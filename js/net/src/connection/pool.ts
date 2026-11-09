@@ -27,11 +27,10 @@ import {
 	type WebSocketProps as WebSocketPropsType,
 	type WebTransportProps as WebTransportPropsType,
 } from "./connect.ts";
-import type { Established as EstablishedType } from "./established.ts";
-import type { Extensions as ExtensionsType } from "./extensions.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { Drain as DrainType, GoawayProps, Redirect as RedirectType } from "./goaway.ts";
 import { pumpAnnounced, Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
+import type { Session as SessionType } from "./session.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
 
@@ -227,7 +226,7 @@ export class Connection {
 
 	#closed = new Once<Error | null>();
 	readonly #status = new Signal<ReloadStatus>("disconnected");
-	readonly #established = new Signal<EstablishedType | undefined>(undefined);
+	readonly #established = new Signal<SessionType | undefined>(undefined);
 	readonly #probe = new Signal<Getter<ProbeType | undefined> | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	readonly #allocator = new Signal<Handle | undefined>(undefined);
@@ -440,10 +439,8 @@ export namespace Connection {
 	export type WebTransportProps = WebTransportPropsType;
 	/** A server certificate hash used to pin a self-signed server. @reexport */
 	export type CertificateHash = CertificateHashType;
-	/** An established one-shot session. @reexport */
-	export type Established = EstablishedType;
-	/** The moq-transport extensions a one-shot session offers. @reexport */
-	export type Extensions = ExtensionsType;
+	/** An established MoQ session, as a one-shot connect or accept returns it. @reexport */
+	export type Session = SessionType;
 }
 
 /** The checked copy of `versions` to dial with, or why it cannot be offered. */

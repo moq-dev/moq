@@ -8,7 +8,15 @@ earlier ones. Rewrite the import and consumer quests around that contract.
 
 ## Plan
 
-Moved from the m3 intra-refresh epic to m2: Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests). The catalog's `warmup` field is new in this release, so its contract (a safe upper bound published before the content it covers) is settled before the cut publishes it. The implementation quests stay in m3.
+Decided 2026-11-08 (maintainer, /quest-plan): moved back from m2. Intra
+refresh is not part of this cut, so `warmup` ships with its current
+duration contract and this plan settles only what the m3 importer needs.
+The boundary stays a catalog field, never a LOC frame property or other
+per-frame container field, and it is a duration, not a frame count. A
+per-group exact boundary carried in the media was offered and declined.
+Re-interview the maintainer before choosing how a catalog duration stays
+safe when a later sweep is longer, since a catalog update and the groups
+it covers travel on separate tracks with no ordering between them.
 
 The 2026-10-11 TS audit found the proposed catalog duration is not yet a
 sufficient guarantee. `h264-import` raises the global value after observing
@@ -26,9 +34,9 @@ merged dual decoder in `decode::Consumer`
 ([#5842](https://github.com/moq-dev/moq/pull/5842)), and the draft now says
 so. Publication ordering for a later, longer sweep remains to settle.
 
-Ask the maintainer to choose between an exact per-group boundary and a safe
-bound known and published before the affected content, including the latency
-and catalog/container consequences. Test timestamp precision, reordered
+Ask the maintainer how the catalog duration stays safe for a longer sweep,
+such as a bound published before the affected content or a fixed bound from
+config, including the latency each costs. Test timestamp precision, reordered
 pictures, frame_num wrap, variable sweep lengths, a missed recovery picture,
 and a join/skip before a longer sweep is known. Decode-only pictures still
 build reference state; withholding presentation is not dropping their input.

@@ -8,7 +8,7 @@ import { Broadcast } from "./broadcast";
 import { Source } from "./video/source";
 
 function publish(origin: Origin.Producer, path: string, instance?: Instance.Valid) {
-	const publication = origin.route(Path.from(path), { instance });
+	const publication = origin.route(Path.from(path), { instance: instance && { id: instance, epoch: 0n } });
 	return publication.broadcast;
 }
 

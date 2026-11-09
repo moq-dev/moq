@@ -39,7 +39,9 @@ export class Fanout<T> {
 	readonly #readers = new Set<Reader<T>>();
 	readonly #reader: ReadableStreamDefaultReader<T>;
 
-	#closed = false;
+	// "ended" once the source finishes cleanly: readers keep draining what they queued, and only
+	// the owner's close() discards it.
+	#state: "open" | "ended" | "closed" = "open";
 
 	// Why the source stopped, when it stopped by failing. Readers surface this rather than seeing a
 	// clean end, so a consumer can tell "the capture died" from "the capture finished".
@@ -66,7 +68,7 @@ export class Fanout<T> {
 			queue: [],
 			limit: validateQueue(queue),
 			waiting: undefined,
-			done: this.#closed,
+			done: this.#state !== "open",
 		};
 		this.#readers.add(reader);
 
@@ -89,6 +91,8 @@ export class Fanout<T> {
 						}
 
 						if (reader.done) {
+							this.#readers.delete(reader);
+
 							// A source that failed has to reach the reader as an error. Closing
 							// cleanly would look like a finished capture, and the consumer would
 							// just stop rather than report it.
@@ -121,8 +125,8 @@ export class Fanout<T> {
 	 * @internal
 	 */
 	close(): void {
-		if (this.#closed) return;
-		this.#closed = true;
+		if (this.#state === "closed") return;
+		this.#state = "closed";
 
 		// The source is ours to release. Without this the pump stays parked on a read, holding the
 		// stream locked and letting a swapped-out capture keep producing into nothing.
@@ -148,9 +152,20 @@ export class Fanout<T> {
 			// the encoders waiting on a source that is never coming back.
 			console.error("fanout source failed:", error);
 			this.#failure = { error };
+			this.close();
+			return;
 		}
 
-		this.close();
+		// Already closed by the owner, which discarded everything.
+		if (this.#state !== "open") return;
+		this.#state = "ended";
+
+		// A clean end leaves each queue to drain, so an encoder still gets the final frames.
+		for (const reader of this.#readers) {
+			reader.done = true;
+			reader.waiting?.();
+			reader.waiting = undefined;
+		}
 	}
 
 	async #read(): Promise<void> {

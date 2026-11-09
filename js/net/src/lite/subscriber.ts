@@ -1091,10 +1091,6 @@ export class Subscriber {
 			lister.abort(refused);
 			return;
 		}
-		// Synced with this hop, which holds nothing yet: a relay never waits on its upstream,
-		// so the peer's tracks follow as live adds.
-		lister.synced();
-
 		// Each listed track holds an announces slot: discovery state the peer makes us hold.
 		const listed = new Set<string>();
 		const unused = new AbortController();
@@ -1139,9 +1135,10 @@ export class Subscriber {
 					if (event.kind === "finished") lister.finish(event.name);
 					else lister.remove(event.name);
 				} else {
-					// This hop synced its readers when the listing began; only the order matters here.
 					if (synced) throw new ProtocolViolation("duplicate SYNCED");
 					synced = true;
+					// Synced when the peer is, so a track listed after it is new upstream too.
+					lister.synced();
 				}
 			}
 		} catch (err) {
@@ -1513,8 +1510,7 @@ export class Subscriber {
 			// accept it again.
 			state.cancel.signal.throwIfAborted();
 			const model = this.#toModelInfo(answered.info);
-			// A TRACK_INFO without a max age sets no publisher limit, not the authored default.
-			const producer = request.accept({ ...model, maxAge: model.maxAge ?? null });
+			const producer = request.accept(model);
 			const framing = {
 				compress: answered.info.compress,
 				timescale: answered.info.timescale ?? 0,
@@ -1695,12 +1691,12 @@ export class Subscriber {
 	// Map the wire TRACK_INFO onto the model track.Info a producer/consumer holds.
 	#toModelInfo(info: TrackInfo): track.Info {
 		return {
-			timescale: info.timescale,
+			timescale: info.timescale ?? null,
 			// Publisher Max Age rides on the wire, so the local media-time budget
 			// matches what the upstream advertises (relays re-serve with the same bound).
-			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
+			maxAge: info.maxAge === undefined ? null : Milli(info.maxAge),
 			priority: info.priority,
-			refresh: info.refresh,
+			refresh: info.refresh ?? null,
 			compression: info.compress ? "deflate" : "none",
 			// Lite-05/06 timestamps may be send times, so the copy's groups skip the rewind check.
 			...(hasMediaTime(this.version) ? {} : { unchecked: true }),

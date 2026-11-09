@@ -955,6 +955,41 @@ describe("Effect", () => {
 		expect(log).toEqual(["served", "released"]);
 	});
 
+	test("get() from a stale spawn does not subscribe the next run", async () => {
+		const tick = new Signal(0);
+		const other = new Signal(0);
+		const gate = Promise.withResolvers<void>();
+		let runs = 0;
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			if (++runs > 1) return;
+
+			e.spawn(async () => {
+				await gate.promise;
+				expect(e.get(other)).toBe(0);
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle();
+			expect(runs).toBe(1); // stale window
+
+			gate.resolve();
+			await settle();
+			expect(runs).toBe(2);
+
+			// Only the dead run read `other`.
+			other.set(1);
+			await settle();
+			expect(runs).toBe(2);
+		} finally {
+			effect.close();
+		}
+	});
+
 	test("cleanup after close fires immediately", async () => {
 		const effect = new Effect((e) => {
 			e.get(new Signal(0));
