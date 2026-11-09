@@ -1,6 +1,8 @@
 # `@moq/qmux`
 
 ```ts
+import { Duration } from "@moq/clock";
+
 export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBufferSize"> {
 	protocol?: string;
 }
@@ -10,8 +12,8 @@ export interface BidirectionalStream extends WebTransportBidirectionalStream {
 }
 
 export interface Config {
-	handshakeTimeout?: number | null;
-	idleTimeout?: number | null;
+	handshakeTimeout?: Duration | null;
+	idleTimeout?: Duration | null;
 	maxDatagramFrameSize?: bigint | null;
 	maxRecordSize?: bigint;
 	maxStreamsBidi?: bigint;

@@ -2333,7 +2333,7 @@ impl Cluster {
 			bind.set_port(0);
 			connect.bind = Some(bind);
 		}
-		if connect.backoff.timeout().is_zero() {
+		if connect.backoff.timeout().is_none() {
 			connect.backoff.timeout = Some(PEER_RETRY.into());
 		}
 		if target.is_some_and(|target| target.lan) {
@@ -2647,17 +2647,27 @@ mod tests {
 	#[cfg(feature = "cluster-lan")]
 	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::origin::RouteEvent::Start(route)
-			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
-			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: route,
+			} => Some((route, true)),
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::End,
+				announce: route,
+			} => Some((route, false)),
 		}
 	}
 
 	/// The next announcement without blocking.
 	fn try_next_announced(announced: &mut moq_net::origin::Routes) -> Option<moq_net::announce::Announce> {
 		match announced.try_next()? {
-			moq_net::origin::RouteEvent::Start(route) => Some(route),
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::Start,
+				announce: route,
+			} => Some(route),
 			other => panic!("expected an announcement: got {other:?}"),
 		}
 	}
@@ -3427,12 +3437,12 @@ mod tests {
 			0,
 			&moq_tokio::connection::Observation {
 				revision: 1,
-				phase: moq_tokio::connection::Phase::Connected,
 				connects: 1,
-				failure: None,
-				version: None,
 				last_connected: Some(kio::clock::now()),
-				transport: Some(moq_tokio::Transport::Quic),
+				phase: moq_tokio::connection::Phase::Connected {
+					transport: moq_tokio::Transport::Quic,
+					version: moq_net::Version::ALL[0],
+				},
 			},
 		);
 		drop(session);

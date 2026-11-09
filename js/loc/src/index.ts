@@ -5,15 +5,15 @@
  * @module
  */
 
-import type { Micro } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 
 /** A decoded LOC frame: the codec bitstream plus its timing metadata. */
 export interface Frame {
 	/** The codec bitstream payload, with the LOC property block stripped. */
 	payload: Uint8Array;
-	/** Presentation timestamp in microseconds. */
-	timestamp: Micro;
+	/** Presentation timestamp, rounded to whole microseconds. */
+	timestamp: Duration;
 	/** True if this frame can be decoded without any preceding frames. */
 	keyframe: boolean;
 }
@@ -47,7 +47,7 @@ export class Format {
 	}
 
 	/** Return the video-frame or audio-source endpoint for an empty codec payload. */
-	end(frame: Frame): Micro | undefined {
+	end(frame: Frame): Duration | undefined {
 		return this.kind !== "data" && frame.payload.byteLength === 0 ? frame.timestamp : undefined;
 	}
 
@@ -100,7 +100,7 @@ export class Format {
 		}
 
 		const activeTimescale = timescale ?? DEFAULT_TIMESCALE;
-		const micros = Math.round((timestamp * DEFAULT_TIMESCALE) / activeTimescale) as Micro;
+		const micros = Duration.micros(Math.round((timestamp * DEFAULT_TIMESCALE) / activeTimescale));
 
 		return [{ payload, timestamp: micros, keyframe: false }];
 	}

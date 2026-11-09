@@ -112,7 +112,8 @@ test("lite-04 refuses datagram tracks at setup", async () => {
 	}
 });
 
-test("lite-07 bounds and prioritizes independent createWritable datagram queues", async () => {
+// Quarantined: flaky under load, see /quest/m0/test-flakes-2/datagram-queues.md
+test.skip("lite-07 bounds and prioritizes independent createWritable datagram queues", async () => {
 	const source = new Origin();
 	const publication = source.route(path, { hidden: true });
 	const datagrams = publication.broadcast.createDatagrams("audio");

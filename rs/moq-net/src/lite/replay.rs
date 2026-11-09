@@ -10,10 +10,14 @@ pub(super) fn initial(events: impl IntoIterator<Item = origin::RouteEvent>) -> V
 	let mut positions = HashMap::new();
 	for event in events {
 		let (update, active) = match event {
-			origin::RouteEvent::Start(update)
-			| origin::RouteEvent::Update(update)
-			| origin::RouteEvent::Restart(update) => (update, true),
-			origin::RouteEvent::End(update) => (update, false),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
+				announce: update,
+			} => (update, true),
+			origin::RouteEvent {
+				kind: origin::RouteKind::End,
+				announce: update,
+			} => (update, false),
 		};
 		if let Some(index) = positions.remove(&update.prefix) {
 			pending[index] = None;

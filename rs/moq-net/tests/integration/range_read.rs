@@ -115,9 +115,7 @@ fn one_range(groups: std::ops::Range<u64>) -> Subscription {
 
 async fn history(version: Version, relay: bool, finished: bool) {
 	let (remote, track, _held) = fixture(version, relay).await;
-	if finished {
-		track.finish().unwrap();
-	}
+	let _finished = finished.then(|| track.clone().finish().unwrap());
 	let mut sub = remote.track("video").unwrap().subscribe(one_range(1..2)).await.unwrap();
 	assert_eq!(read(&mut sub).await, [1], "{version} relay={relay} finished={finished}");
 }

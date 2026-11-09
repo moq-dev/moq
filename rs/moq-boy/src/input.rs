@@ -327,7 +327,7 @@ mod tests {
 		let frame = group.read_frame().await.unwrap().expect("a frame");
 		assert_eq!(&frame.payload[..], br#"{"latency":[{"label":"input","ms":42}]}"#);
 
-		session.producer.finish().unwrap();
+		let _producer = session.producer.finish().unwrap();
 		let Command::Left { viewer: left } = recv(&mut rx).await else {
 			panic!("the finished session did not leave");
 		};

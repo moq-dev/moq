@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Effect, Once, Signal } from "@moq/signals";
@@ -23,7 +23,7 @@ test("media max delay is present on the initial subscription and later updates",
 			},
 		}),
 	} as unknown as Moq.Broadcast.Consumer;
-	const delay = new Signal<Moq.Track.Delay>({ min: Milli(100), max: Milli(250) });
+	const delay = new Signal<Moq.Track.Delay>({ min: Duration.millis(100), max: Duration.millis(250) });
 	const effect = new Effect();
 
 	subscribeMedia(effect, {
@@ -32,11 +32,11 @@ test("media max delay is present on the initial subscription and later updates",
 		priority: 7,
 		delay,
 	});
-	expect(initial).toEqual({ priority: 7, delay: { min: Milli(100), max: Milli(250) } });
+	expect(initial).toEqual({ priority: 7, delay: { min: Duration.millis(100), max: Duration.millis(250) } });
 
-	delay.set({ min: Milli(100), max: Milli(500) });
+	delay.set({ min: Duration.millis(100), max: Duration.millis(500) });
 	await flush();
-	expect(updates.at(-1)).toEqual({ priority: 7, delay: { min: Milli(100), max: Milli(500) } });
+	expect(updates.at(-1)).toEqual({ priority: 7, delay: { min: Duration.millis(100), max: Duration.millis(500) } });
 
 	effect.close();
 });

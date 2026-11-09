@@ -415,6 +415,27 @@ class QueryTests(unittest.TestCase):
         self.assertNotIn("go check", calls)
         self.assertNotIn("obs compile", calls)
 
+    def test_times_record_each_phases_wall_and_child_cpu(self):
+        # The busy loop runs in a child of the phase, so only waited-for children count.
+        self.stub_ci('case "$*" in "gh check") i=0; while ((i < 300000)); do i=$((i + 1)); done ;; esac\n')
+        self.change("quest/m1/example.md")
+        times = self.root / "times"
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "ci", "origin/main"],
+            cwd=self.repo,
+            env=dict(self.env, CHECK_JOBS="1", CHECK_TIMES=str(times)),
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line.split(" ", 2) for line in times.read_text().splitlines()]
+        cpu = {label: int(milliseconds) for _, milliseconds, label in rows}
+        self.assertEqual(rows[-1][2], "whole run")
+        self.assertGreater(cpu["check gh"], 50)
+        self.assertLess(cpu["check quest"], cpu["check gh"])
+        self.assertEqual(cpu["whole run"], sum(cpu.values()) - cpu["whole run"])
+        self.assertRegex(result.stderr, r"\d+ +\d+  check gh\n")
+
     def test_fail_fast_stops_a_serial_run_at_the_first_failure(self):
         self.stub_ci('case "$*" in "js check-changed "*) exit 3 ;; "gh check") exit 4 ;; esac\n')
         self.change("js/net/src/index.ts")

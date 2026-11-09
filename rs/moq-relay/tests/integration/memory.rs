@@ -323,10 +323,17 @@ pub fn record(mut announced: moq_net::origin::Routes) -> std::sync::Arc<std::syn
 	drop(kio::clock::sim::spawn(async move {
 		while let Some(event) = announced.next().await {
 			let (update, active) = match event {
-				moq_net::origin::RouteEvent::End(route) => (route, false),
-				moq_net::origin::RouteEvent::Start(route)
-				| moq_net::origin::RouteEvent::Update(route)
-				| moq_net::origin::RouteEvent::Restart(route) => (route, true),
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					announce: route,
+				} => (route, false),
+				moq_net::origin::RouteEvent {
+					kind:
+						moq_net::origin::RouteKind::Start
+						| moq_net::origin::RouteKind::Update
+						| moq_net::origin::RouteKind::Restart,
+					announce: route,
+				} => (route, true),
 			};
 			recorded
 				.lock()

@@ -389,7 +389,7 @@ impl Fill {
 	/// stitched. Finishing rather than aborting, because the head is a valid prefix of the
 	/// group: it starts at the group's first object and has no holes.
 	fn release(&mut self) {
-		if let Fill::Ready { mut producer, .. } = std::mem::replace(self, Fill::Done) {
+		if let Fill::Ready { producer, .. } = std::mem::replace(self, Fill::Done) {
 			let _ = producer.finish();
 		}
 	}
@@ -5026,7 +5026,7 @@ impl Established {
 			// A no-op once an END_OF_TRACK declared the end, whose readers
 			// wait for a missing group only as long as the grace.
 			Ok(()) => {
-				let _ = self.track.finish();
+				let _ = self.track.finish_shared();
 				self.finished = true;
 			}
 			Err(err) => {
@@ -10836,10 +10836,15 @@ mod tests {
 	fn routed_now(consumer: &crate::origin::Consumer, path: &str) -> Option<crate::origin::RouteInfo> {
 		use futures::FutureExt;
 		match consumer.path_routes(path).ok()?.next().now_or_never()?? {
-			crate::origin::RouteEvent::End(_) => None,
-			crate::origin::RouteEvent::Start(announce)
-			| crate::origin::RouteEvent::Update(announce)
-			| crate::origin::RouteEvent::Restart(announce) => Some(announce.route),
+			crate::origin::RouteEvent {
+				kind: crate::origin::RouteKind::End,
+				..
+			} => None,
+			crate::origin::RouteEvent {
+				kind:
+					crate::origin::RouteKind::Start | crate::origin::RouteKind::Update | crate::origin::RouteKind::Restart,
+				announce,
+			} => Some(announce.route),
 		}
 	}
 
@@ -15018,7 +15023,7 @@ mod stitch_tests {
 		h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
 		let mut stream = h.stream().await.with_version(ingress);
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let (served, _sessions) = match hop {
 			true => {
 				let (served, sessions) = crate::lite::ietf::test_hop(&origin, "room", [true, true]).await;
