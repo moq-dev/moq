@@ -74,6 +74,37 @@ export class Runs<R extends Run> {
 		return { removed, added };
 	}
 
+	/**
+	 * Clear each of `ranges`, sorted and disjoint, in one pass over the set rather than one
+	 * {@link set} each. Returns what {@link set} would.
+	 */
+	clear(ranges: readonly Run[]): { removed: R[]; added: R[] } {
+		const removed: R[] = [];
+		const added: R[] = [];
+		const kept: R[] = [];
+		let next = 0;
+		for (const run of this.#runs) {
+			while (next < ranges.length && ranges[next].end <= run.start) next++;
+			if (next === ranges.length || ranges[next].start >= run.end) {
+				kept.push(run);
+				continue;
+			}
+			removed.push(run);
+			// What the ranges leave of it. A removal never meets an alike neighbour, so nothing merges.
+			const pieces: R[] = [];
+			let from = run.start;
+			for (let i = next; i < ranges.length && ranges[i].start < run.end; i++) {
+				if (ranges[i].start > from) pieces.push({ ...run, start: from, end: ranges[i].start });
+				if (ranges[i].end > from) from = ranges[i].end;
+			}
+			if (from < run.end) pieces.push({ ...run, start: from, end: run.end });
+			kept.push(...pieces);
+			added.push(...pieces);
+		}
+		this.#runs = kept;
+		return { removed, added };
+	}
+
 	// The index of the first run ending past `sequence`.
 	#above(sequence: bigint): number {
 		let lo = 0;
@@ -133,7 +164,15 @@ export class DropSet {
 
 	/** Give up `[start, end)` as `run` says, or forget it when `run` is undefined. */
 	set(start: bigint, end: bigint, run?: Omit<DropRun, "start" | "end">): void {
-		const { removed, added } = this.#runs.set(start, end, run && { ...run, start, end });
+		this.#apply(this.#runs.set(start, end, run && { ...run, start, end }));
+	}
+
+	/** Forget each of `ranges`, sorted and disjoint, in one pass. */
+	clear(ranges: readonly Run[]): void {
+		this.#apply(this.#runs.clear(ranges));
+	}
+
+	#apply({ removed, added }: { removed: DropRun[]; added: DropRun[] }): void {
 		if (removed.length === 0 && added.length === 0) return;
 		for (const old of removed) this.#live.delete(old);
 		for (const fresh of added) {

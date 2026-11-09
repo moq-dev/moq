@@ -57,8 +57,8 @@ because runs keyed by group sequence convert mechanically to starts.
 - **CPU per drop.** Every report inserts into the per-cursor `RangeSet`s and
   sorted arrays, so `track_subscriber_churn_drops` in
   `rs/moq-net/benches/track.rs` slows once many readers each hold many
-  reported runs (256 readers holding 65,536 each: about 1 to 4 ms per drop
-  against 0.16 ms with one each). JS `#askFills` still walks every run above
+  reported runs (256 readers holding 65,536 each: about 0.75 ms per drop
+  against 0.18 ms with one each). JS `#askFills` still walks every run above
   the edge on each probe while a fill handler serves the track; mirror Rust's
   `Misses::unknown` memo there.
 
@@ -87,6 +87,20 @@ Still to cover, beyond the memory work:
   (`rs/moq-net/src/model/track/fill.rs`) records what a fill's source gave up
   as a budget-independent drop, including OLD judged under that fill's own
   terms. Record it as a stale run, so it settles only the readers it covers.
+
+- **A forgotten run a reader already judged.** Found 2026-11-09 by review
+  on moq-dev/moq#8294: `Misses::judge` marks a dropped run judged, and only a
+  change of terms rejudges what it settled, through the runs the track still
+  holds. A run shed or expired after a reader judged it, but before the reader
+  read past it, becomes a hole that reader never asks for or gives up, so an
+  ordered reader behind it can wait on it. Rejudge what a forgotten run
+  leaves, without a full rescan per shed.
+- **A received copy's tail completion.** Found the same day: once a received
+  copy's declared end is reached, `owes` counts a gap the drop set covered as
+  delivered, so forgetting that run can reopen the tail after a reader saw
+  the end, and under an unbounded budget hold it. Keep the completion once
+  reached, rather than keep the runs, which a peer declaring a far end would
+  make unbounded.
 
 Tests, on mock time through a relay, in Rust and mirrored in `js/net`:
 

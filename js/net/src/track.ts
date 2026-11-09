@@ -1146,6 +1146,11 @@ export class Producer {
 			this.#dropsBorn.set(start, end, { start, end, expires });
 			this.#dropsOldest = Math.min(this.#dropsOldest ?? expires, expires);
 		}
+		this.#billDrops();
+	}
+
+	// Bill the drop set and its expiry index to the account as they now stand.
+	#billDrops(): void {
 		const billed = this.#state.drops.size * cache.RUN_OVERHEAD + this.#dropsBorn.size * cache.BORN_OVERHEAD;
 		if (billed > this.#dropsBilled) this.#account.bill(billed - this.#dropsBilled);
 		else this.#account.unbill(this.#dropsBilled - billed);
@@ -1176,7 +1181,12 @@ export class Producer {
 		const expired = this.#dropsBorn.all
 			.filter((run) => now >= run.expires && run.start < kept)
 			.map(({ start, end }) => ({ start, end: min(end, kept) }));
-		for (const run of expired) this.#setDrops(run.start, run.end);
+		// In one pass: runs given up in the same quarter of the window expire together.
+		if (expired.length > 0) {
+			this.#state.drops.clear(expired);
+			this.#dropsBorn.clear(expired);
+			this.#billDrops();
+		}
 		this.#dropsOldest = undefined;
 		for (const run of this.#dropsBorn.all) {
 			if (run.start < kept) this.#dropsOldest = Math.min(this.#dropsOldest ?? run.expires, run.expires);
@@ -3360,9 +3370,16 @@ export class Subscriber {
 			return held;
 		};
 		hooks.givenUp = (subscriber, sequence) => {
-			const { drops, refused } = subscriber.#state;
+			const { drops, refused, judged } = subscriber.#state;
+			const drop = drops.at(sequence);
+			const own = dropAt(refused.peek(), sequence);
+			// As in `givenUp`: only a drop that settles the reader hides its own refusal.
+			const wins =
+				drop &&
+				(own === undefined ||
+					settles({ ...drop, start: sequence }, subscriber.#drift().budget, subscriber.#coverage(), judged));
 			return {
-				error: drops.at(sequence)?.error ?? dropAt(refused.peek(), sequence),
+				error: wins ? drop.error : own,
 				changed: [drops.version, refused],
 			};
 		};
@@ -3921,9 +3938,8 @@ export class Subscriber {
 			if (!full) {
 				this.#pending = this.#pending.flatMap((run) => (run.received ? removeRun([run], from, to) : [run]));
 			}
-			const folded = full
-				? givenUp(drops, refused.peek(), from, to, (run) => settles(run, budget, coverage, judged))
-				: drops.overlapping(from, to);
+			// The reader's own refusals too: clearing the span above took out those it covered.
+			const folded = givenUp(drops, refused.peek(), from, to, (run) => settles(run, budget, coverage, judged));
 			for (const dropped of folded) {
 				// Judged from where it meets this cursor's span, as Rust clips it.
 				const run = { ...dropped, start: max(dropped.start, from), end: min(dropped.end, to) };

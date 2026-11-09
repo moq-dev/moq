@@ -23761,6 +23761,37 @@ mod test {
 		assert!(local.state.read().skipped(5), "a local skip above the edge stays");
 	}
 
+	/// A source refusing a fill in disjoint groups pays for the runs it records, as a drop does.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fragmented_fill_refusal_stays_within_the_pool() {
+		const RUNS: u64 = 1000;
+		const START: u64 = 2 * RUNS;
+		let capacity = 64 * (RUN_OVERHEAD + BORN_OVERHEAD);
+		let (mut producer, pool) = pooled_producer(capacity);
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		producer.start_at(START).unwrap();
+		write_group(&producer, START);
+		assert_eq!(drain_groups(&mut subscriber), [START]);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
+			panic!("the miss below the start is asked");
+		};
+		// Nothing arrives once the feed ends, so a refusal is a verdict on the track.
+		producer.finish().unwrap();
+		for run in 0..RUNS {
+			fill.drop_groups(2 * run..2 * run + 1);
+		}
+		let held = producer.state.read().drops.len() as u64;
+		assert!(held > 0, "the refusals are recorded");
+		assert!(held < RUNS, "the lowest runs were shed");
+		assert!(
+			pool.used() <= capacity + 2 * (RUN_OVERHEAD + BORN_OVERHEAD) + 1024,
+			"{}",
+			pool.used()
+		);
+	}
+
 	/// A drop-only flood of disjoint runs bills the pool and sheds its lowest runs to stay
 	/// within it, with no cached group to evict; a shed run is unknown again, so a wire cursor
 	/// reports only the runs the track still holds.
