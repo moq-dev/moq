@@ -1837,8 +1837,8 @@ pub(crate) fn fanout_threads<B: Backend>(c: &mut Criterion) {
 	// Groups delivered per round: one to each viewer.
 	group.throughput(Throughput::Elements(shape.viewers as u64));
 	for workers in [1, 16] {
-		let rt = threaded(workers);
 		for version in ["moq-lite-06", "moq-lite-07-wip"] {
+			let rt = threaded(workers);
 			let mut room = None;
 			group.bench_function(format!("{version}/workers={workers}"), |b| {
 				let room = room.get_or_insert_with(|| {
