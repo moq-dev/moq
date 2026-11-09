@@ -860,7 +860,7 @@ async fn a_target_without_the_preferred_transport_probes_no_faster_than_the_boun
 #[kio::test]
 async fn a_hung_probe_is_abandoned_at_the_connect_timeout() {
 	let config = Config {
-		timeout: Duration::from_secs(3),
+		timeout: Some(Duration::from_secs(3)),
 		..Default::default()
 	};
 	let (mut machine, _fallback) = on_fallback(config).await;
@@ -876,7 +876,7 @@ async fn a_hung_probe_is_abandoned_at_the_connect_timeout() {
 /// The fallback session ending stops the probing: the redial that follows races afresh.
 #[kio::test]
 async fn a_probe_ends_with_its_fallback_session() {
-	let (mut machine, fallback) = on_fallback(config(INITIAL, Duration::from_secs(1))).await;
+	let (mut machine, fallback) = on_fallback(config(INITIAL, Some(Duration::from_secs(1)))).await;
 	probe(&mut machine).await;
 	drop(fallback);
 	assert!(matches!(next(&mut machine).await, Action::Offline(_)));
