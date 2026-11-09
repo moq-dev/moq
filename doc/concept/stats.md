@@ -231,7 +231,6 @@ refuses) the listing is empty or refused. A bucket's track name carries its
 run's epoch, so a reader finds it only through the listing; one that already
 knows the name can subscribe while it is listed, and is refused otherwise.
 
-
 A bucket that returns after its linger is a new counter run under a new track:
 its frames carry a new `epoch`, which also names the track, and count from
 zero. No track name is ever reused, so each run numbers its groups from 0, and
@@ -264,7 +263,6 @@ measured by its uncompressed size, since a reader inflates the whole group.
 Outside bucket tracks, which number their groups from 0, a group's number is
 its publish's scheduled time divided by the interval, so the interval is its
 timescale. Publishes are scheduled at least an interval
-
 apart, even after a late one, so each opens its groups in an interval of its
 own, and a track recreated later numbers its groups past every group its
 earlier instance wrote.
@@ -490,7 +488,6 @@ count is started minus ended. A frame never shows ended above started.
 A new instance starts every counter from zero, so a reader summing a node over
 time adds each instance's counters rather than diffing across them. Within one
 instance the totals never go down. A bucket's path or label counter going **down**
-
 means the entry was dropped and re-created, and a presence or prefix counter going down
 means the track was held again. Treat it as the start of a fresh segment
 rather than a negative rate. On a route whose instance a session minted (an older relay, or
