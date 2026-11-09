@@ -810,19 +810,26 @@ impl<S: Shape> Merged<S> {
 		// unannounce. A closed stream ends the merged view.
 		loop {
 			match self.announce.poll_next(waiter) {
-				Poll::Ready(Some(
-					moq_net::origin::RouteEvent::Start(update) | moq_net::origin::RouteEvent::Update(update),
-				)) => {
+				Poll::Ready(Some(moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update,
+					announce: update,
+				})) => {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, true)
 				}
-				Poll::Ready(Some(moq_net::origin::RouteEvent::End(update))) => {
+				Poll::Ready(Some(moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					announce: update,
+				})) => {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, false)
 				}
 				// Another instance: the one tracked at the path ends, then the new one
 				// starts, so its reader resolves afresh.
-				Poll::Ready(Some(moq_net::origin::RouteEvent::Restart(update))) => {
+				Poll::Ready(Some(moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Restart,
+					announce: update,
+				})) => {
 					// An announced prefix is a path beneath the root, so rooting it fits.
 					let absolute = self.announce.absolute(&update.prefix).ok();
 					if let Some(previous) = absolute.and_then(|absolute| self.last_announced.get(&absolute).cloned()) {
@@ -1142,10 +1149,17 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::origin::RouteEvent::Start(route)
-			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
-			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: route,
+			} => Some((route, true)),
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::End,
+				announce: route,
+			} => Some((route, false)),
 		}
 	}
 

@@ -182,7 +182,10 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	// route under any other instance is B's.
 	let mut announced = consumer.routes();
 	let instance_a = match within("A's route", announced.next()).await.expect("announce update") {
-		moq_net::origin::RouteEvent::Start(update) => update.route.instance().clone(),
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::Start,
+			announce: update,
+		} => update.route.instance().clone(),
 		other => panic!("expected A's route, got {other:?}"),
 	};
 	session_a
@@ -194,10 +197,13 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 		loop {
 			let event = announced.next().await.expect("announce update");
 			// Under another instance, B's route is another source: a restart.
-			if let moq_net::origin::RouteEvent::Start(update)
-			| moq_net::origin::RouteEvent::Update(update)
-			| moq_net::origin::RouteEvent::Restart(update) = event
-				&& *update.route.instance() != instance_a
+			if let moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: update,
+			} = event && *update.route.instance() != instance_a
 			{
 				break;
 			}

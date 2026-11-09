@@ -10836,10 +10836,15 @@ mod tests {
 	fn routed_now(consumer: &crate::origin::Consumer, path: &str) -> Option<crate::origin::RouteInfo> {
 		use futures::FutureExt;
 		match consumer.path_routes(path).ok()?.next().now_or_never()?? {
-			crate::origin::RouteEvent::End(_) => None,
-			crate::origin::RouteEvent::Start(announce)
-			| crate::origin::RouteEvent::Update(announce)
-			| crate::origin::RouteEvent::Restart(announce) => Some(announce.route),
+			crate::origin::RouteEvent {
+				kind: crate::origin::RouteKind::End,
+				..
+			} => None,
+			crate::origin::RouteEvent {
+				kind:
+					crate::origin::RouteKind::Start | crate::origin::RouteKind::Update | crate::origin::RouteKind::Restart,
+				announce,
+			} => Some(announce.route),
 		}
 	}
 

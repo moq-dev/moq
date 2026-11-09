@@ -818,10 +818,15 @@ async fn next_route(routes: &mut moq_net::origin::Routes) -> (moq_net::announce:
 		.expect("announce timeout")
 		.expect("origin closed");
 	match event {
-		moq_net::origin::RouteEvent::End(announce) => (announce, false),
-		moq_net::origin::RouteEvent::Start(announce)
-		| moq_net::origin::RouteEvent::Update(announce)
-		| moq_net::origin::RouteEvent::Restart(announce) => (announce, true),
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::End,
+			announce,
+		} => (announce, false),
+		moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce,
+		} => (announce, true),
 	}
 }
 
