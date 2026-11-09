@@ -2737,9 +2737,10 @@ impl Enforce {
 				return Poll::Ready(None);
 			};
 			match event {
-				crate::origin::RouteEvent::Start(update) | crate::origin::RouteEvent::Update(update)
-					if !self.live.contains(&update.prefix) =>
-				{
+				crate::origin::RouteEvent {
+					kind: crate::origin::RouteKind::Start | crate::origin::RouteKind::Update,
+					announce: update,
+				} if !self.live.contains(&update.prefix) => {
 					if self.pending.iter().any(|gate| gate.path == update.prefix) {
 						continue;
 					}
@@ -2753,7 +2754,10 @@ impl Enforce {
 					}
 					self.live.insert(gate.path);
 				}
-				crate::origin::RouteEvent::End(update) => {
+				crate::origin::RouteEvent {
+					kind: crate::origin::RouteKind::End,
+					announce: update,
+				} => {
 					self.live.remove(&update.prefix);
 					self.pending.retain(|gate| gate.path != update.prefix);
 				}

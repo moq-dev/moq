@@ -72,8 +72,3 @@ lite-07 (SUBSCRIBE_DROP and SUBSCRIBE_SKIP ranges) and touches
 `lite/subscriber.rs`, `lite/subscribe.rs`, their JS mirrors, and the lite
 draft, but not the instance encoding; expect textual conflicts only, and
 whichever lands second adds its changelog line beside the other's.
-
-## Related
-
-- [moq-net's route stream goes public](/quest/m2/api-shape/net.md) - the
-  audit item this replaces

@@ -58,17 +58,45 @@ impl<A: Clone + Eq> View<A> {
 	}
 
 	/// The view presented to the union of `regions`.
+	#[cfg(test)]
 	pub fn present_all(&self, regions: &[Path]) -> Self {
 		let mut out = Self::default();
+		out.represent(self, regions, self.items.keys());
+		out
+	}
+
+	/// Bring this view of `raw`, presented to the union of `regions`, up to date once
+	/// `claims` of `raw` changed and its floors were replaced.
+	///
+	/// A claim strictly below a region keeps its path, and each region is shown what
+	/// covers it (see [`covering`]), which is the claim exactly there when one is. Only
+	/// the regions' covering claims and the named claims can change, so the work
+	/// follows those rather than the view's size.
+	pub fn represent<'a>(&mut self, raw: &Self, regions: &[Path], claims: impl IntoIterator<Item = &'a Path>) {
+		for claim in claims {
+			// Shown at its region by the covering claim below.
+			if regions.contains(claim) {
+				continue;
+			}
+			let below = regions.iter().any(|region| claim != region && within(claim, region));
+			match raw.items.get(claim).filter(|_| below) {
+				Some(item) => self.items.insert(claim.clone(), item.clone()),
+				None => self.items.remove(claim),
+			};
+		}
 		for region in regions {
-			let presented = self.present(region);
-			out.items.extend(presented.items);
-			for (region, floor) in presented.floors {
-				let entry = out.floors.entry(region).or_insert(floor);
+			match covering(&raw.floors, region, |claim| raw.items.get(claim)) {
+				Some(item) => self.items.insert(region.clone(), item.clone()),
+				None => self.items.remove(region),
+			};
+		}
+		self.floors.clear();
+		for region in regions {
+			for (region, floor) in narrow(&raw.floors, region) {
+				let entry = self.floors.entry(region).or_insert(floor);
 				*entry = (*entry).max(floor);
 			}
 		}
-		out
 	}
 
 	/// What the view certifies within `prefix`: the view as presented there, less
@@ -118,20 +146,39 @@ impl<A: Clone + Eq> View<A> {
 	/// An uncertified claim of `other` is known at no revision, so it is not taken.
 	/// Returns the claims whose state changed.
 	pub fn merge(&mut self, other: &Self) -> Vec<Path> {
-		let mut changed = Vec::new();
 		let claims: BTreeSet<Path> = self.items.keys().chain(other.items.keys()).cloned().collect();
+		self.merge_claims(other, &claims)
+	}
+
+	/// [`Self::merge`], considering only `claims`: the same once they include every
+	/// claim whose state differs between the two views, since a claim held alike is
+	/// never taken.
+	pub fn merge_claims<'a>(&mut self, other: &Self, claims: impl IntoIterator<Item = &'a Path>) -> Vec<Path> {
+		// Every floor of `other` lies within a newer one here, so it knows no claim at a
+		// newer revision and changes nothing: a lagging view costs nothing to merge,
+		// however far it lags.
+		let stale = other
+			.floors
+			.iter()
+			.all(|(region, &floor)| (self.floors.iter()).any(|(wider, &newer)| newer > floor && within(region, wider)));
+		if stale {
+			return Vec::new();
+		}
+		let mut changed = Vec::new();
 		for claim in claims {
-			let (theirs, ours) = (other.as_of(&claim), self.as_of(&claim));
+			let (theirs, ours) = (other.as_of(claim), self.as_of(claim));
 			// At one revision, a claim exactly on a wider region outranks the claim
 			// above it that a floor on this path presented here.
-			let exact = theirs == ours && self.floors.contains_key(&claim) && !other.floors.contains_key(&claim);
-			if (theirs > ours || exact) && self.items.get(&claim) != other.items.get(&claim) {
-				match other.items.get(&claim) {
-					Some(item) => self.items.insert(claim.clone(), item.clone()),
-					None => self.items.remove(&claim),
-				};
-				changed.push(claim);
+			let exact = theirs == ours && self.floors.contains_key(claim) && !other.floors.contains_key(claim);
+			if (theirs > ours || exact) && self.items.get(claim) != other.items.get(claim) {
+				changed.push(claim.clone());
 			}
+		}
+		for claim in &changed {
+			match other.items.get(claim) {
+				Some(item) => self.items.insert(claim.clone(), item.clone()),
+				None => self.items.remove(claim),
+			};
 		}
 		for (region, &floor) in &other.floors {
 			let entry = self.floors.entry(region.clone()).or_insert(floor);

@@ -76,7 +76,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 		group.finish().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 	}
-	source.finish().unwrap();
+	let _source = source.finish().unwrap();
 	*gate.write().ok().unwrap() = true;
 
 	// Read until the track ends, so a skipped group can't be one that merely arrived late.

@@ -44,8 +44,9 @@ window.captureMatrix = async () => {
 					const rms = Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length);
 					channelsAudible[channel] = (channelsAudible[channel] ?? false) || rms > 0.01;
 				}
-				if (expected !== undefined && Math.abs(frame.timestamp - expected) > 2) gaps++;
-				expected = frame.timestamp + (frame.channels[0].length / 48_000) * 1_000_000;
+				const timestamp = frame.timestamp.asMicros();
+				if (expected !== undefined && Math.abs(timestamp - expected) > 2) gaps++;
+				expected = timestamp + (frame.channels[0].length / 48_000) * 1_000_000;
 			}
 			await reader.cancel();
 			results.push({ mode, channelsAudible, gaps, format: capture.out.format.peek() });

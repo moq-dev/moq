@@ -154,7 +154,7 @@ impl Client {
 		let mut policy = moq_net::reconnect::Config::default();
 		policy.backoff = config.backoff.resolve();
 		policy.goaway = config.goaway.resolve();
-		policy.timeout = Some(resolved.timeout).filter(|timeout| !timeout.is_zero());
+		policy.timeout = resolved.timeout;
 		policy.pinned = !config.tls.fingerprint.is_empty();
 
 		let mut moq = moq_net::Client::new()

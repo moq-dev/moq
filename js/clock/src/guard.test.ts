@@ -8,10 +8,10 @@ const src = import.meta.dir;
 // Each case runs as its own test under the real preload, since the guard fails a test from a host callback.
 const fixture = `
 import { test } from "bun:test";
-import { Milli, Nano, sleep, timeout, yieldNow } from "${join(src, "index.ts")}";
+import { Duration, sleep, timeout, yieldNow } from "${join(src, "index.ts")}";
 import { hostTime } from "${join(src, "test.ts")}";
 
-const ms = (n) => Nano.fromMilli(Milli(n));
+const ms = (n) => Duration.millis(n);
 
 test("waits 50ms on the real clock", async () => {
 	await sleep(ms(50));
@@ -23,7 +23,7 @@ test("a watchdog on progress that settles first", async () => {
 	await timeout(ms(1000), Promise.resolve(1));
 });
 test("a sleep already due", async () => {
-	await sleep(Nano(0));
+	await sleep(Duration.ZERO);
 });
 test("opted out with hostTime", async () => {
 	hostTime(); // the case under test

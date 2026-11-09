@@ -106,6 +106,7 @@ test:
     python3 sh/gh/nightly.test.py
     python3 sh/gh/pages-clean.test.py
     python3 sh/gh/bench-report.test.py
+    python3 sh/gh/rustc-cost.test.py
     python3 sh/gh/ts-paths.test.py
     sh/go/publish-wrapper.test.sh
     python3 sh/rs/uring.test.py
@@ -161,6 +162,10 @@ gst-formula *args:
 # Run related Nightly benchmarks in one build environment, reporting every failure.
 nightly group:
     sh/gh/nightly.sh {{ quote(group) }}
+
+# Measure the merge gate's build and test cost, cold and after a moq-net edit, for the benchmark history.
+gate-cost:
+    sh/gh/gate-cost.sh
 
 # Measure selected Criterion targets through the existing benchmark lifecycle.
 [positional-arguments]

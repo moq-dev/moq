@@ -383,7 +383,7 @@ mod test {
 		let mut consumer = Consumer::new(track.consume());
 		let mut group = track.append_group().expect("catalog group should append");
 
-		track.finish().expect("catalog track should finish");
+		let _track = track.finish().expect("catalog track should finish");
 
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
@@ -417,7 +417,7 @@ mod test {
 			.write_frame(moq_net::Timestamp::ZERO, latest_payload)
 			.expect("latest catalog frame should write");
 		latest_group.finish().expect("latest catalog group should finish");
-		track.finish().expect("catalog track should finish");
+		let _track = track.finish().expect("catalog track should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), latest);
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(None))));
@@ -468,7 +468,7 @@ mod test {
 			.write_frame(moq_net::Timestamp::ZERO, latest_payload)
 			.expect("latest catalog frame should write");
 		latest_group.finish().expect("latest catalog group should finish");
-		track.finish().expect("catalog track should finish");
+		let _track = track.finish().expect("catalog track should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), latest);
 
@@ -500,7 +500,7 @@ mod test {
 		let mut consumer: Consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
-		track.finish().expect("catalog track should finish");
+		let _track = track.finish().expect("catalog track should finish");
 
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(None))));
 	}

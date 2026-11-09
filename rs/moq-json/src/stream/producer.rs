@@ -232,10 +232,11 @@ impl Track {
 		// would leave the track open with `group` already taken, so a later append would open a
 		// second group. That is exactly the split log ending the track exists to prevent.
 		let group = match self.group.take() {
-			Some(mut group) => group.finish(),
+			Some(group) => group.finish().map(drop),
 			None => Ok(()),
 		};
-		let track = self.inner.finish();
+		// This shared state keeps its own clone, whose appends the end refuses.
+		let track = self.inner.clone().finish().map(drop);
 
 		group?;
 		track?;

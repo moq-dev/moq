@@ -6,7 +6,7 @@
  * receive shape's publisher dials once with `Moq.Connection.connect`, which runs no loop, so it
  * adds the same delivery work to every variant without sampling of its own.
  */
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Session } from "@moq/qmux";
 import { check, payload } from "../fixture.ts";
@@ -177,7 +177,7 @@ async function receive(config: Sampling): Promise<void> {
 		const request = origin.follow(Moq.Path.from(`${config.path}/live`));
 		cleanup.push(() => request.close());
 		const broadcast = await active(request);
-		const subscriber = broadcast.track("data").subscribe({ delay: { max: Milli(1000) } });
+		const subscriber = broadcast.track("data").subscribe({ delay: { max: Duration.millis(1000) } });
 		cleanup.push(() => subscriber.close());
 		const reader = received.push(0) - 1;
 		readers.push(
