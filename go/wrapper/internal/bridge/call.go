@@ -20,10 +20,11 @@ type Handle interface {
 //
 // `cancel` is the object's own cancel() for a call that owns a session or
 // listener, so a cancelled Connect still tears the client down. Stream reads
-// pass nil: a cancel aborts only that read and leaves the stream usable. The generated binding is given a context that
-// does not cancel with the caller (see objectCallContext); otherwise it can
-// return ctx.Err() into the result channel first and skip that abort. The
-// blocked goroutine then unwinds on its own; the result channel is buffered so
+// pass nil: a cancel aborts only that read and leaves the stream usable. For a
+// call with a cancel, the generated binding is given a context that does not
+// cancel with the caller (see objectCallContext); otherwise it can return
+// ctx.Err() into the result channel first and skip that abort. The blocked
+// goroutine then unwinds on its own; the result channel is buffered so
 // its send never blocks and it can't leak.
 //
 // release, for a call that returns a native handle, disposes of a result nobody
