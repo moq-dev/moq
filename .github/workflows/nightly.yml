@@ -201,6 +201,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # mbx inherits a prediction manifest from earlier Cargo.lock states in history.
+          fetch-depth: 0
+          filter: blob:none
 
       - uses: ./.github/actions/nix
 
@@ -366,6 +369,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
       - uses: ./.github/actions/nix
       - name: Rust cache
         uses: ./.github/actions/rust-cache
@@ -415,6 +420,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
       - uses: ./.github/actions/nix
       - name: Rust cache
         uses: ./.github/actions/rust-cache
@@ -463,6 +470,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
       - uses: ./.github/actions/nix
       - name: Rust cache
         id: setup
@@ -661,6 +670,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
       - uses: ./.github/actions/nix
       - uses: ./.github/actions/rust-cache
         with:

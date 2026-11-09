@@ -103,7 +103,9 @@ compilation is "not looked up".
   46 on 2026-10-26. Decided 2026-10-29 (maintainer): give those jobs full
   history (`fetch-depth: 0` with `filter: blob:none`) only once Windows hits
   after the mbx bump, which shows inheritance pays. Windows hit on
-  2026-11-05 (above), so that condition is met.
+  2026-11-05 (above), so this quest's PR gives Nightly's five Linux
+  Rust-cache jobs full history. Compare their hits on the first scheduled
+  Nightly after it lands against the doctest baseline below.
 - `Cargo.lock` changed 7, 2, 6, 10, 8 and 8 times between consecutive
   scheduled Nightlies from 2026-10-21 to 2026-10-27. Nightly is the only
   hosted writer for Windows and macOS, so after more than 8 changes the
@@ -136,6 +138,24 @@ platform jobs' 8-state lookback, not as the cause of these Linux misses:
 Linux has no history to search even within that window, and the loaded
 predictions did not match. The current run also follows the workspace-hack
 feature unification, so changed compiler inputs remain a separate cause.
+
+Evidence checked 2026-11-08, scheduled run
+[42487375545](https://github.com/moq-dev/moq/actions/runs/42487375545)
+(`Cargo.lock` changed 5 times since each of the previous three scheduled
+runs, so every platform stayed within the 8-state lookback):
+
+- [macOS](https://github.com/moq-dev/moq/actions/runs/42487375545/job/128752177964)
+  workspace build: 567 hits, 15 misses, 687 not looked up, 1,778 prefetched,
+  up from 13 hits on 2026-11-02. Inheritance now pays on macOS; the
+  remaining question is the 687 not looked up.
+- [Windows](https://github.com/moq-dev/moq/actions/runs/42487375545/job/128752177860)
+  workspace build: 163 hits, 757 misses, 310 not looked up, 272 prefetched,
+  down from 846 hits on 2026-11-05 at a similar lockfile distance. The
+  summary still names no manifest identity, so whether it inherited the
+  previous Nightly's manifest or an older one is unknown.
+- [Linux doctest](https://github.com/moq-dev/moq/actions/runs/42487375545/job/128752096274)
+  (depth 1): 174 hits, 279 misses, 305 not looked up, 414 prefetched,
+  4 remote failures.
 
 ## Waiting
 
