@@ -90,8 +90,8 @@ encoder's `muted` instead: it sends nothing, keeps the rendition enabled, and
 marks where each utterance ends, so listeners stay subscribed and treat the gap
 as intentional silence.
 
-Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
-`onDemand: true` also gates video, which then loses its unsubscribed past.
+Pass `onDemand: "off"` to `Publish.Broadcast` to encode audio continuously too.
+`onDemand: "all"` also gates video, which then loses its unsubscribed past.
 Bandwidth reservations still follow subscriptions; unwatched video uses its
 configured bitrate.
 
@@ -188,7 +188,7 @@ const broadcast = new Publish.Broadcast({
 });
 
 // Video encodes while enabled. Audio buffers raw PCM until someone subscribes.
-// Pass `onDemand: false` to the broadcast to encode both continuously.
+// Pass `onDemand: "off"` to the broadcast to encode both continuously.
 new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
 const audioSource = new Publish.Signals.Computed((effect) => effect.get(microphone.out.source)?.audio);

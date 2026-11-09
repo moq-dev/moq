@@ -357,6 +357,8 @@ async fn admit<S: Post>(server: S, mut request: Request, context: Context) -> cr
 		producer: Some(producer),
 		started: Instant::now(),
 	};
+	// Spawned rather than returned: reqwest already needs a tokio runtime, and the driver must
+	// outlive the session to report its end.
 	tokio::spawn(driver.run());
 
 	Ok(consumer)

@@ -1,7 +1,7 @@
 /** A QMux session over Chromium's native `WebSocketStream` sends every datagram on an idle socket. */
 import { expect, test } from "bun:test";
 import { createServer } from "vite";
-import Session, { selectSubprotocol } from "../../../../js/qmux/src/index.ts";
+import { Session, selectSubprotocol } from "../../../../js/qmux/src/index.ts";
 import { BunSocketStream } from "../../../qmux/bun-socket.ts";
 import { launch } from "./harness";
 

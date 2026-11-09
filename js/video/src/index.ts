@@ -23,5 +23,6 @@
  *
  * @module
  */
-export { type Dimensions, type Presentation, rotateVideoDimensions } from "./presentation";
+/** Swap a width and height for a quarter-turn rotation. @internal */
+export { rotateVideoDimensions } from "./presentation";
 export * from "./renderer";

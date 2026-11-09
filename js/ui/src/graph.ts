@@ -1,6 +1,6 @@
 import type { Effect } from "@moq/signals";
 
-/** Options for {@link graph}. */
+/** Options for {@link graph}. @internal */
 export interface GraphOptions {
 	/** Stroke/fill color for the line (any CSS color). */
 	color?: string;
@@ -8,7 +8,7 @@ export interface GraphOptions {
 	format?: (v: number) => string;
 }
 
-/** A sparkline created by {@link graph}. */
+/** A sparkline created by {@link graph}. @internal */
 export interface Graph {
 	/** The root element to mount. */
 	el: HTMLElement;

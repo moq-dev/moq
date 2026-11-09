@@ -107,7 +107,9 @@ player publishes its own broadcast, reporting only what it counted, so a second
 player on one connection that resolves the same feedback path, for any catalog,
 publishes nothing and warns until the first one leaves; give each player its own
 name. The decoders'
-`out.stats` and the stats panel read the same counters. The token must allow
+`out.stats` and the stats panel read the same counters. Audio's `out.stats`
+also counts `skips`, each jump that dropped buffered audio rather than playing
+it faster, which the stats panel shows and the feedback track leaves out. The token must allow
 publishing under the echo path.
 
 ## Binding from a framework
@@ -239,8 +241,9 @@ them; nothing is retained without an open handle.
 
 ## Buffered playback
 
-By default the player minimizes latency: it skips ahead whenever media piles
-up past the delay. Content produced faster than real time, such as a TTS
+By default the player minimizes latency: it time-stretches received audio
+that falls behind the delay back onto it, playing it slightly faster, and skips
+ahead only when media piles up far past it. Content produced faster than real time, such as a TTS
 response emitted in one burst with future timestamps, wants the opposite. Set
 `lookahead` to how far ahead it may run and it plays through at the encoded pace:
 

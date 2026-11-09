@@ -1,4 +1,7 @@
-/** How a frame is shown: deinterlaced if needed, then rotated clockwise, then optionally mirrored. */
+/**
+ * How a frame is shown: deinterlaced if needed, then rotated clockwise, then optionally mirrored.
+ * `RendererInput.presentation` spells out the same shape, keeping this name off the public API.
+ */
 export type Presentation = {
 	/** Clockwise rotation in degrees, rounded to the nearest quarter-turn. Defaults to 0. */
 	rotation?: number;
