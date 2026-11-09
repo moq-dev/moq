@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
 
 use moq_json::snapshot::{self, Decoder, Encoder};
-use moq_stats::{Bucket, BucketFrame, Traffic};
+use moq_net::stats::Traffic;
+use moq_stats::{Bucket, BucketFrame};
 
 /// A bucket frame as the producer writes it.
 #[derive(serde::Serialize)]

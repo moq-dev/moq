@@ -84,9 +84,10 @@ pub struct Args {
 	/// Write what the speaker played to this file, one JSON sample per line every 250ms.
 	///
 	/// Each line has the playhead, the playout target, the render quanta the speaker played
-	/// and how many were quiet, and the gaps and stalls since the line before, in the metric
-	/// schema of `test/audio-quality`, whose analyzer reduces it to underruns, skips, and
-	/// silence. Audio only, so it needs `--video off`.
+	/// and how many were quiet, the received audio trimmed and accelerated away, and the gaps
+	/// and stalls since the line before, in the metric schema of `test/audio-quality`, whose
+	/// analyzer reduces it to underruns, trims, and silence. Audio only, so it needs
+	/// `--video off`.
 	#[usage(long, value_name = "PATH", value_hint = usage_rs::ValueHint::FilePath, extensions("ndjson"))]
 	pub metrics: Option<PathBuf>,
 }

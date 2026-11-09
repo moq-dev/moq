@@ -98,8 +98,8 @@ pub(crate) enum Item {
 ///
 /// Put the initial [`Delay`] on the [`moq_net::track::Subscription`] before
 /// subscribing. [`new`](Self::new) inherits it, reading an unstated [`Delay::min`] as zero, and
-/// [`with_delay`](Self::with_delay) or [`set_delay`](Self::set_delay) sets the whole [`Delay`].
-/// A rendition with a catalog `warmup` builds both with a [`Playout`] instead.
+/// [`set_delay`](Self::set_delay) changes the whole [`Delay`] while reading. To build one at a
+/// delay the subscription does not carry, or with a catalog `warmup`, use a [`Playout`].
 ///
 /// ## Gaps and ends
 ///
@@ -410,12 +410,6 @@ impl<F: Container> Consumer<F> {
 	/// reader; what arrived below the start is discarded.
 	pub(crate) fn live(mut self) -> Self {
 		self.startup = Startup::Newest;
-		self
-	}
-
-	/// Set the [`Delay`] as a builder; see [`set_delay`](Self::set_delay).
-	pub fn with_delay(mut self, delay: Delay) -> Self {
-		self.set_delay(delay);
 		self
 	}
 
@@ -3762,11 +3756,14 @@ mod tests {
 					.with_delay(Delay::default().with_max(Duration::from_millis(500))),
 			)
 			.with_range(5..);
-		let mut consumer =
-			Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data)).with_delay(Delay {
+		let mut consumer = Playout::new(
+			Delay {
 				min: Some(Duration::from_millis(500)),
 				max: Some(Duration::from_millis(500)),
-			});
+			},
+			Duration::ZERO,
+		)
+		.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		assert!(
 			matches!(consumer.startup, Startup::Earliest { .. }),
 			"a local range names no start, so the start still reaches back"
@@ -3869,11 +3866,14 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_delay(Delay::default().with_max(None)));
-		let mut consumer =
-			Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data)).with_delay(Delay {
+		let mut consumer = Playout::new(
+			Delay {
 				min: Some(Duration::from_millis(500)),
 				max: None,
-			});
+			},
+			Duration::ZERO,
+		)
+		.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		assert_eq!(subscribed(&consumer).subscription().delay.max, None);
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);

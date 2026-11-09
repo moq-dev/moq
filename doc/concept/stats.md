@@ -227,8 +227,10 @@ bucket that returns within the linger keeps its track and epoch, and its totals
 continue. The node's announcement never changes, so bucket churn costs no
 announce traffic across a cluster. Over a hop that cannot carry a listing
 (moq-lite 06 and older, or moq-transport, whose `SUBSCRIBE_TRACKS` our relay
-refuses) the listing is empty or refused; a reader that knows a bucket's name
-can still subscribe to it while it is listed, and is refused otherwise.
+refuses) the listing is empty or refused. A bucket's track name carries its
+run's epoch, so a reader finds it only through the listing; one that already
+knows the name can subscribe while it is listed, and is refused otherwise.
+
 
 A bucket that returns after its linger is a new counter run under a new track:
 its frames carry a new `epoch`, which also names the track, and count from

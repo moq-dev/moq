@@ -18,7 +18,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use moq_net::origin;
-use moq_stats::{Bucket, Traffic, aggregate, bucket_track};
+use moq_net::stats::Traffic;
+use moq_stats::{Bucket, aggregate, bucket_track};
 
 /// Broadcast paths each node reports.
 const KEYS: usize = 16;

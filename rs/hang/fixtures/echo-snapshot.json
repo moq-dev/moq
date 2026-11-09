@@ -19,8 +19,7 @@
 			"arrival": {
 				"timestamp": 30000,
 				"wall": 175184640000
-			},
-			"latency": 200
+			}
 		},
 		"reset": {}
 	}
