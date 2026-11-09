@@ -275,6 +275,10 @@ pub(super) struct GroupState {
 	// cache policy moves the frames to them rather than dropping them.
 	handoff: Mutex<Weak<Handoff>>,
 
+	// Whether this copy's ingest wrote a frame itself, which it does only after settling the
+	// relay state; adopted frames (see [`Handle::adopt_head`]) prove nothing about it.
+	wrote: bool,
+
 	// Whether an adopted head (see [`Handle::adopt_head`]) begins at the group's first
 	// object, for a wire header that arrives after it.
 	adopted: Option<bool>,
@@ -1238,9 +1242,7 @@ impl GroupState {
 	/// the end object, or the close: a group is visible before its header is read.
 	#[cfg(feature = "async")]
 	fn poll_wire(&self) -> Poll<Result<Option<Wire>>> {
-		// Frames adopted below the log (see [`Handle::adopt_head`]) came from another copy,
-		// so only one this ingest wrote proves it read the header.
-		let settled = self.next_index > self.offset + self.front.len()
+		let settled = self.wrote
 			|| self.partial.is_some()
 			|| self.relay.as_ref().is_some_and(|relay| relay.end_object.is_some())
 			|| !matches!(self.outcome, Outcome::Open);
@@ -1861,6 +1863,7 @@ impl Producer {
 		}
 		let now = state.commit(entry);
 		state.next_index = next_index;
+		state.wrote = true;
 		let bound = state.settle(origin);
 		self.handle.alive.checked.store(true, Ordering::Relaxed);
 		self.advance_largest(&state);
@@ -1994,6 +1997,7 @@ impl Producer {
 		// A batch past the tail on its own, payloads or slots, sheds its own front.
 		state.trim(0);
 		state.next_index = next_index;
+		state.wrote = true;
 		let bound = state.settle(origin);
 		if count > 0 {
 			self.handle.alive.checked.store(true, Ordering::Relaxed);
@@ -2143,6 +2147,7 @@ impl Producer {
 			wire.sparse |= object_id != (next_index - 1) as u64;
 		}
 		state.next_index = next_index;
+		state.wrote = true;
 		// Opening the frame is enough: the header carries the timestamp, so the group's
 		// place in time is known before a single payload byte streams in.
 		state.stamp(timestamp);
