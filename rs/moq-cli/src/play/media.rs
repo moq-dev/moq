@@ -586,7 +586,7 @@ async fn play_audio<O: Output>(
 		playhead,
 		latency,
 		output,
-		delay: encoder,
+		delay: stated,
 	} = playback;
 
 	// The playout delay is the consumer's to size, from how unevenly packets arrive,
@@ -643,7 +643,18 @@ async fn play_audio<O: Output>(
 	// declared before the replacement media that resumes it is planned. A short
 	// timeline can declare its end before its first PCM, so ends queue until a
 	// frame crosses them.
+	// The jitter target the last write held, so a rise in the stated delay applies
+	// at once rather than waiting on the next write.
+	let jitter = Mutex::new(None);
+	let retarget = |delay: Option<Duration>| {
+		let Some(jitter) = *jitter.lock().unwrap() else { return };
+		if role.set_target(jitter + delay.unwrap_or_default()) {
+			changed.notify_one();
+			output.send(Event::Wake);
+		}
+	};
 	let receive = async {
+		let mut stated = stated.clone();
 		let mut retired = std::pin::pin!(retired);
 		// Media went missing since the last frame, so the next one does not continue it.
 		let mut lost = false;
@@ -658,11 +669,18 @@ async fn play_audio<O: Output>(
 				.front()
 				.is_some_and(|(.., queued): &(_, _, _, Instant)| queued.elapsed() > max_delay)
 			{
-				popped.notified().await;
+				tokio::select! {
+					() = popped.notified() => {}
+					Ok(()) = stated.changed() => retarget(*stated.borrow_and_update()),
+				}
 			}
 			let event = tokio::select! {
 				event = consumer.read() => event,
 				() = &mut retired => Ok(None),
+				Ok(()) = stated.changed() => {
+					retarget(*stated.borrow_and_update());
+					continue;
+				}
 			};
 			let event = match event {
 				Err(err) if !matches!(err, moq_audio::Error::Decode(_)) => return Err(err.into()),
@@ -865,7 +883,8 @@ async fn play_audio<O: Output>(
 			let mut moved = role.received(mapped, arrived_at);
 			// The publisher's encoder delay is on top of the arrival jitter, so the
 			// clock holds both while the sink keeps sizing for jitter alone.
-			moved |= role.set_target(input.latency + encoder.borrow().unwrap_or_default());
+			*jitter.lock().unwrap() = Some(input.latency);
+			moved |= role.set_target(input.latency + stated.borrow().unwrap_or_default());
 			// The depth that makes this frame's end sound when the shared clock says
 			// it is due, so the callback stretches the speaker onto the clock: behind
 			// it after a stall, it plays faster until it catches up. Floored at what

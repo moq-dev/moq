@@ -195,7 +195,10 @@ impl<O: Output> Video<O> {
 					.min()
 					.is_some_and(|arrived| arrived.elapsed() > self.max_delay + held)
 				{
-					advanced.notified().await;
+					tokio::select! {
+						() = advanced.notified() => {}
+						Ok(()) = encoder.changed() => held = hold(&mut track, *encoder.borrow_and_update()),
+					}
 				}
 				let read = tokio::select! {
 					read = track.read() => read?,
