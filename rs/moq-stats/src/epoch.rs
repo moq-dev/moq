@@ -1,13 +1,13 @@
 use std::{fmt, str::FromStr, sync::Arc};
 
-/// Names one run of a group's counters, independently of its broadcast's instance.
+/// Names one run of a bucket's counters, independently of its broadcast's instance.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde_with::SerializeDisplay, serde_with::DeserializeFromStr)]
 pub struct Epoch(Arc<str>);
 
-/// The group epoch is empty or holds a `/`: it names a group track's last
+/// The bucket epoch is empty or holds a `/`: it names a bucket track's last
 /// segment, so it must round-trip through one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("invalid group epoch: empty or contains '/'")]
+#[error("invalid bucket epoch: empty or contains '/'")]
 #[non_exhaustive]
 pub struct InvalidEpoch;
 

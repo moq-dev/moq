@@ -61,13 +61,13 @@ impl Consumer {
 		})
 	}
 
-	/// Subscribe to group `group`'s track; see [`Self::totals`]. The first read
-	/// fails with [`NotFound`](moq_net::Error::NotFound) unless the group is
+	/// Subscribe to bucket `bucket`'s track; see [`Self::totals`]. The first read
+	/// fails with [`NotFound`](moq_net::Error::NotFound) unless the bucket is
 	/// listed.
 	#[cfg(test)]
-	pub(crate) async fn group(&self, group: impl Into<Path>) -> Result<GroupConsumer> {
-		Ok(GroupConsumer {
-			inner: self.subscribe(&crate::listed_group_track(&self.broadcast, &group.into()).await)?,
+	pub(crate) async fn bucket(&self, bucket: impl Into<Path>) -> Result<BucketConsumer> {
+		Ok(BucketConsumer {
+			inner: self.subscribe(&crate::listed_bucket_track(&self.broadcast, &bucket.into()).await)?,
 		})
 	}
 
@@ -134,20 +134,20 @@ impl PrefixConsumer {
 	}
 }
 
-/// A typed reader over one group's track; see [`TotalsConsumer`].
+/// A typed reader over one bucket's track; see [`TotalsConsumer`].
 #[cfg(test)]
-pub(crate) struct GroupConsumer {
-	inner: Reader<crate::GroupFrame>,
+pub(crate) struct BucketConsumer {
+	inner: Reader<crate::BucketFrame>,
 }
 
 #[cfg(test)]
-impl GroupConsumer {
+impl BucketConsumer {
 	/// The next frame, or `None` once the track ends (the producer went away
-	/// or the group lingered out of the listing). Fails with
+	/// or the bucket lingered out of the listing). Fails with
 	/// [`FrameTooLarge`](moq_net::Error::FrameTooLarge) once the frame outgrows
 	/// the cache.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub(crate) fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::GroupFrame>>> {
+	pub(crate) fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::BucketFrame>>> {
 		self.inner.poll_latest(waiter)
 	}
 }
@@ -290,12 +290,12 @@ mod tests {
 		assert_eq!(frame[""].publisher.bytes, 50);
 		assert_eq!(frame[""].sessions.active(), 1);
 
-		// At depth 0 the one group is the empty one.
-		let mut group = consumer
-			.group(moq_net::Path::from_static(""))
+		// At depth 0 the one bucket is the empty one.
+		let mut bucket = consumer
+			.bucket(moq_net::Path::from_static(""))
 			.await
-			.expect("subscribe group");
-		let frame = group.next().await.expect("read").expect("frame");
+			.expect("subscribe bucket");
+		let frame = bucket.next().await.expect("read").expect("frame");
 		let tier = &frame.tiers[""];
 		assert_eq!(tier.publisher.bytes, 50);
 		assert_eq!(tier.paths["foo/bar"].publisher.bytes, 50);

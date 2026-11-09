@@ -93,8 +93,8 @@ lite-07 stream type here. Both moved to m3 on 2026-11-06 (maintainer,
 Added 2026-10-22 (maintainer, clustering audit): three interim fixes for
 announce churn on today's hop-list mesh, shipping with the next cut from
 `main` (not backported to `release`), so deployments get relief before the
-route layer ships; and stats groups as
-tracks, so per-group stats stop costing cluster announces.
+route layer ships; and stats buckets as
+tracks, so per-bucket stats stop costing cluster announces.
 
 Added 2026-10-22 (maintainer, security audit of the relay, auth, stats,
 ACME, and WebRTC): a clean close misreported as a revocation, injectable

@@ -8,7 +8,7 @@
  * let you drill into one. A restarted relay announces a new instance at the same
  * path, which each node's follower hands out afresh, so its history starts over.
  *
- * Per node we read the listed `group.<epoch>.json`, the whole node's group at
+ * Per node we read the listed `bucket.<epoch>.json`, the whole node's bucket at
  * the relay's default `depth = 0`, following the track listing to each new run: `{ epoch, tiers: { <tier>: { paths, labels } } }`, a JSON snapshot
  * with merge-patch deltas. From the default tier we take each path's `publisher`
  * (egress, relay -> downstream viewers) and `subscriber` (ingress, upstream
@@ -84,18 +84,18 @@ interface NodeStats {
 	sessions: SessionFrame; // `labels`
 }
 
-// One tier of a `group.json` frame.
-interface GroupTier {
+// One tier of a `bucket.<epoch>.json` frame.
+interface BucketTier {
 	paths?: Record<string, { publisher?: Snapshot; subscriber?: Snapshot }>;
 	labels?: SessionFrame;
 }
 
-interface GroupFrame {
-	tiers?: Record<string, GroupTier>;
+interface BucketFrame {
+	tiers?: Record<string, BucketTier>;
 }
 
-// The default tier's egress, ingress, and sessions from a group frame.
-function nodeStatsOf(frame: GroupFrame): NodeStats {
+// The default tier's egress, ingress, and sessions from a bucket frame.
+function nodeStatsOf(frame: BucketFrame): NodeStats {
 	const tier = frame.tiers?.[""] ?? {};
 	const egress: BroadcastFrame = {};
 	const ingress: BroadcastFrame = {};
@@ -180,8 +180,8 @@ discovery.run((effect) => {
 	});
 });
 
-// The depth-0 group's track, one per counter run.
-const GROUP_TRACK = /^group\.[^/]+\.json$/;
+// The depth-0 bucket's track, one per counter run.
+const BUCKET_TRACK = /^bucket\.[^/]+\.json$/;
 
 function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: Net.Path.Valid, node: string) {
 	// Follow the node across instances: a restarted one counts from zero, so its series starts
@@ -203,23 +203,23 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 		clusterMembership = "";
 		if (!consumer) return;
 
-		// Each counter run is its own `group.<epoch>.json` track, found through the listing.
+		// Each counter run is its own `bucket.<epoch>.json` track, found through the listing.
 		const tracks = consumer.tracks();
 		instance.cleanup(() => tracks.close());
-		let group: Json.Snapshot.Consumer<GroupFrame> | undefined;
-		instance.cleanup(() => group?.close());
+		let bucket: Json.Snapshot.Consumer<BucketFrame> | undefined;
+		instance.cleanup(() => bucket?.close());
 		instance.spawn(async () => {
 			for (;;) {
 				const event = await instance.race(tracks.next());
 				if (!event) break;
-				if (event.kind !== "added" || !GROUP_TRACK.test(event.name)) continue;
-				group?.close();
-				const reader = new Json.Snapshot.Consumer<GroupFrame>({ track: consumer.track(event.name) });
-				group = reader;
+				if (event.kind !== "added" || !BUCKET_TRACK.test(event.name)) continue;
+				bucket?.close();
+				const reader = new Json.Snapshot.Consumer<BucketFrame>({ track: consumer.track(event.name) });
+				bucket = reader;
 				instance.spawn(async () => {
 					for (;;) {
 						const state = await instance.race(reader.latest());
-						if (state === undefined || group !== reader) break;
+						if (state === undefined || bucket !== reader) break;
 						nodeStats.mutate((s) => {
 							if (s[node]) s[node] = nodeStatsOf(state.value ?? {});
 						});
