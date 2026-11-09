@@ -67,7 +67,7 @@ pub struct Config {
 	/// incurred by a small minimum reset interval.
 	///
 	/// [ISAKMP/IKE amplification]: https://bughunters.google.com/blog/5960150648750080/preventing-cross-service-udp-loops-in-quic#isakmp-ike-amplification-vs-quic
-	pub min_reset_interval: Option<Duration>,
+	pub(crate) min_reset_interval: Option<Duration>,
 
 	/// Seed for the endpoint's random number generator, or `None` (the default) to seed it from
 	/// the platform's entropy source

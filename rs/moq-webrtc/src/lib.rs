@@ -1,5 +1,4 @@
-//! WebRTC for MoQ: a WHIP/WHEP gateway, and with the `p2p` feature, MoQ sessions over a
-//! data channel with a browser peer (the `p2p` module).
+//! WebRTC for MoQ: a WHIP/WHEP gateway.
 //!
 //! The gateway bridges WHIP (RFC 9725) and WHEP between WebRTC peers and
 //! [`moq_net`] broadcasts. The crate is split along two orthogonal axes
@@ -30,6 +29,11 @@
 //! the `axum` re-export sit behind the default `server` feature, so such an
 //! embedder can drop them with `default-features = false`.
 //!
+//! ## Runtime
+//!
+//! The crate is a tokio edge, built on `moq-tokio`, axum, and tokio sockets: its entry
+//! points spawn their session drivers on the current tokio runtime.
+//!
 //! ## Bitstream gotcha
 //!
 //! The WebRTC ↔ MoQ shape conversion for H.264 and H.265 is handled by
@@ -41,6 +45,7 @@
 
 pub mod client;
 #[cfg(feature = "p2p")]
+#[doc(hidden)]
 pub mod p2p;
 pub mod rate;
 pub mod server;

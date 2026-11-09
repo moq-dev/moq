@@ -223,6 +223,12 @@ writes the same samples a page does, so `analyze.ts` reduces both alike, and the
 and clock checks have nothing to void. Decoding is taken as instant. A replay is deterministic, so
 its budgets are exactly what it measured.
 
+The ring time-stretches live playback as the page's does, but the replay's audio is a constant, so
+every seam admits at the shortest pitch period, 2.5 ms. Accelerate therefore moves less per stretch
+than it would from speech; only fast accelerate, which takes every whole period that fits, moves its
+most. `skip_aheads` also reads a sustained accelerate as a skip; `player_skips` counts only the ring's
+own re-anchors.
+
 ```bash
 just test audio-quality-record                        # the three recorded lanes, 35 s each, needs the network
 just test audio-quality-record --lanes relay-bbb
@@ -282,6 +288,9 @@ player's own count, which its stats panel shows, is read alongside:
 - `player_underruns`: `audio.out.stats.underruns`, each time the ring ran dry mid-playback and
   re-stalled to refill, plus each quantum it filled only part-way. The tap files the quanta after a
   run-dry as stalled time, so `underruns` leaves those out and this counts them. Unset natively.
+- `player_skips`: `audio.out.stats.skips`, each jump that dropped buffered audio rather than playing
+  it faster. `skip_aheads` below infers the same events from the playhead, and also reads a time
+  stretch that sustains 40 ms of acceleration as one, so this is the exact count. Unset natively.
 - `underruns`: quanta the ring filled only partly, or not at all, while playing.
 - `short_quanta`: the underruns that were partly filled: the ring ran dry part-way through.
 - `underrun_episodes`: maximal runs of consecutive underruns, one audible gap each.
@@ -295,6 +304,10 @@ player's own count, which its stats panel shows, is read alongside:
   that starts within 60 ms of a stall is that stall, and is not an underrun.
 - `silence`: the share of rendered quanta under -60 dBFS at the output, whatever the cause.
 - `target_ms`: the resolved playout delay (`sync.out.delay`).
+- `av_lag_ms`: how far the audio playhead trails the shared clock video plays from (`sync.now()`),
+  sampled while playing. Audio and video keep separate clocks that align once the delay covers the
+  arrivals, so this is the latency audio adds beyond the target: positive is audio late, negative
+  early. Its replay ceilings hold audio from settling later to buy fewer underruns. Unset natively.
 - `converge_ms`: from first audio to the last time the target moved more than one 20 ms bucket from
   its final value.
 - `render_load`: Chromium's render capacity, the share of each quantum's budget the graph used.
@@ -336,10 +349,11 @@ The nightly `Audio quality` job runs the browser rows under `--enforce` and the 
 only, until an intermittent two-second device stall that voids about one AAC native row in seven is
 fixed. It keeps every run directory for a week as the `audio-quality-run` artifact: each process's log, the shaper's counters, every row's raw
 samples and summary. The
-replays also run under `--enforce` nightly on `main` and on every release PR that touches the
-player's packages (`js/watch`, `js/hang`, `js/net`, `js/signals`) or the harness
-(`.github/workflows/audio-quality.yml`). A change that moves them updates `budgets.json` in the
-same PR, so run `just test audio-quality --replays --enforce` before pushing one.
+replays run under `--enforce` in `just ci` on every diff that touches the player's packages
+(`js/watch`, `js/hang`, `js/net`, `js/signals`, `js/clock`) or the harness (`test/audio-quality`,
+`test/lib`, `test/justfile`), so they gate every merge, and again nightly on `main`. A replay row
+fails when it moves in either direction: a change that moves one updates `budgets.json` to what it
+now measures in the same PR, so run `just test audio-quality --replays --enforce` before pushing one.
 
 ## Layout
 
