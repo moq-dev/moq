@@ -13,7 +13,7 @@ behind it.
 Planned 2026-11-08 (maintainer, approved follow-up of
 [moq-dev/moq#8272](https://github.com/moq-dev/moq/pull/8272), which gives
 moq-mux's playout sync per-track targets and the largest-target delay). Milestone:
-m1, an additive fix to shipped playback; start after #8272 merges.
+m1, an additive fix to shipped playback. #8272 has merged.
 
 On `main`, nothing under `rs/moq-cli/src/play/` reads a rendition's
 `delay`; the browser does (`js/watch/src/video/playhead.ts`,
