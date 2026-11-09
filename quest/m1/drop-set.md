@@ -95,12 +95,6 @@ Still to cover, beyond the memory work:
   read past it, becomes a hole that reader never asks for or gives up, so an
   ordered reader behind it can wait on it. Rejudge what a forgotten run
   leaves, without a full rescan per shed.
-- **A received copy's tail completion.** Found the same day: once a received
-  copy's declared end is reached, `owes` counts a gap the drop set covered as
-  delivered, so forgetting that run can reopen the tail after a reader saw
-  the end, and under an unbounded budget hold it. Keep the completion once
-  reached, rather than keep the runs, which a peer declaring a far end would
-  make unbounded.
 
 Tests, on mock time through a relay, in Rust and mirrored in `js/net`:
 

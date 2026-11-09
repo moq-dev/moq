@@ -407,6 +407,10 @@ struct End {
 	/// clean end stands for good. Atomic so reporting it latches through a read guard; see
 	/// [`TrackState::latch_settled`].
 	settled: AtomicBool,
+	/// Whether the end was reached when a reclaim forgot runs of the drop set, which keeps it
+	/// reached: a received copy's tail counts a dropped gap as delivered, so forgetting the
+	/// run would make a reader that saw the end wait on it again.
+	reached: AtomicBool,
 }
 
 impl End {
@@ -1454,6 +1458,7 @@ impl TrackState {
 		if !self.drops_expired(now) {
 			return;
 		}
+		self.latch_reached();
 		let kept = self.kept_drops();
 		let expired: Vec<_> = self
 			.drops_born
@@ -1470,6 +1475,15 @@ impl TrackState {
 			.filter(|(run, _)| run.start < kept)
 			.map(|(_, expires)| *expires)
 			.min();
+	}
+
+	/// Keep a reached end reached before a reclaim forgets runs; see [`End::reached`].
+	fn latch_reached(&self) {
+		if let Outcome::Ending(end) = &self.outcome
+			&& self.is_complete()
+		{
+			end.reached.store(true, Ordering::Relaxed);
+		}
 	}
 
 	/// Where the runs a reclaim may forget end: every run on a received copy, whose tail
@@ -1502,6 +1516,9 @@ impl TrackState {
 	fn shed_drops(&mut self, cap: u64) -> u64 {
 		let mut paid = 0u64;
 		let kept = self.kept_drops();
+		if self.debt > 0 && cap > 0 {
+			self.latch_reached();
+		}
 		while self.debt > 0 && paid < cap {
 			let Some(run) = self
 				.drops
@@ -3040,6 +3057,7 @@ impl TrackState {
 			error,
 			tail,
 			settled: AtomicBool::new(settled),
+			reached: AtomicBool::new(false),
 		});
 		self.cache.declare_end();
 		self.cache.wakes().arrived(fin..);
@@ -3091,10 +3109,13 @@ impl TrackState {
 	/// still open, so the track was cut off rather than ended.
 	fn is_complete(&self) -> bool {
 		match &self.outcome {
-			Outcome::Ending(end) => end
-				.at
-				.final_sequence()
-				.is_some_and(|fin| self.reaches(fin) && !self.awaits_tail(fin)),
+			Outcome::Ending(end) => {
+				end.reached.load(Ordering::Relaxed)
+					|| end
+						.at
+						.final_sequence()
+						.is_some_and(|fin| self.reaches(fin) && !self.awaits_tail(fin))
+			}
 			// A declared end the last producer dropped short of.
 			Outcome::Sealed(_) => true,
 			// An abort wins unless the end had already settled: a group below it was still open.
@@ -23759,6 +23780,37 @@ mod test {
 		assert!(producer.state.read().drops.is_empty());
 		assert_eq!(pool.used(), used);
 		assert!(local.state.read().skipped(5), "a local skip above the edge stays");
+	}
+
+	/// A received copy whose end a dropped gap let it reach stays ended once that run expires,
+	/// even for a reader whose budget outlasts the run, which would otherwise wait on the gap.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reached_end_outlives_its_expired_drops() {
+		let patient = || {
+			Subscription::default()
+				.with_range(0..)
+				.with_delay(Delay::default().with_max(Duration::from_secs(3600)))
+		};
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		producer.received();
+		let mut subscriber = producer.subscribe(patient());
+		write_group(&producer, 0);
+		producer.drop_groups(1..2, StreamError::Old);
+		write_group(&producer, 2);
+		producer.finish_at(Position::group(3), None).unwrap();
+		drain_groups(&mut subscriber);
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+
+		elapse(&producer, Duration::from_secs(40));
+		pool.sweep();
+		assert!(producer.state.read().drops.is_empty(), "the run expired");
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+		let mut late = producer.subscribe(patient());
+		drain_groups(&mut late);
+		assert!(matches!(late.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
 	}
 
 	/// A source refusing a fill in disjoint groups pays for the runs it records, as a drop does.

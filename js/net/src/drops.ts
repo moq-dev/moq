@@ -98,8 +98,11 @@ export class Runs<R extends Run> {
 				if (ranges[i].end > from) from = ranges[i].end;
 			}
 			if (from < run.end) pieces.push({ ...run, start: from, end: run.end });
-			kept.push(...pieces);
-			added.push(...pieces);
+			// One by one: a run split by many ranges would overflow a spread's arguments.
+			for (const piece of pieces) {
+				kept.push(piece);
+				added.push(piece);
+			}
 		}
 		this.#runs = kept;
 		return { removed, added };
