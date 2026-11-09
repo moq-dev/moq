@@ -399,20 +399,36 @@ mod tests {
 
 	#[test]
 	fn an_open_trace_accounts_for_staging_and_close() {
+		// Own the writer's channel and run its loop on this thread, so the
+		// accounting is settled when the loop returns rather than whenever a
+		// background thread gets scheduled.
 		let dir = tempfile::tempdir().expect("temp dir");
-		let sink = Sink::directory(dir.path()).expect("sink");
+		let (tx, rx) = mpsc::channel();
+		let sink = Sink {
+			inner: Arc::new(Inner {
+				dir: dir.path().to_path_buf(),
+				started: 0,
+				process: 0,
+				sink: 0,
+				tx: Some(tx),
+				memory: Arc::new(AtomicUsize::new(0)),
+				next: AtomicU64::new(0),
+				dropped: AtomicBool::new(false),
+				thread: None,
+			}),
+		};
 		let trace = sink.trace(Side::Server);
 
+		let (writer_tx, writer_rx) = mpsc::channel();
+		writer_tx.send(rx.recv().expect("queued open")).expect("forward open");
+		drop(writer_tx);
+		write_traces(writer_rx, &sink.inner.memory);
+
 		let accounted = CHUNK + std::mem::size_of::<Msg>();
-		for _ in 0..10_000 {
-			if sink.inner.memory.load(Ordering::Relaxed) == accounted {
-				break;
-			}
-			std::thread::yield_now();
-		}
 		assert_eq!(sink.inner.memory.load(Ordering::Relaxed), accounted);
 
 		drop(trace);
+		assert_eq!(sink.inner.memory.load(Ordering::Relaxed), std::mem::size_of::<Msg>());
 		drop(sink);
 	}
 

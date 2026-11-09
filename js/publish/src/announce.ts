@@ -10,8 +10,7 @@ interface Track {
 }
 
 export interface Props {
-	// Undefined refuses to announce.
-	mode: Getter<AnnounceMode | undefined>;
+	mode: Getter<AnnounceMode>;
 	// The selected source while the element is connected; it stays set across capture gaps.
 	source: Getter<SourceType | File | undefined>;
 	video: Track;

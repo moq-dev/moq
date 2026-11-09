@@ -627,7 +627,8 @@ test("muting sends nothing and marks where the audio ends, keeping the rendition
 });
 
 // With `capture="release"` a mute closes the microphone, taking its format away. The rendition stays
-// advertised, still enabled, through the mute and while the reopened microphone resolves.
+// advertised, still enabled, through the mute. Once unmuted it is disabled until the microphone
+// reopens, so one that never does isn't advertised as sending.
 test("a muted rendition keeps its config enabled while its capture is released", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup();
@@ -642,7 +643,15 @@ test("a muted rendition keeps its config enabled while its capture is released",
 
 	encoder.muted.set(false);
 	await settle();
+	expect(encoder.out.catalog.peek()).toEqual({ ...before, enabled: false } as never);
+
+	// Muting again while the reopen is pending is muted, not disabled.
+	encoder.muted.set(true);
+	await settle();
 	expect(encoder.out.catalog.peek()).toEqual(before);
+	encoder.muted.set(false);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual({ ...before, enabled: false } as never);
 
 	capture.out.format.set(format);
 	await settle(10);

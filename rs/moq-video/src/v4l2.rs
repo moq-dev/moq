@@ -206,7 +206,7 @@ pub(crate) fn open(role: &Role) -> Result<Device, Error> {
 		}
 	}
 
-	Err(Error::Codec(anyhow::anyhow!(
+	Err(Error::codec(anyhow::anyhow!(
 		"no V4L2 M2M node converts {} to {} (set {} to name one; tried {})",
 		join_fourcc(role.input),
 		join_fourcc(role.output),
@@ -245,7 +245,7 @@ impl Device {
 			.write(true)
 			.custom_flags(libc::O_NONBLOCK)
 			.open(path)
-			.map_err(|err| Error::Codec(anyhow::anyhow!("{}: open: {err}", path.display())))?;
+			.map_err(|err| Error::codec(anyhow::anyhow!("{}: open: {err}", path.display())))?;
 
 		let device = Self {
 			file,
@@ -260,12 +260,12 @@ impl Device {
 				0 => "not an M2M device",
 				_ => "single-planar M2M only",
 			};
-			return Err(Error::Codec(anyhow::anyhow!("{}: {what}", path.display())));
+			return Err(Error::codec(anyhow::anyhow!("{}: {what}", path.display())));
 		}
 		// Everything below streams MMAP buffers, so a node without streaming I/O is
 		// the wrong node however its formats enumerate.
 		if caps & V4L2_CAP_STREAMING == 0 {
-			return Err(Error::Codec(anyhow::anyhow!("{}: no streaming I/O", path.display())));
+			return Err(Error::codec(anyhow::anyhow!("{}: no streaming I/O", path.display())));
 		}
 		Ok(device)
 	}
@@ -275,7 +275,7 @@ impl Device {
 		for (dir, wanted) in [(Dir::Output, role.input), (Dir::Capture, role.output)] {
 			let offered = self.formats(dir)?;
 			if !wanted.iter().any(|code| offered.contains(code)) {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"offers {} where {} is needed",
 					join_fourcc(&offered),
 					join_fourcc(wanted)
@@ -303,7 +303,7 @@ impl Device {
 
 	/// Wrap an ioctl failure with the node and the operation that failed.
 	fn err(&self, what: impl std::fmt::Display, err: std::io::Error) -> Error {
-		Error::Codec(anyhow::anyhow!("{}: {what}: {err}", self.path.display()))
+		Error::codec(anyhow::anyhow!("{}: {what}: {err}", self.path.display()))
 	}
 
 	/// The capabilities of this node specifically, rather than of the driver as a
@@ -1070,7 +1070,7 @@ impl Planes {
 		let size = rect.size;
 		size.validate("V4L2 4:2:0 frame")?;
 		if rect.left + size.width > format.size.width || rect.top + size.height > format.size.height {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"V4L2 negotiated {} for a {size} picture at {},{}",
 				format.size,
 				rect.left,
@@ -1086,7 +1086,7 @@ impl Planes {
 			NV12 | NV12M => true,
 			YUV420 | YUV420M => false,
 			other => {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"V4L2 chose the unsupported raw format {}",
 					name(other)
 				)));
@@ -1096,7 +1096,7 @@ impl Planes {
 		let luma = *format
 			.planes
 			.first()
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("V4L2 reported a format with no planes")))?;
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("V4L2 reported a format with no planes")))?;
 		let stride = luma.stride.max(format.size.width) as usize;
 		let y = Component {
 			plane: 0,
@@ -1149,7 +1149,7 @@ impl Planes {
 				)
 			}
 			(false, true) => {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"V4L2 chose planar {} with {} planes",
 					name(format.pixelformat),
 					format.planes.len()
@@ -1318,7 +1318,7 @@ fn deinterleave(u: &mut [u8], v: &mut [u8], src: &[u8], at: Component, width: us
 }
 
 fn short(len: usize, needed: usize) -> Error {
-	Error::Codec(anyhow::anyhow!(
+	Error::codec(anyhow::anyhow!(
 		"V4L2 buffer of {len} bytes is too small for the {needed} its format implies"
 	))
 }
