@@ -15,8 +15,9 @@ so it only needs to stay green.
   Triage any red run, then delete this quest once one passes. Its pass skips
   the datagram and replacement cases until
   [routes/js.md](/quest/m2/cluster-routing/routes/js.md) lands, as
-  [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) set; delete on
-  that pass only if those skips stay accepted.
+  [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) set. Decided
+  2026-11-09 (maintainer, AFK, accepting the recommendation): close this quest
+  on that pass, because routes/js.md tracks restoring those cases.
 
 ## Plan
 
