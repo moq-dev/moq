@@ -350,9 +350,17 @@ impl MoqServer {
 			Err(driver) => return cancelled(driver).await,
 		};
 		// A cancel closes the loop, which ends the queue and wakes this.
+		let ended = driver.clone();
 		let request = driver
 			.watch(crate::ffi::run(async move {
-				Ok::<_, MoqError>(queue.lock().await.recv().await)
+				let mut queue = tokio::select! {
+					// A request buffered before the loop ended still goes to whoever takes the queue.
+					biased;
+					queue = queue.lock() => queue,
+					// Another accept holds the queue, and a foreign-cancelled one keeps it until freed.
+					result = ended.finished() => return result.map(|()| None),
+				};
+				Ok::<_, MoqError>(queue.recv().await)
 			}))
 			.await;
 		// Read after the wait, so a parked accept holds no origin past a cancel.

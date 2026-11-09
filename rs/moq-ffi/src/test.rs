@@ -7018,6 +7018,36 @@ async fn server_accept_cancelled_before_free_leaves_the_session() {
 	server.cancel();
 }
 
+/// An accept queued behind a foreign-cancelled one, which keeps the queue until freed, still
+/// resolves on `cancel`.
+#[tokio::test]
+async fn server_cancel_wakes_an_accept_queued_behind_an_unfreed_one() {
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
+	server.listen().await.expect("listen failed");
+
+	// Parked, then left unpolled, as a foreign cancel leaves it until `rust_future_free`.
+	let mut unfreed = Box::pin(server.accept());
+	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+	assert!(unfreed.as_mut().poll(&mut cx).is_pending());
+
+	let queued = server.clone();
+	let queued = tokio::spawn(async move { queued.accept().await });
+	tokio::task::yield_now().await;
+
+	server.cancel();
+	let queued = kio::clock::timeout(TIMEOUT, queued)
+		.await
+		.expect("the queued accept never saw the cancel")
+		.expect("accept task panicked");
+	assert!(matches!(queued, Err(MoqError::Cancelled)));
+	drop(unfreed);
+}
+
 #[tokio::test]
 async fn request_double_respond_returns_already_responded() {
 	use crate::error::MoqError;

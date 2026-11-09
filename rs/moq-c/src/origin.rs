@@ -137,13 +137,15 @@ impl State {
 		visible: bool,
 	) -> Result<Id, Error> {
 		let broadcast = self.publish.create((route.broadcast().clone(), driver.clone()))?;
-		let family = self.publish.target(broadcast)?.children.clone();
-		let announced = match visible {
-			true => route.announce().map_err(Error::from),
-			false => Ok(()),
-		};
-		announced
-			.and_then(|()| self.origin.route_insert(route, driver, broadcast, family))
+		self.publish
+			.target(broadcast)
+			.map(|target| target.children.clone())
+			.and_then(|family| {
+				if visible {
+					route.announce()?;
+				}
+				self.origin.route_insert(route, driver, broadcast, family)
+			})
 			.inspect_err(|_| {
 				self.publish.discard(broadcast);
 			})
