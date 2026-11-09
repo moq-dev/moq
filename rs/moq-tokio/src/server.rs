@@ -1965,7 +1965,9 @@ mod tests {
 		loop {
 			return match announced.next().await? {
 				moq_net::announce::Event::Present(route) => Some((route, true)),
-				moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => Some((route, false)),
+				moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => {
+					Some((route, false))
+				}
 				moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
 			};
 		}

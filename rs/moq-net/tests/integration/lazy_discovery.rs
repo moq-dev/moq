@@ -112,7 +112,9 @@ async fn synced(announced: &mut origin::Routes) -> Vec<String> {
 			origin::RouteEvent::Start(announce) | origin::RouteEvent::Restart(announce) => {
 				seen.push(announce.prefix.to_string())
 			}
-			origin::RouteEvent::End(announce) | origin::RouteEvent::Offline(announce) => seen.retain(|prefix| *prefix != announce.prefix.as_str()),
+			origin::RouteEvent::End(announce) | origin::RouteEvent::Offline(announce) => {
+				seen.retain(|prefix| *prefix != announce.prefix.as_str())
+			}
 			origin::RouteEvent::Update(_) => {}
 		}
 	}

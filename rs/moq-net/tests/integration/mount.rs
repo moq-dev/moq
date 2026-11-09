@@ -158,7 +158,11 @@ async fn relayed(version: &str) {
 
 	drop(upstream);
 	kio::clock::sleep(Duration::from_millis(500)).await;
-	assert_eq!(drain(&mut routes).await, lost(version, &["own", "shared/cam"]), "{version}");
+	assert_eq!(
+		drain(&mut routes).await,
+		lost(version, &["own", "shared/cam"]),
+		"{version}"
+	);
 }
 
 macro_rules! mounted_tests {

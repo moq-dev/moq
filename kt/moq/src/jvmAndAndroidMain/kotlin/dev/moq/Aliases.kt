@@ -109,8 +109,8 @@ typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 typealias AnnounceEventPresent = uniffi.moq.MoqAnnounceEvent.Present
 
 /**
- * The present path lost every usable path to its origin but may recover one: it stays present
- * while requests for it may fail.
+ * The present path lost every usable path to its origin but may recover one: it stays present while
+ * requests for it may fail.
  */
 typealias AnnounceEventUnavailable = uniffi.moq.MoqAnnounceEvent.Unavailable
 
@@ -121,8 +121,8 @@ typealias AnnounceEventAvailable = uniffi.moq.MoqAnnounceEvent.Available
 typealias AnnounceEventAbsent = uniffi.moq.MoqAnnounceEvent.Absent
 
 /**
- * This side let go of the path, which its origin may still serve: the session it arrived on
- * closed, or the network lost every path to it. Carries its last route.
+ * This side let go of the path, which its origin may still serve: the session it arrived on closed,
+ * or the network lost every path to it. Carries its last route.
  */
 typealias AnnounceEventOffline = uniffi.moq.MoqAnnounceEvent.Offline
 

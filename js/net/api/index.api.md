@@ -18,7 +18,7 @@ export namespace Announce {
 		get synced(): Signals.Getter<boolean>;
 	}
 	export type Event = {
-		kind: "present" | "absent";
+		kind: "present" | "unavailable" | "available" | "absent" | "offline";
 	} & Announce.Announce;
 	export interface Options {
 		covering?: boolean;
@@ -513,6 +513,7 @@ export namespace Origin {
 		withdraw(): void;
 	}
 	export interface RouteInfo {
+		readonly available: boolean;
 		readonly cost: Origin.Cost;
 		readonly instance?: Instance.Valid;
 	}

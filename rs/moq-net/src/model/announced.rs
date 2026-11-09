@@ -238,7 +238,9 @@ mod tests {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut announced = origin.consume().announced();
 		let instance = Instance::random();
-		let held = RouteInfo::new().with_instance(instance.clone(), 0).with_available(false);
+		let held = RouteInfo::new()
+			.with_instance(instance.clone(), 0)
+			.with_available(false);
 
 		let lost = origin.forward("lost", held.clone()).unwrap();
 		assert_eq!(listed(&mut announced).await, "present lost");

@@ -2295,7 +2295,8 @@ impl ServePublishNamespace {
 					let token = live.grant.is_some();
 					// Only the peer's own withdrawal ends the route; a failed stream loses it.
 					let ended = matches!(lived, Ok(Ok(Withdraw::Done)));
-					self.this.release_announce(&live.path, &mut live.attached, token, ended)?;
+					self.this
+						.release_announce(&live.path, &mut live.attached, token, ended)?;
 
 					let withdraw = match lived {
 						Ok(withdraw) => withdraw?,
