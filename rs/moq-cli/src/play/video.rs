@@ -1034,7 +1034,7 @@ mod tests {
 			"continuous media reached the codec before the later delivery hole"
 		);
 		write(13, vec![400, 380, 390, 410]);
-		published.finish().unwrap();
+		let _published = published.finish().unwrap();
 		for _ in 0..1300 {
 			tokio::task::yield_now().await;
 			media.output.present(&media);
@@ -1453,14 +1453,14 @@ mod tests {
 		/// Finish every group before `sequence` still open.
 		fn seal(&mut self, sequence: u64) {
 			let open = self.groups.split_off(&sequence);
-			for (_, mut group) in std::mem::replace(&mut self.groups, open) {
+			for (_, group) in std::mem::replace(&mut self.groups, open) {
 				group.finish().unwrap();
 			}
 		}
 
 		fn finish(&mut self) {
 			self.seal(u64::MAX);
-			self.track.finish().unwrap();
+			drop(self.track.clone().finish().unwrap());
 		}
 	}
 

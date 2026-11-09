@@ -1515,7 +1515,7 @@ mod read_tests {
 		.await;
 		assert_eq!(ids.len(), 1);
 		write(2, 20_000, bytes::Bytes::new());
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		run.await.unwrap();
 		assert_eq!(ids.len(), 3);
 		let micros = |value| moq_timestamp {
@@ -1713,7 +1713,7 @@ mod tests {
 				let warming = warmup.is_some_and(|warmup| !warmup.is_zero());
 				assert_eq!(first.is_err(), warming, "video={video}, warmup={warmup:?}");
 				consumer.write(3, 4_400_000);
-				consumer.track.finish().unwrap();
+				drop(consumer.track.clone().finish().unwrap());
 				let mut stamps: Vec<_> = first.ok().flatten().into_iter().collect();
 				while let Some(stamp) = consumer.frame().await {
 					stamps.push(stamp);

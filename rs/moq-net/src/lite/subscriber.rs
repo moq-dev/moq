@@ -980,7 +980,7 @@ impl SubscriptionCleanup {
 				continue;
 			};
 			if entry.tail.read().is_ended() {
-				let _ = producer.finish();
+				let _ = producer.finish_shared();
 			}
 			let _ = producer.abort(err.clone());
 		}
@@ -5417,9 +5417,9 @@ mod tests {
 				update: 0,
 			})
 		};
-		let frame = |group: &mut crate::group::Producer| {
+		let frame = |mut group: crate::group::Producer| {
 			group.write_frame(crate::Timestamp::from_millis(1).unwrap(), &b"x"[..])?;
-			group.finish()
+			group.finish().map(drop)
 		};
 		let arrive = |serving: &mut ServeLoop, sequence| {
 			let group = serving.serving.create_group(crate::group::Info { sequence }).unwrap();
@@ -5428,15 +5428,15 @@ mod tests {
 
 		// OLD, then the group, which finishes.
 		serving.apply_response(&serve, old(1)).unwrap();
-		let (mut one, reading) = arrive(&mut serving, 1);
-		frame(&mut one).unwrap();
+		let (one, reading) = arrive(&mut serving, 1);
+		frame(one).unwrap();
 		drop(reading);
 		// The group first, still arriving when its OLD lands.
-		let (mut two, _two) = arrive(&mut serving, 2);
+		let (two, _two) = arrive(&mut serving, 2);
 		serving.apply_response(&serve, old(2)).unwrap();
 		// OLD, then the group, still arriving at the update.
 		serving.apply_response(&serve, old(3)).unwrap();
-		let (mut three, _three) = arrive(&mut serving, 3);
+		let (three, _three) = arrive(&mut serving, 3);
 		// OLD, and no group.
 		serving.apply_response(&serve, old(4)).unwrap();
 
@@ -5450,8 +5450,8 @@ mod tests {
 		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
 		assert!(covers(1..4), "every group that arrived stays accounted for");
 		assert!(!covers(4..5), "the group that never arrived is owed again");
-		frame(&mut two).expect("the drop leaves a group still arriving");
-		frame(&mut three).expect("the update leaves a group still arriving");
+		frame(two).expect("the drop leaves a group still arriving");
+		frame(three).expect("the update leaves a group still arriving");
 	}
 
 	/// A group whose stream finished wins over a lite-07 stale drop that lands after the cache
@@ -6635,11 +6635,11 @@ mod tests {
 			Err(_) => panic!("the entry holds the parked streams"),
 		};
 		assert_eq!(opened, [kept], "the withdrawn group is gone");
-		let Ok(Open::Group(Opened { mut group, .. })) = entry.unpark(kept) else {
+		let Ok(Open::Group(Opened { group, .. })) = entry.unpark(kept) else {
 			panic!("the kept group");
 		};
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		// Only the kept group reaches the subscriber: the withdrawn one ended, so nothing
 		// waits on it.
 		let mut sequences = Vec::new();
@@ -7432,10 +7432,10 @@ mod tests {
 			assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
 			// Held for the whole round: a dropped tail settles at once.
 			let tail = kio::Producer::new(Tail::default());
-			let mut group = serving.serving.append_group().unwrap();
+			let mut group = Some(serving.serving.append_group().unwrap());
 			if let Some(finished) = ended {
 				if finished {
-					group.finish().unwrap();
+					group.take().unwrap().finish().unwrap();
 				}
 				if version.has_track_stream() {
 					serving.serving.finish_at(Position::group(1), None).unwrap();
@@ -12017,7 +12017,7 @@ impl ServeLoop {
 							return Poll::Pending;
 						}
 						if !serve.subscriber.version.has_track_stream() {
-							let _ = self.serving.finish();
+							let _ = self.serving.finish_shared();
 						}
 						return Poll::Ready(ServeEnd::GiveBack(crate::lite::error::from_transport(err)));
 					}

@@ -1230,7 +1230,7 @@ impl Pump {
 			match outcome {
 				Ok(()) => {
 					if let Some(track) = &self.track {
-						let _ = track.finish();
+						let _ = track.finish_shared();
 					}
 				}
 				Err(err) => {
@@ -1299,7 +1299,7 @@ impl Pump {
 			// Finished without a group: an empty half.
 			if !self.received
 				&& self.subscriber.is_none()
-				&& let Some(mut local) = self.local.take()
+				&& let Some(local) = self.local.take()
 			{
 				let _ = local.finish();
 			}
@@ -1322,8 +1322,7 @@ impl Pump {
 				Poll::Pending => return Ok(()),
 				Poll::Ready(Ok(Some(frame))) => self.pending = Some(frame),
 				Poll::Ready(Ok(None)) => {
-					local.finish()?;
-					self.local = None;
+					self.local.take().expect("checked above").finish()?;
 					self.remote = None;
 					return Ok(());
 				}

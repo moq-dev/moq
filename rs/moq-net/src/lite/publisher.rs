@@ -6732,7 +6732,7 @@ mod serve_group_test {
 		for i in 0..4u8 {
 			group.write_frame(Timestamp::ZERO, vec![i]).unwrap();
 		}
-		group.finish().unwrap();
+		let group = group.finish().unwrap();
 		let ending = |group, frame| {
 			let mut frames = Frames::default();
 			frames.add(group, 0, Some(frame));
@@ -7969,7 +7969,7 @@ mod serve_group_test {
 		write_group(&mut track, 0, 0);
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		write_group(&mut track, 2, 2);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
 
 		// SUBSCRIBE_START with the range starting at 0, a DROP for group 1 with OLD (0x34)
@@ -7997,7 +7997,7 @@ mod serve_group_test {
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		write_group(&mut track, 2, 2);
 		track.skip_groups(1..2);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
 
 		// SUBSCRIBE_START with the range starting at 0, a SKIP for group 1, and
@@ -8064,7 +8064,7 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		track.skip_groups(1..FAR);
 		write_group(&mut track, FAR, 1);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
 
@@ -8223,7 +8223,7 @@ mod serve_group_test {
 			update: 1,
 		});
 		write_group(&mut track, 2, 2000);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(
 			run.ctx.outcomes.opened.load(Ordering::Relaxed),
@@ -9724,7 +9724,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let subscriber = track.subscribe(None);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
 		assert!(
@@ -9754,7 +9754,7 @@ mod serve_group_test {
 		// Group 1 lands a second later, expiring group 0 before it ever opened.
 		kio::clock::sim::advance(Duration::from_secs(1)).await;
 		write_group(&mut track, 1, 1000);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert!(futures::poll!(run.as_mut()).is_pending(), "group 1 is still opening");
 		assert_eq!(
 			*log.writes.lock().unwrap(),

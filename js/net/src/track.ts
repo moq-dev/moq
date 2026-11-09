@@ -2116,15 +2116,18 @@ export class Producer {
 	}
 
 	/**
-	 * Declare the track's end after the highest sequence written. A no-op once an end is declared or the track closed,
-	 * so a cleanup path can finish whatever the track's state.
+	 * Declare the track's end after the highest sequence written, returning it as {@link Finished}.
+	 * A no-op once an end is declared or the track closed, so a cleanup path can finish whatever
+	 * the track's state. A track that closed first keeps its outcome and declares no end, so its
+	 * readers' `finished()` rejects.
 	 *
 	 * Not terminal: groups below the end may still be written. Readers end once the live edge
 	 * reaches it.
 	 */
-	finish(): void {
-		if (this.#state.end.peek() !== undefined || this.#state.closed.peek() !== undefined) return;
-		this.finishAt({ group: this.#received, frame: 0 });
+	finish(): Finished {
+		if (this.#state.end.peek() === undefined && this.#state.closed.peek() === undefined)
+			this.finishAt({ group: this.#received, frame: 0 });
+		return this;
 	}
 
 	/**
@@ -2234,6 +2237,33 @@ type Superseded = { successor?: Successor };
 // a handed-out successor's own record would retain the next one, chaining every later group to
 // the oldest held.
 type Successor = { sequence: bigint; arrived: Instant; fate: () => Error | undefined };
+
+/**
+ * A track its producer finished: its end is declared unless it closed first, and it can still
+ * take an older group below that end, be read, or be aborted or closed, but not append. {@link Producer.finish} returns it,
+ * mirroring the Rust `track::Finished`; the producer itself still refuses a group at or past the
+ * end.
+ *
+ * @public
+ */
+export interface Finished {
+	/** The track name. */
+	readonly name: string;
+	/** Settles once the track's outcome is final; see {@link Producer.closed}. */
+	readonly closed: GetPromise<Error | null>;
+	/** The track's info, once accepted. */
+	info(): Promise<Info>;
+	/** Create an older group below the end, which arrived late; see {@link Producer.createGroup}. */
+	createGroup(sequence: bigint): GroupProducer;
+	/** Serve the groups readers miss below the end; see {@link Producer.requests}. */
+	requests(): Requests;
+	/** Subscribe to this in-process track; see {@link Producer.subscribe}. */
+	subscribe(options?: Subscription): Subscriber;
+	/** Abort the track; see {@link Producer.abort}. */
+	abort(error: Error): void;
+	/** Release the track, like dropping the last Rust handle; see {@link Producer.close}. */
+	close(): void;
+}
 
 /**
  * The read side of a live track subscription, mirroring the Rust `Subscriber`.

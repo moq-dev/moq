@@ -756,7 +756,7 @@ async fn lagging_route_dies(version: Version) {
 	for frame in 0..FRAMES {
 		write(&mut group, 2, frame);
 	}
-	group.finish().unwrap();
+	let group = group.finish().unwrap();
 
 	a_r.server.abort(Error::Cancel);
 	a_r.client.abort(Error::Cancel);

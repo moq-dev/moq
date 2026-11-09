@@ -2464,7 +2464,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).unwrap();
 		track.append_group().unwrap().finish().unwrap();
-		track.finish().unwrap();
+		let track = track.finish().unwrap();
 		assert!(session.finish());
 		while bus.pop().is_some() {}
 
