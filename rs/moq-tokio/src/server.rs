@@ -297,6 +297,7 @@ impl Server {
 		// gets the released spellings folded in too.
 		config.validate()?;
 
+		#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 		let versions = config.versions();
 
 		// Build a QUIC backend when `--listen` is set, or when nothing else
