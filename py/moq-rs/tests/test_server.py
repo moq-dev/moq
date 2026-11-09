@@ -27,9 +27,9 @@ def opus_head() -> bytes:
     )
 
 
-async def wait_phase(session: moq.Session, phase: moq.ConnectionPhase) -> moq.ConnectionState:
+async def wait_phase(session: moq.Session, phase: type) -> moq.ConnectionState:
     state = session.state()
-    while state.phase != phase:
+    while not isinstance(state.phase, phase):
         state = await asyncio.wait_for(session.state_changed(state.revision), timeout=10)
     return state
 
@@ -137,7 +137,6 @@ async def test_client_reconnects_and_resumes_announcements():
                 assert session is not None
                 state = await wait_phase(session, moq.ConnectionPhase.CONNECTED)
                 assert state.connects == 1
-                assert session.state().failure is None
                 assert session.stats().version is not None
 
                 # Kill the transport under the client, like a relay restart.
@@ -148,14 +147,14 @@ async def test_client_reconnects_and_resumes_announcements():
                 # is still the current status when we ask for it.
                 state = await wait_phase(session, moq.ConnectionPhase.DISCONNECTED)
                 # The drop's reason is recorded before the status moves.
-                assert session.state().failure is not None
+                assert isinstance(state.phase, moq.ConnectionPhase.DISCONNECTED)
+                assert state.phase.failure is not None
                 assert session.stats().version is None
 
                 # The client redials on its own; the accept loop serves it.
                 regate.set()
                 state = await wait_phase(session, moq.ConnectionPhase.CONNECTED)
                 assert state.connects == 2
-                assert session.state().failure is None
 
                 # A broadcast published only after the reconnect still arrives.
                 published = server.route("after-reconnect")
@@ -197,11 +196,12 @@ async def test_session_state_names_a_failing_first_dial():
             session = client.session
             assert session is not None
             state = session.state()
-            assert state.phase == moq.ConnectionPhase.CONNECTING
+            assert isinstance(state.phase, moq.ConnectionPhase.CONNECTING)
             assert state.connects == 0
             for _ in range(2):
                 state = await asyncio.wait_for(session.state_changed(state.revision), timeout=10)
-                assert isinstance(state.failure, moq.Error.Connect)
+                assert isinstance(state.phase, moq.ConnectionPhase.CONNECTING)
+                assert isinstance(state.phase.failure, moq.Error.Connect)
                 assert state.connects == 0
             session.cancel(0)
 
@@ -271,8 +271,8 @@ async def test_server_request_close():
             with pytest.raises(moq_ffi.MoqError):  # type: ignore[arg-type]
                 await asyncio.wait_for(session.closed(), timeout=5.0)
             state = session.state()
-            assert state.phase == moq_ffi.MoqConnectionPhase.CLOSED
-            assert state.failure is not None
+            assert isinstance(state.phase, moq_ffi.MoqConnectionPhase.CLOSED)
+            assert state.phase.failure is not None
         finally:
             reject_task.cancel()
             try:

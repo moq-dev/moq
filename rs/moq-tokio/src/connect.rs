@@ -764,7 +764,8 @@ impl Config {
 				.resolution_delay
 				.map(Into::into)
 				.unwrap_or(DEFAULT_RESOLUTION_DELAY),
-			timeout: self.timeout.map(Into::into).unwrap_or(DEFAULT_TIMEOUT),
+			// A configured zero turns the deadline off.
+			timeout: Some(self.timeout.map(Into::into).unwrap_or(DEFAULT_TIMEOUT)).filter(|timeout| !timeout.is_zero()),
 		}
 	}
 }
@@ -782,8 +783,8 @@ pub struct Resolved {
 	pub race: std::time::Duration,
 	/// How long the IPv4-only lookup waits for the full DNS answer.
 	pub resolution_delay: std::time::Duration,
-	/// The deadline one connection attempt gets, dial and handshake together.
-	pub timeout: std::time::Duration,
+	/// The deadline one connection attempt gets, dial and handshake together, or `None` for none.
+	pub timeout: Option<std::time::Duration>,
 }
 
 #[cfg(test)]
@@ -835,6 +836,6 @@ mod duration_tests {
 		timeout,
 		"--connect-timeout",
 		|c: &Config| c.resolve().timeout,
-		|d| d
+		|d: std::time::Duration| Some(d).filter(|d| !d.is_zero())
 	);
 }
