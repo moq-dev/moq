@@ -1098,7 +1098,7 @@ mod tests {
 			.expect("failed to create track");
 		let mut group = track.append_group().expect("failed to append group");
 		group
-			.write_frame(crate::moq_net::Timestamp::ZERO, b"hello".as_ref())
+			.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
 			.expect("failed to write frame");
 		group.finish().expect("failed to finish group");
 

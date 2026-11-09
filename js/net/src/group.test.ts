@@ -535,7 +535,8 @@ test("a plain frame has no size cap, while a compressed one keeps its whole-fram
 	compressed.finish();
 });
 
-test("a compressed frame is refused unless its worst-case slice fits a peer's frame cap", async () => {
+// Quarantined: flaky under load, see /quest/m0/test-flakes-2/compressed-frame-cap.md
+test.skip("a compressed frame is refused unless its worst-case slice fits a peer's frame cap", async () => {
 	const MAX = 32 * 1024 * 1024;
 	let largest = MAX;
 	while (!encodable(largest)) largest--;

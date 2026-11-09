@@ -6,8 +6,6 @@
 
 use std::{sync::Arc, time::Duration};
 
-use moq_tokio::moq_net;
-
 /// What the server saw on one handshake.
 #[derive(Debug, PartialEq)]
 struct Seen {

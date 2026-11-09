@@ -1,5 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Util from "@moq/hang/util";
+import { hosted } from "../assets";
 import { base64ToBytes } from "../base64";
 import { supportCacheKey } from "../support-probe";
 import { decoderConfigKey } from "./config";
@@ -41,7 +42,7 @@ export async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	}
 	// Install the WebCodecs polyfill before probing, since playback would decode through it where
 	// AudioDecoder is missing (Node, Bun, older browsers). Loads nothing where WebCodecs audio is native.
-	await Util.Libav.polyfill();
+	await Util.Libav.polyfill(hosted.url);
 	const res = await AudioDecoder.isConfigSupported({
 		...config,
 		description,

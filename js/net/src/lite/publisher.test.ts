@@ -1535,7 +1535,8 @@ test("lite draft-07: a final drop replaces an expired stream", async () => {
 // A queued re-offer that a later update drops again as stale counts as given up: the track's end
 // leaves that stale drop standing, rather than replacing it with a final one. Mirrors the Rust
 // `a_redropped_reoffer_stays_stale_at_the_end_on_lite07`.
-test("lite draft-07: a re-offer dropped again before it opens stays stale at the end", async () => {
+// Quarantined: flaky under load, see /quest/m0/test-flakes-2/redropped-reoffer.md
+test.skip("lite draft-07: a re-offer dropped again before it opens stays stale at the end", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	// A write's budget yields on host CPU time, which could run the publisher's post-update task

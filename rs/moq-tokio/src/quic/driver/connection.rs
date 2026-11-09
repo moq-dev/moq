@@ -25,9 +25,9 @@ pub use moq_quic::connection::{Error, Stats};
 use moq_quic::{
 	EndpointEvent, TransportError, TransportErrorCode, crypto,
 	endpoint::ConnectionHandle,
-	rustls::pki_types::CertificateDer,
 	stream::{Dir, Id as StreamId},
 };
+use rustls::pki_types::CertificateDer;
 
 /// In-progress connection attempt future
 ///

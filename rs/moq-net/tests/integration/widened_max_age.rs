@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use moq_net::track::Delay;
 use moq_net::track::{Info, Range, Subscription};
-use moq_net::{Timescale, Timestamp, Version, kio, origin, track};
+use moq_net::{Timescale, Timestamp, Version, origin, track};
 
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, peer, spawn};
 

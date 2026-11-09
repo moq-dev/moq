@@ -2,6 +2,7 @@ import { Duration, Instant, now } from "@moq/clock";
 import * as Util from "@moq/hang/util";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { InputAudioTrack, InputVideoTrack, VideoSample } from "mediabunny";
+import { hosted } from "../assets";
 import { pace, sleepUntil } from "./pace";
 import { Timeline } from "./timeline";
 import type { Media } from "./types";
@@ -159,7 +160,7 @@ export class File {
 		// Install the WebCodecs polyfill before probing: canDecode() reports false when AudioDecoder
 		// is missing rather than throwing, so probing first would drop the audio track on an engine
 		// the polyfill could have covered. A no-op wherever WebCodecs is native.
-		if (audio) await Util.Libav.polyfill();
+		if (audio) await Util.Libav.polyfill(hosted.url);
 
 		// A codec this browser can't decode drops just its own track: the other one is usually still
 		// publishable, and a video-only publish beats failing outright.

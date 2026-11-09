@@ -31,6 +31,9 @@ async function measure(backlog: number): Promise<number> {
 		},
 		{ config: { idleTimeout: null } },
 	);
+	incoming.enqueue(
+		Frame.encode({ type: "transport_parameters", params: Frame.RECOMMENDED_TRANSPORT_PARAMS }, "qmux-01"),
+	);
 	await session.ready;
 	session.datagrams.incomingHighWaterMark = backlog;
 	for (let index = 0; index < backlog; index++) incoming.enqueue(packet);

@@ -56,8 +56,6 @@
 
 #![warn(missing_docs)]
 
-pub use object_store;
-
 pub mod consumer;
 mod error;
 /// The `.info` object holding a track's immutable properties.
