@@ -17,33 +17,38 @@ bun add @moq/clock
 ```
 
 ```ts
-import { Manual, Milli, Nano, now, sleep } from "@moq/clock";
+import { Duration, Manual, now, sleep } from "@moq/clock";
 
 const clock = new Manual();
 const installed = clock.install();
 try {
     const start = now();
-    const pending = sleep(Nano.fromMilli(Milli(10)));
-    await clock.advance(Nano.fromMilli(Milli(10)));
+    const pending = sleep(Duration.millis(10));
+    await clock.advance(Duration.millis(10));
     await pending;
-    console.log(now() - start); // 10,000,000 nanoseconds
+    console.log(now().since(start).asMillis()); // 10
 } finally {
     installed.close();
 }
 ```
 
-`Instant` counts nanoseconds from its clock's origin: the realm's performance
-time origin on the host, so DOM timestamps convert by unit, or zero for a
-`Manual` clock. `Nano`, `Micro`,
-`Milli`, and `Second` brand duration units; convert a duration to nanoseconds
-before passing it to a timer. Number nanoseconds are exact for roughly 104
+`Duration`, `Instant`, and `Wall` are immutable objects that mirror Rust's
+`Duration` and `kio::clock`'s `Instant` and `Wall`. Build a duration with a unit
+(`Duration.millis(5)`) and read it with one (`asMillis()`); compare with
+`lt`, `ge`, and friends. None of them converts to a number: arithmetic, `<`,
+and `JSON.stringify` throw a `TypeError`, so a unit mistake can't hide behind a
+cast. A template string prints one with its unit.
+
+`Instant` counts from its clock's origin: the realm's performance time origin
+on the host, so a DOM timestamp `t` is `Instant.ZERO.add(Duration.millis(t))`,
+or zero for a `Manual` clock. Its nanoseconds are exact for roughly 104
 days, then gradually lose sub-microsecond precision. Compare instants only
 from the same clock. Rust and JS each own their origin: no instant may cross
 that boundary until the backend explicitly shares one.
 
-`Wall` is a separate branded number of milliseconds since the Unix epoch.
-Use it for dates, rather than measuring elapsed time. A Rust wall-time
-boundary must convert its units explicitly. A new `Manual` starts at instant
+`Wall` is wall-clock time, separate from monotonic time: `Wall.unixMillis(ms)`
+builds one from Unix milliseconds and `asUnixMillis()` reads them back exactly. Use it for dates, rather than
+measuring elapsed time. A new `Manual` starts at instant
 zero and 2025-01-01 UTC. `await advance()` moves both readings through each due
 timer deadline, draining tasks between deadlines, including timers those tasks
 re-arm before the target. `yieldNow()` waits for a later host task, giving the
@@ -84,7 +89,7 @@ workspace dependencies reach `@moq/clock` loads a preload
 fails a workspace that doesn't. The preload fails a test when a timer it armed
 through `@moq/clock` fires on the host clock, so a test can't prove that nothing
 happened by waiting in real time; lint bans the native timers in test files. A
-timer already due when armed, such as `sleep(0)`, or a `timeout()` whose
+timer already due when armed, such as `sleep(Duration.ZERO)`, or a `timeout()` whose
 operation settles first never waits, and a timer firing after its test ended
 fails nothing. A test on real sockets, devices, or processes calls `hostTime()`
 from `@moq/clock/test` first; without the preload it does nothing.

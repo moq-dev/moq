@@ -5100,7 +5100,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
 		group.finish().unwrap();
-		producer.finish().unwrap();
+		drop(producer.clone().finish().unwrap());
 	}
 	let subscribe = || {
 		let subscription = moq_net::track::Subscription::default()

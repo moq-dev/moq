@@ -360,6 +360,10 @@ struct VideoProducer {
 	/// an allocator. Beside the encoder, so a move to a new track, a finish, and an abort
 	/// change all three together.
 	follow: Option<Following>,
+	/// Notified under this rendition's lock each time the follower retunes, so a test
+	/// awaits the follower instead of polling `target`.
+	#[cfg(test)]
+	retuned: Arc<std::sync::Condvar>,
 }
 
 /// A rendition's bandwidth claim on its current track, and the thread retuning the encoder
@@ -610,10 +614,26 @@ impl MoqVideoProducer {
 	/// The bitrate the encoder produces at, or 0 while disabled.
 	#[cfg(test)]
 	pub(crate) fn applied_bitrate(&self) -> u64 {
-		match self.inner.lock().unwrap().as_ref().map(|producer| producer.target) {
-			Some(moq_mux::rate::Target::Enabled(bitrate)) => bitrate.as_bps(),
-			_ => 0,
+		applied(self.inner.lock().unwrap().as_ref())
+	}
+
+	/// Block until the follower has retuned the encoder to `bitrate`.
+	#[cfg(test)]
+	pub(crate) fn wait_applied(&self, bitrate: u64) {
+		let mut guard = self.inner.lock().unwrap();
+		while applied(guard.as_ref()) != bitrate {
+			let retuned = guard.as_ref().expect("the rendition is open").retuned.clone();
+			guard = retuned.wait(guard).unwrap();
 		}
+	}
+}
+
+/// The bitrate `producer` encodes at, or 0 while disabled or gone.
+#[cfg(test)]
+fn applied(producer: Option<&VideoProducer>) -> u64 {
+	match producer.map(|producer| producer.target) {
+		Some(moq_mux::rate::Target::Enabled(bitrate)) => bitrate.as_bps(),
+		_ => 0,
 	}
 }
 
@@ -855,6 +875,8 @@ impl MoqVideoProducer {
 				priority,
 				target: moq_mux::rate::Target::Enabled(ceiling),
 				follow: None,
+				#[cfg(test)]
+				retuned: Arc::default(),
 			}))),
 			children: children.clone(),
 		};
@@ -1000,6 +1022,8 @@ async fn follow_reservation(followed: Followed) {
 		let policy = video_policy(*producer.ceiling.read(), below);
 		let before = producer.producer.demand();
 		let retuned = retune(&mut follower, policy, target, |target| producer.apply(target));
+		#[cfg(test)]
+		producer.retuned.notify_all();
 		// A disable drains the encoder into the track, and output with a new decoder identity
 		// moves the rendition, so the claim moves with it. The replaced follower is this
 		// thread, which ends here, so it is detached rather than joined.
@@ -1662,6 +1686,7 @@ mod finish_tests {
 			ceiling: kio::Producer::new(moq_net::bandwidth::Rate::from_mbps(1)),
 			priority: hang::catalog::PRIORITY.video,
 			follow: None,
+			retuned: Arc::default(),
 		};
 		let (video, disabled) = tokio::task::spawn_blocking(move || {
 			video

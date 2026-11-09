@@ -221,7 +221,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 			group.finish().unwrap();
 			kio::clock::sleep(INTERVAL).await;
 		}
-		source.finish().unwrap();
+		let _source = source.finish().unwrap();
 	};
 	let read = async {
 		let mut arrivals = Vec::new();

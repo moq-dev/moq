@@ -1,5 +1,5 @@
 /** Publish a synthetic picture with @moq/publish and watch it with @moq/watch through the relay. */
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 import * as Publish from "@moq/publish";
 import * as Watch from "@moq/watch";
@@ -70,7 +70,7 @@ async function publish(config: Media): Promise<void> {
 			codec: config.codec,
 			frameRate: config.fps,
 			maxPixels: config.width * config.height,
-			join: Milli(config.keyframe_ms),
+			join: Duration.millis(config.keyframe_ms),
 			maxBitrate: config.bitrate,
 		},
 	});

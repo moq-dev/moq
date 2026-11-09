@@ -164,7 +164,8 @@ impl<I: DeferredImport> DeferredVideo<I> {
 	/// Finish the media track, whether or not a frame ever created its importer.
 	pub fn finish(&mut self) -> Result<()> {
 		match &mut self.state {
-			DeferredState::Pending(pending) => pending.track.finish()?,
+			// The pending state keeps its own clone, whose appends the end refuses.
+			DeferredState::Pending(pending) => drop(pending.track.clone().finish()?),
 			DeferredState::Active(import) => import.finish()?,
 			// The track already failed, so there is nothing clean to end.
 			DeferredState::Failed(_) | DeferredState::Poisoned => {}

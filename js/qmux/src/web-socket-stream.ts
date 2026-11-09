@@ -13,7 +13,7 @@
  * [spec]: https://github.com/ricea/websocketstream-explainer
  */
 
-import { Milli, Nano, sleep } from "@moq/clock";
+import { Duration, sleep } from "@moq/clock";
 
 /** The data yielded by the readable / accepted by the writable. */
 export type WebSocketStreamData = Uint8Array | string;
@@ -152,7 +152,7 @@ function drain(ws: WebSocketLike, highWaterMark: () => number): Promise<void> | 
 			// The socket closed mid-write: reject so the failure propagates rather
 			// than resolving the write as if it had succeeded.
 			if (ws.readyState > OPEN) throw new Error("WebSocket is closing");
-			await sleep(Nano.fromMilli(Milli(10)));
+			await sleep(Duration.millis(10));
 		}
 	})();
 }

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano, now, Wall, wall } from "@moq/clock";
+import { Duration, Manual, now, Wall, wall } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Path } from "@moq/net";
 import { arrivedAt, Tally } from "./feedback";
@@ -31,11 +31,11 @@ test("a stall reports its time so far and adds its duration once it ends", async
 	try {
 		const tally = new Tally();
 		const end = tally.stall(live);
-		await clock.advance(Nano.fromMilli(Milli(250.6)));
+		await clock.advance(Duration.millis(250.6));
 		expect(tally.report(live.path).video).toEqual({ stalls: 1, stalled: 250 });
-		await clock.advance(Nano.fromMilli(Milli(100)));
+		await clock.advance(Duration.millis(100));
 		expect(end()).toBeCloseTo(350.6);
-		await clock.advance(Nano.fromMilli(Milli(1000)));
+		await clock.advance(Duration.millis(1000));
 		expect(tally.report(live.path).video).toEqual({ stalls: 1, stalled: 350 });
 	} finally {
 		installed.close();
@@ -44,7 +44,7 @@ test("a stall reports its time so far and adds its duration once it ends", async
 
 test("an arrival pairs the media timestamp with milliseconds since the MoQ epoch", () => {
 	const tally = new Tally();
-	tally.arrive(live, Milli(1234.9), Wall(Catalog.MOQ_EPOCH_UNIX_MILLIS + 5000.7));
+	tally.arrive(live, Duration.millis(1234.9), Wall.unixMillis(Catalog.MOQ_EPOCH_UNIX_MILLIS + 5000.7));
 	expect(tally.report(live.path).video.arrival as unknown).toEqual({ timestamp: 1234, wall: 5000 });
 });
 
@@ -52,11 +52,11 @@ test("an arrival's wall time is when the frame came off the transport, not when 
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
-		await clock.advance(Nano.fromMilli(Milli(1000)));
-		const arrival = Nano.toMilli(Nano(now()));
+		await clock.advance(Duration.millis(1000));
+		const arrival = now();
 		const before = wall();
-		await clock.advance(Nano.fromMilli(Milli(300)));
-		expect(arrivedAt(arrival)).toBe(before);
+		await clock.advance(Duration.millis(300));
+		expect(arrivedAt(arrival)).toEqual(before);
 	} finally {
 		installed.close();
 	}

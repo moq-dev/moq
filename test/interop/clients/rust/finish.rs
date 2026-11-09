@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
 			.broadcast()
 			.create_track("live", moq_net::track::Info::default())?;
 		track.write_frame(None, b"session-alive".to_vec())?;
-		track.finish()?;
+		let _track = track.finish()?;
 		health.announce()?;
 		let ack = args.finish_ack.context("publisher needs --finish-ack")?;
 		let mut complete = String::new();

@@ -742,7 +742,7 @@ where
 		if let Some(group) = self.group.as_mut() {
 			self.container.finish_group(group, tail_end)?;
 		}
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 			// Only a closed group reaches anything; a cut with none open names a point nothing reached.
 			if let Some(end) = reached {
@@ -952,7 +952,8 @@ where
 			return Err(cause);
 		}
 		match err {
-			None => self.inner.finish()?,
+			// The producer keeps its own clone, whose appends the end refuses.
+			None => drop(self.inner.clone().finish()?),
 			Some(err) => {
 				let next = self
 					.inner

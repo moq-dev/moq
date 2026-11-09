@@ -694,8 +694,9 @@ impl<E: catalog::Catalog> Capture<E> {
 	/// Flush everything and finish every track.
 	pub fn finish(&mut self, pts: Timestamp) -> anyhow::Result<()> {
 		self.flush(pts, true)?;
-		for track in self.entries.values_mut().filter_map(|entry| entry.track.as_mut()) {
-			track.finish()?;
+		// Each entry keeps its own clone, whose appends the end refuses.
+		for track in self.entries.values().filter_map(|entry| entry.track.as_ref()) {
+			drop(track.clone().finish()?);
 		}
 		Ok(())
 	}

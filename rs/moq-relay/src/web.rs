@@ -1007,9 +1007,11 @@ async fn serve_announced(
 	let mut broadcasts = Vec::new();
 
 	while let Some(event) = announced.try_next() {
-		if let moq_net::origin::RouteEvent::Start(update)
-		| moq_net::origin::RouteEvent::Update(update)
-		| moq_net::origin::RouteEvent::Restart(update) = event
+		if let moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: update,
+		} = event
 		{
 			broadcasts.push(update.prefix);
 		}

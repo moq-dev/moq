@@ -2647,17 +2647,27 @@ mod tests {
 	#[cfg(feature = "cluster-lan")]
 	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::origin::RouteEvent::Start(route)
-			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
-			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: route,
+			} => Some((route, true)),
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::End,
+				announce: route,
+			} => Some((route, false)),
 		}
 	}
 
 	/// The next announcement without blocking.
 	fn try_next_announced(announced: &mut moq_net::origin::Routes) -> Option<moq_net::announce::Announce> {
 		match announced.try_next()? {
-			moq_net::origin::RouteEvent::Start(route) => Some(route),
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::Start,
+				announce: route,
+			} => Some(route),
 			other => panic!("expected an announcement: got {other:?}"),
 		}
 	}

@@ -1,6 +1,6 @@
 /** Measure publisher fairness with memory-resident groups and an immediately writable transport. */
 
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { randomHop } from "../src/hop.ts";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher.ts";
 import { NativeSession } from "../src/ietf/session.ts";
@@ -19,7 +19,7 @@ async function measure(protocol: string, groups: number, viewers: number) {
 	const origin = new Origin();
 	const broadcastRoute = origin.route(Path.from("bench"));
 	const broadcast = broadcastRoute.broadcast;
-	const track = broadcast.createTrack("data", { maxAge: Milli(60_000), timescale: Timescale.MICRO });
+	const track = broadcast.createTrack("data", { maxAge: Duration.millis(60_000), timescale: Timescale.MICRO });
 	const pair = createMockTransportPair(protocol === "lite" ? ALPN_05 : ALPN.DRAFT_22);
 	const version = protocol === "lite" ? LiteVersion.DRAFT_05 : IetfVersion.DRAFT_22;
 	let written = 0,
@@ -65,7 +65,7 @@ async function measure(protocol: string, groups: number, viewers: number) {
 							track: "data",
 							priority: 0,
 							startGroup: 0n,
-							maxDelay: Milli(60_000),
+							maxDelay: 60_000,
 						}),
 						stream,
 					)
