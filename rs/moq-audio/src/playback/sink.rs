@@ -277,26 +277,10 @@ impl Sink {
 		&self.input
 	}
 
-	/// A handle for adjusting this sink from another thread, e.g. a volume
-	/// slider on a UI thread while a decode task does the writing.
+	/// This sink's volume and level, as a handle a UI thread can hold while a
+	/// decode task does the writing.
 	pub fn control(&self) -> Control {
 		self.control.clone()
-	}
-
-	/// Set the playback volume, `0.0` to `1.0`. See [`Control::set_volume`].
-	pub fn set_volume(&self, volume: f32) {
-		self.control.set_volume(volume);
-	}
-
-	/// The volume last set. Defaults to `1.0`.
-	pub fn volume(&self) -> f32 {
-		self.control.volume()
-	}
-
-	/// The loudest sample this sink contributed since the last call. See
-	/// [`Control::peak`].
-	pub fn peak(&self) -> f32 {
-		self.control.peak()
 	}
 }
 

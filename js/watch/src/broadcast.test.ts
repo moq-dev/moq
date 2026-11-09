@@ -628,6 +628,33 @@ describe("restart", () => {
 		await settle();
 	});
 
+	it("plays a claim's job on the instance it resolved", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("pool/job.hang");
+		const pool = owner.routePrefix(Path.from("pool"));
+		const answers = serve(pool);
+		const source = new Broadcast({ origin: owner, name, enabled: true, follow: true, catalogFormat: "manual" });
+		const handed: unknown[] = [];
+		const stop = source.out.active.subscribe((active) => {
+			if (active) handed.push(active);
+		});
+		await settle();
+		const active = source.out.active.peek();
+		expect(active?.instance).toBe(pool.instance);
+
+		// The job's exact route carries the pool's instance, so the player never restarts.
+		for (let i = 0; i < 5; i++) await settle();
+		expect(handed).toEqual([active]);
+		expect(source.out.error.peek()).toBeUndefined();
+
+		stop();
+		for (const answer of answers) answer.close();
+		pool.close();
+		source.close();
+		owner.close();
+		await settle();
+	});
+
 	it("resumes on a covering prefix after a gap", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");

@@ -1022,7 +1022,7 @@ struct LanAuth {
 #[non_exhaustive]
 pub struct Options {
 	/// Session limits for ordinary client sessions.
-	pub session: crate::limits::Client,
+	pub client: crate::limits::Client,
 	/// Session and QUIC limits for authenticated peers and outbound cluster links.
 	pub peer: crate::limits::Peer,
 	/// Cluster identity, peers, and discovery.
@@ -1305,7 +1305,7 @@ fn dialer<'a>(cluster: &'a Cluster, token: &'a ClusterToken) -> impl FnMut(DialT
 /// remote peers.
 #[derive(Clone)]
 pub struct Cluster {
-	session_limits: moq_net::session::Limits,
+	client_limits: moq_net::session::Limits,
 	peer_limits: moq_net::session::Limits,
 	peer_quic: crate::limits::Quic,
 	config: Config,
@@ -1387,7 +1387,7 @@ impl Cluster {
 		if lease.token().peer {
 			self.peer_limits
 		} else {
-			self.session_limits
+			self.client_limits
 		}
 	}
 
@@ -1434,7 +1434,7 @@ impl Cluster {
 		let Options {
 			config,
 			cache,
-			session,
+			client,
 			peer,
 			stats,
 			#[cfg(feature = "test-support")]
@@ -1488,7 +1488,7 @@ impl Cluster {
 		let nodes = crate::nodes::Nodes::default();
 		tracing::info!(hop_id = %origin.hop(), "cluster initialized");
 		let cluster = Cluster {
-			session_limits: session.resolve(),
+			client_limits: client.resolve(),
 			peer_limits: peer.resolve(),
 			peer_quic: peer.quic,
 			config,
@@ -2578,7 +2578,7 @@ mod tests {
 	#[tokio::test]
 	async fn session_limits_follow_the_admitted_grant() {
 		let mut options = Options::default();
-		options.session.announces = 2;
+		options.client.announces = 2;
 		options.peer.announces = 20;
 		let cluster = Cluster::spawn(options).unwrap();
 		for (peer, upstream, expected) in [(false, false, 2), (true, false, 20), (true, true, 20)] {
@@ -2642,8 +2642,7 @@ mod tests {
 		match announced.next().await? {
 			moq_net::origin::RouteEvent::Start(route)
 			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route)
-			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+			| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
 			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 		}
 	}

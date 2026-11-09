@@ -123,7 +123,7 @@ export class Echo {
 			}
 
 			let broadcast: Moq.Broadcast.Producer | undefined;
-			let writer: Report.Writer<Schema.Snapshot>;
+			let writer: Report.Writer<Schema.Snapshot, Schema.SnapshotInput>;
 			try {
 				// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
 				const route = origin.route(path, { hidden: true });
@@ -139,7 +139,7 @@ export class Echo {
 
 			const claim = claims;
 			claim.paths.add(path);
-			const write = () => writer.update(this.#report(base) as Schema.Snapshot);
+			const write = () => writer.update(this.#report(base));
 			// Teardown runs last in, first out: write the final counts, then retract and release the path.
 			effect.cleanup(() => {
 				claim.paths.delete(path);

@@ -98,8 +98,8 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.KeepAlive(served)
-	if served.Instance() == dynamic.Instance() {
-		t.Fatal("a job's route serves a fresh instance")
+	if served.Instance() != dynamic.Instance() {
+		t.Fatal("a job's route continues the instance its prefix route lends")
 	}
 	broadcast, err := served.Broadcast()
 	if err != nil {
@@ -1202,8 +1202,8 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	if mediaName != "requested-audio" {
 		t.Fatalf("media name = %q, want requested-audio", mediaName)
 	}
-	if _, err := request.Name(); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("request name after accept error = %v, want ErrClosed", err)
+	if _, err := request.Name(); !errors.Is(err, moq.ErrAlreadyResponded) {
+		t.Fatalf("request name after accept error = %v, want ErrAlreadyResponded", err)
 	}
 
 	var mediaConsumer *moqmedia.TrackConsumer
