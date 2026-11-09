@@ -335,12 +335,12 @@ impl Config {
 
 	/// The resize options, scaling on this encoder's VA-API node unless they name one.
 	fn resolved_resize(&self) -> Option<crate::resize::Config> {
-		#[allow(unused_mut)]
-		let mut resize = self.resize.clone()?;
+		let resize = self.resize.clone()?;
 		#[cfg(target_os = "linux")]
-		if resize.vaapi.is_none() {
-			resize.vaapi = self.vaapi.clone();
-		}
+		let resize = crate::resize::Config {
+			vaapi: resize.vaapi.or_else(|| self.vaapi.clone()),
+			..resize
+		};
 		Some(resize)
 	}
 
