@@ -134,11 +134,12 @@ impl Dial {
 		if let Some(at) = observation.last_connected {
 			peer.last_connected = Some(peer.last_connected.map_or(at, |prev| prev.max(at)));
 		}
-		match observation.transport {
-			Some(transport) => {
+		use moq_tokio::connection::Phase;
+		match observation.phase {
+			Phase::Connected { transport, .. } | Phase::Migrating { transport, .. } => {
 				peer.connections.insert(id, (self.id, transport));
 			}
-			None => {
+			Phase::Connecting { .. } | Phase::Disconnected { .. } | Phase::Closed { .. } => {
 				peer.connections.remove(&id);
 			}
 		}
@@ -169,15 +170,15 @@ mod tests {
 	fn observation(transport: Option<moq_tokio::Transport>) -> moq_tokio::connection::Observation {
 		moq_tokio::connection::Observation {
 			revision: 1,
-			phase: match transport {
-				Some(_) => moq_tokio::connection::Phase::Connected,
-				None => moq_tokio::connection::Phase::Disconnected,
-			},
 			connects: 1,
-			failure: None,
-			version: None,
 			last_connected: Some(kio::clock::now()),
-			transport,
+			phase: match transport {
+				Some(transport) => moq_tokio::connection::Phase::Connected {
+					transport,
+					version: moq_net::Version::ALL[0],
+				},
+				None => moq_tokio::connection::Phase::Disconnected { failure: None },
+			},
 		}
 	}
 

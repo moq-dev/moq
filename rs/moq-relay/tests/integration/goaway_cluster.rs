@@ -639,7 +639,7 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	let healthy = Duration::from_millis(100);
 	config.backoff.healthy = Some(healthy.into());
 	// Past the handover, so only the handover can end the old session.
-	assert!(config.resolve().timeout > handover);
+	assert!(config.resolve().timeout.is_none_or(|timeout| timeout > handover));
 
 	let connection = within(
 		"client connects",

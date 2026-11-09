@@ -344,7 +344,14 @@ struct State {
 	queues: Queues,
 	/// Each shown claim of another identity, and the streams serving it.
 	homes: BTreeMap<(Id, Path), Home>,
+	/// The usable feasible routes each identity's claims were last served through,
+	/// with the name each stream's peer gives it: while they stay the same, only a
+	/// claim whose shown state changed is served differently.
+	routes: HashMap<Id, Routes>,
 }
+
+/// An identity's usable feasible routes: each stream, its metric, and the peer's name.
+type Routes = Vec<(Key, Metric, Id)>;
 
 /// Where one shown claim is served: each stream, what it was last sent, and
 /// whether it confirmed serving it.
@@ -399,6 +406,7 @@ impl Node {
 				next_key: 1,
 				queues: HashMap::new(),
 				homes: BTreeMap::new(),
+				routes: HashMap::new(),
 			})),
 		}
 	}
@@ -646,43 +654,61 @@ impl State {
 				self.router.echo(key, id);
 			}
 		}
-		// The shown claims below are read whole; the events only say which changed.
+		// The shown claims are read in place; the events only say which changed.
 		self.router.events();
 		let changed = self.router.changed();
 		let declared = self.router.declared();
-		for id in changed {
+		for (id, claims) in changed {
 			if Some(id) != declared {
-				self.home(id);
+				self.home(id, claims);
 			}
 		}
 	}
 
 	/// Serve each shown claim of `id` through every stream with a usable feasible
 	/// route to it that can carry the claim, keeping it where it is, unavailable, while
-	/// there is none.
-	fn home(&mut self, id: Id) {
-		let claims: Vec<(Path, Claim, bool)> = (self.router.shown().range((id, Path::empty())..))
-			.take_while(|((shown, _), _)| *shown == id)
-			.map(|((_, claim), shown)| (claim.clone(), shown.item.clone(), shown.available))
+	/// there is none. Only `claims`, whose shown state changed, are served anew, unless
+	/// the routes changed too.
+	fn home(&mut self, id: Id, claims: BTreeSet<Path>) {
+		let routes: Routes = (self.router.routes(id).into_iter())
+			.map(|(key, metric)| (key, metric, self.router.name(key, id)))
 			.collect();
-		let mut gone: BTreeSet<Path> = (self.homes.range((id, Path::empty())..))
-			.take_while(|((home, _), _)| *home == id)
-			.map(|((_, claim), _)| claim.clone())
-			.collect();
+		let last = self.routes.get(&id).map_or(&[][..], Vec::as_slice);
+		let claims = match last == routes.as_slice() {
+			true => claims,
+			false => {
+				match routes.is_empty() {
+					true => self.routes.remove(&id),
+					false => self.routes.insert(id, routes.clone()),
+				};
+				let shown =
+					(self.router.shown().range((id, Path::empty())..)).take_while(|((shown, _), _)| *shown == id);
+				let homes = (self.homes.range((id, Path::empty())..)).take_while(|((home, _), _)| *home == id);
+				let mut claims: BTreeSet<Path> = shown.map(|((_, claim), _)| claim.clone()).collect();
+				claims.extend(homes.map(|((_, claim), _)| claim.clone()));
+				claims
+			}
+		};
+		let (shown, gone): (Vec<Path>, Vec<Path>) =
+			(claims.into_iter()).partition(|claim| self.router.shown().contains_key(&(id, claim.clone())));
 		// Most specific first: a job continuing its claim's instance is served before
 		// the claim moves on, so a reader resolved through the claim finds the job's route.
-		for (claim, item, available) in claims.into_iter().rev() {
-			gone.remove(&claim);
-			let routes = self.router.routes(id, &claim);
+		for claim in shown.into_iter().rev() {
+			let shown = &self.router.shown()[&(id, claim.clone())];
+			let (item, available) = (shown.item.clone(), shown.available);
+			let carrying: Vec<(Key, Metric, Id)> = (routes.iter())
+				.filter(|(key, _, _)| self.router.carries(*key, &claim))
+				.copied()
+				.collect();
 			let home = self.homes.entry((id, claim.clone())).or_default();
 			// With no route left, the router no longer knows the name a stream's peer
 			// gave the identity, so it keeps the one it was served under.
-			let wanted: Vec<(Key, Metric, bool, Id)> = match routes.is_empty() {
+			let wanted: Vec<(Key, Metric, bool, Id)> = match carrying.is_empty() {
 				true => (home.keys.iter())
 					.map(|(key, slot)| (*key, slot.served.metric, false, slot.named))
 					.collect(),
-				false => (routes.iter())
-					.map(|&(key, metric)| (key, metric, available, self.router.name(key, id)))
+				false => (carrying.into_iter())
+					.map(|(key, metric, named)| (key, metric, available, named))
 					.collect(),
 			};
 			for slot in home.keys.values_mut() {
@@ -739,11 +765,57 @@ impl State {
 				);
 			}
 		}
+		#[cfg(test)]
+		self.check(id, &routes);
 		// Nothing left to recover: let the identity go.
 		let shows =
 			(self.router.shown().range((id, Path::empty())..).next()).is_some_and(|((shown, _), _)| *shown == id);
 		if !self.router.holds(id) && !shows {
+			self.routes.remove(&id);
 			self.router.collect(id);
+		}
+	}
+
+	/// Every claim of `id` is served as serving it anew would: only shown claims have
+	/// a home, and each is served through every route carrying it, or kept unavailable.
+	#[cfg(test)]
+	fn check(&self, id: Id, routes: &Routes) {
+		let homes = (self.homes.range((id, Path::empty())..)).take_while(|((home, _), _)| *home == id);
+		for ((_, claim), _) in homes {
+			assert!(
+				self.router.shown().contains_key(&(id, claim.clone())),
+				"{claim:?} has a home but is not shown"
+			);
+		}
+		let shown = (self.router.shown().range((id, Path::empty())..)).take_while(|((shown, _), _)| *shown == id);
+		for ((_, claim), shown) in shown {
+			let home = self.homes.get(&(id, claim.clone()));
+			let slots = home.into_iter().flat_map(|home| home.keys.iter());
+			let carrying: Vec<_> = (routes.iter())
+				.filter(|(key, _, _)| self.router.carries(*key, claim))
+				.collect();
+			if carrying.is_empty() {
+				for (_, slot) in slots {
+					assert_eq!(slot.served.claim, shown.item, "{claim:?} kept as shown");
+					assert!(!slot.served.available, "{claim:?} kept unavailable");
+				}
+				continue;
+			}
+			let slots: BTreeMap<Key, &Slot> = slots.filter(|(_, slot)| !slot.leaving).map(|(k, s)| (*k, s)).collect();
+			let want: BTreeMap<Key, (Served, Id)> = (carrying.iter())
+				.map(|&&(key, metric, named)| {
+					let served = Served {
+						claim: shown.item.clone(),
+						metric,
+						available: shown.available,
+					};
+					(key, (served, named))
+				})
+				.collect();
+			let got: BTreeMap<Key, (Served, Id)> = (slots.iter())
+				.map(|(key, slot)| (*key, (slot.served.clone(), slot.named)))
+				.collect();
+			assert_eq!(got, want, "{claim:?} served through every route carrying it");
 		}
 	}
 }

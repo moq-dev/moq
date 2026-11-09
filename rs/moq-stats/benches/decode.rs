@@ -1,4 +1,4 @@
-//! Cost of reading one tick off a group track, swept over broadcasts per tier, tiers, and the share
+//! Cost of reading one tick off a bucket track, swept over broadcasts per tier, tiers, and the share
 //! of broadcasts that changed since the last tick.
 //!
 //! Each tick is one merge-patch delta, applied and materialized the way [`moq_stats::Consumer`]
@@ -22,13 +22,13 @@ use std::collections::BTreeMap;
 
 use moq_json::snapshot::{self, Decoder, Encoder};
 use moq_net::stats::Traffic;
-use moq_stats::{Group, GroupFrame};
+use moq_stats::{Bucket, BucketFrame};
 
-/// A group frame as the producer writes it.
+/// A bucket frame as the producer writes it.
 #[derive(serde::Serialize)]
 struct Body {
 	epoch: String,
-	tiers: BTreeMap<String, Group>,
+	tiers: BTreeMap<String, Bucket>,
 }
 
 struct Counter;
@@ -86,7 +86,7 @@ fn traffic(index: usize, tick: u64, changed_percent: usize) -> Traffic {
 	traffic
 }
 
-/// The frames a group's producer would publish over the run, snapshot first.
+/// The frames a bucket's producer would publish over the run, snapshot first.
 fn frames(broadcasts: usize, tiers: usize, changed_percent: usize) -> Vec<(Vec<u8>, bool)> {
 	let mut encoder = Encoder::<Body>::new(snapshot::Config::default().with_deltas(true));
 	let epoch = "01900000-0000-7000-8000-000000000001".to_string();
@@ -94,13 +94,13 @@ fn frames(broadcasts: usize, tiers: usize, changed_percent: usize) -> Vec<(Vec<u
 		.map(|tick| {
 			let tiers = (0..tiers)
 				.map(|tier| {
-					let mut group = Group::default();
+					let mut bucket = Bucket::default();
 					for index in 0..broadcasts {
 						let path = format!("acme/room-{index:06}/camera");
-						let usage = group.paths.entry(path).or_default();
+						let usage = bucket.paths.entry(path).or_default();
 						usage.publisher = traffic(index, tick, changed_percent);
 					}
-					(format!("tier-{tier}"), group)
+					(format!("tier-{tier}"), bucket)
 				})
 				.collect();
 			let frame = Body {
@@ -118,7 +118,7 @@ fn frames(broadcasts: usize, tiers: usize, changed_percent: usize) -> Vec<(Vec<u
 /// Mean allocations and time per tick.
 fn measure(broadcasts: usize, tiers: usize, changed_percent: usize) -> (usize, Duration) {
 	let mut frames = frames(broadcasts, tiers, changed_percent).into_iter();
-	let mut decoder = Decoder::<GroupFrame>::new(snapshot::consumer::Config::default());
+	let mut decoder = Decoder::<BucketFrame>::new(snapshot::consumer::Config::default());
 	let (snapshot, keyframe) = frames.next().unwrap();
 	assert!(keyframe);
 	decoder.snapshot(&snapshot).unwrap();
