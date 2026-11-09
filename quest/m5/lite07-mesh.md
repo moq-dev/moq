@@ -15,5 +15,6 @@ condition cannot clear before a release carries the final version.
 
 Decided 2026-10-05: [Cluster routing](/quest/m2/cluster-routing/README.md)'s
 route layer lands in lite-07, so the final lite-07 carries ROUTE and
-path-less ANNOUNCE instead of hop lists, and loses the `Hop Base`/`Hop Keep`
+path-less ANNOUNCE instead of native hop lists (a temporary lite-06
+compatibility chain rides until lite-08), and loses the `Hop Base`/`Hop Keep`
 announce compression. moq.pro's rollout must plan for that wire.

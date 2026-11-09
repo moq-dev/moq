@@ -351,6 +351,21 @@ test("a closed lister withdraws its answer and syncs", async () => {
 	expect(await tracks.drain()).toEqual(["-up", "synced"]);
 });
 
+test("a closed lister answers nothing more, even beside its successor", async () => {
+	const broadcast = new BroadcastProducer();
+	const stale = wireOf(broadcast).lister();
+	stale.close();
+	const lister = wireOf(broadcast).lister();
+	const tracks = list(broadcast);
+	stale.add("stale", { priority: 0 });
+	stale.synced();
+	stale.abort(new Error("stale"));
+	expect(await tracks.drain()).toEqual([]);
+	lister.add("up", { priority: 0 });
+	lister.synced();
+	expect(await tracks.drain()).toEqual(["+up", "synced"]);
+});
+
 test("an owner lists each broadcast once", async () => {
 	const broadcast = new BroadcastProducer();
 	const other = new BroadcastProducer();
