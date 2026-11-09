@@ -84,6 +84,8 @@ pub(crate) struct Dial {
 	/// The connection credential for [`Client::with_token`](crate::Client::with_token), unless
 	/// the URL brought its own.
 	pub(crate) token: Option<crate::setup::Token>,
+	/// The connection credential, held out of band rather than in an AUTH stream.
+	connection: Option<String>,
 	generation: u64,
 }
 
@@ -161,20 +163,39 @@ impl Tokens {
 	/// Decide what a dial to `url` offering `versions` presents, and hold every other token in
 	/// band on the session it builds. Call it before each dial.
 	pub(crate) fn dial(&self, url: &Url, versions: &crate::Versions) -> Dial {
-		let mut state = self.handle.state.lock();
-		state.record();
-		let configured = state.configured.as_mut().expect("built by Tokens::new");
+		let dial = self.preview(url, versions);
+		self.commit(&dial);
+		dial
+	}
+
+	/// Decide what a dial to `url` offering `versions` would present, leaving the live
+	/// session's tokens untouched until [`commit`](Self::commit).
+	pub(crate) fn preview(&self, url: &Url, versions: &crate::Versions) -> Dial {
+		let state = self.handle.state.read();
+		let configured = state.configured.as_ref().expect("built by Tokens::new");
 		let (url, setup, connection) = credential(url, versions, &configured.tokens);
 		let token = setup.map(|token| crate::setup::Token {
 			kind: crate::setup::Token::OUT_OF_BAND,
 			value: token.into_bytes(),
 		});
-		configured.dialed = Some(connection);
+		Dial {
+			url,
+			token,
+			connection,
+			generation: configured.generation,
+		}
+	}
+
+	/// Make `dial` the latest, holding every token but its connection credential in band on the
+	/// session it builds.
+	pub(crate) fn commit(&self, dial: &Dial) {
+		let mut state = self.handle.state.lock();
+		state.record();
+		let configured = state.configured.as_mut().expect("built by Tokens::new");
+		configured.dialed = Some(dial.connection.clone());
 		configured.session = None;
 		configured.unsupported = false;
-		let generation = configured.generation;
 		state.hold();
-		Dial { url, token, generation }
 	}
 
 	/// The session the latest [`dial`](Self::dial) built on [`handle`](Self::handle), once it
@@ -649,6 +670,26 @@ mod tests {
 		session.link.granted(id(&set, "new"), Grant::all());
 		ok(&set);
 		assert!(!presented(&set, old), "the replaced token was never withdrawn");
+	}
+
+	/// Previewing a dial, as a probe does, leaves the live session's grant alone: a rotated
+	/// connection credential it holds in band stays presented until the dial is committed.
+	#[test]
+	fn a_preview_leaves_the_live_grant_alone() {
+		let set = Tokens::new(tokens(&["first", "extra"]));
+		let session = dial(&set, true, false);
+		session.grant_credential();
+		set.set(tokens(&["second", "extra"]));
+		let second = id(&set, "second");
+		session.link.granted(second, Grant::all());
+
+		let url = "moqt://relay.example.com/".parse().unwrap();
+		let preview = set.preview(&url, &versions(&["moq-lite-07-wip"]));
+		assert!(presented(&set, second), "a preview withdrew a granted token");
+		assert_eq!(held(&set), ["second", "extra"]);
+
+		set.commit(&preview);
+		assert_eq!(held(&set), ["extra"], "the committed dial carries the credential itself");
 	}
 
 	/// A replacement replaced again before its answer added nothing to the grant, so it is

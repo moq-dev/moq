@@ -699,6 +699,12 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			session: old.session,
 			closing: false,
 		});
+		// Only now, once the fallback stops taking new work: a probe that never gets through
+		// leaves the serving session's tokens and their grants alone.
+		let Phase::Dialing(dialing) = &self.phase else {
+			unreachable!("set above");
+		};
+		self.commit(dialing.presented.as_ref());
 		self.queue.push_back(Action::Migrating);
 		true
 	}
@@ -728,21 +734,28 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		self.phase = Phase::Next { index: 0 };
 	}
 
-	/// The attempt dialing the target at `index`, and the tokens it presents.
+	/// The attempt dialing the target at `index`, and the tokens it presents, read without
+	/// touching the live session's tokens.
 	fn attempt(&self, index: usize) -> (Attempt<A>, Option<auth::Dial>) {
 		let target = self.targets[index].clone();
-		// Read before the dial starts its session's driver, so a request the session sends
-		// early waits on the held tokens' answers rather than being refused outside the
-		// connection credential's grant.
 		let presented = self
 			.tokens
 			.as_ref()
-			.map(|(tokens, versions)| tokens.dial(target.url(), versions));
+			.map(|(tokens, versions)| tokens.preview(target.url(), versions));
 		let (url, token) = match &presented {
 			Some(presented) => (presented.url.clone(), presented.token.clone()),
 			None => (target.url().clone(), None),
 		};
 		(Attempt { target, url, token }, presented)
+	}
+
+	/// Make `presented` the tokens' latest dial. Called before the dial's session driver
+	/// starts, so a request the session sends early waits on the held tokens' answers rather
+	/// than being refused outside the connection credential's grant.
+	fn commit(&self, presented: Option<&auth::Dial>) {
+		if let (Some((tokens, _)), Some(presented)) = (&self.tokens, presented) {
+			tokens.commit(presented);
+		}
 	}
 
 	/// Ask for a probe of the live session's target over the preferred transport.
@@ -765,6 +778,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 
 	fn dial(&mut self, now: Instant, index: usize) -> Action<A, E> {
 		let (dial, presented) = self.attempt(index);
+		self.commit(presented.as_ref());
 		let target = &dial.target;
 		tracing::info!(peer = %Shown(target.url()), "connecting");
 
