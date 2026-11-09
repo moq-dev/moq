@@ -77,11 +77,13 @@ pub struct Tokens {
 	handle: Handle,
 }
 
-/// What one dial presents, from [`Tokens::dial`].
+/// What one dial presents, from [`Tokens::preview`].
 pub(crate) struct Dial {
 	/// The connection credential to present in SETUP and, where an offered version cannot
 	/// carry it there, the URL's query ([`locate`]), unless the URL brought its own.
 	pub(crate) token: Option<String>,
+	/// The connection credential, held out of band rather than in an AUTH stream.
+	connection: Option<String>,
 	generation: u64,
 }
 
@@ -156,22 +158,32 @@ impl Tokens {
 		Poll::Ready(answer(&state).expect("checked answered"))
 	}
 
-	/// Decide what a dial to `url` presents, and hold every other token in band on the
-	/// session it builds. Call it before each dial.
-	pub(crate) fn dial(&self, url: &Url) -> Dial {
+	/// Decide what a dial to `url` would present, leaving the live session's tokens untouched
+	/// until [`commit`](Self::commit).
+	pub(crate) fn preview(&self, url: &Url) -> Dial {
+		let state = self.handle.state.read();
+		let configured = state.configured.as_ref().expect("built by Tokens::new");
+		let (token, connection) = credential(url, &configured.tokens);
+		Dial {
+			token,
+			connection,
+			generation: configured.generation,
+		}
+	}
+
+	/// Make `dial` the latest, holding every token but its connection credential in band on the
+	/// session it builds.
+	pub(crate) fn commit(&self, dial: &Dial) {
 		let mut state = self.handle.state.lock();
 		state.record();
 		let configured = state.configured.as_mut().expect("built by Tokens::new");
-		let (token, connection) = credential(url, &configured.tokens);
-		configured.dialed = Some(connection);
+		configured.dialed = Some(dial.connection.clone());
 		configured.session = None;
 		configured.unsupported = false;
-		let generation = configured.generation;
 		state.hold();
-		Dial { token, generation }
 	}
 
-	/// The session the latest [`dial`](Self::dial) built on [`handle`](Self::handle), once it
+	/// The session the latest [`commit`](Self::commit)ted dial built on [`handle`](Self::handle), once it
 	/// connected, whose own answer to the connection credential then counts. A session built
 	/// on another handle answers nothing here.
 	#[cfg(feature = "async")]
@@ -200,7 +212,7 @@ impl Tokens {
 		state.configured.as_mut().expect("built by Tokens::new").session = connected;
 	}
 
-	/// Whether the tokens changed since `dial` read them, so a refusal of its credential earns
+	/// Whether the tokens changed since `dial` was previewed, so a refusal of its credential earns
 	/// another dial.
 	pub(crate) fn changed(&self, dial: &Dial) -> bool {
 		let state = self.handle.state.read();
@@ -551,7 +563,8 @@ mod tests {
 	}
 
 	fn dial(set: &Tokens, supported: bool, requests: bool) -> Session {
-		set.dial(&"moqt://relay.example.com/".parse().unwrap());
+		let presented = set.preview(&"moqt://relay.example.com/".parse().unwrap());
+		set.commit(&presented);
 		let link = Link::attach(&set.handle, supported, requests).unwrap();
 		let credential = supported.then(|| link.present(Bytes::new(), true).unwrap());
 		set.connect(credential.as_ref());
@@ -644,6 +657,30 @@ mod tests {
 		session.link.granted(id(&set, "new"), Grant::all());
 		ok(&set);
 		assert!(!presented(&set, old), "the replaced token was never withdrawn");
+	}
+
+	/// Previewing a dial, as a probe does, leaves the live session's grant alone: a rotated
+	/// connection credential it holds in band stays presented until the dial is committed.
+	#[test]
+	fn a_preview_leaves_the_live_grant_alone() {
+		let set = Tokens::new(tokens(&["first", "extra"]));
+		let session = dial(&set, true, false);
+		session.grant_credential();
+		set.set(tokens(&["second", "extra"]));
+		let second = id(&set, "second");
+		session.link.granted(second, Grant::all());
+
+		let url = "moqt://relay.example.com/".parse().unwrap();
+		let preview = set.preview(&url);
+		assert!(presented(&set, second), "a preview withdrew a granted token");
+		assert_eq!(held(&set), ["second", "extra"]);
+
+		set.commit(&preview);
+		assert_eq!(
+			held(&set),
+			["extra"],
+			"the committed dial carries the credential itself"
+		);
 	}
 
 	/// A replacement replaced again before its answer added nothing to the grant, so it is
@@ -752,7 +789,8 @@ mod tests {
 
 	/// A session without AUTH that awaits the server's SETUP, as a moq-lite-05/06 client does.
 	fn dial_awaiting_setup(set: &Tokens) -> Link {
-		set.dial(&"moqt://relay.example.com/".parse().unwrap());
+		let presented = set.preview(&"moqt://relay.example.com/".parse().unwrap());
+		set.commit(&presented);
 		let link = Link::attach(&set.handle, false, false).unwrap();
 		link.await_setup();
 		set.connect(None);
@@ -909,7 +947,7 @@ mod tests {
 	#[test]
 	fn only_a_change_outdates_a_dial() {
 		let set = Tokens::new(tokens(&["a"]));
-		let dial = set.dial(&"moqt://relay.example.com/".parse().unwrap());
+		let dial = set.preview(&"moqt://relay.example.com/".parse().unwrap());
 		set.set(tokens(&["a"]));
 		assert!(!set.changed(&dial));
 		set.set(tokens(&["b"]));
@@ -947,7 +985,8 @@ mod tests {
 	fn a_url_credential_sends_every_token_on_auth() {
 		let url: Url = "moqt://relay.example.com/room?jwt=peer".parse().unwrap();
 		let set = Tokens::new(tokens(&["a", "peer", "a"]));
-		let dial = set.dial(&url);
+		let dial = set.preview(&url);
+		set.commit(&dial);
 		assert_eq!(dial.token, None);
 		assert_eq!(held(&set), ["a"]);
 	}

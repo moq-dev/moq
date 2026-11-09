@@ -2546,8 +2546,8 @@ run_catalog_fanout() {
     done
     for reader in "${readers[@]}"; do harness_wait "$reader" || true; done
     for version in "${CATALOG_VERSIONS[@]}"; do
-        want="catalog compress=false video=hd,sd audio=en,fr"
-        [[ "$version" != moq-lite-07-wip ]] || want="catalog compress=true video=hd,sd audio=en,fr"
+        want="catalog compression=none video=hd,sd audio=en,fr"
+        [[ "$version" != moq-lite-07-wip ]] || want="catalog compression=deflate video=hd,sd audio=en,fr"
         # Like run_native, a verified result survives the NAPI addon's exit crash.
         grep -qx "$want" "$LOGS/$name-$version.log" || why="${why:-$version reader did not report: $want}"
     done

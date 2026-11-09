@@ -67,7 +67,7 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// Follows a specific broadcast path across the publisher instances that serve it.
 typedef Following = MoqFollowing;
 
-/// The read-only facts on a received route: hops, a static cost, and the stream's instance.
+/// The read-only facts on a received route: a static cost and the stream's instance.
 typedef RouteInfo = MoqRouteInfo;
 
 /// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
@@ -214,8 +214,23 @@ typedef GrantConsumer = MoqGrantConsumer;
 /// What the peer lets this side do: publish and subscribe patterns, and an expiry.
 typedef Grant = MoqGrant;
 
-/// A connection lifecycle transition reported by [Session.state].
+/// Where a connection is in its lifecycle, carrying that phase's failure or version.
 typedef ConnectionPhase = MoqConnectionPhase;
+
+/// No session has connected yet; carries the latest failed dial.
+typedef ConnectionPhaseConnecting = ConnectingMoqConnectionPhase;
+
+/// A session is serving; carries its negotiated version.
+typedef ConnectionPhaseConnected = ConnectedMoqConnectionPhase;
+
+/// No session is serving while the connection redials; carries why.
+typedef ConnectionPhaseDisconnected = DisconnectedMoqConnectionPhase;
+
+/// The old session serves while its replacement dials; carries its version and the replacement's failure.
+typedef ConnectionPhaseMigrating = MigratingMoqConnectionPhase;
+
+/// The connection has stopped for good; carries the terminal error, if any.
+typedef ConnectionPhaseClosed = ClosedMoqConnectionPhase;
 
 /// One coherent connection lifecycle snapshot.
 typedef ConnectionState = MoqConnectionState;
