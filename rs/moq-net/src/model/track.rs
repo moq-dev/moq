@@ -1405,11 +1405,11 @@ impl TrackState {
 			affected.start = affected.start.min(run.start);
 			affected.end = affected.end.max(run.end);
 		}
-		let entries = |state: &Self, affected: &ops::Range<u64>| {
-			state.drops.overlapping(affected).count() as u64 * RUN_OVERHEAD
-				+ state.drops_born.overlapping(affected).count() as u64 * BORN_OVERHEAD
-		};
-		let before = entries(self, &affected);
+		// Whole-map lengths: a coalesced run can span many expiry entries, which a count over
+		// the affected span would scan on every change.
+		let entries =
+			|state: &Self| state.drops.len() as u64 * RUN_OVERHEAD + state.drops_born.len() as u64 * BORN_OVERHEAD;
+		let before = entries(self);
 		match hole {
 			Some(hole) => {
 				self.drops.insert(groups.clone(), hole);
@@ -1435,7 +1435,7 @@ impl TrackState {
 		for (run, _) in self.drops.overlapping(&affected) {
 			self.drops_changes.insert(run.clone());
 		}
-		let after = entries(self, &affected);
+		let after = entries(self);
 		if after > before {
 			self.drops_bill.add(after - before);
 		} else {

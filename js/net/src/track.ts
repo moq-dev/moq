@@ -747,8 +747,9 @@ type End = {
 	error?: Error;
 	// A received end, declared ahead of the group streams below it that QUIC may deliver in any
 	// order: readers wait for a hole below it to fill, or for the track to close, rather than end
-	// at the boundary with groups still to arrive. Cleared once the subscription feeding the copy
-	// ends (see `hooks.cacheTrack`). Mirrors the Rust `End::tail`.
+	// at the boundary with groups still to arrive. Once the subscription feeding the copy ends (see
+	// `hooks.cacheTrack`), nothing is owed and readers end at the boundary. Mirrors the Rust
+	// `End::tail`.
 	tail: boolean;
 };
 
@@ -895,7 +896,12 @@ function givenUp(
 	return found.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
 }
 
-function reaches(received: bigint, drops: DropSet, final: bigint, refused: readonly Run[] = []): boolean {
+// Whether the live edge reached `end`, counting a gap up to it that was wholly given up, or a
+// received end's tail decides it instead: what it misses below is owed only while the feed may
+// still deliver it. Mirrors the Rust `TrackState::reaches`.
+function reaches(received: bigint, drops: DropSet, end: End, refused: readonly Run[] = []): boolean {
+	if (end.tail) return true;
+	const final = finalSequence(end.at);
 	if (received >= final) return true;
 	const given: Run[] = [];
 	for (const run of [...drops.overlapping(received, final), ...refused]) insertRun(given, run.start, run.end);
@@ -1247,14 +1253,9 @@ export class Producer {
 		resubscribe = (producer) => producer.#updateSubscription();
 		hooks.cacheTrack = (producer) => {
 			producer.#wire = undefined;
-			// Nothing feeds the tail anymore, so readers end at the boundary.
-			const end = producer.#state.end.peek();
-			const untailed = end?.tail ? { ...end, tail: false } : undefined;
-			for (const state of [producer.#state, ...producer.#sinks]) {
-				if (untailed) state.end.set(untailed);
-				state.owed.set(false);
-			}
-			producer.#settle();
+			// Nothing feeds the tail anymore, so it owes nothing and readers end at the boundary.
+			for (const state of [producer.#state, ...producer.#sinks]) state.owed.set(false);
+			producer.#endLargest();
 		};
 		hooks.refuseLive = (producer, edge, error) => {
 			for (const sink of producer.#sinks) {
@@ -2139,7 +2140,6 @@ export class Producer {
 			if (declared.at.frame !== 0 || end.frame === 0 || finalSequence(end) !== declared.at.group) {
 				throw new ProtocolViolation(`conflicting track end: ${end.group}/${end.frame}`);
 			}
-			// A tail `cacheTrack` cleared stays cleared: no subscription feeds it anymore.
 			this.#declareEnd(end, error, declared.tail || tail);
 		}
 		this.#owe();
@@ -2169,7 +2169,7 @@ export class Producer {
 		if (!end?.tail) return;
 		const owed = this.#owes(finalSequence(end.at));
 		for (const state of [this.#state, ...this.#sinks]) state.owed.set(owed);
-		this.#settle();
+		this.#endLargest();
 	}
 
 	// Settle the outcome cleanly once the declared end is reached and settled. Also run before a
@@ -2223,7 +2223,7 @@ export class Producer {
 	}
 
 	#owes(final: bigint): boolean {
-		if (!this.#state.end.peek()?.tail) return false;
+		if (!this.#wire || !this.#state.end.peek()?.tail) return false;
 		const feed = this.#feedStart();
 		const floor = (feed === "pending" ? this.#wire?.served?.requested : feed) ?? this.#arrivals.first();
 		if (floor === undefined) return final > 0n;
@@ -2260,8 +2260,9 @@ export class Producer {
 	#endLargest(): void {
 		this.#settle();
 		if (this.#state.largestEnded.peek() || this.#largestOpen) return;
-		const end = this.#state.end.peek()?.at;
-		if (end === undefined || !reaches(this.#received, this.#state.drops, finalSequence(end))) return;
+		const end = this.#state.end.peek();
+		if (end === undefined || !reaches(this.#received, this.#state.drops, end) || this.#owes(finalSequence(end.at)))
+			return;
 		for (const state of [this.#state, ...this.#sinks]) state.largestEnded.set(true);
 	}
 
@@ -2347,10 +2348,10 @@ export class Producer {
 	// abort over a group the tail still owed cut it off, so readers get the error rather than
 	// a clean end without it. Mirrors the Rust `is_settled`.
 	#settled(): boolean {
-		const end = this.#state.end.peek()?.at;
+		const end = this.#state.end.peek();
 		if (end === undefined) return false;
-		const final = finalSequence(end);
-		if (!reaches(this.#received, this.#state.drops, final) || this.#owes(final)) return false;
+		const final = finalSequence(end.at);
+		if (!reaches(this.#received, this.#state.drops, end) || this.#owes(final)) return false;
 		for (const { group } of this.#cache) if (group.sequence < final && group.closed.peek() !== null) return false;
 		return true;
 	}
@@ -4015,10 +4016,10 @@ export class Subscriber {
 	// owes below it. Reader completion does not settle the tail: open streams remain
 	// accounted for by the wire layer, and an abort still wins on the next read.
 	#complete(): boolean {
-		const end = this.#state.end.peek()?.at;
+		const end = this.#state.end.peek();
 		return (
 			end !== undefined &&
-			reaches(this.#state.received.peek(), this.#state.drops, finalSequence(end), this.#state.refused.peek()) &&
+			reaches(this.#state.received.peek(), this.#state.drops, end, this.#state.refused.peek()) &&
 			!this.#state.owed.peek()
 		);
 	}

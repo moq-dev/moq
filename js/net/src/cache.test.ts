@@ -407,3 +407,33 @@ test("a forgotten stale run is asked of a fill", async () => {
 		await next.catch(() => undefined);
 	});
 });
+
+// A received copy that reached its end through a skip stays ended once the pool forgets the skip,
+// since the forgotten run stays accounted for. Mirrors Rust
+// `a_reached_end_outlives_its_expired_drops`.
+test("a reached end outlives its forgotten skip", async () => {
+	await withClock(async (clock) => {
+		const pool = new cache.Pool({ expiry: Milli(1_000) });
+		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		producer.createGroup(0n).finish();
+		hooks.skipTrackGroups(producer, 1n, 3n);
+		hooks.endTrack(producer, { group: 3n, frame: 0 });
+		const done = (reader: ReturnType<TrackProducer["subscribe"]>) => {
+			for (let recv = hooks.tryRecvGroup(reader, false); ; recv = hooks.tryRecvGroup(reader, false)) {
+				if (recv.kind !== "group") return recv.kind;
+				recv.group.close();
+			}
+		};
+		const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
+		expect(done(reader)).toBe("done");
+
+		await clock.advance(3_000);
+		expect(dropsHeld(producer)).toEqual([]);
+		expect(done(reader)).toBe("done");
+		const late = producer.subscribe({ delay: { max: Milli(60_000) } });
+		expect(done(late)).toBe("done");
+		reader.close();
+		late.close();
+	});
+});
