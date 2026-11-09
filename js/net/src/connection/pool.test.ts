@@ -301,7 +301,7 @@ test("connection-specific options infer a private loop and origin", async () => 
 		const options = [
 			{ webtransport: { congestionControl: "throughput" as const } },
 			{ websocket: { enabled: false } },
-			{ delay: { timeout: Milli(0) } },
+			{ delay: { timeout: null } },
 			{ timeout: Milli(10_000) },
 			{ publish: origin.consume() },
 			{ consume: origin },
@@ -336,7 +336,7 @@ test("explicit share: true refuses connection-specific options", () => {
 			/share: false/,
 		);
 		expect(() => new Connection({ share: true, websocket: { enabled: false } })).toThrow(/share: false/);
-		expect(() => new Connection({ share: true, delay: { timeout: Milli(0) } })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, delay: { timeout: null } })).toThrow(/share: false/);
 		expect(() => new Connection({ share: true, timeout: Milli(10_000) })).toThrow(/share: false/);
 	} finally {
 		origin.close();

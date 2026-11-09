@@ -1647,7 +1647,7 @@ impl TrackState {
 	fn max_age_bound(&self) -> Option<Duration> {
 		let published = self.info.as_ref()?.max_age;
 		match published {
-			Some(age) => Some(age.min(self.broadcast.cache_duration)),
+			Some(age) => Some(self.broadcast.cache_duration.map_or(age, |ceiling| age.min(ceiling))),
 			None => self.demand_bound(),
 		}
 	}
@@ -1656,8 +1656,7 @@ impl TrackState {
 	/// when unlimited. It needs no info, so a track asks upstream for the same demand
 	/// before and after its info lands, and the publisher enforces its own max age.
 	fn demand_bound(&self) -> Option<Duration> {
-		let ceiling = self.broadcast.cache_duration;
-		(ceiling != Duration::MAX).then_some(ceiling)
+		self.broadcast.cache_duration
 	}
 
 	/// The live edge a subscription served `servable` measures drift against: the
@@ -4905,11 +4904,15 @@ fn clamp_max_delay(mut max_delay: Duration, bound: Option<Duration>) -> Duration
 	max_delay
 }
 
-/// Clamp the aggregate's max delay budget to `bound`; see [`clamp_max_delay`].
+/// Clamp the aggregate's max delay budget to `bound`; see [`clamp_max_delay`]. A bound that
+/// doesn't lower the budget leaves it as is, so an unbounded demand stays `None` on the wire
+/// rather than becoming a huge value no version can carry.
 fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Option<Subscription> {
 	let mut combined = combined?;
-	if bound.is_some() {
-		combined.delay.max = Some(clamp_max_delay(combined.budget(), bound));
+	if let Some(bound) = bound
+		&& bound < combined.budget()
+	{
+		combined.delay.max = Some(bound);
 	}
 	Some(combined)
 }
@@ -12295,7 +12298,7 @@ mod test {
 	fn track_producer_capped(name: impl Into<Arc<str>>, info: Info, cap: Duration) -> Producer {
 		Producer::new(
 			Arc::new(broadcast::Info {
-				cache_duration: cap,
+				cache_duration: Some(cap),
 				..Default::default()
 			}),
 			name,
@@ -12427,7 +12430,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn the_aggregate_is_not_clamped_to_the_publisher_max_age() {
 		let broadcast = broadcast::Info {
-			cache_duration: Duration::from_secs(30),
+			cache_duration: Some(Duration::from_secs(30)),
 			..Default::default()
 		}
 		.produce();
@@ -12452,6 +12455,27 @@ mod test {
 		// even for a subscriber that defers to the max age alone.
 		assert_eq!(producer.tail_grace(Duration::from_secs(60)), Duration::from_secs(2));
 		assert_eq!(producer.tail_grace(Duration::MAX), Duration::from_secs(2));
+		waiting.await.unwrap();
+	}
+
+	/// A ceiling that doesn't lower an unbounded demand leaves it unbounded: a huge one
+	/// (`Some(Duration::MAX)`) must not reach the wire as a value no version can carry.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_huge_ceiling_keeps_an_unbounded_demand_unbounded() {
+		let broadcast = broadcast::Info {
+			cache_duration: Some(Duration::MAX),
+			..Default::default()
+		}
+		.produce();
+		let mut dynamic = broadcast.requests();
+		let consumer = broadcast.consume();
+		let unbounded = Subscription::default().with_delay(Delay::default().with_max(None));
+		let mut waiting = std::pin::pin!(consumer.track("test").unwrap().subscribe(unbounded));
+		assert!(futures::poll!(waiting.as_mut()).is_pending());
+		let request = dynamic.requested_track().await.unwrap();
+		assert_eq!(request.subscription().unwrap().delay.max, None);
+		request.accept(Info::timed());
 		waiting.await.unwrap();
 	}
 

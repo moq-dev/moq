@@ -1511,7 +1511,7 @@ pub struct moq_client_config {
 	pub backoff_max_us: u64,
 	/// Whether `backoff_max_us` is present.
 	pub has_backoff_max: bool,
-	/// How long reconnection keeps trying before giving up for good.
+	/// How long reconnection keeps trying before giving up for good; zero retries forever.
 	pub backoff_timeout_us: u64,
 	/// Whether `backoff_timeout_us` is present.
 	pub has_backoff_timeout: bool,
