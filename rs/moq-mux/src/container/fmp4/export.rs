@@ -1579,8 +1579,6 @@ mod tests {
 		}
 	}
 
-	/// A frame that opens a group. Every group starts with a keyframe, so this is what
-	/// the far side of a group boundary looks like to `infer_missing_durations`.
 	// A rendition moving off a track whose group already closed keeps that fragment.
 	#[test]
 	fn closing_a_closed_buffer_keeps_its_frames() {
@@ -1592,6 +1590,8 @@ mod tests {
 		assert_eq!(buffer.take().map(|batch| batch.frames.len()), Some(1));
 	}
 
+	/// A frame that opens a group. Every group starts with a keyframe, so this is what
+	/// the far side of a group boundary looks like to `infer_missing_durations`.
 	fn group_start(timestamp_us: u64) -> Frame {
 		Frame {
 			keyframe: true,
