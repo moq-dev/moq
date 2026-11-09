@@ -2293,8 +2293,8 @@ impl Cluster {
 		// A GOAWAY naming no URI is a relay draining to restart. A peer URL names
 		// that one node, so a redial would only reach the draining process again
 		// and replay both announce tables there for the rest of its window. Its
-		// routes are already re-priced to the maximum, so the session serves on
-		// until the node closes it, and the redial after that finds the replacement.
+		// routes already rank below every other, so the session serves on until
+		// the node closes it, and the redial after that finds the replacement.
 		let reconnect = client
 			.with_reconnect(true)
 			.with_restart(moq_tokio::Restart::Wait)
@@ -2333,7 +2333,7 @@ impl Cluster {
 			bind.set_port(0);
 			connect.bind = Some(bind);
 		}
-		if connect.backoff.timeout().is_zero() {
+		if connect.backoff.timeout().is_none() {
 			connect.backoff.timeout = Some(PEER_RETRY.into());
 		}
 		if target.is_some_and(|target| target.lan) {
@@ -3427,12 +3427,12 @@ mod tests {
 			0,
 			&moq_tokio::connection::Observation {
 				revision: 1,
-				phase: moq_tokio::connection::Phase::Connected,
 				connects: 1,
-				failure: None,
-				version: None,
 				last_connected: Some(kio::clock::now()),
-				transport: Some(moq_tokio::Transport::Quic),
+				phase: moq_tokio::connection::Phase::Connected {
+					transport: moq_tokio::Transport::Quic,
+					version: moq_net::Version::ALL[0],
+				},
 			},
 		);
 		drop(session);

@@ -60,5 +60,3 @@ Rejected in planning:
 ## Required
 
 - [moq-net's route stream goes public](/quest/m2/api-shape/net.md) - un-hide `origin::Consumer::routes` and reshape `RouteEvent`, now that #8063 merged
-- [Transports take shared types](/quest/m2/api-shape/transport.md) - moq-uring takes a congestion factory and rustls configs, and the tokio server request stops exposing its QUIC internals
-- [JS Key.sign takes exactly Claims](/quest/m2/api-shape/auth-sign.md) - `@moq/auth` signs only `Claims`, with no legacy `put`/`get` input, like Rust

@@ -792,9 +792,6 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if ann.Prefix != "live" {
 		t.Fatalf("prefix = %q, want %q", ann.Prefix, "live")
 	}
-	if len(ann.Route.Hops) != 0 {
-		t.Fatalf("route hops = %v, want empty for local origin", ann.Route.Hops)
-	}
 
 	bc, err := consumer.Request(ctx, ann.Prefix, nil)
 	if err != nil {

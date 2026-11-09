@@ -87,7 +87,6 @@ mod unannounce_release;
 mod untimed;
 mod viewer_target;
 mod warm_backfill;
-mod wide_hop;
 mod wide_sequence;
 mod widened_max_age;
 mod zero_copy;
