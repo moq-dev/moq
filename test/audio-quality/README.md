@@ -304,13 +304,12 @@ player's own count, which its stats panel shows, is read alongside:
   accelerates about 8%, so shedding more than about 40 ms reads as one skip or more.
 - `discarded_ms`: the media those skip-aheads jumped over. Audio dropped before it reached the ring
   moves no playhead, so it is not counted.
-- `trimmed_ms`: `audio.out.stats.trimmed`, the received audio those `player_skips` dropped
-  unplayed. The native ring cannot tell silence `moq play` wrote for a short
-  hole from received audio, so a trim through one counts it; neither player counts its opening
-  silence or comfort noise. Unlike `discarded_ms`, it never counts an accelerate. Media the
+- `trimmed_ms`: `audio.out.stats.trimmed`, the media those `player_skips` dropped unplayed,
+  including the zeros filling a network gap; neither player counts its opening silence, declared
+  silence, or comfort noise. Unlike `discarded_ms`, it never counts an accelerate. Media the
   subscription skipped before decoding, a group past its age budget, is a gap in the timeline, not
   a trim, in either player.
-- `accelerated_ms`: `audio.out.stats.accelerated`, the received audio the time stretch removed by
+- `accelerated_ms`: `audio.out.stats.accelerated`, the media the time stretch removed by
   playing faster. Inaudible by design, so it is reported rather than budgeted.
 - `stalled`: the share of the window the ring spent stalled, refilling rather than playing. A gap
   that starts within 60 ms of a stall is that stall, and is not an underrun.

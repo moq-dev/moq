@@ -77,7 +77,7 @@ pub struct Observation {
 	/// its latency, summed over the sinks being written. A sink's opening
 	/// silence and comfort noise never count; silence the writer wrote does.
 	pub trimmed: Duration,
-	/// Received audio a sink's time stretch removed by playing faster, summed
+	/// Media a sink's time stretch removed by playing faster, summed
 	/// over the sinks being written. Inaudible by design, unlike a trim.
 	pub accelerated: Duration,
 	/// Whether nothing is playing: no sink is being written to, or every one

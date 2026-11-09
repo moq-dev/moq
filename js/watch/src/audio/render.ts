@@ -64,9 +64,9 @@ export interface State {
 	underruns: number;
 	// How many times the ring skipped ahead, dropping queued audio, cumulative.
 	skips: number;
-	// Received audio those skips dropped unplayed, cumulative.
+	// Media those skips dropped unplayed, less declared silence, cumulative.
 	trimmed: Milli;
-	// Received audio the stretch removed by playing faster, cumulative.
+	// Media the stretch removed by playing faster, cumulative.
 	accelerated: Milli;
 	// Whether playback is at a declared end, reached or announced before any audio, and nothing has played since.
 	silent: boolean;

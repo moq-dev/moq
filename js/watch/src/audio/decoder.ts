@@ -93,9 +93,9 @@ export interface Stats {
 	underruns: number;
 	/** How many times playback skipped ahead, dropping buffered audio rather than playing it faster. */
 	skips: number;
-	/** Received audio those skips dropped unplayed. */
+	/** Media those skips dropped unplayed, less declared silence. */
 	trimmed: Milli;
-	/** Received audio the time stretch removed by playing faster. */
+	/** Media the time stretch removed by playing faster. */
 	accelerated: Milli;
 	/** Frames that arrived after their playout time. */
 	late: number;

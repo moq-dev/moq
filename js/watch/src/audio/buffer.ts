@@ -282,11 +282,11 @@ export class AudioBuffer {
 	readonly skips: Getter<number> = this.#skips;
 
 	readonly #trimmed = new Signal<Milli>(Milli.zero);
-	/** Received audio the ring's skips dropped unplayed, cumulative. */
+	/** Media the ring's skips dropped unplayed, less declared silence, cumulative. */
 	readonly trimmed: Getter<Milli> = this.#trimmed;
 
 	readonly #accelerated = new Signal<Milli>(Milli.zero);
-	/** Received audio the stretch removed by playing faster, cumulative. */
+	/** Media the stretch removed by playing faster, cumulative. */
 	readonly accelerated: Getter<Milli> = this.#accelerated;
 
 	readonly #silent = new Signal<boolean>(false);

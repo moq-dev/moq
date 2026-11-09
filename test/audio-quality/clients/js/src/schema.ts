@@ -130,13 +130,13 @@ export const METRICS = {
 		clock: "media",
 		aggregations: ["total", "per_min"],
 		description:
-			"The player's own count of received audio its skips dropped unplayed. Unlike `discarded_ms`, a time stretch's accelerate is not in it.",
+			"The player's own count of media its skips dropped unplayed. Unlike `discarded_ms`, a time stretch's accelerate is not in it.",
 	},
 	accelerated_ms: {
 		unit: "ms",
 		clock: "media",
 		aggregations: ["total", "per_min"],
-		description: "The player's own count of received audio its time stretch removed by playing faster.",
+		description: "The player's own count of media its time stretch removed by playing faster.",
 	},
 	stalled: {
 		unit: "share",
@@ -425,9 +425,9 @@ export type Sample = {
 	 * threshold, or write a full ring refused.
 	 */
 	playerSkips?: number;
-	/** `audio.out.stats.trimmed`, cumulative: the received audio those skips dropped unplayed. */
+	/** `audio.out.stats.trimmed`, cumulative: the media those skips dropped unplayed. */
 	trimmed?: Ms;
-	/** `audio.out.stats.accelerated`, cumulative: received audio the time stretch removed by playing faster. */
+	/** `audio.out.stats.accelerated`, cumulative: media the time stretch removed by playing faster. */
 	accelerated?: Ms;
 	/** The current connection PROBE round trip. */
 	rtt?: Ms;

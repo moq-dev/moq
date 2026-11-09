@@ -195,7 +195,7 @@ holding the other one back.
 Each role follows the catalog, switching rendition when the publisher retires
 the one playing. With `--video off`, `--metrics <PATH>` writes a JSON line every
 250 ms with the playhead, the delay, every gap and stall the speaker hit, and
-the received audio it trimmed to bound its delay or shed by playing faster, in
+the media it trimmed to bound its delay or shed by playing faster, in
 the schema the
 [audio quality harness](https://github.com/moq-dev/moq/tree/main/test/audio-quality)
 reduces to underruns, trims, and silence. A silence the publisher declares, such
