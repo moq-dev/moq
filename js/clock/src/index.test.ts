@@ -161,18 +161,18 @@ test("timeouts prefer ready work, propagate rejection, and expire on the manual 
 	expect(await pending).toBeInstanceOf(Elapsed);
 });
 
-test("a timeout signal aborts at the manual deadline unless disarmed first", async () => {
+test("a timeout signal aborts at the manual deadline unless its parent aborts first", async () => {
 	const clock = manual();
 	const signal = timeoutSignal(Nano(10));
 	await clock.advance(Nano(9));
 	expect(signal.aborted).toBe(false);
 	await clock.advance(Nano(1));
 	expect(signal.reason).toHaveProperty("name", "TimeoutError");
-	const disarm = new AbortController();
-	const disarmed = timeoutSignal(Nano(10), { signal: disarm.signal });
-	disarm.abort();
+	const parent = new AbortController();
+	const child = timeoutSignal(Nano(10), { signal: parent.signal });
+	parent.abort("closed");
 	await clock.advance(Nano(10));
-	expect(disarmed.aborted).toBe(false);
+	expect(child.reason).toBe("closed");
 });
 
 test("interval burst delivers every missed scheduled tick", async () => {

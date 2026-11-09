@@ -88,12 +88,12 @@ export function timeout<T>(duration: Nano, operation: PromiseLike<T>): Promise<T
 	});
 }
 
-/** An `AbortSignal` that aborts with a `TimeoutError` after a duration on the installed clock; aborting `signal` disarms it. */
+/** An `AbortSignal` that aborts with a `TimeoutError` after a duration on the installed clock, or with `signal`'s reason once it aborts first, cancelling the timer. */
 export function timeoutSignal(duration: Nano, options?: { signal?: AbortSignal; ref?: boolean }): AbortSignal {
 	const expired = new AbortController();
 	void sleep(duration, options).then(
 		() => expired.abort(new DOMException("signal timed out", "TimeoutError")),
-		() => {},
+		() => expired.abort(options?.signal?.reason),
 	);
 	return expired.signal;
 }
