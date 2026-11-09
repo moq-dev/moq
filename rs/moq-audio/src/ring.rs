@@ -496,7 +496,7 @@ pub(crate) struct Consumer {
 	comfort: crate::comfort::Comfort,
 	/// Trim only after filling three quarters of the current target's headroom.
 	trim: bool,
-	/// Frames [`Read::Trimmed`] discarded, ever.
+	/// Received frames [`Read::Trimmed`] discarded, ever.
 	trimmed: u64,
 	/// Frames the stretch removed by accelerating, ever.
 	accelerated: u64,
@@ -547,8 +547,7 @@ impl Consumer {
 			let trim = latency + (capacity - latency) * 3 / 4;
 			if queued >= trim && queued > latency {
 				let frames = queued - latency;
-				self.discard(frames);
-				self.trimmed += frames as u64;
+				self.trimmed += self.discard(frames) as u64;
 				return Read::Trimmed { frames };
 			}
 		}
@@ -670,7 +669,9 @@ impl Consumer {
 		self.comfort.filled()
 	}
 
-	/// Frames discarded to trim the queue back to its latency, ever.
+	/// Pushed frames discarded to trim the queue back to its latency, ever: not
+	/// the startup silence or a resume's comfort noise, though silence padding
+	/// a writer pushed itself, or [`Push::Padded`] added, counts.
 	pub(crate) fn trimmed(&self) -> u64 {
 		self.trimmed
 	}
@@ -695,10 +696,12 @@ impl Consumer {
 		buffered + cushion + self.stretch.as_ref().map_or(0, |stretch| stretch.available())
 	}
 
-	/// Drop up to `frames` queued frames unread.
-	pub(crate) fn discard(&mut self, frames: usize) {
+	/// Drop up to `frames` queued frames unread, returning how many of them were
+	/// pushed rather than the startup silence or a resume's comfort noise.
+	pub(crate) fn discard(&mut self, frames: usize) -> usize {
 		let staged = self.stretch.as_mut().map_or(0, |stretch| stretch.discard(frames));
 		self.consumed = self.consumed.wrapping_add(staged);
+		let mut pushed = if self.staged_prime { 0 } else { staged };
 		let mut left = frames - staged;
 		while left > 0 {
 			let mut take = left;
@@ -713,12 +716,15 @@ impl Consumer {
 			if skipped == 0 {
 				break;
 			}
-			self.prime = self.prime.saturating_sub(skipped);
+			let prime = skipped.min(self.prime);
+			self.prime -= prime;
+			pushed += skipped - prime;
 			self.position = self.position.wrapping_add(skipped);
 			self.consumed = self.consumed.wrapping_add(skipped);
 			left -= skipped;
 		}
 		self.shared.consumed.store(self.consumed, Ordering::Relaxed);
+		pushed
 	}
 }
 
@@ -887,6 +893,28 @@ mod tests {
 		assert_eq!(cons.read(&mut out), Read::Trimmed { frames: 3880 - 480 });
 		assert_eq!(cons.trimmed(), 3880 - 480);
 		assert_eq!(cons.available(), 480);
+	}
+
+	/// A trim that reaches into the startup silence counts only what was pushed.
+	#[test]
+	fn a_trim_counts_no_startup_silence() {
+		let (mut prod, mut cons) = channel(
+			STEREO,
+			48_000,
+			48_000,
+			Config {
+				latency: Duration::from_millis(10),
+				capacity: Duration::from_millis(100),
+				pad: false,
+				trim: true,
+			},
+		);
+		cons.start();
+		assert_eq!(prod.push(&vec![0.5; 4000 * STEREO]), Push::Ok);
+		let mut out = vec![0.0; 128 * STEREO];
+		// 352 of the 480 startup frames are left behind the 128 read.
+		assert_eq!(cons.read(&mut out), Read::Trimmed { frames: 4352 - 480 });
+		assert_eq!(cons.trimmed(), 4352 - 480 - 352);
 	}
 
 	/// Construction allocates for the reader's rate and the queue's channels,

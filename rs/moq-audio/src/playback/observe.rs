@@ -71,8 +71,9 @@ pub struct Observation {
 	/// Device time filled with comfort noise for a silence the publisher
 	/// declared, since the first audible quantum.
 	pub comfort: Duration,
-	/// Received audio discarded unplayed to bring a sink's queue back down to
-	/// its latency, summed over the sinks being written.
+	/// Written audio discarded unplayed to bring a sink's queue back down to
+	/// its latency, summed over the sinks being written. A sink's opening
+	/// silence and comfort noise never count; silence the writer wrote does.
 	pub trimmed: Duration,
 	/// Received audio a sink's time stretch removed by playing faster, summed
 	/// over the sinks being written. Inaudible by design, unlike a trim.

@@ -296,7 +296,9 @@ player's own count, which its stats panel shows, is read alongside:
 - `trimmed_ms`: the player's own count of received audio it discarded unplayed to bound its delay
   (`audio.out.stats.trimmed`): the browser ring dropping its oldest past the target band, and
   natively the ring's capacity trim, the incoming excess skipped at the stretch's fast threshold,
-  and writes a full ring refused. Unlike `discarded_ms`, it never counts an accelerate. Media the
+  and writes a full ring refused. The native ring cannot tell silence `moq play` wrote for a short
+  hole from received audio, so a trim through one counts it; neither player counts its opening
+  silence or comfort noise. Unlike `discarded_ms`, it never counts an accelerate. Media the
   subscription skipped before decoding, a group past its age budget, is a gap in the timeline, not
   a trim, in either player.
 - `accelerated_ms`: native only, the received audio `moq play`'s time stretch removed by playing
