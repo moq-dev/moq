@@ -59,9 +59,13 @@ export type SourceOutput = {
 	track: Signal<string | undefined>;
 	config: Signal<Catalog.VideoConfig | undefined>;
 
-	// The receive rate, in bits per second, at which selection settles on the best rendition
-	// the target allows, or undefined when no candidate has a catalog bitrate. A player claims it
-	// as its viewer ceiling, so a grant that reaches it makes that rendition selectable.
+	/**
+	 * The receive rate, in bits per second, at which selection settles on the best rendition
+	 * the target allows, or undefined when no candidate has a catalog bitrate. A player claims it
+	 * as its viewer ceiling, so a grant that reaches it makes that rendition selectable.
+	 *
+	 * @internal Feeds the player's viewer claim.
+	 */
 	ceiling: Signal<number | undefined>;
 };
 

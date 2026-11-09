@@ -1,4 +1,4 @@
-import Session, { type SendStreamOptions } from "@moq/qmux";
+import { type SendStreamOptions, Session } from "@moq/qmux";
 import { Channel } from "./channel.ts";
 
 /** The peer connection and the MoQ ALPN agreed through signaling. */

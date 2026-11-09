@@ -1,6 +1,6 @@
 import { type Handle, Unsupported } from "../auth.ts";
 import type { Pending } from "../auth_session.ts";
-import type { Established } from "./established.ts";
+import type { Session } from "./session.ts";
 
 /** What one dial presents, decided from its URL, the offered versions, and the tokens. @internal */
 export interface Presentation {
@@ -149,7 +149,7 @@ export class Held {
 const held = new WeakMap<Handle, Held>();
 
 /** Present `tokens` on `connection`, beside the credential its dial carried. @internal */
-export function hold(connection: Established, credential: Presentation, tokens: readonly string[]): Held {
+export function hold(connection: Session, credential: Presentation, tokens: readonly string[]): Held {
 	const existing = held.get(connection.auth);
 	if (existing) {
 		existing.dialed(credential, tokens);
@@ -162,6 +162,6 @@ export function hold(connection: Established, credential: Presentation, tokens: 
 }
 
 /** The tokens `connection` holds, if it was dialed with any. @internal */
-export function heldOf(connection: Established): Held | undefined {
+export function heldOf(connection: Session): Held | undefined {
 	return held.get(connection.auth);
 }

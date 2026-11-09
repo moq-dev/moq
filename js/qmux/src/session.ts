@@ -642,7 +642,7 @@ type End =
 	| { clean: false; cause: Error; send?: { code: number; reason: string } };
 
 /** A `WebTransport` session carried over a WebSocket, for hosts without native WebTransport. */
-export default class Session implements WebTransport {
+export class Session implements WebTransport {
 	// The transport: a native `WebSocketStream` when the platform has one,
 	// otherwise the `WebSocketStream` ponyfill over a plain `WebSocket`. Either
 	// way, one API.

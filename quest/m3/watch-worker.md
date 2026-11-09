@@ -28,7 +28,7 @@ Wire: none.
 
 Gate on the plan's jank harness and N-player sweep, both nightly.
 
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [api-shape/js](/quest/m2/api-shape/js.md) ships `Video.RendererOutput` without `frame` and narrows `@moq/room` before the cut, so those two breaks are gone from this quest.
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [moq-dev/moq#8296](https://github.com/moq-dev/moq/pull/8296) ships `Video.RendererOutput` without `frame` and narrows `@moq/room` before the cut, so those two breaks are gone from this quest.
 
 ## Required
 

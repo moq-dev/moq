@@ -50,7 +50,7 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 		if (notes.length < 200) notes.push(line.slice(0, 200));
 	};
 
-	const { audio, sync, broadcast } = watch.player;
+	const { audio, sync, broadcast } = watch;
 	const recording = capture
 		? new Capture({
 				broadcast: audio.source.in.broadcast,

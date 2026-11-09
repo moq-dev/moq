@@ -1457,7 +1457,7 @@ test("a new instance at the same path clears a refusal", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
-	const broadcast = origin.route(Path.from("restarted"), { instance: Instance.random() });
+	const broadcast = origin.route(Path.from("restarted"), { instance: { id: Instance.random(), epoch: 0n } });
 
 	void pub.runPublishNamespaces();
 

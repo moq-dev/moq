@@ -185,7 +185,7 @@ export class Renderer {
 	}
 }
 
-/** Signals the transcoder reads. */
+/** Signals the transcoder reads. @internal */
 export type TranscodeInput = {
 	// The captured frames to re-encode. We subscribe for our own copies and close them.
 	source: Getter<Fanout<VideoFrame> | undefined>;
@@ -195,10 +195,10 @@ export type TranscodeInput = {
 	settings: Getter<Encoder.Config | undefined>;
 };
 
-/** Constructor options for {@link Transcode}. */
+/** Constructor options for {@link Transcode}. @internal */
 export type TranscodeProps = Inputs<TranscodeInput>;
 
-/** Signals the transcoder derives. */
+/** Signals the transcoder derives. @internal */
 export type TranscodeOutput = {
 	// The decoded output frame. Owned here, closed on each update and on close().
 	frame: Signal<VideoFrame | undefined>;
@@ -207,6 +207,8 @@ export type TranscodeOutput = {
 /**
  * Encodes the captured frames with the live rendition settings and decodes the result, so the
  * output frame is what a viewer would actually see after transmission.
+ *
+ * @internal
  */
 export class Transcode {
 	/** The wired inputs, read-only. */

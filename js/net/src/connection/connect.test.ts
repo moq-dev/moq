@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
 import { hostTime } from "@moq/clock/test";
-import Qmux, { selectSubprotocol, type WebSocketLike } from "@moq/qmux";
+import { Session as Qmux, selectSubprotocol, type WebSocketLike } from "@moq/qmux";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
