@@ -6901,6 +6901,29 @@ async fn server_cancel_during_listen_releases_the_port() {
 	drop(listen);
 }
 
+/// A cancelled server lets go of its configured origins, though its handle lives on.
+#[tokio::test]
+async fn server_cancel_releases_its_origins() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(origin.clone()),
+		consume: Some(origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	server.listen().await.expect("listen failed");
+	assert!(Arc::strong_count(&origin) > 1);
+
+	server.cancel();
+	assert_eq!(
+		Arc::strong_count(&origin),
+		1,
+		"the cancelled server still holds the origin"
+	);
+}
+
 /// A listen that fails to bind leaves the server idle, so it can listen again once the
 /// address frees up.
 #[tokio::test]

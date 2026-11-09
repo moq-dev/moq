@@ -63,6 +63,11 @@ pub struct MoqServerTls {
 struct Settings {
 	config: moq_tokio::listen::Config,
 	quic: moq_tokio::quic::Config,
+}
+
+/// The origins served to incoming sessions, held until the server is cancelled.
+#[derive(Clone)]
+struct Origins {
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
@@ -70,7 +75,7 @@ struct Settings {
 /// Where a server is in its lifecycle.
 enum Phase {
 	/// Nothing bound yet, or the last bind failed.
-	Idle,
+	Idle(Origins),
 	/// `listen` started the accept loop.
 	Listening(Listening),
 	/// Terminal. Keeps the loop's completion, so a later call still reports its panic.
@@ -87,6 +92,7 @@ struct Listening {
 	/// The requests the loop accepted, read by one `accept` at a time.
 	queue: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<moq_tokio::server::Request>>>,
 	certificates: moq_tokio::tls::Certificates,
+	origins: Origins,
 }
 
 impl Listening {
@@ -168,7 +174,7 @@ async fn serve(
 }
 
 impl Settings {
-	fn new(config: MoqServerConfig) -> Result<Self, MoqError> {
+	fn new(config: MoqServerConfig) -> Result<(Self, Origins), MoqError> {
 		let mut listen = moq_tokio::listen::Config::default();
 		listen.implementation = Some(crate::session::implementation(config.implementation.as_deref())?);
 		if let Some(bind) = config.bind {
@@ -188,12 +194,11 @@ impl Settings {
 			reason: err.to_string(),
 		})?;
 
-		Ok(Self {
-			config: listen,
-			quic,
+		let origins = Origins {
 			publish: config.publish,
 			consume: config.consume,
-		})
+		};
+		Ok((Self { config: listen, quic }, origins))
 	}
 }
 
@@ -224,6 +229,7 @@ impl MoqServer {
 	fn start(
 		&self,
 		phase: &mut Phase,
+		origins: Origins,
 	) -> Result<
 		(
 			tokio::sync::oneshot::Receiver<Result<String, MoqError>>,
@@ -252,6 +258,7 @@ impl MoqServer {
 			closed: wait,
 			queue: Arc::new(tokio::sync::Mutex::new(requests)),
 			certificates,
+			origins,
 		});
 		Ok((addr, driver))
 	}
@@ -261,7 +268,7 @@ impl MoqServer {
 	pub(crate) fn accepting(&self) -> bool {
 		match &*self.phase.lock().unwrap() {
 			Phase::Listening(listening) => listening.queue.try_lock().is_err(),
-			Phase::Idle | Phase::Cancelled(_) => false,
+			Phase::Idle(_) | Phase::Cancelled(_) => false,
 		}
 	}
 }
@@ -274,9 +281,10 @@ impl MoqServer {
 	#[uniffi::constructor]
 	pub fn new(config: MoqServerConfig) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
+		let (settings, origins) = Settings::new(config)?;
 		Ok(Arc::new(Self {
-			settings: Settings::new(config)?,
-			phase: std::sync::Mutex::new(Phase::Idle),
+			settings,
+			phase: std::sync::Mutex::new(Phase::Idle(origins)),
 		}))
 	}
 
@@ -286,7 +294,10 @@ impl MoqServer {
 		let started = {
 			let mut phase = self.phase.lock().unwrap();
 			match &*phase {
-				Phase::Idle => Ok(self.start(&mut phase)?),
+				Phase::Idle(origins) => {
+					let origins = origins.clone();
+					Ok(self.start(&mut phase, origins)?)
+				}
 				Phase::Listening(_) => {
 					return Err(MoqError::Bind {
 						reason: "already listening".into(),
@@ -310,11 +321,11 @@ impl MoqServer {
 			match &*phase {
 				Phase::Cancelled(driver) => Some(driver.clone()),
 				// Only this call leaves `Idle`, so the loop that failed to bind is the one listening.
-				Phase::Listening(_) if result.is_err() => {
-					*phase = Phase::Idle;
+				Phase::Listening(listening) if result.is_err() => {
+					*phase = Phase::Idle(listening.origins.clone());
 					None
 				}
-				Phase::Idle | Phase::Listening(_) => None,
+				Phase::Idle(_) | Phase::Listening(_) => None,
 			}
 		};
 		if let Some(driver) = after {
@@ -330,11 +341,15 @@ impl MoqServer {
 	/// call alone and leaves the server listening.
 	pub async fn accept(&self) -> Result<Option<Arc<MoqRequest>>, MoqError> {
 		let listening = match &*self.phase.lock().unwrap() {
-			Phase::Idle => return Err(not_listening()),
-			Phase::Listening(listening) => Ok((listening.driver.clone(), listening.queue.clone())),
+			Phase::Idle(_) => return Err(not_listening()),
+			Phase::Listening(listening) => Ok((
+				listening.driver.clone(),
+				listening.queue.clone(),
+				listening.origins.clone(),
+			)),
 			Phase::Cancelled(driver) => Err(driver.clone()),
 		};
-		let (driver, queue) = match listening {
+		let (driver, queue, origins) = match listening {
 			Ok(listening) => listening,
 			Err(driver) => return cancelled(driver).await,
 		};
@@ -346,17 +361,13 @@ impl MoqServer {
 			.await;
 		let after = match &*self.phase.lock().unwrap() {
 			Phase::Cancelled(driver) => Some(driver.clone()),
-			Phase::Idle | Phase::Listening(_) => None,
+			Phase::Idle(_) | Phase::Listening(_) => None,
 		};
 		if let Some(driver) = after {
 			return cancelled(driver).await;
 		}
 		match request? {
-			Some(request) => Ok(Some(MoqRequest::new(
-				request,
-				self.settings.publish.clone(),
-				self.settings.consume.clone(),
-			)?)),
+			Some(request) => Ok(Some(MoqRequest::new(request, origins.publish, origins.consume)?)),
 			None => {
 				driver.finished().await?;
 				Ok(None)
@@ -371,7 +382,7 @@ impl MoqServer {
 	/// before `listen()`.
 	pub fn cert_fingerprints(&self) -> Result<Vec<String>, MoqError> {
 		match &*self.phase.lock().unwrap() {
-			Phase::Idle => Err(not_listening()),
+			Phase::Idle(_) => Err(not_listening()),
 			Phase::Listening(listening) => {
 				listening.driver.check()?;
 				Ok(listening.certificates.fingerprints())
@@ -391,8 +402,8 @@ impl MoqServer {
 	pub fn cancel(&self) {
 		// Closed under the lock, so a concurrent `cancel` returns only once the socket is released.
 		let mut phase = self.phase.lock().unwrap();
-		let driver = match std::mem::replace(&mut *phase, Phase::Idle) {
-			Phase::Idle => Default::default(),
+		let driver = match std::mem::replace(&mut *phase, Phase::Cancelled(Default::default())) {
+			Phase::Idle(_) => Default::default(),
 			Phase::Listening(listening) => listening.close(),
 			Phase::Cancelled(driver) => driver,
 		};

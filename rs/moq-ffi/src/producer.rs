@@ -778,11 +778,15 @@ impl MoqTrackProducer {
 			// A finished track has no family left to join, and ends at its declared end.
 			(Ok(writer), _) => Ok(Arc::new(writer)),
 			(Err(err), phase) => {
-				// A close during `f` found nothing to end, so the restored track ends here.
-				let closed = matches!(&phase, TrackPhase::Open { family: Some(family), .. } if family.is_closed());
-				match closed {
-					true => phase.abort(moq_net::Error::Unroutable),
-					false => *self.phase.lock().unwrap() = phase,
+				let family = match &phase {
+					TrackPhase::Open { family, .. } => family.clone(),
+					TrackPhase::Finished(_) | TrackPhase::Closed => None,
+				};
+				*self.phase.lock().unwrap() = phase;
+				// Checked after the restore: a close during `f` found nothing to end, so the
+				// restored track ends here, and a close after the restore ends it there.
+				if family.is_some_and(|family| family.is_closed()) {
+					Child::abort(self, moq_net::Error::Unroutable);
 				}
 				Err(err)
 			}
