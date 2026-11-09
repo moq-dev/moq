@@ -195,6 +195,8 @@ int32_t moq_audio_encoder_frame_size(uint32_t encoder);
 int32_t moq_audio_encoder_init(uint32_t encoder, moq_audio_init *dst);
 int32_t moq_audio_encoder_bitrate(uint32_t encoder, uint64_t bitrate);
 int32_t moq_audio_encoder_encode(uint32_t encoder, const float *pcm, uintptr_t pcm_len);
+int32_t moq_audio_encoder_receive(uint32_t encoder, moq_frame *dst);
+int32_t moq_audio_encoder_flush(uint32_t encoder);
 int32_t moq_audio_encoder_finish(uint32_t encoder, const float *pcm, uintptr_t pcm_len, uint64_t *discard_padding);
 int32_t moq_audio_encoder_packet(uint32_t encoder, uint32_t index, moq_frame *dst);
 int32_t moq_audio_encoder_free(uint32_t encoder);

@@ -29,6 +29,11 @@
 //! the `axum` re-export sit behind the default `server` feature, so such an
 //! embedder can drop them with `default-features = false`.
 //!
+//! ## Runtime
+//!
+//! The crate is a tokio edge, built on `moq-tokio`, axum, and tokio sockets: its entry
+//! points spawn their session drivers on the current tokio runtime.
+//!
 //! ## Bitstream gotcha
 //!
 //! The WebRTC ↔ MoQ shape conversion for H.264 and H.265 is handled by
@@ -58,19 +63,6 @@ mod sdp;
 mod session;
 // str0m, dimpl, `is`, and sctp-proto, vendored and trimmed; see the module docs.
 mod vendor;
-
-/// Re-export of the HTTP router stack, so consumers can merge the [`axum::Router`]
-/// returned by [`Server::publish_router`] / [`Server::subscribe_router`] into their
-/// own app without adding their own axum dependency (and risking a version mismatch). A major axum bump is therefore
-/// a breaking change for this crate. Only with the `server` feature.
-#[cfg(feature = "server")]
-pub use axum;
-
-/// Re-export of the URL type, so consumers can build the [`url::Url`] that
-/// [`Client::subscribe`] / [`Client::publish`] dial without adding their own url
-/// dependency (and risking a version mismatch). A major url bump is therefore a
-/// breaking change for this crate.
-pub use url;
 
 pub use client::Client;
 pub use error::*;

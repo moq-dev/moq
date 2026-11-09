@@ -28,7 +28,7 @@ behind a new optional audio `mediacodec` feature and the decode seam, on `target
 - The binding ships in the moq-ffi Android slice, which is how Kotlin and Dart
   reach it.
 
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [audio-codec-seam](/quest/m2/audio-codec-seam.md) makes moq-audio's codecs return zero or more outputs with `flush` before the cut, so this backend adds no break.
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): moq-audio's codecs return zero or more outputs with `flush` before the cut, so this backend adds no break. `decode::Consumer` still places each packet by the one output it returns and refuses any other count, so if this backend holds or splits output, it also teaches the consumer to place that output.
 
 ## Related
 

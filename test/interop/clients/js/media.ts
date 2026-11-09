@@ -166,6 +166,11 @@ if (!native && values.cases === undefined && playerEngine === "firefox") {
 		"QUARANTINE\treplacement\tintermittent audio tone; investigate with https://github.com/moq-dev/moq/pull/8058",
 	);
 }
+// Every replacement publisher pins lite-07, including the lite-06 and IETF reader legs.
+// An explicit --cases replacement remains available while porting the route wire.
+if (values.cases === undefined && selected.delete("replacement")) {
+	console.error("QUARANTINE\treplacement\tJS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md");
+}
 
 // process.exit narrows `url` above, but not inside the function declarations below.
 const relay: string = url;

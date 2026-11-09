@@ -5,7 +5,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Context;
-use hang::moq_net;
 use moq_srt::{Reject, Request, Server};
 use moq_tokio::RedactedUrl;
 use url::Url;

@@ -32,12 +32,6 @@ export interface FrameSource {
 	frameRate?: number;
 }
 
-/** Whether this source is a bare live capture track. */
-export function isStreamTrack(source: Source): source is StreamTrack {
-	// Structural check rather than `instanceof MediaStreamTrack` so this stays correct across realms.
-	return !("frames" in source) && !("track" in source);
-}
-
 /** Stronger typing for the MediaStreamTrack interface. */
 export interface StreamTrack extends MediaStreamTrack {
 	/** Always video. */

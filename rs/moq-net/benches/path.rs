@@ -16,7 +16,7 @@ use futures::FutureExt;
 use moq_net::{
 	Path, Pattern, Patterns,
 	fuzz::{Announced, Messages, decode_announces, decode_namespaces, encode_announces, encode_namespaces},
-	kio, origin,
+	origin,
 };
 
 struct Counting;

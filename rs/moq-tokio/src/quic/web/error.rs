@@ -63,10 +63,11 @@ pub enum HandshakeError {
 	#[error("connect: {0}")]
 	Connect(#[from] web_transport_proto::ConnectError),
 
-	/// A status that does not fit the exchange: a client answered with anything but 200, or a
-	/// server asked to accept with a status other than 200, or to reject with one below 400.
+	/// An HTTP status that does not fit the exchange: a client answered with anything but 200,
+	/// or a server asked to accept with a status other than 200, or to reject with one outside
+	/// 400 to 599.
 	#[error("http status: {0}")]
-	Status(http::StatusCode),
+	Status(u16),
 
 	/// The CONNECT response selected a subprotocol the request did not offer.
 	#[error("subprotocol not offered: {0}")]

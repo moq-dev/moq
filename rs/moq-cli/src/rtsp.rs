@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use hang::moq_net;
 use moq_tokio::RedactedUrl;
 use url::Url;
 

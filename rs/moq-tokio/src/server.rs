@@ -297,6 +297,7 @@ impl Server {
 		// gets the released spellings folded in too.
 		config.validate()?;
 
+		#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 		let versions = config.versions();
 
 		// Build a QUIC backend when `--listen` is set, or when nothing else
@@ -2179,7 +2180,7 @@ mod tests {
 	/// paused clock.
 	#[cfg(feature = "websocket")]
 	async fn session_pair() -> (qmux::Session, qmux::Session) {
-		use qmux::ws::tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+		use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
 
 		const ALPN: &str = "qmux-01.moq-lite-06";
 		let (client, server) = tokio::io::duplex(64 * 1024);
@@ -2197,7 +2198,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn upgraded_websocket_preserves_request_metadata() {
 		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
-		use qmux::ws::tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+		use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
 
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
@@ -2241,7 +2242,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn upgraded_websocket_refuses_setup_path_presence() {
 		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
-		use qmux::ws::tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+		use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
 
 		for protocol in ["qmux-01.moq-lite-06", "qmux-01.moqt-18", "qmux-01.moqt-22"] {
 			for path in ["", "/room?jwt=url-token", "/other?jwt=setup-token"] {
@@ -2715,7 +2716,7 @@ mod tests {
 	#[cfg(all(feature = "uds", unix))]
 	#[tokio::test]
 	async fn unix_listener_serves_the_configured_publisher() {
-		kio::clock::host_time();
+		kio::clock::host_time(); // a real Unix socket
 		use rand::RngExt;
 
 		// macOS caps AF_UNIX paths near 104 bytes and the system temp dir is long,

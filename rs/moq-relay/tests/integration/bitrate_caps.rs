@@ -9,7 +9,6 @@
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
-use moq_tokio::moq_net;
 use moq_tokio::quic::driver;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
