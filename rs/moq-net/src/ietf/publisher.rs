@@ -8741,7 +8741,7 @@ mod group_priority_test {
 			.unwrap();
 		frame.write(b"x".as_slice()).unwrap();
 		frame.finish().unwrap().finish().unwrap();
-		track.finish().unwrap();
+		let _finished = track.finish().unwrap();
 		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
 
 		let mut streams = std::collections::BTreeMap::<usize, Vec<u8>>::new();
