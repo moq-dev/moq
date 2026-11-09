@@ -37,7 +37,7 @@ the cheapest one; fix it with the route-selection rework here.
   route-wire quarantine (every replacement publisher pins lite-07 even for
   older readers). Keep the separate Firefox audio-tone quarantine until
   [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) resolves it.
-  The local drain/datagram recipes and explicit `--cases replacement` remain
+  The local drain/datagram recipes and `just test media --media-cases replacement` remain
   available to validate the port.
 
 ## Required
