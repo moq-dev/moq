@@ -956,7 +956,7 @@ mod tests {
 	#[test]
 	fn only_a_change_outdates_a_dial() {
 		let set = Tokens::new(tokens(&["a"]));
-		let dial = set.dial(
+		let dial = set.preview(
 			&"moqt://relay.example.com/".parse().unwrap(),
 			&versions(&["moq-lite-07-wip"]),
 		);
@@ -996,7 +996,8 @@ mod tests {
 	fn a_url_credential_sends_every_token_on_auth() {
 		let url: Url = "moqt://relay.example.com/room?jwt=peer".parse().unwrap();
 		let set = Tokens::new(tokens(&["a", "peer", "a"]));
-		let dial = set.dial(&url, &crate::Versions::all());
+		let dial = set.preview(&url, &crate::Versions::all());
+		set.commit(&dial);
 		assert_eq!(dial.url, url);
 		assert_eq!(dial.token, None);
 		assert_eq!(held(&set), ["a"]);
