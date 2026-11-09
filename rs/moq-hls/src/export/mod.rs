@@ -3533,9 +3533,13 @@ mod tests {
 		let mut segments = rendition.segments();
 		assert!(segments.init().await.unwrap().is_some(), "init is buildable");
 
-		// Sizing reports the segment's wire bytes before its media is built, without advancing.
-		let size = segments.next_size().await.unwrap();
-		assert_eq!(size, Some(5), "one 4-byte frame and its 1-byte timestamp");
+		// Peeking reports the segment's metadata and wire bytes before its media is built, without
+		// advancing.
+		let peek = segments.peek().await.unwrap().expect("a segment, not end");
+		assert_eq!(peek.segment, 0);
+		assert_eq!(peek.bytes, 5, "one 4-byte frame and its 1-byte timestamp");
+		assert_eq!(peek.duration, Duration::from_secs(2));
+		assert_eq!(peek.discontinuity, 0);
 
 		let first = kio::clock::timeout(Duration::from_secs(5), segments.next())
 			.await
