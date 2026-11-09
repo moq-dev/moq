@@ -6,7 +6,12 @@ use std::collections::HashSet;
 use hang::catalog::Reference;
 use moq_mux::catalog;
 
-pub(super) use moq_mux::timeline::Kind;
+/// A half of the player: the picture or the speaker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Kind {
+	Video,
+	Audio,
+}
 
 /// The track a rendition plays from: its resolved broadcast path and its name there.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
