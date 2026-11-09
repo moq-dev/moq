@@ -1475,11 +1475,24 @@ impl TrackState {
 	/// Where the runs a reclaim may forget end: every run on a received copy, whose tail
 	/// decides its end, but only those below a local track's edge, since one above it is what
 	/// lets its declared end be reached (see [`Self::reaches`]). A local producer gives up only
-	/// what it chose to.
+	/// what it chose to. A closed track keeps them until its last handle frees the state.
 	fn kept_drops(&self) -> u64 {
 		match self.anchors.received() {
 			true => u64::MAX,
 			false => self.edge(),
+		}
+	}
+
+	/// The runs from `from` up to [`Self::kept_drops`] were kept and are now reclaimable: date
+	/// the oldest of them, which the expiry scan skipped, so the next scan finds it.
+	fn rearm_drops(&mut self, from: u64) {
+		let due = self
+			.drops_born
+			.overlapping(&(from..self.kept_drops()))
+			.map(|(_, expires)| *expires)
+			.min();
+		if let Some(due) = due {
+			self.drops_oldest = Some(self.drops_oldest.map_or(due, |oldest| oldest.min(due)));
 		}
 	}
 
@@ -2505,7 +2518,11 @@ impl TrackState {
 	/// The demand wakes it owes wait in [`Self::deferred`] for the caller to fire once its guard
 	/// is released.
 	fn advance(&mut self, sequence: u64, answers: bool) {
+		let kept = self.kept_drops();
 		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
+		if self.kept_drops() > kept {
+			self.rearm_drops(kept);
+		}
 		self.cache.advance_largest(Position::group(sequence));
 		let wakes = self.subscriptions.lock().wrote(sequence, answers);
 		if !wakes.is_empty() {
@@ -23705,8 +23722,6 @@ mod test {
 		write_group(&producer, 9);
 	}
 
-	/// Skips are kept and reported as runs: a huge `skip_groups` or append gap costs one
-	/// entry and one report, whatever its length.
 	/// A run given up longer than the pool's expiry window ago is forgotten by the sweep, even
 	/// on a track that caches nothing, so a pool with no byte target still bounds the drop set;
 	/// a run given up since stays.
@@ -23796,6 +23811,26 @@ mod test {
 		assert_eq!(reported[1..], held[..]);
 	}
 
+	/// A local skip kept above the track's edge is dated once the edge passes it, so the next
+	/// expiry scan past its window forgets it with no other drop to rearm it.
+	#[test]
+	fn a_kept_local_skip_expires_once_the_edge_passes_it() {
+		let producer = track_producer("test", Info::timed());
+		let pool = producer.broadcast.pool.clone();
+		producer.skip_groups(0..10);
+		elapse(&producer, cache::DEFAULT_EXPIRY * 2);
+		pool.sweep();
+		assert!(producer.state.read().skipped(0), "a skip above the edge stays");
+
+		// The write's own expiry scan finds the skip, with nothing else to rearm it.
+		let _group = producer.create_group(group::Info { sequence: 10 }).unwrap();
+		let state = producer.state.read();
+		assert!(!state.skipped(0), "the edge passed the skip");
+		assert_eq!(state.drops_bill.size(), 0, "its bill went with it");
+	}
+
+	/// Skips are kept and reported as runs: a huge `skip_groups` or append gap costs one
+	/// entry and one report, whatever its length.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_huge_skip_costs_one_run() {

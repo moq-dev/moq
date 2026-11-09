@@ -237,7 +237,7 @@ export interface Owner<E extends Entry> {
 	shedDrops(debt: number, cap: number): number;
 	/** Forget the runs of the drop set given up longer than the pool's idle window before tick `now`, returning whether any went. */
 	expireDrops(now: number): boolean;
-	/** Whether the track holds a drop run, which keeps its account in the idle sweep. */
+	/** Whether the track holds a drop run a reclaim may forget, which keeps its account in the idle sweep. */
 	holdsDrops(): boolean;
 }
 
@@ -285,7 +285,7 @@ export class Track<E extends Entry> {
 	bill(n: number): void {
 		this.pool.add(n);
 		this.wrote(n);
-		this.pool.register(this as Track<Entry>);
+		if (this.#owner.holdsDrops()) this.pool.register(this as Track<Entry>);
 	}
 
 	/** Release `n` bytes {@link bill} billed. */

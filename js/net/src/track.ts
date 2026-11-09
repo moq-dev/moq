@@ -1135,7 +1135,7 @@ export class Producer {
 			settle: () => this.#settle(),
 			shedDrops: (debt, cap) => this.#shedDrops(debt, cap),
 			expireDrops: (now) => this.#expireDrops(now),
-			holdsDrops: () => this.#state.drops.size > 0,
+			holdsDrops: () => (this.#state.drops.all[0]?.start ?? UNBOUNDED) < this.#keptDrops(),
 		});
 	}
 
@@ -1193,11 +1193,22 @@ export class Producer {
 		return expired.length > 0;
 	}
 
-	// Where the runs a reclaim may forget end: every run on a received copy, but only those below
-	// a local track's edge, since one above it is what lets its declared end be reached (see
-	// `reaches`). A local producer gives up only what it chose to. Mirrors the Rust `kept_drops`.
+	// Where the runs a reclaim may forget end: every run on a received copy, but only those below an
+	// open local track's edge, since one above it is what lets its declared end be reached (see
+	// `reaches`). A local producer gives up only what it chose to. Mirrors the Rust `kept_drops`,
+	// except that a closed track's runs all go here too: Rust frees them with the state's last
+	// handle, but here the pool holds the account until the sweep forgets them.
 	#keptDrops(): bigint {
-		return this.#wire ? UNBOUNDED : this.#received;
+		return this.#wire || this.#state.closed.peek() !== undefined ? UNBOUNDED : this.#received;
+	}
+
+	// The runs from `from` up to `#keptDrops` were kept and are now reclaimable: date the oldest so
+	// the next idle scan finds it, and have the sweep visit the track for them.
+	#rearmDrops(from: bigint): void {
+		const runs = this.#dropsBorn.overlapping(from, this.#keptDrops());
+		for (const run of runs) this.#dropsOldest = Math.min(this.#dropsOldest ?? run.expires, run.expires);
+		if (this.#state.drops.overlapping(from, this.#keptDrops()).length > 0)
+			this.#account.pool.register(this.#account);
 	}
 
 	static {
@@ -1416,9 +1427,14 @@ export class Producer {
 		return runs;
 	}
 
-	// A publisher may re-create a group it cut; the sequence is no longer given up.
+	// A publisher may re-create a group it cut, and a group a reader's fill refused may still
+	// arrive; the sequence is no longer given up.
 	#undrop(sequence: bigint): void {
 		if (this.#state.drops.at(sequence)) this.#setDrops(sequence, sequence + 1n);
+		for (const sink of this.#sinks) {
+			const refused = sink.refused.peek();
+			if (dropAt(refused, sequence)) sink.refused.set(removeRun(refused, sequence, sequence + 1n));
+		}
 	}
 
 	/**
@@ -1863,7 +1879,9 @@ export class Producer {
 	// asks for.
 	#advance(sequence: bigint, answers: boolean): void {
 		const next = this.#received;
+		const kept = this.#keptDrops();
 		this.#received = max(next, sequence + 1n);
+		if (this.#keptDrops() > kept) this.#rearmDrops(kept);
 		this.#advanceLargest({ group: sequence, frame: 0 });
 		this.#endLargest();
 		if (!this.#refresh || sequence < next) return;
@@ -2269,7 +2287,9 @@ export class Producer {
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = [...this.#cache].filter((entry) => entry.group.closed.peek() === undefined);
+		const kept = this.#keptDrops();
 		closeTrackState(this.#state, abort);
+		if (this.#keptDrops() > kept) this.#rearmDrops(kept);
 		if (this.#state.outcome.peek() === undefined)
 			this.#state.outcome.set(abort ?? this.#state.end.peek()?.error ?? null);
 		// Closing a copy never supplies the missing tail of a group. Already finished groups

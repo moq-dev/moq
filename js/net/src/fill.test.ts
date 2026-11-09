@@ -306,6 +306,24 @@ test("fill: a refusal fails the readers waiting now, and a later reader asks aga
 	broadcast.close();
 });
 
+test("fill: a group arriving after a refusal reaches the reader the refusal named", async () => {
+	const { broadcast, track } = resumed(5n);
+	const requests = track.requests();
+	const waiting = wireOf(broadcast).fetchGroup("video", 2n);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	fill.refuseGroups(2n, 3n, new StreamError(StreamCode.Cancel, { message: "storage busy" }));
+	// Before the waiting fetch looks again.
+	const group = track.createGroup(2n);
+	group.writeFrame({ payload: enc.encode("late") });
+	group.finish();
+	fill.close();
+	expect(await frames(await waiting)).toEqual(["late"]);
+
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a fill names the most urgent priority and loosest budget among its readers", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();

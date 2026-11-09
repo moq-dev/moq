@@ -346,3 +346,28 @@ test("the sweep forgets runs past the idle window", async () => {
 		expect(pool.used).toBe(cache.RUN_OVERHEAD + cache.BORN_OVERHEAD);
 	});
 });
+
+// A local skip kept above the track's edge is dated once the edge passes it, or once the track
+// closes, so an expiry scan past its window forgets it with no other drop to rearm it, and its
+// bill leaves the pool. Mirrors Rust `a_kept_local_skip_expires_once_the_edge_passes_it`; Rust
+// frees a closed track's drops with its state.
+test("a kept local skip expires once the edge passes it or the track closes", async () => {
+	await withClock(async (clock) => {
+		const pool = new cache.Pool({ expiry: Milli(1_000) });
+		const passed = pooled(pool);
+		const closed = pooled(pool, "closed");
+		passed.skipGroups(0n, 10n);
+		closed.skipGroups(0n, 10n);
+		await clock.advance(3_000);
+		expect(dropsHeld(passed)).toEqual([0n]);
+		expect(dropsHeld(closed)).toEqual([0n]);
+
+		// The write's own expiry scan finds the skip.
+		passed.createGroup(10n).finish();
+		expect(dropsHeld(passed)).toEqual([]);
+
+		const used = pool.used;
+		closed.close();
+		expect(pool.used).toBe(used - cache.RUN_OVERHEAD - cache.BORN_OVERHEAD);
+	});
+});
