@@ -931,7 +931,17 @@ fn bench_subscriber_churn_drops(c: &mut Criterion) {
 					let id = format!("{readers}r/{runs}n/{reported}k/span_{span}");
 					group.bench_function(BenchmarkId::from_parameter(id), |b| {
 						let mut set = moq_net::fuzz::DropSet::new(readers, runs, reported, span);
-						b.iter(|| set.drop_one());
+						b.iter_custom(|iterations| {
+							let mut elapsed = Duration::ZERO;
+							for _ in 0..iterations {
+								// Untimed: restore the runs and records each drop adds.
+								set.hold();
+								let start = Instant::now();
+								set.drop_one();
+								elapsed += start.elapsed();
+							}
+							elapsed
+						});
 					});
 				}
 			}
