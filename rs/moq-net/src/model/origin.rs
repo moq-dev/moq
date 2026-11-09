@@ -2269,7 +2269,7 @@ impl Producer {
 	/// identity rotates. `None` while no session has, which leaves the node uncreated.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn route_hop(&self) -> Option<Hop> {
-		let node = self.shared.lock().route_node.clone()?;
+		let (node, _) = self.shared.lock().route_node.clone()?;
 		Some(crate::route::node::hop(node.declared()))
 	}
 
@@ -3608,9 +3608,22 @@ struct OwnClaims {
 	node: crate::route::Node,
 }
 
-impl kio::Task for OwnClaims {
+/// The driver's task feeding [`OwnClaims`], which [`Consumer::route_node`] also catches up.
+struct FeedOwnClaims(Arc<std::sync::Mutex<OwnClaims>>);
+
+impl kio::Task for FeedOwnClaims {
 	type Output = ();
 
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		lock_own(&self.0).poll(waiter)
+	}
+}
+
+fn lock_own(own: &std::sync::Mutex<OwnClaims>) -> std::sync::MutexGuard<'_, OwnClaims> {
+	own.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+impl OwnClaims {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
 			if let Poll::Ready(event) = self.downstream.poll_next(waiter) {
@@ -3629,23 +3642,15 @@ impl kio::Task for OwnClaims {
 }
 
 impl OwnClaims {
-	/// Feed the node the routes the table already holds, so a stream answered before
-	/// the driver next runs sees them.
-	fn new(routes: Routes, downstream: Routes, node: crate::route::Node) -> Self {
-		let mut own = Self {
-			routes,
-			downstream,
-			best: HashMap::new(),
-			local: HashMap::new(),
-			node,
-		};
-		while let Some(event) = own.downstream.try_next() {
-			own.local(event);
+	/// Feed the node every change the table already holds, so a stream registered next
+	/// sees them without waiting for the driver.
+	fn catch_up(&mut self) {
+		while let Some(event) = self.downstream.try_next() {
+			self.local(event);
 		}
-		while let Some(event) = own.routes.try_next() {
-			own.apply(event);
+		while let Some(event) = self.routes.try_next() {
+			self.apply(event);
 		}
-		own
 	}
 
 	fn apply(&mut self, event: RouteEvent) {
@@ -5919,9 +5924,10 @@ struct OriginState {
 	// The sessions withholding this origin's hidden routes from their peer.
 	hidden_withheld: HiddenWithheld,
 
-	// The route layer node this origin's lite-07 sessions share; see
-	// [`Consumer::route_node`].
-	route_node: Option<crate::route::Node>,
+	// The route layer node this origin's lite-07 sessions share, and the feeder the
+	// driver owns; see [`Consumer::route_node`]. Weak, since the feeder's cursors hold
+	// this state.
+	route_node: Option<(crate::route::Node, std::sync::Weak<std::sync::Mutex<OwnClaims>>)>,
 }
 
 impl OriginState {
@@ -7085,17 +7091,21 @@ impl Consumer {
 
 	/// The route layer node every lite-07 session on this origin shares, created on
 	/// first use along with the task that feeds it the routes this node serves
-	/// itself: everything in the table the route layer did not select.
+	/// itself: everything in the table the route layer did not select. It is caught up
+	/// with the table on every call, so a stream registered next presents what the
+	/// table holds now, not what the driver last fed it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn route_node(&self) -> crate::route::Node {
-		let mut shared = self.shared.lock();
-		if let Some(node) = &shared.route_node {
-			return node.clone();
+		let existing = self.shared.lock().route_node.clone();
+		let (node, own) = existing.unwrap_or_else(|| self.create_route_node());
+		if let Some(own) = own.upgrade() {
+			lock_own(&own).catch_up();
 		}
-		let node = crate::route::Node::origin(self.hop());
-		shared.route_node = Some(node.clone());
-		drop(shared);
-		// The whole table, whatever this handle's scope.
+		node
+	}
+
+	fn create_route_node(&self) -> (crate::route::Node, std::sync::Weak<std::sync::Mutex<OwnClaims>>) {
+		// The whole table, whatever this handle's scope, counted against no session.
 		let own = |upstream| {
 			Self {
 				scope: OriginScope::default(),
@@ -7106,15 +7116,35 @@ impl Consumer {
 					..Horizon::default()
 				},
 				covering: false,
+				stats: stats::Session::default(),
 				..self.clone()
 			}
 			.with_hidden(true)
 			// Feeding the node is no reason to ask any peer about anything.
 			.serving()
 		};
-		let claims = OwnClaims::new(own(false).routes(), own(true).routes(), node.clone());
-		self.tasks.push(claims);
-		node
+		// Built before taking the lock, since opening a cursor takes it.
+		let node = crate::route::Node::origin(self.hop());
+		let claims = OwnClaims {
+			routes: own(false).routes(),
+			downstream: own(true).routes(),
+			best: HashMap::new(),
+			local: HashMap::new(),
+			node: node.clone(),
+		};
+		let mut shared = self.shared.lock();
+		// A concurrent first call won the race: use its node, and close these cursors
+		// only once the lock is released, since closing one takes it.
+		if let Some(existing) = shared.route_node.clone() {
+			drop(shared);
+			return existing;
+		}
+		let claims = Arc::new(std::sync::Mutex::new(claims));
+		let created = (node, Arc::downgrade(&claims));
+		shared.route_node = Some(created.clone());
+		drop(shared);
+		self.tasks.push(FeedOwnClaims(claims));
+		created
 	}
 
 	/// Whether this handle carries its peer's traffic to other origins, taken from
@@ -10365,6 +10395,44 @@ mod tests {
 		broadcast.announce().unwrap();
 		drop(broadcast);
 		assert_eq!(announces(), (2, 2));
+	}
+
+	/// A route node already fed by its driver still answers a new stream with the table as
+	/// it stands, including a claim announced since the driver last ran.
+	#[test]
+	fn the_route_node_answers_with_the_table_as_it_stands() {
+		let producer = origin(1).produce();
+		producer.route_node();
+		// Nothing polls this test's driver.
+		let _shown = producer.announce("room/alice", RouteInfo::default()).unwrap();
+		let link = crate::route::Link {
+			proxy: true,
+			..Default::default()
+		};
+		let stream = producer.route_node().answer(link, Path::empty()).unwrap();
+		assert!(
+			matches!(
+				stream.try_output(),
+				Some(crate::route::node::Output::Route { reach: Some(_), .. })
+			),
+			"the new stream is sent the route to the announced claim"
+		);
+	}
+
+	/// Feeding the route node counts nothing against the session whose handle created it.
+	#[test]
+	fn the_route_node_counts_nothing_against_its_creator() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let session = registry
+			.tier(stats::Tier::default())
+			.session(crate::stats::SessionInfo::new(crate::Path::from_static("root")));
+		let producer = origin(1).produce();
+		let _shown = producer.announce("room/alice", RouteInfo::default()).unwrap();
+		producer.consume().with_stats(session).route_node();
+		assert!(
+			registry.snapshot().traffic().is_empty(),
+			"nothing was sent to the session"
+		);
 	}
 
 	/// At equal cost the local broadcast wins.
