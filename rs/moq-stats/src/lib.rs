@@ -438,12 +438,26 @@ mod tests {
 
 	#[test]
 	fn group_track_names_round_trip() {
-		for (group, epoch) in [("", "0192f4e6-7b8a-7c3d-9e1f-2a3b4c5d6e7f"), ("acme", "legacy"), ("acme/live", "é.\0")] {
+		for (group, epoch) in [
+			("", "0192f4e6-7b8a-7c3d-9e1f-2a3b4c5d6e7f"),
+			("acme", "legacy"),
+			("acme/live", "é.\0"),
+		] {
 			let epoch: Epoch = epoch.parse().unwrap();
 			let name = group_track(Path::new(group).unwrap(), &epoch);
-			assert_eq!(parse_group_track(&name), Some((Path::new(group).unwrap(), epoch)), "{name}");
+			assert_eq!(
+				parse_group_track(&name),
+				Some((Path::new(group).unwrap(), epoch)),
+				"{name}"
+			);
 		}
-		for name in ["group.json", "acme/group.json", "acme/group..json", "/group.x.json", "acme/totals.json"] {
+		for name in [
+			"group.json",
+			"acme/group.json",
+			"acme/group..json",
+			"/group.x.json",
+			"acme/totals.json",
+		] {
 			assert_eq!(parse_group_track(name), None, "{name}");
 		}
 	}
