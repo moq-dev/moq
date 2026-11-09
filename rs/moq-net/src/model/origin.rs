@@ -2285,6 +2285,13 @@ impl Producer {
 		self.hop
 	}
 
+	/// Whether `id`, as a peer declared it, names this origin: its hop id, or the Node ID
+	/// its moq-lite-07 sessions currently declare.
+	pub fn is_own(&self, id: NonZeroU64) -> bool {
+		let node = self.shared.lock().route_node.clone();
+		id == self.hop || node.is_some_and(|node| node.declared() == id.get())
+	}
+
 	/// The key sessions prove for this origin.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn route_key(&self) -> Option<super::origin::RouteKey> {

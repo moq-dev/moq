@@ -328,6 +328,7 @@ impl Client {
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				node: None,
 				// Older versions carry the credential in the URL query instead.
 				token: self.setup_token.clone().filter(|_| version.has_auth()),
 				ietf: self.extensions.ietf && version.has_ietf(),

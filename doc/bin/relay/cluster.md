@@ -284,8 +284,9 @@ to pin it.
 A relay never dials its own `cluster.node`, so every relay can share one
 `cluster.connect` list or API response. Peer URLs that differ only in query,
 userinfo, fragment, or slashes name one peer and get one link. A relay
-refuses a session that declares its own Hop ID, which means a peer URL
-reaches the relay itself under another name, such as an IP for its hostname.
+refuses a session that declares its own identity (its Hop ID, or on
+moq-lite-07 its Node ID), which means a peer URL reaches the relay itself
+under another name, such as an IP for its hostname.
 
 ## Failure detection
 

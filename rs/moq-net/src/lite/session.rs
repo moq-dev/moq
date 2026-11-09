@@ -265,6 +265,15 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			.or_else(|| subscribe.as_ref().map(|origin| origin.hop()))
 			.map(Hop::from);
 	}
+	// Lite-07 declares the Node ID our routes originate under instead, so a peer that is
+	// this same process recognizes itself.
+	if version.has_routes() && our_setup.node.is_none() {
+		our_setup.node = publish
+			.as_ref()
+			.map(|origin| origin.route_node())
+			.or_else(|| subscribe.as_ref().map(|origin| origin.route_node()))
+			.and_then(|node| std::num::NonZeroU64::new(node.declared()));
+	}
 
 	// Prove our origin's route key, bound to this session, so a peer that scopes us files
 	// our routes under it. A transport without an exporter cannot bind a proof, so neither
