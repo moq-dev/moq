@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import * as z from "zod/mini";
 import { MissingSnapshot } from "../error.ts";
 import { Decoder } from "./decoder.ts";
 import { type Config, Encoder } from "./encoder.ts";
@@ -364,4 +365,11 @@ test("the frame cap forces a keyframe", () => {
 test("delta before snapshot has a typed error", () => {
 	const decoder = new Decoder<Doc>();
 	expect(() => decoder.delta(new TextEncoder().encode("{}"))).toThrow(MissingSnapshot);
+});
+
+test("a schema-decoded value shares nothing with the decoder", () => {
+	const decoder = new Decoder({ schema: z.object({ a: z.unknown() }) });
+	decoder.snapshot(new TextEncoder().encode('{"a":{"b":1}}'));
+	(decoder.decode()?.a as Doc).b = 2;
+	expect(decoder.decode()).toEqual({ a: { b: 1 } });
 });

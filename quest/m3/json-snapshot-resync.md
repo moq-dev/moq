@@ -47,4 +47,3 @@ Public API: at most a `skipped()` counter in `@moq/json` and `moq-json`. Wire: n
 ## Related
 
 - [Benchmark a Value merge-patch diff for moq-json](/quest/m5/json-value-diff.md) - may replace the Rust diff this consumer applies
-- [@moq/json accepts only what it can reconstruct](/quest/m1/json-decode-limits.md) - the same decoder's parse limits and schema aliasing
