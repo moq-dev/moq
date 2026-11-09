@@ -275,6 +275,10 @@ import * as Watch from "@moq/watch";
 Watch.assets("/moq/");
 ```
 
-The URL must end with `/`. Copy the files again on every upgrade: the worklet
-changes with the package. `@moq/room` and `@moq/boy` play through
+The URL must end with `/` and have no query or fragment. Copy the files again
+on every upgrade: the worklet changes with the package. `@moq/room` and `@moq/boy` play through
 `@moq/watch`, so this one call covers them.
+
+A browser without `AudioDecoder` decodes through the libav polyfill, which
+loads its worker and WebAssembly from the same directory (they are among
+`assets/*`), so also allow `'wasm-unsafe-eval'` in `script-src`.

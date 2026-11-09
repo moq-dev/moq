@@ -1,12 +1,14 @@
 /**
  * Miscellaneous helpers for the hang media layer: AAC and Opus codec constraints, hex encoding,
- * the libav/WebCodecs polyfill, and unlocking Web Audio on a user gesture.
+ * self-hosted file directories, the libav/WebCodecs polyfill, and unlocking Web Audio on a user gesture.
  *
  * @module
  */
 
 /** AAC codec constraints. */
 export * as Aac from "./aac";
+/** A package's directory of self-hosted files. */
+export * as Assets from "./assets";
 /** Unlocking Web Audio on a user gesture. */
 export * as Gesture from "./gesture";
 /** Browser detection for engine-specific workarounds. */

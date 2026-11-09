@@ -226,6 +226,10 @@ import * as Publish from "@moq/publish";
 Publish.assets("/moq/");
 ```
 
-The URL must end with `/`. Copy the files again on every upgrade: they change
-with the package. `@moq/room` publishes through `@moq/publish`, so this one
+The URL must end with `/` and have no query or fragment. Copy the files again
+on every upgrade: they change with the package. `@moq/room` publishes through `@moq/publish`, so this one
 call covers it.
+
+A browser without `AudioEncoder` encodes Opus through the libav polyfill, which
+loads its worker and WebAssembly from the same directory (they are among
+`assets/*`), so also allow `'wasm-unsafe-eval'` in `script-src`.
