@@ -229,3 +229,5 @@ Public API: none. Wire: none.
 - [js/net's lite-06 session-close test keeps the end under load](/quest/m0/test-flakes-2/session-close-end.md) - a session close right after a datagram track's end returns the end, not a `remote error: 0`, and its lite-06 skip is removed
 - [js/net's widened max-age re-drop test ends cleanly, not with a reset](/quest/m0/test-flakes-2/widened-max-age-reset.md) - the test finishes the track only after the re-drop reply arrives, so the end is a FIN, and drops its wall-clock assert
 - [bench/relay.test.py's stream-transport test gets a port free for TCP and UDP](/quest/m0/test-flakes-2/relay-port-pair.md) - the test binds TCP and UDP to one number free in both, so parallel checks can't collide with it
+- [js/net's compressed-frame cap test holds up under load](/quest/m0/test-flakes-2/compressed-frame-cap.md) - the cap is proven without a 32 MiB payload, and its `test.skip` is removed
+- [js/net's lite-07 re-dropped re-offer test holds up under load](/quest/m0/test-flakes-2/redropped-reoffer.md) - update 3 is ordered before the re-offer opens by an event, not a yield count, and its `test.skip` is removed
