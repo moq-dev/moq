@@ -105,7 +105,7 @@ type Listener = { kind: Kind; seen: unknown[]; pending: boolean; gone: boolean }
 // The reference model of the notification contract. A write captures the value it replaces,
 // and the flush at the end of the microtask delivers the final value to every listener when
 // it differs from that capture or the write was forced. A write while nobody listens drops
-// the capture, so nothing is delivered for it.
+// the capture, so nothing is delivered for it. A silent write captures nothing.
 type Model = {
 	value: unknown;
 	base?: { value: unknown };
@@ -129,9 +129,12 @@ function apply(m: Model, r: Real, o: Op): void {
 		case "set": {
 			r.signal.set(o.value, o.notify);
 
+			if (o.notify === false) {
+				m.value = o.value;
+				return;
+			}
 			m.base ??= { value: m.value };
 			m.value = o.value;
-			if (o.notify === false) return;
 			if (o.notify) m.force = true;
 			if (![...m.listeners.values()].some((l) => !l.pending && !l.gone)) {
 				m.base = undefined;

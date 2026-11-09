@@ -1,66 +1,35 @@
-# [L] FFI handle state
+# [M] FFI handle state
 
 ## Goal
 
-Each moq-ffi and moq-c handle holds its lifecycle in one value under one lock:
-
-- A video producer's track, its bandwidth reservation, and its follower
-  change together. A finish or abort can't leave a reservation behind.
-- A one-shot request handle (track, broadcast, datagram, socket, and server
-  requests) is pending, answered, or failed. A failed answer leaves the
-  request pending, or reports why it failed.
-- A background driver that never ran reports `Cancelled`, never `Ok`.
-  Synchronous calls after `moq_ffi_shutdown` fail the same way the
-  asynchronous ones do.
-
-The language wrappers stop mirroring Rust state in their own flags.
+The moq-ffi and moq-c handles that still spread one lifecycle over several
+fields hold it in one value under one lock, and the language wrappers stop
+mirroring Rust state in their own flags.
 
 ## Plan
 
 The shared decisions are in the [epic](/quest/m1/explicit-state/README.md).
 
-Bugs to reproduce and fix:
+[moq-dev/moq#8264](https://github.com/moq-dev/moq/pull/8264) fixed the
+reproduced bugs: the video producer's track, reservation, and follower
+under one lock in both crates; the encoder disable that left the catalog
+enabled; `Background` reading a dropped driver as `Cancelled` everywhere;
+and the one-shot request handles (`OneShot` in `rs/moq-ffi/src/ffi.rs`),
+which now answer once and report `AlreadyResponded` or the first answer's
+error. What remains has no known bug, so it needs no test beyond what each
+redesign changes.
 
-- **Video follow across locks** (`rs/moq-ffi/src/video.rs`):
-  - `inner`, `reservation`, and `follow` are three mutexes.
-  - `write()` releases `inner` and only then calls `follow_track`, so a
-    `finish()` on another thread can run in between.
-  - `follow_track` then stores a new reservation for a finished track.
-  - `abort()` returns early once `inner` is `None` and never clears it.
-  - Recommended: `Mutex<enum { Open { producer, follow: Option<(Reservation,
-    Follow)> }, Closed }>`.
-  - The same bug exists in `rs/moq-c/src/video.rs` (`follow_grant` spreads
-    `reservation`, `follow`, and `followed` across three lock acquisitions).
-    It also exists in the encoder `apply` of both crates: the encoder is taken
-    before a fallible `discontinuity()`, so a failure leaves the catalog
-    saying enabled while frames are dropped.
-- **`Background` after shutdown** (`rs/moq-ffi/src/ffi.rs`; `rs/moq-c/src/ffi.rs`
-  maps the same case to `Panic`):
-  - `Option<Consumer<Option<Result>>>` encodes five states.
-  - `check()` reads "dropped without a result" as `Ok`, while `finished()`
-    reads it as `Cancel`.
-  - Recommended: `enum Completion { Detached, Running, Done(Result), Dropped }`.
+Sweep in moq-ffi and moq-c:
 
-Also sweep:
-
-- The `Mutex<Option<Request>>` handles: `producer.rs`, `origin.rs`,
-  `datagram.rs`, `socket.rs`, `server.rs`, and `media.rs`'s `Requested`
-  target. Each is taken before validation or before an await, and they return
-  inconsistent errors (`Closed` vs `AlreadyResponded`).
-- `Task<T>` (`ffi.rs`): a cancel flag, an `Option` state, and the cleanup.
-- `MoqServer` (`server.rs`): its lifecycle is spread over four places.
+- `Task<T>` (`rs/moq-ffi/src/ffi.rs`): a cancel flag, an `Option` state, and
+  the cleanup.
+- `MoqServer` (`rs/moq-ffi/src/server.rs`): its lifecycle is spread over
+  four places (`task`, `driver`, `listening`, and the task's state).
 - `MoqTrackProducer.keep: None`, which means both "finished" and "has no
   family".
-- `MoqConnectionState` (`session.rs`) is a flat snapshot (`revision`,
-  `phase`, `connects`, `failure`, `version`), so `failure` and `version` are
-  readable in phases where they mean nothing. It carries each phase's data
-  with that phase, mirroring whatever shape Rust's connection state takes,
-  and moq-c's `moq_connection_state` follows (renaming its `protocol` to
-  `version`). It breaks every binding, so under the epic's milestone rule
-  this item splits into its own m2 quest when this quest starts (added
-  2026-11-07, maintainer, /quest-plan from the API shape audit).
-- moq-c's global id counter, whose wrap lets a stale route id name a newer
-  broadcast. Use generation-tagged ids or clear ids on close.
+- moq-c's global id counter (`rs/moq-c/src/id.rs`), whose wrap lets a stale
+  route id name a newer broadcast. Use generation-tagged ids or clear ids on
+  close.
 
 Then sweep the hand-written wrappers:
 
@@ -69,5 +38,6 @@ Then sweep the hand-written wrappers:
 - the OBS output's mirrored `connected`/`live`;
 - the Dart stream.
 
-[moq-dev/moq#8060](https://github.com/moq-dev/moq/pull/8060) (moq-c parity)
-edits `rs/moq-c/src/video.rs` and `ffi.rs`, so expect merge conflicts.
+`MoqConnectionState` split into
+[Connection state carries each phase's data](/quest/m2/connection-state-phases.md),
+since it breaks every binding.

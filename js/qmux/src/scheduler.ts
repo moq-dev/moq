@@ -1,3 +1,4 @@
+import { Queue } from "./queue.ts";
 /** Prioritized send scheduler for a QMux session.
  *
  * A single writer loop owns the socket. Frames are written in priority order:
@@ -181,7 +182,7 @@ export class SendScheduler {
 	// uncapped, so whatever the peer can trigger here must be bounded by design: a
 	// stream's state allows it at most one RESET_STREAM and one STOP_SENDING, and the
 	// peer opens streams only as fast as it reads the MAX_STREAMS we send.
-	#control: Uint8Array[] = [];
+	#control = new Queue<Uint8Array>();
 
 	// Window updates are not queued at all: the session flags them and this polls
 	// `#pending` for the newest values when it next writes, so one is owed at most per
@@ -317,7 +318,7 @@ export class SendScheduler {
 		this.#ready.clear();
 		this.#sendOrders.clear();
 		// Nothing queued means anything once closed, so the close frame goes next.
-		this.#control.length = 0;
+		this.#control.clear();
 		this.#notified = false;
 		this.#latest.clear();
 		this.#datagrams.length = 0;
@@ -445,7 +446,7 @@ export class SendScheduler {
 		this.#closed ??= err;
 		for (const waiter of this.#ready.values()) waiter.reject(err);
 		this.#ready.clear();
-		this.#control.length = 0;
+		this.#control.clear();
 		this.#notified = false;
 		this.#latest.clear();
 		this.#datagrams.length = 0;

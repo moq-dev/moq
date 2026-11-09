@@ -37,9 +37,5 @@ ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_expo
 
 # Quarantined flakes, re-enabled by the quest that fixes them.
 
-# Flaky, disabled until its quest fixes the cause.
-
 # Need another implementation to speak the route wire; the quest ports it.
 ignore moq-net::test_interop::lite_tracks_interop /quest/m2/cluster-routing/routes/js.md
-
-# Quarantined flakes, until the quest that owns the flake fixes it at its cause.
