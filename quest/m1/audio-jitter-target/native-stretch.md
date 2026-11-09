@@ -1,11 +1,14 @@
-# [L] moq play reaches zero steady-state underruns by time-stretching
+# [L] moq play converges inaudibly by time-stretching
 
 ## Goal
 
 `rs/moq-audio`'s playback converges on its playout target by time-stretching
 received audio, as WebRTC NetEq does, instead of running its ring dry and
 padding with silence or trimming buffered audio. `moq play`'s native rows in
-`test/audio-quality` reach zero underruns once the target settles. The
+`test/audio-quality` play with no audible glitch once the target settles,
+with underrun ceilings measured by `budgets.json`'s rule rather than fixed at
+zero, as decided 2026-11-06 on
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058). The
 stretch shares one algorithm and one set of test vectors with the browser's.
 
 Boundaries: no packet loss concealment, so a frame that never arrives is
@@ -23,15 +26,22 @@ received-audio accelerate and preemptive expand into the native playback
 callback. The estimator is unchanged. `doc/concept/audio-jitter.md` specifies
 the shared floating-point algorithm;
 `doc/concept/audio-jitter/stretch/corpus.json` supplies literal PCM vectors
-for both languages. The browser half remains
-[Watch](/quest/m1/audio-jitter-target/watch.md); neither implementation waits
-for the other.
+for both languages. The browser half landed in
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058).
 
 The port retains WebRTC's BSD notice and patent grant, 4 kHz analysis,
 50-sample correlation at lags 10 through 59, 14746/16384 normal and
 8192/16384 fast admission thresholds, passive-speech VAD, 20 ms decision
 band, 4x fast threshold, and 60 ms startup / 50 ms successful-stretch
-cooldowns. Analysis samples NetEq's 48 kHz FIR on a virtual clock for other
+cooldowns.
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) drains a declared
+end's tail unstretched, as finishing does. Its browser half decides on the
+ring's depth right after each arrival and never expands, since expanding on
+the depth between arrivals settled audio a burst behind the shared clock
+(decided 2026-11-08). Native playback still decides on `buffered`, so
+whether it settles behind its clock the same way is worth measuring once its
+rows report A/V lag.
+Analysis samples NetEq's 48 kHz FIR on a virtual clock for other
 device rates and uses floating-point peak refinement and fades. Those
 arithmetic adaptations are documented, not claimed bit-identical to int16
 WebRTC. No threshold was tuned.
@@ -44,18 +54,17 @@ capacity watermark and an incoming excess at the fast threshold trim.
 
 Remaining verification:
 
-- Native `test/audio-quality` rows must show zero steady-state underruns
-  once their targets settle on the remaining nights too. Keep a failed or
-  void row explicit and fix any implementation cause.
+- Native `test/audio-quality` rows must meet their measured underrun
+  ceilings once their targets settle. Keep a failed or void row explicit and
+  fix any implementation cause.
 - Re-measure the provisional native budgets from seven scheduled nightly
   artifacts that carry `moq play`'s own `trimmed` and `accelerated`
   counters, using `budgets.json`'s rule: worst clean run times 1.25, plus
   its documented native hiccup, rounded to two significant figures. A
-  developer run is not that calibration. Native rows then budget
-  `trimmed_ms_per_min` in place of `skip_aheads_per_min` and
-  `discarded_ms_per_min`, which count the accelerate too; the browser rows
-  keep theirs until [Watch](/quest/m1/audio-jitter-target/watch.md)
-  stretches too.
+  developer run is not that calibration. Native rows then budget the
+  player's own `player_skips_per_min` and `trimmed_ms_per_min` in place of
+  the analyzer's `skip_aheads_per_min` and `discarded_ms_per_min`, which
+  count the accelerate too.
 
 Graded 2026-11-08: the scheduled Nightlies of 2026-11-05 to 11-08 on
 `main` (42050683248, 42236107954, 42377867523, 42487375545) are the first
@@ -93,8 +102,9 @@ Decided 2026-11-09 (maintainer, on
 - ✅ `moq play --metrics` reports its own trimmed and accelerated audio,
   and the calibration budgets trims alone (rejected: keep budgeting
   accelerates as `discarded_ms`). An accelerate is inaudible, so it is not
-  the discarded audio these rows guard. #8308 adds the counters, and the
-  browser player's `audio.out.stats.trimmed` for parity.
+  the discarded audio these rows guard. #8308 adds the counters to both
+  players, beside the browser's skip count
+  [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) added.
 - ✅ The nightly runner's `bench-playback` counts as the quiet-host run
   (rejected: naming another host). That settles the timing check.
 
@@ -142,7 +152,7 @@ bench waits below remain.
 
 - moq-dev/moq: seven scheduled Nightlies on a `main` that includes
   [moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308), whose
-  native rows report `trimmed_ms`. Find them with `gh run list --workflow
+  native rows report `player_skips` and `trimmed_ms`. Find them with `gh run list --workflow
   nightly.yml --event schedule`, download each with `gh run download <id>
   -n audio-quality-run` within its 7 days, keep its native rows in the
   calibration PR's body, and apply the calibration rule once seven exist.
@@ -150,4 +160,4 @@ bench waits below remain.
 
 ## Related
 
-- [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser stretch sharing this algorithm and its vectors
+- [Browser ceilings](/quest/m1/audio-jitter-target/browser-ceilings.md) - re-measures the browser rows with the stretch sharing this algorithm and its vectors

@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
-import QmuxSession from "@moq/qmux";
+import { Session as QmuxSession } from "@moq/qmux";
 import { Effect } from "@moq/signals";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";

@@ -50,7 +50,7 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 		if (notes.length < 200) notes.push(line.slice(0, 200));
 	};
 
-	const { audio, sync, broadcast } = watch.player;
+	const { audio, sync, broadcast } = watch;
 	const recording = capture
 		? new Capture({
 				broadcast: audio.source.in.broadcast,
@@ -126,9 +126,12 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			render: context ? context.currentTime * 1000 : undefined,
 			timestamp: audio.out.timestamp.peek(),
 			stalled: audio.out.stalled.peek(),
+			clock: sync.now(),
 			delay: sync.out.delay.peek(),
 			playerUnderruns: audio.out.stats.peek()?.underruns,
+			playerSkips: audio.out.stats.peek()?.skips,
 			trimmed: audio.out.stats.peek()?.trimmed,
+			accelerated: audio.out.stats.peek()?.accelerated,
 			rtt: watch.connection.probe.peek()?.rtt,
 			jitter: audio.source.out.config.peek()?.jitter,
 			renditionDelay: audio.source.out.config.peek()?.delay,

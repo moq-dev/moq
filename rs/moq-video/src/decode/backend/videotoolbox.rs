@@ -166,7 +166,7 @@ impl VideoToolbox {
 	fn new(stream: &Stream) -> Result<Self, Error> {
 		let codec = stream.codec;
 		if !matches!(codec, Codec::H264 | Codec::H265) {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"VideoToolbox {} decode is not wired",
 				codec.label()
 			)));
@@ -232,7 +232,7 @@ impl VideoToolbox {
 		if let Some(old) = self.session.take() {
 			let status = old.finish();
 			if status != 0 {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"VTDecompressionSessionWaitForAsynchronousFrames failed: {status}"
 				)));
 			}
@@ -269,7 +269,7 @@ impl VideoToolbox {
 						self.codec.label()
 					))
 				} else {
-					Error::Codec(anyhow::anyhow!("VTDecompressionSessionCreate failed: {status}"))
+					Error::codec(anyhow::anyhow!("VTDecompressionSessionCreate failed: {status}"))
 				}
 			})?;
 
@@ -285,7 +285,7 @@ impl VideoToolbox {
 	fn take_timestamp(&mut self, sample_time: i64) -> Result<Timestamp, Error> {
 		let found = self.pending.iter().position(|(fed, _)| *fed == sample_time);
 		let Some(index) = found else {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"decoder output did not match fed sample time {sample_time}"
 			)));
 		};
@@ -331,7 +331,7 @@ impl Backend for VideoToolbox {
 					.decode_frame(&sample, VTDecodeFrameFlags(0), ptr::null_mut(), ptr::null_mut())
 			};
 			if status != 0 {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"VTDecompressionSessionDecodeFrame failed: {status}"
 				)));
 			}
@@ -339,7 +339,7 @@ impl Backend for VideoToolbox {
 		};
 
 		if let Some(error) = self.sink.error.take() {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"VideoToolbox decode callback failed: {error}"
 			)));
 		}
@@ -357,11 +357,11 @@ impl Backend for VideoToolbox {
 		let status = self.session.take().map_or(0, Session::finish);
 
 		let result = if status != 0 {
-			Err(Error::Codec(anyhow::anyhow!(
+			Err(Error::codec(anyhow::anyhow!(
 				"VTDecompressionSessionWaitForAsynchronousFrames failed: {status}"
 			)))
 		} else if let Some(error) = self.sink.error.take() {
-			Err(Error::Codec(anyhow::anyhow!(
+			Err(Error::codec(anyhow::anyhow!(
 				"VideoToolbox drain callback failed: {error}"
 			)))
 		} else {
@@ -433,7 +433,7 @@ fn create_format_description(codec: Codec, params: &[Bytes]) -> Result<CFRetaine
 	let pointers: Vec<NonNull<u8>> = params
 		.iter()
 		.map(|p| {
-			NonNull::new(p.as_ptr() as *mut u8).ok_or_else(|| Error::Codec(anyhow::anyhow!("empty parameter set")))
+			NonNull::new(p.as_ptr() as *mut u8).ok_or_else(|| Error::codec(anyhow::anyhow!("empty parameter set")))
 		})
 		.collect::<Result<_, _>>()?;
 	let sizes: Vec<usize> = params.iter().map(|p| p.len()).collect();
@@ -468,7 +468,7 @@ fn create_format_description(codec: Codec, params: &[Bytes]) -> Result<CFRetaine
 			)
 		},
 		Codec::Av1 | Codec::Vp8 | Codec::Vp9 => {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"VideoToolbox {} decode is not wired",
 				codec.label()
 			)));
@@ -478,7 +478,7 @@ fn create_format_description(codec: Codec, params: &[Bytes]) -> Result<CFRetaine
 		.filter(|_| status == 0)
 		.map(|p| unsafe { CFRetained::from_raw(p) })
 		.ok_or_else(|| {
-			Error::Codec(anyhow::anyhow!(
+			Error::codec(anyhow::anyhow!(
 				"CMVideoFormatDescriptionCreateFrom*ParameterSets failed: {status}"
 			))
 		})
@@ -508,7 +508,7 @@ fn make_sample_buffer(
 	let block = NonNull::new(block_ptr)
 		.filter(|_| status == 0)
 		.map(|p| unsafe { CFRetained::from_raw(p) })
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("CMBlockBufferCreateWithMemoryBlock failed: {status}")))?;
+		.ok_or_else(|| Error::codec(anyhow::anyhow!("CMBlockBufferCreateWithMemoryBlock failed: {status}")))?;
 
 	let status = unsafe {
 		CMBlockBuffer::replace_data_bytes(
@@ -519,7 +519,7 @@ fn make_sample_buffer(
 		)
 	};
 	if status != 0 {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"CMBlockBufferReplaceDataBytes failed: {status}"
 		)));
 	}
@@ -547,7 +547,7 @@ fn make_sample_buffer(
 	NonNull::new(sample_ptr)
 		.filter(|_| status == 0)
 		.map(|p| unsafe { CFRetained::from_raw(p) })
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("CMSampleBufferCreateReady failed: {status}")))
+		.ok_or_else(|| Error::codec(anyhow::anyhow!("CMSampleBufferCreateReady failed: {status}")))
 }
 
 /// Build the destination attributes requesting NV12 output, so the download path
@@ -555,7 +555,7 @@ fn make_sample_buffer(
 fn nv12_output_attributes() -> Result<CFRetained<CFDictionary>, Error> {
 	let format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange as i32;
 	let number = unsafe { CFNumber::new(None, CFNumberType::SInt32Type, &format as *const i32 as *const c_void) }
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build CFNumber")))?;
+		.ok_or_else(|| Error::codec(anyhow::anyhow!("failed to build CFNumber")))?;
 
 	let key = (unsafe { kCVPixelBufferPixelFormatTypeKey } as *const CFString).cast::<c_void>();
 	let value = (number.as_ref() as *const CFNumber).cast::<c_void>();
@@ -571,7 +571,7 @@ fn nv12_output_attributes() -> Result<CFRetained<CFDictionary>, Error> {
 			&objc2_core_foundation::kCFTypeDictionaryValueCallBacks,
 		)
 	}
-	.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build NV12 attributes dictionary")))
+	.ok_or_else(|| Error::codec(anyhow::anyhow!("failed to build NV12 attributes dictionary")))
 }
 
 /// Classify a NAL by its header so the parameter sets can be split out. H.264

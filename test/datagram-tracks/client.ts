@@ -14,7 +14,7 @@
  * @module
  */
 import assert from "node:assert/strict";
-import Session from "@moq/qmux";
+import { Session } from "@moq/qmux";
 import * as Moq from "../../js/net/src/index.ts";
 
 // stdout carries the handshake to the Rust test, so library debug logs go to stderr.
@@ -125,7 +125,7 @@ try {
 		assert.equal(audioInfo.timescale, Moq.Time.Timescale.MICRO, "audio timescale");
 		assert.equal(audioInfo.priority, -7, "audio publisher priority");
 		const eventsInfo = await events.info();
-		assert.equal(eventsInfo.timescale ?? undefined, undefined, "events are untimed");
+		assert.equal(eventsInfo.timescale, null, "events are untimed");
 		assert.equal(eventsInfo.priority, 0, "events publisher priority");
 		assert.equal((await track.info()).timescale, Moq.Time.Timescale.MILLI, "stream track timescale");
 		// Answered, so what the publisher writes from now on reaches this session.

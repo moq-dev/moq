@@ -488,7 +488,10 @@ mod tests {
 		};
 		let rendition = config.probe().await.unwrap();
 		let reserved = source_catalog.reserve().with_interval(config.effective_join());
-		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
+		let track = source_broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut producer = EncodeProducer::new(track, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for index in 0..2 {
@@ -985,7 +988,6 @@ mod tests {
 	#[cfg(not(apple))]
 	#[tokio::test]
 	async fn a_cancelled_read_resumes_the_flush_in_flight() {
-		kio::clock::host_time();
 		probe::prepare_blocking_flush();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1227,7 +1229,6 @@ mod tests {
 	/// then the max-delay decoder's once it has decoded the sweep before them.
 	#[tokio::test]
 	async fn a_cold_join_hands_over_to_the_max_delay_decoder() {
-		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let published = track.clone();
 		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
@@ -1260,7 +1261,6 @@ mod tests {
 	/// max-delay decoder still starts at the group before it, and takes over.
 	#[tokio::test]
 	async fn a_cold_join_whose_live_edge_arrives_first_starts_a_group_earlier() {
-		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let mut live = group(&mut track, 1, &[4, 5]);
 
@@ -1306,7 +1306,6 @@ mod tests {
 	/// never alternating in between.
 	#[tokio::test]
 	async fn a_short_stall_skips_only_the_min_delay_decoder() {
-		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let mut consumer = dual(
 			&broadcast,
@@ -1334,11 +1333,15 @@ mod tests {
 		// leading by more than a frame, so it is shown at once.
 		let mut live = group(&mut track, 2, &[8]);
 		shown.push(read(&mut consumer).await);
+		// Mocked time, so the timeout fires only once every task has run, well inside the
+		// sweep; no decode runs while the max-delay decoder waits on the stalled group.
+		tokio::time::pause();
 		assert!(
 			kio::clock::timeout(std::time::Duration::from_millis(100), consumer.next_frame())
 				.await
 				.is_err()
 		);
+		tokio::time::resume();
 		assert_eq!(
 			consumer.selector.source(),
 			Lane::Min,
@@ -1372,7 +1375,6 @@ mod tests {
 	/// late frames are never shown, and the max-delay decoder still takes over.
 	#[tokio::test]
 	async fn a_long_stall_skips_both_decoders() {
-		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let mut consumer = dual(
 			&broadcast,

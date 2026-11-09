@@ -90,8 +90,8 @@ encoder's `muted` instead: it sends nothing, keeps the rendition enabled, and
 marks where each utterance ends, so listeners stay subscribed and treat the gap
 as intentional silence.
 
-Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
-`onDemand: true` also gates video, which then loses its unsubscribed past.
+Pass `onDemand: "off"` to `Publish.Broadcast` to encode audio continuously too.
+`onDemand: "all"` also gates video, which then loses its unsubscribed past.
 Bandwidth reservations still follow subscriptions; unwatched video uses its
 configured bitrate.
 
@@ -188,7 +188,7 @@ const broadcast = new Publish.Broadcast({
 });
 
 // Video encodes while enabled. Audio buffers raw PCM until someone subscribes.
-// Pass `onDemand: false` to the broadcast to encode both continuously.
+// Pass `onDemand: "off"` to the broadcast to encode both continuously.
 new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
 const audioSource = new Publish.Signals.Computed((effect) => effect.get(microphone.out.source)?.audio);
@@ -199,7 +199,9 @@ new Publish.Audio.Encoder("audio", { broadcast, capture: audioCapture, enabled: 
 Standalone components start enabled unless you pass `enabled: false` (or a
 signal). An enabled camera or microphone prompts for permission on
 construction, and a screen source must be built inside the user gesture that
-authorizes it. Audio waits for the page's first click or keypress, since
+authorizes it. A screen source's `out.state` is `off`, `prompting`, `live`, or
+`ended` with a reason (`stopped`, `dismissed`, or `error`); an ended share stays
+ended until the next enable, which prompts again. Audio waits for the page's first click or keypress, since
 browsers suspend Web Audio until then. Every input and output is a signal from
 [`@moq/signals`](/lib/js/signals). A failed encoder exposes the cause through
 `out.error` and disables only its rendition; siblings and the broadcast keep
@@ -224,6 +226,10 @@ import * as Publish from "@moq/publish";
 Publish.assets("/moq/");
 ```
 
-The URL must end with `/`. Copy the files again on every upgrade: they change
-with the package. `@moq/room` publishes through `@moq/publish`, so this one
+The URL must end with `/` and have no query or fragment. Copy the files again
+on every upgrade: they change with the package. `@moq/room` publishes through `@moq/publish`, so this one
 call covers it.
+
+A browser without `AudioEncoder` encodes Opus through the libav polyfill, which
+loads its worker and WebAssembly from the same directory (they are among
+`assets/*`), so also allow `'wasm-unsafe-eval'` in `script-src`.

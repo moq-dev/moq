@@ -8,7 +8,6 @@
 //! `timestamp` the media clock; fields this player cannot read are left out
 //! rather than written as zero. `comfort` and `utterances` have no browser
 //! counterpart: they show how a declared silence played, for push-to-talk.
-//! `accelerated` has none until the browser stretches its audio too.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -21,7 +20,9 @@ use moq_audio::playback::{Observation, Observer};
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use moq_mux::timeline::Consumer;
+use moq_mux::sync::Consumer;
+
+use super::timeline::Playhead;
 
 /// How often a sample is taken, the browser probe's interval.
 const INTERVAL: Duration = Duration::from_millis(250);
@@ -49,6 +50,7 @@ struct Sample {
 	quiet: Option<u64>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	comfort: Option<f64>,
+	player_skips: u64,
 	trimmed: f64,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	accelerated: Option<f64>,
@@ -94,6 +96,7 @@ struct Totals {
 	quanta: u64,
 	quiet: u64,
 	comfort: Duration,
+	skips: u64,
 	trimmed: Duration,
 	accelerated: Duration,
 }
@@ -105,6 +108,7 @@ impl Totals {
 			quanta: observation.quanta,
 			quiet: observation.quiet,
 			comfort: observation.comfort,
+			skips: observation.skips,
 			trimmed: observation.trimmed,
 			accelerated: observation.accelerated,
 		}
@@ -116,6 +120,7 @@ impl Totals {
 			quanta: self.quanta + other.quanta,
 			quiet: self.quiet + other.quiet,
 			comfort: self.comfort + other.comfort,
+			skips: self.skips + other.skips,
 			trimmed: self.trimmed + other.trimmed,
 			accelerated: self.accelerated + other.accelerated,
 		}
@@ -126,14 +131,17 @@ impl Totals {
 pub(super) struct Metrics {
 	file: BufWriter<File>,
 	presentation: Consumer,
+	playhead: Playhead,
 	observers: mpsc::UnboundedReceiver<Observer>,
 	current: Option<(Observer, Totals)>,
 	/// What closed engines counted, added to the current one's totals.
 	base: Totals,
 	/// Utterances since the last sample.
 	utterances: Vec<Utterance>,
-	/// Received audio the player discarded before it reached a speaker's queue.
+	/// Received audio the player discarded before it reached a speaker's queue,
+	/// and the skips that did it.
 	trimmed: Duration,
+	skips: u64,
 	start: Instant,
 	interval: kio::clock::Interval,
 }
@@ -143,6 +151,7 @@ impl Metrics {
 	pub(super) fn create(
 		path: &Path,
 		presentation: Consumer,
+		playhead: Playhead,
 	) -> anyhow::Result<(Self, mpsc::UnboundedSender<Observer>)> {
 		let file = File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
 		let (observe, observers) = mpsc::unbounded_channel();
@@ -151,11 +160,13 @@ impl Metrics {
 		let metrics = Self {
 			file: BufWriter::new(file),
 			presentation,
+			playhead,
 			observers,
 			current: None,
 			base: Totals::default(),
 			utterances: Vec::new(),
 			trimmed: Duration::ZERO,
+			skips: 0,
 			start: Instant::now(),
 			interval,
 		};
@@ -176,9 +187,11 @@ impl Metrics {
 		});
 	}
 
-	/// Count received audio the player discarded rather than handed to the speaker.
-	pub(super) fn trimmed(&mut self, trimmed: Duration) {
-		self.trimmed += trimmed;
+	/// Count received audio the player discarded rather than handed to the
+	/// speaker, and whether that started a skip.
+	pub(super) fn trimmed(&mut self, audio: Duration, skip: bool) {
+		self.trimmed += audio;
+		self.skips += skip as u64;
 	}
 
 	/// End the measurement: close any gap still open and write one last sample.
@@ -227,21 +240,19 @@ impl Metrics {
 			.map_or(self.base, |(o, base)| base.add(Totals::of(o)));
 		// Read straight after the device clock, so the two pair up.
 		let now = Instant::now();
-		let (playhead, target) = {
-			let presentation = &self.presentation;
-			(presentation.playhead(now), presentation.target())
-		};
+		let (playhead, delay) = (self.playhead.at(now), self.presentation.delay());
 
 		let sample = Sample {
 			at: ms(now.duration_since(self.start)),
 			render: observation.as_ref().map(|_| ms(totals.clock)),
 			timestamp: playhead.map(ms),
 			stalled: observation.as_ref().map(|(o, _)| o.stalled),
-			delay: target.map(ms),
+			delay: Some(ms(delay)),
 			output_latency: observation.as_ref().and_then(|(o, _)| o.latency).map(ms),
 			quanta: observation.as_ref().map(|_| totals.quanta),
 			quiet: observation.as_ref().map(|_| totals.quiet),
 			comfort: observation.as_ref().map(|_| ms(totals.comfort)),
+			player_skips: self.skips + totals.skips,
 			trimmed: ms(self.trimmed + totals.trimmed),
 			accelerated: observation.as_ref().map(|_| ms(totals.accelerated)),
 			gaps,

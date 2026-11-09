@@ -187,7 +187,7 @@ impl MediaCodec {
 			Codec::H265 => MIME_H265,
 			Codec::Av1 => MIME_AV1,
 			other => {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"MediaCodec {} decode is not wired",
 					other.label()
 				)));
@@ -222,7 +222,7 @@ impl MediaCodec {
 		let surface = reader.window().map_err(|e| reader_err("get the reader's window", e))?;
 
 		let decoder = media_codec::MediaCodec::from_decoder_type(mime)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("no MediaCodec decoder for {mime}")))?;
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("no MediaCodec decoder for {mime}")))?;
 		let format = decoder_format(mime, width, height);
 		decoder
 			.configure(&format, Some(&surface), MediaCodecDirection::Decoder)
@@ -258,7 +258,7 @@ impl MediaCodec {
 				DequeuedInputBufferResult::Buffer(mut buffer) => {
 					let target = buffer.buffer_mut();
 					if target.len() < access_unit.len() {
-						return Err(Error::Codec(anyhow::anyhow!(
+						return Err(Error::codec(anyhow::anyhow!(
 							"MediaCodec input buffer is {} bytes, needs {} for this access unit",
 							target.len(),
 							access_unit.len()
@@ -293,7 +293,7 @@ impl MediaCodec {
 			self.drain(OUTPUT_TIMEOUT, out)?;
 		}
 
-		Err(Error::Codec(anyhow::anyhow!(
+		Err(Error::codec(anyhow::anyhow!(
 			"MediaCodec never freed an input buffer for an access unit"
 		)))
 	}
@@ -405,7 +405,7 @@ impl MediaCodec {
 			}
 		}
 		if !ended {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"MediaCodec did not reach end of stream within {:?}",
 				DRAIN_TIMEOUT * DRAIN_ROUNDS
 			)));
@@ -455,7 +455,7 @@ impl MediaCodec {
 			self.drain(OUTPUT_TIMEOUT, out)?;
 		}
 
-		Err(Error::Codec(anyhow::anyhow!(
+		Err(Error::codec(anyhow::anyhow!(
 			"MediaCodec never freed an input buffer for the end of stream"
 		)))
 	}
@@ -549,7 +549,7 @@ fn image_size(image: &Image) -> Result<(u32, u32, u32, u32), Error> {
 	// with its last row or column.
 	let (w, h) = (w.max(0) as u32 & !1, h.max(0) as u32 & !1);
 	if w == 0 || h == 0 {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"MediaCodec produced a {width}x{height} image, which is not a picture"
 		)));
 	}
@@ -558,12 +558,12 @@ fn image_size(image: &Image) -> Result<(u32, u32, u32, u32), Error> {
 
 /// Wrap an NDK media error from the codec, naming the call that produced it.
 fn codec_err(what: &str, error: MediaError) -> Error {
-	Error::Codec(anyhow::anyhow!("failed to {what} on the MediaCodec decoder: {error}"))
+	Error::codec(anyhow::anyhow!("failed to {what} on the MediaCodec decoder: {error}"))
 }
 
 /// Wrap an NDK media error from the reader, naming the call that produced it.
 fn reader_err(what: &str, error: MediaError) -> Error {
-	Error::Codec(anyhow::anyhow!(
+	Error::codec(anyhow::anyhow!(
 		"failed to {what} on the decoder's ImageReader: {error}"
 	))
 }

@@ -7,7 +7,7 @@ import { exchangeSetup } from "../../../../js/net/src/connection/handshake.ts";
 import { Connection } from "../../../../js/net/src/ietf/connection.ts";
 import { GoAway } from "../../../../js/net/src/ietf/goaway.ts";
 import * as Ietf from "../../../../js/net/src/ietf/index.ts";
-import Qmux, { selectSubprotocol } from "../../../../js/qmux/src/index.ts";
+import { Session as Qmux, selectSubprotocol } from "../../../../js/qmux/src/index.ts";
 
 console.debug = console.error;
 console.info = console.error;

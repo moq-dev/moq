@@ -66,6 +66,10 @@ tracing = { workspace = true }
 uniffi = { workspace = true }
 url = { workspace = true }
 
+[target.'cfg(target_os = "android")'.dependencies]
+# `JNI_OnLoad` finds the app Context for moq-tokio's platform verifier.
+jni = { workspace = true }
+
 [dev-dependencies]
 moq-shaper = { path = "../moq-shaper" }
 # The video tests encode with OpenH264, the one encoder a GPU-less host has, so

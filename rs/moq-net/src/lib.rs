@@ -164,9 +164,3 @@ pub use version::*;
 /// A wrapper prepends its own token, space-separated, outermost first:
 /// `format!("moq-ffi/{v} {}", moq_net::IMPLEMENTATION)`.
 pub const IMPLEMENTATION: &str = concat!("moq-net-rs/", env!("CARGO_PKG_VERSION"));
-
-// Re-export the bytes crate
-pub use bytes;
-
-// Re-export the kio crate, since it appears in the public API (e.g. poll_* waiters).
-pub use kio;

@@ -110,9 +110,6 @@ export namespace Audio {
 		sampleRate: number;
 		sampleSize?: number;
 	}
-	export function isSampleSource(source: Audio.Source): source is Audio.SampleSource;
-	export function normalizeSource(source: Audio.StreamTrack | Audio.SourceConfig): Audio.SourceConfig;
-	export function sourceKind(source: Audio.Source): Audio.Kind;
 }
 
 export class Broadcast {
@@ -122,7 +119,7 @@ export class Broadcast {
 	readonly catalog: CatalogProducer;
 	close(): void;
 	readonly in: Signals.Readonlys<BroadcastInput>;
-	readonly join: Signals.Signal<Clock.Milli | undefined>;
+	readonly join: Signals.Getter<Clock.Milli | undefined>;
 	readonly net: Signals.Getter<Net.Broadcast.Producer | undefined>;
 	text(name: string): Rendition<Hang.Catalog.TextConfig>;
 	video(name: string): Rendition<Hang.Catalog.VideoConfig>;
@@ -139,7 +136,7 @@ export type BroadcastInput = {
 	flip: Signals.Getter<boolean>;
 	maxAge: Signals.Getter<Clock.Milli | null | undefined>;
 	name: Signals.Getter<Net.Path.Valid>;
-	onDemand: Signals.Getter<boolean | undefined>;
+	onDemand: Signals.Getter<OnDemand>;
 	origin: Signals.Getter<Net.Origin.Table | undefined>;
 	probe: Signals.Getter<Net.Connection.Probe | undefined>;
 	rotation: Signals.Getter<number>;
@@ -163,6 +160,8 @@ export * as Hang from "@moq/hang";
 export type Kind = "video" | "audio" | "text";
 
 export * as Net from "@moq/net";
+
+export type OnDemand = "off" | "retain" | "all";
 
 export namespace Preview {
 	export { Backend } from "@moq/video";
@@ -190,21 +189,6 @@ export namespace Preview {
 		rotation: Signals.Getter<number>;
 	};
 	export type RendererProps = Signals.Inputs<Preview.RendererInput>;
-	export class Transcode {
-		constructor(props?: Preview.TranscodeProps);
-		close(): void;
-		readonly in: Signals.Readonlys<Preview.TranscodeInput>;
-		readonly out: Signals.Readonlys<Preview.TranscodeOutput>;
-	}
-	export type TranscodeInput = {
-		config: Signals.Getter<VideoEncoderConfig | undefined>;
-		settings: Signals.Getter<Video.Config | undefined>;
-		source: Signals.Getter<Fanout<VideoFrame> | undefined>;
-	};
-	export type TranscodeOutput = {
-		frame: Signals.Signal<VideoFrame | undefined>;
-	};
-	export type TranscodeProps = Signals.Inputs<Preview.TranscodeInput>;
 }
 
 export class Rendition<Config> {
@@ -318,16 +302,35 @@ export namespace Source {
 		readonly out: Signals.Readonlys<Source.ScreenOutput>;
 		video: Signals.Signal<Video.Constraints | boolean | undefined>;
 	}
+	export type ScreenEnd = {
+		reason: "stopped";
+	} | {
+		reason: "dismissed";
+	} | {
+		error: Error;
+		reason: "error";
+	};
 	export type ScreenInput = {
 		enabled: Signals.Getter<boolean>;
 	};
 	export type ScreenOutput = {
-		source: Signals.Signal<Source.Media | undefined>;
+		source: Signals.Getter<Source.Media | undefined>;
+		state: Signals.Getter<Source.ScreenState>;
 	};
 	export interface ScreenProps extends Signals.Inputs<Source.ScreenInput> {
 		audio?: Audio.Constraints | boolean | Signals.Signal<Audio.Constraints | boolean | undefined>;
 		video?: Video.Constraints | boolean | Signals.Signal<Video.Constraints | boolean | undefined>;
 	}
+	export type ScreenState = {
+		kind: "off";
+	} | {
+		kind: "prompting";
+	} | {
+		kind: "live";
+		media: Source.Media;
+	} | {
+		kind: "ended";
+	} & Source.ScreenEnd;
 }
 
 export namespace Video {
@@ -416,8 +419,6 @@ export namespace Video {
 		resizeMode: "none" | "crop-and-scale";
 		width: number;
 	}
-	export function isStreamTrack(source: Video.Source): source is Video.StreamTrack;
-	export function normalizeSource(source: Video.StreamTrack | Video.SourceConfig): Video.SourceConfig;
 }
 
 export function assets(url: string | URL): void;

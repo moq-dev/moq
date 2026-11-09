@@ -7,14 +7,13 @@ use std::path::PathBuf;
 use anyhow::Context;
 use axum::http::Method;
 use futures::FutureExt;
-use hang::moq_net;
 use url::Url;
 
 use crate::moq::{ImportTarget, notify_ready};
 
 mod record;
 
-/// Where `export hls` serves when neither `--listen` nor `--output` is given.
+/// Where `export hls` serves when neither `--hls-listen` nor `--output` is given.
 const LISTEN: SocketAddr = SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 8089);
 
 /// HLS import (pull a remote playlist) args.
@@ -37,8 +36,12 @@ pub struct ImportArgs {
 pub struct ExportArgs {
 	/// HTTP listener for the HLS endpoints. Defaults to `[::]:8089` unless `--output` records
 	/// without serving.
-	#[usage(long, value_name = "ADDR")]
+	#[usage(long = "hls-listen", value_name = "ADDR")]
 	pub listen: Option<SocketAddr>,
+
+	/// The released `--listen`, refused by name: the MoQ side's `--listen` is another listener.
+	#[usage(name = "hls-legacy-listen", long = "listen", hide = true)]
+	legacy_listen: Option<String>,
 
 	/// Record the broadcast's playlists and segments into this directory, which must be empty
 	/// or absent. Fails if the recording ends abruptly or misses a segment.
@@ -61,25 +64,28 @@ pub struct ExportArgs {
 }
 
 /// TLS for the HLS HTTP listener, independent of the MoQ listener's environment.
-#[derive(usage_rs::Args, Clone)]
+#[derive(usage_rs::Args, Clone, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Tls {
 	/// Load the HLS listener's PEM certificate.
-	#[usage(long = "listen-tls-cert", env = "MOQ_HLS_TLS_CERT", value_hint = usage_rs::ValueHint::FilePath)]
+	#[usage(long = "hls-tls-cert", env = "MOQ_HLS_TLS_CERT", value_hint = usage_rs::ValueHint::FilePath)]
 	pub cert: Vec<PathBuf>,
 	/// Load the HLS listener's PEM private key.
-	#[usage(long = "listen-tls-key", env = "MOQ_HLS_TLS_KEY", value_hint = usage_rs::ValueHint::FilePath)]
+	#[usage(long = "hls-tls-key", env = "MOQ_HLS_TLS_KEY", value_hint = usage_rs::ValueHint::FilePath)]
 	pub key: Vec<PathBuf>,
 	/// Generate the HLS listener's self-signed certificate for these hostnames.
-	#[usage(long = "listen-tls-generate", env = "MOQ_HLS_TLS_GENERATE", delimiter = ',')]
+	#[usage(long = "hls-tls-generate", env = "MOQ_HLS_TLS_GENERATE", delimiter = ',')]
 	pub generate: Vec<String>,
 	/// Trust these PEM roots for optional HLS client certificates.
-	#[usage(long = "listen-tls-root", env = "MOQ_HLS_TLS_ROOT", delimiter = ',', value_hint = usage_rs::ValueHint::FilePath)]
+	#[usage(long = "hls-tls-root", env = "MOQ_HLS_TLS_ROOT", delimiter = ',', value_hint = usage_rs::ValueHint::FilePath)]
 	pub root: Vec<PathBuf>,
+
+	// Every released spelling of each listener TLS setting. `MOQ_LISTEN_TLS_*` stay
+	// out: they configure the MoQ listener now.
 	#[usage(
 		name = "hls-legacy-cert",
 		long = "tls-cert",
-		alias = "server-tls-cert",
+		aliases("server-tls-cert", "listen-tls-cert"),
 		env = "MOQ_SERVER_TLS_CERT",
 		hide = true
 	)]
@@ -88,7 +94,7 @@ pub struct Tls {
 	#[usage(
 		name = "hls-legacy-key",
 		long = "tls-key",
-		alias = "server-tls-key",
+		aliases("server-tls-key", "listen-tls-key"),
 		env = "MOQ_SERVER_TLS_KEY",
 		hide = true
 	)]
@@ -97,7 +103,7 @@ pub struct Tls {
 	#[usage(
 		name = "hls-legacy-generate",
 		long = "tls-generate",
-		alias = "server-tls-generate",
+		aliases("server-tls-generate", "listen-tls-generate"),
 		env = "MOQ_SERVER_TLS_GENERATE",
 		delimiter = ',',
 		hide = true
@@ -107,6 +113,7 @@ pub struct Tls {
 	#[usage(
 		name = "hls-legacy-root",
 		long = "server-tls-root",
+		alias = "listen-tls-root",
 		env = "MOQ_SERVER_TLS_ROOT",
 		delimiter = ',',
 		hide = true
@@ -114,35 +121,46 @@ pub struct Tls {
 	legacy_root: Vec<PathBuf>,
 }
 
-impl Tls {
+impl ExportArgs {
+	/// The released spellings in use, each paired with what replaced it.
 	pub(super) fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		let mut found = self.tls.deprecated();
+		if self.legacy_listen.is_some() {
+			found.flag("--listen", None, "--hls-listen");
+		}
+		found
+	}
+}
+
+impl Tls {
+	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
 		if !self.legacy_cert.is_empty() {
 			found.flag(
-				"--tls-cert",
+				"--listen-tls-cert, --tls-cert, --server-tls-cert",
 				Some("MOQ_SERVER_TLS_CERT"),
-				"--listen-tls-cert / MOQ_HLS_TLS_CERT",
+				"--hls-tls-cert / MOQ_HLS_TLS_CERT",
 			);
 		}
 		if !self.legacy_key.is_empty() {
 			found.flag(
-				"--tls-key",
+				"--listen-tls-key, --tls-key, --server-tls-key",
 				Some("MOQ_SERVER_TLS_KEY"),
-				"--listen-tls-key / MOQ_HLS_TLS_KEY",
+				"--hls-tls-key / MOQ_HLS_TLS_KEY",
 			);
 		}
 		if !self.legacy_generate.is_empty() {
 			found.flag(
-				"--tls-generate",
+				"--listen-tls-generate, --tls-generate, --server-tls-generate",
 				Some("MOQ_SERVER_TLS_GENERATE"),
-				"--listen-tls-generate / MOQ_HLS_TLS_GENERATE",
+				"--hls-tls-generate / MOQ_HLS_TLS_GENERATE",
 			);
 		}
 		if !self.legacy_root.is_empty() {
 			found.flag(
-				"--server-tls-root",
+				"--listen-tls-root, --server-tls-root",
 				Some("MOQ_SERVER_TLS_ROOT"),
-				"--listen-tls-root / MOQ_HLS_TLS_ROOT",
+				"--hls-tls-root / MOQ_HLS_TLS_ROOT",
 			);
 		}
 		found
@@ -287,11 +305,11 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		None => {
 			anyhow::ensure!(
 				tls.cert.is_empty() && tls.key.is_empty() && tls.generate.is_empty() && tls.root.is_empty(),
-				"the HLS listener's TLS flags only apply with `export hls --listen`"
+				"the HLS listener's TLS flags only apply with `export hls --hls-listen`"
 			);
 			anyhow::ensure!(
 				args.cors.origin.is_empty(),
-				"`--cors-origin` only applies to `export hls --listen`"
+				"`--cors-origin` only applies to `export hls --hls-listen`"
 			);
 			None
 		}
@@ -454,16 +472,8 @@ mod test {
 		let args = ExportArgs {
 			listen: None,
 			output: Some(dir.path().join("recording")),
-			tls: Tls {
-				cert: Vec::new(),
-				key: Vec::new(),
-				generate: Vec::new(),
-				root: Vec::new(),
-				legacy_cert: Vec::new(),
-				legacy_key: Vec::new(),
-				legacy_generate: Vec::new(),
-				legacy_root: Vec::new(),
-			},
+			legacy_listen: None,
+			tls: Tls::default(),
 			window: std::time::Duration::from_secs(16).into(),
 			cors: Default::default(),
 		};
@@ -486,9 +496,8 @@ mod test {
 
 	/// An announced import that fails, here on a timestamp reset, aborts its tracks and catalog
 	/// with the cause, so subscribers see the failure rather than a dropped producer.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_failed_import_aborts_its_tracks() {
-		kio::clock::host_time();
 		use moq_mux::container::{Frame, fmp4::Muxer};
 
 		let dir = tempfile::tempdir().unwrap();

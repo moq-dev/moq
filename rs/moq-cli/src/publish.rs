@@ -1,5 +1,4 @@
 use anyhow::Context;
-use hang::moq_net;
 use moq_mux::container::{flv, fmp4, ts};
 
 /// Container format read from stdin on the import (source) side.
@@ -377,7 +376,7 @@ impl Pending {
 	/// Announce the broadcast if its catalog has gone out, returning whether it has.
 	fn announce(&mut self) -> anyhow::Result<bool> {
 		if !matches!(
-			self.catalog.poll_largest(&moq_net::kio::Waiter::noop()),
+			self.catalog.poll_largest(&kio::Waiter::noop()),
 			std::task::Poll::Ready(Some(_))
 		) {
 			return Ok(false);
@@ -678,21 +677,24 @@ impl Publish {
 					let catalog = catalog.clone();
 					async move {
 						match video {
-							Some(options) => moq_video::encode::publish_capture(broadcast, catalog, options)
-								.await
-								.map_err(anyhow::Error::from),
+							Some(options) => {
+								let (_publication, driver) =
+									moq_video::encode::publish_capture(broadcast, catalog, options)?;
+								driver.run().await.map_err(anyhow::Error::from)
+							}
 							None => Ok(()),
 						}
 					}
 				};
 				let audio_fut = async move {
 					match audio {
-						Some((config, encode, on_demand)) => {
+						Some((config, encode, retain)) => {
 							let capture = moq_audio::capture::Producer::open(config).await?;
 							let mut options = moq_audio::encode::Capture::new(capture.consume());
 							options.encode = encode;
-							options.on_demand = on_demand;
-							let (_control, driver) = moq_audio::encode::Control::new(broadcast, catalog, options)?;
+							options.retain = retain;
+							let (_publication, driver) =
+								moq_audio::encode::publish_capture(broadcast, catalog, options)?;
 							let mut publish = std::pin::pin!(driver.run());
 							tokio::select! {
 								result = capture.run() => {
@@ -1905,7 +1907,7 @@ pub(crate) mod tests {
 		let mut track = consumer.track(Catalog::DEFAULT_NAME).unwrap();
 		let mut published = || {
 			matches!(
-				track.poll_largest(&moq_net::kio::Waiter::noop()),
+				track.poll_largest(&kio::Waiter::noop()),
 				std::task::Poll::Ready(Some(_))
 			)
 		};

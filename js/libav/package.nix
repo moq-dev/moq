@@ -136,6 +136,14 @@ stdenvNoCC.mkDerivation {
     runHook preInstall
     mkdir -p $out
     cp ${wasm}/* $out/
+    chmod u+w $out/libav-${variant}.mjs
+    # The frontend reaches its worker and wasm through `base`, which a page under a strict CSP points
+    # at its own copies (@moq/hang's assets()). Two spots break app bundlers before that matters:
+    # webpack rewrites the computed import into a lookup that always misses, and an IIFE bundle has
+    # no import.meta.url, which the default base reads unguarded while the module loads.
+    substituteInPlace $out/libav-${variant}.mjs \
+      --replace-fail 'import(toImport)' 'import(/* webpackIgnore: true */ /* @vite-ignore */ toImport)' \
+      --replace-fail 'libav.base=import.meta.url;libav.base=libav.base.replace(' 'libav.base=import.meta.url&&import.meta.url.replace('
     install -Dm444 ${./README.md} $out/README.md
     install -Dm444 ${./index.d.ts} $out/index.d.ts
     jq 'del(.scripts, .devDependencies)

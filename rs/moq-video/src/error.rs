@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 /// Errors returned by `moq-video`.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
 	/// A [`decode::Consumer`](crate::decode::Consumer) refused the rendition before
@@ -108,11 +110,11 @@ pub enum Error {
 	/// GPU rendering failure: building the pipeline, importing a frame's surface
 	/// as a texture, or the device itself.
 	#[error("render: {0}")]
-	Render(#[source] anyhow::Error),
+	Render(#[source] Arc<anyhow::Error>),
 
 	/// Capture / encode / codec failure (the message carries the detail).
 	#[error(transparent)]
-	Codec(#[from] anyhow::Error),
+	Codec(Arc<anyhow::Error>),
 
 	/// moq-mux muxer/catalog error.
 	#[error(transparent)]
@@ -125,4 +127,23 @@ pub enum Error {
 	/// Timestamp overflow converting to the moq microsecond timescale.
 	#[error(transparent)]
 	TimeOverflow(#[from] moq_net::TimeOverflow),
+}
+
+impl Error {
+	/// A [`Codec`](Self::Codec) failure.
+	pub(crate) fn codec(err: anyhow::Error) -> Self {
+		Self::Codec(Arc::new(err))
+	}
+
+	/// A [`Render`](Self::Render) failure.
+	#[cfg(feature = "render")]
+	pub(crate) fn render(err: anyhow::Error) -> Self {
+		Self::Render(Arc::new(err))
+	}
+}
+
+impl From<anyhow::Error> for Error {
+	fn from(err: anyhow::Error) -> Self {
+		Self::codec(err)
+	}
 }
