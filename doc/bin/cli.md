@@ -187,6 +187,9 @@ Playback starts at the newest group and trails the live edge by `--delay`. The
 default, `auto`, sizes the buffer to how unevenly audio arrives, with the same
 [algorithm](/concept/audio-jitter) as the browser player. A duration fixes the
 delay and is also how long a stalled group is waited on before it is skipped.
+Audio and video play from one clock and stay in sync while both arrive on time;
+a track that stalls plays late and catches up by playing faster, rather than
+holding the other one back.
 Each role follows the catalog, switching rendition when the publisher retires
 the one playing. With `--video off`, `--metrics <PATH>` writes a JSON line every
 250 ms with the playhead, the delay, and every gap and stall the speaker hit, in

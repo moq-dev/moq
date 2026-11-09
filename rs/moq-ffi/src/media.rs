@@ -780,14 +780,17 @@ pub enum MoqMediaTarget {
 }
 
 impl MoqMediaTarget {
-	fn resolve(
+	/// Import onto the target's track: a newly reserved one, or the requested one, whose later
+	/// calls then report a failed import.
+	fn import<R>(
 		self,
 		broadcast: &moq_net::broadcast::Producer,
-		format: &impl std::fmt::Display,
-	) -> Result<moq_net::track::Request, MoqError> {
+		format: impl std::fmt::Display,
+		import: impl FnOnce(moq_net::track::Request) -> Result<R, MoqError>,
+	) -> Result<R, MoqError> {
 		match self {
-			Self::Named { name } => reserve_track(broadcast, name, format),
-			Self::Requested { request } => request.take(),
+			Self::Named { name } => import(reserve_track(broadcast, name, &format)?),
+			Self::Requested { request } => request.answer(import),
 		}
 	}
 }
@@ -1006,14 +1009,14 @@ impl MoqMediaTrackProducer {
 		let _guard = crate::ffi::enter();
 		broadcast.with_state(|state| {
 			let init: moq_mux::import::AudioInit = init.into();
-			let request = target.resolve(&state.broadcast, &init.format)?;
-
-			let import = moq_mux::import::Track::audio(request, state.catalog.reserve(), init).map_err(|err| {
-				MoqError::Codec {
-					reason: format!("init failed: {err}"),
-				}
-			})?;
-			MoqMediaTrackProducer::from_import(import, None, &state.children)
+			target.import(&state.broadcast, init.format, |request| {
+				let import = moq_mux::import::Track::audio(request, state.catalog.reserve(), init).map_err(|err| {
+					MoqError::Codec {
+						reason: format!("init failed: {err}"),
+					}
+				})?;
+				MoqMediaTrackProducer::from_import(import, None, &state.children)
+			})
 		})
 	}
 }
@@ -1034,14 +1037,14 @@ impl MoqMediaTrackProducer {
 		let init = init.resolve()?;
 		broadcast.with_state(|state| {
 			let priority = init.priority;
-			let request = target.resolve(&state.broadcast, &init.format)?;
-
-			let import = moq_mux::import::Track::video(request, state.catalog.reserve(), init).map_err(|err| {
-				MoqError::Codec {
-					reason: format!("init failed: {err}"),
-				}
-			})?;
-			MoqMediaTrackProducer::from_import(import, Some(priority), &state.children)
+			target.import(&state.broadcast, init.format, |request| {
+				let import = moq_mux::import::Track::video(request, state.catalog.reserve(), init).map_err(|err| {
+					MoqError::Codec {
+						reason: format!("init failed: {err}"),
+					}
+				})?;
+				MoqMediaTrackProducer::from_import(import, Some(priority), &state.children)
+			})
 		})
 	}
 }
@@ -1087,22 +1090,21 @@ impl MoqMediaTrackStreamProducer {
 		let init = init.resolve()?;
 		broadcast.with_state(|state| {
 			let priority = init.priority;
-			let request = target.resolve(&state.broadcast, &init.format)?;
-
-			let import =
-				moq_mux::import::TrackStream::video(request, state.catalog.reserve(), init).map_err(|err| {
-					MoqError::Codec {
-						reason: format!("init failed: {err}"),
-					}
-				})?;
-
-			state.children.adopt(Arc::new(MoqMediaTrackStreamProducer {
-				inner: std::sync::Mutex::new(Some(MediaStreamProducer {
-					import: Box::new(import),
-					priority,
-				})),
-				children: state.children.clone(),
-			}))
+			target.import(&state.broadcast, init.format, |request| {
+				let import =
+					moq_mux::import::TrackStream::video(request, state.catalog.reserve(), init).map_err(|err| {
+						MoqError::Codec {
+							reason: format!("init failed: {err}"),
+						}
+					})?;
+				state.children.adopt(Arc::new(MoqMediaTrackStreamProducer {
+					inner: std::sync::Mutex::new(Some(MediaStreamProducer {
+						import: Box::new(import),
+						priority,
+					})),
+					children: state.children.clone(),
+				}))
+			})
 		})
 	}
 }
