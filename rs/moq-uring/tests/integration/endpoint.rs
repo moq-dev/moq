@@ -220,8 +220,8 @@ fn dropping_the_last_connection_handle_closes_it() {
 fn a_close_reaches_both_ends_with_its_code() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
-	let activity = moq_net::server::Activity::default();
-	let outgoing = moq_net::server::Activity::default();
+	let admission = moq_net::server::Admission::default();
+	let outgoing = moq_net::server::Admission::default();
 	let certs = support::certs().expect("certificates");
 
 	let socket = |handle: &moq_uring::Handle| {
@@ -230,10 +230,10 @@ fn a_close_reaches_both_ends_with_its_code() {
 			.expect("socket")
 	};
 	let mut incoming_config = quic::endpoint::Config::default().with_server(server_config(&certs));
-	incoming_config.activity = activity.clone();
+	incoming_config.admission = admission.clone();
 	let server = quic::Endpoint::new(incoming_config, socket(&handle)).expect("server endpoint");
 	let mut outgoing_config = quic::endpoint::Config::default();
-	outgoing_config.activity = outgoing.clone();
+	outgoing_config.admission = outgoing.clone();
 	let client = quic::Endpoint::new(outgoing_config, socket(&handle)).expect("dial-only endpoint");
 
 	worker
@@ -242,15 +242,15 @@ fn a_close_reaches_both_ends_with_its_code() {
 				.connect(&dial_config(), server.local_addr(), "localhost")
 				.await
 				.expect("dial");
-			let closes = |activity: &moq_net::server::Activity| {
-				let mut future = std::pin::pin!(activity.close());
+			let closes = |admission: &moq_net::server::Admission| {
+				let mut future = std::pin::pin!(admission.close());
 				std::future::Future::poll(
 					future.as_mut(),
 					&mut std::task::Context::from_waker(std::task::Waker::noop()),
 				)
 				.is_ready()
 			};
-			assert!(!closes(&activity), "unclaimed incoming connection holds admission");
+			assert!(!closes(&admission), "unclaimed incoming connection holds admission");
 			assert!(closes(&outgoing), "outbound dials are not admissions");
 			let mut accepted = server.accept().await.expect("accept");
 
@@ -266,7 +266,7 @@ fn a_close_reaches_both_ends_with_its_code() {
 				}
 			}
 			assert!(
-				closes(&activity),
+				closes(&admission),
 				"closed transport releases admission even while handles survive"
 			);
 			assert!(
@@ -274,7 +274,7 @@ fn a_close_reaches_both_ends_with_its_code() {
 					.connect(&dial_config(), server.local_addr(), "localhost")
 					.await
 					.is_err(),
-				"closed activity refuses a new connection at accept"
+				"closed admission refuses a new connection at accept"
 			);
 		})
 		.expect("worker");

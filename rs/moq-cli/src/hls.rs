@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use anyhow::Context;
 use axum::http::Method;
 use futures::FutureExt;
-use hang::moq_net;
 use url::Url;
 
 use crate::moq::{ImportTarget, notify_ready};
@@ -182,13 +181,7 @@ impl Tls {
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
 /// announced under `instance`. Once the playlist ends, serve the finished broadcast for the linger.
 pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::Instance) -> anyhow::Result<()> {
-	let ImportTarget {
-		origin,
-		name,
-		max_age,
-		linger,
-		bandwidth,
-	} = target;
+	let ImportTarget { origin, name, ingest } = target;
 	// Held through the linger, so the finished broadcast stays announced while it serves the tail.
 	let route = origin
 		.route(
@@ -197,10 +190,7 @@ pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::I
 		)
 		.context("failed to create broadcast")?;
 
-	let config = moq_mux::catalog::Config::default()
-		.with_max_age(max_age)
-		.with_bandwidth(bandwidth);
-	let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), config)?;
+	let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), ingest.catalog())?;
 	// Announced once the catalog first goes out, which waits for every rendition's init: a
 	// relay queries a broadcast's tracks the moment it is announced, and keeps the refusals of a
 	// publisher that cannot serve its declared tracks yet.
@@ -228,6 +218,7 @@ pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::I
 	// The playlist ended: serve the finished broadcast for the linger, so a subscriber that
 	// arrives after the end still gets the tail. An interrupt drops it at once.
 	importer.finish()?;
+	let linger = ingest.linger;
 	tracing::info!(?linger, "playlist ended; serving the finished broadcast");
 	moq_mux::Linger::new([route.broadcast().clone()], importer, linger)
 		.wait()
@@ -497,9 +488,8 @@ mod test {
 
 	/// An announced import that fails, here on a timestamp reset, aborts its tracks and catalog
 	/// with the cause, so subscribers see the failure rather than a dropped producer.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_failed_import_aborts_its_tracks() {
-		kio::clock::host_time();
 		use moq_mux::container::{Frame, fmp4::Muxer};
 
 		let dir = tempfile::tempdir().unwrap();
@@ -530,9 +520,7 @@ mod test {
 		let target = ImportTarget {
 			origin,
 			name: "hls".to_string(),
-			max_age: None,
-			linger: moq_mux::Linger::DEFAULT,
-			bandwidth: Default::default(),
+			ingest: moq_mux::Ingest::default(),
 		};
 		let args = ImportArgs {
 			playlist: playlist.to_str().unwrap().to_string(),

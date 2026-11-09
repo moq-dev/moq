@@ -60,8 +60,8 @@ fn tokio_client(
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			let request = moq_tokio::quic::web::proto::ConnectRequest::new(url::Url::parse(&url).expect("url"))
-				.with_protocol(PROTO);
+			let request =
+				web_transport_proto::ConnectRequest::new(url::Url::parse(&url).expect("url")).with_protocol(PROTO);
 			let session = crate::support::web_connect(request, Default::default())
 				.await
 				.expect("connect");
@@ -160,7 +160,7 @@ fn webtransport_echo_end_to_end() {
 			);
 			assert_eq!(request.protocols, [PROTO.to_string()]);
 			let session = request
-				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
+				.respond(web_transport_proto::ConnectResponse::OK.with_protocol(PROTO))
 				.await
 				.expect("respond");
 			assert_eq!(session.protocol(), Some(PROTO), "negotiated subprotocol");
@@ -227,7 +227,7 @@ fn webtransport_accepts_a_buffered_uni_after_the_peer_close() {
 			let conn = endpoint.accept().await.expect("accept");
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			let session = request
-				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
+				.respond(web_transport_proto::ConnectResponse::OK.with_protocol(PROTO))
 				.await
 				.expect("respond");
 			kio::wait(|waiter| session.poll_closed(waiter)).await;
@@ -263,7 +263,7 @@ fn a_clean_finish_closes_a_stream() {
 			let conn = endpoint.accept().await.expect("accept");
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			let session = request
-				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
+				.respond(web_transport_proto::ConnectResponse::OK.with_protocol(PROTO))
 				.await
 				.expect("respond");
 			let mut recv = kio::wait(|waiter| session.poll_accept_uni(waiter))
@@ -304,8 +304,8 @@ fn an_open_waits_only_for_stream_credit() {
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			let request = moq_tokio::quic::web::proto::ConnectRequest::new(url::Url::parse(&url).expect("url"))
-				.with_protocol(PROTO);
+			let request =
+				web_transport_proto::ConnectRequest::new(url::Url::parse(&url).expect("url")).with_protocol(PROTO);
 			let mut transport = moq_tokio::quic::driver::transport::Config::default();
 			transport.limits.receive_window = std::num::NonZeroU64::new(16 * 1024);
 			let session = crate::support::web_connect(request, transport).await.expect("connect");
@@ -326,7 +326,7 @@ fn an_open_waits_only_for_stream_credit() {
 			let conn = endpoint.accept().await.expect("accept");
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			let session = request
-				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
+				.respond(web_transport_proto::ConnectResponse::OK.with_protocol(PROTO))
 				.await
 				.expect("respond");
 			let mut first = kio::wait(|waiter| session.poll_open_uni(waiter, Default::default()))
@@ -395,7 +395,7 @@ fn a_stray_datagram_is_dropped() {
 			let conn = endpoint.accept().await.expect("accept");
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			let session = request
-				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
+				.respond(web_transport_proto::ConnectResponse::OK.with_protocol(PROTO))
 				.await
 				.expect("respond");
 			let datagram = within(
@@ -442,7 +442,7 @@ fn an_unread_lease_holds_the_close_watch_off() {
 			let conn = endpoint.accept().await.expect("accept");
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			let session = request
-				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
+				.respond(web_transport_proto::ConnectResponse::OK.with_protocol(PROTO))
 				.await
 				.expect("respond");
 			let mut recv = kio::wait(|waiter| session.poll_accept_uni(waiter))
@@ -566,7 +566,7 @@ fn lite_session_over_webtransport() {
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			// The WebTransport equivalent of ALPN: pick the moq version.
 			let protocol = request.protocols.iter().find(|p| *p == PROTO).cloned();
-			let mut response = quic::web::proto::ConnectResponse::OK;
+			let mut response = web_transport_proto::ConnectResponse::OK;
 			if let Some(protocol) = &protocol {
 				response = response.with_protocol(protocol);
 			}
@@ -620,8 +620,8 @@ fn tokio_client_err(url: String) -> std::thread::JoinHandle<moq_tokio::quic::web
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			let request = moq_tokio::quic::web::proto::ConnectRequest::new(url::Url::parse(&url).expect("url"))
-				.with_protocol(PROTO);
+			let request =
+				web_transport_proto::ConnectRequest::new(url::Url::parse(&url).expect("url")).with_protocol(PROTO);
 			// The server answers by closing, so the failure has to arrive as
 			// that close. Waiting out the idle timeout would "fail" too, ten
 			// seconds later, which is what a peer sees when a close is
@@ -659,7 +659,7 @@ fn an_abandoned_handshake_closes_the_connection() {
 			let watch = conn.clone();
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			let err = request
-				.respond(quic::web::proto::ConnectResponse::OK.with_protocol("never-offered"))
+				.respond(web_transport_proto::ConnectResponse::OK.with_protocol("never-offered"))
 				.await
 				.expect_err("a subprotocol the peer did not offer");
 			assert!(
@@ -719,13 +719,9 @@ fn a_rejection_reaches_the_peer() {
 		.block_on(async move {
 			let conn = endpoint.accept().await.expect("accept");
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
-			within(
-				&handle,
-				"the rejection to be delivered",
-				request.reject(quic::web::http::StatusCode::NOT_FOUND),
-			)
-			.await
-			.expect("reject");
+			within(&handle, "the rejection to be delivered", request.reject(404))
+				.await
+				.expect("reject");
 		})
 		.expect("worker");
 
@@ -734,7 +730,7 @@ fn a_rejection_reaches_the_peer() {
 		matches!(
 			&err,
 			moq_tokio::quic::web::Error::Handshake(moq_tokio::quic::web::HandshakeError::Connect(
-				moq_tokio::quic::web::proto::ConnectError::WrongStatus(Some(status))
+				web_transport_proto::ConnectError::WrongStatus(Some(status))
 			)) if *status == http::StatusCode::NOT_FOUND
 		),
 		"got {err:?}"
@@ -750,12 +746,8 @@ fn a_rejection_refuses_non_error_statuses() {
 	let certs = support::certs().expect("certificates");
 	let endpoint = h3_endpoint(&handle, &certs);
 	let addr = endpoint.local_addr();
-	for status in [
-		http::StatusCode::CONTINUE,
-		http::StatusCode::OK,
-		http::StatusCode::NO_CONTENT,
-		http::StatusCode::FOUND,
-	] {
+	// 600 parses as an HTTP status but is no error; 99 is no HTTP status at all.
+	for status in [100, 200, 204, 302, 600, 99] {
 		let client = tokio_client_err(format!("https://{addr}/nope"));
 		worker
 			.block_on(async {
@@ -829,7 +821,7 @@ fn a_dropped_stream_carries_a_webtransport_code() {
 			let conn = endpoint.accept().await.expect("accept");
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			let session = request
-				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
+				.respond(web_transport_proto::ConnectResponse::OK.with_protocol(PROTO))
 				.await
 				.expect("respond");
 
@@ -913,7 +905,7 @@ fn a_reset_stream_keeps_its_header() {
 			let conn = endpoint.accept().await.expect("accept");
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			let session = request
-				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
+				.respond(web_transport_proto::ConnectResponse::OK.with_protocol(PROTO))
 				.await
 				.expect("respond");
 
@@ -967,7 +959,7 @@ fn a_stream_reset_before_its_header_fits_never_reaches_the_session() {
 			let mut transport = moq_tokio::quic::driver::transport::Config::default();
 			transport.limits.receive_window = std::num::NonZeroU64::new(16 * 1024);
 			let request =
-				moq_tokio::quic::web::proto::ConnectRequest::new(url::Url::parse(&format!("https://{addr}/")).unwrap())
+				web_transport_proto::ConnectRequest::new(url::Url::parse(&format!("https://{addr}/")).unwrap())
 					.with_protocol(PROTO);
 			let session = crate::support::web_connect(request, transport).await.expect("connect");
 
@@ -989,7 +981,7 @@ fn a_stream_reset_before_its_header_fits_never_reaches_the_session() {
 			let conn = endpoint.accept().await.expect("accept");
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			let session = request
-				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
+				.respond(web_transport_proto::ConnectResponse::OK.with_protocol(PROTO))
 				.await
 				.expect("respond");
 

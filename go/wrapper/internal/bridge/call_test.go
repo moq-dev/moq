@@ -215,3 +215,37 @@ func TestRunHandleReturnsAResultThatWon(t *testing.T) {
 	default:
 	}
 }
+
+// A range loop whose context ends cancels the stream; one that ends on a
+// stream error leaves it alone.
+func TestSeqCancelsOnlyWhenContextEnds(t *testing.T) {
+	failed := errors.New("failed")
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+		err    error
+	}{
+		{"context", true, context.Canceled},
+		{"stream", false, failed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, stop := context.WithCancel(context.Background())
+			defer stop()
+			cancelled := false
+			next := func(context.Context) (*int, error) {
+				if tc.cancel {
+					stop()
+				}
+				return nil, tc.err
+			}
+			for _, err := range Seq(ctx, func() { cancelled = true }, next) {
+				if !errors.Is(err, tc.err) {
+					t.Fatalf("err = %v, want %v", err, tc.err)
+				}
+			}
+			if cancelled != tc.cancel {
+				t.Fatalf("cancelled = %v, want %v", cancelled, tc.cancel)
+			}
+		})
+	}
+}

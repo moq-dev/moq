@@ -603,7 +603,9 @@ mod tests {
 			stats::{Message, Registry, Tier, Totals},
 		};
 		let registry = Registry::new(Default::default());
-		let session = registry.tier(Tier::default()).session(crate::Path::from_static(""));
+		let session = registry
+			.tier(Tier::default())
+			.session(crate::stats::SessionInfo::new(crate::Path::from_static("")));
 		let version = lite::Version::Lite07;
 		let msg = lite::Probe {
 			bitrate: Some(123),

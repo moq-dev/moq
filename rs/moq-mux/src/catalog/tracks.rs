@@ -73,7 +73,7 @@ use super::hang::{Catalog, CatalogExt};
 /// # ) -> moq_mux::Result<()> {
 /// let info = moq_net::track::Info::default()
 ///     .with_timescale(moq_net::Timescale::MILLI)
-///     .with_compress(true);
+///     .with_compression(moq_net::track::Compression::Deflate);
 /// let track = broadcast.create_track("telemetry", info)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
 /// let entry = Mavlink { config: JsonConfig::new(Mode::Stream), sysid: 1 };

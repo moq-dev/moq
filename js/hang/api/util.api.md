@@ -11,6 +11,14 @@ export namespace Aac {
 	export function supportsRate(rate: number): boolean;
 }
 
+export namespace Assets {
+	export class Directory {
+		constructor();
+		set(url: string | URL): void;
+		get url(): URL | undefined;
+	}
+}
+
 export namespace Gesture {
 	export function unlock(effect: Signals.Effect, context: AudioContext): Signals.Getter<boolean>;
 }
@@ -27,7 +35,7 @@ export namespace Hex {
 }
 
 export namespace Libav {
-	export function polyfill(): Promise<boolean>;
+	export function polyfill(base?: URL): Promise<boolean>;
 }
 
 export namespace Opus {

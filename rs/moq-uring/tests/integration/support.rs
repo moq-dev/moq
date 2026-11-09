@@ -54,7 +54,7 @@ pub fn client_tls(alpn: &[&str]) -> std::sync::Arc<rustls::ClientConfig> {
 /// Open a WebTransport session to `request` from tokio, through the driver's
 /// own `connect`, trusting whatever certificate the server presents.
 pub async fn web_connect(
-	request: moq_tokio::quic::web::proto::ConnectRequest,
+	request: web_transport_proto::ConnectRequest,
 	transport: moq_tokio::quic::driver::transport::Config,
 ) -> Result<moq_tokio::quic::web::Session, moq_tokio::quic::web::Error> {
 	use moq_tokio::quic::{driver, web};

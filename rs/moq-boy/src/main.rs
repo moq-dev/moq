@@ -33,7 +33,7 @@ use std::time::Duration;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
-static ALLOC: moq_tokio::jemalloc::tikv_jemallocator::Jemalloc = moq_tokio::jemalloc::tikv_jemallocator::Jemalloc;
+static ALLOC: moq_tokio::jemalloc::Allocator = moq_tokio::jemalloc::Allocator;
 
 mod audio;
 mod emulator;
@@ -316,7 +316,7 @@ async fn run(config: &Config) -> Result<()> {
 
 	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), %name, broadcast = %broadcast_path, "connecting to relay");
 
-	let reconnect = client.with_origin(origin).connect(url);
+	let reconnect = client.with_publisher(&origin).with_subscriber(origin).connect(url);
 
 	// Set up catalog and encoders.
 	let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), moq_mux::catalog::Config::default())?;

@@ -3890,7 +3890,7 @@ impl Reload {
 		if paths.is_empty() {
 			return Ok(Self { _task: None });
 		}
-		let watcher = crate::watch::Files::new(&paths).map_err(|err| Error::Watch(err.to_string()))?;
+		let watcher = crate::watch::Files::watch(&paths).map_err(|err| Error::Watch(err.to_string()))?;
 
 		// The certificates were loaded before the watch existed, so anything that
 		// landed in between produced no event and would sit unseen until the next

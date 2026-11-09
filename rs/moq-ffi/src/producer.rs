@@ -57,10 +57,25 @@ pub struct MoqTrackInfo {
 	/// Per-frame timescale in ticks per second, or null for an untimed track.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
-	/// Whether each group is DEFLATE-compressed on the wire to peers that support it.
-	/// Readers always see the original frames.
-	#[uniffi(default = false)]
-	pub compress: bool,
+	/// How each group is compressed on the wire to peers that support it, or null to send
+	/// frames as written. Readers always see the original frames.
+	#[uniffi(default = None)]
+	pub compression: Option<MoqCompression>,
+}
+
+/// How a track's frames are compressed, mirroring [`moq_net::track::Compression`]; an
+/// uncompressed track has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqCompression {
+	/// Each group is one DEFLATE stream, which suits small, repetitive frames like JSON.
+	Deflate,
+}
+
+fn compression(compression: Option<MoqCompression>) -> moq_net::track::Compression {
+	match compression {
+		None => moq_net::track::Compression::None,
+		Some(MoqCompression::Deflate) => moq_net::track::Compression::Deflate,
+	}
 }
 
 impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
@@ -81,7 +96,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			})?;
 			out = out.with_timescale(scale);
 		}
-		Ok(out.with_compress(info.compress))
+		Ok(out.with_compression(compression(info.compression)))
 	}
 }
 
@@ -99,7 +114,8 @@ impl From<&moq_net::track::Info> for MoqTrackInfo {
 			max_age_unlimited: info.max_age.is_none(),
 			refresh: info.refresh,
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
-			compress: info.compress,
+			// A codec this binding cannot name yet reads as uncompressed, as its frames do.
+			compression: (info.compression == moq_net::track::Compression::Deflate).then_some(MoqCompression::Deflate),
 		}
 	}
 }
@@ -1006,7 +1022,7 @@ mod metadata_tests {
 		let binding = MoqGroupProducer::from_inner(group);
 		drop(binding);
 		assert!(matches!(
-			consumer.poll_read_frame(&moq_net::kio::Waiter::noop()),
+			consumer.poll_read_frame(&kio::Waiter::noop()),
 			std::task::Poll::Ready(Err(moq_net::Error::Unroutable))
 		));
 	}
@@ -1043,7 +1059,7 @@ mod metadata_tests {
 			max_age_unlimited,
 			refresh: None,
 			timescale: None,
-			compress: false,
+			compression: None,
 		};
 		let zero = Some(std::time::Duration::ZERO);
 		let five = Some(std::time::Duration::from_secs(5));

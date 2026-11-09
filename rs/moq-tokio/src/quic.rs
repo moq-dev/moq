@@ -84,7 +84,7 @@ pub(crate) struct Forward {
 
 /// A congestion controller of the application's own, built fresh for each connection.
 ///
-/// Implement [`crate::congestion::Factory`] and install it with [`Config::controller`].
+/// Implement [`moq_congestion::Factory`] and install it with [`Config::controller`].
 #[cfg(feature = "driver")]
 #[derive(Clone)]
 pub struct Controller(pub std::sync::Arc<dyn moq_congestion::Factory + Send + Sync>);

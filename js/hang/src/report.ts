@@ -35,7 +35,7 @@ export class Writer<T, I = T> {
 	 * publisher passes the schema's input (plain numbers) and readers get its output.
 	 */
 	constructor(broadcast: Moq.Broadcast.Producer, name: string, schema: z.ZodMiniType<T, I>) {
-		this.track = broadcast.createTrack(name, { priority: PRIORITY, compress: true, refresh: REFRESH });
+		this.track = broadcast.createTrack(name, { priority: PRIORITY, compression: "deflate", refresh: REFRESH });
 		this.#producer = new Json.Snapshot.Producer<T>({ track: this.track });
 		this.#schema = schema;
 	}

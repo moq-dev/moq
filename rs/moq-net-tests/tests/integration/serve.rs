@@ -9,7 +9,7 @@ use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 async fn first_subscribe(version: &str, publish: bool) {

@@ -3,8 +3,8 @@ use std::pin::Pin;
 use futures::{StreamExt, stream::FuturesUnordered, try_join};
 use tokio::io::AsyncReadExt;
 
-use super::proto::StreamUni;
 use super::session::{PendingUni, log_header_error, read_uni_header};
+use web_transport_proto::StreamUni;
 
 pub struct Settings {
 	#[allow(

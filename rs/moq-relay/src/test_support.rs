@@ -60,6 +60,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn fixture_binds_ephemeral_ports_and_reports_ready() {
+		moq_tokio::crypto::install_default().unwrap();
 		let fixture = test_relay().await.expect("load test relay");
 		assert_ne!(fixture.quic.port(), 0);
 		assert_ne!(fixture.http.port(), 0);

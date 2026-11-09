@@ -323,7 +323,7 @@ impl Internal {
 			crate::listener::Config {
 				health,
 				timeout,
-				activity: None,
+				admission: None,
 			},
 			InternalAcceptor,
 		)?
@@ -1571,6 +1571,7 @@ mod tests {
 	/// and forking both the socket options and the disabled-listener contract.
 	#[tokio::test]
 	async fn serve_hosts_merged_routes_alongside_the_defaults() {
+		moq_tokio::crypto::install_default().unwrap();
 		let listen = Some("127.0.0.1:0".parse().unwrap());
 		let internal = Internal::new(Config { listen }, moq_net::stats::Registry::disabled())
 			.bind()
@@ -1735,7 +1736,7 @@ mod tests {
 		for tier in ["internal", "edge"] {
 			let session = registry
 				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static(tier)))
-				.session(moq_net::Path::empty());
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::empty()));
 			let source = moq_net::transport::Wire::new();
 			let guard = session.wire(source.clone());
 			source.set_sent_bytes(123);
@@ -1762,7 +1763,7 @@ mod tests {
 			);
 			drop(guard);
 			drop(session);
-			registry.report(&mut Default::default());
+			registry.report(&mut Default::default(), moq_net::time::Instant::now());
 			check();
 			let body = render_metrics(&registry.snapshot(), &[], &[]);
 			assert!(
@@ -1780,7 +1781,7 @@ mod tests {
 		let producer = moq_tokio::origin::spawn().with_stats(
 			stats
 				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("edge")))
-				.session(moq_net::Path::from_static("root")),
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))),
 		);
 		let broadcast = producer
 			.route("demo/retired", moq_net::origin::RouteOptions::default())
@@ -1800,7 +1801,7 @@ mod tests {
 		drop(broadcast);
 		drop(producer);
 		let mut report = moq_net::stats::Report::default();
-		stats.report(&mut report);
+		stats.report(&mut report, moq_net::time::Instant::now());
 
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(
@@ -1825,7 +1826,9 @@ mod tests {
 
 		// Default-tier egress: an untagged local publisher writes, a tagged egress
 		// consumer reads it out, so publisher `bytes` advance on the default tier.
-		let default_ctx = stats.tier(Tier::default()).session(moq_net::Path::from_static("acme"));
+		let default_ctx = stats
+			.tier(Tier::default())
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		let pub_origin = moq_tokio::origin::spawn();
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
 		let mut announced = egress.routes();
@@ -1838,7 +1841,7 @@ mod tests {
 		// `bytes` advance on the regional tier.
 		let regional_ctx = stats
 			.tier(Tier::new(moq_net::Path::from_static("region/sjc")))
-			.session(moq_net::Path::from_static("peer"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("peer")));
 		let sub_origin = moq_tokio::origin::spawn().with_stats(regional_ctx.clone());
 		let sub_source = sub_origin
 			.route("demo/x", moq_net::origin::RouteOptions::default())
@@ -1919,7 +1922,10 @@ mod tests {
 			.unwrap();
 		let track = source
 			.broadcast()
-			.create_track("catalog.json", timed().with_compress(true))
+			.create_track(
+				"catalog.json",
+				timed().with_compression(moq_net::track::Compression::Deflate),
+			)
 			.unwrap();
 		let payload = format!("{{\"pad\":\"{}\"}}", "abc".repeat(300));
 
@@ -1927,7 +1933,7 @@ mod tests {
 		for session in ["a", "b"] {
 			let ctx = stats
 				.tier(Tier::default())
-				.session(moq_net::Path::new(session).unwrap());
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::new(session).unwrap()));
 			let egress = origin.consume().with_stats(ctx);
 			let bc = egress.request("demo/x", None).await.unwrap();
 			readers.push(bc.track("catalog.json").unwrap().subscribe(None).await.unwrap());
@@ -2019,7 +2025,8 @@ mod tests {
 	async fn metrics_series_are_pinned() {
 		let stats = moq_net::stats::Registry::new(Default::default());
 		let edge = stats.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("edge")));
-		let origin = moq_tokio::origin::spawn().with_stats(edge.session(moq_net::Path::from_static("root")));
+		let origin = moq_tokio::origin::spawn()
+			.with_stats(edge.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))));
 		let _broadcast = origin.route("demo", moq_net::origin::RouteOptions::default()).unwrap();
 		drop(edge.request(moq_net::Path::from_static("root")));
 		let refusals = crate::refusals::Refusals::default();
@@ -2123,7 +2130,7 @@ counter moq_relay_sessions_failed_total{kind="transport",tier="edge"} 0
 counter moq_relay_sessions_opened_total{tier="edge"} 1
 counter moq_relay_sessions_refused_total{reason="expired"} 0
 counter moq_relay_sessions_refused_total{reason="forbidden"} 0
-counter moq_relay_sessions_refused_total{reason="lan"} 0
+counter moq_relay_sessions_refused_total{reason="membership"} 0
 counter moq_relay_sessions_refused_total{reason="refused"} 0
 counter moq_relay_sessions_refused_total{reason="request"} 0
 counter moq_relay_sessions_refused_total{reason="unavailable"} 1

@@ -279,7 +279,7 @@ fn javascript_partial_frame_gives_way() {
 				.await
 				.expect("handshake");
 			let session = request
-				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(ALPN))
+				.respond(web_transport_proto::ConnectResponse::OK.with_protocol(ALPN))
 				.await
 				.expect("respond");
 			let (session, driver) = moq_net::Server::new()

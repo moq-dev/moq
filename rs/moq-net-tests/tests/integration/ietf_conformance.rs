@@ -14,7 +14,7 @@ const NAMESPACE: &str = "moq-test-00/0/0/0/1/2/2/1024/100/50/1/1/1/-1/-1/0";
 fn origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 async fn routing(version: &str, cluster: bool) {

@@ -70,7 +70,7 @@ fn echo_tokio_peer() {
 			.build()
 			.expect("runtime");
 		runtime.block_on(async move {
-			let request = moq_tokio::quic::web::proto::ConnectRequest::new(
+			let request = web_transport_proto::ConnectRequest::new(
 				url::Url::parse(&format!("https://{addr}/echo")).expect("url"),
 			);
 			let session = crate::support::web_connect(request, Default::default())

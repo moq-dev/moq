@@ -119,10 +119,12 @@ fixtures and controlled-time regressions, including residual stale revival,
 not only results from deployment tooling. Do not claim per-origin aggregation
 reduces origin count when every application publishes one broadcast.
 
-Non-goals: measured RTT/loss pricing by default, cache-dependent route prices,
-TURN, browser transit, full link-state topology, or cross-operator economic
-exchange rates. Basic federation does not wait for
-[routing cost domains](/quest/m5/routing-cost-domains.md).
+Non-goals: measured RTT/loss pricing by default, TURN, browser transit, full
+link-state topology, or cross-operator economic exchange rates. Basic
+federation does not wait for
+[routing cost domains](/quest/m5/routing-cost-domains.md). Node routes here
+are the cold cost that [cache-aware routing](/quest/m3/cache-routing/README.md)'s
+per-broadcast warm routes rank against (decided 2026-11-08, maintainer).
 
 Each implementation updates the docs it makes stale. The separate
 [routing guide](/quest/m1/routing-guide.md) explains the combined design and
@@ -141,3 +143,4 @@ setup after the capabilities land.
 - [Routing guide](/quest/m1/routing-guide.md) - concept page and federation setup; P2P extends it in m4
 - [Route wakes](/quest/m4/route-wakes.md) - local work follows affected fronts rather than the whole covered table
 - [Link quality](/quest/m5/link-quality.md) - optional measured link cost, distinct from delivery-health failover
+- [Cache-aware routing](/quest/m3/cache-routing/README.md) - per-broadcast warm routes ranked against these node routes

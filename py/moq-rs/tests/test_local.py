@@ -589,7 +589,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
 
 async def test_json_snapshot_roundtrip():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compress=True))
+    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.DEFLATE))
     producer = moq.json.SnapshotProducer(broadcast, track)
     consumer = moq.json.SnapshotConsumer(broadcast.consume(), "status")
 
@@ -623,7 +623,7 @@ async def test_json_stream_roundtrip():
 
 async def test_json_window_roundtrip():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000, compress=True))
+    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.DEFLATE))
     producer = moq.json.WindowProducer(track)
     consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
     demand = producer.demand()
@@ -709,7 +709,7 @@ async def test_json_window_skips_records_outside_the_checkpoint():
 
 async def test_json_producers_report_demand():
     broadcast = moq.BroadcastProducer()
-    timed = moq.TrackInfo(timescale=1_000, compress=True)
+    timed = moq.TrackInfo(timescale=1_000, compression=moq.Compression.DEFLATE)
     snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status", timed))
     stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", timed))
     snapshot_demand = snapshot.demand()
@@ -1708,6 +1708,7 @@ async def test_decode_video_frame():
     decoder.cancel()
     assert isinstance(frame, moq.VideoDecodedFrame)
     assert frame.timestamp().scale == 1_000_000
+    assert frame.surface() is None
 
     i420 = frame.pixels(moq.VideoPixelFormat.I420)
 
@@ -1719,6 +1720,15 @@ async def test_decode_video_frame():
 
     video.finish()
     broadcast.close()
+
+
+def test_video_surface_unknown_kind() -> None:
+    """A surface kind this package predates maps to the fallback arm instead of failing."""
+    from moq._records import _surface
+
+    assert _surface(None) is None
+    assert _surface(cast(Any, moq_ffi.MoqVideoSurface.PIXEL_BUFFER(7))) == moq.VideoSurfacePixelBuffer(7)
+    assert _surface(cast(Any, object())) == moq.VideoSurfaceUnknown()
 
 
 async def test_broadcast_is_reachable_only_while_announced():

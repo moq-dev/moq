@@ -52,7 +52,7 @@ fn timed_info() -> MoqTrackInfo {
 		max_age_unlimited: false,
 		refresh: None,
 		timescale: Some(1_000_000),
-		compress: false,
+		compression: None,
 	}
 }
 
@@ -1233,7 +1233,7 @@ async fn raw_track_info_reports_publisher_properties() {
 		max_age_unlimited: false,
 		refresh: Some(2),
 		timescale: Some(90_000),
-		compress: true,
+		compression: Some(crate::producer::MoqCompression::Deflate),
 	};
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
 	let consumer = track.consume(None).unwrap();
@@ -1244,7 +1244,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	assert!(!got.max_age_unlimited);
 	assert_eq!(got.refresh, Some(2));
 	assert_eq!(got.timescale, Some(90_000));
-	assert!(got.compress);
+	assert_eq!(got.compression, Some(crate::producer::MoqCompression::Deflate));
 }
 
 #[tokio::test]
@@ -1319,7 +1319,7 @@ async fn data_writes_preserve_the_callers_timestamp() {
 					max_age_unlimited: false,
 					refresh: None,
 					timescale: Some(timestamp.scale),
-					compress: false,
+					compression: None,
 				}),
 			)
 			.unwrap();
@@ -1423,7 +1423,7 @@ async fn json_snapshot_roundtrip() {
 		max_age_unlimited: false,
 		timescale: Some(1_000_000),
 		refresh: None,
-		compress: true,
+		compression: Some(crate::producer::MoqCompression::Deflate),
 	};
 	let track = broadcast.publish_track("meta".into(), Some(info)).unwrap();
 	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
@@ -1497,7 +1497,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 				max_age_unlimited: false,
 				refresh: Some(1),
 				timescale: Some(1_000_000),
-				compress: false,
+				compression: None,
 			}),
 		)
 		.unwrap();
@@ -1725,7 +1725,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 				max_age_unlimited: false,
 				refresh: Some(1),
 				timescale: Some(1_000_000),
-				compress: false,
+				compression: None,
 			}),
 		)
 		.unwrap();
@@ -3336,7 +3336,6 @@ fn audio_rejects_bad_init_bytes() {
 /// the announcement.
 #[tokio::test]
 async fn a_hidden_route_is_invisible_until_announced() {
-	kio::clock::host_time();
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let route = origin.route("live".into(), hidden()).unwrap();
@@ -6282,13 +6281,11 @@ async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 
 #[tokio::test]
 async fn follow_hands_out_a_takeover_once_while_resolving() {
-	kio::clock::host_time();
 	follow_hands_out_a_takeover_once("").await;
 }
 
 #[tokio::test]
 async fn follow_hands_out_a_held_takeover_once() {
-	kio::clock::host_time();
 	follow_hands_out_a_takeover_once("live").await;
 }
 
@@ -6420,7 +6417,6 @@ async fn an_instance_pins_request_and_follow() {
 /// clock that nothing comes past the origin's update hold either.
 #[tokio::test]
 async fn follow_waits_for_another_instance_after_a_dropped_takeover() {
-	kio::clock::host_time();
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, "live");
 	let followed = origin.consume().follow("live".into(), None).unwrap();
@@ -8249,7 +8245,8 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 	let (client, server) = moq_net::transport::memory::pair(transport);
 	let connect = async {
 		let (session, driver) = moq_net::Client::new()
-			.with_origin(a.inner.clone())
+			.with_publisher(&a.inner)
+			.with_subscriber(a.inner.clone())
 			.with_versions(version.into())
 			.connect(kio::clock::Instant::now(), client)
 			.await
@@ -8631,9 +8628,10 @@ async fn auth_tokens_join_and_leave_the_union() {
 	let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
 	let addr = listener.tcp_local_addr().unwrap();
 
-	let publish = |pattern: &str| moq_net::auth::Grant {
-		publish: pattern.parse::<moq_net::Pattern>().unwrap().into(),
-		..Default::default()
+	let publish = |pattern: &str| {
+		let mut grant = moq_net::auth::Grant::default();
+		grant.publish = pattern.parse::<moq_net::Pattern>().unwrap().into();
+		grant
 	};
 	let serving = tokio::spawn(async move {
 		let mut request = listener.accept().await.expect("accept");
@@ -9280,7 +9278,7 @@ async fn audio_subscribe_configuration_boundary() {
 				max_age_unlimited: false,
 				refresh: None,
 				timescale: None,
-				compress: false,
+				compression: None,
 			}),
 		)
 		.unwrap();

@@ -22,11 +22,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use moq_auth::{Event, Grant, Pattern, Patterns, Request};
+use moq_net::stats;
 #[cfg(feature = "websocket")]
 use moq_relay::web;
 use moq_relay::{Config, Connection, Relay, auth, cluster};
-use moq_tokio::moq_net;
-use moq_tokio::moq_net::stats;
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -687,7 +686,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	// Each label's (active sessions, sent bytes, received bytes), from one report.
 	let labels = || {
 		let mut report = stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, moq_net::time::Instant::now());
 		report
 			.sessions
 			.into_iter()
@@ -1231,7 +1230,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 	trigger.start();
 	let started = kio::clock::now();
 	for client in &clients {
-		kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| client.draining().poll(waiter)))
+		kio::clock::timeout(TIMEOUT, kio::wait(|waiter| client.draining().poll(waiter)))
 			.await
 			.expect("GOAWAY timeout")
 			.expect("a GOAWAY");
