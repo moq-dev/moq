@@ -4722,3 +4722,31 @@ test("group sequences stop at 2^64-1, as a u64 does", () => {
 	producer.skipGroups(1n << 63n, 1n << 64n);
 	expect(() => producer.skipGroups(0n, (1n << 64n) + 1n)).toThrow(RangeError);
 });
+
+// Mirrors the Rust `track::Finished` doctests: the handle `finish` returns takes no new
+// writes, at compile time and at run time, yet still fills a late group below the end.
+test("finishing returns handles that write nothing new but fill a late group", async () => {
+	const producer = new TrackProducer("test");
+	const subscriber = producer.subscribe({ delay: { max: null }, ranges: [{ start: { absolute: 0n } }] });
+	producer.createGroup(1n).finish();
+	const finished = producer.finish();
+	// @ts-expect-error a finished track appends no group
+	expect(() => finished.appendGroup()).toThrow("at or past the track's end");
+	expect(() => finished.createGroup(2n)).toThrow("at or past the track's end");
+
+	const late = finished.createGroup(0n);
+	late.writeFrame(textFrame("late"));
+	const group = late.finish();
+	// @ts-expect-error a finished group takes no frame
+	expect(() => group.writeFrame(textFrame("later"))).toThrow();
+	const reader = group.consume();
+	expect(dec.decode((await reader.readFrame())?.payload)).toBe("late");
+	expect(await reader.readFrame()).toBeUndefined();
+	expect(await group.closed).toBeNull();
+
+	const got: bigint[] = [];
+	for (let next = subscriber.tryRecvGroup(); next; next = subscriber.tryRecvGroup()) got.push(next.sequence);
+	expect(got.sort()).toEqual([0n, 1n]);
+	expect(hooks.tryRecvGroup(subscriber, false)).toEqual({ kind: "done" });
+	finished.close();
+});

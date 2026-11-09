@@ -93,7 +93,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
 	group.finish().unwrap();
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 	drop(track);
 	if finish_broadcast {
 		broadcast.broadcast().close();
