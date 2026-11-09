@@ -632,10 +632,6 @@ interface StreamState {
 	onClose?: () => void;
 }
 
-/** A session's lifecycle. Once closed it stays closed: `clean` says whether `closed`
- *  fulfilled or rejected, and `error` is what later calls throw. */
-type State = { kind: "open" } | { kind: "closed"; clean: boolean; error: Error };
-
 /** A terminal transition, with the close frame that tells the peer, if any. A clean
  *  end fulfills `closed` with its code and reason, and `send` puts them on the wire
  *  as an APPLICATION_CLOSE. An abort rejects `closed` with `cause`, and `send` tells
@@ -664,7 +660,8 @@ export default class Session implements WebTransport {
 	// `SessionOptions.requireProtocol` on a dial: the server must pick one of
 	// our application protocols, not answer with none.
 	#requireProtocol = false;
-	#state: State = { kind: "open" };
+	// Set once closed, and never changed after: the error later calls throw.
+	#closed?: Error;
 
 	#streams = new Map<bigint, StreamState>();
 	// Streams whose MAX_STREAM_DATA is owed, sent with the newest limit when the scheduler polls.
@@ -1771,11 +1768,6 @@ export default class Session implements WebTransport {
 		return writable as SendStream;
 	}
 
-	/** The error later calls throw once closed, or undefined while open. */
-	get #closed(): Error | undefined {
-		return this.#state.kind === "closed" ? this.#state.error : undefined;
-	}
-
 	/** The one terminal transition; a no-op once closed. A clean end fulfills `closed`,
 	 *  and per the WebTransport contract is reached only by a local {@link close} or a
 	 *  peer's APPLICATION_CLOSE (0x1d). Everything else aborts, rejecting `closed`
@@ -1786,7 +1778,7 @@ export default class Session implements WebTransport {
 	 *  Settles `ready` and `closed`, then tears down streams, credits, and the
 	 *  scheduler, and closes the socket once it has the close frame. */
 	#end(end: End) {
-		if (this.#state.kind === "closed") return;
+		if (this.#closed) return;
 
 		// Encode before the transition, so an oversized reason throws with the session still open.
 		const send = end.clean
@@ -1799,7 +1791,7 @@ export default class Session implements WebTransport {
 		}
 
 		const error = end.clean ? new Error(`Connection closed: ${end.code} ${end.reason}`) : end.cause;
-		this.#state = { kind: "closed", clean: end.clean, error };
+		this.#closed = error;
 		// Rejecting `ready` is a no-op once it has resolved (after a successful open).
 		this.#readyReject(error);
 		if (end.clean) this.#closedResolve({ closeCode: end.code, reason: end.reason });

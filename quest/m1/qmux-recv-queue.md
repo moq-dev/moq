@@ -24,7 +24,3 @@ Decided 2026-11-08 (maintainer, /quest-plan of an external code audit of `9f51fa
 - Test: one-byte chunks filling the window drain in bounded time on V8.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [js/qmux close](/quest/m1/explicit-state/qmux-close.md) - also edits `session.ts`; expect conflicts
