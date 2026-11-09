@@ -1,4 +1,4 @@
-import { type Nano, sleep } from "@moq/clock";
+import { type Duration, sleep } from "@moq/clock";
 
 /**
  * Run `fn` after `duration` on the installed clock, and return the call that cancels it.
@@ -7,7 +7,7 @@ import { type Nano, sleep } from "@moq/clock";
  *
  * @internal
  */
-export function after(duration: Nano, fn: () => void, options?: { ref?: boolean }): () => void {
+export function after(duration: Duration, fn: () => void, options?: { ref?: boolean }): () => void {
 	const abort = new AbortController();
 	void sleep(duration, { signal: abort.signal, ref: options?.ref }).then(() => {
 		// The wakeup can already be queued when the timer is cancelled.

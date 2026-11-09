@@ -1,11 +1,11 @@
-import { Milli, Nano, now } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
 import type { Effect, Getter } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import { formatBitrate, formatFps, formatHz, formatMillis, graph, statCard, statLine } from "@moq/ui";
 import type MoqWatch from "../element";
 import { audio as audioIcon, network as networkIcon, video as videoIcon } from "./icons";
 
-const POLL = Nano.fromMilli(Milli(250));
+const POLL = Duration.millis(250);
 
 /** Bitrate from a byte counter, sampled across an interval. */
 function rate(prev: { bytes: number; when: number }, bytes: number, now: number): number | undefined {
@@ -84,7 +84,8 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 
 	container.append(videoCard.el, audioCard.el, netCard.el);
 
-	const at = () => Nano.toMilli(Nano(now()));
+	// Monotonic milliseconds.
+	const at = () => now().since(Instant.ZERO).asMillis();
 	let vPrev = { frames: 0, bytes: 0, when: at() };
 	let aPrev = { bytes: 0, when: at() };
 
@@ -111,7 +112,7 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		vFpsGraph.push(fps);
 		if (vStats) vPrev = { frames: vStats.frameCount, bytes: vStats.bytesReceived, when: now };
 		vLate.textContent = vStats ? `${vStats.late}` : "-";
-		vStalls.textContent = vStats ? `${vStats.stalls} (${formatMillis(vStats.stalled)})` : "-";
+		vStalls.textContent = vStats ? `${vStats.stalls} (${formatMillis(vStats.stalled.asMillis())})` : "-";
 
 		// Audio.
 		const aConf = watch.audio.source.out.config.peek();
@@ -139,7 +140,7 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 			vBitrate !== undefined || aBitrate2 !== undefined ? (vBitrate ?? 0) + (aBitrate2 ?? 0) : undefined;
 		nActual.textContent = actual !== undefined ? formatBitrate(actual) : "-";
 		const rtt = probe?.rtt;
-		nRttGraph.push(rtt !== undefined && rtt > 0 ? rtt : undefined);
+		nRttGraph.push(rtt !== undefined && !rtt.isZero() ? rtt.asMillis() : undefined);
 	}, POLL);
 
 	return container;

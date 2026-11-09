@@ -1,11 +1,11 @@
 /**
  * {@link Timescale} and {@link Timestamp} for presentation timing.
  *
- * Duration units (`Nano`, `Micro`, `Milli`, `Second`) live in `@moq/clock`.
+ * Durations and instants live in `@moq/clock`.
  *
  * @module
  */
-import { now } from "@moq/clock";
+import { Instant, now } from "@moq/clock";
 import { toNumber } from "./util/bigint.ts";
 
 /** Units per second for a {@link Timestamp}'s value, e.g. `1000` for milliseconds. */
@@ -46,7 +46,7 @@ function assertTimestampValue(value: number): void {
 /**
  * A presentation timestamp: a raw value in a given {@link Timescale}.
  *
- * Mirrors the Rust `Timestamp`. Unlike `@moq/clock`'s bare duration units it carries its
+ * Mirrors the Rust `Timestamp`. Unlike a `@moq/clock` `Duration` it carries its
  * own scale, so a track can pick its units and conversions can't silently mix them up.
  *
  * The value must be finite and in `[0, Number.MAX_SAFE_INTEGER]`. Fractions are allowed
@@ -71,7 +71,7 @@ export class Timestamp {
 
 	/** The installed clock's monotonic instant in milliseconds, not wall-clock time. */
 	static now(): Timestamp {
-		return new Timestamp(now() / 1_000_000, Timescale.MILLI);
+		return new Timestamp(now().since(Instant.ZERO).asMillis(), Timescale.MILLI);
 	}
 
 	/** A timestamp of `ms` milliseconds. */

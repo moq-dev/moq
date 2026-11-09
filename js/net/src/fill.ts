@@ -10,7 +10,7 @@
  *
  * @module
  */
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { NotFound } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
@@ -463,10 +463,10 @@ export class Fill {
 	 * The most tolerant age budget among the readers waiting on it now, or `null` for none: the
 	 * publisher's {@link Info.maxAge} alone bounds it. Each reader still enforces its own.
 	 */
-	get maxDelay(): Milli | null {
+	get maxDelay(): Duration | null {
 		let max = 0;
 		for (const asker of this.#pending.askers) max = Math.max(max, asker.maxDelay());
-		return max < NO_MAX_DELAY ? Milli(max) : null;
+		return max < NO_MAX_DELAY ? Duration.millis(max) : null;
 	}
 
 	/** Which end to fill first now: `"descending"`, newest first, if any reader asks it. */

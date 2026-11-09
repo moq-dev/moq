@@ -1,4 +1,4 @@
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { createAccessor } from "@moq/signals/solid";
 import { For, Show } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
@@ -12,7 +12,7 @@ export default function StatsPanel() {
 
 	const onDelayInput = (e: Event) => {
 		const el = e.currentTarget as HTMLInputElement;
-		game.delay.set(Milli(Number.parseInt(el.value, 10)));
+		game.delay.set(Duration.millis(Number.parseInt(el.value, 10)));
 	};
 
 	const location = () => ctx.status()?.location;
@@ -47,13 +47,13 @@ export default function StatsPanel() {
 			</Show>
 
 			<label class="boy__jitter">
-				<span class="boy__jitter-label">Buffer: {delay()}ms</span>
+				<span class="boy__jitter-label">Buffer: {Math.round(delay().asMillis())}ms</span>
 				<input
 					type="range"
 					class="boy__jitter-slider"
 					min="0"
 					max="500"
-					value={delay()}
+					value={Math.round(delay().asMillis())}
 					onInput={onDelayInput}
 					onClick={(e) => e.stopPropagation()}
 				/>

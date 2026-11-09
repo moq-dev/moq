@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { Manual, Micro, Milli, Nano, Second, yieldNow } from "@moq/clock";
-import { now, pace, type Sample, SEEK_BEHIND, type Sink } from "./pace";
+import { Duration, Instant, Manual, now, yieldNow } from "@moq/clock";
+import { pace, type Sample, SEEK_BEHIND, type Sink } from "./pace";
 import { Timeline } from "./timeline";
 
 // A ten-second file with a sample every 100ms.
@@ -62,16 +62,17 @@ function setup(opts?: { samples?: number; convert?: (sample: FakeSample) => Conv
 	const clock = new Manual();
 	const installed = clock.install();
 	// Start away from zero so an unanchored timestamp can't pass by accident.
-	clock.jump(Nano.fromSecond(Second(1)));
+	clock.jump(Duration.secs(1));
 
 	const { sink, starts, decoded } = fakeSink(opts?.samples ?? DURATION);
-	const zero = now();
+	// The anchor in microseconds, as restamped samples read.
+	const zero = 1_000_000;
 	const abort = new AbortController();
 	const converted: Converted[] = [];
 	const convert = opts?.convert ?? ((sample: FakeSample) => new Converted(sample));
 	const reader = pace(
 		sink,
-		new Timeline(zero, DURATION),
+		new Timeline(now(), DURATION),
 		(sample) => {
 			const value = convert(sample);
 			converted.push(value);
@@ -96,7 +97,7 @@ test("a reader returning after a long gap seeks to the present on the shared tim
 		expect(await read()).toBe(zero);
 
 		// Unread for a minute and a bit: six full passes, then 1.55s into the seventh.
-		clock.jump(Nano.fromMilli(Milli(61_550)));
+		clock.jump(Duration.millis(61_550));
 
 		// The sample covering the present, on the pass the clock is in, rather than the old cursor's.
 		expect(await read()).toBe(zero + 61_500_000);
@@ -106,7 +107,7 @@ test("a reader returning after a long gap seeks to the present on the shared tim
 
 		// Pacing continues from there at 1x.
 		expect(await read()).toBe(zero + 61_600_000);
-		expect(Nano.toMicro(Nano(clock.now()))).toBe(Micro(zero + 61_600_000));
+		expect(clock.now()).toEqual(Instant.ZERO.add(Duration.micros(zero + 61_600_000)));
 	} finally {
 		await close();
 	}
@@ -119,7 +120,7 @@ test("a briefly slow reader drains every sample without seeking", async () => {
 		expect(await read()).toBe(zero);
 
 		// Behind, but by less than the seek threshold.
-		clock.jump(Micro.toNano(Micro(SEEK_BEHIND - SPACING)));
+		clock.jump(SEEK_BEHIND.sub(Duration.micros(SPACING)));
 
 		const late = [];
 		for (let i = 1; i <= 5; i++) late.push(await read());

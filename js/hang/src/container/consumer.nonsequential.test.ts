@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { type Installed, Manual, type Micro, Milli, Nano } from "@moq/clock";
+import { Duration, type Installed, Manual } from "@moq/clock";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
@@ -19,7 +19,7 @@ afterEach(() => {
 
 /** Flush the consumer's readers without moving time, then return what `read` settled with, or "pending". */
 async function poll<T>(read: Promise<T>): Promise<T | "pending"> {
-	const flushed = clock.advance(Nano.zero);
+	const flushed = clock.advance(Duration.ZERO);
 	try {
 		return await Promise.race([read, flushed.then(() => "pending" as const)]);
 	} finally {
@@ -35,7 +35,7 @@ async function nextFrame(consumer: Consumer) {
 	}
 }
 
-function encodeLegacyFrame(timestamp: Micro, payload: Uint8Array): Uint8Array {
+function encodeLegacyFrame(timestamp: number, payload: Uint8Array): Uint8Array {
 	const tsBytes = Varint.encode(timestamp);
 	const data = new Uint8Array(tsBytes.byteLength + payload.byteLength);
 	data.set(tsBytes, 0);
@@ -58,13 +58,13 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("data"),
-		delay: { max: 5000 as Milli },
+		delay: { max: Duration.millis(5000) },
 	});
 
 	// Group A at a large sequence, completed so the cursor advances past it.
 	const a = track.createGroup(1_000_000n);
 	a.writeFrame({
-		payload: encodeLegacyFrame(0 as Micro, new Uint8Array([0x01])),
+		payload: encodeLegacyFrame(0, new Uint8Array([0x01])),
 		timestamp: Time.Timestamp.now(),
 	});
 	a.finish();
@@ -81,13 +81,13 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	// could still be coming. We cannot tell, so B must NOT surface yet.
 	const b = track.createGroup(1_090_000n);
 	b.writeFrame({
-		payload: encodeLegacyFrame(1_000_000 as Micro, new Uint8Array([0x02])),
+		payload: encodeLegacyFrame(1_000_000, new Uint8Array([0x02])),
 		timestamp: Time.Timestamp.now(),
 	});
 
 	// Within the max delay budget (5s), the parked next() stays parked: no duration means no proof of
 	// contiguity, so the consumer waits instead of eagerly delivering across the gap.
-	await clock.advance(Nano.fromMilli(Milli(4_999)));
+	await clock.advance(Duration.millis(4_999));
 	expect(await poll(pending)).toBe("pending");
 
 	consumer.close();
@@ -100,12 +100,12 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("audio"),
-		delay: { max: 500 as Milli },
+		delay: { max: Duration.millis(500) },
 	});
 	const write = (group: Group.Producer, timestamps: number[]) => {
 		for (const timestamp of timestamps) {
 			group.writeFrame({
-				payload: encodeLegacyFrame(timestamp as Micro, new Uint8Array([0x01])),
+				payload: encodeLegacyFrame(timestamp, new Uint8Array([0x01])),
 				timestamp: Time.Timestamp.now(),
 			});
 		}
@@ -120,12 +120,12 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 	// frame and leaves only the skipped group's end to show the timeline goes on.
 	first.finish();
 	const empty = track.createGroup(1n);
-	await clock.advance(Nano.zero);
+	await clock.advance(Duration.ZERO);
 	const last = track.createGroup(20n);
 	write(last, [400_000, 1_000_000]);
 	last.finish();
 	empty.finish();
-	await clock.advance(Nano.zero);
+	await clock.advance(Duration.ZERO);
 	const next = await poll(consumer.next());
 	expect(next).toMatchObject({ kind: "frame", group: 20n });
 

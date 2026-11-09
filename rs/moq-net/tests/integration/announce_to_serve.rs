@@ -44,17 +44,9 @@ enum Observer {
 
 /// Drain every route event the cursor has pending, as `kind prefix` lines.
 fn drain(announced: &mut moq_net::origin::Routes) -> Vec<String> {
-	use moq_net::origin::RouteEvent as Event;
-
 	let mut seen = Vec::new();
 	while let Some(event) = announced.try_next() {
-		let (kind, announce) = match event {
-			Event::Start(announce) => ("Start", announce),
-			Event::Update(announce) => ("Update", announce),
-			Event::Restart(announce) => ("Restart", announce),
-			Event::End(announce) => ("End", announce),
-		};
-		seen.push(format!("{kind} {}", announce.prefix));
+		seen.push(format!("{:?} {}", event.kind, event.announce.prefix));
 	}
 	seen
 }
