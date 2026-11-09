@@ -54,6 +54,14 @@ because runs keyed by group sequence convert mechanically to starts.
   `rs/moq-net/src/model/track/miss.rs` keeps per gap (from
   [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171), decided
   2026-10-23).
+- **The track's arrivals ledger,** billed and bounded too (decided
+  2026-11-09, maintainer: ✅ fold it into this quest's memory work; rejected:
+  a separate m1 quest, dropping it). `TrackState::arrivals` (Rust) and JS
+  `#arrivals` are unbilled and fold a gap only once the grace passes, so
+  under an unbounded grace (no cache duration, no max age, an unbounded max
+  delay) a peer fragmenting its arrivals, or in JS its drops, which JS
+  accounts as they land, grows them without bound. A reclaimed drop run
+  already adds no run to them (moq-dev/moq#8294).
 - **CPU per drop.** Every report inserts into the per-cursor `RangeSet`s and
   sorted arrays, so `track_subscriber_churn_drops` in
   `rs/moq-net/benches/track.rs` slows once many readers each hold many

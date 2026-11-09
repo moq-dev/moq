@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept as acceptSession, connect as connectSession } from "./connection/index.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
@@ -348,13 +348,13 @@ test("fill: the track's skip of a run a reader's fill refused is what the reader
 test("fill: a fill names the most urgent priority and loosest budget among its readers", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
-	const low = track.subscribe({ ...history, priority: 1, delay: { max: Milli(60_000) } });
+	const low = track.subscribe({ ...history, priority: 1, delay: { max: Duration.millis(60_000) } });
 	void drain(low);
 	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no fill");
 	expect([fill.start, fill.end]).toEqual([0n, 5n]);
 	expect(fill.priority).toBe(1);
-	expect(fill.maxDelay).toBe(Milli(60_000));
+	expect(fill.maxDelay).toEqual(Duration.millis(60_000));
 	expect(fill.order).toBe("ascending");
 
 	const high = track.subscribe({ ...history, priority: 7, order: "descending" });
@@ -430,7 +430,7 @@ test("fill: an ordered reader stops waiting on an unanswered fill once its budge
 		const requests = track.requests();
 		const reader = track.subscribe({
 			ranges: [{ start: { absolute: 0n } }],
-			delay: { max: Milli(1000) },
+			delay: { max: Duration.millis(1000) },
 			order: "ascending",
 		});
 		const next = reader.ordered().nextGroup();
@@ -439,7 +439,7 @@ test("fill: an ordered reader stops waiting on an unanswered fill once its budge
 		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
 
 		// Group 5 arrived when the reader asked, so its budget gives up the holes below a second on.
-		await clock.advance(Nano.fromMilli(Milli(1001)));
+		await clock.advance(Duration.millis(1001));
 		expect((await next)?.sequence).toBe(5n);
 
 		fill?.close();
@@ -458,14 +458,17 @@ test("fill: an arrival-order reader stops waiting on an unanswered fill once its
 		const { broadcast, track } = resumed(5n);
 		track.finish();
 		const requests = track.requests();
-		const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Milli(1000) } });
+		const reader = track.subscribe({
+			ranges: [{ start: { absolute: 0n } }],
+			delay: { max: Duration.millis(1000) },
+		});
 		expect((await reader.recvGroup())?.sequence).toBe(5n);
 		const next = reader.recvGroup();
 		const fill = await requests.requestedFill();
 		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
 
 		// The fill never answers; the holes go past the budget, and the finished track ends the read.
-		await clock.advance(Nano.fromMilli(Milli(1001)));
+		await clock.advance(Duration.millis(1001));
 		expect(await next).toBeUndefined();
 		// The reader gave the stale holes up, so the handler hears it no longer waits on them.
 		expect(fill?.wanted()).toBeUndefined();
@@ -487,7 +490,7 @@ test("fill: a handler hears that a reader stopped wanting what it handed out pas
 		const requests = track.requests();
 		const reader = track.subscribe({
 			ranges: [{ start: { absolute: 0n } }],
-			delay: { max: Milli(1000) },
+			delay: { max: Duration.millis(1000) },
 			order: "ascending",
 		});
 		const next = reader.ordered().nextGroup();
@@ -498,7 +501,7 @@ test("fill: a handler hears that a reader stopped wanting what it handed out pas
 		const unwanted = fill.unwanted(0n);
 
 		// Past the budget the reader takes group 5, leaving the holes below it for good.
-		await clock.advance(Nano.fromMilli(Milli(1001)));
+		await clock.advance(Duration.millis(1001));
 		expect((await next)?.sequence).toBe(5n);
 		expect(await changed).toBeUndefined();
 		await unwanted;
@@ -526,12 +529,12 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 		};
 		// Holes 0-1 wait on group 2, which arrives first; holes 3-4 on group 5, half a second later.
 		write(2n);
-		await clock.advance(Nano.fromMilli(Milli(500)));
+		await clock.advance(Duration.millis(500));
 		write(5n);
 		const requests = track.requests();
 		const reader = track.subscribe({
 			ranges: [{ start: { absolute: 0n }, end: { absolute: 6n } }],
-			delay: { max: Milli(1000) },
+			delay: { max: Duration.millis(1000) },
 		});
 		expect((await reader.recvGroup())?.sequence).toBe(2n);
 		expect((await reader.recvGroup())?.sequence).toBe(5n);
@@ -547,7 +550,7 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 		]);
 
 		// Holes 0-1 are past the budget now, but 3-4 are not: the read waits on them.
-		await clock.advance(Nano.fromMilli(Milli(600)));
+		await clock.advance(Duration.millis(600));
 		const late = fills[1].accept(3n);
 		late.writeFrame({ payload: enc.encode("old 3") });
 		late.finish();
@@ -801,7 +804,7 @@ test("fill: a stale run that does not settle the reader is still asked for", asy
 	hooks.dropTrackGroups(track, 0n, 2n, staleHole(60_000));
 	const reader = track.subscribe({
 		ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
-		delay: { max: Milli(500) },
+		delay: { max: Duration.millis(500) },
 	});
 	void drain(reader);
 	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
@@ -819,7 +822,7 @@ test("fill: a stale run that does not settle the reader leaves its own refusal r
 	hooks.dropTrackGroups(track, 0n, 2n, staleHole(60_000));
 	const reader = track.subscribe({
 		ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
-		delay: { max: Milli(500) },
+		delay: { max: Duration.millis(500) },
 	});
 	const first = reader.recvGroup();
 	const fill = await requests.requestedFill();
@@ -839,7 +842,7 @@ test("fill: a stale run that does not settle the reader keeps its pending refusa
 	const requests = track.requests();
 	const reader = track.subscribe({
 		ranges: [{ start: { absolute: 0n }, end: { absolute: 6n } }],
-		delay: { max: Milli(500) },
+		delay: { max: Duration.millis(500) },
 	});
 	const first = reader.recvGroup();
 	const fill = await requests.requestedFill();
@@ -873,7 +876,7 @@ function judgedTwice() {
 	const reader = (ranges: [bigint, bigint][]) =>
 		track.subscribe({
 			ranges: ranges.map(([start, end]) => ({ start: { absolute: start }, end: { absolute: end } })),
-			delay: { max: Milli(500) },
+			delay: { max: Duration.millis(500) },
 		});
 	return { broadcast, requests, reader };
 }

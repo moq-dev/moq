@@ -1,4 +1,4 @@
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import { formatMillis } from "@moq/ui";
@@ -25,7 +25,7 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const buttons = PRESETS.map((preset) => {
 		const chip = DOM.create("button", { className: "chip", type: "button" }, preset.label);
 		parent.event(chip, "click", () => {
-			watch.delay = preset.value === "auto" ? "auto" : Milli(preset.value);
+			watch.delay = preset.value === "auto" ? "auto" : Duration.millis(preset.value);
 		});
 		chips.appendChild(chip);
 		return { preset, chip };
@@ -34,7 +34,10 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	parent.run((effect) => {
 		const mode = effect.get(watch.controls.delay);
 		for (const { preset, chip } of buttons) {
-			const active = preset.value === "auto" ? mode === "auto" : mode === preset.value;
+			const active =
+				preset.value === "auto"
+					? mode === "auto"
+					: mode instanceof Duration && mode.asMillis() === preset.value;
 			chip.classList.toggle("chip--active", active);
 		}
 	});
@@ -52,7 +55,7 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	parent.run((effect) => {
 		const mode = effect.get(watch.controls.delay);
 		const delay = effect.get(watch.sync.out.delay);
-		delayVal.textContent = `${formatMillis(delay)}${mode === "auto" ? " (auto)" : ""}`;
+		delayVal.textContent = `${formatMillis(delay.asMillis())}${mode === "auto" ? " (auto)" : ""}`;
 	});
 
 	const hint = DOM.create(

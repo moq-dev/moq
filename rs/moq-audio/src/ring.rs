@@ -42,6 +42,10 @@ pub(crate) struct Config {
 	/// Trim back down to the latency once the queue fills three quarters of the
 	/// room above it.
 	pub trim: bool,
+	/// Measure what plays, so a declared silence fills with comfort noise at
+	/// its level. Without it a declared silence is plain silence, for a writer
+	/// that never declares one.
+	pub comfort: bool,
 }
 
 /// What a [`Producer::push`] did with its input.
@@ -157,7 +161,11 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 		cleared: 0,
 		cushioned: 0,
 		comfort: crate::comfort::Comfort::new(output_rate, channels),
+		measure: config.comfort,
 		trim: config.trim,
+		skips: 0,
+		trimmed: 0,
+		accelerated: 0,
 		shared,
 	};
 	(producer, consumer)
@@ -492,8 +500,16 @@ pub(crate) struct Consumer {
 	/// Comfort noise already played at the pending resume.
 	cushioned: usize,
 	comfort: crate::comfort::Comfort,
+	/// Whether the comfort noise measures what plays; unmeasured, it fills plain silence.
+	measure: bool,
 	/// Trim only after filling three quarters of the current target's headroom.
 	trim: bool,
+	/// Times [`Read::Trimmed`] was returned, ever.
+	skips: u64,
+	/// Received frames [`Read::Trimmed`] discarded, ever.
+	trimmed: u64,
+	/// Frames the stretch removed by accelerating, ever.
+	accelerated: u64,
 	shared: Arc<Shared>,
 }
 
@@ -541,7 +557,8 @@ impl Consumer {
 			let trim = latency + (capacity - latency) * 3 / 4;
 			if queued >= trim && queued > latency {
 				let frames = queued - latency;
-				self.discard(frames);
+				self.skips += 1;
+				self.trimmed += self.discard(frames) as u64;
 				return Read::Trimmed { frames };
 			}
 		}
@@ -602,7 +619,7 @@ impl Consumer {
 		while done < output.len() {
 			if let Some(stretch) = self.stretch.as_mut().filter(|stretch| stretch.available() > 0) {
 				let frames = stretch.read(&mut output[done..]);
-				if !self.staged_prime {
+				if self.measure && !self.staged_prime {
 					self.comfort.played(&output[done..done + frames * channels]);
 				}
 				done += frames * channels;
@@ -632,7 +649,9 @@ impl Consumer {
 				debug_assert_eq!(read, frames * channels);
 				let prime = frames.min(self.prime);
 				self.prime -= prime;
-				self.comfort.played(&output[done + prime * channels..done + read]);
+				if self.measure {
+					self.comfort.played(&output[done + prime * channels..done + read]);
+				}
 				self.position = self.position.wrapping_add(frames);
 				self.consumed = self.consumed.wrapping_add(frames);
 				done += read;
@@ -651,6 +670,7 @@ impl Consumer {
 			debug_assert_eq!(read, frames * channels);
 			self.position = self.position.wrapping_add(frames);
 			stretch.process(frames, buffered, self.shared.target.load(Ordering::Relaxed), enabled);
+			self.accelerated += frames.saturating_sub(stretch.available()) as u64;
 			// The writer still counts the input while it is being analysed.
 			// Publish only the resulting duration change, then the rendered
 			// frames. Moving PCM into staging never makes it disappear.
@@ -663,6 +683,23 @@ impl Consumer {
 	/// Frames of comfort noise read so far, ever.
 	pub(crate) fn comfort(&self) -> u64 {
 		self.comfort.filled()
+	}
+
+	/// Times the queue was trimmed back to its latency, ever.
+	pub(crate) fn skips(&self) -> u64 {
+		self.skips
+	}
+
+	/// Pushed frames discarded to trim the queue back to its latency, ever: not
+	/// the startup silence or a resume's comfort noise, though silence padding
+	/// a writer pushed itself, or [`Push::Padded`] added, counts.
+	pub(crate) fn trimmed(&self) -> u64 {
+		self.trimmed
+	}
+
+	/// Frames of received audio the stretch removed by accelerating, ever.
+	pub(crate) fn accelerated(&self) -> u64 {
+		self.accelerated
 	}
 
 	/// Accept pushes without reading first, as a read would.
@@ -680,10 +717,12 @@ impl Consumer {
 		buffered + cushion + self.stretch.as_ref().map_or(0, |stretch| stretch.available())
 	}
 
-	/// Drop up to `frames` queued frames unread.
-	pub(crate) fn discard(&mut self, frames: usize) {
+	/// Drop up to `frames` queued frames unread, returning how many of them were
+	/// pushed rather than the startup silence or a resume's comfort noise.
+	pub(crate) fn discard(&mut self, frames: usize) -> usize {
 		let staged = self.stretch.as_mut().map_or(0, |stretch| stretch.discard(frames));
 		self.consumed = self.consumed.wrapping_add(staged);
+		let mut pushed = if self.staged_prime { 0 } else { staged };
 		let mut left = frames - staged;
 		while left > 0 {
 			let mut take = left;
@@ -698,12 +737,15 @@ impl Consumer {
 			if skipped == 0 {
 				break;
 			}
-			self.prime = self.prime.saturating_sub(skipped);
+			let prime = skipped.min(self.prime);
+			self.prime -= prime;
+			pushed += skipped - prime;
 			self.position = self.position.wrapping_add(skipped);
 			self.consumed = self.consumed.wrapping_add(skipped);
 			left -= skipped;
 		}
 		self.shared.consumed.store(self.consumed, Ordering::Relaxed);
+		pushed
 	}
 }
 
@@ -723,6 +765,7 @@ mod tests {
 				capacity,
 				pad: false,
 				trim: false,
+				comfort: true,
 			},
 		);
 		cons.start();
@@ -805,6 +848,7 @@ mod tests {
 				capacity: Duration::from_millis(200),
 				pad: false,
 				trim: true,
+				comfort: true,
 			},
 		);
 		cons.start();
@@ -832,6 +876,7 @@ mod tests {
 				capacity: Duration::from_millis(100),
 				pad: false,
 				trim: false,
+				comfort: true,
 			},
 		);
 		assert_eq!(prod.push(&[0.5; 2 * STEREO]), Push::NotReady);
@@ -859,6 +904,7 @@ mod tests {
 				capacity: Duration::from_millis(100),
 				pad: true,
 				trim: true,
+				comfort: true,
 			},
 		);
 		cons.start();
@@ -870,7 +916,32 @@ mod tests {
 
 		assert_eq!(prod.push(&vec![0.5; 3800 * STEREO]), Push::Ok);
 		assert_eq!(cons.read(&mut out), Read::Trimmed { frames: 3880 - 480 });
+		assert_eq!(cons.trimmed(), 3880 - 480);
+		assert_eq!(cons.skips(), 1);
 		assert_eq!(cons.available(), 480);
+	}
+
+	/// A trim that reaches into the startup silence counts only what was pushed.
+	#[test]
+	fn a_trim_counts_no_startup_silence() {
+		let (mut prod, mut cons) = channel(
+			STEREO,
+			48_000,
+			48_000,
+			Config {
+				latency: Duration::from_millis(10),
+				capacity: Duration::from_millis(100),
+				pad: false,
+				trim: true,
+				comfort: true,
+			},
+		);
+		cons.start();
+		assert_eq!(prod.push(&vec![0.5; 4000 * STEREO]), Push::Ok);
+		let mut out = vec![0.0; 128 * STEREO];
+		// 352 of the 480 startup frames are left behind the 128 read.
+		assert_eq!(cons.read(&mut out), Read::Trimmed { frames: 4352 - 480 });
+		assert_eq!(cons.trimmed(), 4352 - 480 - 352);
 	}
 
 	/// Construction allocates for the reader's rate and the queue's channels,
@@ -907,6 +978,7 @@ mod tests {
 						capacity: Duration::from_secs(3),
 						pad: false,
 						trim: false,
+						comfort: true,
 					},
 				);
 				cons.stretch(rate);
@@ -961,6 +1033,7 @@ mod tests {
 				capacity: Duration::from_secs(1),
 				pad: false,
 				trim: false,
+				comfort: true,
 			},
 		);
 		cons.stretch(48_000);
@@ -994,6 +1067,7 @@ mod tests {
 				capacity: Duration::from_secs(1),
 				pad: false,
 				trim: false,
+				comfort: true,
 			},
 		);
 		cons.stretch(48_000);
@@ -1022,6 +1096,7 @@ mod tests {
 				capacity: Duration::from_secs(1),
 				pad: true,
 				trim: false,
+				comfort: true,
 			},
 		);
 		cons.stretch(48_000);
@@ -1056,6 +1131,7 @@ mod tests {
 				capacity: Duration::from_millis(3050),
 				pad: false,
 				trim: true,
+				comfort: true,
 			},
 		);
 		cons.stretch(48_000);
@@ -1096,6 +1172,8 @@ mod tests {
 			(120..=720).contains(&removed),
 			"accelerate removes one pitch period, removed {removed}"
 		);
+		assert_eq!(cons.accelerated(), removed as u64, "the shed is counted");
+		assert_eq!(cons.trimmed(), 0, "and is no trim");
 		assert_eq!(
 			prod.buffered(),
 			Duration::from_secs_f64(cons.available() as f64 / 48_000.0)
@@ -1139,6 +1217,31 @@ mod tests {
 		assert!(out[LATENCY * STEREO..].iter().all(|&sample| sample == 0.5));
 		// Running dry after the next utterance is an underflow again.
 		assert_eq!(cons.read(&mut out), Read::Underflow { frames: 0 });
+	}
+
+	/// A queue that measures nothing fills a declared silence with plain silence.
+	#[test]
+	fn an_unmeasured_declared_silence_is_silent() {
+		let (mut prod, mut cons) = channel(
+			STEREO,
+			48_000,
+			48_000,
+			Config {
+				latency: Duration::from_millis(50),
+				capacity: Duration::from_secs(1),
+				pad: false,
+				trim: false,
+				comfort: false,
+			},
+		);
+		cons.start();
+		assert_eq!(prod.push(&[0.0002; 4800 * STEREO]), Push::Ok);
+		let mut out = vec![0.0; (LATENCY + 4800) * STEREO];
+		assert_eq!(cons.read(&mut out), Read::Ok);
+		prod.end();
+		let mut out = vec![1.0; 1000 * STEREO];
+		assert_eq!(cons.read(&mut out), Read::Comfort { frames: 0 });
+		assert!(out.iter().all(|&sample| sample == 0.0));
 	}
 
 	/// A next utterance pushed while the end's tail still plays waits behind it,
@@ -1237,6 +1340,7 @@ mod tests {
 				capacity: Duration::from_secs(1),
 				pad: true,
 				trim: false,
+				comfort: true,
 			},
 		);
 		cons.stretch(48_000);

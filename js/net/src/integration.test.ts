@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, onTestFinished, spyOn, test } from "bun:test";
-import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { Duration, Manual, now, yieldNow } from "@moq/clock";
 import type * as Announce from "./announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import {
@@ -203,14 +203,14 @@ test("integration: lite subscription options and updates reach the publisher", a
 	// A floor of group 1, a concrete group on every draft.
 	const subscriber = remote.track("video").subscribe({
 		priority: 3,
-		delay: { max: Milli(250) },
+		delay: { max: Duration.millis(250) },
 		ranges: [{ start: { absolute: 1n }, end: { absolute: 9n } }],
 	});
 	const producer = await accepted;
 	expect(producer.subscription.peek()).toEqual({
 		priority: 3,
 		// The negotiated lite-06 cannot state a minimum.
-		delay: { min: null, max: Milli(250) },
+		delay: { min: null, max: Duration.millis(250) },
 		order: "descending",
 		ranges: [{ start: { absolute: 1n }, end: { absolute: 9n } }],
 	});
@@ -218,12 +218,12 @@ test("integration: lite subscription options and updates reach the publisher", a
 	const updated = producer.subscription.changed();
 	subscriber.update({
 		priority: 8,
-		delay: { max: Milli(500) },
+		delay: { max: Duration.millis(500) },
 		ranges: [{ start: { absolute: 2n }, end: { absolute: 12n } }],
 	});
 	expect(await updated).toEqual({
 		priority: 8,
-		delay: { min: null, max: Milli(500) },
+		delay: { min: null, max: Duration.millis(500) },
 		order: "descending",
 		ranges: [{ start: { absolute: 2n }, end: { absolute: 12n } }],
 	});
@@ -253,14 +253,14 @@ test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries the subscriber max age 
 	})();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({ delay: { max: Milli(250) } });
+	const subscriber = remote.track("video").subscribe({ delay: { max: Duration.millis(250) } });
 	const producer = await accepted;
 	// Without the negotiated parameter the publisher keeps its whole backlog instead.
-	expect(producer.subscription.peek()?.delay?.max).toBe(Milli(250));
+	expect(producer.subscription.peek()?.delay?.max).toEqual(Duration.millis(250));
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ delay: { max: Milli(500) } });
-	expect((await updated)?.delay?.max).toBe(Milli(500));
+	subscriber.update({ delay: { max: Duration.millis(500) } });
+	expect((await updated)?.delay?.max).toEqual(Duration.millis(500));
 
 	subscriber.close();
 	remote.close();
@@ -303,7 +303,7 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 	// nothing resubscribes. The publisher must see the budget rounded up instead.
 	const subscriber = remote
 		.track("video")
-		.subscribe({ delay: { max: Milli(38.75) }, ranges: [{ start: { absolute: 1n } }] });
+		.subscribe({ delay: { max: Duration.millis(38.75) }, ranges: [{ start: { absolute: 1n } }] });
 
 	// A failed subscribe never reaches the publisher, so race its closure to report the
 	// encode error rather than block until the suite times out.
@@ -312,11 +312,11 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 	});
 
 	const producer = await Promise.race([accepted, failed]);
-	expect(producer.subscription.peek()?.delay?.max).toBe(Milli(39));
+	expect(producer.subscription.peek()?.delay?.max).toEqual(Duration.millis(39));
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ delay: { max: Milli(500.25) }, ranges: [{ start: { absolute: 1n } }] });
-	expect((await Promise.race([updated, failed]))?.delay?.max).toBe(Milli(501));
+	subscriber.update({ delay: { max: Duration.millis(500.25) }, ranges: [{ start: { absolute: 1n } }] });
+	expect((await Promise.race([updated, failed]))?.delay?.max).toEqual(Duration.millis(501));
 
 	subscriber.close();
 	remote.close();
@@ -353,7 +353,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	const subscriber = remote
 		.track("video")
 		.subscribe({
-			delay: { max: Milli(REPLAY_LATENCY_MS) },
+			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
 			ranges: [{ start: { absolute: INITIAL_START_GROUP }, end: { absolute: INITIAL_END_GROUP } }],
 		})
 		.ordered();
@@ -366,11 +366,11 @@ test("integration: lite applies initial and updated group bounds", async () => {
 
 		// Replacing the ranges reads on from the same reader, the update going upstream.
 		subscriber.update({
-			delay: { max: Milli(REPLAY_LATENCY_MS) },
+			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
 			ranges: [{ start: { absolute: UPDATED_GROUP }, end: { absolute: UPDATED_END_GROUP } }],
 		});
 		const updated = (pending: Promise<unknown>) =>
-			withTimeout(pending, Nano.fromMilli(Milli(UPDATE_TIMEOUT_MS)), "updated group bound timed out");
+			withTimeout(pending, Duration.millis(UPDATE_TIMEOUT_MS), "updated group bound timed out");
 		expect(((await updated(subscriber.nextGroup())) as { sequence: bigint } | undefined)?.sequence).toBe(
 			UPDATED_GROUP,
 		);
@@ -378,10 +378,10 @@ test("integration: lite applies initial and updated group bounds", async () => {
 
 		// An open range parks at the live edge instead.
 		subscriber.update({
-			delay: { max: Milli(REPLAY_LATENCY_MS) },
+			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
 			ranges: [{ start: { absolute: GROUP_COUNT } }],
 		});
-		expect(await settlesWithin(subscriber.nextGroup(), clock, Milli(PENDING_ASSERT_MS))).toBe(false);
+		expect(await settlesWithin(subscriber.nextGroup(), clock, Duration.millis(PENDING_ASSERT_MS))).toBe(false);
 	} finally {
 		subscriber.close();
 		remote.close();
@@ -413,38 +413,30 @@ test("integration: lite refuses an empty requested range on open and on update",
 		// Bounds that meet cannot go on the wire: the nearest encoding inverts the range. The read
 		// of an empty window ends at once, and the copy is refused.
 		const empty = video.subscribe({
-			delay: { max: Milli(REPLAY_LATENCY_MS) },
+			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
 			ranges: [{ start: { absolute: 2n }, end: { absolute: 2n } }],
 		});
 		expect(await empty.recvGroup()).toBeUndefined();
 		expect(
-			await withTimeout(
-				Promise.resolve(empty.closed),
-				Nano.fromMilli(Milli(TIMEOUT_MS)),
-				"empty open never settled",
-			),
+			await withTimeout(Promise.resolve(empty.closed), Duration.millis(TIMEOUT_MS), "empty open never settled"),
 		).toHaveProperty("message", "empty subscription range cannot be encoded");
 		empty.close();
 
 		// A live subscription whose demand later collapses to nothing fails the same way.
 		const live = video
 			.subscribe({
-				delay: { max: Milli(REPLAY_LATENCY_MS) },
+				delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
 				ranges: [{ start: { absolute: 1n }, end: { absolute: 2n } }],
 			})
 			.ordered();
 		expect((await live.nextGroup())?.sequence).toBe(1n);
 		live.update({
-			delay: { max: Milli(REPLAY_LATENCY_MS) },
+			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
 			ranges: [{ start: { absolute: 3n }, end: { absolute: 3n } }],
 		});
 		expect(await live.nextGroup()).toBeUndefined();
 		expect(
-			await withTimeout(
-				Promise.resolve(live.closed),
-				Nano.fromMilli(Milli(TIMEOUT_MS)),
-				"empty update never settled",
-			),
+			await withTimeout(Promise.resolve(live.closed), Duration.millis(TIMEOUT_MS), "empty update never settled"),
 		).toHaveProperty("message", "empty subscription range cannot be encoded");
 		live.close();
 	} finally {
@@ -560,7 +552,7 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const bounded = (end: bigint) =>
 		remote.track("video").subscribe({
-			delay: { max: Milli(60_000) },
+			delay: { max: Duration.millis(60_000) },
 			order: "ascending",
 			ranges: [{ start: { absolute: 1n }, end: { absolute: end } }],
 		});
@@ -686,7 +678,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		const remote = wireOf(client).consume(Path.from("test"));
 		const track = remote.track("video").subscribe().ordered();
 		expect(await track.readString()).toBe("hello");
-		await clock.advance(Nano.fromMilli(Milli(50)));
+		await clock.advance(Duration.millis(50));
 		// One request, wanted from its subscription on and never let go in between.
 		if (!producer) throw new Error("the track was never answered");
 		const served = producer;
@@ -695,7 +687,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		expect(edges.at(-1)).toBe(true);
 
 		track.close();
-		await withTimeout(unwanted(served.demand()), Nano.fromMilli(Milli(1000)), "demand outlived the reader");
+		await withTimeout(unwanted(served.demand()), Duration.millis(1000), "demand outlived the reader");
 		expect(edges.at(-1)).toBe(false);
 		expect(edges.filter((edge) => edge)).toEqual([true]);
 
@@ -758,7 +750,7 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 async function announcedUntil(announced: Announce.Routes, until: string) {
 	const seen: string[] = [];
 	while (!seen.includes(until)) {
-		const entry = await withTimeout(announced.next(), Nano.fromMilli(Milli(1000)), `waiting for ${until}`);
+		const entry = await withTimeout(announced.next(), Duration.millis(1000), `waiting for ${until}`);
 		if (!entry) throw new Error("announcements ended");
 		seen.push(entry.prefix);
 	}
@@ -918,7 +910,7 @@ test("integration: subscribing to an unserved broadcast is refused as NotFound",
 	broadcast.close();
 
 	const track = remote.track("video").subscribe();
-	const err = await withTimeout(Promise.resolve(track.closed), Nano.fromMilli(Milli(1000)), "track never closed");
+	const err = await withTimeout(Promise.resolve(track.closed), Duration.millis(1000), "track never closed");
 	expect(err).toBeInstanceOf(StreamError);
 	expect((err as StreamError).code).toBe(StreamCode.NotFound);
 
@@ -935,7 +927,7 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const instance = Instance.random();
 	const localRoute = origin.route(path, { instance: { id: instance, epoch: 0n }, cost: 5n });
 	const local = localRoute.broadcast;
-	const dynamic = origin.routePrefix(path, { instance: { id: instance, epoch: 0n }, cost: 1n });
+	const dynamic = origin.claim(path, { instance: { id: instance, epoch: 0n }, cost: 1n });
 
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),
@@ -946,7 +938,7 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const track = remote.track("video").subscribe();
 	const { value: request } = await withTimeout(
 		dynamic.requested().next(),
-		Nano.fromMilli(Milli(1000)),
+		Duration.millis(1000),
 		"the cheaper route was never asked",
 	);
 	expect(request?.path).toBe(path);
@@ -1190,23 +1182,23 @@ test("integration: lite draft-07 track info follows a republished broadcast", as
 
 	const path = Path.from("test");
 	const first = publish(origin, path);
-	first.createTrack("video", { priority: 1, timescale: Timescale.MILLI, maxAge: Milli(1000) });
+	first.createTrack("video", { priority: 1, timescale: Timescale.MILLI, maxAge: Duration.millis(1000) });
 
 	const remote = wireOf(client).consume(path);
 	const before = await remote.track("video").info();
 	expect(before.priority).toBe(1);
 	expect(before.timescale).toBe(Timescale.MILLI);
-	expect(before.maxAge).toBe(Milli(1000));
+	expect(before.maxAge).toEqual(Duration.millis(1000));
 
 	// Replace the broadcast on the same path with one whose track declares different
 	// immutable properties.
 	const second = publish(origin, path);
-	second.createTrack("video", { priority: 7, timescale: Timescale.MICRO, maxAge: Milli(5000) });
+	second.createTrack("video", { priority: 7, timescale: Timescale.MICRO, maxAge: Duration.millis(5000) });
 
 	const after = await remote.track("video").info();
 	expect(after.priority).toBe(7);
 	expect(after.timescale).toBe(Timescale.MICRO);
-	expect(after.maxAge).toBe(Milli(5000));
+	expect(after.maxAge).toEqual(Duration.millis(5000));
 
 	first.close();
 	second.close();
@@ -1233,9 +1225,9 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 		const tracks = {
 			omitted: broadcast.createTrack("omitted", { timescale: Timescale.MILLI }),
 			unlimited: broadcast.createTrack("unlimited", { timescale: Timescale.MILLI, maxAge: null }),
-			explicit: broadcast.createTrack("explicit", { timescale: Timescale.MILLI, maxAge: Milli(5000) }),
+			explicit: broadcast.createTrack("explicit", { timescale: Timescale.MILLI, maxAge: Duration.millis(5000) }),
 		};
-		expect((await tracks.omitted.info()).maxAge).toBe(Milli.zero);
+		expect((await tracks.omitted.info()).maxAge).toEqual(Duration.ZERO);
 		expect((await tracks.unlimited.info()).maxAge).toBeNull();
 
 		const remote = wireOf(client).consume(path);
@@ -1243,15 +1235,15 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 			// moq-transport answers info through a subscription, so hold one open.
 			const sub = remote.track(name).subscribe();
 			try {
-				return await withTimeout(sub.info(), Nano.fromMilli(Milli(5_000)), `${name} info`);
+				return await withTimeout(sub.info(), Duration.millis(5_000), `${name} info`);
 			} finally {
 				sub.close();
 			}
 		};
 		const carried = alpn !== Lite.ALPN_03;
-		expect((await info("omitted")).maxAge).toBe(carried ? Milli.zero : null);
+		expect((await info("omitted")).maxAge).toEqual(carried ? Duration.ZERO : null);
 		expect((await info("unlimited")).maxAge).toBeNull();
-		expect((await info("explicit")).maxAge).toBe(carried ? Milli(5000) : null);
+		expect((await info("explicit")).maxAge).toEqual(carried ? Duration.millis(5000) : null);
 
 		broadcast.close();
 		remote.close();
@@ -1645,7 +1637,7 @@ test("integration: lite fetch re-armed by a late reader keeps every frame", asyn
 
 		group.writeFrame(textFrame("more"));
 		const more = f2.readString();
-		expect(`${delay}: ${await settlesWithin(more, clock, Milli(500))}`).toBe(`${delay}: true`);
+		expect(`${delay}: ${await settlesWithin(more, clock, Duration.millis(500))}`).toBe(`${delay}: true`);
 		expect(await more).toBe("more");
 
 		f2.close();
@@ -1744,7 +1736,7 @@ test("integration: a follower waits for a late publisher", async () => {
 	// Nobody publishes this path yet. A blind consume would be reset (see the
 	// "subscribe to non-existent broadcast" test); the handle just stays offline.
 	const watched = clientOrigin.follow(Path.from("late"));
-	await clock.advance(Nano.fromMilli(Milli(50)));
+	await clock.advance(Duration.millis(50));
 	expect(watched.active.peek()).toBeUndefined();
 
 	// The publisher arrives afterwards.
@@ -1903,13 +1895,13 @@ async function runRepublishCycle(protocol: string) {
 		// A dead consumer left in place would still satisfy `!== undefined`, so wait for the swap.
 		const active = await withTimeout(
 			waitFor(watched.active, (b) => b !== undefined && b !== previous),
-			Nano.fromMilli(Milli(1000)),
+			Duration.millis(1000),
 			`generation ${generation} never came online`,
 		);
 		if (!active) throw new Error("expected an active broadcast");
 		const frame = withTimeout(
 			active.track("audio").subscribe().ordered().readString(),
-			Nano.fromMilli(Milli(1000)),
+			Duration.millis(1000),
 			`generation ${generation} never served a frame`,
 		);
 		expect(await frame).toBe(payload);
@@ -1921,7 +1913,7 @@ async function runRepublishCycle(protocol: string) {
 		await serving;
 		await withTimeout(
 			waitFor(watched.active, (b) => b === undefined),
-			Nano.fromMilli(Milli(1000)),
+			Duration.millis(1000),
 			`generation ${generation} never ended`,
 		);
 		expect(watched.closed.peek()).toBeUndefined();
@@ -2057,9 +2049,9 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 /** Poll until `pred` holds, so a regression fails the test instead of hanging it. */
 // Yields rather than sleeps, so it also polls under a Manual clock, where only the suite timeout bounds it.
 async function until(pred: () => boolean): Promise<void> {
-	const deadline = Instant.add(now(), Nano.fromMilli(Milli(1000)));
+	const deadline = now().add(Duration.millis(1000));
 	while (!pred()) {
-		if (now() > deadline) throw new Error("timed out waiting for condition");
+		if (now().gt(deadline)) throw new Error("timed out waiting for condition");
 		await yieldNow();
 	}
 }
@@ -2197,7 +2189,7 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	// The critical part: the client must NOT re-announce "from-server" back. If it did, the
 	// server's forwarder would insert it as a remote entry in serverSees. Give the wire a
 	// moment, then check the only remote entry the server has is the client's own broadcast.
-	await clock.advance(Nano.fromMilli(Milli(50)));
+	await clock.advance(Duration.millis(50));
 	expect(wireOf(serverReader).routes(Path.from("from-server"))).toBe(false);
 
 	watchingShared.close();
@@ -2357,7 +2349,7 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			// The listing leaves. Its announce request stays open for the request beneath it rather
 			// than handing the route to a narrower one, so the instance never changes.
 			listing.close();
-			await clock.advance(Nano.fromMilli(Milli(2000)));
+			await clock.advance(Duration.millis(2000));
 			expect([started, ended]).toEqual([1, 0]);
 			expect(request.closed.peek()).toBeUndefined();
 			expect(request.active.peek()).toBe(front);
@@ -2367,7 +2359,7 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 
 			// Once the request goes too, the announce request lingers out.
 			request.close();
-			await clock.advance(Nano.fromMilli(Milli(2000)));
+			await clock.advance(Duration.millis(2000));
 			expect(ended).toBe(1);
 
 			broadcast.close();
@@ -2461,7 +2453,7 @@ test("origin: a blind request ends with its session, and the next session answer
 		enabled: true,
 		url: reconnectUrl,
 		websocket: { enabled: false },
-		delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
+		delay: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
 		consume: clientOrigin,
 		share: false,
 	});
@@ -2504,7 +2496,7 @@ test("origin: a reactive handle follows announcements across a republish", async
 	const watch = clientOrigin.follow(Path.from("show"));
 
 	// Nothing published yet: the handle waits instead of subscribing blind.
-	await clock.advance(Nano.fromMilli(Milli(5)));
+	await clock.advance(Duration.millis(5));
 	expect(watch.active.peek()).toBeUndefined();
 
 	// The publish resolves it through the wire.
@@ -2563,7 +2555,7 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 	// The newer session dies; the older one still carries the path and must keep serving.
 	second.client.abort();
 	second.server.abort();
-	await clock.advance(Nano.fromMilli(Milli(50)));
+	await clock.advance(Duration.millis(50));
 
 	const remote = await routed(reader, Path.from("redundant"));
 	if (!remote) throw new Error("route black-holed despite a live session");
@@ -2670,7 +2662,7 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
-		const handle = origin.routePrefix(Path.empty());
+		const handle = origin.claim(Path.empty());
 		const held = new BroadcastProducer();
 		held.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 		const serving = (async () => {
@@ -2705,7 +2697,7 @@ test.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
-		const handle = origin.routePrefix(Path.empty());
+		const handle = origin.claim(Path.empty());
 		const serving = (async () => {
 			const requests = handle.requested();
 			const request = (await requests.next()).value;
@@ -2745,7 +2737,7 @@ test.each(["request", "follow"] as const)(
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
 		const path = Path.from("live/cam");
-		const handle = origin.routePrefix(Path.empty());
+		const handle = origin.claim(Path.empty());
 		const serving = (async () => {
 			const requests = handle.requested();
 			const request = (await requests.next()).value;
@@ -2830,7 +2822,7 @@ async function runSessionDeath(
 	else pair.server.close({ closeCode: DEATH, reason: "killed" });
 	const groupEnd = Promise.resolve(group.closed);
 	const closed = await clock.drive(
-		withTimeout(Promise.resolve(track.closed), Nano.fromMilli(Milli(2000)), "the track never ended"),
+		withTimeout(Promise.resolve(track.closed), Duration.millis(2000), "the track never ended"),
 	);
 
 	broadcast.close();
@@ -2841,7 +2833,7 @@ async function runSessionDeath(
 	origin.close();
 	return [
 		closed,
-		await clock.drive(withTimeout(groupEnd, Nano.fromMilli(Milli(2000)), "the group never ended")),
+		await clock.drive(withTimeout(groupEnd, Duration.millis(2000), "the group never ended")),
 		hooks.subscriberEnd(track),
 	];
 }
@@ -2903,11 +2895,7 @@ test("integration: lite draft-05 ends a track with the publisher's reset", async
 
 	const reset = StreamCode(70);
 	for (const producer of served) producer.abort(new StreamError(reset));
-	const closed = await withTimeout(
-		Promise.resolve(track.closed),
-		Nano.fromMilli(Milli(2000)),
-		"the track never ended",
-	);
+	const closed = await withTimeout(Promise.resolve(track.closed), Duration.millis(2000), "the track never ended");
 	expect(closed).toBeInstanceOf(StreamError);
 	expect((closed as StreamError).code).toBe(reset);
 

@@ -293,8 +293,7 @@ int main(void)
 	route_options.hidden = true;
 	moq_route *route = NULL;
 	ok(moq_origin_producer_route(origin, "probe", &route_options, &route), "route");
-	moq_broadcast_producer *broadcast = NULL;
-	ok(moq_route_broadcast(route, &broadcast), "route broadcast");
+	moq_broadcast_producer *broadcast = moq_route_broadcast(route);
 	char *instance = moq_route_instance_id(route);
 	CHECK(instance && instance[0] != '\0');
 	moq_string_free(instance);
@@ -441,14 +440,15 @@ int main(void)
 	moq_session *redialing = await(&dialing, "retrying connect");
 	moq_task_free(task);
 	moq_connection_state *state = moq_session_state(redialing);
-	while (!state->failure) {
+	CHECK(state->phase.tag == MOQ_CONNECTION_PHASE_CONNECTING);
+	while (!state->phase.connecting.failure) {
 		state = next_state(redialing, state);
+		CHECK(state->phase.tag == MOQ_CONNECTION_PHASE_CONNECTING);
 	}
-	CHECK(state->phase == MOQ_CONNECTION_PHASE_CONNECTING);
-	CHECK(state->failure->tag == MOQ_ERROR_CONNECT);
+	CHECK(state->phase.connecting.failure->tag == MOQ_ERROR_CONNECT);
 	CHECK(state->connects == 0);
 	moq_session_cancel(redialing, 0);
-	while (state->phase != MOQ_CONNECTION_PHASE_CLOSED) {
+	while (state->phase.tag != MOQ_CONNECTION_PHASE_CLOSED) {
 		state = next_state(redialing, state);
 	}
 	CHECK(state->connects == 0);
@@ -464,8 +464,7 @@ int main(void)
 	late_options.hidden = true;
 	moq_route *late_route = NULL;
 	ok(moq_origin_producer_route(late_origin, "late", &late_options, &late_route), "late route");
-	moq_broadcast_producer *late_broadcast = NULL;
-	ok(moq_route_broadcast(late_route, &late_broadcast), "late broadcast");
+	moq_broadcast_producer *late_broadcast = moq_route_broadcast(late_route);
 	moq_route_free(late_route);
 	moq_track_producer *late_track = NULL;
 	ok(moq_broadcast_producer_publish_track(late_broadcast, "data", &info, &late_track), "late track");

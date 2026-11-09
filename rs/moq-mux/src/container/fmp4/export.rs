@@ -1,3 +1,4 @@
+use moq_net::track::Delay;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::task::Poll;
 use std::time::Duration;
@@ -64,7 +65,7 @@ const INIT_QUEUE: Duration = Duration::from_secs(30);
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Feed<S>,
-	max_delay: Duration,
+	delay: Delay,
 	fragment_duration: Option<Duration>,
 
 	/// The tracks being read, by rendition name. Before the init a rendition that leaves the
@@ -213,10 +214,10 @@ enum Rendition {
 }
 
 impl Rendition {
-	fn subscribe(&self, source: &crate::Source, name: &str, max_delay: Duration) -> Result<Option<ExportSource>> {
+	fn subscribe(&self, source: &crate::Source, name: &str, delay: Delay) -> Result<Option<ExportSource>> {
 		match self {
-			Rendition::Video(config) => ExportSource::for_fmp4_video(source, name, config, max_delay),
-			Rendition::Audio(config) => ExportSource::for_audio(source, name, config, max_delay),
+			Rendition::Video(config) => ExportSource::for_fmp4_video(source, name, config, delay),
+			Rendition::Audio(config) => ExportSource::for_audio(source, name, config, delay),
 		}
 	}
 
@@ -669,7 +670,7 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Feed::Live(catalog),
-			max_delay: Duration::ZERO,
+			delay: Delay::default(),
 			fragment_duration: None,
 			tracks: HashMap::new(),
 			departed: HashMap::new(),
@@ -680,13 +681,13 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	/// Set the max delay for each per-track source.
+	/// Set how far behind the live edge each per-track source plays: [`Delay::min`] is where it
+	/// starts, and [`Delay::max`] how late a group may fall before it is skipped.
 	///
-	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
-	/// Defaults to
-	/// [`Duration::ZERO`] (skip aggressively).
-	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
-		self.max_delay = max_delay;
+	/// See [`Consumer`](crate::container::Consumer) for the per-track start and skip behavior.
+	/// Defaults to zero for both (start at the live edge, skip aggressively).
+	pub fn with_delay(mut self, delay: Delay) -> Self {
+		self.delay = delay;
 		self
 	}
 
@@ -1066,7 +1067,7 @@ impl<S: Stream> Export<S> {
 			match self.tracks.get_mut(&name) {
 				Some(track) if track.subscription().is_some() && !moved => track.reconfigure(&name, config)?,
 				Some(track) => {
-					let Some(source) = config.subscribe(&self.source, &name, self.max_delay)? else {
+					let Some(source) = config.subscribe(&self.source, &name, self.delay)? else {
 						continue;
 					};
 					// The publisher still caches the group the rendition left on, which a fresh
@@ -1085,7 +1086,7 @@ impl<S: Stream> Export<S> {
 				None => {
 					// Subscribe via ExportSource, which applies any per-codec transform
 					// (Annex-B → length-prefixed) at pull time.
-					let Some(source) = config.subscribe(&self.source, &name, self.max_delay)? else {
+					let Some(source) = config.subscribe(&self.source, &name, self.delay)? else {
 						continue;
 					};
 					if self.init.written() && !self.late {
@@ -1171,7 +1172,7 @@ pub(crate) fn extract_init(
 	trexs: &mut Vec<mp4_atom::Trex>,
 ) -> Result<()> {
 	let mut cursor = std::io::Cursor::new(init.as_ref());
-	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).map_err(crate::Error::mp4)? {
 		match atom {
 			mp4_atom::Any::Ftyp(f) if ftyp_data.is_none() => {
 				*ftyp_data = Some(f);
@@ -1547,7 +1548,7 @@ pub(crate) fn catalog_timescale_audio(config: &hang::catalog::AudioConfig) -> Re
 
 fn parse_timescale_from_init(init: &[u8]) -> Result<u64> {
 	let mut cursor = std::io::Cursor::new(init);
-	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).map_err(crate::Error::mp4)? {
 		if let mp4_atom::Any::Moov(moov) = atom {
 			let trak = moov.trak.first().ok_or(Error::NoTracks)?;
 			return Ok(trak.mdia.mdhd.timescale as u64);

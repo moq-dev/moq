@@ -32,7 +32,7 @@ pub use super::driver::Endpoint;
 #[non_exhaustive]
 pub struct Config {
 	/// Tracks accepted connections from admission until transport closure.
-	pub activity: moq_net::server::Activity,
+	pub admission: moq_net::server::Admission,
 	/// Accept incoming connections with this configuration. Without it the
 	/// endpoint only dials, and inbound handshakes are dropped.
 	pub server: Option<server::Config>,
@@ -62,7 +62,7 @@ pub struct Config {
 impl std::fmt::Debug for Config {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("Config")
-			.field("activity", &self.activity)
+			.field("admission", &self.admission)
 			.field("server", &self.server)
 			.field("backlog", &self.backlog)
 			.field("handshake", &self.handshake)
@@ -75,7 +75,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			server: None,
-			activity: Default::default(),
+			admission: Default::default(),
 			backlog: 1024,
 			handshake: Default::default(),
 			reset_secret: None,

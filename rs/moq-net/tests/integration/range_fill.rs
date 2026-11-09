@@ -26,7 +26,7 @@ fn origin(hop: u64, pool: Option<cache::Pool>) -> moq_net::origin::Producer {
 	}
 	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// The publisher's groups, one per second, with no publisher max age.
@@ -179,7 +179,7 @@ async fn a_recovery_outlives_the_track_finishing() {
 		// Superseded, the copy expires them, while the reader keeps the subscription live.
 		kio::clock::sleep(cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
 		let mut second = fixture.subscribe([Range::groups(1..4)]).await;
-		fixture.track.finish().unwrap();
+		let _track = fixture.track.finish().unwrap();
 		assert_eq!(receive(&mut second, 3).await, (1..4).collect());
 	})
 	.await

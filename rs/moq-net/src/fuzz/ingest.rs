@@ -60,7 +60,9 @@ fn track_info(timed: bool, compress: bool, draft: Option<ietf::Version>) -> trac
 	if timed {
 		info = info.with_timescale(Timescale::MILLI);
 	}
-	info.compress = compress;
+	if compress {
+		info.compression = crate::track::Compression::Deflate;
+	}
 	info.properties = draft.map(|version| {
 		std::sync::Arc::new(TrackProperties {
 			version,
@@ -137,7 +139,7 @@ fn check(session: Session, info: &track::Info, body: &[u8], ingested: &Ingested)
 		);
 		assert_eq!(
 			frame.inflated.is_some(),
-			info.compress,
+			info.compressed(),
 			"frame {index} lost its inflated size"
 		);
 		let id = frame.fields.as_ref().map_or(index as u64, |(id, _)| *id);
@@ -219,7 +221,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 			let mut reader = reader(Bytes::copy_from_slice(body), chunk, version);
 			let producer = track.append_group().ok()?;
 			let consumer = producer.consume();
-			let mut viewer = stored(producer.consume(), info.compress);
+			let mut viewer = stored(producer.consume(), info.compressed());
 			let mut group = crate::recv::Group::new(producer);
 			let framing = lite::Framing::new(info, version);
 			let mut ingest = lite::FrameIngest::new(framing, records, frame_start);
@@ -250,7 +252,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 				})
 				.ok()?;
 			let consumer = producer.consume();
-			let mut viewer = stored(producer.consume(), info.compress);
+			let mut viewer = stored(producer.consume(), info.compressed());
 			let mut group = crate::recv::Group::new(producer);
 			let mut ingest = ietf::GroupIngest::new(version, &header, info.timescale);
 			let end = drive(body.len(), |waiter| {
@@ -274,7 +276,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 	}
 
 	Some(Ingested {
-		frames: read(consumer, info.compress),
+		frames: read(consumer, info.compressed()),
 		end: end.map_err(|err| err.to_string()),
 	})
 }

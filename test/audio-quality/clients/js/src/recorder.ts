@@ -16,14 +16,14 @@
  * @module
  */
 
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { format, arrivals as readArrivals } from "./capture.ts";
 import type { Arrival } from "./schema.ts";
 
 /** How far back the relay may serve a group. Long, so a late group is recorded rather than dropped. */
-const MAX_DELAY = Milli(10_000);
+const MAX_DELAY = Duration.millis(10_000);
 
 /** What the recorder has, until the driver drains it. */
 export type Recorder = {
@@ -66,7 +66,9 @@ async function record(): Promise<void> {
 
 	let rtt: number | null = null;
 	connection.probe.subscribe((probe) => {
-		if (probe.rtt !== undefined) rtt = rtt === null ? probe.rtt : Math.min(rtt, probe.rtt);
+		if (probe.rtt === undefined) return;
+		const sample = probe.rtt.asMillis();
+		rtt = rtt === null ? sample : Math.min(rtt, sample);
 	});
 
 	const request = origin.request(Moq.Path.from(required("broadcast")));

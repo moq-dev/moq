@@ -376,7 +376,7 @@ mod tests {
 			.expect("colour");
 		assert_eq!(
 			(color.primaries, color.transfer, color.matrix, color.range),
-			(Some(9), Some(16), Some(9), Some(hang::catalog::Range::Limited))
+			(Some(9), Some(16), Some(9), Some(hang::catalog::ColorRange::Limited))
 		);
 		let hdr = crate::codec::color::test::hdr10();
 		assert_eq!(

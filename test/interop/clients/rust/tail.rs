@@ -120,10 +120,7 @@ async fn main() -> anyhow::Result<()> {
 					.connect(url)
 					.established()
 					.await?;
-				let mut priority = track.priority();
-				while priority.is_none() {
-					priority = kio::wait(|waiter| track.poll_priority(waiter, priority)).await;
-				}
+				while kio::wait(|waiter| track.poll_priority_changed(waiter)).await.is_none() {}
 				for sequence in 0..GROUPS {
 					ensure!(
 						commands.next_line().await?.as_deref() == Some(&format!("datagram {sequence}")),
@@ -144,7 +141,10 @@ async fn main() -> anyhow::Result<()> {
 					"tail",
 					moq_net::track::Info::default()
 						.with_timescale(moq_net::Timescale::MILLI)
-						.with_compress(compress)
+						.with_compression(match compress {
+							true => moq_net::track::Compression::Deflate,
+							false => moq_net::track::Compression::None,
+						})
 						// `cached` and `late` read groups a newer one supersedes, which the default
 						// zero max age would leave stale.
 						.with_max_age(None),
@@ -167,6 +167,8 @@ async fn main() -> anyhow::Result<()> {
 					.connect(url)
 					.established()
 					.await?;
+				// Held until the reader acknowledged the end, as the producer was.
+				let mut _finished = None;
 				if let Some(mut group) = head {
 					ensure!(
 						commands.next_line().await?.as_deref() == Some("late tail"),
@@ -183,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
 						}
 						group.finish()?;
 					}
-					track.finish()?;
+					_finished = Some(track.finish()?);
 				} else if !cached {
 					let mut demand = track.demand();
 					while demand.wanted_changed().await?.is_none() {}
@@ -276,7 +278,8 @@ async fn main() -> anyhow::Result<()> {
 			let mut track = remote.subscribe(Some(options)).await?;
 			if compress {
 				ensure!(
-					track.info().compress == args.get(4).is_some_and(|version| version == "moq-lite-07-wip"),
+					(track.info().compression == moq_net::track::Compression::Deflate)
+						== args.get(4).is_some_and(|version| version == "moq-lite-07-wip"),
 					"wrong compression metadata"
 				);
 			}

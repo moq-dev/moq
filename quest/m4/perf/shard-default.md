@@ -5,7 +5,7 @@
 A saturating benchmark shows whether thread-per-core QUIC beats the shared
 runtime, and the relay's default follows the measurement. If sharding wins,
 an unset `runtime.workers` runs one worker per core on Linux, and
-`workers = 0` is the explicit way back to the shared runtime. Off Linux, the
+`workers = "shared"` is the explicit way back to the shared runtime. Off Linux, the
 shared runtime stays the default.
 
 ## Plan
@@ -59,7 +59,7 @@ way until a measurement justifies the flip.
 
 Update `doc/bin/relay/` for the default change.
 
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [no-sentinels](/quest/m2/no-sentinels.md) makes `runtime.workers` `"shared" | "auto" | <n>` before the cut, so flipping the default changes only the default.
+`runtime.workers` is `"shared" | "auto" | <n>`, defaulting to `"shared"`, so flipping the default changes only the default: `auto` already sizes the group from `available_parallelism`, capped at `MAX_SHARDS`.
 
 ## Related
 

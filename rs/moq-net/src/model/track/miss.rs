@@ -2523,7 +2523,7 @@ mod tests {
 			.unwrap()
 			.finish()
 			.unwrap();
-		track.finish().unwrap();
+		let track = track.finish().unwrap();
 		// Group 0 lies below where the feed starts: only a fill may deliver it.
 		let ranges = [crate::track::Range::groups(0..1), crate::track::Range::groups(8..)];
 		let mut reader = track.subscribe(

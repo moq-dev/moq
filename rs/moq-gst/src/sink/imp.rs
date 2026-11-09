@@ -1491,7 +1491,9 @@ mod tests {
 		};
 		assert_eq!(
 			first.media.clock.unwrap().wall.as_micros(),
-			((1_735_689_600 - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128,
+			(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(1_735_689_600))
+				.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+				.as_micros(),
 		);
 	}
 
@@ -1532,7 +1534,9 @@ mod tests {
 			};
 			assert_eq!(
 				clock.wall.as_micros(),
-				((zero - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128
+				(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(zero))
+					.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+					.as_micros()
 			);
 			for (name, kind, expected) in [
 				("video", moq_mux::container::Kind::Video, 3),
@@ -2460,7 +2464,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).unwrap();
 		track.append_group().unwrap().finish().unwrap();
-		track.finish().unwrap();
+		let track = track.finish().unwrap();
 		assert!(session.finish());
 		while bus.pop().is_some() {}
 
@@ -2625,7 +2629,7 @@ mod tests {
 
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let quic = super::super::session::quic_config(&resolved).resolve();
-		assert_eq!(quic.idle_timeout, Duration::from_secs(15));
+		assert_eq!(quic.idle_timeout, Some(Duration::from_secs(15)));
 		assert_eq!(quic.keep_alive, Some(Duration::from_secs(3)));
 		assert!(!sink.property::<bool>("quic-keylog"));
 		assert!(quic.keylog.is_none());
@@ -2635,8 +2639,8 @@ mod tests {
 		sink.set_property("quic-keylog", true);
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let quic = super::super::session::quic_config(&resolved).resolve();
-		assert_eq!(quic.idle_timeout, Duration::ZERO);
-		assert_eq!(quic.keep_alive, Some(Duration::ZERO));
+		assert_eq!(quic.idle_timeout, None);
+		assert_eq!(quic.keep_alive, None);
 		assert!(quic.keylog.is_some());
 	}
 

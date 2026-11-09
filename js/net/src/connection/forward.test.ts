@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
-import { type Installed, Manual, Milli, Nano } from "@moq/clock";
+import { Duration, type Installed, Manual } from "@moq/clock";
 import * as Announce from "../announced.ts";
 import { AuthSession } from "../auth_session.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
@@ -30,12 +30,12 @@ afterEach(() => {
 
 /** Drain the reactive work without moving time. */
 function settle(): Promise<void> {
-	return clock.advance(Nano.zero);
+	return clock.advance(Duration.ZERO);
 }
 
 /** Move time forward, draining the reactive work at each deadline on the way. */
 function advance(ms: number): Promise<void> {
-	return clock.advance(Nano.fromMilli(Milli(ms)));
+	return clock.advance(Duration.millis(ms));
 }
 
 /**
@@ -72,6 +72,7 @@ class FakeSession {
 		registerWire(this, {
 			consume: (path) => this.consume(path),
 			exclusive,
+			leave: () => {},
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
 		});
 		this.closed = new Promise((resolve) => {

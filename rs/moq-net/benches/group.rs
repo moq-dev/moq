@@ -90,10 +90,10 @@ const LIVE_BATCH: usize = 128;
 
 /// Keeps the broadcast/track producers alive alongside the group so the group
 /// isn't torn down mid-benchmark. Only `group` is written to.
-struct Ctx {
+struct Ctx<G = group::Producer> {
 	_broadcast: broadcast::Producer,
 	_track: track::Producer,
-	group: group::Producer,
+	group: G,
 }
 
 /// Build a fresh, empty group via the public producer path.
@@ -154,14 +154,25 @@ fn bench_write(c: &mut Criterion) {
 }
 
 /// A pre-filled, finished group plus a consumer positioned at its first frame.
-fn filled_group(n: usize, payload: &Bytes) -> (Ctx, group::Consumer) {
-	let mut ctx = fresh_group();
+fn filled_group(n: usize, payload: &Bytes) -> (Ctx<group::Finished>, group::Consumer) {
+	let Ctx {
+		_broadcast,
+		_track,
+		mut group,
+	} = fresh_group();
 	for _ in 0..n {
-		ctx.group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 	}
-	ctx.group.finish().unwrap();
-	let consumer = ctx.group.consume();
-	(ctx, consumer)
+	let group = group.finish().unwrap();
+	let consumer = group.consume();
+	(
+		Ctx {
+			_broadcast,
+			_track,
+			group,
+		},
+		consumer,
+	)
 }
 
 /// Drain a whole group through a reused `moq_net::fuzz::FrameBatch<N>`.
@@ -348,13 +359,13 @@ fn bench_roundtrip(c: &mut Criterion) {
 					for _ in 0..n {
 						ctx.group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 					}
-					ctx.group.finish().unwrap();
-					let mut consumer = ctx.group.consume();
+					let group = ctx.group.finish().unwrap();
+					let mut consumer = group.consume();
 					for _ in 0..n {
 						let frame = consumer.read_frame().now_or_never().unwrap().unwrap();
 						black_box(frame);
 					}
-					(ctx, consumer)
+					(ctx._broadcast, ctx._track, group, consumer)
 				},
 				BatchSize::SmallInput,
 			);
@@ -489,14 +500,16 @@ fn bench_inflate(c: &mut Criterion) {
 				b.iter_batched(
 					|| {
 						let broadcast = broadcast::Producer::new(broadcast::Info::default());
-						let track = broadcast.create_track("bench", timed().with_compress(true)).unwrap();
+						let track = broadcast
+							.create_track("bench", timed().with_compression(moq_net::track::Compression::Deflate))
+							.unwrap();
 						let consumers: Vec<group::Consumer> = (0..groups)
 							.flat_map(|_| {
 								let mut group = track.append_group().unwrap();
 								for payload in &payloads {
 									group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 								}
-								group.finish().unwrap();
+								let group = group.finish().unwrap();
 								(0..readers).map(move |_| group.consume()).collect::<Vec<_>>()
 							})
 							.collect();
@@ -534,7 +547,10 @@ fn bench_compressed_updates(c: &mut Criterion) {
 						let producers: Vec<_> = (0..tracks)
 							.map(|i| {
 								let track = broadcast
-									.create_track(format!("bench{i}"), track::Info::default().with_compress(true))
+									.create_track(
+										format!("bench{i}"),
+										track::Info::default().with_compression(moq_net::track::Compression::Deflate),
+									)
 									.unwrap();
 								let mut group = track.append_group().unwrap();
 								group.write_frame(None, payload.clone()).unwrap();
@@ -552,10 +568,9 @@ fn bench_compressed_updates(c: &mut Criterion) {
 									group.write_frame(None, payload.clone()).unwrap();
 									groups.push(group);
 								}
-								for group in &mut groups {
+								for group in groups.drain(..) {
 									group.finish().unwrap();
 								}
-								groups.clear();
 							}
 						}
 						(broadcast, producers, groups)
@@ -768,7 +783,7 @@ fn contended(
 			if written + burst > ROLL {
 				let rolled = track.append_group().unwrap();
 				*next.lock().unwrap() = rolled.consume();
-				let mut done = std::mem::replace(&mut group, rolled);
+				let done = std::mem::replace(&mut group, rolled);
 				done.finish().unwrap();
 				written = 0;
 			}
@@ -880,7 +895,7 @@ fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads
 			frame.write(chunk.clone()).unwrap();
 			writing = Some(match frame.remaining() {
 				0 => {
-					let mut group = frame.finish().unwrap();
+					let group = frame.finish().unwrap();
 					frames += 1;
 					if frames == ROLL {
 						let rolled = track.append_group().unwrap();

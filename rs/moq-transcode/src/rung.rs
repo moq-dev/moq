@@ -78,12 +78,8 @@ pub(crate) struct Rung {
 	pub broadcast: moq_net::broadcast::Consumer,
 	/// The source rendition's catalog entry (codec + container).
 	pub config: VideoConfig,
-	/// Which encoder implementation to use.
-	pub encoder: moq_video::encode::Kind,
-	/// Which decoder implementation to use.
-	pub decoder: moq_video::decode::Kind,
-	/// How to resize decoded frames.
-	pub resize: moq_video::resize::Config,
+	/// The codec implementations, devices, and resize the transcode was configured with.
+	pub transcode: crate::Config,
 	/// Where to report that this rung is encoding.
 	pub active: crate::active::Producer,
 	/// The handle this rung's output is counted on, the one a caller bills.
@@ -121,11 +117,10 @@ impl Rung {
 	/// it. The sink owns a thread and stays on it.
 	async fn encode(&self, color: moq_video::Color) -> Result<moq_video::encode::Sink, Error> {
 		let framerate = self.info.framerate.unwrap_or(moq_video::FrameRate::new(30, 1).unwrap());
-		let mut config = moq_video::encode::Config::new(self.info.size.width, self.info.size.height, framerate);
+		let mut config = self.transcode.encoder(self.info.size, framerate);
 		config.bitrate = Some(self.info.bitrate);
-		config.kind = self.encoder.clone();
 		config.color = Some(color);
-		config.resize = Some(self.resize);
+		config.resize = Some(self.transcode.resize.clone());
 		// Every source group boundary is a cut; the join is only a backstop
 		// against pathologically long source groups.
 		config.join = std::time::Duration::from_secs(8);
@@ -149,7 +144,7 @@ struct Writing(Option<moq_net::group::Producer>);
 
 impl Writing {
 	fn finish(mut self) -> moq_net::Result<()> {
-		self.0.take().expect("owned group").finish()
+		self.0.take().expect("owned group").finish().map(drop)
 	}
 
 	fn abort(mut self, err: moq_net::Error) -> moq_net::Result<()> {
@@ -217,7 +212,8 @@ pub(crate) fn serve(rung: Rung, request: moq_net::track::Request) -> impl Future
 		// to count, so finishing then would reject the very group it was fetching.
 		match (live, fetches) {
 			(Ok(Ended::Finished), Ok(())) => {
-				producer.finish()?;
+				// Released with `serving`, the last clone, which then no longer aborts it.
+				drop(producer.finish()?);
 				serving.0 = None;
 				Ok(())
 			}
@@ -769,10 +765,8 @@ struct Pipeline {
 
 impl Pipeline {
 	async fn new(rung: &Rung) -> Result<Self, Error> {
-		let mut decode = moq_video::decode::Config::new();
-		decode.kind = rung.decoder.clone();
-		decode.output = rung.resize.output;
-		decode.scale_hint = scale_hint(rung.info.size, rung.resize.output);
+		let mut decode = rung.transcode.decoder();
+		decode.scale_hint = scale_hint(rung.info.size, rung.transcode.resize.output);
 		// A `Sink` for the same reason as the encoder above: a fetch task holds this
 		// pipeline across a group read, so the codec must own its thread.
 		let decoder = moq_video::decode::Sink::open(&rung.config, &decode).await?;
@@ -948,9 +942,11 @@ mod tests {
 			),
 			broadcast,
 			config,
-			encoder: moq_video::encode::Kind::Software,
-			decoder: moq_video::decode::Kind::Software,
-			resize: Default::default(),
+			transcode: crate::Config {
+				encoder: moq_video::encode::Kind::Software,
+				decoder: moq_video::decode::Kind::Software,
+				..Default::default()
+			},
 			active,
 			retire,
 		};

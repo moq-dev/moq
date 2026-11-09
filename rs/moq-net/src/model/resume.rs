@@ -3286,7 +3286,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_failed_compressed_group_continues_from_the_replacement() {
-		let info = crate::track::Info::timed().with_compress(true);
+		let info = crate::track::Info::timed().with_compression(crate::track::Compression::Deflate);
 		let compressed = || track::Producer::new(Arc::new(broadcast::Info::default()), "video", info.clone());
 		let routes = Producer::new();
 		let logical = track::Request::new(Arc::new(broadcast::Info::default()), "video")
@@ -3326,7 +3326,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_malformed_compressed_frame_fails_the_read() {
-		let info = crate::track::Info::timed().with_compress(true);
+		let info = crate::track::Info::timed().with_compression(crate::track::Compression::Deflate);
 		let routes = Producer::new();
 		let logical = track::Request::new(Arc::new(broadcast::Info::default()), "video")
 			.routes(routes.consume())
@@ -3349,7 +3349,7 @@ mod test {
 		};
 		let mut corrupt = group.create_object(header).unwrap();
 		corrupt.write(slice).unwrap();
-		let mut group = corrupt.finish().unwrap();
+		let group = corrupt.finish().unwrap();
 		group.finish().unwrap();
 
 		let mut reading = recv(&mut sub);
@@ -3368,7 +3368,7 @@ mod test {
 			pool: pool.clone(),
 			..Default::default()
 		});
-		let info = crate::track::Info::timed().with_compress(true);
+		let info = crate::track::Info::timed().with_compression(crate::track::Compression::Deflate);
 		let routes = Producer::new();
 		let logical = track::Request::new(broadcast.clone(), "video")
 			.routes(routes.consume())
@@ -4161,7 +4161,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_fetched_plain_reader_past_a_shed_inflated_front_gets_evicted() {
-		let info = crate::track::Info::timed().with_compress(true);
+		let info = crate::track::Info::timed().with_compression(crate::track::Compression::Deflate);
 		let routes = Producer::new();
 		let a = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info.clone());
 		routes.serve(a.consume());
@@ -4501,7 +4501,7 @@ mod test {
 		for sequence in 0..4 {
 			write(&c, sequence);
 		}
-		c.finish().unwrap();
+		let c = c.finish().unwrap();
 		nested_routes.serve(c.consume());
 		assert!(matches!(sub.poll_next_group(&waiter), Poll::Ready(Ok(None))));
 	}
@@ -4554,7 +4554,7 @@ mod test {
 				write(&c, sequence);
 			}
 			assert_eq!(drain(&mut sub, true), [4], "a newly ready copy inherits the floor");
-			c.finish().unwrap();
+			let _c = c.finish().unwrap();
 			assert!(
 				matches!(sub.poll_next_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
 				"nested end propagates past covered copies"
@@ -4652,7 +4652,7 @@ mod test {
 				let mut sub = subscribe(if nested { &outer } else { &inner }, HOUR);
 				let mut one = a.create_group(group::Info { sequence: 1 }).unwrap();
 				one.write_frame(ts(1), b"x".as_ref()).unwrap();
-				one.finish().unwrap();
+				let one = one.finish().unwrap();
 				write(&a, 3);
 				let reserved = peek(&mut sub, ordered);
 				assert_eq!(reserved.sequence(), 1);
@@ -4691,7 +4691,7 @@ mod test {
 					drain(&mut sub, ordered);
 					let mut two = a.create_group(group::Info { sequence: 2 }).unwrap();
 					two.write_frame(ts(2), b"x".as_ref()).unwrap();
-					two.finish().unwrap();
+					let two = two.finish().unwrap();
 					let reserved = peek(&mut sub, ordered);
 					assert_eq!(reserved.sequence(), 2, "{case}");
 					two.abort(Error::Evicted).unwrap();
@@ -4924,7 +4924,7 @@ mod test {
 		// The new route has only the group already handed out, and ends there.
 		let b = copy();
 		write(&b, 2);
-		b.finish().unwrap();
+		let b = b.finish().unwrap();
 		routes.serve(b.consume());
 		let noop = kio::Waiter::noop();
 		assert!(sub.poll_recv_group(&noop).is_pending(), "group 1 may still land");
@@ -4961,7 +4961,7 @@ mod test {
 				if first_group {
 					assert_eq!(recv(&mut sub).sequence, 3);
 				}
-				b.finish().unwrap();
+				let _b = b.finish().unwrap();
 				sub.set_range(..1);
 				let wake = Arc::new(Wake::default());
 				let waiter = kio::Waiter::new(wake.clone().into());
@@ -5005,7 +5005,7 @@ mod test {
 
 		let b = copy();
 		write(&b, 2);
-		b.finish().unwrap();
+		let b = b.finish().unwrap();
 		routes.serve(b.consume());
 		let wake = Arc::new(Wake::default());
 		let waiter = kio::Waiter::new(wake.clone().into());

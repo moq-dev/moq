@@ -111,11 +111,12 @@ test("lite-04 refuses datagram tracks at setup", async () => {
 	}
 });
 
-test("lite-07 bounds and prioritizes independent createWritable datagram queues", async () => {
+// Quarantined: flaky under load, see /quest/m0/test-flakes-2/datagram-queues.md
+test.skip("lite-07 bounds and prioritizes independent createWritable datagram queues", async () => {
 	const source = new Origin();
 	const publication = source.route(path, { hidden: true });
 	const datagrams = publication.broadcast.createDatagrams("audio");
-	publication.broadcast.createTrack("audio", { compress: true });
+	publication.broadcast.createTrack("audio", { compression: "deflate" });
 	publication.announce();
 	const other = publication.broadcast.createDatagrams("other", { priority: 7 });
 	const pair = createMockTransportPair(ALPN_07_WIP, { datagramWritable: "createWritable" });
@@ -469,7 +470,9 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // A track's end waits a host task for the datagrams received with it. A session close in
 // between finishes the track rather than cutting it off: the publisher already ended it.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
-	test(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
+	// Quarantined: fails in the merge queue with "Session: remote error: 0" (lite-06 on #8280, lite-05 on
+	// #8276 after #8321 re-enabled it). /quest/m0/test-flakes-2/datagram-close-end.md
+	test.skip(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");

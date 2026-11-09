@@ -1,4 +1,3 @@
-import type { Milli } from "@moq/clock";
 import type * as Path from "../path.ts";
 import { type Reader, Writer } from "../stream.ts";
 import type { Order } from "../track.ts";
@@ -96,7 +95,7 @@ export class Fetch {
 	 * FILL_TIMEOUT: the total wait for objects not yet available before they are reported as
 	 * a gap, zero for only what is cached. Absent waits as long as the publisher chooses.
 	 */
-	fillTimeout?: Milli;
+	fillTimeout?: number;
 
 	/** Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES, draft-22). */
 	propertiesWanted: boolean;
@@ -115,7 +114,7 @@ export class Fetch {
 		subscriberPriority?: number;
 		groupOrder?: Order;
 		rangeFilters?: boolean;
-		fillTimeout?: Milli;
+		fillTimeout?: number;
 		propertiesWanted?: boolean;
 	}) {
 		this.requestId = requestId;

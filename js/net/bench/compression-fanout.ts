@@ -15,7 +15,9 @@ export function fanout() {
 			let stored = 0;
 			let inflated = 0;
 			for (let round = 0; round < rounds; round++) {
-				const tracks = Array.from({ length: publishers }, () => new Track("bench").accept({ compress: true }));
+				const tracks = Array.from({ length: publishers }, () =>
+					new Track("bench").accept({ compression: "deflate" }),
+				);
 				const groups: Group[] = tracks.map((track) => track.appendGroup());
 				const consumers = groups.map((group) => Array.from({ length: readers }, () => group.consume()));
 				let started = performance.now();
@@ -71,7 +73,9 @@ export function tails() {
 				for (const compress of [false, true]) {
 					const frames = frame_bytes === 256 ? 9000 : 96;
 					const payload = new Uint8Array(frame_bytes).fill(42);
-					const tracks = Array.from({ length: publishers }, () => new Track("tail").accept({ compress }));
+					const tracks = Array.from({ length: publishers }, () =>
+						new Track("tail").accept({ compression: compress ? "deflate" : "none" }),
+					);
 					const groups = tracks.map((track) => track.appendGroup());
 					const consumers = groups.map((group) => Array.from({ length: readers }, () => group.consume()));
 					const started = performance.now();

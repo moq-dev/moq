@@ -1,4 +1,4 @@
-import { type Micro, Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import * as Video from "@moq/video";
 import type { Decoder } from "./decoder";
@@ -32,7 +32,7 @@ export type RendererInput = {
 /** Signals the renderer derives. */
 export type RendererOutput = {
 	/** The media timestamp of the most recently painted frame. */
-	timestamp: Getter<Milli | undefined>;
+	timestamp: Getter<Duration | undefined>;
 	/** Whether the canvas should currently download per the configured distance and tab focus. */
 	visible: Getter<boolean>;
 	/** Why drawing stopped, or undefined while healthy. See {@link Video.RendererOutput.error}. */
@@ -95,7 +95,7 @@ export class Renderer {
 		const frame = this.#video.out.frame;
 		this.painted = frame;
 		this.out = readonlys({
-			timestamp: new Derived([frame], (frame) => (frame ? Milli.fromMicro(frame.timestamp as Micro) : undefined)),
+			timestamp: new Derived([frame], (frame) => (frame ? Duration.micros(frame.timestamp) : undefined)),
 			visible: this.#visible,
 			error: this.#video.out.error,
 		});

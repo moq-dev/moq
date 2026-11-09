@@ -1,4 +1,4 @@
-import { Nano, Second } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
@@ -42,7 +42,8 @@ function handed(task: Promise<void>): Promise<void> {
 }
 
 /** Where a session is: open, delivering what it owes before it closes, or closed. */
-type Phase = { kind: "open" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
+/** `leaving` is open but draining at this side's own request; see the wire view's `leave`. */
+type Phase = { kind: "open" } | { kind: "leaving" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
 
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
@@ -232,6 +233,10 @@ export class Connection implements Session {
 			// The drafts refuse overlapping SUBSCRIBE_NAMESPACEs (PREFIX_OVERLAP). A peer that
 			// declared MoQ Solicit is ours and holds both; any other may enforce it.
 			exclusive: solicit === undefined,
+			// Drained locally only: this compatibility layer sends no client GOAWAY.
+			leave: () => {
+				if (this.#phase.kind === "open") this.#phase = { kind: "leaving" };
+			},
 			auth: this.#auth,
 		});
 
@@ -246,10 +251,11 @@ export class Connection implements Session {
 	/** Withdraw announcements and wait up to one second for delivery before closing. */
 	close(): Promise<void> {
 		switch (this.#phase.kind) {
-			case "open": {
+			case "open":
+			case "leaving": {
 				const done = withTimeout(
 					this.#publisher.withdraw(),
-					Nano.fromSecond(Second(1)),
+					Duration.secs(1),
 					"session close timed out",
 				).finally(() => this.abort());
 				this.#phase = { kind: "closing", done };

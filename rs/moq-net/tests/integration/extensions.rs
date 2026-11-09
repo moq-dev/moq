@@ -24,7 +24,7 @@ const AUTH: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn declined(f: impl FnOnce(&mut Extensions)) -> Extensions {
@@ -44,12 +44,19 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 	let mut live = false;
 	while let Some(event) = announced.try_next() {
 		match event {
-			moq_net::origin::RouteEvent::Start(update)
-			| moq_net::origin::RouteEvent::Update(update)
-			| moq_net::origin::RouteEvent::Restart(update) => {
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: update,
+			} => {
 				live |= update.prefix.as_str() == path;
 			}
-			moq_net::origin::RouteEvent::End(update) => {
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::End,
+				announce: update,
+			} => {
 				live &= update.prefix.as_str() != path;
 			}
 		}

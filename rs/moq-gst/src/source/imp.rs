@@ -3264,7 +3264,7 @@ mod session_tests {
 
 		// End the served rendition and the broadcast, which answers for the reserved one.
 		catalog.finish().unwrap();
-		video.finish().unwrap();
+		let _video = video.finish().unwrap();
 		broadcast.close();
 
 		// No shutdown is sent: the run has to end on the media draining alone.
@@ -3533,7 +3533,7 @@ mod session_tests {
 
 		// Everything ends while listed, so the run ends on its own with the pads held.
 		producer.finish().unwrap();
-		audio.finish().unwrap();
+		let _audio = audio.finish().unwrap();
 		catalog.finish().unwrap();
 		super::RUNTIME
 			.block_on(async { kio::clock::timeout(Duration::from_secs(10), session).await })
@@ -3663,7 +3663,7 @@ mod session_tests {
 		);
 
 		// The run ends only once every reader drains, a replaying one included.
-		audio.finish().unwrap();
+		let _audio = audio.finish().unwrap();
 		catalog.finish().unwrap();
 		super::RUNTIME.block_on(session).unwrap().unwrap();
 
@@ -3759,7 +3759,7 @@ mod session_tests {
 
 		// The run ends only once every reader drains, a replaying one included.
 		again.finish().unwrap();
-		audio.finish().unwrap();
+		let _audio = audio.finish().unwrap();
 		catalog.finish().unwrap();
 		super::RUNTIME.block_on(session).unwrap().unwrap();
 
@@ -4394,7 +4394,13 @@ mod session_tests {
 	fn announced(origin: &moq_net::origin::Producer) -> moq_net::origin::Routes {
 		let mut follow = watch(origin, "room");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		follow
 	}
@@ -4445,9 +4451,7 @@ mod session_tests {
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let claim = origin
-			.route_prefix("", moq_net::origin::RouteOptions::default())
-			.unwrap();
+		let claim = origin.claim("", moq_net::origin::RouteOptions::default()).unwrap();
 		let (answers, answered) = std::sync::mpsc::channel();
 		let handler = super::RUNTIME.spawn(async move {
 			while let Some(request) = claim.requested().await {
@@ -4481,9 +4485,7 @@ mod session_tests {
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let pool = origin
-			.route_prefix("", moq_net::origin::RouteOptions::default())
-			.unwrap();
+		let pool = origin.claim("", moq_net::origin::RouteOptions::default()).unwrap();
 		let session = follow(&element, &origin);
 		let pending = super::RUNTIME.block_on(async {
 			kio::clock::timeout(Duration::from_secs(10), pool.requested())
@@ -4522,11 +4524,23 @@ mod session_tests {
 		let pad = recorder.written(&mut first, 1);
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		drop(first);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		let mut second = Publisher::sibling(&origin, Default::default());
@@ -4583,11 +4597,23 @@ mod session_tests {
 
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		drop(first);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 3), pad, "the return moved to another pad");
@@ -4682,15 +4708,33 @@ mod session_tests {
 		first.video.finish().unwrap();
 		await_finished(&first);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		first.route.as_ref().unwrap().withdraw();
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 		first.route.as_ref().unwrap().announce().unwrap();
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 
 		let mut second = Publisher::sibling(&origin, Default::default());
@@ -4738,14 +4782,26 @@ mod session_tests {
 		let mut first = Publisher::sibling(&origin, None);
 		let pad = recorder.written(&mut first, 1);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		// The pad plays out the failure while the instance is still announced.
 		first.video.abort(moq_net::Error::Cancel);
 		super::RUNTIME.block_on(pads.settled(&(TrackKind::Video, "video".to_string())));
 		first.route.as_ref().unwrap().withdraw();
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		// The returning instance serves the track again, from a later group.
@@ -4825,11 +4881,23 @@ mod session_tests {
 		room.catalog.finish().unwrap();
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		drop(first);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		let mut second = Publisher::sibling(&origin, Default::default());
@@ -5038,13 +5106,22 @@ mod session_tests {
 		let pad = played.into_iter().find(|pad| *pad != unpinned).unwrap();
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		drop(second);
 		await_event(&mut follow, |event| {
 			matches!(
 				event,
-				moq_net::origin::RouteEvent::Restart(_) | moq_net::origin::RouteEvent::Start(_)
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Restart | moq_net::origin::RouteKind::Start,
+					..
+				}
 			)
 		});
 
@@ -5090,11 +5167,23 @@ mod session_tests {
 		let pad = recorder.written(&mut first, 1);
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		drop(first);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		room.catalog.modify().unwrap().video.renditions.clear();
@@ -5111,7 +5200,13 @@ mod session_tests {
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		for _ in 0..10 {
 			second.write(2);
@@ -5138,11 +5233,23 @@ mod session_tests {
 		let pad = recorder.written(&mut first, 1);
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		drop(first);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		let listed = room.catalog.modify().unwrap().video.renditions.clone();
@@ -5218,17 +5325,35 @@ mod session_tests {
 		// does the new one leave, so the return is a resume rather than a missed restart.
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		let mut new = Publisher::sibling(&origin, Default::default());
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Restart(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Restart,
+					..
+				}
+			)
 		});
 		await_demand(&old, false);
 		new.write(2);
 		drop(new);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Restart(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Restart,
+					..
+				}
+			)
 		});
 
 		await_demand(&old, true);
@@ -5328,7 +5453,13 @@ mod session_tests {
 
 		publisher.route.as_ref().unwrap().set_cost(5).unwrap();
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Update(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Update,
+					..
+				}
+			)
 		});
 		recorder.written(&mut publisher, 2);
 		stop(session);
@@ -5513,7 +5644,13 @@ mod session_tests {
 		old.catalog.finish().unwrap();
 		drop(old);
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		let mut new = Publisher::new(&origin, Default::default(), video_rendition());
@@ -5543,7 +5680,13 @@ mod session_tests {
 
 		old.route.as_ref().unwrap().withdraw();
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 		drop(old);
 
@@ -5618,7 +5761,13 @@ mod session_tests {
 			let route = next.route.as_ref().unwrap();
 			route.withdraw();
 			await_event(&mut announced, |event| {
-				matches!(event, moq_net::origin::RouteEvent::End(_))
+				matches!(
+					event,
+					moq_net::origin::RouteEvent {
+						kind: moq_net::origin::RouteKind::End,
+						..
+					}
+				)
 			});
 			route.announce().unwrap();
 			assert_eq!(
@@ -6114,7 +6263,13 @@ mod session_tests {
 		let mut announced = announced(&relay.origin);
 		session.abort(moq_net::Error::App(1));
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		let mut new = Publisher::new(&relay.origin, Default::default(), video_rendition());

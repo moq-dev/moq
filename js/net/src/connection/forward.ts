@@ -4,12 +4,12 @@
  * @module
  */
 
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { routesEqual, type WireRoute } from "../hop.ts";
 import { coveringPrefixes } from "../internal.ts";
-import type { Producer as OriginProducer, Route } from "../origin.ts";
+import type { Claim, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { after } from "../util/timer.ts";
 import { type RequestSlot, wireOf } from "../wire.ts";
@@ -20,7 +20,7 @@ export const DISCOVERY_REMOVED =
 	"the discovery option is removed: a session asks only about watched prefixes and turns blind if the relay refuses";
 
 /** How long an announce request outlives its last watcher, so a watcher torn down and rebuilt reuses it. */
-const LINGER = Milli(2000);
+const LINGER = Duration.millis(2000);
 
 /** One announce request open on the session, and the routes it currently reports. */
 interface Interest {
@@ -39,7 +39,7 @@ interface Interest {
  * request handing over to another never retracts it. The first reporter drives it.
  */
 interface Reported {
-	handle: Route;
+	handle: Claim;
 	/** Each request's latest route for the prefix. */
 	readonly reporters: Map<Interest, WireRoute>;
 }
@@ -240,7 +240,7 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 			return;
 		}
 		interest.linger?.();
-		interest.linger = after(Nano.fromMilli(LINGER), () => {
+		interest.linger = after(LINGER, () => {
 			// Forgotten now rather than once its stream winds down, so a watch arriving
 			// meanwhile opens a fresh request instead of reviving this one.
 			interests.delete(prefix);
@@ -290,7 +290,7 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 }
 
 /** Answer the requests under a received route by consuming them from the session. */
-async function drive(handle: Route, conn: Session): Promise<void> {
+async function drive(handle: Claim, conn: Session): Promise<void> {
 	const session = wireOf(conn);
 	try {
 		for await (const request of handle.requested()) {

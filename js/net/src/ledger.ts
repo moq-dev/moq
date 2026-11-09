@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano } from "@moq/clock";
+import { Duration, type Instant } from "@moq/clock";
 import * as btree from "sorted-btree";
 import { max, min } from "./util/sequence.ts";
 
@@ -16,11 +16,11 @@ const compare = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 : 0);
  * so a stream opened before the end can still be in flight after it. This bounds the wait on
  * IETF, and on moq-lite when the subscription has no max delay to bound it with.
  */
-export const GRACE = Milli(1000);
+export const GRACE = Duration.millis(1000);
 
 /** The grace for a subscription with `delay.max`: how long it was willing to wait for a late group anyway, or {@link GRACE} without one. */
-export function grace(maxDelay: Milli): Milli {
-	return maxDelay > 0 ? maxDelay : GRACE;
+export function grace(maxDelay: Duration): Duration {
+	return maxDelay.isZero() ? GRACE : maxDelay;
 }
 
 // A run of accounted sequences `[start, end)`, and when the gap below it opened, which is
@@ -43,7 +43,7 @@ export class Ledger {
 	#runs = new BTree<bigint, Run>(undefined, compare);
 	// Demand can restart a gap below an older one. Index ages separately so expiring
 	// one gap never scans all the younger ones. Both indexes own exactly the same runs.
-	#ages = new BTree<Run, undefined>(undefined, (a, b) => a.since - b.since || compare(a.start, b.start));
+	#ages = new BTree<Run, undefined>(undefined, (a, b) => a.since.cmp(b.since) || compare(a.start, b.start));
 	#last?: Run;
 	// Exclude the leading gap, which has no lower run to fold into.
 	#next?: Run;
@@ -93,9 +93,8 @@ export class Ledger {
 	}
 
 	/** Fold every gap at least `grace` old into the runs around it. */
-	expire(at: Instant, grace: Milli): void {
-		const limit = Nano.fromMilli(grace);
-		while (this.#next && Instant.durationSince(at, this.#next.since) >= limit) {
+	expire(at: Instant, grace: Duration): void {
+		while (this.#next && at.since(this.#next.since).ge(grace)) {
 			const run = this.#next;
 			const below = this.#runs.nextLowerPair(run.start)?.[1];
 			if (!below) throw new Error("an expiring gap must have a lower run");

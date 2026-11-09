@@ -448,7 +448,7 @@ impl Model {
 		let mut hops = Hops::new();
 		hops.push(Hop::new(10 * (instance as u64 + 1) + slot as u64).unwrap())
 			.unwrap();
-		let route = RouteInfo::default()
+		let route = RouteInfo::new()
 			.with_instance(self::instance(instance), 0)
 			.with_hops(hops)
 			// The second instance's routes all undercut the first's.
@@ -568,7 +568,7 @@ impl Model {
 		let Some(copy) = &publisher.routes[slot] else {
 			return;
 		};
-		if copy.groups.contains_key(&(GROUPS - 1)) && copy.track.finish().is_ok() {
+		if copy.groups.contains_key(&(GROUPS - 1)) && copy.track.finish_shared().is_ok() {
 			publisher.ended = true;
 		}
 	}

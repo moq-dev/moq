@@ -80,6 +80,9 @@ pub struct Client {
 	/// in-memory sessions on a paused clock.
 	#[cfg(test)]
 	pub(crate) dialer: Option<std::sync::Arc<Dialer>>,
+	/// Replaces the QUIC transport a probe reaches in tests.
+	#[cfg(test)]
+	pub(crate) prober: Option<std::sync::Arc<Prober>>,
 	/// Where every dial goes instead of the network, set by [`Self::with_network`].
 	#[cfg(feature = "sim")]
 	network: Option<crate::sim::Network>,
@@ -89,6 +92,12 @@ pub struct Client {
 /// would handshake with.
 #[cfg(test)]
 pub(crate) type Dialer = dyn Fn(crate::connect::Addr, moq_net::Client) -> std::pin::Pin<Box<dyn Future<Output = crate::Result<Dialed>> + Send>>
+	+ Send
+	+ Sync;
+
+/// A test stand-in for the QUIC transport [`Client::probe`] reaches, handed the address.
+#[cfg(test)]
+pub(crate) type Prober = dyn Fn(crate::connect::Addr) -> std::pin::Pin<Box<dyn Future<Output = crate::Result<qmux::Session>> + Send>>
 	+ Send
 	+ Sync;
 
@@ -179,6 +188,8 @@ impl Client {
 			qmux,
 			#[cfg(test)]
 			dialer: None,
+			#[cfg(test)]
+			prober: None,
 			#[cfg(feature = "sim")]
 			network: None,
 		})
@@ -187,12 +198,6 @@ impl Client {
 	/// Publish the given origin to every session this client opens.
 	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
 		self.moq = self.moq.with_publisher(publish);
-		self
-	}
-
-	/// Publish and subscribe through one shared origin.
-	pub fn with_origin(mut self, origin: moq_net::origin::Producer) -> Self {
-		self.moq = self.moq.with_origin(origin);
 		self
 	}
 
@@ -344,9 +349,9 @@ impl Client {
 		let timeout = self.policy.timeout;
 		let connect = connect_session(&self.moq, session);
 		crate::runtime::scope(async move {
-			match timeout.is_zero() {
-				true => Ok(connect.await?),
-				false => Ok(kio::clock::timeout(timeout, connect)
+			match timeout {
+				None => Ok(connect.await?),
+				Some(timeout) => Ok(kio::clock::timeout(timeout, connect)
 					.await
 					.map_err(|_| Error::ConnectTimeout(timeout))??),
 			}
@@ -380,15 +385,7 @@ impl Client {
 		&self,
 		attempt: moq_net::reconnect::Attempt<crate::connect::Addr>,
 	) -> crate::Result<Dialed> {
-		let addr = attempt.target().with_url(attempt.url().clone());
-		let client = match attempt.token() {
-			Some(token) => {
-				let mut client = self.clone();
-				client.moq = client.moq.with_token(token.clone());
-				std::borrow::Cow::Owned(client)
-			}
-			None => std::borrow::Cow::Borrowed(self),
-		};
+		let (addr, client) = self.attempt(&attempt);
 		#[cfg(test)]
 		if let Some(dialer) = &self.dialer {
 			return dialer(addr, client.moq.clone()).await;
@@ -409,6 +406,53 @@ impl Client {
 		let dialed = Box::pin(client.connect_inner(addr)).await?;
 		tracing::info!(version = %dialed.session.version(), transport = %dialed.transport, "connected");
 		Ok(dialed)
+	}
+
+	/// The address an attempt dials, and this client presenting the attempt's credential.
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
+	fn attempt(&self, attempt: &moq_net::reconnect::Attempt<crate::connect::Addr>) -> (crate::connect::Addr, Self) {
+		let mut client = self.clone();
+		client.moq = attempt.client(&self.moq);
+		let url = client.moq.url().expect("an attempt sets the URL").clone();
+		(attempt.target().with_url(url), client)
+	}
+
+	/// Whether a session dialed at `url` over `transport` sits on the WebSocket fallback of
+	/// a race QUIC could win, so it should probe QUIC.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	pub(crate) fn on_fallback(&self, url: &Url, transport: crate::Transport) -> bool {
+		transport == crate::Transport::WebSocket && self.quic.is_some() && matches!(url.scheme(), "http" | "https")
+	}
+
+	/// Reach one probe of a [`Connection`]'s policy over QUIC alone, with no WebSocket
+	/// fallback to race, returning the MoQ handshake to finish over it.
+	///
+	/// The handshake waits for the policy to move off the fallback, since the tokens back
+	/// one session at a time.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	pub(crate) async fn probe(
+		&self,
+		attempt: moq_net::reconnect::Attempt<crate::connect::Addr>,
+	) -> crate::Result<std::pin::Pin<Box<crate::connection::Dial>>> {
+		let (addr, client) = self.attempt(&attempt);
+		let url = addr.url().clone();
+		let transport = quic_transport(&url);
+		let moq = client.moq.clone().with_url(url);
+		#[cfg(test)]
+		if let Some(prober) = &self.prober {
+			let session = prober(addr).await?;
+			return Ok(Box::pin(async move {
+				Ok(Dialed::new(connect_session(&moq, session).await?, transport))
+			}));
+		}
+		let quic = self
+			.quic
+			.as_ref()
+			.ok_or(Error::NoBackend("a probe needs the QUIC backend"))?;
+		let session = quic.connect(&client.tls, addr, &client.versions).await?;
+		Ok(Box::pin(async move {
+			Ok(Dialed::new(connect_session(&moq, session).await?, transport))
+		}))
 	}
 
 	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
@@ -914,11 +958,7 @@ mod tests {
 	fn test_cli_version_help_lists_every_parseable_name() {
 		let help = Cli::render_help(Cli::command(), true).expect("long help");
 		// Every wire code this crate parses, including the opt-in `-wip` drafts.
-		let codes = (0xff0dad00..=0xff0dadff).chain(0xff000000..=0xff0000ff);
-		for name in codes
-			.filter_map(moq_net::Version::from_code)
-			.map(|version| version.as_str())
-		{
+		for name in moq_net::Version::ALL.iter().map(|version| version.as_str()) {
 			assert!(help.contains(name), "missing {name} from --connect-version help");
 		}
 	}

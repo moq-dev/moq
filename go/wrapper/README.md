@@ -139,11 +139,12 @@ import (
 )
 
 route, _ := client.Route("room", moq.RouteOptions{Hidden: true})
-broadcast, _ := route.Broadcast()
+broadcast := route.Broadcast()
 // Every JSON write is stamped, so the track is timed. JSON is small and repetitive, so
 // compress it on the wire.
 scale := uint64(1_000)
-track, _ := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compress: true})
+deflate := moq.CompressionDeflate
+track, _ := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compression: &deflate})
 status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{})
 catalog, _ := moqmedia.NewCatalogProducer(broadcast)
 now, _ := catalog.Now()

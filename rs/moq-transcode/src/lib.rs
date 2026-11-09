@@ -127,7 +127,7 @@ impl Transcoder {
 		// The source catalog drives everything; wait for a snapshot with a usable
 		// video rendition (the first may precede the source publishing its video).
 		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(source.track(hang::Catalog::DEFAULT_NAME)?);
-		let mut decoders = catalog::Decoders::new(config.feed_decoder());
+		let mut decoders = catalog::Decoders::new(config.decoder());
 		let (source_name, source_config, snapshot) = loop {
 			let Some(snapshot) = catalogs.next().await? else {
 				return Err(Error::NoSource);
@@ -436,7 +436,7 @@ mod tests {
 		let clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
 		let source = source_catalog(320, 240);
 		let rendition = source.catalog.snapshot().video.renditions["video"].clone();
-		let decoders = catalog::Decoders::new(config.feed_decoder());
+		let decoders = catalog::Decoders::new(config.decoder());
 		let mut ladder = pipeline::Pipeline::new(
 			source.broadcast.consume(),
 			config,
@@ -2047,7 +2047,7 @@ mod tests {
 			write_keyframe(&mut group);
 			group.finish().unwrap();
 			match finish {
-				true => source._track.finish().unwrap(),
+				true => drop(source._track.clone().finish().unwrap()),
 				false => source._track.clone().abort(moq_net::Error::Cancel).unwrap(),
 			}
 

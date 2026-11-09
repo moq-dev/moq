@@ -19,8 +19,6 @@ type (
 	AudioSampleFormat = ffi.MoqAudioSampleFormat
 	// AudioFrame is one audio frame: PCM payload plus a presentation Timestamp.
 	AudioFrame = ffi.MoqAudioFrame
-	// ConnectionPhase is a connection lifecycle transition reported by Session.State.
-	ConnectionPhase = ffi.MoqConnectionPhase
 	// CongestionControl is the congestion control family for a QUIC connection.
 	CongestionControl = ffi.MoqCongestionControl
 	// ErrorScope is whether a protocol code is from the session or stream registry.
@@ -39,7 +37,7 @@ type (
 	// route of one instance together, so restarting the sequences under an old instance splices
 	// unrelated groups into their tracks.
 	RouteOptions = ffi.MoqRouteOptions
-	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
+	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream) and its static production and link cost (lower wins).
 	RouteInfo = ffi.MoqRouteInfo
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (Captures), and the RouteInfo serving it. It carries no broadcast;
@@ -69,6 +67,8 @@ type (
 	AnchorTime = ffi.MoqAnchorTime
 	// Order is which of a subscription's pending groups the publisher sends first.
 	Order = ffi.MoqOrder
+	// Compression is how a track's frames are compressed on the wire: CompressionDeflate.
+	Compression = ffi.MoqCompression
 	// Position is a location within a track: a group sequence and a frame index in it.
 	Position = ffi.MoqPosition
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
@@ -154,18 +154,10 @@ const (
 	OrderDescending = ffi.MoqOrderDescending
 )
 
-// ConnectionPhase values: the lifecycle of a client session's connection.
+// Compression values: how a track's frames are compressed on the wire.
 const (
-	// ConnectionPhaseConnecting means no session has connected yet.
-	ConnectionPhaseConnecting = ffi.MoqConnectionPhaseConnecting
-	// ConnectionPhaseClosed means the connection has stopped for good.
-	ConnectionPhaseClosed = ffi.MoqConnectionPhaseClosed
-	// ConnectionPhaseConnected means a session connected (the first connect, or a reconnect after a drop).
-	ConnectionPhaseConnected = ffi.MoqConnectionPhaseConnected
-	// ConnectionPhaseDisconnected means the session dropped; a reconnect attempt follows.
-	ConnectionPhaseDisconnected = ffi.MoqConnectionPhaseDisconnected
-	// ConnectionPhaseMigrating means the peer sent a GOAWAY; the replacement is being dialed while the old session keeps serving.
-	ConnectionPhaseMigrating = ffi.MoqConnectionPhaseMigrating
+	// CompressionDeflate makes each group one DEFLATE stream, which suits small, repetitive frames like JSON.
+	CompressionDeflate = ffi.MoqCompressionDeflate
 )
 
 // CongestionControl values.

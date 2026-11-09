@@ -213,7 +213,7 @@ threads. `pin = true` also keeps that thread on one core, and needs `workers`.
 
 ```toml
 [runtime]
-workers = 8                          # Single-threaded QUIC workers. Omit for the shared runtime.
+workers = 8                          # Single-threaded QUIC workers: "shared" (default), "auto" (one per core), or a count.
 pin = false                          # Pin each worker to a core. Off by default.
 io_uring = false                     # Drive them with io_uring instead of tokio.
 ```
@@ -389,19 +389,19 @@ enabled = true
 prefix = ".stats"                    # The broadcast appears at <prefix>/node/<node>.
 interval = "1s"                      # Time between snapshots. Default.
 node = "sjc/1"                       # Required with stats enabled on a clustered relay, so nodes do not overwrite each other.
-depth = 1                            # One group track per first N path segments (per tenant).
-linger = "5m"                        # Keep an empty group's track listed this long. Default.
+depth = 1                            # One bucket track per first N path segments (per tenant).
+linger = "5m"                        # Keep an empty bucket's track listed this long. Default.
 ```
 
 Each node publishes its traffic and session counters as MoQ tracks, split by a
 **tier** label from the auth server's grant (`--cluster-tier` for links this
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
 Each run announces under a fresh [instance](/concept/moq-lite#publisher-instances),
-so a restart is a new broadcast at the same path. Each group is a
-[track](/concept/stats#group-tracks) of that broadcast, and one returning after
+so a restart is a new broadcast at the same path. Each bucket is a
+[track](/concept/stats#bucket-tracks) of that broadcast, and one returning after
 its linger restarts its counters under a new run id without an announce. The
 node's totals count everything since its run began, so billing reads those;
-a group's per-path traffic and per-label sessions and HTTP requests are for
+a bucket's per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
 [Stats](/concept/stats) describes the paths, tracks, and encodings; read them

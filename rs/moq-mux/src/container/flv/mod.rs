@@ -26,6 +26,55 @@ mod import;
 pub use export::*;
 pub use import::*;
 
+/// FLV export errors.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	/// A decode or presentation time falls before the stream's origin or past FLV's 32-bit
+	/// millisecond timestamp.
+	#[error("FLV timestamp before the stream's origin or past 32 bits")]
+	TimestampRange,
+
+	/// A composition time offset does not fit FLV's signed 24-bit field.
+	#[error("FLV composition time exceeds signed 24 bits")]
+	CompositionTimeRange,
+
+	/// A tag body exceeds FLV's 24-bit `DataSize` field (16 MiB).
+	#[error("FLV tag body of {0} bytes exceeds the 24-bit DataSize limit")]
+	TagTooLarge(usize),
+
+	/// More renditions of one kind than FLV's 8-bit multitrack id can number.
+	#[error("too many FLV {0} tracks")]
+	TooManyTracks(&'static str),
+
+	/// A codec that needs a sequence-header tag has no config record.
+	#[error("FLV track '{0}' missing its codec config record")]
+	MissingConfigRecord(String),
+
+	/// A rendition moved to a track with another codec after the stream header fixed its tags.
+	#[error("FLV track '{0}' moved to another codec after the stream header")]
+	CodecChanged(String),
+
+	/// A rendition's container is not one whose frames FLV tags carry as is.
+	#[error("FLV export does not support container '{container}' on {kind} track '{name}'")]
+	UnsupportedContainer {
+		/// `video` or `audio`.
+		kind: &'static str,
+		/// The rendition name.
+		name: String,
+		/// The catalog container kind.
+		container: String,
+	},
+
+	/// The video codec has no FLV or enhanced-RTMP mapping.
+	#[error("FLV export does not support video codec {0}")]
+	UnsupportedVideoCodec(String),
+
+	/// The audio codec has no FLV or enhanced-RTMP mapping.
+	#[error("FLV export does not support audio codec {0}")]
+	UnsupportedAudioCodec(String),
+}
+
 #[cfg(test)]
 mod export_test;
 #[cfg(test)]

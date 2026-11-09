@@ -20,13 +20,13 @@ Its writes fail after closing or releasing the broadcast.
 Media timestamps are exact `Timestamp` records, `value` units at `scale` units per second, carried at the track's timescale
 (a write at another scale rounds down to it). On macOS 13+ and iOS, `try Timestamp(duration)` converts a `Duration` exactly,
 and `try timestamp.duration` rounds down to a whole attosecond.
-Publish JSON tracks with `TrackInfo(compress: true)`; a `Json` consumer reads one with no option of its own.
+Publish JSON tracks with `TrackInfo(compression: .deflate)`; a `Json` consumer reads one with no option of its own.
 A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
 `Json.SnapshotProducer.update`, `Json.StreamProducer.append`, and `Json.WindowProducer.push` and `pop` require a timestamp on the broadcast clock (`Media.CatalogProducer.now()`), the epoch every track in the broadcast shares, so their track needs a timescale.
 `Json` consumers yield `Json.Timed` (`value`, `timestamp`); a snapshot consumer yields each state in order,
 and `latest()` skips to the newest.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
-`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+`MoqTrackInfo.compression` set to `.deflate` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `Media.CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -72,7 +72,7 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 // Hidden until the catalog is filled; hold the route while it should stay announced.
 let route = try session.publish.route(path: "my-stream.hang", hidden: true)
-let broadcast = try route.broadcast
+let broadcast = route.broadcast
 let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusInit))
 try audio.writeFrame(packet, timestamp: Timestamp(value: 20, scale: 1_000))
 try audio.cut() // audio has no keyframes, so this is what gives it groups

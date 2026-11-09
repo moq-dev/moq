@@ -52,7 +52,7 @@ fn timed_info() -> MoqTrackInfo {
 		max_age_unlimited: false,
 		refresh: None,
 		timescale: Some(1_000_000),
-		compress: false,
+		compression: None,
 	}
 }
 
@@ -274,7 +274,7 @@ impl std::ops::Deref for Announced {
 fn create_announced(origin: &MoqOriginProducer, path: &str) -> Announced {
 	let route = origin.route(path.into(), MoqRouteOptions::default()).unwrap();
 	Announced {
-		broadcast: route.broadcast().unwrap(),
+		broadcast: route.broadcast(),
 		_route: route,
 	}
 }
@@ -428,13 +428,11 @@ async fn route_options_reach_the_announced_route() {
 		.unwrap();
 
 	// Reading an advertisement preserves its static production price and the route's
-	// instance; a local route took no hops.
+	// instance.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let info = next_announced(&announced).await.route;
 	assert_eq!(info.cost, 9);
 	assert_eq!(info.instance, route.instance_id());
-	assert!(info.hops.is_empty());
-	assert!(!info.anonymous);
 
 	// Re-pricing changes the route in place: the listing never reports it, but a fresh
 	// listing reads the new price under the same instance.
@@ -444,7 +442,7 @@ async fn route_options_reach_the_announced_route() {
 	assert_eq!(info.cost, 4);
 	assert_eq!(info.instance, route.instance_id());
 
-	route.broadcast().unwrap().close().unwrap();
+	route.broadcast().close().unwrap();
 }
 
 #[tokio::test]
@@ -477,7 +475,7 @@ async fn route_options_name_an_instance_or_refuse() {
 		Err(MoqError::InvalidInstance { .. })
 	));
 	assert!(matches!(
-		origin.route_prefix("refused".into(), empty),
+		origin.claim("refused".into(), empty),
 		Err(MoqError::InvalidInstance { .. })
 	));
 
@@ -516,17 +514,6 @@ async fn a_new_route_at_a_path_restarts_its_followers() {
 
 	first.cancel();
 	second.cancel();
-}
-
-#[tokio::test]
-async fn an_exact_route_yields_no_requests_and_a_prefix_route_no_broadcast() {
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let exact = origin.route("live".into(), Default::default()).unwrap();
-	assert!(exact.requested().await.unwrap().is_none());
-	let prefix = origin.route_prefix("room".into(), Default::default()).unwrap();
-	assert!(matches!(prefix.broadcast(), Err(MoqError::Internal { .. })));
-	exact.cancel();
-	prefix.cancel();
 }
 
 /// A media track reserves through its demand, so an app that publishes
@@ -1233,7 +1220,7 @@ async fn raw_track_info_reports_publisher_properties() {
 		max_age_unlimited: false,
 		refresh: Some(2),
 		timescale: Some(90_000),
-		compress: true,
+		compression: Some(crate::producer::MoqCompression::Deflate),
 	};
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
 	let consumer = track.consume(None).unwrap();
@@ -1244,7 +1231,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	assert!(!got.max_age_unlimited);
 	assert_eq!(got.refresh, Some(2));
 	assert_eq!(got.timescale, Some(90_000));
-	assert!(got.compress);
+	assert_eq!(got.compression, Some(crate::producer::MoqCompression::Deflate));
 }
 
 #[tokio::test]
@@ -1319,7 +1306,7 @@ async fn data_writes_preserve_the_callers_timestamp() {
 					max_age_unlimited: false,
 					refresh: None,
 					timescale: Some(timestamp.scale),
-					compress: false,
+					compression: None,
 				}),
 			)
 			.unwrap();
@@ -1423,7 +1410,7 @@ async fn json_snapshot_roundtrip() {
 		max_age_unlimited: false,
 		timescale: Some(1_000_000),
 		refresh: None,
-		compress: true,
+		compression: Some(crate::producer::MoqCompression::Deflate),
 	};
 	let track = broadcast.publish_track("meta".into(), Some(info)).unwrap();
 	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
@@ -1497,7 +1484,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 				max_age_unlimited: false,
 				refresh: Some(1),
 				timescale: Some(1_000_000),
-				compress: false,
+				compression: None,
 			}),
 		)
 		.unwrap();
@@ -1725,7 +1712,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 				max_age_unlimited: false,
 				refresh: Some(1),
 				timescale: Some(1_000_000),
-				compress: false,
+				compression: None,
 			}),
 		)
 		.unwrap();
@@ -3283,11 +3270,7 @@ async fn media_track_activity_and_name() {
 #[tokio::test]
 async fn publish_media_aac_populates_description() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let config = moq_mux::codec::aac::Config {
-		profile: 2,
-		sample_rate: 44_100,
-		channel_count: 2,
-	};
+	let config = moq_mux::codec::aac::Config::new(2, 44_100, 2);
 	let init = config.encode().unwrap();
 	let _media = MoqMediaTrackProducer::audio(
 		&broadcast,
@@ -3374,7 +3357,7 @@ async fn a_hidden_route_is_invisible_until_announced() {
 		matches!(&update, MoqAnnounceEvent::Present { announce } if announce.prefix == "live"),
 		"{update:?}"
 	);
-	route.broadcast().unwrap().close().unwrap();
+	route.broadcast().close().unwrap();
 }
 
 /// Waiting for an exact path must hand the broadcast back named by that path, the base a
@@ -3734,9 +3717,9 @@ async fn resolve_honors_the_reference_instance() {
 	};
 
 	let catalog_route = origin.route("a/pub".into(), options.clone()).unwrap();
-	let catalog = catalog_route.broadcast().unwrap();
+	let catalog = catalog_route.broadcast();
 	let source_route = origin.route("a/source".into(), options).unwrap();
-	let source = source_route.broadcast().unwrap();
+	let source = source_route.broadcast();
 	let _video = source.publish_track("video".into(), None).unwrap();
 	let plain = create_announced(&origin, "a/plain");
 
@@ -3820,7 +3803,7 @@ async fn announce_and_withdraw_toggle_discovery() {
 		.expect("timed out requesting the reannounced broadcast")
 		.expect("a reannounced broadcast resolves");
 
-	route.broadcast().unwrap().close().unwrap();
+	route.broadcast().close().unwrap();
 }
 
 /// The route alone keeps its broadcast announced: dropping the broadcast handle retracts
@@ -3830,21 +3813,20 @@ async fn the_route_keeps_its_broadcast_announced() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let live = origin.route("live".into(), MoqRouteOptions::default()).unwrap();
-	let broadcast = live.broadcast().unwrap();
-	assert!(Arc::ptr_eq(&broadcast, &live.broadcast().unwrap()));
+	let broadcast = live.broadcast();
+	assert!(Arc::ptr_eq(&broadcast, &live.broadcast()));
 	drop(broadcast);
 	await_announced(&consumer, "live").await;
 
 	let dropped = origin.route("dropped".into(), MoqRouteOptions::default()).unwrap();
-	let dropped_broadcast = dropped.broadcast().unwrap();
+	let dropped_broadcast = dropped.broadcast();
 	await_announced(&consumer, "dropped").await;
 	drop(dropped);
 	let cancelled = origin.route("cancelled".into(), MoqRouteOptions::default()).unwrap();
-	let cancelled_broadcast = cancelled.broadcast().unwrap();
+	let cancelled_broadcast = cancelled.broadcast();
 	await_announced(&consumer, "cancelled").await;
 	cancelled.cancel();
 	assert!(matches!(cancelled.announce(), Err(MoqError::Cancelled)));
-	assert!(matches!(cancelled.requested().await, Err(MoqError::Cancelled)));
 	for path in ["dropped", "cancelled"] {
 		let unroutable = kio::clock::timeout(TIMEOUT, consumer.request(path.into(), None))
 			.await
@@ -3856,7 +3838,7 @@ async fn the_route_keeps_its_broadcast_announced() {
 		broadcast.close().unwrap();
 	}
 
-	live.broadcast().unwrap().close().unwrap();
+	live.broadcast().close().unwrap();
 	let unroutable = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("an unroutable request answers at once");
@@ -3870,7 +3852,7 @@ async fn a_closed_route_leaves_its_replacement_alone() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let stale = origin.route("live".into(), MoqRouteOptions::default()).unwrap();
-	stale.broadcast().unwrap().close().unwrap();
+	stale.broadcast().close().unwrap();
 
 	let replacement = origin.route("live".into(), MoqRouteOptions::default()).unwrap();
 	assert!(matches!(stale.announce(), Err(MoqError::Closed)));
@@ -3881,7 +3863,7 @@ async fn a_closed_route_leaves_its_replacement_alone() {
 		.expect("timed out requesting the replacement")
 		.expect("the replacement still resolves");
 
-	replacement.broadcast().unwrap().close().unwrap();
+	replacement.broadcast().close().unwrap();
 }
 
 #[tokio::test]
@@ -5049,13 +5031,13 @@ async fn follow() {
 	_broadcast.close().unwrap();
 }
 
-fn serve(origin: &MoqOriginProducer, prefix: &str) -> Arc<MoqRoute> {
-	origin.route_prefix(prefix.into(), MoqRouteOptions::default()).unwrap()
+fn serve(origin: &MoqOriginProducer, prefix: &str) -> Arc<MoqClaim> {
+	origin.claim(prefix.into(), MoqRouteOptions::default()).unwrap()
 }
 
-/// The next request beneath a prefix route, failing the test once it yields none.
-async fn requested(route: &MoqRoute) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
-	Ok(route.requested().await?.expect("the prefix route ended"))
+/// The next request beneath a claim, failing the test once it yields none.
+async fn requested(claim: &MoqClaim) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
+	Ok(claim.requested().await?.expect("the claim ended"))
 }
 
 #[tokio::test]
@@ -5076,7 +5058,7 @@ async fn dynamic_broadcast_request() {
 	assert_eq!(request.path().unwrap(), "dynamic/broadcast");
 
 	let job = request.route(hidden()).unwrap();
-	let served = job.broadcast().unwrap();
+	let served = job.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
 	// Only announce answers the requester, under the claim's instance and after admission.
 	let instance = job.instance_id();
@@ -5135,7 +5117,7 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "live/cam");
 	let job = request.route(MoqRouteOptions::default()).unwrap();
-	let served = job.broadcast().unwrap();
+	let served = job.broadcast();
 	kio::clock::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for the request to resolve")
@@ -5176,7 +5158,7 @@ async fn dynamic_keeps_the_origin_alive() {
 		.expect("the handler must still receive requests")
 		.unwrap();
 	let job = request.route(MoqRouteOptions::default()).unwrap();
-	let served = job.broadcast().unwrap();
+	let served = job.broadcast();
 	kio::clock::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for the request to resolve")
@@ -6100,7 +6082,7 @@ async fn datagrams_cross_a_default_connection() {
 			scale: 90_000
 		})
 	);
-	assert_eq!(session.state().version.as_deref(), Some("moq-lite-06"));
+	assert!(matches!(session.state().phase, MoqConnectionPhase::Connected { version } if version == "moq-lite-06"));
 }
 
 /// An on-demand datagram-only track reaches a reader on the default lite-06 path while a
@@ -6135,7 +6117,7 @@ async fn requested_datagrams_cross(versions: Vec<String>, negotiated: &str) {
 		.unwrap()
 		.unwrap();
 	assert_eq!(datagram.payload, b"only");
-	assert_eq!(session.state().version.as_deref(), Some(negotiated));
+	assert!(matches!(session.state().phase, MoqConnectionPhase::Connected { version } if version == negotiated));
 }
 
 /// A replacement session from the same publisher re-announces every route while the old one
@@ -6243,7 +6225,7 @@ async fn follow_retries_a_dropped_wait() {
 		.expect("the retry waited for another instance")
 		.unwrap()
 		.unwrap();
-	served.broadcast().unwrap().close().unwrap();
+	served.broadcast().close().unwrap();
 }
 
 /// Another instance taking over while `available()` resolves is the one it hands out, and
@@ -6332,7 +6314,7 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		"the claim above did not answer the same instance"
 	);
 	drop((served, dynamic));
-	first_route.broadcast().unwrap().close().unwrap();
+	first_route.broadcast().close().unwrap();
 }
 
 /// An instance pins both resolutions to one publisher instance: a request for another one is
@@ -6408,8 +6390,8 @@ async fn an_instance_pins_request_and_follow() {
 		"the follower handed out another instance"
 	);
 	drop(takeover);
-	first.broadcast().unwrap().close().unwrap();
-	second.broadcast().unwrap().close().unwrap();
+	first.broadcast().close().unwrap();
+	second.broadcast().close().unwrap();
 }
 
 /// Dropping a handed-out handle changes nothing about the path, so the follower hands out
@@ -6589,7 +6571,7 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	let defaults = moq_client_defaults();
 
 	let connect = moq_tokio::connect::Config::default().resolve();
-	assert_eq!(defaults.timeout, Some(connect.timeout));
+	assert_eq!(defaults.timeout, connect.timeout);
 	assert_eq!(defaults.race, Some(connect.race));
 	assert_eq!(defaults.resolution_delay, Some(connect.resolution_delay));
 
@@ -6602,8 +6584,8 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(defaults.websocket.enabled, Some(true));
 	let backoff = moq_tokio::connection::Backoff::default();
 	assert_eq!(defaults.backoff.initial, Some(backoff.initial()));
-	assert_eq!(defaults.backoff.max, Some(backoff.max()));
-	assert_eq!(defaults.backoff.timeout, Some(backoff.timeout()));
+	assert_eq!(defaults.backoff.max, Some(backoff.max().unwrap_or_default()));
+	assert_eq!(defaults.backoff.timeout, Some(backoff.timeout().unwrap_or_default()));
 
 	// The backend picks these, so there is no single value to report.
 	assert_eq!(defaults.tls.system_roots, None);
@@ -7109,12 +7091,13 @@ async fn request_per_session_publish_override() {
 	server.cancel();
 }
 
+/// Wait for a state whose phase passes `reached`.
 async fn wait_phase(
 	session: &MoqSession,
-	phase: MoqConnectionPhase,
+	reached: fn(&MoqConnectionPhase) -> bool,
 ) -> Result<crate::session::MoqConnectionState, MoqError> {
 	let mut state = session.state();
-	while state.phase != phase {
+	while !reached(&state.phase) {
 		state = session.state_changed(state.revision).await?;
 	}
 	Ok(state)
@@ -7139,18 +7122,21 @@ async fn session_state_names_a_failing_first_dial() {
 	.unwrap();
 	let session = client.connect(format!("https://{addr}")).await.unwrap();
 	let mut state = session.state();
-	assert_eq!(state.phase, MoqConnectionPhase::Connecting);
+	assert!(matches!(state.phase, MoqConnectionPhase::Connecting { .. }));
 	assert_eq!(state.connects, 0);
-	assert!(state.version.is_none());
 	drop(client);
 	for _ in 0..2 {
 		state = kio::clock::timeout(TIMEOUT, session.state_changed(state.revision))
 			.await
 			.unwrap()
 			.unwrap();
-		assert_eq!(state.phase, MoqConnectionPhase::Connecting);
+		assert!(matches!(
+			state.phase,
+			MoqConnectionPhase::Connecting {
+				failure: Some(MoqError::Connect { .. })
+			}
+		));
 		assert_eq!(state.connects, 0);
-		assert!(matches!(state.failure, Some(MoqError::Connect { .. })));
 	}
 	drop(silent);
 	let server = MoqServer::new(MoqServerConfig {
@@ -7162,15 +7148,16 @@ async fn session_state_names_a_failing_first_dial() {
 	server.listen().await.unwrap();
 	let request = server.accept().await.unwrap().unwrap();
 	let accepted = request.accept(None, None).await.unwrap();
-	let connected = kio::clock::timeout(TIMEOUT, wait_phase(&session, MoqConnectionPhase::Connected))
-		.await
-		.unwrap()
-		.unwrap();
+	let connected = kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&session, |phase| matches!(phase, MoqConnectionPhase::Connected { .. })),
+	)
+	.await
+	.unwrap()
+	.unwrap();
 	assert_eq!(connected.connects, 1);
-	assert!(connected.failure.is_none());
-	assert!(connected.version.is_some());
 	let initial_accepted = accepted.state();
-	assert_eq!(initial_accepted.phase, MoqConnectionPhase::Connected);
+	assert!(matches!(initial_accepted.phase, MoqConnectionPhase::Connected { .. }));
 	assert_eq!(initial_accepted.connects, 1);
 	let ending = accepted.state_changed(initial_accepted.revision);
 	tokio::pin!(ending);
@@ -7181,14 +7168,15 @@ async fn session_state_names_a_failing_first_dial() {
 	);
 	accepted.cancel(0);
 	let terminal = kio::clock::timeout(TIMEOUT, ending).await.unwrap().unwrap();
-	assert_eq!(terminal.phase, MoqConnectionPhase::Closed);
-	assert!(terminal.version.is_none());
-	assert!(terminal.failure.is_some());
+	assert!(matches!(
+		terminal.phase,
+		MoqConnectionPhase::Closed { failure: Some(_) }
+	));
 	assert_eq!(accepted.state().revision, terminal.revision);
 	assert!(accepted.state_changed(terminal.revision).await.is_err());
 	session.cancel(0);
 	session.closed().await.unwrap();
-	assert_eq!(session.state().phase, MoqConnectionPhase::Closed);
+	assert!(matches!(session.state().phase, MoqConnectionPhase::Closed { .. }));
 	accepted.cancel(0);
 	server.cancel();
 }
@@ -7258,14 +7246,17 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("connect failed");
 
 	// Observe the first successful connect through the same state as its initial dial.
-	let status = kio::clock::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
-		.await
-		.expect("status timed out")
-		.expect("status errored");
-	assert_eq!(status.phase, MoqConnectionPhase::Connected);
+	let status = kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&cs, |phase| matches!(phase, MoqConnectionPhase::Connected { .. })),
+	)
+	.await
+	.expect("status timed out")
+	.expect("status errored");
 	assert_eq!(status.connects, 1);
-	assert!(status.failure.is_none(), "nothing has failed yet");
-	let version = status.version.expect("a live connection reports its version");
+	let MoqConnectionPhase::Connected { version } = status.phase else {
+		panic!("waited for a connect, got {:?}", status.phase);
+	};
 	crate::session::parse_versions(&[version]).expect("the version is spelled like the config's");
 
 	// Kill the transport under the client, simulating a relay restart.
@@ -7276,25 +7267,29 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("accept task gone");
 	first.cancel(0);
 
-	let status = kio::clock::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Disconnected))
-		.await
-		.expect("disconnect status timed out")
-		.expect("disconnect status errored");
-	assert_eq!(status.phase, MoqConnectionPhase::Disconnected);
+	let status = kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&cs, |phase| matches!(phase, MoqConnectionPhase::Disconnected { .. })),
+	)
+	.await
+	.expect("disconnect status timed out")
+	.expect("disconnect status errored");
 	// Recorded before the status moved, so the watcher woken by the drop finds why.
-	assert!(status.failure.is_some(), "the drop must report its reason");
-	assert!(status.version.is_none());
+	assert!(
+		matches!(status.phase, MoqConnectionPhase::Disconnected { failure: Some(_) }),
+		"the drop must report its reason"
+	);
 	assert!(cs.stats().version.is_none(), "nothing is live to report a version");
 
 	// Open the gate; the redial completes.
 	regate_tx.send(()).expect("accept task gone");
-	let status = kio::clock::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
-		.await
-		.expect("reconnect status timed out")
-		.expect("reconnect status errored");
-	assert_eq!(status.phase, MoqConnectionPhase::Connected);
-	assert!(status.failure.is_none(), "the reconnect must clear the failure");
-	assert!(status.version.is_some());
+	let status = kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&cs, |phase| matches!(phase, MoqConnectionPhase::Connected { .. })),
+	)
+	.await
+	.expect("reconnect status timed out")
+	.expect("reconnect status errored");
 	assert!(cs.stats().version.is_some(), "the reconnect reports its version");
 
 	assert_eq!(status.connects, 2, "phase and count come from one observation");
@@ -7499,11 +7494,13 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 		.expect("server accept timed out")
 		.expect("server accept task panicked");
 
-	let status = kio::clock::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
-		.await
-		.expect("status timed out")
-		.expect("status errored");
-	assert_eq!(status.phase, MoqConnectionPhase::Connected);
+	let status = kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&cs, |phase| matches!(phase, MoqConnectionPhase::Connected { .. })),
+	)
+	.await
+	.expect("status timed out")
+	.expect("status errored");
 
 	// Give up on a status that isn't coming, once the call has parked on it: a call that
 	// never reached its await would pass either way.
@@ -7525,7 +7522,7 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 		.await
 		.expect("the cancelled waiter swallowed the disconnect")
 		.expect("status errored");
-	assert_eq!(status.phase, MoqConnectionPhase::Disconnected);
+	assert!(matches!(status.phase, MoqConnectionPhase::Disconnected { .. }));
 
 	cs.cancel(0);
 	server.cancel();
@@ -7535,7 +7532,6 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
-	kio::clock::host_time();
 	use crate::bandwidth::MoqAllocator;
 	use crate::video::*;
 
@@ -7586,18 +7582,8 @@ async fn video_encoder_follows_a_shrinking_grant() {
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
 
-	let deadline = kio::clock::Instant::now() + TIMEOUT;
-	loop {
-		if video.applied_bitrate() == 1_000_000 {
-			break;
-		}
-		assert!(
-			kio::clock::Instant::now() < deadline,
-			"encoder did not follow the shrinking grant, last applied {}",
-			video.applied_bitrate()
-		);
-		kio::clock::sleep(Duration::from_millis(10)).await;
-	}
+	// A drop applies at once, so this waits on the follow thread alone, never a timer.
+	video.wait_applied(1_000_000);
 
 	video.finish().unwrap();
 	broadcast.close().unwrap();
@@ -7797,7 +7783,7 @@ async fn cancelling_a_session_aborts_its_first_dial() {
 	session.cancel(0);
 	kio::clock::timeout(TIMEOUT, session.closed()).await.unwrap().unwrap();
 	let state = session.state_changed(revision).await.unwrap();
-	assert_eq!(state.phase, MoqConnectionPhase::Closed);
+	assert!(matches!(state.phase, MoqConnectionPhase::Closed { .. }));
 	assert_eq!(state.connects, 0);
 	assert!(matches!(
 		session.state_changed(state.revision).await,
@@ -8245,7 +8231,8 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 	let (client, server) = moq_net::transport::memory::pair(transport);
 	let connect = async {
 		let (session, driver) = moq_net::Client::new()
-			.with_origin(a.inner.clone())
+			.with_publisher(&a.inner)
+			.with_subscriber(a.inner.clone())
 			.with_versions(version.into())
 			.connect(kio::clock::Instant::now(), client)
 			.await
@@ -8627,9 +8614,10 @@ async fn auth_tokens_join_and_leave_the_union() {
 	let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
 	let addr = listener.tcp_local_addr().unwrap();
 
-	let publish = |pattern: &str| moq_net::auth::Grant {
-		publish: pattern.parse::<moq_net::Pattern>().unwrap().into(),
-		..Default::default()
+	let publish = |pattern: &str| {
+		let mut grant = moq_net::auth::Grant::default();
+		grant.publish = pattern.parse::<moq_net::Pattern>().unwrap().into();
+		grant
 	};
 	let serving = tokio::spawn(async move {
 		let mut request = listener.accept().await.expect("accept");
@@ -9276,7 +9264,7 @@ async fn audio_subscribe_configuration_boundary() {
 				max_age_unlimited: false,
 				refresh: None,
 				timescale: None,
-				compress: false,
+				compression: None,
 			}),
 		)
 		.unwrap();

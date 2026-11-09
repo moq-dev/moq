@@ -194,10 +194,11 @@ a track that stalls plays late and catches up by playing faster, rather than
 holding the other one back.
 Each role follows the catalog, switching rendition when the publisher retires
 the one playing. With `--video off`, `--metrics <PATH>` writes a JSON line every
-250 ms with the playhead, the delay, and every gap and stall the speaker hit, in
+250 ms with the playhead, the delay, every gap and stall the speaker hit, and
+the media it trimmed to bound its delay or shed by playing faster, in
 the schema the
 [audio quality harness](https://github.com/moq-dev/moq/tree/main/test/audio-quality)
-reduces to underruns, skips, and silence. A silence the publisher declares, such
+reduces to underruns, trims, and silence. A silence the publisher declares, such
 as a push-to-talk mute, plays as comfort noise at the level of the quietest audio
 heard before it, and counts as no gap or stall. The metrics total that comfort
 noise and name the media timestamp each utterance after it resumes from.

@@ -57,10 +57,25 @@ pub struct MoqTrackInfo {
 	/// Per-frame timescale in ticks per second, or null for an untimed track.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
-	/// Whether each group is DEFLATE-compressed on the wire to peers that support it.
-	/// Readers always see the original frames.
-	#[uniffi(default = false)]
-	pub compress: bool,
+	/// How each group is compressed on the wire to peers that support it, or null to send
+	/// frames as written. Readers always see the original frames.
+	#[uniffi(default = None)]
+	pub compression: Option<MoqCompression>,
+}
+
+/// How a track's frames are compressed, mirroring [`moq_net::track::Compression`]; an
+/// uncompressed track has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqCompression {
+	/// Each group is one DEFLATE stream, which suits small, repetitive frames like JSON.
+	Deflate,
+}
+
+fn compression(compression: Option<MoqCompression>) -> moq_net::track::Compression {
+	match compression {
+		None => moq_net::track::Compression::None,
+		Some(MoqCompression::Deflate) => moq_net::track::Compression::Deflate,
+	}
 }
 
 impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
@@ -81,7 +96,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			})?;
 			out = out.with_timescale(scale);
 		}
-		Ok(out.with_compress(info.compress))
+		Ok(out.with_compression(compression(info.compression)))
 	}
 }
 
@@ -99,7 +114,8 @@ impl From<&moq_net::track::Info> for MoqTrackInfo {
 			max_age_unlimited: info.max_age.is_none(),
 			refresh: info.refresh,
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
-			compress: info.compress,
+			// A codec this binding cannot name yet reads as uncompressed, as its frames do.
+			compression: (info.compression == moq_net::track::Compression::Deflate).then_some(MoqCompression::Deflate),
 		}
 	}
 }
@@ -859,8 +875,9 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let raw = guard.as_mut().ok_or(MoqError::Closed)?;
+		// The kept handle stays a producer, whose appends the end refuses.
 		if raw.finished().is_none() {
-			raw.finish()?;
+			drop(raw.clone().finish()?);
 		}
 		if let Some(children) = self.keep.lock().unwrap().take() {
 			children.keep(raw.clone());
@@ -889,13 +906,22 @@ pub struct MoqGroupProducer {
 	/// The group keeps one writer waker, so every [`ready`](Self::ready) call polls it with the
 	/// bridge's, which wakes them all. Every other call locks it through the bridge too, so a
 	/// wake it causes reaches a foreign continuation only after the lock is released.
-	inner: kio::Bridge<Option<moq_net::group::Producer>>,
+	inner: kio::Bridge<GroupPhase>,
+}
+
+/// How far a group binding got: writing, finished but still abortable, or closed.
+#[derive(Default)]
+enum GroupPhase {
+	Writing(moq_net::group::Producer),
+	Finished(moq_net::group::Finished),
+	#[default]
+	Closed,
 }
 
 impl Drop for MoqGroupProducer {
 	fn drop(&mut self) {
 		let _guard = crate::ffi::enter();
-		if let Some(group) = self.inner.get_mut().take()
+		if let GroupPhase::Writing(group) = std::mem::take(self.inner.get_mut())
 			&& group.poll_closed(&kio::Waiter::noop()).is_pending()
 		{
 			let _ = group.abort(moq_net::Error::Unroutable);
@@ -908,7 +934,7 @@ impl MoqGroupProducer {
 	pub(crate) fn from_inner(group: moq_net::group::Producer) -> Self {
 		Self {
 			sequence: group.sequence,
-			inner: kio::Bridge::new(Some(group)),
+			inner: kio::Bridge::new(GroupPhase::Writing(group)),
 		}
 	}
 }
@@ -923,9 +949,12 @@ impl MoqGroupProducer {
 	/// Create a consumer that reads frames from this group.
 	pub fn consume(&self) -> Result<Arc<MoqGroupConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let guard = self.inner.lock();
-		let group = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(Arc::new(MoqGroupConsumer::new(group.consume(), Background::default())))
+		let consumer = match &*self.inner.lock() {
+			GroupPhase::Writing(group) => group.consume(),
+			GroupPhase::Finished(group) => group.consume(),
+			GroupPhase::Closed => return Err(MoqError::Closed),
+		};
+		Ok(Arc::new(MoqGroupConsumer::new(consumer, Background::default())))
 	}
 
 	/// Write `frame` into this group.
@@ -937,7 +966,9 @@ impl MoqGroupProducer {
 		let _guard = crate::ffi::enter();
 		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
 		let mut guard = self.inner.lock();
-		let group = guard.as_mut().ok_or(MoqError::Closed)?;
+		let GroupPhase::Writing(group) = &mut *guard else {
+			return Err(MoqError::Closed);
+		};
 		group.write_frame(timestamp, frame.payload)?;
 		Ok(())
 	}
@@ -956,8 +987,10 @@ impl MoqGroupProducer {
 		let mut park = kio::Park::default();
 		crate::ffi::run(kio::wait(|waiter| {
 			self.inner.poll(waiter, |group, cx| match group {
-				Some(group) => group.poll_ready(park.hold(cx), &frame).map(Ok),
-				None => Poll::Ready(Err(MoqError::Closed)),
+				GroupPhase::Writing(group) => group.poll_ready(park.hold(cx), &frame).map(Ok),
+				// The next write reports why.
+				GroupPhase::Finished(_) => Poll::Ready(Ok(())),
+				GroupPhase::Closed => Poll::Ready(Err(MoqError::Closed)),
 			})
 		}))
 		.await
@@ -969,16 +1002,23 @@ impl MoqGroupProducer {
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock();
-		let group = guard.as_mut().ok_or(MoqError::Closed)?;
-		group.finish()?;
+		match std::mem::take(&mut *guard) {
+			GroupPhase::Writing(group) => *guard = GroupPhase::Finished(group.finish()?),
+			GroupPhase::Finished(group) => *guard = GroupPhase::Finished(group),
+			GroupPhase::Closed => return Err(MoqError::Closed),
+		}
 		Ok(())
 	}
 
 	/// Abort this group with an application error code.
 	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let group = self.inner.lock().take().ok_or(MoqError::Closed)?;
-		group.abort(moq_net::Error::App(error_code))?;
+		let err = moq_net::Error::App(error_code);
+		match std::mem::take(&mut *self.inner.lock()) {
+			GroupPhase::Writing(group) => group.abort(err)?,
+			GroupPhase::Finished(group) => group.abort(err)?,
+			GroupPhase::Closed => return Err(MoqError::Closed),
+		}
 		Ok(())
 	}
 }
@@ -987,7 +1027,10 @@ impl MoqGroupProducer {
 impl MoqGroupProducer {
 	/// Wait until a consumer wants this group.
 	pub(crate) async fn wanted(&self) -> Result<(), MoqError> {
-		let mut demand = self.inner.lock().as_ref().ok_or(MoqError::Closed)?.demand();
+		let mut demand = match &*self.inner.lock() {
+			GroupPhase::Writing(group) => group.demand(),
+			_ => return Err(MoqError::Closed),
+		};
 		while !demand.wanted_changed().await? {}
 		Ok(())
 	}
@@ -1043,7 +1086,7 @@ mod metadata_tests {
 			max_age_unlimited,
 			refresh: None,
 			timescale: None,
-			compress: false,
+			compression: None,
 		};
 		let zero = Some(std::time::Duration::ZERO);
 		let five = Some(std::time::Duration::from_secs(5));

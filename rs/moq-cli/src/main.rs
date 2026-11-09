@@ -55,11 +55,11 @@ impl Net {
 	fn server(
 		&self,
 		config: moq_tokio::listen::Config,
-		activity: moq_net::server::Activity,
+		admission: moq_net::server::Admission,
 	) -> anyhow::Result<moq_tokio::Server> {
 		let mut server = moq_tokio::server::Config::default();
 		server.listen = config;
-		server.activity = activity;
+		server.admission = admission;
 		server.quic = self.quic.clone();
 		Ok(server.init()?)
 	}
@@ -85,7 +85,7 @@ async fn spawn_server(
 		.map(Into::into)
 		.unwrap_or(moq_relay::DEFAULT_DRAIN_TIMEOUT);
 	let (trigger, shutdown) = moq_relay::shutdown::Observer::new(window);
-	let server = net.server(moq.server_config(), shutdown.activity().clone())?;
+	let server = net.server(moq.server_config(), shutdown.admission().clone())?;
 	let certificates = server.certificates();
 	let cluster = attach_lan(cluster.clone(), moq, &server)?;
 	// The auth server or public grant a `--listen` endpoint admits through. A
@@ -1078,7 +1078,7 @@ mod tests {
 	async fn drain_ends_when_the_last_admission_leaves() {
 		let _signals = SIGNALS.lock().await;
 		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(std::time::Duration::from_secs(10));
-		let active = observer.activity().enter().unwrap();
+		let active = observer.admission().enter().unwrap();
 		let mut signals = Signals::new().unwrap();
 		let shutdown = Shutdown {
 			trigger,
@@ -1099,7 +1099,7 @@ mod tests {
 	async fn a_signal_before_the_driver_polls_drains() {
 		let _signals = SIGNALS.lock().await;
 		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(std::time::Duration::from_secs(10));
-		let session = observer.activity().enter().unwrap();
+		let session = observer.admission().enter().unwrap();
 		let signals = Signals::new().unwrap();
 		// SAFETY: raise has no memory-safety preconditions.
 		assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
@@ -1180,7 +1180,7 @@ mod tests {
 		let _signals = SIGNALS.lock().await;
 		let window = std::time::Duration::from_secs(10);
 		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(window);
-		let _active = observer.activity().enter().unwrap();
+		let _active = observer.admission().enter().unwrap();
 		let mut signals = Signals::new().unwrap();
 		let shutdown = Shutdown {
 			trigger,

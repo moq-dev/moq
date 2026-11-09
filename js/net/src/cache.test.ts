@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import * as cache from "./cache.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
@@ -10,7 +10,7 @@ async function withClock(fn: (clock: { advance: (ms: number) => Promise<void> })
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
-		await fn({ advance: (ms) => clock.advance(Nano.fromMilli(Milli(ms))) });
+		await fn({ advance: (ms) => clock.advance(Duration.millis(ms)) });
 	} finally {
 		installed.close();
 	}
@@ -147,7 +147,7 @@ test("a read group outlives a later unread one", async () => {
 // it almost a window later. Mirrors Rust `delivery_restarts_the_expiry_clock`.
 test("delivery restarts a group's idle window", async () => {
 	await withClock(async (clock) => {
-		const pool = new cache.Pool({ expiry: Milli(10_000) });
+		const pool = new cache.Pool({ expiry: Duration.millis(10_000) });
 		const producer = pooled(pool);
 		const subscriber = producer.subscribe({ delay: { max: null } });
 		finished(producer, 1); // seq 0
@@ -204,7 +204,7 @@ test("a shared capacity spares a fresher track and evicts a staler one's oldest"
 // excepted, and leaves only what those still bill. Mirrors Rust `pool_sweep_expires_without_a_write`.
 test("the sweep expires idle groups across tracks without a write", async () => {
 	await withClock(async (clock) => {
-		const pool = new cache.Pool({ expiry: Milli(1_000) });
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
 		const tracks = [pooled(pool, "a"), pooled(pool, "b")];
 		const stalled = tracks.map((track) => {
 			const group = track.appendGroup(); // left open
@@ -225,7 +225,7 @@ test("the sweep expires idle groups across tracks without a write", async () => 
 // Every byte a group bills, its subscribers' mirrors included, goes back once it leaves.
 test("the pool is billed only for what is cached", async () => {
 	await withClock(async (clock) => {
-		const pool = new cache.Pool({ expiry: Milli(1_000) });
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
 		const producer = pooled(pool);
 		const subscriber = producer.subscribe({ delay: { max: null } });
 		finished(producer, 100);
@@ -322,7 +322,7 @@ test("a drop flood stays within the pool", () => {
 // `the_sweep_forgets_runs_past_the_expiry_window`.
 test("the sweep forgets runs past the idle window", async () => {
 	await withClock(async (clock) => {
-		const pool = new cache.Pool({ expiry: Milli(1_000) });
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
 		const producer = pooled(pool);
 		hooks.receiveTrack(producer);
 		// A local track keeps what it skipped above its newest group, which its end relies on.
@@ -353,7 +353,7 @@ test("the sweep forgets runs past the idle window", async () => {
 // frees a closed track's drops with its state.
 test("a kept local skip expires once the edge passes it or the track closes", async () => {
 	await withClock(async (clock) => {
-		const pool = new cache.Pool({ expiry: Milli(1_000) });
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
 		const passed = pooled(pool);
 		const closed = pooled(pool, "closed");
 		passed.skipGroups(0n, 10n);
@@ -377,7 +377,7 @@ test("a kept local skip expires once the edge passes it or the track closes", as
 // `a_reader_asks_a_fill_for_a_forgotten_run_it_judged`.
 test("a forgotten stale run is asked of a fill", async () => {
 	await withClock(async (clock) => {
-		const pool = new cache.Pool({ expiry: Milli(1_000) });
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
 		const producer = pooled(pool);
 		hooks.receiveTrack(producer);
 		const requests = producer.requests();
@@ -388,7 +388,7 @@ test("a forgotten stale run is asked of a fill", async () => {
 
 		const reader = producer.subscribe({
 			ranges: [{ start: { absolute: 1n } }],
-			delay: { max: Milli(60_000) },
+			delay: { max: Duration.millis(60_000) },
 			order: "ascending",
 		});
 		// The live group first, in arrival order; the next read asks for what it misses.
@@ -413,7 +413,7 @@ test("a forgotten stale run is asked of a fill", async () => {
 // `a_reached_end_outlives_its_expired_drops`.
 test("a reached end outlives its forgotten skip", async () => {
 	await withClock(async (clock) => {
-		const pool = new cache.Pool({ expiry: Milli(1_000) });
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
 		const producer = pooled(pool);
 		hooks.receiveTrack(producer);
 		producer.createGroup(0n).finish();
@@ -425,13 +425,13 @@ test("a reached end outlives its forgotten skip", async () => {
 				recv.group.close();
 			}
 		};
-		const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
+		const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
 		expect(done(reader)).toBe("done");
 
 		await clock.advance(3_000);
 		expect(dropsHeld(producer)).toEqual([]);
 		expect(done(reader)).toBe("done");
-		const late = producer.subscribe({ delay: { max: Milli(60_000) } });
+		const late = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
 		expect(done(late)).toBe("done");
 		reader.close();
 		late.close();

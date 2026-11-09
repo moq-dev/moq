@@ -403,7 +403,7 @@ impl poll::Session for Session {
 	fn receive_window(&self) -> Option<net::ReceiveWindow> {
 		let state = self.inner.lock();
 		Some(net::ReceiveWindow::new(
-			state.conn.receive_window(),
+			Some(state.conn.receive_window()),
 			state.conn.stream_receive_window(),
 		))
 	}

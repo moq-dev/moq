@@ -589,7 +589,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
 
 async def test_json_snapshot_roundtrip():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compress=True))
+    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.DEFLATE))
     producer = moq.json.SnapshotProducer(broadcast, track)
     consumer = moq.json.SnapshotConsumer(broadcast.consume(), "status")
 
@@ -623,7 +623,7 @@ async def test_json_stream_roundtrip():
 
 async def test_json_window_roundtrip():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000, compress=True))
+    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.DEFLATE))
     producer = moq.json.WindowProducer(track)
     consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
     demand = producer.demand()
@@ -709,7 +709,7 @@ async def test_json_window_skips_records_outside_the_checkpoint():
 
 async def test_json_producers_report_demand():
     broadcast = moq.BroadcastProducer()
-    timed = moq.TrackInfo(timescale=1_000, compress=True)
+    timed = moq.TrackInfo(timescale=1_000, compression=moq.Compression.DEFLATE)
     snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status", timed))
     stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", timed))
     snapshot_demand = snapshot.demand()
@@ -830,7 +830,7 @@ async def test_dynamic_track_request_can_publish_media():
 
 async def test_dynamic_broadcast_request():
     origin = moq.OriginProducer(cache_capacity_bytes=4096)
-    dynamic = origin.route_prefix("")
+    dynamic = origin.claim("")
     consumer = origin.consume()
 
     requesting = asyncio.create_task(consumer.request("dynamic/broadcast"))
@@ -839,7 +839,7 @@ async def test_dynamic_broadcast_request():
     assert request is not None
     assert request.path == "dynamic/broadcast"
 
-    # A hidden job route answers once it announces, under the instance its prefix route lends.
+    # A hidden job route answers once it announces, under the instance its claim lends.
     served = request.route(hidden=True)
     assert served.instance == dynamic.instance
     track = served.broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
@@ -862,7 +862,7 @@ async def test_dynamic_broadcast_request():
 
 async def test_dynamic_serves_held_content_without_an_exact_route():
     origin = moq.OriginProducer()
-    dynamic = origin.route_prefix("live")
+    dynamic = origin.claim("live")
     held = moq.BroadcastProducer()
     track = held.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     source = held.consume()
@@ -884,7 +884,7 @@ async def test_dynamic_serves_held_content_without_an_exact_route():
 
 async def test_dynamic_broadcast_request_can_reject():
     origin = moq.OriginProducer()
-    dynamic = origin.route_prefix("")
+    dynamic = origin.claim("")
     consumer = origin.consume()
 
     requesting = asyncio.create_task(consumer.request("missing"))
@@ -1832,7 +1832,7 @@ async def test_announced_pattern_captures():
     announced = consumer.announced("room", filter="*/chat")
 
     # A claim at "room" could serve a match, but its own name is none, so it is not listed.
-    dynamic = origin.route_prefix("room")
+    dynamic = origin.claim("room")
 
     audio = origin.route("room/alice/audio")
     chat = origin.route("room/alice/chat")
@@ -1849,10 +1849,8 @@ async def test_announced_pattern_captures():
 
 async def test_dynamic_serves_a_request_under_a_prefix():
     origin = moq.OriginProducer()
-    dynamic = origin.route_prefix("live")
+    dynamic = origin.claim("live")
     consumer = origin.consume()
-    with pytest.raises(moq.Error.Internal):
-        _ = dynamic.broadcast
 
     pending = asyncio.create_task(consumer.request("live/cam"))
     request = await asyncio.wait_for(anext(dynamic), timeout=5.0)
@@ -1872,7 +1870,7 @@ async def test_dynamic_and_json_handles_are_async_context_managers():
         assert moq.is_shutdown(excinfo.value)
 
     origin = moq.OriginProducer()
-    async with origin.route_prefix("live") as origin_dynamic:
+    async with origin.claim("live") as origin_dynamic:
         pass
     await assert_cancelled(origin_dynamic.requested())
 
