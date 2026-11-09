@@ -513,9 +513,7 @@ export namespace Origin {
 		withdraw(): void;
 	}
 	export interface RouteInfo {
-		readonly anonymous: boolean;
 		readonly cost: Origin.Cost;
-		readonly hops: readonly bigint[];
 		readonly instance?: Instance.Valid;
 	}
 	export interface RouteOptions {

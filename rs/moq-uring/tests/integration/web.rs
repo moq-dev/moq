@@ -40,12 +40,7 @@ fn timed() -> moq_net::track::Info {
 
 /// Build the uring server endpoint serving `h3`.
 fn h3_endpoint(handle: &moq_uring::Handle, certs: &support::Certs) -> quic::Endpoint {
-	let server = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&["h3"], quic::server::ClientAuth::None)
-			.expect("tls"),
-	);
+	let server = quic::server::Config::new(certs.server(&["h3"]));
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
@@ -1045,9 +1040,7 @@ fn dropped_session_delivers_close(explicit: bool) {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
 	let client = quic::Endpoint::new(quic::endpoint::Config::default(), sock).expect("client endpoint");
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec!["h3".to_string()];
-	dial.verify = false;
+	let dial = quic::client::Config::new(support::client_tls(&["h3"]));
 
 	worker
 		.block_on(async {
@@ -1164,9 +1157,7 @@ fn cancelling_a_pending_web_handshake(send_settings: bool) {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
 	let client = quic::Endpoint::new(quic::endpoint::Config::default(), sock).expect("client endpoint");
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec!["h3".to_string()];
-	dial.verify = false;
+	let dial = quic::client::Config::new(support::client_tls(&["h3"]));
 
 	worker
 		.block_on(async {
