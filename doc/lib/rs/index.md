@@ -61,7 +61,7 @@ let origin = moq_tokio::origin::spawn();
 let client = moq_tokio::connect::Config::default().init(Default::default())?;
 let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 // Reconnects on its own; `closed()` resolves when it gives up.
-let session = client.with_origin(origin.clone()).connect(url);
+let session = client.with_publisher(&origin).with_subscriber(origin.clone()).connect(url);
 
 // Subscribe: wait for a route, resolve the broadcast at its path, read the catalog.
 let consumer = origin.consume();

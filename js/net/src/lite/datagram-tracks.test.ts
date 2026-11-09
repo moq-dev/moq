@@ -115,7 +115,7 @@ test("lite-07 bounds and prioritizes independent createWritable datagram queues"
 	const source = new Origin();
 	const publication = source.route(path, { hidden: true });
 	const datagrams = publication.broadcast.createDatagrams("audio");
-	publication.broadcast.createTrack("audio", { compress: true });
+	publication.broadcast.createTrack("audio", { compression: "deflate" });
 	publication.announce();
 	const other = publication.broadcast.createDatagrams("other", { priority: 7 });
 	const pair = createMockTransportPair(ALPN_07_WIP, { datagramWritable: "createWritable" });

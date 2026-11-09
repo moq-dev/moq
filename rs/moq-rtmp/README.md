@@ -45,7 +45,7 @@ while let Some(request) = server.accept().await {
         // per token with `with_root` / `scope`.
         match request {
             moq_rtmp::Request::Publish(publish) => match authorize(publish.app(), publish.stream_key()).await {
-                Ok(path) => { let _ = publish.accept(&origin, &path).await; }
+                Ok(path) => { let _ = publish.accept(&origin, &path, &moq_mux::Ingest::default()).await; }
                 Err(err) => { let _ = publish.reject(&err.to_string()).await; }
             },
             moq_rtmp::Request::Play(play) => match authorize(play.app(), play.stream_key()).await {

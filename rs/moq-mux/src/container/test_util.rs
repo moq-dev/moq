@@ -357,7 +357,7 @@ impl Link {
 		// `from` may be a middle hop, so it forwards what it learned as well as its own.
 		let client = moq_net::Client::new()
 			.with_versions(version.into())
-			.with_publisher(from.consume().with_proxy(true));
+			.with_publisher(from.clone().with_proxy(true).consume());
 		let server = moq_net::Server::new()
 			.with_versions(version.into())
 			.with_subscriber(to.clone());
@@ -409,7 +409,7 @@ impl Link {
 			.with_subscriber(to.clone());
 		let server = moq_net::Server::new()
 			.with_versions(version.into())
-			.with_publisher(from.consume().with_proxy(true));
+			.with_publisher(from.clone().with_proxy(true).consume());
 		let sessions = tokio::join!(
 			async {
 				let (session, driver) = client

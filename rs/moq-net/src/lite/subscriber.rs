@@ -6445,7 +6445,7 @@ mod tests {
 					priority: 0,
 					max_age: None,
 					timescale: Some(Timescale::MILLI),
-					compress: false,
+					compression: crate::track::Compression::None,
 				}
 				.encode(&mut crate::coding::Encoder::new(&mut info, version.into()), version)
 				.unwrap();
@@ -6471,7 +6471,7 @@ mod tests {
 				priority: 0,
 				max_age: Some(Duration::from_secs(1)),
 				timescale: Some(Timescale::MILLI),
-				compress: false,
+				compression: crate::track::Compression::None,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut info, version.into()), version)
 			.unwrap();
@@ -12522,7 +12522,7 @@ impl kio::Task for FetchServeRun {
 					// fetch we can serve.
 					// Until TRACK_INFO says, the group may be compressed, which only a whole
 					// group decodes: ask for all of it.
-					let plain = matches!(self.info.peek(), Some(Ok(info)) if !info.compress);
+					let plain = matches!(self.info.peek(), Some(Ok(info)) if !info.compressed());
 					let frame_start = match self.serve.subscriber.version.has_frame_bounds() {
 						true if plain => request.frame_start(),
 						true => 0,

@@ -1153,10 +1153,8 @@ async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 		"moq-lite-04",
 		"moq-lite-05",
 	];
-	let every = (0xff0dad00..=0xff0dadff)
-		.chain(0xff000000..=0xff0000ff)
-		.filter_map(moq_net::Version::from_code);
-	for version in every
+	for version in moq_net::Version::ALL
+		.iter()
 		.map(|version| version.as_str())
 		.filter(|version| !pre06.contains(version))
 	{
@@ -1288,11 +1286,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 /// open (a JSON log appending frames to group 0), on every version.
 #[tokio::test]
 async fn broadcast_rejoin_replays_a_current_warm_cache() {
-	for version in (0xff0dad00..=0xff0dadff)
-		.chain(0xff000000..=0xff0000ff)
-		.filter_map(moq_net::Version::from_code)
-		.map(|version| version.as_str())
-	{
+	for version in moq_net::Version::ALL.iter().map(|version| version.as_str()) {
 		for open in [false, true] {
 			rejoin_replays_a_current_warm_cache(version, open).await;
 		}
@@ -2417,7 +2411,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 	let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
 	let stats = registry
 		.tier(moq_net::stats::Tier::default())
-		.session(moq_net::Path::empty());
+		.session(moq_net::stats::SessionInfo::new(moq_net::Path::empty()));
 
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();

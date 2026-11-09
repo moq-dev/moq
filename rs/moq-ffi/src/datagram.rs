@@ -158,7 +158,24 @@ impl MoqDatagramProducer {
 	/// Wait until the aggregate subscriber priority differs from `last`.
 	pub async fn priority_changed(&self, last: Option<i8>) -> Result<Option<i8>, MoqError> {
 		self.inner
-			.wait(|producer, waiter| Poll::Ready(Ok(ready!(producer.poll_priority(waiter, last)))))
+			.wait(|producer, waiter| {
+				// The producer compares against what it last returned, which another call on this
+				// shared handle may have moved past `last`. Register first, then compare to `last`,
+				// so a change after the check still wakes this wait.
+				loop {
+					match producer.poll_priority_changed(waiter) {
+						Poll::Ready(priority) if priority != last => return Poll::Ready(Ok(priority)),
+						Poll::Ready(_) => continue,
+						Poll::Pending => {
+							let now = producer.priority();
+							return match now != last {
+								true => Poll::Ready(Ok(now)),
+								false => Poll::Pending,
+							};
+						}
+					}
+				}
+			})
 			.await
 	}
 

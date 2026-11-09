@@ -26,10 +26,10 @@ A reader that set `delay.max` to replay a snapshot track's history or trail a pl
 ### Compression moves to the track
 
 `Compression`, every `Config::compression` field, the `with_compression` setters, `Error::Flate`, `Error::Desync`, and `stream::Decoder::reset` are gone, along with the moq-flate dependency.
-Frames are plain JSON; set `compress: true` on the `moq_net::track::Info` you create the track with, and moq-net compresses each group on the wire and hands every reader plain frames.
+Frames are plain JSON; set `compression: Compression::Deflate` on the `moq_net::track::Info` you create the track with, and moq-net compresses each group on the wire and hands every reader plain frames.
 Drop the `compression` field from your producer and consumer configs: a consumer reads a compressed track with no setting of its own.
 The stream and window consumer configs are now empty, kept for options to come.
-Every frame is charged its JSON size against `moq_net::group::MAX_CACHE_BYTES`, as a compressed one already was.
+Every frame is charged its JSON size against the 32 MiB group budget, as a compressed one already was.
 
 ### Groups roll on joiner demand
 

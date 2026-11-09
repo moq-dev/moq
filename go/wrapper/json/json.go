@@ -5,7 +5,7 @@
 // their broadcast's catalog, which has no window mode), and a consumer takes
 // over a [moq.TrackConsumer] that has not read a group yet. The track can come
 // from a request as well as by name. Compression is the track's: publish JSON
-// with [moq.TrackInfo] Compress set, and a consumer reads it with no option of
+// with [moq.TrackInfo] Compression set, and a consumer reads it with no option of
 // its own. Every write (a snapshot update, a stream append, a window push or
 // pop) takes a timestamp on the broadcast clock, the epoch every track in the
 // broadcast shares (read it with media.CatalogProducer.Now), so the track needs
@@ -176,20 +176,20 @@ func NewSnapshotConsumer(broadcast *moq.BroadcastConsumer, name string, options 
 // Next returns the next state in order, or nil when the track ends. It skips
 // every group a newer one supersedes.
 func (c *SnapshotConsumer) Next(ctx context.Context) (*Timed, error) {
-	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
+	value, err := bridge.Call(ctx, nil, c.inner.Next)
 	return timed(value), err
 }
 
 // Latest skips to the newest state, or waits for one; nil when the track ends.
 // Skipped states are gone, and Next continues after this one.
 func (c *SnapshotConsumer) Latest(ctx context.Context) (*Timed, error) {
-	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Latest)
+	value, err := bridge.Call(ctx, nil, c.inner.Latest)
 	return timed(value), err
 }
 
 // All ranges over each JSON state until the track ends.
 func (c *SnapshotConsumer) All(ctx context.Context) iter.Seq2[*Timed, error] {
-	return bridge.Seq(ctx, c.Next)
+	return bridge.Seq(ctx, c.inner.Cancel, c.Next)
 }
 
 // Cancel stops current and future reads.
@@ -214,13 +214,13 @@ func NewStreamConsumer(track *moq.TrackConsumer) (*StreamConsumer, error) {
 
 // Next returns the next JSON record, or nil when the track ends.
 func (c *StreamConsumer) Next(ctx context.Context) (*Timed, error) {
-	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
+	value, err := bridge.Call(ctx, nil, c.inner.Next)
 	return timed(value), err
 }
 
 // All ranges over every JSON record until the track ends.
 func (c *StreamConsumer) All(ctx context.Context) iter.Seq2[*Timed, error] {
-	return bridge.Seq(ctx, c.Next)
+	return bridge.Seq(ctx, c.inner.Cancel, c.Next)
 }
 
 // Cancel stops current and future reads.
@@ -367,7 +367,7 @@ func NewWindowConsumer(track *moq.TrackConsumer) (*WindowConsumer, error) {
 // Next returns the next change to the window, or nil when the track ends. Group
 // rolls never surface.
 func (c *WindowConsumer) Next(ctx context.Context) (*WindowTimed, error) {
-	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
+	value, err := bridge.Call(ctx, nil, c.inner.Next)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +376,7 @@ func (c *WindowConsumer) Next(ctx context.Context) (*WindowTimed, error) {
 
 // All ranges over every change to the window until the track ends.
 func (c *WindowConsumer) All(ctx context.Context) iter.Seq2[*WindowTimed, error] {
-	return bridge.Seq(ctx, c.Next)
+	return bridge.Seq(ctx, c.inner.Cancel, c.Next)
 }
 
 // Cancel stops current and future reads.

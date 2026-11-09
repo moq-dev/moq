@@ -698,11 +698,10 @@ impl Lease {
 										subscribe = %join(&fresh.subscribe),
 										"grant changed; re-authorizing the session",
 									);
-									session.authorize(&moq_net::auth::Grant {
-										publish: fresh.publish.clone(),
-										subscribe: fresh.subscribe.clone(),
-										expires: None,
-									});
+									let mut grant = moq_net::auth::Grant::default();
+									grant.publish = fresh.publish.clone();
+									grant.subscribe = fresh.subscribe.clone();
+									session.authorize(&grant);
 									self.token.publish = fresh.publish;
 									self.token.subscribe = fresh.subscribe;
 								}

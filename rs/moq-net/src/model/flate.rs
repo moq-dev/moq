@@ -1,4 +1,4 @@
-//! The DEFLATE codec behind compressed tracks ([`crate::track::Info::compress`]).
+//! The DEFLATE codec behind compressed tracks ([`crate::track::Info::compression`]).
 //!
 //! Each group is one raw DEFLATE stream ([RFC 1951]) with a sync flush after every frame, so
 //! each frame's slice is self-delimited while later frames compress against earlier ones.

@@ -618,7 +618,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 			.udp(member, udp)
 			.context("failed to adopt the worker socket")?;
 		let mut endpoint_config = moq_uring::quic::endpoint::Config::default().with_server(server);
-		endpoint_config.activity = serve.shutdown.activity.clone();
+		endpoint_config.admission = serve.shutdown.admission.clone();
 		endpoint_config.handshake.timeout = serve.timeout;
 		endpoint_config.reset_secret = serve.reset_secret;
 		let endpoint =

@@ -96,8 +96,8 @@ relay.with_web(web).run().await?;
   example to leave DNS before draining, call `with_signals(false)` and fire
   `shutdown_trigger()` yourself. The drain reaches only MoQ sessions, so stop any extra listener
   (RTMP, SRT, ...) on your own deadline.
-- To serve MoQ from your own `moq_tokio::server::Config`, set its `activity`
-  from `relay.shutdown().activity()` and pass `relay.shutdown().clone()` to
+- To serve MoQ from your own `moq_tokio::server::Config`, set its `admission`
+  from `relay.shutdown().admission()` and pass `relay.shutdown().clone()` to
   `Connection::with_shutdown`, so the drain waits for its handshakes too.
 - To serve a session from any other moq-net transport, such as the in-memory
   one in tests, enable the `test-support` feature, read its SETUP with `moq_net::Server::accept_request` and pass

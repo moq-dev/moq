@@ -27,7 +27,7 @@ in advance, so it never needed the undeclared-name handler (maintainer,
   custom-track mappings only inside the encrypted catalog.
 - Encrypt the single Hang `catalog.json` left by the
   [m1 compression migration](https://github.com/moq-dev/moq/pull/7046), and encrypt or
-  suppress the MSF catalog. Set logical `compress` on protected catalog
+  suppress the MSF catalog. Set logical `compression` on protected catalog
   tracks; the [e2ee wrapper](/quest/m5/net-wrap/e2ee.md) compresses before
   encryption. Retain ordinary plaintext publication unchanged outside E2EE mode.
 - Cover every current Rust importer and capture path so a convenience API

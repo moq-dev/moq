@@ -92,7 +92,7 @@ impl Properties {
 			group_order: Some(GroupOrder::Descending),
 			// A track opted in to refresh answers a NEW_GROUP_REQUEST as a join.
 			dynamic_groups: info.refresh.is_some(),
-			compress: info.compress,
+			compress: info.compressed(),
 			unknown: Vec::new(),
 		}
 	}
