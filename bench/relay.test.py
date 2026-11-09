@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise relay workload lifetimes with deterministic fake counters."""
 
+import contextlib
+import errno
 import os
 import random
 import signal
@@ -149,6 +151,30 @@ run_workload fixture ignored video
             self.assertNotIn("generator", report)
 
 
+def bind_tcp_and_udp_on_one_port(sockets):
+    """Return a port that a TCP listener and a UDP socket both hold, keeping them in `sockets`.
+
+    TCP and UDP have separate port spaces, so a number the OS picks for one says nothing
+    about the other. Each refused TCP draw keeps its UDP socket open, so the next draw is
+    a new number and the search ends once a pair binds.
+    """
+    while True:
+        udp = sockets.enter_context(socket.socket(type=socket.SOCK_DGRAM))
+        udp.bind(("127.0.0.1", 0))
+        port = udp.getsockname()[1]
+        tcp = socket.socket()
+        try:
+            tcp.bind(("127.0.0.1", port))
+        except OSError as error:
+            tcp.close()
+            if error.errno != errno.EADDRINUSE:
+                raise
+            continue
+        sockets.enter_context(tcp)
+        tcp.listen()
+        return port
+
+
 @unittest.skipUnless(sys.platform == "linux", "relay process metrics require Linux")
 class PortOwnership(unittest.TestCase):
     def run_shell(self, script, directory, relay, **env):
@@ -269,17 +295,9 @@ relay_owns_port "$OWNER_PID" "$PORT"
             )
             self.assertEqual(result.returncode, 1, result.stderr)
 
-    @unittest.skip("flaky under parallel checks; quarantined until quest/m0/test-flakes-2/relay-port-pair.md lands")
     def test_a_stream_transport_needs_its_own_listener(self):
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            socket.socket() as tcp,
-            socket.socket(type=socket.SOCK_DGRAM) as udp,
-        ):
-            tcp.bind(("127.0.0.1", 0))
-            tcp.listen()
-            port = tcp.getsockname()[1]
-            udp.bind(("127.0.0.1", port))
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as sockets:
+            port = bind_tcp_and_udp_on_one_port(sockets)
             script = """set -euo pipefail
 ROOT=$1 RUN=$2
 source "$ROOT/bench/relay.sh"
