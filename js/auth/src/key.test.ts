@@ -805,13 +805,15 @@ test("sign - subtree grants are written as legacy put/get", async () => {
 	expect(payload).toEqual({ root: "test-path", put: ["alice"], get: [""] });
 });
 
-test("sign - legacy-shaped input cannot slip past a key scope", async () => {
+test("sign - refuses the legacy put/get spelling, even within scope", async () => {
 	const scoped: Key = {
 		...Key.parse(encodeJwk(testKey)),
 		scope: { root: "demo", publish: ["inside/**"] },
 	};
-	const legacy = { root: "demo", put: ["outside"] } as unknown as Parameters<typeof Key.sign>[1];
-	await expect(Key.sign(scoped, legacy)).rejects.toThrow(/scope/);
+	const inside = { root: "demo", put: ["inside"] } as unknown as Claims;
+	await expect(Key.sign(scoped, inside)).rejects.toThrow("legacy put/get");
+	const outside = { root: "demo", put: ["outside"] } as unknown as Claims;
+	await expect(Key.sign(scoped, outside)).rejects.toThrow("legacy put/get");
 });
 
 test("key scope is enforced when signing and verifying", async () => {

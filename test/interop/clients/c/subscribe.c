@@ -101,10 +101,21 @@ static void done(ctx_t *c, int *flag) {
     pthread_mutex_unlock(&c->mu);
 }
 
+// The failure a state's phase carries, or zero for a phase that carries none.
+static int32_t state_failure(const moq_connection_state *state) {
+    switch (state->phase) {
+    case MOQ_CONNECTION_PHASE_CONNECTING: return state->data.connecting.failure;
+    case MOQ_CONNECTION_PHASE_DISCONNECTED: return state->data.disconnected.failure;
+    case MOQ_CONNECTION_PHASE_MIGRATING: return state->data.migrating.failure;
+    case MOQ_CONNECTION_PHASE_CLOSED: return state->data.closed.failure;
+    default: return 0;
+    }
+}
+
 static void on_state(void *ud, const moq_connection_state *state) {
     ctx_t *c = (ctx_t *)ud;
     fprintf(stderr, "session state: phase=%d connects=%llu failure=%d\n", (int)state->phase,
-            (unsigned long long)state->connects, state->failure);
+            (unsigned long long)state->connects, state_failure(state));
     if (c->finish.enabled && state->connects > 0) {
         pthread_mutex_lock(&c->mu);
         c->finish.connected = (int)state->connects;

@@ -2333,7 +2333,7 @@ impl Cluster {
 			bind.set_port(0);
 			connect.bind = Some(bind);
 		}
-		if connect.backoff.timeout().is_zero() {
+		if connect.backoff.timeout().is_none() {
 			connect.backoff.timeout = Some(PEER_RETRY.into());
 		}
 		if target.is_some_and(|target| target.lan) {
@@ -3427,12 +3427,12 @@ mod tests {
 			0,
 			&moq_tokio::connection::Observation {
 				revision: 1,
-				phase: moq_tokio::connection::Phase::Connected,
 				connects: 1,
-				failure: None,
-				version: None,
 				last_connected: Some(kio::clock::now()),
-				transport: Some(moq_tokio::Transport::Quic),
+				phase: moq_tokio::connection::Phase::Connected {
+					transport: moq_tokio::Transport::Quic,
+					version: moq_net::Version::ALL[0],
+				},
 			},
 		);
 		drop(session);

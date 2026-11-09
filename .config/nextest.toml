@@ -86,6 +86,11 @@ retries = 0
 # Repeat each failure at the end of the run, so it isn't buried in the log.
 failure-output = "immediate-final"
 
+# Each run's per-test times, which the nightly gate cost scenarios read
+# (see bench/README.md); a later run of the profile replaces the report.
+[profile.ci.junit]
+path = "junit.xml"
+
 # `just rs miri` interprets every instruction, orders of magnitude slower than
 # native, so a test that takes a second here takes minutes there. The cap still
 # turns a lost wakeup into a TIMEOUT; keep a test under it by shrinking its

@@ -88,6 +88,33 @@ export function timeout<T>(duration: Duration, operation: PromiseLike<T>): Promi
 	});
 }
 
+/** An `AbortSignal` that aborts with a `TimeoutError` after a duration on the installed clock, or with `signal`'s reason once it aborts first, cancelling the timer. */
+export function timeoutSignal(duration: Duration, options: { signal?: AbortSignal; ref?: boolean } = {}): AbortSignal {
+	const { signal: parent, ref = true } = options;
+	const controller = new AbortController();
+	if (parent?.aborted) {
+		controller.abort(parent.reason);
+		return controller.signal;
+	}
+	const clock = backend();
+	const abort = () => {
+		disarm();
+		controller.abort(parent?.reason);
+	};
+	// The clock may fire synchronously for a reached deadline, before `disarm` is assigned.
+	let disarm = () => {};
+	disarm = clock.arm(
+		clock.now() + duration.asNanos(),
+		() => {
+			parent?.removeEventListener("abort", abort);
+			controller.abort(new DOMException("signal timed out", "TimeoutError"));
+		},
+		ref,
+	);
+	if (!controller.signal.aborted) parent?.addEventListener("abort", abort, { once: true });
+	return controller.signal;
+}
+
 /** Choose how an interval catches up after its caller misses ticks. */
 export const MissedTickBehavior = {
 	/** Deliver every missed tick on the original schedule. */

@@ -14,6 +14,7 @@ import {
 	sleep,
 	sleepUntil,
 	timeout,
+	timeoutSignal,
 	Wall,
 	wall,
 	yieldNow,
@@ -206,6 +207,26 @@ test("timeouts prefer ready work, propagate rejection, and expire on the manual 
 	await clock.advance(Duration.nanos(9));
 	await clock.advance(Duration.nanos(1));
 	expect(await pending).toBeInstanceOf(Elapsed);
+});
+
+test("a timeout signal aborts at the manual deadline unless its parent aborts first", async () => {
+	const clock = manual();
+	const signal = timeoutSignal(Duration.nanos(10));
+	await clock.advance(Duration.nanos(9));
+	expect(signal.aborted).toBe(false);
+	await clock.advance(Duration.nanos(1));
+	expect(signal.reason).toHaveProperty("name", "TimeoutError");
+	const parent = new AbortController();
+	const child = timeoutSignal(Duration.nanos(10), { signal: parent.signal });
+	parent.abort("closed");
+	expect(child.reason).toBe("closed");
+	await clock.advance(Duration.nanos(10));
+	expect(child.reason).toBe("closed");
+	const late = new AbortController();
+	const fired = timeoutSignal(Duration.nanos(10), { signal: late.signal });
+	clock.jump(Duration.nanos(10));
+	late.abort("closed");
+	expect(fired.reason).toHaveProperty("name", "TimeoutError");
 });
 
 test("interval burst delivers every missed scheduled tick", async () => {

@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 /// the relay accepts (and every cluster dial). The producer publishes a single
 /// `<prefix>/node/<node>` broadcast (or `<prefix>/node` when [`Self::node`] is
 /// unset) on the cluster origin, under a fresh instance each run. The broadcast
-/// carries a `totals.json` track of per-tier totals, one `<group>/group.json`
-/// track per [`Self::depth`] group with its per-path traffic and per-label
+/// carries a `totals.json` track of per-tier totals, one `<bucket>/bucket.<epoch>.json`
+/// track per [`Self::depth`] bucket with its per-path traffic and per-label
 /// sessions, and presence and prefix tracks on request, each a compressed JSON
 /// track; see `moq_stats` for the wire format and per-field semantics.
 #[derive(usage_rs::Args, Clone, Debug, Deserialize, Serialize)]
@@ -66,10 +66,10 @@ pub struct Config {
 	pub node: Option<String>,
 
 	/// Number of leading broadcast-path segments to bucket stats by, one
-	/// `<group>/group.json` track per bucket on the node's broadcast. Defaults
-	/// to 0: a single `group.json` track for the whole node. Set to 1 to
+	/// `<bucket>/bucket.<epoch>.json` track per bucket on the node's broadcast. Defaults
+	/// to 0: a single `bucket.<epoch>.json` track for the whole node. Set to 1 to
 	/// publish a per-first-segment track (e.g. per tenant), so a consumer
-	/// subscribes to just that group rather than slurping every node's full
+	/// subscribes to just that bucket rather than slurping every node's full
 	/// stats.
 	#[usage(
 		long = "stats-depth",
@@ -79,9 +79,9 @@ pub struct Config {
 	)]
 	pub depth: usize,
 
-	/// How long a group's stats track stays listed after the group's last
+	/// How long a bucket's stats track stays listed after the bucket's last
 	/// session and traffic leave, e.g. "5m" or "30s". Defaults to 5 minutes. A
-	/// group that returns within it keeps its track and counters; one that
+	/// bucket that returns within it keeps its track and counters; one that
 	/// returns after it is a new track instance counted from zero. Only applies
 	/// at `depth` 1 or more. See [`moq_stats::produce::Config::linger`].
 	#[usage(long = "stats-linger", env = "MOQ_STATS_LINGER", setting = "stats.linger")]

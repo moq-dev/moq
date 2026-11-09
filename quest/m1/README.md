@@ -45,7 +45,7 @@ moves what remains of them once their claims merge.
 - [Lifecycles are explicit state](/quest/m1/explicit-state/README.md) - every lifecycle the 2026-11-07 audit found implicit is one enum or union, fixing the bugs in the 11 lifecycles it redesigns, with review and agent rules against new ones
 - [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
 - [A macOS camera delivers frames the renderer imports](/quest/m1/camera-nv12-macos.md) - AVFoundation capture asks for NV12, so a camera whose native format is `2vuy` reaches the renderer
-- [The video decoder configures with the codec its probe accepted](/quest/m1/video-probe-codec.md) - Safari's `avc3` to `avc1` retry reaches the decoder without rewriting the catalog's codec
+- [An accept whose client already left fails instead of hanging](/quest/m1/accept-after-client-close.md) - a server's `request.accept()` after its client shut down fails promptly in Rust and every binding
 
 ## Related
 

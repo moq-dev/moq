@@ -277,6 +277,10 @@ async function guardedPlayback(
 	});
 	if (live) next.mockRestore();
 	class Codec {
+		// Like Safari, which rejects `avc3.*` but decodes the same stream as `avc1.*`.
+		static async isConfigSupported(config: VideoDecoderConfig) {
+			return { supported: !config.codec.startsWith("avc3."), config };
+		}
 		state = "unconfigured";
 		// Like WebCodecs, a configure requires a key chunk before any delta.
 		#keyRequired = true;
@@ -510,6 +514,20 @@ it("promoting from no active track holds its picture and timestamp until a frame
 		expect(playback.decoder.out.frame.peek()).toBe(held);
 		expect(playback.decoder.out.timestamp.peek()).toEqual(Duration.millis(1));
 		expect((held as unknown as Picture).closed).toBe(false);
+	} finally {
+		playback.close();
+	}
+});
+
+it("configures an avc3 rendition with the avc1 string WebCodecs accepted, leaving the catalog untouched", async () => {
+	const playback = await guardedPlayback("legacy", [sample(10n, 1000)], [], false, 0, {
+		fields: { codec: "avc3.640028" },
+	});
+	try {
+		const rendition = playback.catalog.peek().video?.renditions?.video;
+		expect(rendition && (await Decoder.supported(rendition))).toBe(true);
+		expect(rendition?.codec).toBe("avc3.640028");
+		expect(playback.configures.at(-1)?.codec).toBe("avc1.640028");
 	} finally {
 		playback.close();
 	}

@@ -10,7 +10,18 @@ import { type Wall, wallOf } from "./types.ts";
 
 export type { Installed } from "./ambient.ts";
 export { Manual } from "./manual.ts";
-export { Elapsed, Interval, interval, MissedTickBehavior, now, sleep, sleepUntil, timeout, yieldNow } from "./timer.ts";
+export {
+	Elapsed,
+	Interval,
+	interval,
+	MissedTickBehavior,
+	now,
+	sleep,
+	sleepUntil,
+	timeout,
+	timeoutSignal,
+	yieldNow,
+} from "./timer.ts";
 export { Duration, Instant, Wall } from "./types.ts";
 
 /** Read the installed clock's wall time. */
