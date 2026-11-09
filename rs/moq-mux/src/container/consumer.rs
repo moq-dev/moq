@@ -548,7 +548,7 @@ impl<F: Container> Consumer<F> {
 			// buffers past a full max buffer, so a start is always found.
 			let any_frame = self.pending.iter_mut().enumerate().any(|(i, group)| {
 				let _ = group.poll_min_timestamp(waiter, &self.format, i == 0);
-				!group.empty
+				!group.is_empty()
 			});
 			if any_frame {
 				// A live reader takes the newest group, though its frames may still be on their
@@ -664,8 +664,8 @@ impl<F: Container> Consumer<F> {
 					Poll::Ready(Ok(None)) => {
 						// A data track's marker carries no timestamp, so it ends where this reader
 						// got to. Before the first item there is nothing to end.
-						if group.bare
-							&& !std::mem::replace(&mut group.ended, true)
+						if let Content::Bare { ended } = &mut group.content
+							&& !std::mem::replace(ended, true)
 							&& let Some(edge) = self.edge
 						{
 							let end = u64::try_from(edge.as_micros())
@@ -749,7 +749,7 @@ impl<F: Container> Consumer<F> {
 				if finished || elapsed || aged || excluded || full {
 					let _ = self.pending.front_mut().unwrap().look_all(waiter, &self.format);
 					let front = self.pending.front_mut().unwrap();
-					let empty = front.empty && matches!(front.group.poll_finished(waiter), Poll::Ready(Ok(_)));
+					let empty = front.is_empty() && matches!(front.group.poll_finished(waiter), Poll::Ready(Ok(_)));
 					let front = self.pending.front().unwrap();
 					let next_start = front.min_timestamp.map(std::time::Duration::from).or(front.max_end);
 					// A data marker has no timestamp to prove continuity across the hole.
@@ -1105,7 +1105,7 @@ impl<F: Container> Consumer<F> {
 		self.pending.retain_mut(|group| {
 			// Keep the cursor's gap and anything already decoded, including markers and faults.
 			// A never-read evicted group holds no event that its missing sequence cannot say.
-			group.sequence == current || !group.empty || !group.poll_aborted(waiter)
+			group.sequence == current || !group.is_empty() || !group.poll_aborted(waiter)
 		});
 		self.collect_at = self.pending.len().saturating_mul(2).max(1);
 	}
@@ -1233,18 +1233,7 @@ struct GroupBuffer<F: Container> {
 	// The current frame index within the group.
 	index: usize,
 
-	// Whether the group has carried any wire frame. Empty groups (zero objects) mean
-	// nothing; a finished group with wire frames and no media is a marker.
-	empty: bool,
-
-	// Whether a decodable (non-marker) frame was buffered.
-	media: bool,
-
-	// Whether this is a data track's marker group: one object with no bytes.
-	bare: bool,
-
-	// Whether a marker with no timestamp of its own was read as an end.
-	ended: bool,
+	content: Content,
 
 	// A decode error found while looking ahead, delivered after the frames buffered before it.
 	fault: Option<F::Error>,
@@ -1271,6 +1260,19 @@ struct GroupBuffer<F: Container> {
 	max_end: Option<std::time::Duration>,
 }
 
+/// What a group has carried so far.
+enum Content {
+	/// No wire frame: an empty group means nothing.
+	Empty,
+	/// Wire frames but no media, so a marker once it finishes.
+	Marker,
+	/// A data track's marker: one object with no bytes. `ended` once it was read as an end,
+	/// since it has no timestamp of its own.
+	Bare { ended: bool },
+	/// A decodable (non-marker) frame was buffered.
+	Media,
+}
+
 impl<F: Container> GroupBuffer<F> {
 	fn new(group: moq_net::group::Consumer, memory: Memory) -> Self {
 		let mut this = Self {
@@ -1278,10 +1280,7 @@ impl<F: Container> GroupBuffer<F> {
 			late: group.arrived(),
 			group,
 			index: 0,
-			empty: true,
-			media: false,
-			bare: false,
-			ended: false,
+			content: Content::Empty,
 			fault: None,
 			buffered: VecDeque::new(),
 			markers: VecDeque::new(),
@@ -1330,17 +1329,22 @@ impl<F: Container> GroupBuffer<F> {
 			Err(err) if self.poll_aborted(waiter) => return Poll::Ready(Err(Failure::Lost(err.into()))),
 			Err(err) => return Poll::Ready(Err(Failure::Decode(err.into()))),
 		};
-		self.empty = false;
+		if matches!(self.content, Content::Empty) {
+			self.content = Content::Marker;
+		}
 		let arrived = wire.arrived();
 		let size = wire.payload.len();
 		let frames = format.decode(wire).map_err(Failure::Decode)?;
 		if format.kind() == super::Kind::Data {
 			// A data track's marker is one object with no bytes, alone in its group.
-			if self.bare || (frames.is_empty() && self.media) {
-				let err = moq_net::Error::Decode(moq_net::DecodeError::ExpectedEnd).into();
-				return Poll::Ready(Err(Failure::Decode(err)));
+			match (&self.content, frames.is_empty()) {
+				(Content::Bare { .. }, _) | (Content::Media, true) => {
+					let err = moq_net::Error::Decode(moq_net::DecodeError::ExpectedEnd).into();
+					return Poll::Ready(Err(Failure::Decode(err)));
+				}
+				(_, true) => self.content = Content::Bare { ended: false },
+				(_, false) => {}
 			}
-			self.bare = frames.is_empty();
 		}
 
 		// Decoded payloads are views of the wire payload, which stays allocated while any of them is
@@ -1378,7 +1382,7 @@ impl<F: Container> GroupBuffer<F> {
 			// the container's flag otherwise so CMAF mid-group keyframes survive.
 			frame.keyframe = frame.keyframe || self.index == 0;
 			self.index += 1;
-			self.media = true;
+			self.content = Content::Media;
 
 			let cost = frame_cost(&frame);
 			views += frame.payload.len();
@@ -1489,7 +1493,12 @@ impl<F: Container> GroupBuffer<F> {
 	}
 
 	fn marker(&self) -> bool {
-		!self.empty && !self.media
+		matches!(self.content, Content::Marker | Content::Bare { .. })
+	}
+
+	/// The group has carried no wire frame.
+	fn is_empty(&self) -> bool {
+		matches!(self.content, Content::Empty)
 	}
 
 	fn charge(&mut self, bytes: usize) {
@@ -5730,7 +5739,7 @@ mod tests {
 		track.finish().unwrap();
 		assert!(consumer.poll_received(&kio::Waiter::noop()).is_pending());
 		assert!(
-			consumer.pending.iter().all(|group| group.empty),
+			consumer.pending.iter().all(|group| group.is_empty()),
 			"receipt must not decode payload"
 		);
 		group.finish().unwrap();

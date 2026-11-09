@@ -64,7 +64,7 @@ const INIT_QUEUE: Duration = Duration::from_secs(30);
 /// fragments belong to one track.
 pub struct Export<S: Stream> {
 	source: crate::Source,
-	catalog: Option<S>,
+	catalog: Feed<S>,
 	delay: Delay,
 	fragment_duration: Option<Duration>,
 
@@ -77,22 +77,11 @@ pub struct Export<S: Stream> {
 	/// so a publisher cycling names holds only what it recorded.
 	departed: HashMap<String, Fmp4Track>,
 
-	/// The first track id the init segment does not declare.
-	first_late_id: u32,
-
-	/// Fragments cut before the init segment, written right after it in the order they
-	/// were cut.
-	queued: VecDeque<(String, Fragment)>,
-
-	/// Set after the init segment has been emitted, which fixes the track set.
-	init_emitted: bool,
+	init: Init,
 
 	/// Keep a rendition that joins after the init segment instead of failing, for a writer
 	/// that declares it elsewhere. Its fragments carry a track id the init never declared.
 	late: bool,
-
-	/// Set by [`stop`](Self::stop), after which nothing more is read.
-	stopped: bool,
 
 	/// The `tkhd.track_id` the next new rendition gets.
 	next_track_id: u32,
@@ -105,6 +94,50 @@ pub struct Export<S: Stream> {
 	/// fragment. Each track's own numbers still ascend within the shared sequence, which
 	/// is what CMAF asks for.
 	sequence_number: u32,
+}
+
+/// Where the catalog subscription stands.
+enum Feed<S> {
+	Live(S),
+	/// The publisher ended the catalog.
+	Ended,
+	/// [`Export::stop`] dropped it, so media no track could be described for is discarded.
+	Stopped,
+}
+
+impl<S> Feed<S> {
+	fn live(&self) -> bool {
+		matches!(self, Feed::Live(_))
+	}
+}
+
+/// Whether the init segment went out, which fixes the track set.
+enum Init {
+	/// Fragments cut before the init segment, written right after it in the order they were cut.
+	Waiting(VecDeque<(String, Fragment)>),
+	/// `first_late` is the first track id the init does not declare, and `queued` the
+	/// fragments cut while it waited, still to go out.
+	Written {
+		first_late: u32,
+		queued: VecDeque<Fragment>,
+	},
+}
+
+impl Init {
+	fn written(&self) -> bool {
+		matches!(self, Init::Written { .. })
+	}
+
+	/// The init segment went out, declaring every track id below `first_late`.
+	fn write(&mut self, first_late: u32) {
+		if let Init::Waiting(queued) = self {
+			let queued = std::mem::take(queued)
+				.into_iter()
+				.map(|(_, fragment)| fragment)
+				.collect();
+			*self = Init::Written { first_late, queued };
+		}
+	}
 }
 
 /// One emitted CMAF chunk: the init segment, then media fragments.
@@ -234,9 +267,107 @@ struct Declaration {
 	provisional: bool,
 }
 
+/// Where a track's subscription stands.
+enum Phase {
+	/// Reading the rendition's subscription.
+	Reading(Subscription),
+	/// The subscription ended while the rendition stays in the catalog.
+	Ended(Subscription),
+	/// The rendition left the catalog after the init. One that returns resumes here.
+	Departed(Resume),
+	/// [`Export::stop`] ended the read.
+	Stopped,
+}
+
+/// A track's subscription to its rendition.
+struct Subscription {
+	source: ExportSource,
+	/// Checked against the track's declaration. Until then its frames are dropped: they
+	/// come before the codec configuration they need.
+	described: bool,
+}
+
+/// A run of frames that becomes one fragment.
+struct Batch {
+	frames: Vec<Frame>,
+	/// The first frame was a keyframe, so the fragment can start an HLS segment.
+	/// Meaningless for audio.
+	independent: bool,
+}
+
+/// The frames a track accumulates for its next moof+mdat, flushed when the next frame
+/// opens a group or on the duration cap.
+#[derive(Default)]
+enum Buffer {
+	#[default]
+	Empty,
+	Open(Batch),
+	/// The source group closed, so the fragment can be emitted.
+	Closed(Batch),
+}
+
+impl Buffer {
+	fn batch(&self) -> Option<&Batch> {
+		match self {
+			Buffer::Empty => None,
+			Buffer::Open(batch) | Buffer::Closed(batch) => Some(batch),
+		}
+	}
+
+	fn is_empty(&self) -> bool {
+		self.batch().is_none()
+	}
+
+	fn is_closed(&self) -> bool {
+		matches!(self, Buffer::Closed(_))
+	}
+
+	fn first(&self) -> Option<&Frame> {
+		self.batch()?.frames.first()
+	}
+
+	fn last(&self) -> Option<&Frame> {
+		self.batch()?.frames.last()
+	}
+
+	fn last_mut(&mut self) -> Option<&mut Frame> {
+		match self {
+			Buffer::Empty => None,
+			Buffer::Open(batch) | Buffer::Closed(batch) => batch.frames.last_mut(),
+		}
+	}
+
+	/// Append to the open run, or open one with `frame`.
+	fn push(&mut self, frame: Frame) {
+		match self {
+			Buffer::Open(batch) => batch.frames.push(frame),
+			_ => {
+				*self = Buffer::Open(Batch {
+					independent: frame.keyframe,
+					frames: vec![frame],
+				})
+			}
+		}
+	}
+
+	/// End the open run, so its fragment can go out.
+	fn close(&mut self) {
+		*self = match std::mem::take(self) {
+			Buffer::Open(batch) => Buffer::Closed(batch),
+			buffer => buffer,
+		};
+	}
+
+	fn take(&mut self) -> Option<Batch> {
+		match std::mem::take(self) {
+			Buffer::Empty => None,
+			Buffer::Open(batch) | Buffer::Closed(batch) => Some(batch),
+		}
+	}
+}
+
 struct Fmp4Track {
-	/// The subscription while the rendition is in the catalog.
-	source: Option<ExportSource>,
+	phase: Phase,
 
 	config: Rendition,
 
@@ -244,20 +375,10 @@ struct Fmp4Track {
 	/// must keep its sample entry, except to settle a provisional one.
 	declaration: Option<Declaration>,
 
-	/// The current subscription has been checked against `declaration`. Until then its
-	/// frames are dropped: they come before the codec configuration they need.
-	described: bool,
-
 	/// The next decoded frame from the source, used for cross-track timestamp ordering.
 	pending: Option<Frame>,
 
-	/// Frames accumulated for the current fragment. Flushed as a single
-	/// moof+mdat when the next frame opens a group, or on the duration cap.
-	buffer: Vec<Frame>,
-
-	/// Whether the first frame of the current `buffer` was a keyframe, i.e. the
-	/// fragment it produces can start an HLS segment. Meaningless for audio.
-	buffer_independent: bool,
+	buffer: Buffer,
 
 	/// True if this track is video. Its samples are independently decodable only
 	/// at a keyframe; audio samples always are.
@@ -269,14 +390,6 @@ struct Fmp4Track {
 	/// Fallback duration for a trailing frame that carries no per-sample duration
 	/// (Legacy / LOC sources). Derived from the catalog framerate / sample rate.
 	default_frame: Duration,
-
-	/// Whether the source has signalled end-of-track, or the rendition left the catalog.
-	finished: bool,
-	/// Where the subscription stopped when the rendition left the catalog, which a
-	/// resubscription resumes from.
-	resume: Option<Resume>,
-	/// The source group closed, so its buffered fragment can be emitted.
-	group_finished: bool,
 
 	/// The latest presentation time written, so a resubscription that replays it fails
 	/// instead of writing the track's history twice.
@@ -307,19 +420,17 @@ impl Fmp4Track {
 			Rendition::Audio(config) => catalog_timescale_audio(config)?,
 		};
 		Ok(Self {
-			source: Some(source),
+			phase: Phase::Reading(Subscription {
+				source,
+				described: false,
+			}),
 			is_video: config.is_video(),
 			opus: matches!(&config, Rendition::Audio(config) if matches!(config.codec, AudioCodec::Opus)),
 			default_frame: config.default_frame(),
 			config,
 			declaration: None,
-			described: false,
 			pending: None,
-			buffer: Vec::new(),
-			buffer_independent: false,
-			finished: false,
-			resume: None,
-			group_finished: false,
+			buffer: Buffer::Empty,
 			written: None,
 			decode_end: None,
 			backlog: None,
@@ -341,13 +452,54 @@ impl Fmp4Track {
 			.map(|frame| Duration::from(frame.timestamp))
 	}
 
+	/// The subscription, while the rendition is in the catalog.
+	fn subscription(&self) -> Option<&Subscription> {
+		match &self.phase {
+			Phase::Reading(subscription) | Phase::Ended(subscription) => Some(subscription),
+			Phase::Departed(_) | Phase::Stopped => None,
+		}
+	}
+
+	fn subscription_mut(&mut self) -> Option<&mut Subscription> {
+		match &mut self.phase {
+			Phase::Reading(subscription) | Phase::Ended(subscription) => Some(subscription),
+			Phase::Departed(_) | Phase::Stopped => None,
+		}
+	}
+
+	/// Nothing more will be read: the subscription ended, or the rendition left.
+	fn finished(&self) -> bool {
+		!matches!(self.phase, Phase::Reading(_))
+	}
+
+	fn described(&self) -> bool {
+		self.subscription().is_some_and(|subscription| subscription.described)
+	}
+
+	/// The source signalled end-of-track.
+	fn end(&mut self) {
+		self.phase = match std::mem::replace(&mut self.phase, Phase::Stopped) {
+			Phase::Reading(subscription) => Phase::Ended(subscription),
+			phase => phase,
+		};
+	}
+
+	/// The rendition left the catalog after the init: end the subscription, keeping where
+	/// it stopped for a return. What was already read still goes out.
+	fn depart(&mut self) {
+		self.phase = match std::mem::replace(&mut self.phase, Phase::Stopped) {
+			Phase::Reading(subscription) | Phase::Ended(subscription) => Phase::Departed(subscription.source.resume()),
+			phase => phase,
+		};
+	}
+
 	/// Apply a newer catalog entry for the same rendition.
 	fn reconfigure(&mut self, name: &str, config: Rendition) -> Result<()> {
 		if config.is_video() != self.is_video {
 			return Err(Error::TrackChanged(name.to_string()).into());
 		}
-		if let (Rendition::Video(video), Some(source)) = (&config, self.source.as_mut())
-			&& !source.note_catalog(video)
+		if let (Rendition::Video(video), Some(subscription)) = (&config, self.subscription_mut())
+			&& !subscription.source.note_catalog(video)
 		{
 			return Err(Error::TrackChanged(name.to_string()).into());
 		}
@@ -360,15 +512,16 @@ impl Fmp4Track {
 	/// dropped, and the buffered run goes out as a fragment of its own, before the new track's.
 	fn moved(&mut self) {
 		self.pending = None;
-		self.group_finished = !self.buffer.is_empty();
+		self.buffer.close();
 	}
 
 	/// Resubscribe a rendition that left the catalog after the init and came back, or moved
 	/// to another track.
 	fn rejoin(&mut self, name: &str, config: Rendition, source: ExportSource) -> Result<()> {
-		self.source = Some(source);
-		self.finished = false;
-		self.described = false;
+		self.phase = Phase::Reading(Subscription {
+			source,
+			described: false,
+		});
 		self.reconfigure(name, config)
 	}
 
@@ -393,7 +546,9 @@ impl Fmp4Track {
 			}
 			None => self.declaration = Some(declaration),
 		}
-		self.described = true;
+		if let Some(subscription) = self.subscription_mut() {
+			subscription.described = true;
+		}
 		Ok(())
 	}
 
@@ -407,7 +562,7 @@ impl Fmp4Track {
 			Rendition::Video(config) => match &config.container {
 				Container::Cmaf { init, .. } => init,
 				Container::Legacy | Container::Loc => {
-					let Some(source) = self.source.as_ref() else {
+					let Some(Subscription { source, .. }) = self.subscription() else {
 						return Ok(None);
 					};
 					if !source.header_ready() || !source.video_geometry_ready(config) {
@@ -514,16 +669,13 @@ impl<S: Stream> Export<S> {
 	pub fn new(source: crate::Source, catalog: S) -> Self {
 		Self {
 			source,
-			catalog: Some(catalog),
+			catalog: Feed::Live(catalog),
 			delay: Delay::default(),
 			fragment_duration: None,
 			tracks: HashMap::new(),
 			departed: HashMap::new(),
-			first_late_id: u32::MAX,
-			queued: VecDeque::new(),
-			init_emitted: false,
+			init: Init::Waiting(VecDeque::new()),
 			late: false,
-			stopped: false,
 			next_track_id: 1,
 			sequence_number: 1,
 		}
@@ -575,12 +727,10 @@ impl<S: Stream> Export<S> {
 	///
 	/// Stopping before the init segment could be written ends the export without writing.
 	pub(crate) fn stop(&mut self) {
-		self.catalog = None;
+		self.catalog = Feed::Stopped;
 		for track in self.tracks.values_mut() {
-			track.source = None;
-			track.finished = true;
+			track.phase = Phase::Stopped;
 		}
-		self.stopped = true;
 	}
 
 	/// The `trak` and `trex` declaring `track_id`, once the track could be described.
@@ -630,11 +780,11 @@ impl<S: Stream> Export<S> {
 		// samples that is.
 		loop {
 			// 1. Drain catalog updates and (un)subscribe tracks accordingly.
-			while let Some(catalog) = self.catalog.as_mut() {
+			while let Feed::Live(catalog) = &mut self.catalog {
 				match catalog.poll_next(waiter)? {
 					Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot.without_ext())?,
 					Poll::Ready(None) => {
-						self.catalog = None;
+						self.catalog = Feed::Ended;
 						break;
 					}
 					Poll::Pending => break,
@@ -648,16 +798,16 @@ impl<S: Stream> Export<S> {
 			// A track that can't be described yet drops its frames, so the source keeps
 			// polling for the SPS/PPS-bearing keyframe instead of parking.
 			for (name, track) in &mut self.tracks {
-				if track.pending.is_some() || track.finished || track.group_finished {
+				if track.pending.is_some() || track.buffer.is_closed() {
 					continue;
 				}
-				while let Some(source) = track.source.as_mut() {
-					match source.poll_event(waiter)? {
+				while let Phase::Reading(subscription) = &mut track.phase {
+					match subscription.source.poll_event(waiter)? {
 						Poll::Ready(Some(Event::Frame { frame, .. })) => {
 							// A keyframe may carry new parameter sets, so check it still matches.
-							if !track.described || frame.keyframe {
+							if !track.described() || frame.keyframe {
 								track.describe(name)?;
-								if !track.described {
+								if !track.described() {
 									continue;
 								}
 							}
@@ -682,11 +832,11 @@ impl<S: Stream> Export<S> {
 							if track.buffer.is_empty() {
 								continue;
 							}
-							track.group_finished = true;
+							track.buffer.close();
 							break;
 						}
 						Poll::Ready(None) => {
-							track.finished = true;
+							track.end();
 							break;
 						}
 						Poll::Pending => break,
@@ -696,21 +846,22 @@ impl<S: Stream> Export<S> {
 
 			// 3. Emit the init segment once every track can be described, then the
 			// fragments queued while it waited.
-			if !self.init_emitted {
+			if let Init::Waiting(queued) = &self.init {
 				if self.init_ready() {
 					let init = self.build_init()?;
-					self.init_emitted = true;
-					self.first_late_id = self.next_track_id;
+					self.init.write(self.next_track_id);
 					return Poll::Ready(Ok(Some(Chunk::Init(init))));
 				}
-				if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
+				if !self.catalog.live() && self.tracks.values().all(Fmp4Track::finished) {
 					// Media was read but can't be written without every track's description.
-					if !self.queued.is_empty() && !self.stopped {
+					if !queued.is_empty() && !matches!(self.catalog, Feed::Stopped) {
 						return Poll::Ready(Err(Error::TrackUndescribed(self.undescribed()).into()));
 					}
 					return Poll::Ready(Ok(None));
 				}
-			} else if let Some((_, fragment)) = self.queued.pop_front() {
+			} else if let Init::Written { queued, .. } = &mut self.init
+				&& let Some(fragment) = queued.pop_front()
+			{
 				return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
 			}
 
@@ -718,9 +869,8 @@ impl<S: Stream> Export<S> {
 			// (or an ended track's tail) once no other track holds earlier content.
 			if let Some(name) = self.completed_fragment() {
 				let track = self.tracks.get_mut(&name).unwrap();
-				track.group_finished = false;
-				let frames = std::mem::take(&mut track.buffer);
-				let fragment = emit_fragment(&name, track, &mut self.sequence_number, frames, None)?;
+				let batch = track.buffer.take().unwrap();
+				let fragment = emit_fragment(&name, track, &mut self.sequence_number, batch, None)?;
 				if let Some(chunk) = self.deliver(name, fragment) {
 					return Poll::Ready(Ok(Some(chunk)));
 				}
@@ -746,7 +896,7 @@ impl<S: Stream> Export<S> {
 				let track = self.tracks.get_mut(&name).unwrap();
 				let frame = track.pending.take().unwrap();
 				// Everything a track reads before the init is queued or buffered behind it.
-				if !self.init_emitted {
+				if !self.init.written() {
 					let start = *track.backlog.get_or_insert(frame.timestamp.into());
 					if Duration::from(frame.timestamp).saturating_sub(start) > INIT_QUEUE {
 						return Poll::Ready(Err(Error::TrackUndescribed(self.undescribed()).into()));
@@ -755,32 +905,29 @@ impl<S: Stream> Export<S> {
 				// A zero cap emits one sample at a time. Unknown video duration still
 				// needs a successor timestamp or endpoint before it can be encoded.
 				let fragment = if frag == Some(Duration::ZERO) {
-					if !track.buffer.is_empty() {
+					if let Some(batch) = track.buffer.take() {
 						// A catalog change can leave buffered frames behind. Drain them
 						// first and retry this frame on the next poll.
-						let frames = std::mem::take(&mut track.buffer);
-						let fragment = emit_fragment(&name, track, &mut self.sequence_number, frames, Some(&frame))?;
+						let fragment = emit_fragment(&name, track, &mut self.sequence_number, batch, Some(&frame))?;
 						track.pending = Some(frame);
 						fragment
+					} else if track.is_video && frame.duration.is_none() {
+						track.buffer.push(frame);
+						continue;
 					} else {
-						track.buffer_independent = frame.keyframe;
-						if track.is_video && frame.duration.is_none() {
-							track.buffer.push(frame);
-							continue;
-						}
-						emit_fragment(&name, track, &mut self.sequence_number, vec![frame], None)?
+						let batch = Batch {
+							independent: frame.keyframe,
+							frames: vec![frame],
+						};
+						emit_fragment(&name, track, &mut self.sequence_number, batch, None)?
 					}
-				} else if should_flush(track, &frame, frag) {
-					let frames = std::mem::take(&mut track.buffer);
-					let fragment = emit_fragment(&name, track, &mut self.sequence_number, frames, Some(&frame))?;
+				} else if should_flush(&track.buffer, &frame, frag) {
+					let batch = track.buffer.take().unwrap();
+					let fragment = emit_fragment(&name, track, &mut self.sequence_number, batch, Some(&frame))?;
 					// The flushed run is done; the incoming frame opens the next buffer.
-					track.buffer_independent = frame.keyframe;
 					track.buffer.push(frame);
 					fragment
 				} else {
-					if track.buffer.is_empty() {
-						track.buffer_independent = frame.keyframe;
-					}
 					track.buffer.push(frame);
 					// Frame appended to buffer; go round again to look for more work or a flush.
 					continue;
@@ -799,20 +946,17 @@ impl<S: Stream> Export<S> {
 				.tracks
 				.iter()
 				.filter_map(|(name, t)| {
-					if (t.finished || t.group_finished) && !t.buffer.is_empty() {
-						Some((Duration::from(t.buffer[0].timestamp), !t.is_video, name.clone()))
-					} else {
-						None
-					}
+					let first = t.buffer.first()?;
+					(t.finished() || t.buffer.is_closed())
+						.then(|| (Duration::from(first.timestamp), !t.is_video, name.clone()))
 				})
 				.min()
 				.map(|(_, _, name)| name);
 
 			if let Some(name) = flushable {
 				let track = self.tracks.get_mut(&name).unwrap();
-				track.group_finished = false;
-				let frames = std::mem::take(&mut track.buffer);
-				let fragment = emit_fragment(&name, track, &mut self.sequence_number, frames, None)?;
+				let batch = track.buffer.take().unwrap();
+				let fragment = emit_fragment(&name, track, &mut self.sequence_number, batch, None)?;
 				if let Some(chunk) = self.deliver(name, fragment) {
 					return Poll::Ready(Ok(Some(chunk)));
 				}
@@ -820,9 +964,9 @@ impl<S: Stream> Export<S> {
 			}
 
 			// 7. If catalog is closed and every track is finished and drained, we're done.
-			if self.init_emitted
-				&& self.catalog.is_none()
-				&& self.tracks.values().all(|t| t.finished && t.buffer.is_empty())
+			if self.init.written()
+				&& !self.catalog.live()
+				&& self.tracks.values().all(|t| t.finished() && t.buffer.is_empty())
 			{
 				return Poll::Ready(Ok(None));
 			}
@@ -834,11 +978,13 @@ impl<S: Stream> Export<S> {
 	/// Hand a fragment to the caller, or queue it behind the init segment that has yet
 	/// to go out.
 	fn deliver(&mut self, name: String, fragment: Fragment) -> Option<Chunk> {
-		if self.init_emitted {
-			return Some(Chunk::Fragment(fragment));
+		match &mut self.init {
+			Init::Written { .. } => Some(Chunk::Fragment(fragment)),
+			Init::Waiting(queued) => {
+				queued.push_back((name, fragment));
+				None
+			}
 		}
-		self.queued.push_back((name, fragment));
-		None
 	}
 
 	/// The renditions holding up the init segment, by name.
@@ -846,7 +992,7 @@ impl<S: Stream> Export<S> {
 		let mut names: Vec<String> = self
 			.tracks
 			.iter()
-			.filter(|(_, track)| !track.described)
+			.filter(|(_, track)| !track.described())
 			.map(|(name, _)| name.clone())
 			.collect();
 		names.sort();
@@ -858,15 +1004,15 @@ impl<S: Stream> Export<S> {
 		let earliest = self.tracks.values().filter_map(Fmp4Track::next_start).min()?;
 		self.tracks
 			.iter()
-			.filter(|(_, track)| {
-				!track.buffer.is_empty()
-					// A stopped track's pending frame joins its buffer first.
-					&& ((track.finished && track.pending.is_none())
-						|| track.group_finished
-						|| (self.fragment_duration == Some(Duration::ZERO)
-							&& track.buffer.last().is_some_and(|frame| frame.duration.is_some())))
+			.filter_map(|(name, track)| {
+				let first = track.buffer.first()?;
+				// A stopped track's pending frame joins its buffer first.
+				let complete = (track.finished() && track.pending.is_none())
+					|| track.buffer.is_closed()
+					|| (self.fragment_duration == Some(Duration::ZERO)
+						&& track.buffer.last().is_some_and(|frame| frame.duration.is_some()));
+				complete.then(|| (Duration::from(first.timestamp), !track.is_video, name))
 			})
-			.map(|(name, track)| (Duration::from(track.buffer[0].timestamp), !track.is_video, name))
 			.filter(|(start, _, _)| *start <= earliest)
 			.min()
 			.map(|(_, _, name)| name.clone())
@@ -911,15 +1057,15 @@ impl<S: Stream> Export<S> {
 			let moved = self
 				.tracks
 				.get(&name)
-				.and_then(|track| track.source.as_ref())
-				.is_some_and(|source| !config.read_by(source, &self.source, &name));
+				.and_then(Fmp4Track::subscription)
+				.is_some_and(|subscription| !config.read_by(&subscription.source, &self.source, &name));
 			// Before the init nothing of a moved rendition went out, so it starts over as a new one.
-			if moved && !self.init_emitted {
+			if moved && let Init::Waiting(queued) = &mut self.init {
 				self.tracks.remove(&name);
-				self.queued.retain(|(queued, _)| *queued != name);
+				queued.retain(|(queued, _)| *queued != name);
 			}
 			match self.tracks.get_mut(&name) {
-				Some(track) if track.source.is_some() && !moved => track.reconfigure(&name, config)?,
+				Some(track) if track.subscription().is_some() && !moved => track.reconfigure(&name, config)?,
 				Some(track) => {
 					let Some(source) = config.subscribe(&self.source, &name, self.delay)? else {
 						continue;
@@ -927,15 +1073,13 @@ impl<S: Stream> Export<S> {
 					// The publisher still caches the group the rendition left on, which a fresh
 					// subscription would start at, so resume after what was read. A move is new
 					// content, which continues past what was read under the declared track.
-					let source = match track.source.take() {
-						Some(previous) => {
+					let source = match std::mem::replace(&mut track.phase, Phase::Stopped) {
+						Phase::Reading(previous) | Phase::Ended(previous) => {
 							track.moved();
-							source.continuing(&previous)
+							source.continuing(&previous.source)
 						}
-						None => match &track.resume {
-							Some(resume) => source.resuming(resume),
-							None => source,
-						},
+						Phase::Departed(resume) => source.resuming(&resume),
+						Phase::Stopped => source,
 					};
 					track.rejoin(&name, config, source)?;
 				}
@@ -945,7 +1089,7 @@ impl<S: Stream> Export<S> {
 					let Some(source) = config.subscribe(&self.source, &name, self.delay)? else {
 						continue;
 					};
-					if self.init_emitted && !self.late {
+					if self.init.written() && !self.late {
 						return Err(Error::TrackAdded(name).into());
 					}
 					let mut track = Fmp4Track::new(source, config, self.next_track_id)?;
@@ -957,30 +1101,29 @@ impl<S: Stream> Export<S> {
 			active.insert(name);
 		}
 
-		if self.init_emitted {
-			// The init declared these tracks, so keep them for a rendition that returns.
-			// Ending the subscription writes out what was already read.
-			for (name, track) in &mut self.tracks {
-				if !active.contains(name)
-					&& let Some(source) = track.source.take()
-				{
-					track.resume = Some(source.resume());
-					track.finished = true;
-					track.described = false;
+		match &mut self.init {
+			Init::Written { first_late, .. } => {
+				// The init declared these tracks, so keep them for a rendition that returns.
+				// Ending the subscription writes out what was already read.
+				for (name, track) in &mut self.tracks {
+					if !active.contains(name) {
+						track.depart();
+					}
+				}
+				// A departed track still holding media waits for the next catalog to move.
+				let drained = self.tracks.extract_if(|_, track| {
+					track.subscription().is_none() && track.pending.is_none() && track.buffer.is_empty()
+				});
+				for (name, track) in drained {
+					if track.written.is_some() || track.track_id < *first_late {
+						self.departed.insert(name, track);
+					}
 				}
 			}
-			// A departed track still holding media waits for the next catalog to move.
-			let drained = self
-				.tracks
-				.extract_if(|_, track| track.source.is_none() && track.pending.is_none() && track.buffer.is_empty());
-			for (name, track) in drained {
-				if track.written.is_some() || track.track_id < self.first_late_id {
-					self.departed.insert(name, track);
-				}
+			Init::Waiting(queued) => {
+				self.tracks.retain(|name, _| active.contains(name));
+				queued.retain(|(name, _)| active.contains(name));
 			}
-		} else {
-			self.tracks.retain(|name, _| active.contains(name));
-			self.queued.retain(|(name, _)| active.contains(name));
 		}
 
 		Ok(())
@@ -988,7 +1131,7 @@ impl<S: Stream> Export<S> {
 
 	/// True once every track can be described, so the merged init segment can be built.
 	fn init_ready(&self) -> bool {
-		!self.tracks.is_empty() && self.tracks.values().all(|t| t.described)
+		!self.tracks.is_empty() && self.tracks.values().all(Fmp4Track::described)
 	}
 
 	/// Build the merged ftyp + multi-track moov init segment, video first, each kind in
@@ -1062,17 +1205,19 @@ pub(crate) fn extract_init(
 	Ok(())
 }
 
-/// Should we flush `track.buffer` before appending the incoming `frame`?
+/// Should we flush `buffer` before appending the incoming `frame`?
 ///
 /// Triggers when `frame` opens a group, or on the duration cap. The keyframe bit is the
 /// group boundary on every track: a video keyframe closes a GOP, and an audio frame
 /// carries it only where the publisher cut a group, which is the boundary the file
 /// should keep rather than one invented here. Per-frame output is handled before
 /// this check.
-fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Duration>) -> bool {
-	if track.buffer.is_empty() {
-		return false;
-	}
+fn should_flush(buffer: &Buffer, frame: &Frame, fragment_duration: Option<Duration>) -> bool {
+	let batch = match buffer {
+		Buffer::Empty => return false,
+		Buffer::Closed(_) => return true,
+		Buffer::Open(batch) => batch,
+	};
 	if frame.keyframe {
 		return true;
 	}
@@ -1083,7 +1228,7 @@ fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Dura
 	// PTS, so the span of the buffer is min..max of all PTS.
 	let mut min = Duration::from(frame.timestamp);
 	let mut max = min;
-	for f in &track.buffer {
+	for f in &batch.frames {
 		let pts = Duration::from(f.timestamp);
 		min = min.min(pts);
 		max = max.max(pts);
@@ -1137,13 +1282,19 @@ fn emit_fragment(
 	name: &str,
 	track: &mut Fmp4Track,
 	sequence_number: &mut u32,
-	mut frames: Vec<Frame>,
+	batch: Batch,
 	successor: Option<&Frame>,
 ) -> Result<Fragment> {
+	let Batch {
+		mut frames,
+		independent,
+	} = batch;
 	apply_codec_durations(&mut frames, track.opus);
+	// A run that starts or ends inside a GOP sees only part of its reordering.
+	let partial = !independent || successor.is_some_and(|next| !next.keyframe);
 	// Every audio sample is independently decodable, so every audio fragment is
 	// independent; video is only when its buffer opened on a keyframe (a GOP boundary).
-	let independent = !track.is_video || track.buffer_independent;
+	let independent = !track.is_video || independent;
 	if let (Some(first), Some(written)) = (frames.first(), track.written) {
 		let start = Duration::from(first.timestamp);
 		if independent && start <= written {
@@ -1158,8 +1309,6 @@ fn emit_fragment(
 	let latest = frames.iter().map(|frame| Duration::from(frame.timestamp)).max();
 	track.written = track.written.max(latest);
 	let timescale = moq_net::Timescale::new(track.timescale)?;
-	// A run that starts or ends inside a GOP sees only part of its reordering.
-	let partial = !track.buffer_independent || successor.is_some_and(|next| !next.keyframe);
 	let run = if partial && track.config.may_reorder() {
 		Run::PartialGop
 	} else {
@@ -1429,6 +1578,17 @@ mod tests {
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: false,
 		}
+	}
+
+	// A rendition moving off a track whose group already closed keeps that fragment.
+	#[test]
+	fn closing_a_closed_buffer_keeps_its_frames() {
+		let mut buffer = Buffer::Empty;
+		buffer.push(group_start(0));
+		buffer.close();
+		buffer.close();
+		assert!(buffer.is_closed());
+		assert_eq!(buffer.take().map(|batch| batch.frames.len()), Some(1));
 	}
 
 	/// A frame that opens a group. Every group starts with a keyframe, so this is what

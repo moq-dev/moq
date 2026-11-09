@@ -111,8 +111,7 @@ test("lite-04 refuses datagram tracks at setup", async () => {
 	}
 });
 
-// Quarantined: flaky under load, see /quest/m0/test-flakes-2/datagram-queues.md
-test.skip("lite-07 bounds and prioritizes independent createWritable datagram queues", async () => {
+test("lite-07 bounds and prioritizes independent createWritable datagram queues", async () => {
 	const source = new Origin();
 	const publication = source.route(path, { hidden: true });
 	const datagrams = publication.broadcast.createDatagrams("audio");
@@ -470,9 +469,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // A track's end waits a host task for the datagrams received with it. A session close in
 // between finishes the track rather than cutting it off: the publisher already ended it.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
-	// Quarantined: lite-06 fails under load (quest/m0/test-flakes-2/session-close-end.md).
-	const run = alpn === ALPN_06 ? test.skip : test;
-	run(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
+	test(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");

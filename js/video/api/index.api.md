@@ -10,17 +10,6 @@ export type Backend = "auto" | "webgpu" | "2d";
 
 export type Canvas = HTMLCanvasElement | OffscreenCanvas;
 
-export type Dimensions = {
-	height: number;
-	width: number;
-};
-
-export type Presentation = {
-	flip?: boolean;
-	interlaced?: boolean;
-	rotation?: number;
-};
-
 export class Renderer {
 	constructor(props?: RendererProps);
 	close(): void;
@@ -31,9 +20,16 @@ export class Renderer {
 export type RendererInput = {
 	backend: Getter<Backend>;
 	canvas: Getter<Canvas | undefined>;
-	display: Getter<Dimensions | undefined>;
+	display: Getter<{
+		height: number;
+		width: number;
+	} | undefined>;
 	frame: Getter<VideoFrame | undefined>;
-	presentation: Getter<Presentation | undefined>;
+	presentation: Getter<{
+		flip?: boolean;
+		interlaced?: boolean;
+		rotation?: number;
+	} | undefined>;
 };
 
 export type RendererOutput = {
@@ -42,6 +38,4 @@ export type RendererOutput = {
 };
 
 export type RendererProps = Inputs<RendererInput>;
-
-export function rotateVideoDimensions(dimensions: Dimensions, rotation?: number): Dimensions;
 ```
