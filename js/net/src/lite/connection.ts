@@ -1,4 +1,4 @@
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
@@ -301,7 +301,7 @@ export class Connection implements Session {
 			case "leaving": {
 				const done = withTimeout(
 					this.#publisher.drain(),
-					Nano.fromMilli(Milli(1000)),
+					Duration.millis(1000),
 					"session close timed out",
 				).finally(() => this.abort());
 				this.#phase = { kind: "closing", done };

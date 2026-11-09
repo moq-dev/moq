@@ -6,7 +6,7 @@
  *
  * @module
  */
-import { Nano, Second } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
@@ -37,7 +37,7 @@ interface Command {
 }
 
 // Close the session to the emulator after 60s of no input.
-const FEEDBACK_IDLE = Nano.fromSecond(Second(60));
+const FEEDBACK_IDLE = Duration.secs(60);
 
 // Game Boy native resolution.
 const GB_WIDTH = 160;
@@ -225,15 +225,15 @@ export class Game {
 		this.#command.set({ cmd, timestamps: this.#timestamps() }, true);
 	}
 
-	/** Collect media timestamps at each pipeline stage for latency measurement. */
+	/** Collect media timestamps, in milliseconds, at each pipeline stage for latency measurement. */
 	#timestamps(): { label: string; ts: number }[] {
 		const entries: { label: string; ts: number }[] = [];
 		const received = this.sync.out.timestamp.peek();
-		if (received != null) entries.push({ label: "received", ts: received });
+		if (received != null) entries.push({ label: "received", ts: received.asMillis() });
 		const decoded = this.videoDecoder.out.timestamp.peek();
-		if (decoded != null) entries.push({ label: "decoded", ts: decoded });
+		if (decoded != null) entries.push({ label: "decoded", ts: decoded.asMillis() });
 		const rendered = this.videoRenderer.out.timestamp.peek();
-		if (rendered != null) entries.push({ label: "rendered", ts: rendered });
+		if (rendered != null) entries.push({ label: "rendered", ts: rendered.asMillis() });
 		return entries;
 	}
 

@@ -1,4 +1,4 @@
-import { Micro } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type { AudioFrame } from "./capture";
 
 /** Constructor options for {@link Resampler}. */
@@ -91,8 +91,8 @@ export class Resampler {
 		// Where the first output sample landed relative to this chunk's start, in input samples.
 		// Slightly negative when it interpolates back across the boundary.
 		const offset = first * this.#ratio - base;
-		// A signed offset, so plain arithmetic rather than a duration brand.
-		const timestamp = Micro(input.timestamp + (offset / this.#from) * 1_000_000);
+		// A signed offset, so the sum is taken in microseconds rather than with Duration arithmetic.
+		const timestamp = Duration.micros(input.timestamp.asMicros() + (offset / this.#from) * 1_000_000);
 
 		return { timestamp, channels };
 	}

@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Session as Qmux } from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
@@ -113,10 +113,10 @@ test("a lite GOAWAY keeps the session open, and a second one closes it", async (
 		await sendGoaway(pair.server, "");
 		const drain = await connection.draining;
 		expect(drain.uri).toBe("");
-		expect(await settlesWithin(connection.closed, clock, Milli(20))).toBe(false);
+		expect(await settlesWithin(connection.closed, clock, Duration.millis(20))).toBe(false);
 
 		await sendGoaway(pair.server, "https://other.example/");
-		expect(await settlesWithin(connection.closed, clock, Milli(50))).toBe(true);
+		expect(await settlesWithin(connection.closed, clock, Duration.millis(50))).toBe(true);
 	} finally {
 		connection.abort();
 	}
@@ -323,7 +323,7 @@ function qmuxPair(): { client: WebTransport; server: WebTransport } {
 function mockDeadline() {
 	const clock = new Manual();
 	return {
-		expire: () => clock.advance(Nano.fromMilli(Milli(1000))),
+		expire: () => clock.advance(Duration.millis(1000)),
 		installed: clock.install(),
 	};
 }

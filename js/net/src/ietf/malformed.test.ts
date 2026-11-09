@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { type Manual, Milli, Nano } from "@moq/clock";
+import { Duration, type Manual } from "@moq/clock";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
@@ -52,7 +52,7 @@ async function closeCode(quic: WebTransport, clock: Manual): Promise<number | un
 	void quic.closed.then((info) => {
 		code = info.closeCode;
 	});
-	await clock.advance(Nano.fromMilli(Milli(50)));
+	await clock.advance(Duration.millis(50));
 	return code;
 }
 

@@ -17,7 +17,7 @@ import { Window } from "@moq/json";
 
 export namespace Chat {
 	export type Event = Window.Event<string>;
-	export const HISTORY: Clock.Nano;
+	export const HISTORY: Clock.Duration;
 	export const PRIORITY: 10;
 	export class Publisher {
 		constructor(track: Track.Producer);
@@ -112,7 +112,7 @@ export class Member {
 	constructor(kind: Kind, path: Path.Valid, connection: Connection);
 	readonly audio: Readonlys<{
 		stats: Getter<Audio.Stats | undefined>;
-		timestamp: Getter<Clock.Milli | undefined>;
+		timestamp: Getter<Clock.Duration | undefined>;
 	}>;
 	readonly canvas: Signal<HTMLCanvasElement | undefined>;
 	close(): void;
@@ -123,7 +123,7 @@ export class Member {
 	readonly user: Readonlys<UserInput>;
 	readonly video: Readonlys<{
 		stats: Getter<import("@moq/watch").Video.Stats | undefined>;
-		timestamp: Getter<Clock.Milli | undefined>;
+		timestamp: Getter<Clock.Duration | undefined>;
 	}>;
 	readonly volume: Signal<number>;
 }

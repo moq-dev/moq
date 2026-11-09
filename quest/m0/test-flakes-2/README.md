@@ -249,3 +249,4 @@ Public API: none. Wire: none.
 - [js/net's bandwidth sampling test holds up under load](/quest/m0/test-flakes-2/bandwidth-sampling.md) - the sampling test counts ticks without racing the mocked clock, and its `test.skip` is removed
 - [js/net's datagram session-close-after-end test holds up under load](/quest/m0/test-flakes-2/datagram-close-end.md) - the abort is ordered after the end by an event the client observes, and its `test.skip` is removed
 - [moq-rs's Python TCP close test settles on a promised error](/quest/m0/test-flakes-2/tcp-close-unroutable.md) - the reader's error after an endpoint close is one the socket contract promises, and its `pytest.mark.skip` is removed
+- [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the test waits for the first track's queue instead of asserting at once, and its `test.skip` is removed

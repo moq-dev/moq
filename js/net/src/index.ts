@@ -5,6 +5,8 @@
  * @module
  */
 
+/** Re-export of {@link https://www.npmjs.com/package/@moq/clock | @moq/clock}, the durations, instants, and timers this package takes. */
+export * as Clock from "@moq/clock";
 /** Re-export of {@link https://www.npmjs.com/package/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
 export * as Signals from "@moq/signals";
 /** Broadcast announcement streams. */
@@ -35,7 +37,7 @@ export * as Origin from "./origin.ts";
 export * as Path from "./path.ts";
 /** Point-to-point TCP and track sessions through an origin. */
 export * as Socket from "./socket.ts";
-/** Presentation timestamps and their timescales; duration units live in `@moq/clock`. */
+/** Presentation timestamps and their timescales; durations live in {@link Clock}. */
 export * as Time from "./time.ts";
 /** A value paired with the timestamp it was captured at, absent when untimed. */
 export type { Timed } from "./timed.ts";
