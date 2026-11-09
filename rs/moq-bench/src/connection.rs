@@ -365,7 +365,7 @@ async fn subscribe(
 					Some(
 						moq_net::announce::Event::Present(update),
 					) => update,
-					Some(moq_net::announce::Event::Absent(_)) => continue,
+					Some(_) => continue,
 					None => break,
 				};
 				let path = update.prefix.to_string();
@@ -391,7 +391,7 @@ async fn subscribe(
 	while selected < want {
 		let update = match announced.next().await {
 			Some(moq_net::announce::Event::Present(update)) => update,
-			Some(moq_net::announce::Event::Absent(_)) => continue,
+			Some(_) => continue,
 			None => break,
 		};
 		let path = update.prefix.to_string();

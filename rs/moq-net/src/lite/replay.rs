@@ -13,7 +13,7 @@ pub(super) fn initial(events: impl IntoIterator<Item = origin::RouteEvent>) -> V
 			origin::RouteEvent::Start(update)
 			| origin::RouteEvent::Update(update)
 			| origin::RouteEvent::Restart(update) => (update, true),
-			origin::RouteEvent::End(update) => (update, false),
+			origin::RouteEvent::End(update) | origin::RouteEvent::Offline(update) => (update, false),
 		};
 		if let Some(index) = positions.remove(&update.prefix) {
 			pending[index] = None;

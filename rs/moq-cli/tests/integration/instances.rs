@@ -107,7 +107,7 @@ async fn changed(follow: &mut origin::Routes) -> bool {
 	loop {
 		match follow.next().await.unwrap() {
 			origin::RouteEvent::Restart(_) => return true,
-			origin::RouteEvent::End(_) => {
+			origin::RouteEvent::End(_) | origin::RouteEvent::Offline(_) => {
 				assert!(matches!(follow.next().await, Some(origin::RouteEvent::Start(_))));
 				return false;
 			}

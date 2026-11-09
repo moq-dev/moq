@@ -36,6 +36,7 @@ fn drain(announced: &mut moq_net::origin::Routes) -> Vec<String> {
 			Event::Update(announce) => ("Update", announce),
 			Event::Restart(announce) => ("Restart", announce),
 			Event::End(announce) => ("End", announce),
+			Event::Offline(announce) => ("Offline", announce),
 		};
 		seen.push(format!("{kind} {}", announce.prefix));
 	}

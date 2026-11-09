@@ -49,7 +49,7 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 			| moq_net::origin::RouteEvent::Restart(update) => {
 				live |= update.prefix.as_str() == path;
 			}
-			moq_net::origin::RouteEvent::End(update) => {
+			moq_net::origin::RouteEvent::End(update) | moq_net::origin::RouteEvent::Offline(update) => {
 				live &= update.prefix.as_str() != path;
 			}
 		}

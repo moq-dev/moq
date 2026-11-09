@@ -1026,6 +1026,8 @@ pub struct moq_route_info {
 	pub cost: u64,
 	/// The stream the route serves: routes with one instance are one continuous stream.
 	pub instance: moq_string,
+	/// Whether a usable path reaches the route's origin; requests may fail while it is not.
+	pub available: bool,
 }
 
 /// Parse [moq_route_options], treating NULL as the default.
@@ -1102,11 +1104,20 @@ pub enum moq_announce_kind {
 	/// A route now covers the path, which was absent. Another instance taking it over keeps it
 	/// present: follow it with [moq_origin_follow] to see the broadcast change.
 	MOQ_ANNOUNCE_KIND_PRESENT = 0,
-	/// No route covers the path any more.
+	/// The origin withdrew the path: no route covers it any more.
 	MOQ_ANNOUNCE_KIND_ABSENT = 1,
+	/// This origin let go of the path, and no route covers it any more: the session it arrived
+	/// on closed, or the network lost every path to it. Its origin may still serve it.
+	MOQ_ANNOUNCE_KIND_OFFLINE = 2,
+	/// The present path lost every usable path to its origin but may recover one: it stays
+	/// present while requests for it may fail.
+	MOQ_ANNOUNCE_KIND_UNAVAILABLE = 3,
+	/// The present path recovered a usable path: request it again.
+	MOQ_ANNOUNCE_KIND_AVAILABLE = 4,
 }
 
-/// An announce event from an origin: a path becoming present or absent.
+/// An announce event from an origin: a path becoming present, absent, or offline, or its
+/// availability changing.
 #[repr(C)]
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
@@ -1123,8 +1134,8 @@ pub struct moq_announce_event {
 	/// Which event this is.
 	pub kind: moq_announce_kind,
 
-	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_ABSENT` it carries the last
-	/// advertised route.
+	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_ABSENT` and
+	/// `MOQ_ANNOUNCE_KIND_OFFLINE` it carries the last advertised route.
 	pub route: moq_route_info,
 }
 

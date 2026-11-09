@@ -134,7 +134,7 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timest
 fn via_a(announce: &origin::RouteEvent) -> bool {
 	let route = match announce {
 		origin::RouteEvent::Start(a) | origin::RouteEvent::Update(a) | origin::RouteEvent::Restart(a) => &a.route,
-		origin::RouteEvent::End(_) => return false,
+		origin::RouteEvent::End(_) | origin::RouteEvent::Offline(_) => return false,
 	};
 	route.cost().value() >= A_COST
 }

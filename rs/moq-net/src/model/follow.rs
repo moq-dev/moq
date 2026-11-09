@@ -93,7 +93,7 @@ impl Follow {
 				return Poll::Ready(None);
 			};
 			if let Some(event) = self.fold(event) {
-				self.idle = matches!(event, RouteEvent::End(_));
+				self.idle = matches!(event, RouteEvent::End(_) | RouteEvent::Offline(_));
 				return Poll::Ready(Some(event));
 			}
 		}
@@ -126,14 +126,15 @@ impl Follow {
 
 	/// Apply one route's event, returning what it means for the path, if anything.
 	fn fold(&mut self, event: RouteEvent) -> Option<RouteEvent> {
-		let (RouteEvent::Start(announce)
-		| RouteEvent::Update(announce)
-		| RouteEvent::Restart(announce)
-		| RouteEvent::End(announce)) = &event;
-		if !self.path.has_prefix(&announce.prefix) {
+		let prefix = event.announce().prefix.clone();
+		if !self.path.has_prefix(&prefix) {
 			return None;
 		}
-		let prefix = announce.prefix.clone();
+		// A route that went reports its own way of going: ended by its origin, or let go.
+		let gone = match event {
+			RouteEvent::Offline(_) => RouteEvent::Offline,
+			_ => RouteEvent::End,
+		};
 		let before = self
 			.serving()
 			.map(|standing| (standing.announce.clone(), standing.seen));
@@ -144,7 +145,7 @@ impl Follow {
 			.position(|standing| standing.announce.prefix == prefix)
 			.map(|index| self.covering.swap_remove(index).since);
 		let (announce, since, restart) = match event {
-			RouteEvent::End(_) => (None, None, false),
+			RouteEvent::End(_) | RouteEvent::Offline(_) => (None, None, false),
 			RouteEvent::Start(announce) => (Some(announce), None, false),
 			RouteEvent::Update(announce) => (Some(announce), standing, false),
 			RouteEvent::Restart(announce) => (Some(announce), standing, true),
@@ -163,12 +164,12 @@ impl Follow {
 		match (before, after) {
 			(None, None) => None,
 			(None, Some((after, _))) => Some(RouteEvent::Start(after)),
-			(Some((before, _)), None) => Some(RouteEvent::End(before)),
+			(Some((before, _)), None) => Some(gone(before)),
 			// The serving route ended, and the one left may have started after it did.
 			(Some((before, seen)), Some((after, since)))
 				if before.prefix == prefix && before.prefix != after.prefix && since > self.dry.max(seen) =>
 			{
-				Some(RouteEvent::End(before))
+				Some(gone(before))
 			}
 			(Some((before, _)), Some((after, _))) if before.prefix != after.prefix => {
 				let same = before.route.instance == after.route.instance;
@@ -377,7 +378,7 @@ impl Following {
 			RouteEvent::Start(_) | RouteEvent::Restart(_) => self.unseen = true,
 			// An end is a gap that ended every request on the old route, so whatever serves the
 			// path next is handed out, even the same instance coming back.
-			RouteEvent::End(_) => {
+			RouteEvent::End(_) | RouteEvent::Offline(_) => {
 				self.unseen = false;
 				self.end();
 			}
@@ -412,6 +413,7 @@ mod tests {
 			RouteEvent::Update(announce) => ("update", announce.prefix.to_string()),
 			RouteEvent::Restart(announce) => ("restart", announce.prefix.to_string()),
 			RouteEvent::End(announce) => ("end", announce.prefix.to_string()),
+			RouteEvent::Offline(announce) => ("offline", announce.prefix.to_string()),
 		}
 	}
 
@@ -464,7 +466,7 @@ mod tests {
 		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
 
 		drop(pool);
-		assert_eq!(followed(&mut follow).await, ("end", "pool".into()));
+		assert_eq!(followed(&mut follow).await, ("offline", "pool".into()));
 	}
 
 	/// A follower that joins late starts on the route serving the path, not on whichever

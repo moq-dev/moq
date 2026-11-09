@@ -41,7 +41,7 @@ async fn ended(announced: &mut origin::Routes) {
 		.expect("announce hung")
 		.expect("announce ended")
 	{
-		origin::RouteEvent::End(_) => {}
+		origin::RouteEvent::End(_) | origin::RouteEvent::Offline(_) => {}
 		other => panic!("expected an end, got {other:?}"),
 	}
 }

@@ -65,7 +65,9 @@ async fn next_broadcast(
 			.expect("origin closed")
 		{
 			moq_net::origin::RouteEvent::Start(_) | moq_net::origin::RouteEvent::Restart(_) => break,
-			moq_net::origin::RouteEvent::End(_) | moq_net::origin::RouteEvent::Update(_) => {}
+			moq_net::origin::RouteEvent::End(_)
+			| moq_net::origin::RouteEvent::Offline(_)
+			| moq_net::origin::RouteEvent::Update(_) => {}
 		}
 	}
 	let broadcast = running(child, "the broadcast", consumer.request("camera", None))

@@ -100,6 +100,7 @@ async fn drain(announced: &mut origin::Routes) -> Vec<(&'static str, String, Ins
 			origin::RouteEvent::Update(a) => ("update", a),
 			origin::RouteEvent::Restart(a) => ("restart", a),
 			origin::RouteEvent::End(a) => ("end", a),
+			origin::RouteEvent::Offline(a) => ("offline", a),
 		};
 		events.push((kind, announce.prefix.to_string(), announce.route.instance().clone()));
 	}

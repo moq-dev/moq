@@ -37,7 +37,7 @@ fn scanned(events: Vec<origin::RouteEvent>) -> Vec<announce::Announce> {
 			origin::RouteEvent::Start(update)
 			| origin::RouteEvent::Update(update)
 			| origin::RouteEvent::Restart(update) => (update, true),
-			origin::RouteEvent::End(update) => (update, false),
+			origin::RouteEvent::End(update) | origin::RouteEvent::Offline(update) => (update, false),
 		};
 		initial.retain(|held| held.prefix != update.prefix);
 		if active {

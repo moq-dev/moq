@@ -351,7 +351,7 @@ async fn synced_listing(url: url::Url) -> BTreeSet<String> {
 			.await;
 			use moq_net::origin::RouteEvent;
 			match next {
-				Some(RouteEvent::End(route)) => listed.remove(route.prefix.as_str()),
+				Some(RouteEvent::End(route) | RouteEvent::Offline(route)) => listed.remove(route.prefix.as_str()),
 				Some(RouteEvent::Start(route) | RouteEvent::Update(route) | RouteEvent::Restart(route)) => {
 					listed.insert(route.prefix.to_string())
 				}

@@ -85,6 +85,7 @@ struct AnnouncedRecord {
 	capture_views: Vec<moq_string>,
 	kind: moq_announce_kind,
 	cost: u64,
+	available: bool,
 	/// The route's instance.
 	instance: String,
 }
@@ -99,6 +100,9 @@ impl AnnouncedRecord {
 		let (update, kind) = match event {
 			Event::Present(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT),
 			Event::Absent(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_ABSENT),
+			Event::Offline(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_OFFLINE),
+			Event::Unavailable(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_UNAVAILABLE),
+			Event::Available(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_AVAILABLE),
 		};
 		let captures: Vec<_> = update
 			.captures
@@ -120,6 +124,7 @@ impl AnnouncedRecord {
 			capture_views,
 			kind,
 			cost: update.route.cost().value(),
+			available: update.route.available(),
 			instance: update.route.instance().to_string(),
 		}
 	}
@@ -242,6 +247,7 @@ impl Origin {
 					data: announced.instance.as_ptr().cast::<c_char>(),
 					len: announced.instance.len(),
 				},
+				available: announced.available,
 			},
 		};
 		Ok(())

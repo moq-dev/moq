@@ -501,14 +501,17 @@ pub struct RouteInfo {
 	/// peer that names no node.
 	pub(crate) node: Option<u64>,
 
-	/// The session it arrived on is going away (the peer sent a GOAWAY), or the route
-	/// layer holds the route without a path to it: it ranks below every other eligible
-	/// route, whatever its preference or cost, yet still serves when nothing else does.
+	/// The session it arrived on is going away (the peer sent a GOAWAY): it ranks below
+	/// every other eligible route, whatever its preference or cost, yet still serves when
+	/// nothing else does.
 	///
 	/// A preference state, never a saturated metric. Local, like [`Self::via`]: never
 	/// forwarded, so a relay advertises a draining route at its real cost and its
 	/// readers never see the flag.
 	pub(crate) draining: bool,
+
+	/// Whether a usable path reaches the route's origin; see [`Self::available`].
+	pub(crate) available: bool,
 }
 
 impl RouteInfo {
@@ -525,6 +528,7 @@ impl RouteInfo {
 			source: Source::Local,
 			node: None,
 			draining: false,
+			available: true,
 		}
 	}
 }
@@ -560,6 +564,14 @@ impl RouteInfo {
 	/// and finally the most recently announced route. See [`Cost`].
 	pub fn cost(&self) -> Cost {
 		self.cost
+	}
+
+	/// Whether a usable path reaches the route's origin. An unavailable route is held:
+	/// the network lost every path to it but may recover one, so the announcement stays.
+	/// It ranks with a draining route, below every available one, and requests through
+	/// it may fail until it recovers: request again once it turns available.
+	pub fn available(&self) -> bool {
+		self.available
 	}
 
 	/// Serve a stable `instance` at `epoch`; see [`RouteOptions::with_instance`].
@@ -613,6 +625,13 @@ impl RouteInfo {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_draining(mut self, draining: bool) -> Self {
 		self.draining = draining;
+		self
+	}
+
+	/// Mark whether a usable path reaches the route's origin; see [`Self::available`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn with_available(mut self, available: bool) -> Self {
+		self.available = available;
 		self
 	}
 
@@ -773,9 +792,9 @@ impl<'a> Epochs<'a> {
 }
 
 /// Ordering key for an eligible route entry resolving `path` (see [`Epochs`]).
-/// Lower wins: first a route that is not draining (see [`RouteInfo::draining`]), so a
-/// peer that sent a GOAWAY ranks below every other eligible route and serves only as a
-/// last resort. Then the higher link [`Preference`], so metrics from different operators
+/// Lower wins: first a route that is neither draining (see [`RouteInfo::draining`]) nor
+/// unavailable (see [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held
+/// route ranks below every other eligible route and serves only as a last resort. Then the higher link [`Preference`], so metrics from different operators
 /// are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
 /// of cost, then the cheapest cost, then a broadcast published on this origin (it serves
 /// what is here, not a claim that has to ask), then the shortest hop chain, then a hash
@@ -795,7 +814,7 @@ impl<'a> Epochs<'a> {
 /// until the transport times out.
 fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 	(
-		entry.draining,
+		entry.draining || !entry.available,
 		Reverse(entry.preference),
 		entry.is_anonymous(),
 		entry.cost,
@@ -826,8 +845,8 @@ type RouteOrder = (
 	Reverse<u64>,
 );
 
-/// The `(hops, cost, source, instance, epoch, auth, node)` metadata an announce cursor delivers
-/// alongside a prefix.
+/// The `(hops, cost, source, instance, epoch, auth, node, available)` metadata an announce
+/// cursor delivers alongside a prefix.
 type RouteMeta = (
 	Hops,
 	Cost,
@@ -836,6 +855,7 @@ type RouteMeta = (
 	u64,
 	Option<crate::auth::Credential>,
 	Option<u64>,
+	bool,
 );
 
 /// The earlier of two optional deadlines.
@@ -893,8 +913,22 @@ type AnnounceMeta = (RouteMeta, Option<Vec<Pattern>>);
 enum PendingUpdate {
 	Announce(AnnounceMeta),
 	Restart(AnnounceMeta),
-	Unannounce(AnnounceMeta),
-	UnannounceAnnounce { old: AnnounceMeta, new: AnnounceMeta },
+	Unannounce(AnnounceMeta, Gone),
+	UnannounceAnnounce {
+		old: AnnounceMeta,
+		gone: Gone,
+		new: AnnounceMeta,
+	},
+}
+
+/// How a route left a cursor: the origin ended it, or this node lost it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gone {
+	/// Its origin withdrew it, as far as this node knows: [`RouteEvent::End`].
+	End,
+	/// This node let go of it, such as the session it arrived on closing:
+	/// [`RouteEvent::Offline`].
+	Offline,
 }
 
 // An update is taken only while collapsing it under the cursor state lock.
@@ -964,7 +998,7 @@ impl OriginConsumerState {
 			pending.owed = !self.delivered.contains(prefix)
 				|| matches!(
 					pending.update,
-					Some(PendingUpdate::Unannounce(_) | PendingUpdate::UnannounceAnnounce { .. })
+					Some(PendingUpdate::Unannounce(..) | PendingUpdate::UnannounceAnnounce { .. })
 				);
 			self.owed += usize::from(pending.owed);
 		}
@@ -1028,8 +1062,8 @@ impl OriginConsumerState {
 			// The consumer still owes the restart; this only moves its metadata.
 			Some(PendingUpdate::Restart(_)) => PendingUpdate::Restart(meta),
 			// Consumer needs to observe the retraction before this announce.
-			Some(PendingUpdate::Unannounce(old) | PendingUpdate::UnannounceAnnounce { old, .. }) => {
-				PendingUpdate::UnannounceAnnounce { old, new: meta }
+			Some(PendingUpdate::Unannounce(old, gone) | PendingUpdate::UnannounceAnnounce { old, gone, .. }) => {
+				PendingUpdate::UnannounceAnnounce { old, gone, new: meta }
 			}
 		};
 		self.put(prefix, new);
@@ -1040,8 +1074,8 @@ impl OriginConsumerState {
 	fn apply_restart(&mut self, prefix: Path, meta: RouteMeta, captures: Option<Vec<Pattern>>) {
 		let meta = (meta, captures);
 		let new = match self.pending.get_mut(&prefix).and_then(|pending| pending.update.take()) {
-			Some(PendingUpdate::Unannounce(old) | PendingUpdate::UnannounceAnnounce { old, .. }) => {
-				PendingUpdate::UnannounceAnnounce { old, new: meta }
+			Some(PendingUpdate::Unannounce(old, gone) | PendingUpdate::UnannounceAnnounce { old, gone, .. }) => {
+				PendingUpdate::UnannounceAnnounce { old, gone, new: meta }
 			}
 			Some(PendingUpdate::Restart(_)) => PendingUpdate::Restart(meta),
 			_ if self.delivered.contains(&prefix) => PendingUpdate::Restart(meta),
@@ -1051,7 +1085,7 @@ impl OriginConsumerState {
 		self.put(prefix, new);
 	}
 
-	fn apply_unannounce(&mut self, prefix: Path, last: RouteMeta, captures: Option<Vec<Pattern>>) {
+	fn apply_unannounce(&mut self, prefix: Path, last: RouteMeta, captures: Option<Vec<Pattern>>, gone: Gone) {
 		let last = (last, captures);
 		match self.pending.get_mut(&prefix).and_then(|pending| pending.update.take()) {
 			// The pending announce was never delivered and neither was any earlier
@@ -1062,13 +1096,13 @@ impl OriginConsumerState {
 			}
 			// Either nothing is pending or the pending announce was a metadata
 			// update on a delivered route; the consumer still owes a retraction.
-			None | Some(PendingUpdate::Announce(_) | PendingUpdate::Restart(..) | PendingUpdate::Unannounce(_)) => {
-				self.put(prefix, PendingUpdate::Unannounce(last));
+			None | Some(PendingUpdate::Announce(_) | PendingUpdate::Restart(..) | PendingUpdate::Unannounce(..)) => {
+				self.put(prefix, PendingUpdate::Unannounce(last, gone));
 			}
 			// The embedded announce cancels with this retraction; the consumer still
-			// needs the leading one.
+			// needs the leading one, reported as the later one went.
 			Some(PendingUpdate::UnannounceAnnounce { old, .. }) => {
-				self.put(prefix, PendingUpdate::Unannounce(old));
+				self.put(prefix, PendingUpdate::Unannounce(old, gone));
 			}
 		}
 	}
@@ -1160,10 +1194,7 @@ impl OriginConsumerState {
 	/// Take the pending update at `prefix` for delivery.
 	fn take_prefix(&mut self, prefix: Path) -> RouteEvent {
 		let (event, owed) = self.take_update(prefix);
-		let (RouteEvent::Start(announce)
-		| RouteEvent::Update(announce)
-		| RouteEvent::Restart(announce)
-		| RouteEvent::End(announce)) = &event;
+		let announce = event.announce();
 		// A trailing announce left pending is still owed.
 		if owed && !self.pending.contains_key(&announce.prefix) {
 			self.owed -= 1;
@@ -1177,7 +1208,7 @@ impl OriginConsumerState {
 			Start,
 			Update,
 			Restart,
-			End,
+			Gone(Gone),
 		}
 
 		let pending = self.remove(&prefix).unwrap();
@@ -1195,16 +1226,16 @@ impl OriginConsumerState {
 				self.delivered.insert(prefix.clone());
 				(meta, Kind::Restart)
 			}
-			PendingUpdate::Unannounce(meta) => {
+			PendingUpdate::Unannounce(meta, gone) => {
 				self.delivered.remove(&prefix);
-				(meta, Kind::End)
+				(meta, Kind::Gone(gone))
 			}
-			PendingUpdate::UnannounceAnnounce { old, new } => {
+			PendingUpdate::UnannounceAnnounce { old, gone, new } => {
 				// Deliver the retraction now; leave the trailing announce pending so
 				// the next take returns it for the same prefix.
 				self.delivered.remove(&prefix);
 				self.insert(prefix.clone(), PendingUpdate::Announce(new), owed);
-				(old, Kind::End)
+				(old, Kind::Gone(gone))
 			}
 		};
 		let announce = Announce {
@@ -1220,13 +1251,15 @@ impl OriginConsumerState {
 				auth: meta.5,
 				node: meta.6,
 				draining: false,
+				available: meta.7,
 			},
 		};
 		let event = match kind {
 			Kind::Start => RouteEvent::Start(announce),
 			Kind::Update => RouteEvent::Update(announce),
 			Kind::Restart => RouteEvent::Restart(announce),
-			Kind::End => RouteEvent::End(announce),
+			Kind::Gone(Gone::End) => RouteEvent::End(announce),
+			Kind::Gone(Gone::Offline) => RouteEvent::Offline(announce),
 		};
 		(event, owed)
 	}
@@ -1266,6 +1299,8 @@ struct RouteEntry {
 	/// Whether the route ranks last; see [`RouteInfo::draining`]. Local selection state,
 	/// so never part of [`Self::meta`].
 	draining: bool,
+	/// Whether a usable path reaches the route's origin; see [`RouteInfo::available`].
+	available: bool,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a [`Claim`]). `None` for an advertise-only
 	/// announcement ([`Producer::announce`]) and for a local broadcast.
@@ -1333,12 +1368,13 @@ impl RouteEntry {
 			self.epoch,
 			self.auth.clone(),
 			self.node,
+			self.available,
 		)
 	}
 
 	/// Whether [`Self::meta`] would equal `meta`, without building it.
 	fn delivers(&self, meta: &RouteMeta) -> bool {
-		let (hops, cost, source, instance, epoch, auth, node) = meta;
+		let (hops, cost, source, instance, epoch, auth, node, available) = meta;
 		*hops == self.hops
 			&& *cost == self.cost
 			&& *source == self.entered()
@@ -1346,6 +1382,7 @@ impl RouteEntry {
 			&& *epoch == self.epoch
 			&& *auth == self.auth
 			&& *node == self.node
+			&& *available == self.available
 	}
 
 	/// Whether a request for `path` can be served through this entry. A served
@@ -1675,13 +1712,14 @@ impl TableCursor {
 			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&entry.prefix))
 	}
 
-	/// Deliver a changed winner at this presented prefix.
-	fn update(&mut self, presented: &Path, best: Option<&RouteEntry>) {
+	/// Deliver a changed winner at this presented prefix, reporting a route left with
+	/// none as `gone`.
+	fn update(&mut self, presented: &Path, best: Option<&RouteEntry>, gone: Gone) {
 		let Some(entry) = best else {
 			if let Some(last) = self.current.remove(presented)
 				&& let Ok(mut state) = self.state.write()
 			{
-				state.apply_unannounce(self.under.rejoin(presented), last.meta, last.captures);
+				state.apply_unannounce(self.under.rejoin(presented), last.meta, last.captures, gone);
 			}
 			return;
 		};
@@ -1715,7 +1753,12 @@ impl TableCursor {
 			// identity explicitly so consumers keyed on it remove it.
 			Some(previous) if previous.captures != captures => {
 				if let Ok(mut state) = self.state.write() {
-					state.apply_unannounce(self.under.rejoin(presented), previous.meta, previous.captures);
+					state.apply_unannounce(
+						self.under.rejoin(presented),
+						previous.meta,
+						previous.captures,
+						Gone::End,
+					);
 					state.apply_announce(self.under.rejoin(presented), meta, captures);
 				}
 			}
@@ -2049,11 +2092,18 @@ impl Drop for HiddenWithholding {
 pub enum RouteEvent {
 	/// A route now covers the prefix; the cursor had none there.
 	Start(Announce),
-	/// The route covering the prefix changed hops, cost or epoch, with the same instance;
-	/// it is delivered in place.
+	/// The route covering the prefix changed hops, cost, epoch or
+	/// [availability](RouteInfo::available), with the same instance; it is delivered in
+	/// place.
 	Update(Announce),
-	/// No route covers the prefix any more. Carries its last advertised route.
+	/// The origin withdrew the route, as far as this origin knows, and no other covers
+	/// the prefix. Carries its last advertised route.
 	End(Announce),
+	/// This origin let go of the route, and no other covers the prefix: the session it
+	/// arrived on closed, or the route layer lost every path to it. Its origin may still
+	/// serve it; only an [`End`](Self::End) says it stopped. Carries its last advertised
+	/// route.
+	Offline(Announce),
 	/// Another [`Instance`] now serves the prefix: another stream, such as a publisher
 	/// that restarted, a redundant ingest switching, or a pool failing over.
 	///
@@ -2061,6 +2111,19 @@ pub enum RouteEvent {
 	/// request afresh to follow the new one. Subscriptions already open stay on the old
 	/// one until dropped or its route goes.
 	Restart(Announce),
+}
+
+impl RouteEvent {
+	/// The announcement the event carries.
+	pub(crate) fn announce(&self) -> &Announce {
+		match self {
+			Self::Start(announce)
+			| Self::Update(announce)
+			| Self::End(announce)
+			| Self::Offline(announce)
+			| Self::Restart(announce) => announce,
+		}
+	}
 }
 
 /// A route over a prefix, as an announcement listing or a [`Routes`] stream reports it.
@@ -2450,6 +2513,7 @@ impl Producer {
 			state: Arc::new(RouteState {
 				announcement: entry,
 				control: kio::Lock::new(control),
+				forwarded: false,
 				_keepalive: self.tasks.keepalive(),
 			}),
 			broadcast: source.clone(),
@@ -2668,10 +2732,13 @@ impl Producer {
 			None,
 		)?;
 		let control = RouteControl::new(options, &announcement, None);
+		// A session's route outlives nothing it was given: dropping it means the session lost it.
+		let forwarded = publisher.is_none();
 		Ok(Claim {
 			state: Arc::new(RouteState {
 				announcement,
 				control: kio::Lock::new(control),
+				forwarded,
 				_keepalive: self.tasks.keepalive(),
 			}),
 			server: serve,
@@ -2907,6 +2974,7 @@ impl Announcing {
 				link: self.link,
 				node: route.node,
 				draining: route.draining,
+				available: route.available,
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
@@ -2916,7 +2984,7 @@ impl Announcing {
 				lends: serving.lends,
 				lent: None,
 			});
-			shared.sync_route(prefix, claim);
+			shared.sync_route(prefix, claim, Gone::End);
 			entries.push((prefix.clone(), id));
 		}
 		drop(shared);
@@ -3003,6 +3071,9 @@ struct RouteState {
 	/// The advertisement, retracted on drop.
 	announcement: AnnounceProducer,
 	control: kio::Lock<RouteControl>,
+	/// Whether a session landed it for its peer, so dropping it means the session lost
+	/// the route ([`RouteEvent::Offline`]), not that its origin ended it.
+	forwarded: bool,
 	/// A route is lifecycle work: the origin's driver keeps running for as long as one
 	/// lives, even once every producer handle is gone.
 	_keepalive: Keepalive,
@@ -3060,7 +3131,7 @@ impl RouteState {
 		// first or finds the entries gone, never advertises after it.
 		let mut control = self.control.lock();
 		let request = control.request.take();
-		self.announcement.retract(false);
+		self.announcement.retract(Retract::Ended);
 		drop(control);
 		// Dropped outside every lock: refusing it wakes the requesters.
 		drop(request);
@@ -3182,7 +3253,7 @@ impl Route {
 			// A failed answer can never announce. Retracted under the control lock, as
 			// `ended` does, so a clone's racing announce finds the entries gone rather than
 			// advertising through the ordinary branch now that the request is taken.
-			self.state.announcement.retract(false);
+			self.state.announcement.retract(Retract::Ended);
 			drop(control);
 			// The claim moved past the instance the job read: its requesters wait on for
 			// the handler to prepare the job again under the new one.
@@ -3384,10 +3455,18 @@ impl Claim {
 	}
 
 	/// Retire an explicit peer withdrawal, hiding derived paths only once its
-	/// last live advertisement at the prefix is gone. A lost session just drops.
+	/// last live advertisement at the prefix is gone. Readers see it end. A lost
+	/// session just drops, and readers see it go offline.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn withdrawn(self) {
-		self.state.announcement.retract(true);
+		self.state.announcement.retract(Retract::Withdrawn);
+	}
+
+	/// Retire a route its announcer ended without a hop chain to stale, such as a
+	/// moq-transport PUBLISH_NAMESPACE_DONE: readers see it end, not go offline.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn ended(self) {
+		self.state.announcement.retract(Retract::Ended);
 	}
 }
 
@@ -3395,8 +3474,22 @@ impl Drop for RouteState {
 	fn drop(&mut self) {
 		// Retract before a job's unanswered request drops, so its requesters are refused
 		// rather than asked again through this route.
-		self.announcement.retract(false);
+		self.announcement.retract(match self.forwarded {
+			true => Retract::Lost,
+			false => Retract::Ended,
+		});
 	}
+}
+
+/// Why an advertisement leaves the table.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Retract {
+	/// The session it arrived on lost it: readers see it go offline.
+	Lost,
+	/// Its announcer ended it: readers see it end.
+	Ended,
+	/// A peer withdrew it, which also stales the routes derived through that peer.
+	Withdrawn,
 }
 
 /// The write half of an advertisement: a live claim that paths under a
@@ -3497,9 +3590,10 @@ impl AnnounceProducer {
 			entry.via = route.via;
 			entry.node = route.node;
 			entry.draining = route.draining;
+			entry.available = route.available;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
-			shared.sync_route(prefix, &claim);
+			shared.sync_route(prefix, &claim, Gone::End);
 			if let Some(((lender, lender_id), instance)) = spent {
 				shared.advance(&lender, lender_id, &instance);
 			}
@@ -3557,6 +3651,7 @@ impl AnnounceProducer {
 			source: entry.entered(),
 			node: entry.node,
 			draining: entry.draining,
+			available: entry.available,
 		})
 	}
 
@@ -3584,7 +3679,7 @@ impl AnnounceProducer {
 			}
 			let claim = entry.claim.clone();
 			let spent = entry.lent.take().map(|lender| (lender, entry.instance.clone()));
-			shared.sync_route(prefix, &claim);
+			shared.sync_route(prefix, &claim, Gone::End);
 			if let Some(((lender, lender_id), instance)) = spent {
 				shared.advance(&lender, lender_id, &instance);
 			}
@@ -3602,7 +3697,7 @@ impl AnnounceProducer {
 
 	/// Retract the route now: remove its table entries and reject anything still
 	/// waiting on its queue. Idempotent, and what dropping the advertisement does.
-	fn retract(&self, withdrawn: bool) {
+	fn retract(&self, how: Retract) {
 		let mut shared = self.shared.lock();
 		let guard = self.guard.lock().take();
 		let mut servers = Vec::new();
@@ -3615,7 +3710,7 @@ impl AnnounceProducer {
 			// prefix. Remove this session's route before testing the remaining
 			// claims, under the same lock, so overlapping withdrawals cannot
 			// invalidate a newer advertisement or miss the last withdrawal.
-			if withdrawn
+			if how == Retract::Withdrawn
 				&& let Some(&peer) = entry.hops.iter().last()
 				&& peer != Hop::UNKNOWN
 				&& !shared
@@ -3626,7 +3721,11 @@ impl AnnounceProducer {
 				shared.withdrawn.entry(prefix.clone()).or_default().insert(peer);
 				shared.restale(prefix);
 			}
-			shared.sync_route(&entry.prefix, &entry.claim);
+			let gone = match how {
+				Retract::Lost => Gone::Offline,
+				Retract::Ended | Retract::Withdrawn => Gone::End,
+			};
+			shared.sync_route(&entry.prefix, &entry.claim, gone);
 			if entry.advertised
 				&& let Some((lender, lender_id)) = &entry.lent
 			{
@@ -3658,7 +3757,7 @@ impl AnnounceProducer {
 
 impl Drop for AnnounceProducer {
 	fn drop(&mut self) {
-		self.retract(false);
+		self.retract(Retract::Ended);
 	}
 }
 
@@ -3728,7 +3827,7 @@ impl OwnClaims {
 	fn apply(&mut self, event: RouteEvent) {
 		let announce = match event {
 			RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) => announce,
-			RouteEvent::End(announce) => {
+			RouteEvent::End(announce) | RouteEvent::Offline(announce) => {
 				self.best.remove(&announce.prefix);
 				return self.node.own(announce.prefix, None);
 			}
@@ -3753,7 +3852,7 @@ impl OwnClaims {
 	/// go to an upstream peer follows it.
 	fn local(&mut self, event: RouteEvent) {
 		match event {
-			RouteEvent::End(announce) => {
+			RouteEvent::End(announce) | RouteEvent::Offline(announce) => {
 				self.local.remove(&announce.prefix);
 				self.feed(announce.prefix);
 			}
@@ -6044,7 +6143,7 @@ impl OriginState {
 			}
 		}
 		if let Some(claim) = changed {
-			self.sync_route(prefix, &claim);
+			self.sync_route(prefix, &claim, Gone::End);
 		}
 	}
 
@@ -6092,7 +6191,7 @@ impl OriginState {
 	/// every cursor it can present on. Called after an entry covering `prefix`
 	/// was added, updated, or removed. `claim` is `prefix`'s [`prefix_claim`],
 	/// held by the entry that changed.
-	fn sync_route(&mut self, prefix: &Path, claim: &Pattern) {
+	fn sync_route(&mut self, prefix: &Path, claim: &Pattern, gone: Gone) {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
 		let mut candidates = None;
@@ -6103,7 +6202,7 @@ impl OriginState {
 			if let Some(presented) = cursor.presented(prefix, claim) {
 				if presented.is_empty() {
 					// A cursor root can collapse several covering prefixes into one.
-					Self::sync_cursor(routes, cursor, &presented);
+					Self::sync_cursor(routes, cursor, &presented, gone);
 				} else {
 					// Every non-root presentation refers to this exact prefix. Rank
 					// its routes once, then take each cursor's first eligible visible entry.
@@ -6121,7 +6220,7 @@ impl OriginState {
 						.filter(|entry| cursor.visible(entry));
 					let epochs = Epochs::of(visible.clone());
 					let best = visible.clone().find(|entry| !epochs.superseded(entry));
-					cursor.update(&presented, best);
+					cursor.update(&presented, best, gone);
 				}
 			}
 		}
@@ -6239,7 +6338,7 @@ impl OriginState {
 
 	/// Recompute the best visible route presenting at `presented` (relative) for
 	/// one cursor and deliver the change, if any.
-	fn sync_cursor(routes: &RouteTable, cursor: &mut TableCursor, presented: &Path) {
+	fn sync_cursor(routes: &RouteTable, cursor: &mut TableCursor, presented: &Path, gone: Gone) {
 		// The entries presenting here are the ones announced at the absolute
 		// prefix, or, for the cursor's own root, at the root and every prefix
 		// above it (all of which present as the empty path). Among them, the
@@ -6253,7 +6352,7 @@ impl OriginState {
 			}
 		};
 
-		cursor.update(presented, best);
+		cursor.update(presented, best, gone);
 	}
 
 	/// Register a cursor and replay the current best route per presented prefix.
@@ -6287,7 +6386,7 @@ impl OriginState {
 			}
 		}
 		for p in &presented {
-			Self::sync_cursor(&self.routes, &mut cursor, p);
+			Self::sync_cursor(&self.routes, &mut cursor, p, Gone::End);
 		}
 		for head in &cursor.heads {
 			self.routes.add_cursor(head, id);
@@ -6427,7 +6526,7 @@ impl OriginState {
 		entry.instance = Instance::random();
 		entry.epoch = 0;
 		let claim = entry.claim.clone();
-		self.sync_route(prefix, &claim);
+		self.sync_route(prefix, &claim, Gone::End);
 	}
 
 	/// Whether `instance` still serves `path` as a request would resolve it now: the winning
@@ -6855,7 +6954,7 @@ impl Requesting {
 			if let Some(discovery) = &mut self.discovery {
 				loop {
 					match discovery.poll_next(waiter) {
-						Poll::Ready(Some(RouteEvent::End(_))) => self.routed = false,
+						Poll::Ready(Some(RouteEvent::End(_) | RouteEvent::Offline(_))) => self.routed = false,
 						Poll::Ready(Some(
 							RouteEvent::Start(announce) | RouteEvent::Restart(announce) | RouteEvent::Update(announce),
 						)) => {
@@ -8000,6 +8099,18 @@ impl Routes {
 		}
 	}
 
+	#[cfg(test)]
+	pub(crate) async fn expect_next_offline(&mut self, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
+		match self.expect_next().await {
+			RouteEvent::Offline(announce) => assert_eq!(
+				announce.prefix,
+				expected.try_into().expect("expected path"),
+				"wrong prefix"
+			),
+			other => panic!("should go offline: got {other:?}"),
+		}
+	}
+
 	fn new(
 		root: Path,
 		cursors: Vec<TableCursor>,
@@ -8054,7 +8165,7 @@ impl Routes {
 	/// Start a retraction's quarantine. A delivered announcement leaves it to
 	/// expire: later ones for the prefix are updates, which it never holds.
 	fn quarantine(&mut self, event: &RouteEvent, now: Instant) {
-		let RouteEvent::End(update) = event else {
+		let (RouteEvent::End(update) | RouteEvent::Offline(update)) = event else {
 			return;
 		};
 		if self.update_hold.is_zero() {
@@ -8133,7 +8244,7 @@ impl Routes {
 					.entry(announce.prefix.clone())
 					.or_insert_with(|| scope.announce());
 			}
-			RouteEvent::End(announce) => {
+			RouteEvent::End(announce) | RouteEvent::Offline(announce) => {
 				self.guards.remove(&announce.prefix);
 			}
 		}
@@ -8279,14 +8390,14 @@ impl Routes {
 			for (presented, CursorRoute { meta, captures, .. }) in &cursor.current {
 				let prefix = cursor.under.rejoin(presented);
 				if revoked.contains(&prefix) {
-					state.apply_unannounce(prefix, meta.clone(), captures.clone());
+					state.apply_unannounce(prefix, meta.clone(), captures.clone(), Gone::End);
 					continue;
 				}
 				if advertised.contains(&prefix) {
 					if state.pending.get(&prefix).is_some_and(|pending| {
 						matches!(
 							pending.update,
-							Some(PendingUpdate::Unannounce(_) | PendingUpdate::UnannounceAnnounce { .. })
+							Some(PendingUpdate::Unannounce(..) | PendingUpdate::UnannounceAnnounce { .. })
 						)
 					}) {
 						state.apply_announce(prefix, meta.clone(), captures.clone());
@@ -11059,7 +11170,7 @@ mod tests {
 		let replacement = broadcast::Info::new().produce();
 		queued(&echo).await.serve(&replacement);
 		resolved.assert_not_closed();
-		view.expect_next_ended("room").await;
+		view.expect_next_offline("room").await;
 	}
 
 	/// A route that ends abruptly releases its open groups, and the next route may
@@ -11469,7 +11580,7 @@ mod tests {
 		assert_eq!(announced.expect_next_restarted("live").await.cost, Cost::new(3));
 
 		drop(first);
-		announced.expect_next_ended("live").await;
+		announced.expect_next_offline("live").await;
 		announced.assert_next_wait();
 	}
 
@@ -11594,8 +11705,8 @@ mod tests {
 		drop(video_route);
 		assert_eq!(all.expect_next_active("room/live").await.cost, Cost::new(9));
 		assert_eq!(rooted.expect_next_active("").await.cost, Cost::new(9));
-		excluded.expect_next_ended("room/live").await;
-		video.expect_next_ended("room/live").await;
+		excluded.expect_next_offline("room/live").await;
+		video.expect_next_offline("room/live").await;
 	}
 
 	#[kio::test]
@@ -11667,7 +11778,7 @@ mod tests {
 		assert_eq!(update.prefix.as_str(), "live");
 		assert!(next().is_none());
 		drop(server);
-		assert!(matches!(next(), Some(Some(RouteEvent::End(_)))));
+		assert!(matches!(next(), Some(Some(RouteEvent::Offline(_)))));
 	}
 
 	#[kio::test]
@@ -11678,7 +11789,7 @@ mod tests {
 		announced.expect_next_active("live").await;
 
 		drop(server);
-		announced.expect_next_ended("live").await;
+		announced.expect_next_offline("live").await;
 	}
 
 	#[kio::test]
@@ -11960,8 +12071,8 @@ mod tests {
 			for (i, route) in far.into_iter().enumerate().rev() {
 				drop(route);
 				match announced.try_next() {
-					Some(RouteEvent::End(end)) => assert_eq!(end.prefix, Path::new(&format!("room/{i}")).unwrap()),
-					other => panic!("should be a retraction: got {other:?}"),
+					Some(RouteEvent::Offline(end)) => assert_eq!(end.prefix, Path::new(&format!("room/{i}")).unwrap()),
+					other => panic!("should go offline: got {other:?}"),
 				}
 			}
 
@@ -12008,7 +12119,7 @@ mod tests {
 
 		// The last route goes: retracted at once.
 		drop(farther);
-		announced.expect_next_ended("room").await;
+		announced.expect_next_offline("room").await;
 	}
 
 	/// After a retraction, a worse path to the same publisher waits out the
@@ -12032,7 +12143,7 @@ mod tests {
 		let near = peer.forward("named", route(&[9, 2], 2)).unwrap();
 		announced.expect_next_active("named").await;
 		drop(near);
-		announced.expect_next_ended("named").await;
+		announced.expect_next_offline("named").await;
 		let start = kio::clock::now();
 		let _stale = peer.forward("named", route(&[9, 3, 4], 4)).unwrap();
 		match announced.next().await.unwrap() {
@@ -12044,7 +12155,7 @@ mod tests {
 		let near = peer.forward("anonymous", route(&[0, 2], 2)).unwrap();
 		announced.expect_next_active("anonymous").await;
 		drop(near);
-		announced.expect_next_ended("anonymous").await;
+		announced.expect_next_offline("anonymous").await;
 		let _other = peer.forward("anonymous", route(&[0, 3, 4], 4)).unwrap();
 		announced.expect_next_active("anonymous").await;
 
@@ -12055,7 +12166,7 @@ mod tests {
 			let churn = peer.forward("churn", route(&chain, 2)).unwrap();
 			announced.expect_next_active("churn").await;
 			drop(churn);
-			announced.expect_next_ended("churn").await;
+			announced.expect_next_offline("churn").await;
 		}
 		assert_eq!(announced.anchoring.len(), queued + 1);
 
@@ -12064,7 +12175,7 @@ mod tests {
 		let gone = peer.forward("gone", route(&[9, 2], 2)).unwrap();
 		announced.expect_next_active("gone").await;
 		drop(gone);
-		announced.expect_next_ended("gone").await;
+		announced.expect_next_offline("gone").await;
 		assert!(!announced.retracted.is_empty());
 		for _ in 0..2 {
 			announced.assert_next_wait();
@@ -12212,7 +12323,7 @@ mod tests {
 			.unwrap();
 		assert_eq!(local.expect_next_active("both").await.source(), Source::Local);
 		drop(ingest);
-		local.expect_next_ended("both").await;
+		local.expect_next_offline("both").await;
 
 		// Resolution agrees with the cursor: a peer-only path is unroutable here,
 		// while the full view queues the request on the peer's route.
@@ -12269,7 +12380,7 @@ mod tests {
 			.unwrap();
 		assert_eq!(toward_core.expect_next_active("both").await.source(), Source::Peer(8));
 		drop(mesh);
-		toward_core.expect_next_ended("both").await;
+		toward_core.expect_next_offline("both").await;
 
 		// Resolution agrees with the cursor: an upstream-only path is unroutable
 		// toward an upstream, while the full view queues it on the core's route.
@@ -12997,7 +13108,7 @@ mod tests {
 
 		// Nothing serves an uncovered path once the handler is gone.
 		drop(dynamic);
-		announced.expect_next_ended("").await;
+		announced.expect_next_offline("").await;
 		let err = consumer
 			.request("something/else", None)
 			.now_or_never()

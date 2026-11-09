@@ -2753,7 +2753,7 @@ impl Enforce {
 					}
 					self.live.insert(gate.path);
 				}
-				crate::origin::RouteEvent::End(update) => {
+				crate::origin::RouteEvent::End(update) | crate::origin::RouteEvent::Offline(update) => {
 					self.live.remove(&update.prefix);
 					self.pending.retain(|gate| gate.path != update.prefix);
 				}

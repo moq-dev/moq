@@ -4136,7 +4136,7 @@ impl Publisher {
 				| crate::origin::RouteEvent::Restart(update) => {
 					initial.insert(update.prefix.clone(), update);
 				}
-				crate::origin::RouteEvent::End(update) => {
+				crate::origin::RouteEvent::End(update) | crate::origin::RouteEvent::Offline(update) => {
 					initial.remove(&update.prefix);
 				}
 			}
@@ -5902,7 +5902,7 @@ impl ForwardNamespaces {
 					(update, true, false)
 				}
 				crate::origin::RouteEvent::Restart(update) => (update, true, true),
-				crate::origin::RouteEvent::End(update) => (update, false, false),
+				crate::origin::RouteEvent::End(update) | crate::origin::RouteEvent::Offline(update) => (update, false, false),
 			})));
 		}
 		if self.retry.poll(waiter).is_ready() {

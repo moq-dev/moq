@@ -413,7 +413,7 @@ async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 		| moq_net::origin::RouteEvent::Restart(update) => {
 			live.insert(update.prefix.to_string());
 		}
-		moq_net::origin::RouteEvent::End(update) => {
+		moq_net::origin::RouteEvent::End(update) | moq_net::origin::RouteEvent::Offline(update) => {
 			live.remove(update.prefix.as_str());
 		}
 	};

@@ -1235,7 +1235,7 @@ impl AnnounceRun {
 				| origin::RouteEvent::Restart(update) => {
 					current.insert(update.prefix, update.route);
 				}
-				origin::RouteEvent::End(update) => {
+				origin::RouteEvent::End(update) | origin::RouteEvent::Offline(update) => {
 					current.remove(&update.prefix);
 				}
 			}
@@ -1599,7 +1599,7 @@ impl AnnounceRun {
 			let (update, active, restart) = match next {
 				Some(origin::RouteEvent::Start(update) | origin::RouteEvent::Update(update)) => (update, true, false),
 				Some(origin::RouteEvent::Restart(update)) => (update, true, true),
-				Some(origin::RouteEvent::End(update)) => (update, false, false),
+				Some(origin::RouteEvent::End(update) | origin::RouteEvent::Offline(update)) => (update, false, false),
 				None => {
 					if self.initial.take().is_some() {
 						stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;

@@ -356,9 +356,8 @@ impl Routed {
 		drop(std::mem::replace(&mut self.stream, stream));
 		self.previous = previous;
 		self.outputs(subscriber);
-		for (_, served) in std::mem::take(&mut self.previous) {
-			served.route.dynamic.withdrawn();
-		}
+		// What the new stream no longer serves is let go here, not ended by its origin.
+		self.previous.clear();
 		Ok(())
 	}
 
@@ -398,8 +397,11 @@ impl Routed {
 				claim,
 				served,
 			} => self.serve(subscriber, id, named, claim, served),
-			node::Output::Unserve { id, claim } => {
-				if let Some(served) = self.served.remove(&(id, claim)) {
+			node::Output::Unserve { id, claim, ended } => {
+				// Dropped, a claim the node let go of goes offline rather than ending.
+				if let Some(served) = self.served.remove(&(id, claim))
+					&& ended
+				{
 					served.route.dynamic.withdrawn();
 				}
 			}
@@ -422,15 +424,16 @@ impl Routed {
 		if !self.permit.within_limit(path.as_str()) {
 			return;
 		}
-		// A route held without a path to it serves only as a last resort, like a draining
-		// peer's, at its real cost.
+		// A route held without a path to it is unavailable: it serves only as a last
+		// resort, like a draining peer's, at its real cost.
 		let route = crate::origin::RouteInfo::new()
 			.with_instance(served.claim.instance.clone(), served.claim.epoch)
 			.with_hops(hops(id))
 			.with_cost(served.claim.cost.saturating_add(served.metric))
 			.with_via(subscriber.via(None))
 			.with_node(Some(id))
-			.with_draining(self.drained || !served.available);
+			.with_draining(self.drained)
+			.with_available(served.available);
 		let key = (id, claim);
 		if let Some(entry) = self.previous.remove(&key) {
 			self.served.insert(key.clone(), entry);

@@ -84,7 +84,7 @@ async fn until(announced: &mut origin::Routes, path: &str, active: bool) {
 				origin::RouteEvent::Start(announce)
 				| origin::RouteEvent::Update(announce)
 				| origin::RouteEvent::Restart(announce) => (announce, true),
-				origin::RouteEvent::End(announce) => (announce, false),
+				origin::RouteEvent::End(announce) | origin::RouteEvent::Offline(announce) => (announce, false),
 			};
 			if announce.prefix.as_str() == path && now_active == active {
 				return;

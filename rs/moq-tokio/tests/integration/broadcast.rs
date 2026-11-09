@@ -818,7 +818,7 @@ async fn next_route(routes: &mut moq_net::origin::Routes) -> (moq_net::announce:
 		.expect("announce timeout")
 		.expect("origin closed");
 	match event {
-		moq_net::origin::RouteEvent::End(announce) => (announce, false),
+		moq_net::origin::RouteEvent::End(announce) | moq_net::origin::RouteEvent::Offline(announce) => (announce, false),
 		moq_net::origin::RouteEvent::Start(announce)
 		| moq_net::origin::RouteEvent::Update(announce)
 		| moq_net::origin::RouteEvent::Restart(announce) => (announce, true),
@@ -3507,8 +3507,11 @@ async fn abort_carries_its_code_to_the_peer() {
 
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	match announced.next().await? {
-		moq_net::announce::Event::Present(route) => Some((route, true)),
-		moq_net::announce::Event::Absent(route) => Some((route, false)),
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Present(route) => Some((route, true)),
+			moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => Some((route, false)),
+			moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
+		};
 	}
 }

@@ -1,5 +1,6 @@
 //! The paths announced under a scope, each present or absent.
 
+use std::collections::HashSet;
 use std::task::Poll;
 
 use super::origin_impl::{Announce, RouteEvent, Routes};
@@ -8,33 +9,74 @@ use crate::{Error, Path};
 /// What an announcement listing reports for a path.
 #[derive(Clone, Debug)]
 pub enum AnnounceEvent {
-	/// A route now covers the path, which was absent.
+	/// A route now covers the path, which was absent. It may arrive unavailable; see
+	/// [`RouteInfo::available`](crate::origin::RouteInfo::available).
 	Present(Announce),
-	/// No route covers the path any more. Carries its last advertised route.
+	/// The present path's route lost every usable path to its origin but may recover
+	/// one, so the path stays present while requests for it may fail.
+	Unavailable(Announce),
+	/// The present path's route recovered a usable path: request it again.
+	Available(Announce),
+	/// The origin withdrew the path: no route covers it any more. Carries its last
+	/// advertised route.
 	Absent(Announce),
+	/// This origin let go of the path, and no route covers it any more: the session it
+	/// arrived on closed, or the network lost every path to it. Its origin may still
+	/// serve it. Carries its last advertised route.
+	Offline(Announce),
 }
 
 /// The paths announced in a scope, each reported as it becomes present or absent.
 ///
 /// A path that another instance takes over stays present, and a route's metadata
-/// changing is not reported: hold a [`follow`](crate::origin::Consumer::follow) to
-/// see the broadcast change. Created by
+/// changing is not reported, except its availability: hold a
+/// [`follow`](crate::origin::Consumer::follow) to see the broadcast change. Created by
 /// [`Consumer::announced`](crate::origin::Consumer::announced). Drop to unregister.
 pub struct AnnounceConsumer {
 	routes: Routes,
+	/// The present paths last reported unavailable, bounded by the present set.
+	unavailable: HashSet<Path>,
 }
 
 impl AnnounceConsumer {
 	pub(super) fn new(routes: Routes) -> Self {
-		Self { routes }
+		Self {
+			routes,
+			unavailable: HashSet::new(),
+		}
 	}
 
 	/// What a route change means for the listing, if anything.
-	fn list(event: RouteEvent) -> Option<AnnounceEvent> {
+	fn list(&mut self, event: RouteEvent) -> Option<AnnounceEvent> {
 		match event {
-			RouteEvent::Start(announce) => Some(AnnounceEvent::Present(announce)),
-			RouteEvent::End(announce) => Some(AnnounceEvent::Absent(announce)),
-			RouteEvent::Update(_) | RouteEvent::Restart(_) => None,
+			RouteEvent::Start(announce) => {
+				if !announce.route.available() {
+					self.unavailable.insert(announce.prefix.clone());
+				}
+				Some(AnnounceEvent::Present(announce))
+			}
+			RouteEvent::Update(announce) | RouteEvent::Restart(announce) => {
+				let was = !self.unavailable.contains(&announce.prefix);
+				match (was, announce.route.available()) {
+					(true, false) => {
+						self.unavailable.insert(announce.prefix.clone());
+						Some(AnnounceEvent::Unavailable(announce))
+					}
+					(false, true) => {
+						self.unavailable.remove(&announce.prefix);
+						Some(AnnounceEvent::Available(announce))
+					}
+					_ => None,
+				}
+			}
+			RouteEvent::End(announce) => {
+				self.unavailable.remove(&announce.prefix);
+				Some(AnnounceEvent::Absent(announce))
+			}
+			RouteEvent::Offline(announce) => {
+				self.unavailable.remove(&announce.prefix);
+				Some(AnnounceEvent::Offline(announce))
+			}
 		}
 	}
 
@@ -55,7 +97,7 @@ impl AnnounceConsumer {
 			let Some(event) = std::task::ready!(self.routes.poll_next(waiter)) else {
 				return Poll::Ready(None);
 			};
-			if let Some(event) = Self::list(event) {
+			if let Some(event) = self.list(event) {
 				return Poll::Ready(Some(event));
 			}
 		}
@@ -67,7 +109,8 @@ impl AnnounceConsumer {
 	/// Use [`Self::is_closed`] to check if the listing is closed.
 	pub fn try_next(&mut self) -> Option<AnnounceEvent> {
 		loop {
-			if let Some(event) = Self::list(self.routes.try_next()?) {
+			let event = self.routes.try_next()?;
+			if let Some(event) = self.list(event) {
 				return Some(event);
 			}
 		}
@@ -113,7 +156,7 @@ impl futures::Stream for AnnounceConsumer {
 			else {
 				return Poll::Ready(None);
 			};
-			if let Some(event) = Self::list(event) {
+			if let Some(event) = this.list(event) {
 				return Poll::Ready(Some(event));
 			}
 		}
@@ -140,6 +183,9 @@ mod tests {
 		match event {
 			AnnounceEvent::Present(announce) => format!("present {}", announce.prefix),
 			AnnounceEvent::Absent(announce) => format!("absent {}", announce.prefix),
+			AnnounceEvent::Offline(announce) => format!("offline {}", announce.prefix),
+			AnnounceEvent::Available(announce) => format!("available {}", announce.prefix),
+			AnnounceEvent::Unavailable(announce) => format!("unavailable {}", announce.prefix),
 		}
 	}
 
