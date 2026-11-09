@@ -18,14 +18,12 @@ test("audio-only sampling holds probe demand until its final RTT sample", async 
 	const empty = new Signal(undefined);
 	const watch = {
 		connection: { probe: network },
-		player: {
-			audio: {
-				out: { stalled: new Signal(false), context: empty, root: empty, timestamp: empty, stats: empty },
-				source: { out: { config: empty } },
-			},
-			sync: { out: { delay: empty, jitter: empty } },
-			broadcast: { out: { catalog: empty } },
+		audio: {
+			out: { stalled: new Signal(false), context: empty, root: empty, timestamp: empty, stats: empty },
+			source: { out: { config: empty } },
 		},
+		sync: { out: { delay: empty, jitter: empty }, now: () => undefined },
+		broadcast: { out: { catalog: empty } },
 	} as unknown as MoqWatch;
 	const measurement = probe(watch);
 	try {

@@ -70,7 +70,7 @@ fn run_test<F: std::future::Future<Output = ()> + 'static>(test: fn() -> F) {
 
 #[test]
 fn sigint_drains_sessions_before_exiting() {
-	kio::clock::host_time();
+	kio::clock::host_time(); // a real relay on real sockets
 	let _sigint = SIGINT.lock().unwrap_or_else(|e| e.into_inner());
 	run_test(sigint_drains_sessions_before_exiting_inner);
 }
@@ -110,7 +110,7 @@ fn a_failed_startup_leaves_the_signals_alone() {
 /// drains on its own trigger.
 #[test]
 fn an_embedder_owns_the_signals() {
-	kio::clock::host_time();
+	kio::clock::host_time(); // a real relay on real sockets
 	const CHILD: &str = "MOQ_RELAY_EMBEDDER_SIGNALS_CHILD";
 	if std::env::var_os(CHILD).is_some() {
 		run_test(a_relay_without_signals_leaves_sigint_alone_inner);
@@ -132,7 +132,7 @@ fn an_embedder_owns_the_signals() {
 
 #[test]
 fn a_session_arriving_mid_drain_gets_what_is_left() {
-	kio::clock::host_time();
+	kio::clock::host_time(); // a real relay on real sockets
 	run_test(a_session_arriving_mid_drain_gets_what_is_left_inner);
 }
 
@@ -143,13 +143,13 @@ fn a_drain_ends_once_every_session_leaves() {
 
 #[test]
 fn a_trigger_before_run_keeps_the_deadline() {
-	kio::clock::host_time();
+	kio::clock::host_time(); // a real relay on real sockets
 	run_test(a_trigger_before_run_keeps_the_deadline_inner);
 }
 
 #[test]
 fn a_reconnecting_client_rides_out_a_restart() {
-	kio::clock::host_time();
+	kio::clock::host_time(); // a real relay on real sockets
 	run_test(a_reconnecting_client_rides_out_a_restart_inner);
 }
 

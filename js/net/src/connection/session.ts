@@ -13,7 +13,7 @@ import type { Transport } from "./transport.ts";
  * Publishing goes through an origin, not the session: pass an `Origin.Consumer` as the
  * `publish` connect option and the session announces and serves that origin's broadcasts.
  */
-export interface Established {
+export interface Session {
 	/** URL of the connected server. */
 	readonly url: URL;
 

@@ -2,7 +2,7 @@
 // This creates a dist/ folder with the correct paths and dependencies for publishing
 // Split from release.ts to allow building packages without publishing
 
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { publint } from "publint";
 import { formatMessage } from "publint/utils";
@@ -112,9 +112,14 @@ if (existsSync("src/version.ts")) {
 	writeFileSync(file, body.replace(placeholder, `VERSION = ${JSON.stringify(pkg.version)};`));
 }
 
-// Copy static files
+// Copy static files, including the license and patent notices of any third-party code ported in,
+// such as js/watch's WEBRTC-LICENSE and WEBRTC-PATENTS.
 console.log("📄 Copying README.md...");
 copyFileSync("README.md", join("dist", "README.md"));
+for (const notice of readdirSync(".").filter((name) => /^[A-Z0-9]+-(LICENSE|PATENTS)$/.test(name))) {
+	console.log(`📄 Copying ${notice}...`);
+	copyFileSync(notice, join("dist", notice));
+}
 
 // Lint the package to catch publishing issues
 console.log("🔍 Running publint...");
