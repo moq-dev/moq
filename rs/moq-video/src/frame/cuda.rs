@@ -76,7 +76,7 @@ fn kernels(ctx: &Arc<CudaContext>) -> Result<Arc<Kernels>, Error> {
 			}))
 		})
 		.clone()
-		.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA resize unavailable: {e}")))
+		.map_err(|e| Error::codec(anyhow::anyhow!("CUDA resize unavailable: {e}")))
 }
 
 /// An owned device allocation. Plain `cuMemAlloc` on purpose: NVENC's
@@ -92,10 +92,10 @@ struct Raw {
 impl Raw {
 	fn alloc(ctx: &Arc<CudaContext>, len: usize) -> Result<Self, Error> {
 		ctx.bind_to_thread()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA bind: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA bind: {e:?}")))?;
 		// SAFETY: a plain device allocation, freed exactly once by Drop.
 		let ptr = unsafe { result::malloc_sync(len) }
-			.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA alloc of {len} bytes: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA alloc of {len} bytes: {e:?}")))?;
 		Ok(Self {
 			ctx: ctx.clone(),
 			ptr,
@@ -183,7 +183,7 @@ fn nv12_len(height: u32, pitch: u32) -> Result<usize, Error> {
 		.and_then(|luma| luma.checked_mul(3))
 		.map(|bytes| bytes / 2)
 		.ok_or_else(|| {
-			Error::Codec(anyhow::anyhow!(
+			Error::codec(anyhow::anyhow!(
 				"NV12 frame of {height} rows at pitch {pitch} is too large"
 			))
 		})
@@ -196,7 +196,7 @@ fn nv12_len(height: u32, pitch: u32) -> Result<usize, Error> {
 fn aligned_pitch(width: u32) -> Result<u32, Error> {
 	width
 		.checked_next_multiple_of(256)
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("frame width {width} is too wide for a CUDA NV12 pitch")))
+		.ok_or_else(|| Error::codec(anyhow::anyhow!("frame width {width} is too wide for a CUDA NV12 pitch")))
 }
 
 impl Frame {
@@ -249,12 +249,12 @@ impl Frame {
 		self.buf
 			.ctx
 			.bind_to_thread()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA bind: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA bind: {e:?}")))?;
 		let mut host = vec![0u8; self.buf.len];
 		// SAFETY: the buffer is `len` bytes of device memory and stays alive
 		// for the synchronous copy.
 		unsafe { result::memcpy_dtoh_sync(&mut host, self.buf.ptr) }
-			.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA download: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA download: {e:?}")))?;
 
 		let (w, h) = (self.width as usize, self.height as usize);
 		let (cw, ch) = (w / 2, h / 2);
@@ -322,7 +322,7 @@ impl Frame {
 		let stream = ctx.default_stream();
 		let block = (16u32, 16, 1);
 		let grid = |w: u32, h: u32| (w.div_ceil(16), h.div_ceil(16), 1);
-		let launch_err = |plane: &str, e| Error::Codec(anyhow::anyhow!("CUDA resize {plane}: {e:?}"));
+		let launch_err = |plane: &str, e| Error::codec(anyhow::anyhow!("CUDA resize {plane}: {e:?}"));
 
 		// Luma plane: one thread per destination pixel.
 		//
@@ -378,7 +378,7 @@ impl Frame {
 		// our stream), so wait for the kernels rather than queueing.
 		stream
 			.synchronize()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA resize sync: {e:?}")))
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA resize sync: {e:?}")))
 	}
 }
 
@@ -539,13 +539,13 @@ impl Slot {
 					shared_mem_bytes: 0,
 				})
 		}
-		.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA color conversion: {e:?}")))?;
+		.map_err(|e| Error::codec(anyhow::anyhow!("CUDA color conversion: {e:?}")))?;
 
 		// The frame may head straight to NVENC, which does not order against
 		// our stream, and the caller may drop the image next; wait here.
 		stream
 			.synchronize()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA color conversion sync: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA color conversion sync: {e:?}")))?;
 		Ok(dst)
 	}
 

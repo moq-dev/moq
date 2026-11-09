@@ -32,9 +32,6 @@ moves what remains of them once their claims merge.
 ## Required
 
 - [Drop set](/quest/m1/drop-set.md) - the drop set's track and cursor runs are billed to the cache pool, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind`
-- [js/net and moq-net decode the same inputs the same way](/quest/m1/js-net-input-checks.md) - a shared input corpus pins both decoders, and a typed endpoint stops loopback spellings from slipping past GOAWAY checks
-- [Resetting a kio sleep to its deadline does not wake it](/quest/m1/kio-reset-same-deadline.md) - a caller that resets on every poll no longer spins the simulator
-- [A cluster peer's identity is a type, not a string](/quest/m1/cluster-peer-identity.md) - a canonical `PeerKey` and a refused duplicate cluster id stop self-dials, double links, and silent mesh partitions
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [A reader on a failed copy continues on the held re-offer](/quest/m1/copy-recover.md) - a live reader keeps a group whose copy fails by continuing on the same track's re-offer at the same frame
 - [Group errors are cached by kind](/quest/m1/group-error-cache.md) - permanent group errors bind every reader, retryable ones are kept only for a bounded time, and a live SUBSCRIBE_DROP or FETCH answered `Old` no longer caches it for good
@@ -47,10 +44,14 @@ moves what remains of them once their claims merge.
 - [Push-to-talk's press-to-audible latency fits a budget on the defaults](/quest/m1/push-to-talk-latency.md) - press to audible on the browser defaults, excluding device output, stays under a kixtop-measured budget that `just test push-to-talk` enforces
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
 - [Lifecycles are explicit state](/quest/m1/explicit-state/README.md) - every lifecycle the 2026-11-07 audit found implicit is one enum or union, fixing the bugs in the 11 lifecycles it redesigns, with review and agent rules against new ones
-- [Session auth grants and replies stay consistent and bounded](/quest/m1/auth-stream-bounds.md) - an AUTH_ERROR revokes its grant, queued grants and retiring tokens are bounded, and dropping queued requests cannot deadlock
 - [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
 - [A macOS camera delivers frames the renderer imports](/quest/m1/camera-nv12-macos.md) - AVFoundation capture asks for NV12, so a camera whose native format is `2vuy` reaches the renderer
-- [Encoders keyframe by time, not frame count](/quest/m1/keyframe-by-time.md) - groups stay within the declared join interval when a source's frame rate drifts from the configured one
+- [js/qmux's WebSocket ponyfill ends its writable on close](/quest/m1/qmux-ws-close.md) - writes after close reject, and a reused AbortSignal stops holding closed sockets
+- [HLS import holds a bounded amount of each response](/quest/m1/hls-import-bounds.md) - media segments stream into the importer and playlists and init segments are refused past a bound
+- [@moq/json accepts only what it can reconstruct](/quest/m1/json-decode-limits.md) - nesting past 128 levels and out-of-range numbers are refused at parse like Rust, and schema output shares no decoder state
+- [@moq/signals delivers every change exactly as documented](/quest/m1/signals-correctness.md) - the React adapter, silent writes, cyclic equality, and `watch` dispose
+- [@moq/publish file sources and Fanout end cleanly](/quest/m1/publish-stream-end.md) - empty file tracks end, samples never leak on failure or cancel, and readers drain their tail at EOF
+- [A WebSocket fallback session returns to QUIC](/quest/m1/websocket-quic-upgrade.md) - a session that fell back to WebSocket re-probes QUIC and migrates back once UDP works, and a post-outage redial prefers QUIC
 
 ## Related
 

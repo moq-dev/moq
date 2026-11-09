@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -24509,10 +24507,10 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_reject() != 9727) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_route() != 16046) {
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_route() != 8265) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_serve() != 2580) {
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_serve() != 10832) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqfollowing_available() != 26337) {
@@ -24548,7 +24546,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqroute_cancel() != 41411) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqroute_instance_id() != 18728) {
+  if (uniffi_moq_ffi_checksum_method_moqroute_instance_id() != 57871) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqroute_requested() != 49558) {
@@ -24694,7 +24692,7 @@ void _checkApiChecksums() {
       55377) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqrequest_accept() != 55136) {
+  if (uniffi_moq_ffi_checksum_method_moqrequest_accept() != 30910) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqrequest_cancel() != 25859) {
@@ -24710,7 +24708,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqrequest_query() != 23842) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqrequest_reject() != 2829) {
+  if (uniffi_moq_ffi_checksum_method_moqrequest_reject() != 53566) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqrequest_transport() != 57171) {

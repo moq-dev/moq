@@ -28,7 +28,7 @@ use super::source::{Layout, Source};
 use crate::{Color, DmaBuf, DmaBufPlane, DrmFormat, Error, Size};
 
 fn err(message: impl std::fmt::Display) -> Error {
-	Error::Render(anyhow::anyhow!("{message}"))
+	Error::render(anyhow::anyhow!("{message}"))
 }
 
 /// Alias one DMA-BUF allocation as the sampled Vulkan textures of a frame.
@@ -53,7 +53,7 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Source, E
 	// planes follow it.
 	let export = buffer
 		.export()
-		.map_err(|e| Error::Render(anyhow::Error::new(e).context("export DMA-BUF")))?;
+		.map_err(|e| Error::render(anyhow::Error::new(e).context("export DMA-BUF")))?;
 	let (fd, lease) = export.into_parts();
 
 	// SAFETY: `fd` is a live descriptor for this DMA-BUF, and `adopt`
@@ -210,7 +210,7 @@ unsafe fn adopt(
 		// cannot serve two imports.
 		let dup = fd
 			.try_clone_to_owned()
-			.map_err(|e| Error::Render(anyhow::Error::new(e).context("duplicate DMA-BUF")))?;
+			.map_err(|e| Error::render(anyhow::Error::new(e).context("duplicate DMA-BUF")))?;
 		// SAFETY: the caller's contract, narrowed to this plane.
 		views.push(unsafe { adopt_plane(device, dup, modifier, plane) }?);
 	}

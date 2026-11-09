@@ -25,8 +25,7 @@ publish = false
 ### BEGIN HAKARI SECTION
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-base64-2b5c6dc72f624058 = { package = "base64", version = "0.23" }
-base64-3c51e837cfc5589a = { package = "base64", version = "0.22" }
+base64 = { version = "0.23" }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
@@ -113,8 +112,7 @@ zeroize = { version = "1", features = ["derive"] }
 
 [build-dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-base64-2b5c6dc72f624058 = { package = "base64", version = "0.23" }
-base64-3c51e837cfc5589a = { package = "base64", version = "0.22" }
+base64 = { version = "0.23" }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }

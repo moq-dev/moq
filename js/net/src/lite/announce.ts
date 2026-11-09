@@ -3,6 +3,7 @@ import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP, wireHop } from "
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { SEGMENT_BYTES } from "../util/limits.ts";
 import { decodeRoute, encodeRoute } from "./instance.ts";
 import * as Message from "./message.ts";
 import {
@@ -10,7 +11,6 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasAnnounceRestart,
-	hasAnnounceTakeover,
 	hasExcludeHop,
 	hasHidden,
 	hasRouteCost,
@@ -33,8 +33,6 @@ const ANNOUNCE_UPDATE = 2;
 // lite-07: another publisher instance replaces the advertisement.
 const ANNOUNCE_RESTART = 3;
 const SYNCED = 4;
-// lite-07: a new advertisement continues what a live one served beneath its path.
-const ANNOUNCE_TAKEOVER = 5;
 
 /**
  * Lite-07: copy `keep` path segments (from the head) or hops (from the tail) of the
@@ -47,10 +45,9 @@ export type Base = { distance: bigint; keep: number };
  * An announcement on the Announce Stream, advertising or retracting a broadcast.
  *
  * On lite-06+ these are independently-typed messages (`ANNOUNCE_START`, `ANNOUNCE_END`,
- * `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART` and `ANNOUNCE_TAKEOVER`), each
- * framed as `Type | Length | Body` like the subscribe stream's responses. Each `active`
- * (ANNOUNCE_START) or `takeover` implicitly assigns the next announce id (a per-stream ordinal starting
- * at 0); the others reference that id instead of repeating the path. Older versions send
+ * `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART`), each framed as `Type | Length | Body`
+ * like the subscribe stream's responses. Each `active` (ANNOUNCE_START) implicitly assigns the
+ * next announce id (a per-stream ordinal starting at 0); the others reference that id instead of repeating the path. Older versions send
  * a single ANNOUNCE_BROADCAST message that retracts by path (`ended`).
  */
 export type AnnounceBroadcast =
@@ -87,20 +84,6 @@ export type AnnounceBroadcast =
 			epoch?: bigint;
 			hops: Hop[];
 			cost?: Cost;
-			hopBase?: Base;
-	  }
-	/** Lite07+: an `active` that continues what the live announcement `predecessor` served
-	 * beneath this one's path. It assigns the next id; one at the predecessor's own path
-	 * retires the predecessor. */
-	| {
-			status: "takeover";
-			predecessor: bigint;
-			suffix: Path.Valid;
-			instance?: Instance.Valid;
-			epoch?: bigint;
-			hops: Hop[];
-			cost?: Cost;
-			pathBase?: Base;
 			hopBase?: Base;
 	  }
 	/** An unknown lite-06+ announce type, skipped by length. Does not assign an id. */
@@ -264,13 +247,6 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
-		case "takeover":
-			await w.u62(msg.predecessor);
-			await encodePath(w, version, msg.suffix, msg.pathBase);
-			await encodeRoute(w, version, msg.instance, msg.epoch);
-			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
-			await encodeRouteCost(w, version, msg.cost);
-			break;
 		case "synced":
 			break;
 		case "ended":
@@ -294,10 +270,6 @@ function announce06Type(msg: AnnounceBroadcast, version: Version): number {
 			// Older versions send an end and a start instead.
 			if (!hasAnnounceRestart(version)) throw new Error("announce restart not supported for this version");
 			return ANNOUNCE_RESTART;
-		case "takeover":
-			// Older versions send a start instead.
-			if (!hasAnnounceTakeover(version)) throw new Error("announce takeover not supported for this version");
-			return ANNOUNCE_TAKEOVER;
 		case "synced":
 			if (!hasSynced(version)) throw new Error("synced not supported for this version");
 			return SYNCED;
@@ -334,22 +306,6 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 			const hops = await decodeHopsBlock(r, version);
 			return { status: "restart", id, ...served, ...hops, cost: await decodeRouteCost(r, version) };
 		}
-		case ANNOUNCE_TAKEOVER: {
-			// Unknown before lite-07: skipped below like any other.
-			if (!hasAnnounceTakeover(version)) break;
-			const predecessor = await r.u62();
-			const path = await decodePath(r, version);
-			const served = await decodeRoute(r, version);
-			const hops = await decodeHopsBlock(r, version);
-			return {
-				status: "takeover",
-				predecessor,
-				...path,
-				...served,
-				...hops,
-				cost: await decodeRouteCost(r, version),
-			};
-		}
 	}
 	// Skip the length-prefixed body so an earlier Lite06 build negotiating
 	// the same ALPN does not kill the announce stream.
@@ -375,7 +331,6 @@ async function encodeLegacyBody(w: Writer, msg: AnnounceBroadcast, version: Vers
 		case "endedId":
 		case "update":
 		case "restart":
-		case "takeover":
 		case "skipped":
 			// The id-referencing forms only exist on lite-06+.
 			throw new Error("announce ids not supported for this version");
@@ -476,23 +431,6 @@ export class AnnounceHistory {
 		return { suffix, hops };
 	}
 
-	/** An ANNOUNCE_TAKEOVER: resolve it like a start against the live `predecessor`,
-	 * returning the predecessor's suffix too. One at the predecessor's own suffix retires the
-	 * predecessor, since a suffix holds one advertisement. */
-	takeover(msg: {
-		predecessor: bigint;
-		suffix: Path.Valid;
-		hops: Hop[];
-		pathBase?: Base;
-		hopBase?: Base;
-	}): Advertised & { previous: Path.Valid } {
-		const live = this.#live.get(msg.predecessor);
-		if (!live) throw new ProtocolViolation(`unknown announce id: ${msg.predecessor}`);
-		const resolved = this.start(msg);
-		if (resolved.suffix === live.suffix) this.#live.delete(msg.predecessor);
-		return { ...resolved, previous: live.suffix };
-	}
-
 	/** An ANNOUNCE_UPDATE: resolve its chain before replacing the old one, which it may be based on. */
 	update(msg: { id: bigint; hops: Hop[]; hopBase?: Base }): Advertised {
 		const hops = this.#hops(msg.hops, msg.hopBase);
@@ -586,8 +524,10 @@ export class AnnounceInit {
 		}
 	}
 
-	static async #decode(r: Reader): Promise<AnnounceInit> {
+	static async #decode(r: Reader, budget: number): Promise<AnnounceInit> {
 		const count = await r.u53();
+		// Refused before decoding any, so the set grows no larger than what may be announced.
+		if (count > budget) throw new Error(`announce init lists ${count} broadcasts with ${budget} slots left`);
 		const suffixes: Path.Valid[] = [];
 		for (let i = 0; i < count; i++) {
 			suffixes.push(Path.decode(await r.string()));
@@ -595,17 +535,19 @@ export class AnnounceInit {
 		return new AnnounceInit(suffixes);
 	}
 
-	// The whole initial set in one message, so it scales with the publisher's broadcasts.
-	static readonly MAX_SIZE = 64 * 1024 * 1024;
+	// The whole initial set in one message, capped like Rust's so it fits one storage segment
+	// (1 MiB) with its type and size prefixes. A larger set is refused on both ends.
+	static readonly MAX_SIZE = SEGMENT_BYTES - 16;
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		AnnounceInit.#guard(version);
 		return Message.encode(w, this.#encode.bind(this), { max: AnnounceInit.MAX_SIZE });
 	}
 
-	static async decode(r: Reader, version: Version): Promise<AnnounceInit> {
+	/** Decode the initial set, refusing one that lists more than `budget` broadcasts. */
+	static async decode(r: Reader, version: Version, budget: number): Promise<AnnounceInit> {
 		AnnounceInit.#guard(version);
-		return Message.decode(r, AnnounceInit.#decode, AnnounceInit.MAX_SIZE);
+		return Message.decode(r, (r) => AnnounceInit.#decode(r, budget), AnnounceInit.MAX_SIZE);
 	}
 }
 

@@ -196,7 +196,7 @@ objc2-screen-capture-kit = "0.3.2"
 object_store = { version = "0.14", default-features = false }
 once_cell = "1.21.3"
 pcap-file = "2"
-pem = "3.0.6"
+pem = "4.0.0"
 percent-encoding = "2"
 pkcs1 = { version = "0.7.5", features = ["alloc"] }
 pkcs8 = "0.11.0"
@@ -212,11 +212,11 @@ rcgen = { version = "0.14", default-features = false }
 # default-features off so each consumer picks its own TLS backend and body
 # features; nothing here wants the default native-tls stack.
 reqwest = { version = "0.13", default-features = false }
-rind = "0.1.12"
-rind-jsonwebtoken = "0.1.2"
-rind-object-store = "0.1.2"
-rind-rcgen = "0.1.12"
-rind-rustls = "0.1.12"
+rind = { version = "0.3.1", features = ["wipe"] }
+rind-jsonwebtoken = "11.0.2"
+rind-object-store = "0.14.2"
+rind-rcgen = "0.14.2"
+rind-rustls = "0.23.2"
 rustc-hash = "2.1.3"
 rustls-native-certs = "0.8.5"
 sd-notify = "0.5"
@@ -244,7 +244,7 @@ tracing-test = "0.2"
 # carries generator-only patches against this release in its own manifest.
 uniffi = "0.32"
 url = "2"
-usage-rs = "7.1.0"
+usage-rs = "7.3.0"
 uuid = { version = "1.26", features = ["v7"] }
 web-transport-proto = "0.6.4"
 web-transport-trait = "0.5"
