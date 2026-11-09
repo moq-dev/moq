@@ -74,7 +74,6 @@ federation) land.
 - [fMP4 and TS imports publish BCP-47 languages](/quest/m3/import-lang-iso639.md) - ISO 639-2 codes become `en`-style tags on audio and text
 - [HLS carries every audio language](/quest/m3/hls-audio-languages.md) - every `EXT-X-MEDIA` audio entry imports with its `LANGUAGE`, and exports write it back
 - [A refused follower asks a replacement handler](/quest/m3/follow-refused-retry.md) - a same-instance handler swap with identical route details re-asks a refused `Following`, while listeners still see no change
-- [Content protection](/quest/m3/drm/README.md) - Common Encryption CMAF publishes unchanged, signalled in the hang `drm` section and MSF `contentProtections`, with license URLs from Rust, the CLI, and every binding
 - [iOS capture](/quest/m3/mobile-capture-ios.md) - Rust captures the camera and screen on iOS, setting the catalog rotation
 - [Android capture](/quest/m3/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs and setting the catalog rotation
 - [Latest readers use Range::live()](/quest/m3/readers-range-live.md) - after #6278, readers start at the live edge without waiting on `largest()`

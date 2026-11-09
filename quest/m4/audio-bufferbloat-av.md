@@ -24,7 +24,7 @@ Decided in planning (2026-10-20):
   audio. Video freezes, skips, and lag are reported, not gated: the point is
   that audio does not pay for them. Since 2026-11-05 the shared clock never
   follows audio, so congested video lags it by design, and steady-state lip
-  sync belongs to [the Watch stretch](/quest/m1/audio-jitter-target/watch.md).
+  sync belongs to the audio ring's time stretch.
 - Folded in: the native `pulse` rows become enforced. They report only
   because an intermittent two-second device stall voids about one AAC native
   row in seven (see `test/audio-quality/README.md`). Reproduce and fix that

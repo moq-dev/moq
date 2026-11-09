@@ -4,7 +4,7 @@ import { SessionError, StreamError } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
 import * as QMux from "./index.ts";
-import Session, { type Config } from "./session.ts";
+import { type Config, Session } from "./session.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
 import type { WebSocketLike, WebSocketStreamLike } from "./web-socket-stream.ts";
@@ -1245,13 +1245,46 @@ describe("Session integration (scripted peer)", () => {
 			expect(await session.closed).toEqual({ closeCode: 1002, reason: "bye" });
 		});
 
+		test("a peer APPLICATION_CLOSE ends the incoming readables cleanly", async () => {
+			const { session, peer } = connect();
+			await started(peer);
+
+			peer.send({ type: "application_close", code: VarInt.from(42), reason: "bye" });
+			await session.closed;
+			expect(await session.incomingBidirectionalStreams.getReader().read()).toEqual({
+				done: true,
+				value: undefined,
+			});
+			expect(await session.incomingUnidirectionalStreams.getReader().read()).toEqual({
+				done: true,
+				value: undefined,
+			});
+			expect(await session.datagrams.readable.getReader().read()).toEqual({ done: true, value: undefined });
+		});
+
+		test("a peer CONNECTION_CLOSE errors the incoming readables with its cause", async () => {
+			const { session, peer } = connect();
+			await started(peer);
+
+			peer.send({ type: "connection_close", code: VarInt.from(1002), reason: "bad" });
+			await expectSessionFailure(session);
+			for (const readable of [
+				session.incomingBidirectionalStreams,
+				session.incomingUnidirectionalStreams,
+				session.datagrams.readable,
+			] as ReadableStream<unknown>[]) {
+				const err = await settleTo(readable.getReader().read());
+				expect((err as Error).message).toBe("Connection closed: 1002 bad");
+			}
+		});
+
 		test("a peer CONNECTION_CLOSE rejects closed", async () => {
 			const { session, peer } = connect();
 			await started(peer);
 
 			// The peer detected a protocol violation / transport error and sent a
 			// CONNECTION_CLOSE (0x1c) - abnormal, so `closed` rejects rather than
-			// fulfilling. Mirrors the frame we emit from #abort.
+			// fulfilling. Mirrors the frame we emit on a violation we detect.
 			peer.send({
 				type: "connection_close",
 				code: VarInt.from(1002),
@@ -1756,7 +1789,7 @@ describe("Session integration (scripted peer)", () => {
 		await session.ready;
 
 		const reader = session.datagrams.readable.getReader();
-		session.close(); // graceful: no #closeReason, so the readable must not error
+		session.close(); // graceful, so the readable must not error
 		const { done } = await reader.read();
 		expect(done).toBe(true);
 	});
@@ -2504,8 +2537,7 @@ describe("Session integration (scripted peer)", () => {
 		const { session, peer } = connect();
 		await started(peer);
 
-		// Graceful app-initiated close leaves #closeReason unset, so the synchronous
-		// already-closed throw must fall back to #closed's "Connection closed: <code> <reason>",
+		// A graceful close still throws the descriptive "Connection closed: <code> <reason>",
 		// not a generic "Connection closed".
 		session.close({ closeCode: 5, reason: "done" });
 

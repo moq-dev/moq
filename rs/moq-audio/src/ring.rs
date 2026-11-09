@@ -620,6 +620,9 @@ impl Consumer {
 				}
 				frames = frames.min(ahead);
 			}
+			// A declared end's tail drains as received: running dry after it is
+			// silence, not an underrun, so nothing should expand toward the target.
+			let declared = self.declared();
 			let Some(stretch) = self.stretch.as_mut() else {
 				let frames = frames.min((output.len() - done) / channels);
 				if frames == 0 {
@@ -640,7 +643,7 @@ impl Consumer {
 				break;
 			}
 			// Never transform startup padding or a finite stream's tail.
-			let enabled = self.prime == 0 && !self.shared.finished.load(Ordering::Relaxed);
+			let enabled = self.prime == 0 && !self.shared.finished.load(Ordering::Relaxed) && !declared;
 			let frames = if self.prime > 0 { frames.min(self.prime) } else { frames };
 			self.staged_prime = self.prime > 0;
 			self.prime -= frames.min(self.prime);
@@ -981,6 +984,34 @@ mod tests {
 	}
 
 	#[test]
+	fn a_declared_end_drains_its_tail_unstretched() {
+		let (mut prod, mut cons) = channel(
+			2,
+			48_000,
+			48_000,
+			Config {
+				latency: Duration::from_millis(50),
+				capacity: Duration::from_secs(1),
+				pad: false,
+				trim: false,
+			},
+		);
+		cons.stretch(48_000);
+		cons.start();
+		// Twice the target, so the tail drains through it: without the end it
+		// would expand there, toward a target nothing will refill.
+		assert_eq!(prod.push(&vec![0.25; 4800 * 2]), Push::Ok);
+		prod.end();
+		let mut out = [0.0; 128 * 2];
+		let mut reads = 0;
+		while cons.available() > 0 {
+			cons.read(&mut out);
+			reads += 1;
+		}
+		assert_eq!(reads, 7200usize.div_ceil(128), "a declared end never extends the tail");
+	}
+
+	#[test]
 	fn recovery_waits_for_received_pcm_without_stretching_padding() {
 		let (mut prod, mut cons) = channel(
 			2,
@@ -1035,12 +1066,18 @@ mod tests {
 		for (i, frame) in pcm.as_chunks_mut::<2>().0.iter_mut().enumerate() {
 			frame.fill((i as f32 * std::f32::consts::TAU * 200.0 / 48_000.0).sin() * 0.25);
 		}
-		let (first, second) = pcm.split_at(143_000 * 2);
-		// Play out the 50 ms prime and the 60 ms startup cooldown below the
-		// trim watermark, ending on a window boundary.
+		let (first, rest) = pcm.split_at(143_000 * 2);
+		let (cushion, second) = rest.split_at(1_000 * 2);
+		// Play out the 50 ms prime below the trim watermark, then top the queue
+		// up to the target so its first window, inside the 60 ms startup
+		// cooldown, holds rather than expands. End on a window boundary.
 		assert_eq!(prod.push(first), Push::Ok);
 		let mut out = [0.0; 480 * 2];
-		for _ in 0..8 {
+		for _ in 0..5 {
+			assert_eq!(cons.read(&mut out), Read::Ok);
+		}
+		assert_eq!(prod.push(cushion), Push::Ok);
+		for _ in 0..3 {
 			assert_eq!(cons.read(&mut out), Read::Ok);
 		}
 		// Above NetEq's high limit (target + 20 ms) but under the trim
