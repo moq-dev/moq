@@ -27,10 +27,11 @@ fi
 stats=$(mktemp)
 trap 'rm -f "$stats"' EXIT
 status=0
-perf stat -x, --no-big-num -e instructions:u,task-clock -o "$stats" -- "$@" || status=$?
+perf stat -x, --no-big-num --no-scale -e instructions:u,task-clock -o "$stats" -- "$@" || status=$?
 
 # A hybrid CPU reports instructions per core type, and a type the compiler
-# never ran on is "<not counted>".
+# never ran on is "<not counted>". --no-scale keeps each type's count as
+# counted, rather than extrapolated over the whole run, so they sum.
 cpu=
 instructions=
 while IFS=, read -r count _ event _; do

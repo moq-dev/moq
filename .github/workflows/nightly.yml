@@ -721,6 +721,11 @@ jobs:
       # The hosted image's default of 4 hides every hardware counter; 2 allows user-space ones.
       - name: Allow user-space instruction counts
         run: sudo sysctl -w kernel.perf_event_paranoid=2
+      # Ubuntu 24.04 confines the user namespaces Nix's unshare maps for the
+      # flake module's runner image build, as `just gh runner-vm-ci` handles.
+      # The runner is disposable, so the profile stays loaded.
+      - name: Allow Nix builders to map user namespaces
+        run: sudo apparmor_parser --add "$(nix build --no-link --print-out-paths .#runner-userns-profile)"
       - name: Measure the gate
         id: measure
         run: nix develop --command just gh gate-cost

@@ -867,7 +867,8 @@ compile) for the repository's own crates, or `crate/PACKAGE` for a dependency,
 are the user-space instructions of every rustc run, which
 `sh/gh/rustc-cost.sh` counts under `perf stat` as the `RUSTC_WRAPPER`.
 Instructions are the low-noise series for compiles; build script runs, such as
-aws-lc-sys's C build, count only in their module. `rust-test/BINARY` and
+aws-lc-sys's C build, and tooling tests' fixture crates count only in their
+module. `rust-test/BINARY` and
 `js-test/FILE` are summed test seconds (slot time, which more workers do not
 shrink) from the workspace nextest run's JUnit report and a Bun JUnit report
 per package. The total's history keeps the load average before the scenario

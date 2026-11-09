@@ -269,6 +269,8 @@ class ReportTest(unittest.TestCase):
             f"moq-net\t{ours}\tlib\t1000\t100\n"
             "aws-lc-sys\t/cargo/registry/src/aws-lc-sys-0.30.0\tbuild\t500\t50\n"
             "aws-lc-sys\t/cargo/registry/src/aws-lc-sys-0.30.0\tlib\t1500\t70\n"
+            f"moq-ffi\t{ROOT / '.tmp' / 'fixture'}\tbin\t7000\t900\n"
+            "moq-ffi\t/tmp/fixture\tlib\t7000\t900\n"
         )
         (raw / "cold" / "nextest.xml").write_text(
             '<testsuites><testsuite name="moq-net">'
@@ -298,7 +300,8 @@ class ReportTest(unittest.TestCase):
                 "cold/total/cpu": ("s", 660.5),
                 "cold/rustc/cpu": ("s", 16),
                 "cold/rustc/instructions": ("instructions", 720),
-                # Our crate splits by target kind; the dependency's build script and library sum.
+                # Our crate splits by target kind; the dependency's build script and library sum;
+                # the tooling tests' fixture crates, whatever their names, are left out.
                 "cold/crate/moq-net/lib/instructions": ("instructions", 400),
                 "cold/crate/moq-net/test/instructions": ("instructions", 200),
                 "cold/crate/aws-lc-sys/instructions": ("instructions", 120),

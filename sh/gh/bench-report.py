@@ -253,11 +253,17 @@ def cost(directory):
             entries.append({"name": f"{name}/{key}/wall", "unit": "s", "value": value(int(wall)), **note})
             entries.append({"name": f"{name}/{key}/cpu", "unit": "s", "value": value(int(cpu) / 1000), **note})
 
-        # The repository's own crates split by target kind; a dependency's builds sum into one series.
+        # The repository's own crates split by target kind; a dependency's builds sum into one
+        # series. A tooling test's fixture crate, in a scratch directory, counts only in its module.
         crates, cpu = {}, 0
         for line in (scenario / "rustc.tsv").read_text().splitlines():
             package, manifest, kind, milliseconds, instructions = line.split("\t")
-            key = f"{package}/{kind}" if Path(manifest).is_relative_to(ROOT) else package
+            if Path(manifest).is_relative_to(ROOT) and not Path(manifest).is_relative_to(ROOT / ".tmp"):
+                key = f"{package}/{kind}"
+            elif "/registry/src/" in manifest or "/git/checkouts/" in manifest:
+                key = package
+            else:
+                continue
             crates[key] = crates.get(key, 0) + int(instructions)
             cpu += int(milliseconds)
         entries.append({"name": f"{name}/rustc/cpu", "unit": "s", "value": value(cpu / 1000)})
