@@ -535,7 +535,6 @@ test("a plain frame has no size cap, while a compressed one keeps its whole-fram
 	compressed.finish();
 });
 
-// Quarantined: flaky under load, see /quest/m0/test-flakes-2/compressed-frame-cap.md
 // The bound's soundness for incompressible input lives in flate/codec.test.ts; deflating 32 MiB of
 // noise here would cost seconds under load.
 test("a compressed frame is refused unless its worst-case slice fits a peer's frame cap", async () => {
