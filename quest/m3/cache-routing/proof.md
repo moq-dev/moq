@@ -7,8 +7,8 @@ warm routes and eligibility rule keep per-broadcast forwarding loop-free at
 every step, under stale, reordered, and in-flight messages. Once demand and
 topology stop changing, every demanded broadcast is delivered, parent choices
 stop changing, and a relay carries a broadcast only when it has a local
-reader, feeds two or more downstream sessions, or sits on a consumer's
-cheapest cold route. The warm message's shape and wire placement are chosen
+reader, feeds two or more downstream sessions, or is its one consumer's
+cheapest cold route, as the epic's Goal states. The warm message's shape and wire placement are chosen
 and recorded in the epic's Plan.
 
 ## Plan
@@ -28,8 +28,9 @@ Fixtures, each a deterministic counterexample the rules must survive:
 
 - A chain of three relays plus a skip link, priced 3 and 5: cold skip, warm
   join, and the return to the skip when the skipped relay's reader leaves.
-- A relay whose only consumer is N withdraws its warm route toward N, and N
-  bypasses it.
+- A relay whose only consumer is N withdraws its warm route toward N. N
+  bypasses it over a cheaper skip link, and stays when the relay is N's
+  cheapest cold route.
 - Two relays at equal cold metric, both warm: only the lower hash keeps its
   upstream, the other joins it, and they never adopt each other.
 - A ring of relays each holding a stale, lower report of a neighbor's cold

@@ -2,9 +2,10 @@
 
 ## Goal
 
-A relay stays on a broadcast's path only while it has a local reader or
-feeds two or more downstream sessions. Otherwise its child bypasses it, so a
-broadcast with one viewer crosses fewer relays. A relay joins a neighbor
+A relay stays on a broadcast's path only while it has a local reader, feeds
+two or more downstream sessions, or is its one consumer's cheapest cold
+route. Otherwise its child bypasses it, so a broadcast with one viewer
+crosses fewer relays. A relay joins a neighbor
 that already carries a broadcast instead of pulling a second copy, so a LAN
 of relays with their own uplinks pulls one copy over one uplink. Routing
 stays loop-free under stale state, converges once demand and topology stop
