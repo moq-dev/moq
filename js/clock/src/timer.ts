@@ -93,9 +93,9 @@ export function timeoutSignal(duration: Nano, options?: { signal?: AbortSignal; 
 	const expired = new AbortController();
 	void sleep(duration, options).then(
 		() => expired.abort(new DOMException("signal timed out", "TimeoutError")),
-		() => expired.abort(options?.signal?.reason),
+		() => {},
 	);
-	return expired.signal;
+	return options?.signal ? AbortSignal.any([options.signal, expired.signal]) : expired.signal;
 }
 
 /** Choose how an interval catches up after its caller misses ticks. */

@@ -171,6 +171,7 @@ test("a timeout signal aborts at the manual deadline unless its parent aborts fi
 	const parent = new AbortController();
 	const child = timeoutSignal(Nano(10), { signal: parent.signal });
 	parent.abort("closed");
+	expect(child.reason).toBe("closed");
 	await clock.advance(Nano(10));
 	expect(child.reason).toBe("closed");
 });
