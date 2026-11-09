@@ -309,6 +309,36 @@ async fn a_zero_initial_redials_at_once() {
 	}
 }
 
+/// A zero window is a real bound, not "unlimited": the first walk still dials, and its
+/// failure gives up at once. A peer that keeps serving is unaffected.
+#[kio::test]
+async fn a_zero_timeout_gives_up_when_the_first_walk_fails() {
+	let peer = url("tcp://peer:1/");
+	let started = kio::clock::now();
+	let mut machine = Reconnect::new(config(INITIAL, Some(Duration::ZERO)), vec![peer.clone()], started).unwrap();
+	let mut run = Run::default();
+	let err = drive(
+		&mut machine,
+		&[(peer.clone(), Peer::Fail(Verdict::Retry))],
+		&mut run,
+		|_| false,
+	)
+	.await
+	.unwrap()
+	.expect_err("a failed walk kept retrying");
+	assert!(matches!(err, TestError::Policy(Failure::Exhausted { .. })), "{err}");
+	assert_eq!(run.dials, [peer.clone()], "the first walk dialed once");
+	assert_eq!(kio::clock::now(), started, "gave up without waiting");
+
+	let mut machine = Reconnect::new(config(INITIAL, Some(Duration::ZERO)), vec![peer.clone()], started).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+	assert!(machine.session().is_some(), "a zero window refused the first dial");
+}
+
 /// The first address that answers wins, however many dead ones precede it.
 #[kio::test]
 async fn the_walk_lands_on_the_first_address_that_answers() {
