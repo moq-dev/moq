@@ -443,8 +443,7 @@ struct MoQOutputStatsTest {
 		current->connected = false;
 		output.connect_time_ms = 0;
 		auto state = current->session->state();
-		state.phase = moq::ConnectionPhase::kDisconnected;
-		state.version.reset();
+		state.phase = moq::ConnectionPhase::kDisconnected{};
 		output.OnState(current, std::move(state));
 		return current->connected && !current->live && output.GetConnectTime() > 0;
 	}

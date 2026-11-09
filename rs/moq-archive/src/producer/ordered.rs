@@ -216,7 +216,7 @@ mod tests {
 
 		// Too late for its turn.
 		group(&track, 3);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert!(matches!(ordered.poll_next(&kio::Waiter::noop()), Poll::Ready(None)));
 	}
 

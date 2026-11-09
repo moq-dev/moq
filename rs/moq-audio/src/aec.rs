@@ -533,6 +533,7 @@ fn channel(rate: u32) -> (ring::Producer, ring::Consumer) {
 			// is shaped to avoid.
 			pad: false,
 			trim: true,
+			comfort: false,
 		},
 	)
 }

@@ -8,17 +8,17 @@ use moq_net::{Path, origin, stats::Registry, track};
 
 use super::{Drain, Task};
 
-/// Group-track frame sizes from one tick, in bytes.
+/// Bucket-track frame sizes from one tick, in bytes.
 ///
-/// `held` is the largest snapshot any group's track is still holding (idle
+/// `held` is the largest snapshot any bucket's track is still holding (idle
 /// paths included). `wrote` is the largest frame this tick wrote, a snapshot
-/// or a merge-patch delta, or zero when every group was unchanged. Each is a
-/// max across groups, so a single frame can be compared with the cache cap.
+/// or a merge-patch delta, or zero when every bucket was unchanged. Each is a
+/// max across buckets, so a single frame can be compared with the cache cap.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameBytes {
-	/// Largest group snapshot still held.
+	/// Largest bucket snapshot still held.
 	pub held: usize,
-	/// Largest group frame written this tick.
+	/// Largest bucket frame written this tick.
 	pub wrote: usize,
 }
 
@@ -30,7 +30,7 @@ pub struct Driver {
 }
 
 impl Driver {
-	/// Publish `.stats/node` on `origin` and drain `registry` into one group
+	/// Publish `.stats/node` on `origin` and drain `registry` into one bucket
 	/// track per `depth` leading path segments, the way [`crate::Producer::new`]
 	/// does. `None` if the origin refuses the broadcast.
 	pub fn new(registry: Registry, origin: origin::Producer, depth: usize) -> Option<Self> {
@@ -54,7 +54,7 @@ impl Driver {
 		self.now = self.now.saturating_add(self.drain.task.interval);
 		self.drain.collect();
 		self.drain.publish(self.now);
-		self.drain.group_frame_bytes()
+		self.drain.bucket_frame_bytes()
 	}
 
 	/// Hold `label`'s presence track as a reader would, so every tick updates

@@ -133,7 +133,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	// does whenever a finish races a group still in flight.
 	let mut tail = track.append_group().unwrap();
 	tail.write_frame(Timestamp::ZERO, TAIL[0]).unwrap();
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 	settle().await;
 
 	// The rest of the group, its clean end, and the disconnect happen with no await in

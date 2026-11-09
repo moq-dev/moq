@@ -89,6 +89,9 @@ at EOF are different process boundaries.
 
 Check first:
 
+- The [benchmark history](https://git.moq.dev/bench/)'s `bench-gate-cost` rows: `cold/rust-test/*` is each test
+  binary's summed slot time in the full gate's workspace nextest run, and
+  `cold/js-test/*` each Bun test file's, flagged on the nights they moved.
 - Account for [moq-dev/moq#6987](https://github.com/moq-dev/moq/pull/6987)
   before touching the TS export/jitter simulations, routing reference model,
   JSON budgets, QUIC simulation payloads, or other CPU cuts it owns. Its

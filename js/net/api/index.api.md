@@ -404,6 +404,11 @@ export namespace Group {
 			sequence: number;
 		} & Group.Frame | undefined;
 	}
+	export interface Finished {
+		readonly closed: Signals.GetPromise<Error | null>;
+		consume(): Group.Consumer;
+		readonly sequence: bigint;
+	}
 	export interface Frame {
 		arrived?: Instant;
 		payload: Uint8Array;
@@ -418,7 +423,7 @@ export namespace Group {
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Group.Consumer;
 		createFrame(info: Frame.Info): Frame.Producer;
-		finish(): void;
+		finish(): Group.Finished;
 		get isClosed(): boolean;
 		readonly sequence: bigint;
 		writeFrame(frame: Group.Frame): void;
@@ -731,6 +736,16 @@ export namespace Track {
 		wanted(): bigint | undefined;
 		wantedChanged(): Promise<bigint | undefined>;
 	}
+	export interface Finished {
+		abort(error: Error): void;
+		close(): void;
+		readonly closed: Signals.GetPromise<Error | null>;
+		createGroup(sequence: bigint): Group.Producer;
+		info(): Promise<Track.Info>;
+		readonly name: string;
+		requests(): Track.Requests;
+		subscribe(options?: Track.Subscription): Track.Subscriber;
+	}
 	export interface Groups {
 		end?: Track.Bound;
 		start?: Track.Bound;
@@ -781,7 +796,7 @@ export namespace Track {
 		get closed(): Signals.GetPromise<Error | null>;
 		createGroup(sequence: bigint): Group.Producer;
 		demand(): Track.Demand;
-		finish(): void;
+		finish(): Track.Finished;
 		finishAt(end: Track.Position, error?: Error): void;
 		info(): Promise<Track.Info>;
 		largest(): Track.Position | undefined;

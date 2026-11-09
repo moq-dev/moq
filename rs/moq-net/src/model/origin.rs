@@ -4029,7 +4029,7 @@ impl TrackIo {
 			None => {
 				if let Some(accepted) = self.accepted.take() {
 					let _ = match &result {
-						Ok(()) => accepted.finish(),
+						Ok(()) => accepted.finish().map(drop),
 						// A failed track refuses newcomers too, so they ask afresh.
 						Err(err) => accepted.abort(err.clone()),
 					};
@@ -8622,7 +8622,7 @@ mod tests {
 			let mut group = source.create_group(7u64.into()).unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
 			group.finish().unwrap();
-			source.finish().unwrap();
+			let source = source.finish().unwrap();
 
 			let routes = crate::model::resume::Producer::new();
 			routes.serve(source.consume());
@@ -10330,9 +10330,9 @@ mod tests {
 			assert_eq!(listed(&mut tracks).await, event);
 		}
 
-		dropped.finish().unwrap();
+		let dropped = dropped.finish().unwrap();
 		drop(dropped);
-		held.finish().unwrap();
+		let _held = held.finish().unwrap();
 		source.broadcast().close();
 		for event in ["~dropped", "~held", "end"] {
 			assert_eq!(listed(&mut tracks).await, event);
@@ -10693,7 +10693,7 @@ mod tests {
 				let mut group = source.append_group().unwrap();
 				group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
 				group.finish().unwrap();
-				source.finish().unwrap();
+				let source = source.finish().unwrap();
 
 				let mut subscription = subscribing.await.expect("subscribe survives the retraction");
 				assert_eq!(subscription.info(), source.info(), "the source's actual track info");
@@ -10739,7 +10739,7 @@ mod tests {
 		let mut group = source.create_group(0u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
 		group.finish().unwrap();
-		source.finish().unwrap();
+		let source = source.finish().unwrap();
 		let mut subscription = subscribing.await.unwrap().expect("subscribe");
 		assert_eq!(
 			next_group(&mut subscription)
@@ -11296,7 +11296,7 @@ mod tests {
 		let mut group = source.create_group(1u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
 		group.finish().unwrap();
-		source.finish().unwrap();
+		let _source = source.finish().unwrap();
 
 		let mut subscription = subscribing.await.unwrap().expect("subscribe survives the retraction");
 		let mut payloads = Vec::new();
@@ -14287,7 +14287,7 @@ mod tests {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let track = track.finish().unwrap();
 		drop(track);
 		broadcast.broadcast().close();
 
@@ -14341,7 +14341,7 @@ mod tests {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let track = track.finish().unwrap();
 		drop(track);
 
 		let mut group = next_group(&mut subscription)
@@ -14761,7 +14761,7 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"still");
 
 		// The incumbent's clean end is the track's, not the newcomer's error.
-		old.finish().unwrap();
+		let _old = old.finish().unwrap();
 		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
 	}
 
@@ -14801,7 +14801,7 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"still");
 
 		// The incumbent's clean end is the track's, not the newcomer's error.
-		old.finish().unwrap();
+		let _old = old.finish().unwrap();
 		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
 	}
 
@@ -14828,7 +14828,7 @@ mod tests {
 		let mut group = old.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
 		group.finish().unwrap();
-		old.finish().unwrap();
+		let _old = old.finish().unwrap();
 		replacement.abort(Error::App(7)).unwrap();
 
 		let mut group = next_group(&mut subscription)
@@ -14878,7 +14878,7 @@ mod tests {
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
 		}
-		old.finish().unwrap();
+		let _old = old.finish().unwrap();
 		replacement.abort(Error::App(7)).unwrap();
 
 		assert!(matches!(next_group(&mut later).await, Ok(None)));
@@ -14956,7 +14956,7 @@ mod tests {
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
 		}
-		replacement.finish().unwrap();
+		let replacement = replacement.finish().unwrap();
 
 		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
 		drop(replacement);
@@ -15907,7 +15907,7 @@ mod tests {
 		let mut written = track.append_group().unwrap();
 		written.write_frame(crate::Timestamp::ZERO, b"frame".as_ref()).unwrap();
 		written.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let mut reader = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = reader.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"frame");

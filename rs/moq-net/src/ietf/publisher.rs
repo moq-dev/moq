@@ -6899,8 +6899,8 @@ impl TrackServe {
 				Poll::Ready(Ok(Some(datagram))) => datagram,
 				Poll::Ready(Ok(None)) => {
 					self.datagrams = None;
-					if let Some(track) = &mut self.datagram_track {
-						let _ = track.finish();
+					if let Some(track) = &self.datagram_track {
+						let _ = track.finish_shared();
 					}
 					return;
 				}
@@ -8242,13 +8242,14 @@ mod group_priority_test {
 					None,
 				);
 				assert!(serve.poll(&kio::Waiter::noop()).is_pending());
+				let mut group = Some(group);
 				if finished {
-					group.finish().unwrap();
+					group.take().unwrap().finish().unwrap();
 					assert!(serve.poll(&kio::Waiter::noop()).is_pending());
 					assert!(log.trail().iter().any(|(_, event)| matches!(event, Sent::Finish)));
 				}
 				track.finish_at(track::Position { group: 5, frame: 5 }, None).unwrap();
-				if !finished {
+				if let Some(group) = group {
 					group.finish().unwrap();
 				}
 				kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
@@ -8380,7 +8381,7 @@ mod group_priority_test {
 		group
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
 			.unwrap();
-		group.finish().unwrap();
+		let group = group.finish().unwrap();
 
 		let msg = ietf::GroupHeader {
 			track_alias: 0,
@@ -8652,7 +8653,7 @@ mod group_priority_test {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"hello".as_slice()).unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
@@ -9059,7 +9060,7 @@ mod subscribe_cursor_test {
 		}
 
 		let subscriber = track.subscribe(None);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
@@ -9192,7 +9193,7 @@ mod serve_tests {
 						.run_subscription(&mut stream, &mut serving, &mut finished, &mut goaways, &mut updates);
 				let mut run = std::pin::pin!(run);
 				assert!(futures::poll!(run.as_mut()).is_pending());
-				h.track.finish().unwrap();
+				h.track.finish_shared().unwrap();
 				assert!(matches!(run.await, Some(Served::Track(Ok(())))), "{version}");
 			}
 			// The same reader now watches cancellation while the final marker waits for credit.
@@ -9732,7 +9733,7 @@ mod serve_tests {
 		.await;
 
 		group.finish().unwrap();
-		h.track.finish().unwrap();
+		h.track.finish_shared().unwrap();
 		kio::clock::timeout(std::time::Duration::from_secs(10), serve)
 			.await
 			.expect("the track's end ends the subscription")
@@ -9800,7 +9801,7 @@ mod serve_tests {
 		// Group 2 arrives later, so a verdict that forgot group 1 would wait for 2's deadline.
 		wait(serve.as_mut(), 10).await;
 		append();
-		h.track.finish().unwrap();
+		h.track.finish_shared().unwrap();
 		serve_until(serve.as_mut(), "group 2's stream finished", || finished() == 3).await;
 
 		// Groups 0 and 1 go idle past the cache window long before the deadline.
@@ -11204,7 +11205,7 @@ mod serve_tests {
 			);
 		}
 
-		h.track.finish().unwrap();
+		h.track.finish_shared().unwrap();
 		served(h, serve).await;
 		h.session.reopen();
 	}
@@ -12005,7 +12006,7 @@ mod serve_tests {
 			let mut later = h.track.create_group(group::Info { sequence: 4 }).unwrap();
 			later.write_frame(timestamp(), b"wanted".as_slice()).unwrap();
 			later.finish().unwrap();
-			h.track.finish().unwrap();
+			h.track.finish_shared().unwrap();
 			serving.await.unwrap();
 			assert_eq!(
 				occurrences(&h.log, b"after-update"),
@@ -12102,7 +12103,7 @@ mod serve_tests {
 				group.write_frame(timestamp(), payload.as_slice()).unwrap();
 			}
 			group.finish().unwrap();
-			h.track.finish().unwrap();
+			h.track.finish_shared().unwrap();
 			serving.await.unwrap();
 			assert_eq!(
 				occurrences(&h.log, b"history"),
@@ -12160,7 +12161,7 @@ mod serve_tests {
 		})
 		.await;
 		// Group 1 stays open: the end falls after it.
-		h.track.finish().unwrap();
+		h.track.finish_shared().unwrap();
 		let update = ietf::SubscribeUpdate {
 			request_id: RequestId(2),
 			subscriber_priority: None,
@@ -12251,7 +12252,7 @@ mod serve_tests {
 		})
 		.await;
 		group.finish().unwrap();
-		h.track.finish().unwrap();
+		h.track.finish_shared().unwrap();
 		serving.await.unwrap();
 		assert_eq!(occurrences(&h.log, b"history"), 0, "the historical fill is refused");
 		assert_eq!(occurrences(&h.log, b"live"), 1, "the live group is not repeated");
@@ -12321,7 +12322,7 @@ mod serve_tests {
 				group.write_frame(timestamp(), payload).unwrap();
 				group.finish().unwrap();
 			}
-			h.track.finish().unwrap();
+			h.track.finish_shared().unwrap();
 			serving.await.unwrap();
 			assert_eq!(occurrences(&h.log, b"history"), 0, "the historical fill is refused");
 			assert_eq!(occurrences(&h.log, b"excluded"), 0, "the live floor stays at group 4");
@@ -12832,7 +12833,7 @@ mod serve_tests {
 					assert!(futures::poll!(serving.as_mut()).is_pending());
 				}
 				frame.finish().unwrap().finish().unwrap();
-				h.track.finish().unwrap();
+				h.track.finish_shared().unwrap();
 				served(&h, serving.as_mut()).await;
 				assert_eq!(occurrences(&h.log, payload), 1, "{version} streamed={streamed}");
 				assert!(h.log.resets().is_empty(), "{version} streamed={streamed}");
@@ -13253,7 +13254,7 @@ mod serve_tests {
 	/// request ends with it: a finished subscription keeps its join until the subscriber
 	/// closes the request.
 	async fn finish_and_retain(h: &Serve, mut serving: std::pin::Pin<&mut impl Future<Output = Result<(), Error>>>) {
-		h.track.finish().unwrap();
+		h.track.finish_shared().unwrap();
 		for _ in 0..200 {
 			assert!(
 				futures::poll!(serving.as_mut()).is_pending(),
@@ -13421,7 +13422,7 @@ mod serve_tests {
 			};
 			*writable = false;
 			drop(writable);
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			for _ in 0..50 {
 				assert!(futures::poll!(serving.as_mut()).is_pending(), "{version}");
 				settle().await;
@@ -13486,7 +13487,7 @@ mod serve_tests {
 				registered_as(&h, RequestId(id), serving.as_mut()).await;
 				servings.push(serving);
 			}
-			h.track.finish().unwrap();
+			h.track.finish_shared().unwrap();
 			for _ in 0..50 {
 				for serving in &mut servings {
 					assert!(futures::poll!(serving.as_mut()).is_pending(), "{version}");
@@ -14541,7 +14542,7 @@ mod serve_tests {
 		publish_pairs(h, 5, None);
 		match largest {
 			Largest::Finished => {
-				h.track.finish().unwrap();
+				h.track.finish_shared().unwrap();
 				None
 			}
 			Largest::Live => Some(h.track.create_group(group::Info { sequence: 5 }).unwrap()),
@@ -14556,7 +14557,7 @@ mod serve_tests {
 			}
 			Largest::IdleFinished => {
 				h.track.set_idle();
-				h.track.finish().unwrap();
+				h.track.finish_shared().unwrap();
 				None
 			}
 			Largest::Aborted => {
@@ -14624,7 +14625,7 @@ mod serve_tests {
 		let version = Version::Draft22;
 		let mut h = serve(version);
 		publish_pairs(&mut h, 5, None);
-		let mut empty = h.track.create_group(group::Info { sequence: 5 }).unwrap();
+		let empty = h.track.create_group(group::Info { sequence: 5 }).unwrap();
 		empty.finish().unwrap();
 		settle().await;
 
@@ -14713,7 +14714,7 @@ mod serve_tests {
 		for version in FETCH_DRAFTS {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 5, None);
-			h.track.finish().unwrap();
+			h.track.finish_shared().unwrap();
 			settle().await;
 
 			let buf = standalone_fetch(
@@ -14742,7 +14743,7 @@ mod serve_tests {
 			for end in [1, 2] {
 				let mut h = serve(version);
 				publish_pairs(&mut h, 5, None);
-				h.track.finish().unwrap();
+				h.track.finish_shared().unwrap();
 				settle().await;
 
 				let buf = standalone_fetch(
@@ -15614,7 +15615,9 @@ mod serve_tests {
 						group.finish().unwrap();
 					}
 					// An empty finished track: nothing to serve but the marker.
-					_ => track.finish().unwrap(),
+					_ => {
+						track.finish_shared().unwrap();
+					}
 				}
 				(None, Some((broadcast, track)))
 			}
@@ -16466,7 +16469,7 @@ mod serve_tests {
 				group.write_frame(crate::Timestamp::ZERO, payload.as_slice()).unwrap();
 			}
 			group.finish().unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 
 			let range = ServeRange {
 				start: Some(Location { group: 0, object: 0 }),
@@ -21559,7 +21562,7 @@ mod compression_tests {
 				group.write_frame(crate::Timestamp::ZERO, payload.clone()).unwrap();
 			}
 			group.finish().unwrap();
-			track.finish().unwrap();
+			track.finish_shared().unwrap();
 			let response = ietf::SubscribeOk {
 				track_alias: 0,
 				largest: None,

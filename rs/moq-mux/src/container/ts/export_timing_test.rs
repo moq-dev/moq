@@ -276,10 +276,12 @@ impl Live {
 			} else {
 				let tick = self.tick;
 				let keyframe = tick.is_multiple_of(GOP);
-				if keyframe && let Some(mut group) = self.group.take() {
+				if keyframe && let Some(group) = self.group.take() {
 					match std::mem::take(&mut self.stalling) {
 						true => self.stalled.push(group),
-						false => group.finish().unwrap(),
+						false => {
+							group.finish().unwrap();
+						}
 					}
 				}
 				if keyframe {
@@ -356,11 +358,11 @@ impl Live {
 
 	/// End the media tracks while the catalog can still announce more.
 	fn finish_media(&mut self) {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish().unwrap();
 		}
 		self.stalled.clear();
-		self.video.finish().unwrap();
+		drop(self.video.clone().finish().unwrap());
 		self.audio.finish().unwrap();
 	}
 

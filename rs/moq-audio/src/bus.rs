@@ -374,6 +374,9 @@ impl Bus {
 				// the target depth, not by letting the ring run dry or full.
 				pad: true,
 				trim: true,
+				// No writer here declares a silence, so measuring for comfort
+				// noise would be wasted on every block.
+				comfort: false,
 			},
 		);
 		let port = self.open(input, strip, Queue::Live(cons))?;

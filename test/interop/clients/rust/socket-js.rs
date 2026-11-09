@@ -71,13 +71,13 @@ async fn main() -> anyhow::Result<()> {
 		for i in 0..3 {
 			stream.producer.write_frame(None, vec![own + i])?;
 		}
-		stream.producer.finish()?;
+		let finished = stream.producer.finish()?;
 		for i in 0..3 {
 			let frame = stream.consumer.read_frame().await?.context("short TCP half")?;
 			ensure!(frame.payload.as_ref() == [peer + i], "wrong TCP frame");
 		}
 		ensure!(stream.consumer.read_frame().await?.is_none(), "extra TCP frame");
-		Box::new(stream)
+		Box::new((finished, stream.consumer))
 	} else {
 		let mut stream = if dial {
 			endpoint.dial_track("acceptor", None)?.await?
@@ -100,9 +100,9 @@ async fn main() -> anyhow::Result<()> {
 				stream.producer.write_frame(None, vec![own + i])?;
 			}
 		}
-		stream.producer.finish()?;
+		let finished = stream.producer.finish()?;
 		ensure!(reader.next_group().await?.is_none(), "extra track frame");
-		Box::new((stream.producer, reader))
+		Box::new((finished, reader))
 	};
 	eprintln!("socket data verified {} {}", args[4], args[1]);
 	if tcp {
