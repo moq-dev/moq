@@ -181,7 +181,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 		first.is_closed(),
 	));
 	write_group(&track, "after");
-	track.finish().unwrap();
+	let _track = track.finish().unwrap();
 	log.push(format!(
 		"draining: {} then {}",
 		next(&mut reader).await,

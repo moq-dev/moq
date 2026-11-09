@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import { Signal } from "@moq/signals";
 import { parseText, VTTCue } from "media-captions";
@@ -306,22 +306,22 @@ describe("Renderer", () => {
 		const renderer = new Renderer({ source, sync, enabled, container });
 		try {
 			await yieldNow();
-			expect(sync.out.delay.peek()).toBe(Milli(300));
+			expect(sync.out.delay.peek()).toEqual(Duration.millis(300));
 
 			// Captions that are off hold nothing.
 			enabled.set(false);
 			await yieldNow();
-			expect(sync.out.delay.peek()).toBe(Milli.zero);
+			expect(sync.out.delay.peek()).toEqual(Duration.ZERO);
 			enabled.set(true);
 			container.set(undefined);
 			await yieldNow();
-			expect(sync.out.delay.peek()).toBe(Milli.zero);
+			expect(sync.out.delay.peek()).toEqual(Duration.ZERO);
 			container.set({} as HTMLElement);
 			await yieldNow();
-			expect(sync.out.delay.peek()).toBe(Milli(300));
+			expect(sync.out.delay.peek()).toEqual(Duration.millis(300));
 			config.set(undefined);
 			await yieldNow();
-			expect(sync.out.delay.peek()).toBe(Milli.zero);
+			expect(sync.out.delay.peek()).toEqual(Duration.ZERO);
 		} finally {
 			renderer.close();
 			sync.close();

@@ -1,4 +1,4 @@
-import { Instant, Nano, now } from "@moq/clock";
+import { Instant, now } from "@moq/clock";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { Fanout } from "../fanout";
 import { TrackProcessor } from "./processor";
@@ -145,7 +145,7 @@ class Frames extends Fanout<VideoFrame> {
 				throw error;
 			}
 		};
-		const held: Held = { at: Instant(0) };
+		const held: Held = { at: Instant.ZERO };
 		const active = new Signal(0);
 		const reader = stream.getReader();
 		// The first picture supplies dimensions for encoder setup and a replay for still sources.
@@ -201,8 +201,10 @@ class Frames extends Fanout<VideoFrame> {
 		// alone could fall below frames an earlier reader published, rewinding a track resumed after a
 		// gap. Never stamp below the held stamp plus how long it was held, nor below an earlier replay.
 		const clock = now();
-		const elapsed = Nano.toMicro(Instant.durationSince(clock, this.#held.at));
-		const at = Math.round(Math.max(held ? held.timestamp + elapsed : 0, Nano.toMicro(Nano(clock)), this.#replayed));
+		const elapsed = clock.since(this.#held.at).asMicros();
+		const at = Math.round(
+			Math.max(held ? held.timestamp + elapsed : 0, clock.since(Instant.ZERO).asMicros(), this.#replayed),
+		);
 		this.#replayed = at;
 		let first = held ? new VideoFrame(held, { timestamp: at }) : undefined;
 		if (first) this.#unread.add(first);

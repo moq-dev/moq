@@ -38,6 +38,4 @@ Then sweep the hand-written wrappers:
 - the OBS output's mirrored `connected`/`live`;
 - the Dart stream.
 
-`MoqConnectionState` split into
-[Connection state carries each phase's data](/quest/m2/connection-state-phases.md),
-since it breaks every binding.
+`MoqConnectionState` split into its own m2 quest, since it breaks every binding.

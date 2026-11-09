@@ -486,6 +486,7 @@ mod tests {
 					capacity: Duration::from_secs(1),
 					pad: true,
 					trim: true,
+					comfort: true,
 				},
 			);
 
@@ -818,6 +819,7 @@ mod tests {
 				capacity: Duration::from_millis(200),
 				pad: true,
 				trim: true,
+				comfort: true,
 			},
 		)
 	}

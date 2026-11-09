@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { hooks } from "../../../net/src/internal.ts";
 import { Consumer } from "./consumer.ts";
@@ -10,7 +10,7 @@ type Value = Record<string, unknown>;
 
 // These tests inspect complete finished timelines through raw ordered reads, so request a
 // replay window instead of the transport's live-edge default. A snapshot consumer ignores it.
-const REPLAY_LATENCY = Milli(30_000);
+const REPLAY_LATENCY = Duration.millis(30_000);
 
 // Reconstruct every state a consumer reading `track` yields from `next()`, in order.
 async function drain(track: Track.Producer | Consumer<Value>): Promise<Value[]> {
@@ -195,7 +195,7 @@ test("next skips every superseded group, whatever budget another reader asks for
 	for (let n = 1; n <= 3; n++) producer.update({ value: { n }, at: Time.Timestamp.fromMillis(n * 1_000) });
 	producer.finish();
 
-	for (const max of [Milli.zero, Milli(500), REPLAY_LATENCY, null]) {
+	for (const max of [Duration.ZERO, Duration.millis(500), REPLAY_LATENCY, null]) {
 		const other = track.subscribe({ delay: { max } });
 		expect(await drain(track)).toEqual([{ n: 3 }]);
 		other.close();
@@ -210,7 +210,7 @@ test("reads skip a group the subscription still owes", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
-		for (const max of [Milli.zero, Milli(1_000), null]) {
+		for (const max of [Duration.ZERO, Duration.millis(1_000), null]) {
 			const track = new Track.Producer("test").accept({});
 			hooks.receiveTrack(track);
 			const other = track.subscribe({ delay: { max } });
@@ -226,7 +226,7 @@ test("reads skip a group the subscription still owes", async () => {
 			expect((await latest.latest())?.value).toEqual({ n: 0 });
 			expect((await next.next())?.value).toEqual({ n: 0 });
 			const reads = [latest.latest(), next.next()];
-			await clock.advance(Nano.zero);
+			await clock.advance(Duration.ZERO);
 			put(2n);
 			expect((await Promise.all(reads)).map((state) => state?.value)).toEqual([{ n: 2 }, { n: 2 }]);
 

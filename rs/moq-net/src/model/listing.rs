@@ -815,10 +815,10 @@ mod tests {
 		let c = broadcast.create_track("c", None).unwrap();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		assert_eq!(drain(&mut tracks), ["+a", "+b", "+c", "synced"]);
-		a.finish().unwrap();
+		let a = a.finish().unwrap();
 		drop(a);
 		drop(b);
-		c.finish().unwrap();
+		let c = c.finish().unwrap();
 		c.abort(Error::Cancel).unwrap();
 		assert_eq!(drain(&mut tracks), ["~a", "-b", "-c"]);
 	}
@@ -831,7 +831,7 @@ mod tests {
 		let a = broadcast.create_track("a", None).unwrap();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		assert_eq!(drain(&mut tracks), ["+a", "synced"]);
-		a.finish().unwrap();
+		let a = a.finish().unwrap();
 		drop(a);
 		let _a = broadcast.create_track("a", None).unwrap();
 		assert_eq!(pending(&tracks), 1, "the removal and re-add collapse");
@@ -864,11 +864,11 @@ mod tests {
 		let live = broadcast.create_track("live", None).unwrap();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		assert_eq!(drain(&mut tracks), ["+a", "+b", "+live", "synced"]);
-		a.finish().unwrap();
+		let a = a.finish().unwrap();
 		drop(a);
 		drop(b);
 		let _unseen = broadcast.create_track("unseen", None).unwrap();
-		live.finish().unwrap();
+		let _live = live.finish().unwrap();
 		broadcast.close();
 		assert_eq!(drain(&mut tracks), ["~a", "-b", "~live", "end"]);
 
@@ -880,7 +880,7 @@ mod tests {
 		let a = broadcast.create_track("a", None).unwrap();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		assert_eq!(drain(&mut tracks), ["+a", "synced"]);
-		a.finish().unwrap();
+		let _a = a.finish().unwrap();
 		broadcast.close();
 		assert_eq!(drain(&mut tracks), ["~a", "end"]);
 

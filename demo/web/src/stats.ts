@@ -8,8 +8,8 @@
  * let you drill into one. A restarted relay announces a new instance at the same
  * path, which each node's follower hands out afresh, so its history starts over.
  *
- * Per node we read `group.json`, the whole node's group at the relay's default
- * `depth = 0`: `{ epoch, tiers: { <tier>: { paths, labels } } }`, a JSON snapshot
+ * Per node we read the listed `bucket.<epoch>.json`, the whole node's bucket at
+ * the relay's default `depth = 0`, following the track listing to each new run: `{ epoch, tiers: { <tier>: { paths, labels } } }`, a JSON snapshot
  * with merge-patch deltas. From the default tier we take each path's `publisher`
  * (egress, relay -> downstream viewers) and `subscriber` (ingress, upstream
  * publishers -> relay), and each stats label's sessions.
@@ -23,7 +23,7 @@
  */
 
 import "./highlight";
-import { Milli, Nano, wall } from "@moq/clock";
+import { Duration, wall } from "@moq/clock";
 import { Net, Signals } from "@moq/hang";
 import * as Json from "@moq/json";
 
@@ -33,7 +33,7 @@ const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? "http://localhost:4443";
 const STATS_PREFIX = ".stats/node";
 
 // Rolling history window for the charts.
-const SAMPLE = Nano.fromMilli(Milli(1000));
+const SAMPLE = Duration.millis(1000);
 const MAX_SAMPLES = 90;
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -84,18 +84,18 @@ interface NodeStats {
 	sessions: SessionFrame; // `labels`
 }
 
-// One tier of a `group.json` frame.
-interface GroupTier {
+// One tier of a `bucket.<epoch>.json` frame.
+interface BucketTier {
 	paths?: Record<string, { publisher?: Snapshot; subscriber?: Snapshot }>;
 	labels?: SessionFrame;
 }
 
-interface GroupFrame {
-	tiers?: Record<string, GroupTier>;
+interface BucketFrame {
+	tiers?: Record<string, BucketTier>;
 }
 
-// The default tier's egress, ingress, and sessions from a group frame.
-function nodeStatsOf(frame: GroupFrame): NodeStats {
+// The default tier's egress, ingress, and sessions from a bucket frame.
+function nodeStatsOf(frame: BucketFrame): NodeStats {
 	const tier = frame.tiers?.[""] ?? {};
 	const egress: BroadcastFrame = {};
 	const ingress: BroadcastFrame = {};
@@ -132,7 +132,8 @@ const selectedNode = new Signals.Signal<string | undefined>(undefined);
 
 // The relay URL, editable at runtime (see the input binding below).
 const relayUrl = new Signals.Signal<URL | undefined>(new URL(RELAY_URL));
-const connection = new Net.Connection({ url: relayUrl });
+// Stats tracks are found through the broadcast's track listing, which only moq-lite-07 carries.
+const connection = new Net.Connection({ url: relayUrl, versions: ["moq-lite-07-wip"] });
 
 // ---- Discover nodes + subscribe to each -----------------------------------
 
@@ -180,6 +181,9 @@ discovery.run((effect) => {
 	});
 });
 
+// The depth-0 bucket's track, one per counter run.
+const BUCKET_TRACK = /^bucket\.[^/]+\.json$/;
+
 function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: Net.Path.Valid, node: string) {
 	// Follow the node across instances: a restarted one counts from zero, so its series starts
 	// afresh rather than splicing onto the old one's.
@@ -200,14 +204,46 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 		clusterMembership = "";
 		if (!consumer) return;
 
-		const group = new Json.Snapshot.Consumer<GroupFrame>({ track: consumer.track("group.json") });
-		instance.cleanup(() => group.close());
+		// Each counter run is its own `bucket.<epoch>.json` track, found through the listing.
+		const tracks = consumer.tracks();
+		instance.cleanup(() => tracks.close());
+		let bucket: Json.Snapshot.Consumer<BucketFrame> | undefined;
+		instance.cleanup(() => {
+			bucket?.close();
+			bucket = undefined;
+		});
+
 		instance.spawn(async () => {
 			for (;;) {
-				const state = await instance.race(group.latest());
-				if (state === undefined) break;
-				nodeStats.mutate((s) => {
-					if (s[node]) s[node] = nodeStatsOf(state.value ?? {});
+				const event = await instance.race(tracks.next());
+				if (!event) break;
+				if (event.kind !== "added" || !BUCKET_TRACK.test(event.name)) continue;
+				if (bucket) {
+					// A new run counts from zero, so its series must not splice onto the old run's.
+					bucket.close();
+					history.delete(node);
+					clusterMembership = "";
+				}
+				const reader = new Json.Snapshot.Consumer<BucketFrame>({ track: consumer.track(event.name) });
+				bucket = reader;
+				instance.spawn(async () => {
+					try {
+						for (;;) {
+							const state = await instance.race(reader.latest());
+							if (state === undefined || bucket !== reader) break;
+							nodeStats.mutate((s) => {
+								if (s[node]) s[node] = nodeStatsOf(state.value ?? {});
+							});
+						}
+					} catch (err) {
+						console.warn("stats: bucket track failed", node, err);
+					}
+					// The run ended (unlisted, or aborted as too large): its counts are no longer live.
+					if (bucket === reader) {
+						nodeStats.mutate((s) => {
+							if (s[node]) s[node] = nodeStatsOf({});
+						});
+					}
 				});
 			}
 		});
@@ -318,7 +354,7 @@ sampler.run((effect) => {
 	effect.interval(() => {
 		const all = nodeStats.peek();
 		const nodes = Object.keys(all).sort();
-		const t = wall();
+		const t = wall().asUnixMillis();
 
 		const agg: Sample = {
 			t,

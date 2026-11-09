@@ -10,7 +10,7 @@
  * @module
  */
 
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { COLLISION_ALERT_MS, collisionAge, collisionLabel, diverged, divergence } from "./feedback.ts";
 import { drawDivergence, drawDriveHud, drawGuide } from "./guides.ts";
@@ -720,7 +720,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection, origin: Moq.
 		frame = requestAnimationFrame(tick);
 	}
 	signals.cleanup(() => cancelAnimationFrame(frame));
-	signals.interval(step, Nano.fromMilli(Milli(250)));
+	signals.interval(step, Duration.millis(250));
 
 	// --- Wheel status chip + calibration dialog. ---
 	let calibration: Calibration | undefined;
@@ -1118,7 +1118,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection, origin: Moq.
 			// A collision's age is wall clock, not a status field, so it needs its own
 			// tick: without one the callout would freeze on a truck that stops moving
 			// and therefore stops changing its snapshot.
-			this.#signals.interval(() => this.#renderCollision(this.truck.status.peek()), Nano.fromMilli(Milli(1000)));
+			this.#signals.interval(() => this.#renderCollision(this.truck.status.peek()), Duration.millis(1000));
 
 			// Repaint on layout/resize (the initial effect run happens before layout,
 			// so the overlay has zero size until the first observation fires).

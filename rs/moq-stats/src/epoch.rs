@@ -1,12 +1,13 @@
 use std::{fmt, str::FromStr, sync::Arc};
 
-/// Names one run of a group's counters, independently of its broadcast's instance.
+/// Names one run of a bucket's counters, independently of its broadcast's instance.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde_with::SerializeDisplay, serde_with::DeserializeFromStr)]
 pub struct Epoch(Arc<str>);
 
-/// The group epoch is empty.
+/// The bucket epoch is empty or holds a `/`: it names a bucket track's last
+/// segment, so it must round-trip through one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("invalid group epoch: empty")]
+#[error("invalid bucket epoch: empty or contains '/'")]
 #[non_exhaustive]
 pub struct InvalidEpoch;
 
@@ -26,7 +27,7 @@ impl FromStr for Epoch {
 	type Err = InvalidEpoch;
 
 	fn from_str(text: &str) -> Result<Self, Self::Err> {
-		if text.is_empty() {
+		if text.is_empty() || text.contains('/') {
 			return Err(InvalidEpoch);
 		}
 		Ok(Self(text.into()))
@@ -37,7 +38,7 @@ impl TryFrom<String> for Epoch {
 	type Error = InvalidEpoch;
 
 	fn try_from(text: String) -> Result<Self, Self::Error> {
-		if text.is_empty() {
+		if text.is_empty() || text.contains('/') {
 			return Err(InvalidEpoch);
 		}
 		Ok(Self(text.into()))

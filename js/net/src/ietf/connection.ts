@@ -1,4 +1,4 @@
-import { Nano, Second } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
@@ -255,7 +255,7 @@ export class Connection implements Session {
 			case "leaving": {
 				const done = withTimeout(
 					this.#publisher.withdraw(),
-					Nano.fromSecond(Second(1)),
+					Duration.secs(1),
 					"session close timed out",
 				).finally(() => this.abort());
 				this.#phase = { kind: "closing", done };
