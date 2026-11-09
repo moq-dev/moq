@@ -1288,6 +1288,44 @@ func TestRecvGroupCancelRace(t *testing.T) {
 	wg.Wait()
 }
 
+// TestRecvGroupCancelKeepsConsumer confirms a cancelled read aborts only
+// itself: the same consumer still receives the next group.
+func TestRecvGroupCancelKeepsConsumer(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Close()
+
+	track, err := broadcast.PublishTrack("x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := track.Consume(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Cancel()
+
+	if _, err := consumer.RecvGroup(newCancelOnWait()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled RecvGroup = %v, want context.Canceled", err)
+	}
+
+	group, err := track.AppendGroup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := consumer.RecvGroup(ctx)
+	if err != nil {
+		t.Fatalf("RecvGroup after cancel = %v", err)
+	}
+	if got == nil || got.Sequence() != group.Sequence() {
+		t.Fatalf("RecvGroup after cancel = %v, want group %d", got, group.Sequence())
+	}
+}
+
 // TestConsumerCancelConcurrent confirms Cancel is safe to call repeatedly from
 // multiple goroutines (it underlies every stream's cleanup and Close path).
 func TestConsumerCancelConcurrent(t *testing.T) {

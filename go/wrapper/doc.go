@@ -26,8 +26,9 @@
 // A cancel aborts only the call it bounds and leaves the object usable, so the
 // same broadcast, producer, consumer, or server takes the next call. A stream
 // read (any Next, RecvGroup, ReadFrame) may lose the item it was about to
-// return. A range loop over a stream (All, Groups, Frames) is the exception:
-// when its context ends, it cancels the stream too, since the loop is done
-// with it. Calls that own a session or listener (Dial, Listen, a session's
+// return. A range loop over a consumer's stream (All, Groups, Frames) is the
+// exception: when its context ends, it cancels the stream too, since the loop
+// is done with it. Route.All and Server.All leave the route advertised and the
+// listener open. Calls that own a session or listener (Dial, Listen, a session's
 // Closed) tear it down when cancelled.
 package moq

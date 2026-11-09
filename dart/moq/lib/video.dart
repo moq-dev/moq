@@ -176,7 +176,16 @@ final class _MappedFuture<S, T> implements UniffiRustFuture<T> {
   _MappedFuture(this._source, T Function(S) map) : _future = _source.then(map);
 
   @override
-  Future<void> cancel() => _source.cancel();
+  Future<void> cancel() {
+    // The mapped future fails with the source's cancellation too; handle it so
+    // a caller awaiting only cancel() leaves no uncaught error.
+    final done = _future.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    _source.cancel();
+    return done;
+  }
 
   @override
   Stream<T> asStream() => _future.asStream();

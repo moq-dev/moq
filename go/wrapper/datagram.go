@@ -74,7 +74,7 @@ func (c *DatagramConsumer) Name() (string, error) { return c.inner.Name() }
 
 // Info waits for the publisher to accept the track and returns its properties.
 func (c *DatagramConsumer) Info(ctx context.Context) (DatagramInfo, error) {
-	return bridge.Call(ctx, c.inner.Cancel, c.inner.Info)
+	return bridge.Call(ctx, nil, c.inner.Info)
 }
 
 // Recv returns the next datagram, or (nil, nil) after the track finishes.

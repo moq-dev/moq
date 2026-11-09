@@ -142,7 +142,7 @@ func (r *Route) Requested(ctx context.Context) (*BroadcastRequest, error) {
 }
 
 // All ranges over requested broadcasts until the route ends, a call errors, or
-// the loop breaks.
+// the loop breaks. Ending ctx stops the loop but leaves the route advertised.
 func (r *Route) All(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
 	return bridge.Seq(ctx, nil, r.Requested)
 }
