@@ -89,7 +89,7 @@ export function timeout<T>(duration: Nano, operation: PromiseLike<T>): Promise<T
 }
 
 /** An `AbortSignal` that aborts with a `TimeoutError` after a duration on the installed clock, or with `signal`'s reason once it aborts first, cancelling the timer. */
-export function timeoutSignal(duration: Nano, options: Options = {}): AbortSignal {
+export function timeoutSignal(duration: Nano, options: { signal?: AbortSignal; ref?: boolean } = {}): AbortSignal {
 	const { signal: parent, ref = true } = options;
 	const controller = new AbortController();
 	if (parent?.aborted) {
