@@ -133,7 +133,7 @@ async fn relays_route_a_covering_claim_that_listings_omit() {
 		let version: Version = version.parse().unwrap();
 		let publisher = produce_origin(1);
 		let claim = publisher
-			.route_prefix("room", moq_net::origin::RouteOptions::default())
+			.claim("room", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let listed = publisher
 			.route("lobby.chat", moq_net::origin::RouteOptions::hidden())

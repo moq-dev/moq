@@ -125,6 +125,19 @@ export const METRICS = {
 		description:
 			"Media time the skip-aheads jumped over without playing. Audio dropped before it reached the ring moves no playhead and is not counted.",
 	},
+	trimmed_ms: {
+		unit: "ms",
+		clock: "media",
+		aggregations: ["total", "per_min"],
+		description:
+			"The player's own count of media its skips dropped unplayed. Unlike `discarded_ms`, a time stretch's accelerate is not in it.",
+	},
+	accelerated_ms: {
+		unit: "ms",
+		clock: "media",
+		aggregations: ["total", "per_min"],
+		description: "The player's own count of media its time stretch removed by playing faster.",
+	},
 	stalled: {
 		unit: "share",
 		clock: "viewer",
@@ -408,9 +421,14 @@ export type Sample = {
 	playerUnderruns?: number;
 	/**
 	 * `audio.out.stats.skips`, cumulative: the player's own count of jumps that dropped buffered audio
-	 * rather than playing it faster. Unset natively.
+	 * rather than playing it faster. Natively, each trim of the ring, skip at the stretch's fast
+	 * threshold, or write a full ring refused.
 	 */
 	playerSkips?: number;
+	/** `audio.out.stats.trimmed`, cumulative: the media those skips dropped unplayed. */
+	trimmed?: Ms;
+	/** `audio.out.stats.accelerated`, cumulative: media the time stretch removed by playing faster. */
+	accelerated?: Ms;
 	/** The current connection PROBE round trip. */
 	rtt?: Ms;
 	/** The selected rendition's advertised jitter at this sample. */

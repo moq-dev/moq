@@ -728,8 +728,8 @@ impl Subscriber {
 		announced: &Announced,
 	) -> crate::origin::RouteInfo {
 		let mut route = match announced.instance(path) {
-			Some((instance, epoch)) => crate::origin::RouteInfo::default().with_instance(instance, epoch),
-			None => crate::origin::RouteInfo::default(),
+			Some((instance, epoch)) => crate::origin::RouteInfo::new().with_instance(instance, epoch),
+			None => crate::origin::RouteInfo::new(),
 		}
 		.with_hops(hops)
 		.with_cost(cost.charged(link_cost))
@@ -9651,7 +9651,7 @@ impl Announced {
 	}
 
 	/// Attach a route, queued for its first serve pass.
-	fn attach(&mut self, path: Path, route: crate::origin::RouteInfo, dynamic: crate::origin::Route) {
+	fn attach(&mut self, path: Path, route: crate::origin::RouteInfo, dynamic: crate::origin::Claim) {
 		let wake = crate::util::QueueWake::new(path.clone(), self.ready.clone());
 		let route = AnnouncedRoute::new(route, dynamic, wake);
 		route.waker.wake_by_ref();
@@ -9859,7 +9859,7 @@ struct AnnouncedRoute<K = Path> {
 	/// without recomputing the chain.
 	route: crate::origin::RouteInfo,
 	/// Dropping it retracts the route and rejects its queued requests.
-	dynamic: crate::origin::Route,
+	dynamic: crate::origin::Claim,
 	/// Closes as the route goes, which closes every source it minted.
 	live: kio::Producer<()>,
 	/// Queues this route on its prefix's ready set when its request queue wakes.
@@ -9872,7 +9872,7 @@ struct AnnouncedRoute<K = Path> {
 impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
 	fn new(
 		route: crate::origin::RouteInfo,
-		dynamic: crate::origin::Route,
+		dynamic: crate::origin::Claim,
 		wake: Arc<crate::util::QueueWake<K>>,
 	) -> Self {
 		Self {

@@ -39,10 +39,7 @@ func newRoute(t *testing.T, origin *moq.OriginProducer, path string, options moq
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { runtime.KeepAlive(route) })
-	broadcast, err := route.Broadcast()
-	if err != nil {
-		t.Fatal(err)
-	}
+	broadcast := route.Broadcast()
 	return route, broadcast
 }
 
@@ -62,14 +59,11 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.RoutePrefix("", moq.RouteOptions{})
+	dynamic, err := origin.Claim("", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer dynamic.Cancel()
-	if _, err := dynamic.Broadcast(); err == nil {
-		t.Fatal("a prefix route owns no broadcast")
-	}
 
 	type result struct {
 		broadcast *moq.BroadcastConsumer
@@ -99,12 +93,9 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	}
 	defer runtime.KeepAlive(served)
 	if served.Instance() != dynamic.Instance() {
-		t.Fatal("a job's route continues the instance its prefix route lends")
+		t.Fatal("a job's route continues the instance its claim lends")
 	}
-	broadcast, err := served.Broadcast()
-	if err != nil {
-		t.Fatal(err)
-	}
+	broadcast := served.Broadcast()
 	track, err := broadcast.PublishTrack("status", timedInfo())
 	if err != nil {
 		t.Fatal(err)
@@ -149,10 +140,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The route hands out one broadcast, so closing it ends the route too.
-	again, err := served.Broadcast()
-	if err != nil {
-		t.Fatal(err)
-	}
+	again := served.Broadcast()
 	if _, err := again.PublishTrack("late", nil); !errors.Is(err, moq.ErrClosed) {
 		t.Fatalf("PublishTrack after close = %v, want ErrClosed", err)
 	}
@@ -1357,7 +1345,7 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 // that one request rather than the consumer it was made on.
 func TestRequestCancelKeepsTheOrigin(t *testing.T) {
 	origin := newOrigin(t)
-	dynamic, err := origin.RoutePrefix("", moq.RouteOptions{})
+	dynamic, err := origin.Claim("", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1883,7 +1871,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.RoutePrefix("live", moq.RouteOptions{})
+	dynamic, err := origin.Claim("live", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1919,7 +1907,7 @@ func TestCancellingAHiddenAnswerRefusesTheRequest(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.RoutePrefix("live", moq.RouteOptions{})
+	dynamic, err := origin.Claim("live", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -127,7 +127,7 @@ fn vtt(header: &str, mut data: &[u8], start: Timestamp, end: Timestamp) -> crate
 	let mut output = header.to_string();
 	while !data.is_empty() {
 		let atom = Any::decode_maybe(&mut data)
-			.map_err(Error::from)?
+			.map_err(Error::mp4)?
 			.ok_or(Error::InvalidSubtitle("truncated WebVTT sample box"))?;
 		let Any::Unknown(kind, body) = atom else {
 			return Err(Error::InvalidSubtitle("unsupported WebVTT sample box").into());
@@ -142,7 +142,7 @@ fn vtt(header: &str, mut data: &[u8], start: Timestamp, end: Timestamp) -> crate
 				let mut origin = None;
 				while !body.is_empty() {
 					let atom = Any::decode_maybe(&mut body)
-						.map_err(Error::from)?
+						.map_err(Error::mp4)?
 						.ok_or(Error::InvalidSubtitle("truncated WebVTT cue box"))?;
 					let Any::Unknown(kind, value) = atom else {
 						return Err(Error::InvalidSubtitle("unsupported WebVTT cue box").into());

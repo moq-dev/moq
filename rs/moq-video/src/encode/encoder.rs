@@ -203,6 +203,16 @@ pub struct Config {
 	/// `None` retains selection for CPU and native decoder/capture surfaces.
 	#[cfg(target_os = "linux")]
 	pub input: Option<crate::frame::vulkan::Device>,
+	/// The VA-API render node, such as `/dev/dri/renderD129`. `None` picks the
+	/// first that encodes, decodes, and scales, so a DMA-BUF moves between them
+	/// without a copy. A named node is used even when it fails to open.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	pub vaapi: Option<std::path::PathBuf>,
+	/// The V4L2 M2M encoder node, such as `/dev/video11`. `None` searches every
+	/// node for one that encodes H.264, which a driver whose format enumeration
+	/// is wrong can defeat.
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	pub v4l2: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -222,6 +232,10 @@ impl Config {
 			resize: None,
 			#[cfg(target_os = "linux")]
 			input: None,
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
+			vaapi: None,
+			#[cfg(all(target_os = "linux", feature = "v4l2"))]
+			v4l2: None,
 		}
 	}
 
@@ -319,6 +333,17 @@ impl Config {
 		self.color.unwrap_or_else(|| Color::infer(self.size()))
 	}
 
+	/// The resize options, scaling on this encoder's VA-API node unless they name one.
+	fn resolved_resize(&self) -> Option<crate::resize::Config> {
+		let resize = self.resize.clone()?;
+		#[cfg(all(target_os = "linux", feature = "vaapi"))]
+		let resize = crate::resize::Config {
+			vaapi: resize.vaapi.or_else(|| self.vaapi.clone()),
+			..resize
+		};
+		Some(resize)
+	}
+
 	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
 	pub(crate) fn resolved_bitrate(&self) -> moq_net::bandwidth::Rate {
 		self.bitrate
@@ -388,7 +413,7 @@ impl Encoder {
 			color: config.resolved_color(),
 			pending_cut: false,
 			join: Join::new(config),
-			resize: config.resize,
+			resize: config.resolved_resize(),
 			#[cfg(target_os = "linux")]
 			input: config.input,
 			_thread_bound: PhantomData,
@@ -524,9 +549,9 @@ impl Encoder {
 		#[cfg(not(target_os = "linux"))]
 		let external = false;
 		let resized;
-		let frame = match self.resize {
+		let frame = match &self.resize {
 			Some(config) if !external && frame.size() != self.size => {
-				resized = frame.resize(self.size, &config)?;
+				resized = frame.resize(self.size, config)?;
 				&resized
 			}
 			_ => frame,
@@ -1241,7 +1266,7 @@ mod tests {
 			color: config.resolved_color(),
 			pending_cut: false,
 			join: Join::new(config),
-			resize: config.resize,
+			resize: config.resolved_resize(),
 			#[cfg(target_os = "linux")]
 			input: None,
 			_thread_bound: PhantomData,

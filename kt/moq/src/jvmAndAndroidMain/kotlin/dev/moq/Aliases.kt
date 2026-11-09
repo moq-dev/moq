@@ -49,16 +49,23 @@ typealias Request = uniffi.moq.MoqRequest
 typealias Transport = uniffi.moq.MoqTransport
 
 // Origin (broadcast discovery / announcement).
-/** The publish side of an origin: create routes so subscribers can discover them. */
+/** The publish side of an origin: create routes and claims so subscribers can discover them. */
 typealias OriginProducer = uniffi.moq.MoqOriginProducer
 
 /**
- * A route on an origin: an exact route owning one broadcast (`broadcast()` to fill it), or a prefix
- * route yielding the requests beneath it (`requested()`). `announce`, `withdraw`, and `setCost`
- * advertise it. Closing or cancelling it retracts it, as does ending its broadcast; a broadcast
- * handle alone does not keep it announced.
+ * An exact route on an origin, owning one broadcast (`broadcast()` to fill it). `announce`,
+ * `withdraw`, and `setCost` advertise it. Closing or cancelling it retracts it, as does ending its
+ * broadcast; a broadcast handle alone does not keep it announced.
  */
 typealias Route = uniffi.moq.MoqRoute
+
+/**
+ * A prefix route on an origin, from `OriginProducer.claim`: a claim that every path beneath a
+ * prefix can be served, yielding each request (`requested()`). `announce`, `withdraw`, and
+ * `setCost` advertise it. Closing or cancelling it retracts it and rejects the requests still
+ * waiting.
+ */
+typealias Claim = uniffi.moq.MoqClaim
 
 /** Config for creating an origin, such as its total cache budget. */
 typealias OriginConfig = uniffi.moq.MoqOriginConfig

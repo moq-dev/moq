@@ -287,7 +287,7 @@ versions! {
 /// A worker claiming `live`, answering each request with a job's exact route: the catalog,
 /// which names `./media` under the job's instance, and the media it references.
 struct Worker {
-	claim: origin::Route,
+	claim: origin::Claim,
 	jobs: std::sync::Arc<std::sync::Mutex<Vec<Job>>>,
 }
 
@@ -301,7 +301,7 @@ struct Job {
 
 impl Worker {
 	fn new(origin: &origin::Producer) -> Self {
-		let claim = origin.route_prefix("live", origin::RouteOptions::default()).unwrap();
+		let claim = origin.claim("live", origin::RouteOptions::default()).unwrap();
 		let jobs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 		let (handler, answered) = (claim.clone(), jobs.clone());
 		tokio::spawn(async move {

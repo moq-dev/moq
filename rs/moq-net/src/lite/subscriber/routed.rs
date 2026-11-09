@@ -424,7 +424,7 @@ impl Routed {
 		}
 		// A route held without a path to it serves only as a last resort, like a draining
 		// peer's, at its real cost.
-		let route = crate::origin::RouteInfo::default()
+		let route = crate::origin::RouteInfo::new()
 			.with_instance(served.claim.instance.clone(), served.claim.epoch)
 			.with_hops(hops(id))
 			.with_cost(served.claim.cost.saturating_add(served.metric))

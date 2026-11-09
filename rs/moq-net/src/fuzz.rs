@@ -461,7 +461,7 @@ pub fn route_info(
 	cost: u64,
 	instance: Option<(crate::Instance, u64)>,
 ) -> crate::origin::RouteInfo {
-	let info = crate::origin::RouteInfo::default()
+	let info = crate::origin::RouteInfo::new()
 		.with_hops(hop_chain(hops))
 		.with_cost(cost);
 	match instance {
@@ -481,12 +481,12 @@ pub fn requests_route(
 	origin: &crate::origin::Producer,
 	prefix: impl Into<crate::Path>,
 	route: crate::origin::RouteInfo,
-) -> Result<crate::origin::Route, crate::Error> {
+) -> Result<crate::origin::Claim, crate::Error> {
 	origin.forward(prefix, route)
 }
 
 /// Replace a peer claim's route in place, as a session does on a route update.
-pub fn update_route(dynamic: &crate::origin::Route, route: crate::origin::RouteInfo) -> Result<(), crate::Error> {
+pub fn update_route(dynamic: &crate::origin::Claim, route: crate::origin::RouteInfo) -> Result<(), crate::Error> {
 	dynamic.update(route)
 }
 
@@ -1980,7 +1980,7 @@ pub struct RequestValidity {
 
 impl RequestValidity {
 	/// Watch which instance this route's peer selects for a path.
-	pub fn new(route: &crate::origin::Route, path: &crate::Path) -> Self {
+	pub fn new(route: &crate::origin::Claim, path: &crate::Path) -> Self {
 		Self {
 			watch: crate::model::broadcast::RequestValidity::for_source(route, path),
 			periods: Vec::new(),

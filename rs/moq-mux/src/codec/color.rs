@@ -6,7 +6,7 @@
 //! travels with the elementary stream, while a muxer adds the box and may get it wrong. So an
 //! importer resolves the bitstream's colour first and [`fill`]s only its gaps from the container.
 
-use hang::catalog::{Chromaticity, Color, ContentLight, Mastering, Range};
+use hang::catalog::{Chromaticity, Color, ColorRange, ContentLight, Mastering};
 
 /// The colour a set of H.273 code points signals, leaving each unspecified or reserved one absent.
 ///
@@ -22,7 +22,7 @@ pub(crate) fn cicp(primaries: u8, transfer: u8, matrix: u8, full_range: Option<b
 	color.primaries = registered(primaries, &[1..=1, 4..=12, 22..=22]);
 	color.transfer = registered(transfer, &[1..=1, 4..=18]);
 	color.matrix = registered(matrix, &[0..=1, 4..=17]);
-	color.range = full_range.map(|full| if full { Range::Full } else { Range::Limited });
+	color.range = full_range.map(|full| if full { ColorRange::Full } else { ColorRange::Limited });
 	(color != Color::default()).then_some(color)
 }
 
@@ -268,7 +268,7 @@ pub(crate) mod test {
 		let color = cicp(9, 16, 0, Some(false)).unwrap();
 		assert_eq!(
 			(color.primaries, color.transfer, color.matrix, color.range),
-			(Some(9), Some(16), Some(0), Some(hang::catalog::Range::Limited))
+			(Some(9), Some(16), Some(0), Some(hang::catalog::ColorRange::Limited))
 		);
 	}
 
@@ -282,7 +282,7 @@ pub(crate) mod test {
 		assert_eq!(color.transfer, Some(1), "the container fills an unspecified field");
 		assert_eq!(
 			color.range,
-			Some(hang::catalog::Range::Full),
+			Some(hang::catalog::ColorRange::Full),
 			"the container fills an unsignalled range"
 		);
 	}

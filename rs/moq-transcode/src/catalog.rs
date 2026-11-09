@@ -323,12 +323,11 @@ pub(crate) fn resolve_rungs(ladder: &Ladder, source_name: &str, source: &VideoCo
 pub(crate) async fn rung_entry(
 	rung: &Resolved,
 	source: &VideoConfig,
-	encoder: &moq_video::encode::Kind,
+	transcode: &crate::Config,
 ) -> Result<VideoConfig, Error> {
 	let encode_rate = rung.framerate.unwrap_or(moq_video::FrameRate::new(30, 1).unwrap());
-	let mut config = moq_video::encode::Config::new(rung.size.width, rung.size.height, encode_rate);
+	let mut config = transcode.encoder(rung.size, encode_rate);
 	config.bitrate = Some(rung.bitrate);
-	config.kind = encoder.clone();
 
 	let mut entry = config.probe().await?;
 	entry.framerate = rung.framerate.map(moq_video::FrameRate::as_f64);
@@ -699,6 +698,14 @@ mod tests {
 	/// A rung's entry describes the rung, not the source: the codec string's level and every
 	/// dimension come from what this rung will encode, since a player picks between rungs on
 	/// exactly those fields before a single frame exists.
+	/// A transcode on openh264, so a probe is deterministic and never touches a hardware backend.
+	fn software() -> crate::Config {
+		crate::Config {
+			encoder: moq_video::encode::Kind::Software,
+			..Default::default()
+		}
+	}
+
 	#[tokio::test]
 	async fn rung_entry_describes_the_rung() {
 		let rung = Resolved {
@@ -711,10 +718,7 @@ mod tests {
 		let mut source = source(1920, 1080, Some(6_000_000));
 		source.optimize_for_latency = Some(true);
 
-		// Software (openh264) so the probe is deterministic and never touches a hardware backend.
-		let entry = rung_entry(&rung, &source, &moq_video::encode::Kind::Software)
-			.await
-			.unwrap();
+		let entry = rung_entry(&rung, &source, &software()).await.unwrap();
 
 		// Read out of the encoder that will serve this rung, so the entry describes the rung rather
 		// than the source: a player picks between rungs on exactly these fields, before a single
@@ -740,13 +744,9 @@ mod tests {
 			bitrate: moq_net::bandwidth::Rate::from_bps(600_000),
 			framerate: None,
 		};
-		let entry = rung_entry(
-			&rung,
-			&source(1920, 1080, Some(6_000_000)),
-			&moq_video::encode::Kind::Software,
-		)
-		.await
-		.unwrap();
+		let entry = rung_entry(&rung, &source(1920, 1080, Some(6_000_000)), &software())
+			.await
+			.unwrap();
 		assert_eq!(entry.framerate, None);
 	}
 

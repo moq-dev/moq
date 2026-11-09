@@ -461,7 +461,7 @@ mod tests {
 		};
 		let origin = moq_tokio::origin::spawn();
 		let claim = origin
-			.route_prefix("live/a", moq_net::origin::RouteOptions::default())
+			.claim("live/a", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let recording = tokio::spawn(export(origin.consume(), "live".into(), args));
 

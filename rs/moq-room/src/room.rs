@@ -185,7 +185,7 @@ mod tests {
 		let mut room = Room::new(&origin.consume(), None);
 
 		let claim = origin
-			.route_prefix("bob/camera", moq_net::origin::RouteOptions::default())
+			.claim("bob/camera", moq_net::origin::RouteOptions::default())
 			.expect("claim");
 		let (request, nothing) = tokio::join!(claim.requested(), kio::clock::timeout(wait, room.next()));
 		assert!(nothing.is_err(), "nothing serves bob yet");

@@ -931,7 +931,7 @@ struct BroadcastState {
 	// The served route: dropping it (and the serve task's clone) retracts the
 	// route and rejects its queued requests. `None` while the session's limit holds
 	// it back, though the peer still advertises it.
-	dynamic: Option<crate::origin::Route>,
+	dynamic: Option<crate::origin::Claim>,
 
 	// Bumped each time the route attaches, so a serve task outlived by a limit that
 	// took the route away and gave it back ends rather than serve beside the new one.
@@ -1349,7 +1349,7 @@ impl Subscriber {
 		let mut hops = crate::Hops::new();
 		hops.push(crate::Hop::UNKNOWN)
 			.expect("an empty hop chain has room for one entry");
-		crate::origin::RouteInfo::default()
+		crate::origin::RouteInfo::new()
 			.with_hops(hops)
 			.with_via(self.via(peer))
 			// A peer without Cluster contributes only the arriving link price.
@@ -10719,10 +10719,7 @@ mod tests {
 		// What we are publishing to the peer: a real upstream route.
 		let upstream = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let _source = origin
-			.announce(
-				"room/host",
-				crate::origin::RouteInfo::default().with_hops(upstream.clone()),
-			)
+			.announce("room/host", crate::origin::RouteInfo::new().with_hops(upstream.clone()))
 			.unwrap();
 		announced.expect_next_active("room/host").await;
 		let _advertised = publishing.expect_next_active("room/host").await;
@@ -11336,7 +11333,7 @@ mod tests {
 		let path = crate::Path::from_static("room/host");
 
 		let first = Advertised {
-			route: crate::origin::RouteInfo::default()
+			route: crate::origin::RouteInfo::new()
 				.with_hops(hop_path(&[7, 9]).hops().clone())
 				.with_cost(4),
 		};
@@ -11347,7 +11344,7 @@ mod tests {
 
 		// A new chain and cost: the route updates in place.
 		let rerouted = Advertised {
-			route: crate::origin::RouteInfo::default()
+			route: crate::origin::RouteInfo::new()
 				.with_hops(hop_path(&[7, 11]).hops().clone())
 				.with_cost(2),
 		};

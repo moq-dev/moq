@@ -209,6 +209,8 @@ export function analyze(input: Input): Summary {
 	};
 	const playerUnderruns = rise((s) => s.playerUnderruns);
 	const playerSkips = rise((s) => s.playerSkips);
+	const trimmed = rise((s) => s.trimmed);
+	const accelerated = rise((s) => s.accelerated);
 
 	// ── the playhead ────────────────────────────────────────────────────────
 	// The lag drifts when the media timeline does not run at wall rate, a property of the source
@@ -269,6 +271,10 @@ export function analyze(input: Input): Summary {
 		skip_aheads_per_min: perMin(skips.count),
 		discarded_ms_total: round(skips.ms),
 		discarded_ms_per_min: perMin(skips.ms),
+		trimmed_ms_total: round(trimmed),
+		trimmed_ms_per_min: trimmed === null ? null : perMin(trimmed),
+		accelerated_ms_total: round(accelerated),
+		accelerated_ms_per_min: accelerated === null ? null : perMin(accelerated),
 		stalled_share: round(stalledShare, 3),
 		silence_share: round(silence, 3),
 		av_lag_ms_p50: round(percentile(behind, 50)),

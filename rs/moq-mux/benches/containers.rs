@@ -101,7 +101,7 @@ async fn export(format: &str, source: moq_mux::Source, stream: impl Stream, coll
 	let mut data = BytesMut::new();
 	if format == "cmaf" {
 		let mut export = moq_mux::container::fmp4::Export::new(source, stream)
-			.with_max_delay(Duration::from_secs(30))
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30)))
 			.with_fragment_duration(Duration::ZERO);
 		while let Some(chunk) = export.next().await.unwrap() {
 			if collect {
@@ -111,7 +111,8 @@ async fn export(format: &str, source: moq_mux::Source, stream: impl Stream, coll
 			}
 		}
 	} else {
-		let mut export = h264::Export::new(source, stream).with_max_delay(Duration::from_secs(30));
+		let mut export = h264::Export::new(source, stream)
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30)));
 		while let Some(chunk) = export.next().await.unwrap() {
 			if collect {
 				data.extend_from_slice(&chunk);

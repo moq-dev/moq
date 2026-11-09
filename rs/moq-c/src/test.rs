@@ -75,11 +75,19 @@ fn hidden() -> moq_route_options {
 
 /// The instance a route serves.
 fn instance_of(route: u32) -> String {
+	read_instance(|dst| unsafe { moq_route_instance(route, dst) })
+}
+
+fn claim_instance_of(claim: u32) -> String {
+	read_instance(|dst| unsafe { moq_claim_instance(claim, dst) })
+}
+
+fn read_instance(read: impl FnOnce(&mut moq_string) -> i32) -> String {
 	let mut dst = moq_string {
 		data: std::ptr::null(),
 		len: 0,
 	};
-	assert_eq!(unsafe { moq_route_instance(route, &mut dst) }, 0);
+	assert_eq!(read(&mut dst), 0);
 	unsafe { std::str::from_utf8(std::slice::from_raw_parts(dst.data.cast::<u8>(), dst.len)) }
 		.unwrap()
 		.to_string()
@@ -4294,10 +4302,10 @@ fn a_new_route_at_a_path_restarts() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Create a prefix route over `prefix` delivering its requests through `cb`.
-fn route_prefix(origin: u32, prefix: &[u8], cb: &Callback) -> u32 {
+/// Claim `prefix`, delivering its requests through `cb`.
+fn claim(origin: u32, prefix: &[u8], cb: &Callback) -> u32 {
 	id(unsafe {
-		moq_origin_route_prefix(
+		moq_origin_claim(
 			origin,
 			prefix.as_ptr() as *const c_char,
 			prefix.len(),
@@ -4312,8 +4320,7 @@ fn route_prefix(origin: u32, prefix: &[u8], cb: &Callback) -> u32 {
 fn dynamic_serves_a_request_under_a_prefix() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
-	let dynamic = route_prefix(origin, b"live", &cb);
-	assert!(moq_route_broadcast(dynamic) < 0, "a prefix route owns no broadcast");
+	let dynamic = claim(origin, b"live", &cb);
 
 	let path = b"live/cam";
 	let req_cb = Callback::new();
@@ -4350,26 +4357,26 @@ fn dynamic_serves_a_request_under_a_prefix() {
 		crate::error::MOQ_ERROR_UTF8
 	);
 
-	// A hidden job route answers nobody until it announces, under the instance its prefix
-	// route lends.
+	// A hidden job route answers nobody until it announces, under the instance its claim
+	// lends.
 	let job = id(unsafe { moq_broadcast_request_route(request, &hidden()) });
 	assert!(
 		unsafe { moq_broadcast_request_route(request, std::ptr::null()) } < 0,
 		"request is consumed"
 	);
-	let lent = instance_of(dynamic);
+	let lent = claim_instance_of(dynamic);
 	assert_eq!(instance_of(job), lent);
 	let served = id(moq_route_broadcast(job));
 	assert_eq!(moq_route_announce(job), 0);
 	assert!(req_cb.recv() > 0);
 	req_cb.recv_terminal();
-	// The answer's route is the job's to withdraw, which moves the prefix route on.
+	// The answer's route is the job's to withdraw, which moves the claim on.
 	assert_eq!(moq_route_withdraw(job), 0);
-	assert_ne!(instance_of(dynamic), lent);
+	assert_ne!(claim_instance_of(dynamic), lent);
 	assert_eq!(moq_route_free(job), 0);
 
-	assert_eq!(moq_route_free(dynamic), 0);
-	assert!(moq_route_free(dynamic) < 0, "double-free should fail");
+	assert_eq!(moq_claim_free(dynamic), 0);
+	assert!(moq_claim_free(dynamic) < 0, "double-free should fail");
 	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_close(served), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -4381,7 +4388,7 @@ fn dynamic_serves_a_held_consumer_without_taking_its_handle() {
 	let broadcast = publish_broadcast(origin, b"source");
 	let held = consume_local(broadcast);
 	let cb = Callback::new();
-	let dynamic = route_prefix(origin, b"live", &cb);
+	let dynamic = claim(origin, b"live", &cb);
 	let result = Callback::new();
 	let _task = id(unsafe {
 		moq_origin_request(
@@ -4401,7 +4408,7 @@ fn dynamic_serves_a_held_consumer_without_taking_its_handle() {
 	assert_eq!(moq_consume_close(held), 0, "source handle remains caller-owned");
 	result.recv_terminal();
 	assert_eq!(moq_consume_close(served), 0);
-	assert_eq!(moq_route_free(dynamic), 0);
+	assert_eq!(moq_claim_free(dynamic), 0);
 	cb.recv_terminal();
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -4412,7 +4419,7 @@ fn dynamic_refuses_a_missing_callback() {
 	let origin = id(moq_origin_create());
 	let prefix = b"live";
 	let code = unsafe {
-		moq_origin_route_prefix(
+		moq_origin_claim(
 			origin,
 			prefix.as_ptr() as *const c_char,
 			prefix.len(),
@@ -5702,7 +5709,7 @@ fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 			.origin
 			.get(origin)
 			.unwrap()
-			.route_prefix(dynamic_at, moq_net::origin::RouteOptions::default())
+			.claim(dynamic_at, moq_net::origin::RouteOptions::default())
 			.unwrap()
 	};
 	let cb = Callback::new();
@@ -5819,14 +5826,14 @@ fn an_instance_pins_request_and_follow() {
 }
 
 /// Serve `prefix` on `origin` dynamically.
-fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Route {
+fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Claim {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
 	State::lock()
 		.origin
 		.get(origin)
 		.unwrap()
-		.route_prefix(prefix, moq_net::origin::RouteOptions::default())
+		.claim(prefix, moq_net::origin::RouteOptions::default())
 		.unwrap()
 }
 
