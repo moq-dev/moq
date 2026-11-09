@@ -93,7 +93,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
 # Reclaims the socket under a WebSocket upgrade as a WebSocket stream.
-tokio-tungstenite = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, features = ["connect", "handshake"], optional = true }
 toml = { workspace = true }
 tower-service = "0.3"
 tracing = { workspace = true }

@@ -29,14 +29,18 @@ impl Files {
 	/// poll watcher on platforms without a native backend, so there's no manual
 	/// polling here.
 	pub fn new(paths: &[PathBuf]) -> crate::Result<Self> {
+		Self::watch(paths).map_err(|err| crate::Error::Watch(crate::error::message(err)))
+	}
+
+	/// [`Self::new`] with notify's own error, for callers that wrap it in theirs.
+	pub(crate) fn watch(paths: &[PathBuf]) -> notify::Result<Self> {
 		// A capacity-1 channel of unit wakeups coalesces the burst of raw events
 		// notify emits per change: a full buffer already has a pending wakeup, so
 		// extra sends are dropped.
 		let (tx, rx) = mpsc::channel(1);
 		let watcher = callback(paths, move || {
 			let _ = tx.try_send(());
-		})
-		.map_err(|err| crate::Error::Watch(crate::error::message(err)))?;
+		})?;
 
 		Ok(Self {
 			_watcher: watcher,

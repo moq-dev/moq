@@ -309,8 +309,8 @@ fn an_open_waits_only_for_stream_credit() {
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			let request = web_transport_proto::ConnectRequest::new(url::Url::parse(&url).expect("url"))
-				.with_protocol(PROTO);
+			let request =
+				web_transport_proto::ConnectRequest::new(url::Url::parse(&url).expect("url")).with_protocol(PROTO);
 			let mut transport = moq_tokio::quic::driver::transport::Config::default();
 			transport.limits.receive_window = std::num::NonZeroU64::new(16 * 1024);
 			let session = crate::support::web_connect(request, transport).await.expect("connect");
