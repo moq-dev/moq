@@ -254,6 +254,125 @@ static moq_connection_state *next_state(moq_session *session, moq_connection_sta
 	return next;
 }
 
+static void on_announce(void *user_data, moq_error *error, moq_announce_event *value)
+{
+	on_value(user_data, error, value);
+}
+
+/* Over moq-lite-06, whose wire carries no instance, the session mints the announced one.
+ * Passed back as is, it pins request and follow; its text, parsed, names another instance. */
+static void minted_instance(void)
+{
+	moq_instance *empty = NULL;
+	moq_error *error = moq_instance_parse("", &empty);
+	CHECK(error && error->tag == MOQ_ERROR_INVALID_INSTANCE && !empty);
+	moq_error_free(error);
+
+	moq_origin_config origin_config = moq_origin_config_default();
+	moq_origin_producer *origin = moq_origin_producer_new(&origin_config);
+	moq_route_options route_options = moq_route_options_default();
+	moq_route *route = NULL;
+	ok(moq_origin_producer_route(origin, "live", &route_options, &route), "minted route");
+
+	const char *generate[] = {"localhost"};
+	const char *versions[] = {"moq-lite-06"};
+	moq_server_config server_config = moq_server_config_default();
+	server_config.bind = "127.0.0.1:0";
+	server_config.versions.data = versions;
+	server_config.versions.len = 1;
+	server_config.tls.generate.data = generate;
+	server_config.tls.generate.len = 1;
+	server_config.publish = origin;
+	moq_server *server = NULL;
+	ok(moq_server_new(&server_config, &server), "lite-06 server new");
+	result listening = {0};
+	moq_task *task = moq_server_listen(server, on_string, &listening);
+	char *addr = await(&listening, "lite-06 listen");
+	moq_task_free(task);
+
+	moq_client_config client_config = moq_client_config_default();
+	client_config.tls.insecure = true;
+	client_config.versions = server_config.versions;
+	client_config.implementation = MOQ_IMPLEMENTATION;
+	moq_client *client = NULL;
+	ok(moq_client_new(&client_config, &client), "lite-06 client new");
+	char url[128];
+	snprintf(url, sizeof(url), "https://%s", addr);
+	moq_string_free(addr);
+	result accepting = {0};
+	result connecting = {0};
+	moq_task *accept_task = moq_server_accept(server, on_request, &accepting);
+	moq_task *connect_task = moq_client_connect(client, url, on_session, &connecting);
+	moq_request *request = await(&accepting, "lite-06 accept");
+	CHECK(request);
+	result serving = {0};
+	moq_task *serve_task = moq_request_accept(request, NULL, NULL, on_session, &serving);
+	moq_session *served = await(&serving, "lite-06 request accept");
+	moq_session *session = await(&connecting, "lite-06 connect");
+	moq_task_free(accept_task);
+	moq_task_free(connect_task);
+	moq_task_free(serve_task);
+
+	moq_origin_consumer *consumer = moq_session_consume(session);
+	moq_announce_config announce_config = moq_announce_config_default();
+	moq_announce_consumer *announced = NULL;
+	ok(moq_origin_consumer_announced(consumer, &announce_config, &announced), "announced");
+	result next = {0};
+	task = moq_announce_consumer_next(announced, on_announce, &next);
+	moq_announce_event *event = await(&next, "announce event");
+	moq_task_free(task);
+	CHECK(event && event->tag == MOQ_ANNOUNCE_EVENT_PRESENT);
+	moq_instance *minted = event->present.announce.route.instance;
+	CHECK(moq_instance_is_minted(minted));
+
+	result requested = {0};
+	task = moq_origin_consumer_request(consumer, "live", minted, on_broadcast, &requested);
+	moq_broadcast_consumer_free(await(&requested, "request the minted instance"));
+	moq_task_free(task);
+	moq_following *following = NULL;
+	ok(moq_origin_consumer_follow(consumer, "live", minted, &following), "follow the minted instance");
+	result available = {0};
+	task = moq_following_available(following, on_broadcast, &available);
+	moq_broadcast_consumer *followed = await(&available, "available the minted instance");
+	CHECK(followed);
+	moq_broadcast_consumer_free(followed);
+	moq_task_free(task);
+
+	/* A handle's == compares pointers, so moq_instance_eq compares instances. */
+	char *text = moq_instance_text(minted);
+	moq_instance *named = NULL;
+	ok(moq_instance_parse(text, &named), "parse the minted text");
+	moq_string_free(text);
+	CHECK(!moq_instance_is_minted(named));
+	CHECK(!moq_instance_eq(named, minted) && moq_instance_ne(named, minted));
+	CHECK(moq_instance_eq(minted, minted));
+	result refused = {0};
+	task = moq_origin_consumer_request(consumer, "live", named, on_broadcast, &refused);
+	CHECK(pump(&refused.done, 5000));
+	CHECK(refused.error && refused.error->tag == MOQ_ERROR_PROTOCOL && !refused.value);
+	moq_error_free(refused.error);
+	moq_task_free(task);
+	moq_instance_free(named);
+	moq_announce_event_free(event);
+
+	moq_following_cancel(following);
+	moq_announce_consumer_cancel(announced);
+	moq_session_cancel(session, 0);
+	moq_session_cancel(served, 0);
+	moq_server_cancel(server);
+	moq_route_cancel(route);
+	moq_following_free(following);
+	moq_announce_consumer_free(announced);
+	moq_origin_consumer_free(consumer);
+	moq_session_free(session);
+	moq_session_free(served);
+	moq_request_free(request);
+	moq_client_free(client);
+	moq_server_free(server);
+	moq_route_free(route);
+	moq_origin_producer_free(origin);
+}
+
 int main(void)
 {
 #ifdef _WIN32
@@ -273,6 +392,8 @@ int main(void)
 	moq_subscription_free(defaults);
 	moq_subscription bare = moq_subscription_default();
 	CHECK(!bare.delay.max.has_value);
+
+	minted_instance();
 
 	/* A synchronous error is a returned value with Rust's Display message. */
 	moq_server_config unbound_config = moq_server_config_default();
@@ -294,9 +415,12 @@ int main(void)
 	moq_route *route = NULL;
 	ok(moq_origin_producer_route(origin, "probe", &route_options, &route), "route");
 	moq_broadcast_producer *broadcast = moq_route_broadcast(route);
-	char *instance = moq_route_instance_id(route);
-	CHECK(instance && instance[0] != '\0');
-	moq_string_free(instance);
+	moq_instance *instance = moq_route_instance_id(route);
+	CHECK(instance && !moq_instance_is_minted(instance));
+	char *text = moq_instance_text(instance);
+	CHECK(text && text[0] != '\0');
+	moq_string_free(text);
+	moq_instance_free(instance);
 	moq_track_info info = moq_track_info_default();
 	info.timescale.has_value = true;
 	info.timescale.value = 1000000;
