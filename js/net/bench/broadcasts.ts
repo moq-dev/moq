@@ -38,7 +38,7 @@ for (const scope of [
 		for (const observerCount of observerCounts) {
 			const origin = new Producer();
 			const handles = Array.from({ length: routeCount }, (_, index) =>
-				origin.routePrefix(Path.from(`room/${index}${scope === "full-name" ? ".chat" : ""}`)),
+				origin.claim(Path.from(`room/${index}${scope === "full-name" ? ".chat" : ""}`)),
 			);
 			const touched = Path.from(
 				scope === "rooted-producers" ? "0" : scope === "full-name" ? "room/0.chat" : "room/0",
@@ -233,7 +233,7 @@ const nextInstance = Instance.parse("01900000-0000-7000-8000-000000000002");
 for (const pathCount of routeCounts) {
 	for (const readerCount of observerCounts) {
 		const origin = new Producer();
-		const dynamic = origin.routePrefix(Path.from("room"), { instance });
+		const dynamic = origin.claim(Path.from("room"), { instance });
 		const pending = dynamic.requested();
 		const requests = Array.from({ length: pathCount }, (_, index) =>
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),

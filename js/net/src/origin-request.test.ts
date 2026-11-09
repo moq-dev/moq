@@ -160,7 +160,7 @@ test("followers track the serving prefix, ignoring descendants and re-prices", a
 	const origin = new Producer();
 	const source = new BroadcastProducer();
 	const keeper = source.consume();
-	const prefix = origin.routePrefix(Path.from("pool"));
+	const prefix = origin.claim(Path.from("pool"));
 	const serving = (async () => {
 		for await (const request of prefix.requested()) request.serve(source.consume());
 	})();
@@ -196,7 +196,7 @@ test("followers track the serving prefix, ignoring descendants and re-prices", a
 test("a follower ignores a covering route whose scope excludes its path", async () => {
 	const origin = new Producer();
 	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
-	const prefix = scoped.routePrefix(Path.from("room/alice"));
+	const prefix = scoped.claim(Path.from("room/alice"));
 	const exactRoute = origin.route(Path.from("room/alice"), { cost: 5n });
 	const exact = exactRoute.broadcast;
 	const request = origin.follow(Path.from("room/alice"));
@@ -213,7 +213,7 @@ test("a follower tracks a route replaced by an identical one", async () => {
 	const origin = new Producer();
 	const path = Path.from("room");
 	const serve = (source: BroadcastProducer) => {
-		const route = origin.routePrefix(path);
+		const route = origin.claim(path);
 		void (async () => {
 			for await (const request of route.requested()) request.serve(source.consume());
 		})();
@@ -244,7 +244,7 @@ test("an origin closing settles a follower a served route resolved", async () =>
 	const origin = new Producer();
 	const path = Path.from("room");
 	const source = new BroadcastProducer();
-	const route = origin.routePrefix(path);
+	const route = origin.claim(path);
 	void (async () => {
 		for await (const request of route.requested()) request.serve(source.consume());
 	})();
@@ -263,7 +263,7 @@ test("an origin closing settles a follower a served route resolved", async () =>
 test("a follower keeps a refusal that lands with a re-price", async () => {
 	const origin = new Producer();
 	const path = Path.from("room");
-	const route = origin.routePrefix(path);
+	const route = origin.claim(path);
 	const requested = route.requested();
 	const request = origin.follow(path);
 	const pending = (await requested.next()).value;
@@ -294,7 +294,7 @@ for (const received of [false, true]) {
 		const events: string[] = [];
 		const stop = wireOf(origin).interests((prefix, wanted) => events.push(`${prefix} ${wanted}`));
 		const source = new BroadcastProducer();
-		const route = received ? wireOf(origin).receive(path, WireRoute.default) : origin.routePrefix(path);
+		const route = received ? wireOf(origin).receive(path, WireRoute.default) : origin.claim(path);
 		void (async () => {
 			for await (const request of route.requested()) request.serve(source.consume());
 		})();
@@ -318,7 +318,7 @@ for (const received of [false, true]) {
 test("a hidden job route is hidden until announced under its own instance", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const requests = claim.requested();
 	const request = origin.request(path);
 	const pending = (await requests.next()).value;
@@ -339,7 +339,7 @@ test("a hidden job route is hidden until announced under its own instance", asyn
 test("a visible job route answers its waiting requesters at once", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const requests = claim.requested();
 	const first = origin.request(path);
 	const pending = (await requests.next()).value;
@@ -375,7 +375,7 @@ test("a visible job route answers its waiting requesters at once", async () => {
 test("a hidden job route's broadcast cannot announce itself", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const requests = claim.requested();
 	const request = origin.request(path);
 	const pending = (await requests.next()).value;
@@ -396,7 +396,7 @@ test("a hidden job route's broadcast cannot announce itself", async () => {
 
 test("an application serves held content without an exact route", async () => {
 	const origin = new Producer();
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const requests = claim.requested();
 	const request = origin.request(Path.from("room/alice"));
 	const pending = (await requests.next()).value;
@@ -418,7 +418,7 @@ test("an application serves held content without an exact route", async () => {
 for (const withdraw of ["withdraw", "replace"] as const) {
 	test(`a job's route is not cached after ${withdraw}`, async () => {
 		const origin = new Producer();
-		const claim = origin.routePrefix(Path.from("room"));
+		const claim = origin.claim(Path.from("room"));
 		const requests = claim.requested();
 		const path = Path.from("room/alice");
 		const first = origin.request(path);
@@ -446,7 +446,7 @@ for (const withdraw of ["withdraw", "replace"] as const) {
 
 test("closing a hidden job route refuses the request and closes its broadcast", async () => {
 	const origin = new Producer();
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const requests = claim.requested();
 	const request = origin.request(Path.from("room/alice"));
 	const pending = (await requests.next()).value;
@@ -465,7 +465,7 @@ test("closing a hidden job route refuses the request and closes its broadcast", 
 test("a job route for an abandoned claim is never announced", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const requests = claim.requested();
 	const request = origin.request(path);
 	const pending = (await requests.next()).value;
@@ -487,7 +487,7 @@ for (const cleanup of ["close", "dispose", "broadcast"] as const) {
 	test(`a hidden job route's ${cleanup} releases shared requesters and admits a new request`, async () => {
 		const origin = new Producer();
 		const path = Path.from("room/alice");
-		const claim = origin.routePrefix(Path.from("room"));
+		const claim = origin.claim(Path.from("room"));
 		const requests = claim.requested();
 		const first = origin.request(path);
 		const pending = (await requests.next()).value;
@@ -523,7 +523,7 @@ for (const cleanup of ["close", "dispose", "broadcast"] as const) {
 test("a throwing handler disposes its job route and leaves the claim answerable", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const failed = (async () => {
 		for await (const request of claim.requested()) {
 			using job = request.route({ hidden: true });
@@ -552,7 +552,7 @@ test("a throwing handler disposes its job route and leaves the claim answerable"
 test("announcing a job route again keeps it answering under one instance", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const requests = claim.requested();
 	const request = origin.request(path);
 	const pending = (await requests.next()).value;
@@ -577,7 +577,7 @@ for (const cleanup of ["close", "dispose", "broadcast", "announce"] as const) {
 	test(`an old job route's ${cleanup} cannot refuse the next request for its path`, async () => {
 		const origin = new Producer();
 		const path = Path.from("room/alice");
-		const claim = origin.routePrefix(Path.from("room"));
+		const claim = origin.claim(Path.from("room"));
 		const requests = claim.requested();
 		const first = origin.request(path);
 		const pending = (await requests.next()).value;
@@ -631,7 +631,7 @@ test("an instance-pinned follower resumes when its instance returns after a gap"
 	const source = new BroadcastProducer();
 	const keeper = source.consume();
 	const serve = (instance: Instance.Valid, broadcast: BroadcastProducer) => {
-		const route = origin.routePrefix(path, { instance: instance });
+		const route = origin.claim(path, { instance: instance });
 		void (async () => {
 			for await (const request of route.requested()) request.serve(broadcast.consume());
 		})();
@@ -782,7 +782,7 @@ test("a pending request waits for a session before concluding absence", async ()
 test("a follower retains a selected handler's explicit unroutable refusal", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const route = origin.routePrefix(path);
+	const route = origin.claim(path);
 	const pending = route.requested();
 	const requested = origin.follow(path);
 	const request = (await pending.next()).value;
@@ -799,14 +799,14 @@ test("a follower retains a selected handler's explicit unroutable refusal", asyn
 test("a pending request retries a route gap and never retargets after resolving", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const first = origin.routePrefix(path);
+	const first = origin.claim(path);
 	const requested = origin.request(path);
 	const before = await first.requested().next();
 	expect(before.value).toBeDefined();
 	first.close();
 	await settle();
 	expect(requested.closed.peek()).toBeUndefined();
-	const second = origin.routePrefix(path);
+	const second = origin.claim(path);
 	const pending = (await second.requested().next()).value;
 	if (!pending) throw new Error("replacement route was not requested");
 	const source = new BroadcastProducer();
@@ -852,8 +852,8 @@ test.each(["request", "follow"] as const)("a %s pinned to a losing instance reso
 	const origin = new Producer();
 	const path = Path.from("room/audio");
 	const pinned = Instance.random();
-	const losing = origin.routePrefix(path, { instance: pinned, cost: 9n });
-	const winning = origin.routePrefix(path, { instance: Instance.random(), cost: 1n });
+	const losing = origin.claim(path, { instance: pinned, cost: 9n });
+	const winning = origin.claim(path, { instance: Instance.random(), cost: 1n });
 	const asked = losing.requested();
 	const requested = origin[method](path, { instance: pinned });
 	const pending = (await asked.next()).value;
@@ -893,7 +893,7 @@ test("a peer's pin is served by a local broadcast that loses the path", async ()
 	const path = Path.from("room/audio");
 	const pinned = Instance.random();
 	const publication = origin.route(path, { instance: pinned, cost: 9n });
-	const winning = origin.routePrefix(path, { instance: Instance.random(), cost: 1n });
+	const winning = origin.claim(path, { instance: Instance.random(), cost: 1n });
 	expect(wire.local(path)).toBeUndefined();
 	expect(wire.local(path, pinned)).toBeDefined();
 	expect(await wire.demand(path, pinned)).toBeDefined();
@@ -907,7 +907,7 @@ test("a peer's pin is served by a local broadcast that loses the path", async ()
 test("a peer's pin reaches its job after a sibling moved the claim on", async () => {
 	const origin = new Producer();
 	const wire = wireOf(origin.consume());
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const minted = claim.instance;
 	const requests = claim.requested();
 	const reader = origin.request(Path.from("room/alice"));
@@ -938,7 +938,7 @@ test("a peer's pin reaches its job after a sibling moved the claim on", async ()
 test.each(["request", "follow"] as const)("a %s through a claim continues on its job's route", async (method) => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const minted = claim.instance;
 	const requests = claim.requested();
 	const reader = method === "request" ? origin.request(path) : origin.follow(path);
@@ -978,7 +978,7 @@ test("a restarted job gets a fresh instance and its old one is refused", async (
 	const origin = new Producer();
 	const wire = wireOf(origin.consume());
 	const path = Path.from("room/alice");
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const minted = claim.instance;
 	const requests = claim.requested();
 	const first = origin.request(path);
@@ -1015,7 +1015,7 @@ test("a restarted job gets a fresh instance and its old one is refused", async (
 // when an unrelated job ends keeps its request and answers it under the claim's new instance.
 test("a hidden job announces under the instance its claim moved to", async () => {
 	const origin = new Producer();
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const minted = claim.instance;
 	const requests = claim.requested();
 	const alice = origin.request(Path.from("room/alice"));
@@ -1047,7 +1047,7 @@ test("a hidden job announces under the instance its claim moved to", async () =>
 // the worker, which prepares the job under the claim's new instance. Every requester waits on.
 test("a job that read its instance is refused once its claim moves", async () => {
 	const origin = new Producer();
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const minted = claim.instance;
 	const requests = claim.requested();
 	const alice = origin.request(Path.from("room/alice"));
@@ -1088,7 +1088,7 @@ test("a job that read its instance is refused once its claim moves", async () =>
 // the claim when it ends.
 test("one job ending leaves another job's instance alone", async () => {
 	const origin = new Producer();
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const minted = claim.instance;
 	const requests = claim.requested();
 	const jobs = [];
@@ -1124,7 +1124,7 @@ test("one job ending leaves another job's instance alone", async () => {
 test("a claim naming its instance gives each job a fresh one", async () => {
 	const origin = new Producer();
 	const stable = Instance.parse("stable");
-	const claim = origin.routePrefix(Path.from("room"), { instance: stable, epoch: 1n });
+	const claim = origin.claim(Path.from("room"), { instance: stable, epoch: 1n });
 	const requests = claim.requested();
 	const request = origin.request(Path.from("room/alice"));
 	const pending = (await requests.next()).value;
@@ -1144,7 +1144,7 @@ test("a claim naming its instance gives each job a fresh one", async () => {
 // request for a held path is answered again without asking the handler, under the new instance.
 test("a claim moving on keeps its held answers", async () => {
 	const origin = new Producer();
-	const claim = origin.routePrefix(Path.from("room"));
+	const claim = origin.claim(Path.from("room"));
 	const minted = claim.instance;
 	const requests = claim.requested();
 	const held = new BroadcastProducer();

@@ -27,7 +27,7 @@ test.each(["lite", "ietf", "fetch", "track"] as const)(
 	async (kind) => {
 		const pair = createMockTransportPair();
 		const origin = new Producer();
-		const dynamic = origin.routePrefix(Path.from("room"));
+		const dynamic = origin.claim(Path.from("room"));
 		const publisher =
 			kind === "ietf"
 				? new IetfPublisher({
@@ -106,7 +106,7 @@ test.each(["lite", "ietf", "fetch", "track"] as const)(
 
 test("last cancellation finishes the internal wait and discards a late consumer", async () => {
 	const origin = new Producer();
-	const dynamic = origin.routePrefix(Path.from("room"));
+	const dynamic = origin.claim(Path.from("room"));
 	const requests = dynamic.requested();
 	const hold = new AbortController();
 	const wait = wireOf(origin.consume()).demand(path, undefined, hold.signal);
@@ -149,7 +149,7 @@ test.each([true, false])(
 	"shared local/remote demand is withdrawn whichever leaves last (local first: %s)",
 	async (localFirst) => {
 		const origin = new Producer();
-		const dynamic = origin.routePrefix(Path.from("room"));
+		const dynamic = origin.claim(Path.from("room"));
 		const requests = dynamic.requested();
 		const hold = new AbortController();
 		const wait = wireOf(origin.consume())
@@ -193,7 +193,7 @@ test.each([
 ] as const)("cancelling one waiter preserves a second %s requester across %i routes", async (other, routes) => {
 	const origin = new Producer();
 	const prefix = Path.from("room");
-	const dynamics = Array.from({ length: routes }, (_, i) => origin.routePrefix(prefix, { cost: BigInt(i) }));
+	const dynamics = Array.from({ length: routes }, (_, i) => origin.claim(prefix, { cost: BigInt(i) }));
 	const hold = new AbortController();
 	const wire = wireOf(origin.consume());
 	const first = wire.demand(path, undefined, hold.signal).catch(() => undefined);
@@ -223,7 +223,7 @@ test.each([
 
 test("an already cancelled signal never enqueues or subscribes to abort", async () => {
 	const origin = new Producer();
-	const dynamic = origin.routePrefix(Path.from("room"));
+	const dynamic = origin.claim(Path.from("room"));
 	const requests = dynamic.requested();
 	const hold = new AbortController();
 	hold.abort();
@@ -245,7 +245,7 @@ test.each(["accept", "reject", "cancel"] as const)(
 	"%s releases the abort listener without closing a shared producer",
 	async (action) => {
 		const origin = new Producer();
-		const dynamic = origin.routePrefix(Path.from("room"));
+		const dynamic = origin.claim(Path.from("room"));
 		const requests = dynamic.requested();
 		const source = new Broadcast();
 		const keeper = source.consume();
@@ -281,12 +281,12 @@ test.each(["accept", "reject", "cancel"] as const)(
 
 test("a pending local request changing routes withdraws the old route's work", async () => {
 	const origin = new Producer();
-	const first = origin.routePrefix(Path.from("room"), { cost: 5n });
+	const first = origin.claim(Path.from("room"), { cost: 5n });
 	const a = first.requested();
 	const local = origin.request(path);
 	const old = (await a.next()).value;
 	if (!old) throw new Error("expected a pending request");
-	const second = origin.routePrefix(Path.from("room"), { cost: 1n });
+	const second = origin.claim(Path.from("room"), { cost: 1n });
 	const b = second.requested();
 	const fresh = (await b.next()).value;
 	if (!fresh) throw new Error("expected a pending request");
@@ -314,7 +314,7 @@ test("a pending local request changing routes withdraws the old route's work", a
 test("cancelling an old instance waiter does not decrement a new instance's demand", async () => {
 	const origin = new Producer();
 	const instance = Instance.random();
-	const dynamic = origin.routePrefix(Path.from("room"), { instance });
+	const dynamic = origin.claim(Path.from("room"), { instance });
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const hold = new AbortController();
@@ -346,8 +346,8 @@ test.each(["answer", "release"] as const)(
 		const origin = new Producer();
 		const instance = Instance.random();
 		const prefix = Path.from("room");
-		const a = origin.routePrefix(prefix, { instance, cost: 1n });
-		const b = origin.routePrefix(prefix, { instance, cost: 5n });
+		const a = origin.claim(prefix, { instance, cost: 1n });
+		const b = origin.claim(prefix, { instance, cost: 5n });
 		const ar = a.requested();
 		const br = b.requested();
 		const held = origin.request(path);
@@ -355,7 +355,7 @@ test.each(["answer", "release"] as const)(
 		(await ar.next()).value.serve(source);
 		await settle();
 		// Another instance wins new requests. The old handle stays on its own instance.
-		const c = origin.routePrefix(prefix, { instance: Instance.random(), cost: 0n });
+		const c = origin.claim(prefix, { instance: Instance.random(), cost: 0n });
 		a.close();
 		await settle();
 		const pending = (await br.next()).value;
@@ -407,8 +407,8 @@ test.each([0, 1])(
 			// Each instance undercuts the last, so it wins the path for the request made now.
 			const instance = Instance.parse(`instance-${i + 1}`);
 			const cost = BigInt(4 - 2 * i);
-			const primary = origin.routePrefix(prefix, { instance, cost });
-			const standby = origin.routePrefix(prefix, { instance, cost: cost + 1n });
+			const primary = origin.claim(prefix, { instance, cost });
+			const standby = origin.claim(prefix, { instance, cost: cost + 1n });
 			const ar = primary.requested();
 			const br = standby.requested();
 			const held = origin.request(path);
@@ -418,7 +418,7 @@ test.each([0, 1])(
 			await settle();
 			entries.push({ primary, ar, br, held });
 		}
-		origin.routePrefix(prefix, { instance: Instance.parse("instance-3"), cost: 0n });
+		origin.claim(prefix, { instance: Instance.parse("instance-3"), cost: 0n });
 		const pending = [];
 		for (const entry of entries) {
 			entry.primary.close();
@@ -459,7 +459,7 @@ test.each([0, 1])(
 test("a normal FETCH request FIN keeps unanswered origin demand alive", async () => {
 	const pair = createMockTransportPair();
 	const origin = new Producer();
-	const dynamic = origin.routePrefix(Path.from("room"));
+	const dynamic = origin.claim(Path.from("room"));
 	const requests = dynamic.requested();
 	const publisher = new LitePublisher(pair.server, LiteVersion.DRAFT_06, randomHop(), origin.consume());
 	let input!: ReadableStreamDefaultController<Uint8Array>;
@@ -500,7 +500,7 @@ test.each(["accept", "reject"] as const)(
 	"cancellation racing %s releases only the cancelled waiter",
 	async (answer) => {
 		const origin = new Producer();
-		const dynamic = origin.routePrefix(Path.from("room"));
+		const dynamic = origin.claim(Path.from("room"));
 		const requests = dynamic.requested();
 		const wire = wireOf(origin.consume());
 		const hold = new AbortController();
@@ -529,7 +529,7 @@ test.each(["accept", "reject"] as const)(
 
 test.each([true, false])("last waiter cancellation and accept in one turn (cancel first: %s)", async (cancelFirst) => {
 	const origin = new Producer();
-	const dynamic = origin.routePrefix(Path.from("room"));
+	const dynamic = origin.claim(Path.from("room"));
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const hold = new AbortController();
@@ -570,7 +570,7 @@ test.each([true, false])("last waiter cancellation and accept in one turn (cance
 
 test.each([true, false])("local demand survives same-turn cancellation only when rejoined: %s", async (rejoin) => {
 	const origin = new Producer();
-	const dynamic = origin.routePrefix(Path.from("room"));
+	const dynamic = origin.claim(Path.from("room"));
 	const requests = dynamic.requested();
 	const local = origin.request(path);
 	const hold = new AbortController();
@@ -616,7 +616,7 @@ test.each([true, false])("local demand survives same-turn cancellation only when
 
 test("queued cancellation preserves order, replacement identity, and empty-queue wakeup", async () => {
 	const origin = new Producer();
-	const dynamic = origin.routePrefix(Path.from("room"));
+	const dynamic = origin.claim(Path.from("room"));
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const holds = Array.from({ length: 4 }, () => new AbortController());
@@ -642,7 +642,7 @@ test("queued cancellation preserves order, replacement identity, and empty-queue
 test("reset clears queued work while a handler is suspended and admits the new instance", async () => {
 	const origin = new Producer();
 	const instance = Instance.random();
-	const dynamic = origin.routePrefix(Path.from("room"), { instance });
+	const dynamic = origin.claim(Path.from("room"), { instance });
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const waits = [path, Path.from("room/obsolete")].map((name) => wire.demand(name, instance).catch(() => {}));
@@ -666,7 +666,7 @@ test("reset clears queued work while a handler is suspended and admits the new i
 
 test("concurrent handlers consume queued requests once across empty batches", async () => {
 	const origin = new Producer();
-	const dynamic = origin.routePrefix(Path.from("room"));
+	const dynamic = origin.claim(Path.from("room"));
 	const handlers = [dynamic.requested(), dynamic.requested()];
 	const wire = wireOf(origin.consume());
 	const waits: Promise<unknown>[] = [];
