@@ -2918,13 +2918,7 @@ mod tests {
 				"{}",
 				String::from_utf8_lossy(&response)
 			);
-			let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
-				stream,
-				tokio_tungstenite::tungstenite::protocol::Role::Client,
-				None,
-			)
-			.await;
-			let (transport, driver) = qmux::ws::Upgraded::new(socket, "qmux-01.moq-lite-06")
+			let (transport, driver) = qmux::ws::Upgraded::new(stream, "qmux-01.moq-lite-06")
 				.connect()
 				.await
 				.unwrap();

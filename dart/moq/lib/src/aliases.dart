@@ -67,7 +67,7 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// Follows a specific broadcast path across the publisher instances that serve it.
 typedef Following = MoqFollowing;
 
-/// The read-only facts on a received route: hops, a static cost, and the stream's instance.
+/// The read-only facts on a received route: a static cost and the stream's instance.
 typedef RouteInfo = MoqRouteInfo;
 
 /// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.

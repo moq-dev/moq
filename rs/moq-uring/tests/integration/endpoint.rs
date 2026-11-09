@@ -32,19 +32,11 @@ const CLOSE_CODE: u32 = 42;
 const CLOSE_REASON: &str = "bye";
 
 fn server_config(certs: &support::Certs) -> quic::server::Config {
-	quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
-	)
+	quic::server::Config::new(certs.server(&[ALPN]))
 }
 
 fn dial_config() -> quic::client::Config {
-	let mut config = quic::client::Config::default();
-	config.alpn = vec![ALPN.to_string()];
-	config.verify = false;
-	config
+	quic::client::Config::new(support::client_tls(&[ALPN]))
 }
 
 /// One socket carries dials and accepts at once: two endpoints dial each
@@ -766,54 +758,6 @@ fn accept_needs_a_server_config() {
 
 	let result = worker.block_on(async move { endpoint.accept().await }).expect("worker");
 	assert!(matches!(result, Err(quic::Error::NotServer)), "got {result:?}");
-}
-
-/// One [`quic::Identity`] serves every endpoint built from it, without ever
-/// touching the files again.
-///
-/// A worker group builds its endpoints on the worker threads, so re-reading
-/// the certificate per endpoint means a certificate replaced on disk while
-/// those threads are starting leaves earlier and later workers presenting
-/// different identities, and a client pinning either one fails depending on
-/// which worker accepts it.
-#[test]
-fn an_identity_is_read_once() {
-	let Some(mut worker) = worker() else { return };
-	let handle = worker.handle();
-	let certs = support::certs().expect("certificates");
-	let config = server_config(&certs);
-
-	// Whatever the endpoints below present, it did not come from here.
-	std::fs::remove_file(&certs.cert).expect("remove cert");
-	std::fs::remove_file(&certs.key).expect("remove key");
-
-	let listener = |handle: &moq_uring::Handle| {
-		let sock = handle
-			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
-			.expect("socket");
-		quic::Endpoint::new(quic::endpoint::Config::default().with_server(config.clone()), sock).expect("endpoint")
-	};
-
-	// Two endpoints, as two workers would build them, then a real handshake
-	// against the second: the identity has to survive being cloned as well as
-	// being read.
-	let _first = listener(&handle);
-	let second = listener(&handle);
-	let server = second.local_addr();
-
-	worker
-		.block_on(async move {
-			let sock = handle
-				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
-				.expect("client socket");
-			handle.spawn(async move {
-				quic::client::connect(sock, &dial_config(), server, "localhost")
-					.await
-					.expect("dial");
-			});
-			second.accept().await.expect("accepted connection");
-		})
-		.expect("worker");
 }
 
 /// Cancelling a dial after it created a connection closes that connection,

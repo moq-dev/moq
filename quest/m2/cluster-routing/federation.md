@@ -20,8 +20,8 @@ local publishers', are qualified, so a forger or a misconfigured uplink only
 affects its own scope (decided 2026-10-14; see [Routes and
 announces](/quest/m2/cluster-routing/routes/README.md)). Decided 2026-11-04
 (maintainer): those identities are keyed by the route key the peer proves,
-read from a key file the local relay's uplinks share ([Route session
-integration](/quest/m2/cluster-routing/routes/session.md)). Without a key, a
+read from a key file the local relay's uplinks share
+([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)). Without a key, a
 scoped forger declaring a victim's id captures claims outside its scope
 (`forged_identity_hijacks_claims_outside_the_forgers_scope`). The scope itself
 (`hash(scope, id)`) was rejected 2026-10-15, and the grant's issuer-qualified
@@ -59,7 +59,7 @@ the same PR; the combined concept/setup guide follows separately.
 
 Decided 2026-11-06 (maintainer; the agent picked the children): require
 only the route children federation builds on,
-[session integration](/quest/m2/cluster-routing/routes/session.md) and
+session integration (landed in [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023) and [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)) and
 [acceptance](/quest/m2/cluster-routing/routes/acceptance.md), not the whole
 [route epic](/quest/m2/cluster-routing/routes/README.md). Federation is
 relay-to-relay, so browser route-key proofs, the Playwright pin they wait on,
@@ -75,7 +75,6 @@ Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts ch
 
 ## Required
 
-- [Route session integration](/quest/m2/cluster-routing/routes/session.md) - lite-07 sessions driven by the router, scoped identities keyed by the proven route key, bounded per-peer state
 - [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - the forwarding and partition fixtures this reuses, proven on the implementation
 
 ## Related
