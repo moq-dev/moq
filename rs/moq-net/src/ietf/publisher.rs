@@ -7754,7 +7754,13 @@ impl GroupServe {
 						self.state = GroupState::Done;
 						return Poll::Ready(Err(Error::Cancel));
 					}
-					let wire = ready!(self.group.poll_wire(waiter));
+					let wire = match ready!(self.group.poll_wire(waiter)) {
+						Ok(wire) => wire,
+						Err(err) => {
+							self.state = GroupState::Done;
+							return Poll::Ready(Err(err));
+						}
+					};
 					let GroupState::Describe { mut writer } = std::mem::replace(&mut self.state, GroupState::Done)
 					else {
 						unreachable!("matched above");
@@ -8667,11 +8673,14 @@ mod group_priority_test {
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"test",
-			track::Info::default(),
+			// Keeps a superseded group, so the later group landing does not give up on this one.
+			track::Info::default().with_max_age(None),
 		);
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
-			track.subscribe(None),
+			track.subscribe(Some(
+				track::Subscription::default().with_delay(track::Delay::default().with_max(None)),
+			)),
 			RequestId(0),
 			Version::Draft18,
 			ServeRange::default(),

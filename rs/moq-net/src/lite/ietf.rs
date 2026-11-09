@@ -242,13 +242,13 @@ impl Records {
 	pub fn poll_state<W: crate::transport::poll::SendStream>(
 		&mut self,
 		writer: &mut crate::coding::Writer<W, Version>,
-		group: &group::Consumer,
+		group: &mut group::Consumer,
 		waiter: &kio::Waiter,
 	) -> std::task::Poll<Result<(), Error>> {
 		if self.stated {
 			return std::task::Poll::Ready(Ok(()));
 		}
-		let wire = std::task::ready!(group.poll_wire(waiter));
+		let wire = std::task::ready!(group.poll_wire(waiter))?;
 		let whole = group.index() <= group.first_frame();
 		writer.buffer_varint(encode_state(wire.as_ref(), whole, self.capped))?;
 		self.stated = true;

@@ -1238,7 +1238,9 @@ impl GroupState {
 	/// the end object, or the close: a group is visible before its header is read.
 	#[cfg(feature = "async")]
 	fn poll_wire(&self) -> Poll<Result<Option<Wire>>> {
-		let settled = self.next_index > self.offset
+		// Frames adopted below the log (see [`Handle::adopt_head`]) came from another copy,
+		// so only one this ingest wrote proves it read the header.
+		let settled = self.next_index > self.offset + self.front.len()
 			|| self.partial.is_some()
 			|| self.relay.as_ref().is_some_and(|relay| relay.end_object.is_some())
 			|| !matches!(self.outcome, Outcome::Open);
@@ -3693,13 +3695,16 @@ impl Consumer {
 		self.cursor.state.read().wire().cloned()
 	}
 
-	/// The relay state an egress header describes, once the ingest has set it.
+	/// The relay state an egress header describes, once the ingest has set it, or
+	/// [`Error::Old`] once the drift budget gives up on the group first.
 	#[cfg(feature = "async")]
-	pub(crate) fn poll_wire(&self, waiter: &kio::Waiter) -> Poll<Option<Wire>> {
+	pub(crate) fn poll_wire(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Wire>>> {
 		// A dropped producer settled whatever it was going to.
-		self.cursor
+		let res = self
+			.cursor
 			.poll(waiter, |state| state.poll_wire())
-			.map(|res| res.unwrap_or_else(|_| self.wire()))
+			.map(|res| Ok(res.unwrap_or_else(|_| self.wire())));
+		self.poll_expired_if_blocked(waiter, res)
 	}
 
 	/// Read a compressed group's stored DEFLATE slices instead of plain frames, with each

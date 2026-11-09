@@ -6223,7 +6223,7 @@ impl GroupServe {
 								}
 							}
 							if let Some(records) = records {
-								match records.poll_state(writer, &self.group, waiter) {
+								match records.poll_state(writer, &mut self.group, waiter) {
 									Poll::Ready(Ok(())) => {}
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => return Poll::Pending,
