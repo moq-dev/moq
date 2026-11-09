@@ -19,12 +19,14 @@ nightly without a quest). Reported by
 45 s even alone, so any load pushes them over. CI passed them, so this is cost,
 not a race.
 
-Find where the time goes before changing anything: the 200 seeds in
-`withdrawal_counts` each build a mesh, publish, close, and wait out the
-withdrawal, so a wall-clock wait per seed (such as the 300 ms hold) costs
-minutes in total. Drive the waits on the test clock (`#[kio::test]`'s
-manual clock), or run the seeds concurrently, so the work is CPU-bound and
-small. Cutting seeds is the last resort: the counts in each test's doc
+Find where the time goes before changing anything. The tests run on
+`#[kio::test]`'s single-threaded simulated clock, where every wait is
+`kio::clock::sim::idle()`, so the 300 ms hold costs no wall time: the 40 s is
+CPU spent across the 200 seeds in `withdrawal_counts`, each building a mesh,
+publishing, closing, and settling. Profile one seed (`cargo flamegraph` or
+`perf` on the test binary) and cut the per-seed cost it shows, such as mesh
+setup the seeds could share or work that grows with the mesh on each route
+change. Cutting seeds is the last resort: the counts in each test's doc
 comment came from all 200. If neither fits, move them to the nightly suite
 with a caller instead of ignoring them. Never raise the timeout.
 

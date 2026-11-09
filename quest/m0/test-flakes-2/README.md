@@ -219,6 +219,15 @@ raw media warmup test, which failed in the merge queue for
 buffered groups on the FFI runtime's real clock. It is quarantined with `#[ignore]` until its
 child fixes it.
 
+Added 2026-11-09 (maintainer, /quest-complete): `js/net`'s compressed-frame
+cap test and lite-07 re-dropped re-offer test, which failed under load during
+the datagram-queues runs and were quarantined with `test.skip` by
+[moq-dev/moq#8333](https://github.com/moq-dev/moq/pull/8333); and moq-net's
+two random-mesh withdrawal tests, which hit nextest's 60 s kill in
+[moq-dev/moq#8247](https://github.com/moq-dev/moq/pull/8247)'s local
+`just check` and are quarantined with `#[ignore]` by
+[moq-dev/moq#8336](https://github.com/moq-dev/moq/pull/8336).
+
 Public API: none. Wire: none.
 
 ## Required
@@ -229,4 +238,4 @@ Public API: none. Wire: none.
 - [bench/relay.test.py's stream-transport test gets a port free for TCP and UDP](/quest/m0/test-flakes-2/relay-port-pair.md) - the test binds TCP and UDP to one number free in both, so parallel checks can't collide with it
 - [js/net's compressed-frame cap test holds up under load](/quest/m0/test-flakes-2/compressed-frame-cap.md) - the cap is proven without a 32 MiB payload, and its `test.skip` is removed
 - [js/net's lite-07 re-dropped re-offer test holds up under load](/quest/m0/test-flakes-2/redropped-reoffer.md) - update 3 is ordered before the re-offer opens by an event, not a yield count, and its `test.skip` is removed
-- [moq-net's random-mesh withdrawal tests fit the gate](/quest/m0/test-flakes-2/mesh-withdraw-runtime.md) - the 200-seed mesh tests run in seconds on the test clock, and their `#[ignore]` is removed
+- [moq-net's random-mesh withdrawal tests fit the gate](/quest/m0/test-flakes-2/mesh-withdraw-runtime.md) - the 200-seed mesh tests cost seconds of CPU, and their `#[ignore]` is removed
