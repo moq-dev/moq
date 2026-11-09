@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { SessionCode, StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -41,9 +41,9 @@ for (const [version, alpn, requestId] of [
 
 			const drain = await connection.draining;
 			expect(drain.uri).toBe("");
-			expect(drain.timeout).toBe(Milli(5000));
+			expect(drain.timeout).toEqual(Duration.millis(5000));
 
-			expect(await settlesWithin(connection.closed, clock, Milli(20))).toBe(false);
+			expect(await settlesWithin(connection.closed, clock, Duration.millis(20))).toBe(false);
 		} finally {
 			connection.abort();
 		}
@@ -69,7 +69,7 @@ test("a server rejects a client GOAWAY that names a redirect", async () => {
 	try {
 		await peer.writer.u53(GoAway.id);
 		await new GoAway({ newSessionUri: "https://other.example/", timeout: 0n }).encode(peer.writer, version);
-		expect(await settlesWithin(connection.closed, clock, Milli(50))).toBe(true);
+		expect(await settlesWithin(connection.closed, clock, Duration.millis(50))).toBe(true);
 	} finally {
 		connection.abort();
 	}

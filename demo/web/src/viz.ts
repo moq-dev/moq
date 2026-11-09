@@ -9,6 +9,7 @@
  *   to change the delay.
  */
 
+import { Duration } from "@moq/clock";
 import type { BufferedRanges, Signals } from "@moq/watch";
 import type MoqWatch from "@moq/watch/element";
 
@@ -153,7 +154,7 @@ const BUFFER_MAX = 4000; // window shown, in milliseconds
 function drawRanges(
 	canvas: HTMLCanvasElement,
 	ranges: BufferedRanges,
-	timestamp: number | undefined,
+	timestamp: Duration | undefined,
 	stalled: boolean,
 ) {
 	const ctx = canvas.getContext("2d");
@@ -173,11 +174,12 @@ function drawRanges(
 	ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 	ctx.clearRect(0, 0, width, height);
 	if (timestamp === undefined) return;
+	const playhead = timestamp.asMillis();
 
 	for (let i = 0; i < ranges.length; i++) {
 		const range = ranges[i];
-		const startMs = range.start - timestamp;
-		const endMs = range.end - timestamp;
+		const startMs = range.start.asMillis() - playhead;
+		const endMs = range.end.asMillis() - playhead;
 		const visibleStart = Math.max(0, startMs);
 		const visibleEnd = Math.min(endMs, BUFFER_MAX);
 		if (visibleEnd <= visibleStart) continue;
@@ -256,10 +258,9 @@ export function bufferBars(parent: Signals.Effect, watch: MoqWatch): HTMLElement
 
 	root.append(viz, legend);
 
-	// Set the playback delay. Cast bypasses the branded ms type.
+	// Set the playback delay, in milliseconds.
 	const setDelay = (ms: number) => {
-		const clamped = Math.max(0, Math.min(BUFFER_MAX, ms));
-		watch.delay = clamped as unknown as typeof watch.delay;
+		watch.delay = Duration.millis(Math.max(0, Math.min(BUFFER_MAX, ms)));
 	};
 
 	const setFromX = (clientX: number) => {
@@ -290,12 +291,12 @@ export function bufferBars(parent: Signals.Effect, watch: MoqWatch): HTMLElement
 					: 0;
 		if (delta === 0) return;
 		e.preventDefault();
-		setDelay(watch.sync.out.delay.peek() + delta);
+		setDelay(watch.sync.out.delay.peek().asMillis() + delta);
 	});
 
 	// Position the target line from the resolved delay (the live buffer in ms).
 	parent.run((effect) => {
-		const delay = effect.get(watch.sync.out.delay);
+		const delay = effect.get(watch.sync.out.delay).asMillis();
 		const pct = Math.max(0, Math.min(1, delay / BUFFER_MAX)) * 100;
 		target.style.left = `${pct}%`;
 		targetLabel.textContent = `${Math.round(delay)}ms`;

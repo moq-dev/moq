@@ -244,13 +244,13 @@ class SmokeTest {
         val server: ServerConfig = ServerConfig(tls = ServerTls(generate = listOf("localhost")))
         assertEquals(4096uL, client.quic.maxStreams)
         assertEquals(listOf("localhost"), server.tls.generate)
-        val status: ConnectionPhase = ConnectionPhase.CONNECTED
+        val status: ConnectionPhase = ConnectionPhaseConnected(version = "moq-lite-03")
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(true, snapshot.deltas)
         assertNull(properties.display)
         assertNull(properties.flip)
         assertEquals(java.time.Duration.ofMillis(500), backoff.initial)
-        assertEquals(ConnectionPhase.CONNECTED, status)
+        assertEquals("moq-lite-03", assertIs<ConnectionPhaseConnected>(status).version)
     }
 
     @Test
@@ -1112,7 +1112,7 @@ class SmokeTest {
             assertEquals(0uL, session.state().connects)
             session.cancel(0u)
             session.closed()
-            assertEquals(ConnectionPhase.CLOSED, session.state().phase)
+            assertIs<ConnectionPhaseClosed>(session.state().phase)
         }
     }
 

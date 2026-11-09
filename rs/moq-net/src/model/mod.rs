@@ -71,8 +71,7 @@ pub mod origin {
 
 	// Relay-level: every route change, for forwarding and stats. Apps read
 	// `announce` and `follow` instead.
-	#[doc(hidden)]
-	pub use super::origin_impl::{RouteEvent, Routes};
+	pub use super::origin_impl::{RouteEvent, RouteKind, Routes};
 }
 
 /// Listing the paths announced on an origin.

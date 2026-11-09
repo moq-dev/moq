@@ -262,10 +262,63 @@ struct Pending<N> {
 struct Heard<A> {
 	/// As the neighbor sent it, to apply the next batch to.
 	raw: View<A>,
-	/// Within the neighbor's scope: what it certifies here.
-	view: View<A>,
+	/// What it certifies here, where that is not `raw`: presented within the
+	/// neighbor's scope, or what it certified before its route ended.
+	kept: Option<View<A>>,
+	/// The route ended: the next batch starts a fresh view.
+	ended: bool,
 	/// The interest generation it answers.
 	interest: u32,
+	/// The claims within the view's floors where the merged view holds something
+	/// else: the only ones merging the view can change.
+	differs: BTreeSet<Path>,
+}
+
+impl<A> Heard<A> {
+	fn new(interest: u32) -> Self {
+		Self {
+			raw: View::default(),
+			kept: None,
+			ended: false,
+			interest,
+			differs: BTreeSet::new(),
+		}
+	}
+
+	/// What the neighbor certifies here.
+	fn view(&self) -> &View<A> {
+		self.kept.as_ref().unwrap_or(&self.raw)
+	}
+}
+
+impl<A: Clone + Eq> Heard<A> {
+	/// Note whether `claim` differs from `merged`'s.
+	fn compare(&mut self, merged: Option<&View<A>>, claim: &Path) {
+		let view = self.view();
+		let mine = view.items.get(claim);
+		let differs = view.as_of(claim).is_some() && merged.and_then(|merged| merged.items.get(claim)) != mine;
+		match differs {
+			true => self.differs.insert(claim.clone()),
+			false => self.differs.remove(claim),
+		};
+	}
+
+	/// Compare every claim against `merged`.
+	fn resync(&mut self, merged: Option<&View<A>>) {
+		let view = self.view();
+		let mut claims: BTreeSet<Path> = view.items.keys().cloned().collect();
+		if let Some(merged) = merged {
+			claims.extend(
+				(merged.items.keys())
+					.filter(|claim| view.floors.keys().any(|region| within(claim, region)))
+					.cloned(),
+			);
+		}
+		self.differs.clear();
+		for claim in &claims {
+			self.compare(merged, claim);
+		}
+	}
 }
 
 struct Peer {
@@ -366,8 +419,9 @@ pub(crate) struct Router<N, A> {
 	dirty: BTreeMap<Id, Dirty>,
 	/// Each identity's context as last recomputed: a change marks every claim dirty.
 	ctxs: BTreeMap<Id, Ctx<N>>,
-	/// The identities recomputed since [`Self::changed`] last took them.
-	changed: BTreeSet<Id>,
+	/// The identities recomputed since [`Self::changed`] last took them, each with
+	/// the claims whose shown state changed.
+	changed: BTreeMap<Id, BTreeSet<Path>>,
 	/// Mints a fresh identity on rotation.
 	rng: u64,
 	/// Per claim this node has shown, how many times it forgot that claim.
@@ -412,7 +466,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			shown: BTreeMap::new(),
 			dirty: BTreeMap::new(),
 			ctxs: BTreeMap::new(),
-			changed: BTreeSet::new(),
+			changed: BTreeMap::new(),
 			rng: seed | 1,
 			#[cfg(test)]
 			forgot: BTreeMap::new(),
@@ -423,9 +477,9 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		}
 	}
 
-	/// Take the identities recomputed since the last call: their selection or
-	/// shown claims may have changed.
-	pub fn changed(&mut self) -> BTreeSet<Id> {
+	/// Take the identities recomputed since the last call, whose selection may have
+	/// changed, each with the claims whose shown state did.
+	pub fn changed(&mut self) -> BTreeMap<Id, BTreeSet<Path>> {
 		std::mem::take(&mut self.changed)
 	}
 
@@ -686,6 +740,8 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 				view,
 			},
 		);
+		// The views heard for it merge from here on.
+		self.resync(old);
 		self.mark_all(old);
 		self.mark_all(id);
 		self.update([old, id]);
@@ -736,12 +792,13 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		if reach.is_none()
 			&& let Some(heard) = self.heard.get_mut(&(id, from))
 		{
-			heard.raw = View::default();
-			let floors = &heard.view.floors;
-			heard
-				.view
-				.items
+			let raw = std::mem::take(&mut heard.raw);
+			let kept = heard.kept.get_or_insert(raw);
+			let floors = &kept.floors;
+			kept.items
 				.retain(|claim, _| floors.keys().any(|region| within(claim, region)));
+			// What it drops lay outside every floor, so nothing it differed in.
+			heard.ended = true;
 		}
 		self.update([id]);
 	}
@@ -764,35 +821,58 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		let scope = peer.link.scope.as_ref().map(|scope| scope.regions.clone());
 		let region = peer.asked.clone().unwrap_or_else(|| self.watch.clone());
 		let floors = floor.map(|rev| BTreeMap::from([(region, rev)])).unwrap_or_default();
-		let heard = self.heard.entry((id, from)).or_insert_with(|| Heard {
-			raw: View::default(),
-			view: View::default(),
-			interest,
-		});
+		let heard = self.heard.entry((id, from)).or_insert_with(|| Heard::new(interest));
 		// What the batch can change in this node's view: the claims it names, and
 		// the claims a scope presents at its regions. A new stream, or certified
 		// regions that moved, can change any claim.
 		let mut all = heard.interest != interest;
-		// A new stream starts from an empty view.
-		if heard.interest != interest {
+		// A new stream, or a restarted route, starts from an empty view.
+		let fresh = heard.interest != interest || heard.ended;
+		if fresh {
 			heard.raw = View::default();
 			heard.interest = interest;
+			heard.ended = false;
 		}
 		let mut dirty: Vec<Path> = changes.iter().map(|(claim, _)| claim.clone()).collect();
+		let regions = heard.view().floors.keys().cloned().collect::<Vec<_>>();
 		heard.raw.apply(changes, floors);
-		let regions = heard.view.floors.keys().cloned().collect::<Vec<_>>();
-		heard.view = match &scope {
-			Some(regions) => {
-				dirty.extend(regions.iter().cloned());
-				heard.raw.present_all(regions)
+		match &scope {
+			Some(scope) => {
+				dirty.extend(scope.iter().cloned());
+				let Heard { raw, kept, .. } = heard;
+				let view = match fresh {
+					true => kept.insert(View::default()),
+					false => kept.get_or_insert_default(),
+				};
+				match fresh {
+					true => view.represent(raw, scope, raw.items.keys()),
+					false => view.represent(raw, scope, &dirty),
+				}
 			}
-			None => heard.raw.clone(),
-		};
-		all |= !heard.view.floors.keys().eq(regions.iter());
-		let view = heard.view.clone();
+			None => heard.kept = None,
+		}
+		#[cfg(test)]
+		if let Some(scope) = &scope {
+			assert_eq!(*heard.view(), heard.raw.present_all(scope), "incremental scoped view");
+		}
+		let moved = !heard.view().floors.keys().eq(regions.iter());
+		all |= moved;
+		// This node's own identities merge nothing, so they track no differences.
+		if !self.origins.contains_key(&id) {
+			let merged = self.views.get(&id);
+			match fresh || moved {
+				true => heard.resync(merged),
+				false => {
+					for claim in &dirty {
+						heard.compare(merged, claim);
+					}
+				}
+			}
+		}
+		let certifies: Vec<Path> = heard.view().floors.keys().cloned().collect();
 
 		// The batch certifies the regions its floors name.
-		for region in view.floors.keys() {
+		for region in &certifies {
 			let Some(regions) = self.current.get_mut(&id) else {
 				break;
 			};
@@ -806,17 +886,40 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		}
 		if !self.origins.contains_key(&id) {
 			let merged = self.views.entry(id).or_default();
+			let heard = &self.heard[&(id, from)];
 			let regions = merged.floors.keys().cloned().collect::<Vec<_>>();
-			dirty.extend(merged.merge(&view));
+			#[cfg(test)]
+			let full = {
+				let mut full = merged.clone();
+				full.merge(heard.view());
+				full
+			};
+			let changed = merged.merge_claims(heard.view(), &heard.differs);
+			#[cfg(test)]
+			assert_eq!(*merged, full, "incremental merge");
 			all |= !merged.floors.keys().eq(regions.iter());
-			// The batch certifies the interest, so what lies outside can go.
-			let kept = merged.retire(&self.watch);
-			if kept != *merged {
+			// The batch certifies the interest, so what lies outside can go. While every
+			// floor lies within the interest, nothing does.
+			let outside = !merged.floors.keys().all(|region| within(region, &self.watch));
+			#[cfg(test)]
+			if !outside {
+				assert_eq!(merged.retire(&self.watch), *merged, "nothing to retire");
+			}
+			let retired = outside && {
+				let kept = merged.retire(&self.watch);
+				let retired = kept != *merged;
 				*merged = kept;
+				retired
+			};
+			if retired {
 				all = true;
 				let watch = [self.watch.clone()];
 				self.forgot_outside(id, &watch);
+				self.resync(id);
+			} else {
+				self.compare(id, &changed);
 			}
+			dirty.extend(changed);
 		}
 		match all {
 			true => self.mark_all(id),
@@ -929,18 +1032,21 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		best.map(|(_, selected)| selected)
 	}
 
-	/// Every usable feasible route to `id` through a neighbor that can carry
-	/// `claim`, with this node's metric through each. Any of them forwards without a
-	/// loop.
-	pub fn routes(&self, id: Id, claim: &Path) -> Vec<(N, Metric)> {
+	/// Every usable feasible route to `id`, with this node's metric through each. Any
+	/// of them forwards without a loop, if it [carries](Self::carries) the claim.
+	pub fn routes(&self, id: Id) -> Vec<(N, Metric)> {
 		if self.origins.contains_key(&id) {
 			return Vec::new();
 		}
 		(self.rx.get(&id).into_iter().flatten())
 			.filter(|(_, entry)| !entry.held && self.feasible(id, entry.advert))
-			.filter(|(next, _)| self.neighbors[*next].carries(claim))
 			.filter_map(|(&next, entry)| Some((next, add(entry.advert.metric, self.neighbors[&next].link.cost)?)))
 			.collect()
+	}
+
+	/// Whether a request for a claim at `claim` may go through `next`.
+	pub fn carries(&self, next: N, claim: &Path) -> bool {
+		self.neighbors.get(&next).is_some_and(|peer| peer.carries(claim))
 	}
 
 	#[cfg(test)]
@@ -1144,7 +1250,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 				.get(&(id, next))
 				.filter(|heard| heard.interest == self.interest)?;
 			if held || !routes[&next].held {
-				regions.extend(heard.view.floors.keys().cloned());
+				regions.extend(heard.view().floors.keys().cloned());
 			}
 		}
 		Some(regions)
@@ -1182,13 +1288,33 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		} else {
 			let mut rebuilt = View::default();
 			for next in self.certifiers(id) {
-				rebuilt.merge(&self.heard[&(id, next)].view);
+				rebuilt.merge(self.heard[&(id, next)].view());
 			}
 			(rebuilt, Vec::new())
 		};
 		self.views.insert(id, rebuilt);
+		self.resync(id);
 		self.forgot_outside(id, &remembered);
 		self.mark_all(id);
+	}
+
+	/// Compare `claims` of every view heard for `id` against the merged view, once
+	/// they changed there.
+	fn compare(&mut self, id: Id, claims: &[Path]) {
+		let merged = self.views.get(&id);
+		for (_, heard) in self.heard.range_mut((id, N::MIN)..=(id, N::MAX)) {
+			for claim in claims {
+				heard.compare(merged, claim);
+			}
+		}
+	}
+
+	/// Compare every view heard for `id` against the merged view, once it was replaced.
+	fn resync(&mut self, id: Id) {
+		let merged = self.views.get(&id);
+		for (_, heard) in self.heard.range_mut((id, N::MIN)..=(id, N::MAX)) {
+			heard.resync(merged);
+		}
 	}
 
 	/// Count a forget against each shown claim of `id` overlapping none of `kept`.
@@ -1244,7 +1370,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 				.get(&(id, next))
 				.filter(|heard| heard.interest == self.interest)
 				.into_iter()
-				.flat_map(|heard| heard.view.uncertified())
+				.flat_map(|heard| heard.view().uncertified())
 				.filter(move |(claim, _)| merged.is_none_or(|merged| merged.as_of(claim).is_none()))
 				.map(move |(claim, item)| (claim, item, held))
 		})
@@ -1313,7 +1439,9 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		{
 			self.touched += ids.len();
 		}
-		self.changed.extend(&ids);
+		for &id in &ids {
+			self.changed.entry(id).or_default();
+		}
 		for id in ids {
 			self.prune(id);
 			self.record(id, &peers);
@@ -1397,7 +1525,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			if !answers {
 				continue;
 			}
-			let view = &self.heard[&(id, next)].view;
+			let view = self.heard[&(id, next)].view();
 			if let Some(item) = view.items.get(claim)
 				&& view.as_of(claim).is_none()
 			{
@@ -1431,7 +1559,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			.iter()
 			.filter(|&&(_, _, answers)| answers)
 			.any(|&(next, _, _)| {
-				let view = &self.heard[&(id, next)].view;
+				let view = self.heard[&(id, next)].view();
 				// A floor over the whole interest certifies everything below it.
 				!view.floors.keys().any(|region| within(watch, region))
 					&& below(&view.items, watch).any(|(claim, _)| {
@@ -1741,10 +1869,16 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		for (claim, kind, item) in events {
 			self.log(id, &claim, kind, &item);
 		}
+		let changed = self.changed.entry(id).or_default();
 		for (claim, now) in now {
+			let key = (id, claim);
+			if self.shown.get(&key) == now.as_ref() {
+				continue;
+			}
+			changed.insert(key.1.clone());
 			match now {
-				Some(now) => self.shown.insert((id, claim), now),
-				None => self.shown.remove(&(id, claim)),
+				Some(now) => self.shown.insert(key, now),
+				None => self.shown.remove(&key),
 			};
 		}
 	}

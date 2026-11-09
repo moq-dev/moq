@@ -22,8 +22,8 @@ and incarnation that shares it. Two instances are two independent streams,
 never stitched together. An instance names a run, not who publishes it: it is
 no credential, and auth decides who may publish the path.
 
-- **A new stream takes a new instance.** Every broadcast generates a random
-  one when it is created and keeps it while it is withdrawn and announced again or
+- **A new stream takes a new instance.** A broadcast that names no instance
+  generates a random one when it is created and keeps it while it is withdrawn and announced again or
   reconnects, since its numbering continues. A restarted process, or anything
   that starts its group numbers over, is a new broadcast with a new instance.
   Replaying a recording is a new stream too: [`moq import archive`](/bin/cli#archive)

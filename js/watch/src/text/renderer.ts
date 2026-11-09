@@ -1,4 +1,4 @@
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { Error as NetError } from "@moq/net";
@@ -9,11 +9,11 @@ import type { Sync, Track } from "../sync";
 import type { Source } from "./source";
 
 // Drop cues whose end is more than this far behind the playhead, to bound memory on a long stream.
-const PRUNE_BEHIND = Milli(30_000);
+const PRUNE_BEHIND = Duration.millis(30_000);
 
 // The longest a cue shows. A `utf8` roll-up cue lingers this long when no later cue supersedes it,
 // and a longer declared end is clamped to it, so every cue eventually falls behind the prune horizon.
-const MAX_CUE = Milli(30_000);
+const MAX_CUE = Duration.millis(30_000);
 
 /**
  * The most cues, and separately clear marks, one track retains, evicting the earliest start first.
@@ -28,7 +28,7 @@ export const MAX_RETAINED = 1024;
 
 // How far a VTT payload's own timing may sit from its frame timestamp before we call it a bug.
 // Generous: this is catching a wrong clock, not measuring drift.
-const SKEW_TOLERANCE = Milli(1_000);
+const SKEW_TOLERANCE = Duration.millis(1_000);
 
 /**
  * The cue state for one selected track, accumulated as groups arrive.
@@ -98,7 +98,7 @@ function merge<T>(stored: T[], incoming: T[], key: (value: T) => number): T[] {
  * @internal
  */
 export function insertCues(store: CueStore, cues: VTTCue[]): void {
-	for (const cue of cues) cue.endTime = Math.min(cue.endTime, cue.startTime + MAX_CUE / 1000);
+	for (const cue of cues) cue.endTime = Math.min(cue.endTime, cue.startTime + MAX_CUE.asSecs());
 	store.cues = merge(store.cues, cues, (cue) => cue.startTime);
 }
 
@@ -247,7 +247,7 @@ export class Renderer {
 			// Captions with nowhere to render hold nothing.
 			if (!effect.get(this.in.enabled) || !effect.get(this.in.container)) return undefined;
 			const delay = effect.get(this.source.out.config)?.delay;
-			return delay !== undefined ? Milli(delay) : undefined;
+			return delay !== undefined ? Duration.millis(delay) : undefined;
 		});
 		this.#clock = this.sync.track({ target });
 		this.#signals.cleanup(() => this.#clock.close());
@@ -325,9 +325,9 @@ export class Renderer {
 			const tick = () => {
 				const now = this.sync.now();
 				if (now !== undefined) {
-					renderer.currentTime = now / 1000;
+					renderer.currentTime = now.asSecs();
 
-					if (pruneCues(store, (now - PRUNE_BEHIND) / 1000)) commit();
+					if (pruneCues(store, now.asSecs() - PRUNE_BEHIND.asSecs())) commit();
 				}
 				effect.animate(tick);
 			};
@@ -371,7 +371,7 @@ export class Renderer {
 	async #ingest(format: string, sample: Container.Frame, store: CueStore): Promise<void> {
 		const { VTTCue, parseText } = await import("./captions");
 		const text = new TextDecoder().decode(sample.payload);
-		const start = (sample.timestamp as number) / 1e6;
+		const start = sample.timestamp.asSecs();
 
 		if (format === "utf8") {
 			// An empty payload clears the caption (per the hang draft) rather than showing nothing,
@@ -381,7 +381,7 @@ export class Renderer {
 				return;
 			}
 
-			const cue = new VTTCue(start, start + MAX_CUE / 1000, sanitizeCue(text));
+			const cue = new VTTCue(start, start + MAX_CUE.asSecs(), sanitizeCue(text));
 			insertCues(store, [cue]);
 			rollUp(store, cue);
 			return;
@@ -402,7 +402,7 @@ export class Renderer {
 		// timestamp. A publisher emitting segment-relative times (the usual WebVTT-in-fMP4 habit)
 		// would otherwise place every cue silently wrong, so say so once rather than never.
 		const first = parsed.cues.at(0);
-		if (!this.#skewWarned && first && Math.abs(first.startTime - start) > SKEW_TOLERANCE / 1000) {
+		if (!this.#skewWarned && first && Math.abs(first.startTime - start) > SKEW_TOLERANCE.asSecs()) {
 			this.#skewWarned = true;
 			console.warn(
 				`captions: cue timing is ${(first.startTime - start).toFixed(3)}s off its frame timestamp; ` +

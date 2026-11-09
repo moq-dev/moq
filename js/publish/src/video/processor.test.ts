@@ -1,5 +1,5 @@
 import { expect, mock, test } from "bun:test";
-import { Nano, now, origin } from "@moq/clock";
+import { Instant, now, origin } from "@moq/clock";
 import type { FromWorker, ToWorker } from "./capture-worker.ts";
 
 // Whether the fake worker claims a native MediaStreamTrackProcessor, how much its source clock
@@ -26,7 +26,7 @@ class FakeWorker {
 
 	#timestamp = 5_000_000; // the camera's own epoch, which the rewrite has to erase
 	#frames = 0;
-	#at = Nano.toMilli(Nano(now())); // frozen, so arrivals only move by arrivalStep
+	#at = now().since(Instant.ZERO).asMillis(); // frozen, so arrivals only move by arrivalStep
 
 	constructor() {
 		spawned.push(this);
@@ -44,7 +44,7 @@ class FakeWorker {
 		this.#emit({
 			type: "frame",
 			frame: new FakeVideoFrame(this.#timestamp) as unknown as VideoFrame,
-			at: origin() + this.#at + this.#frames * arrivalStep,
+			at: origin().asUnixMillis() + this.#at + this.#frames * arrivalStep,
 		});
 		this.#timestamp += advance;
 		this.#frames += 1;
@@ -104,7 +104,7 @@ test("captures through the worker, transferring a clone", async () => {
 	spawned.length = 0;
 
 	// Bracket the whole call, which spawns the worker.
-	const before = Nano.toMicro(Nano(now()));
+	const before = now().since(Instant.ZERO).asMicros();
 
 	const track = new FakeTrack();
 	const stream = TrackProcessor(track as unknown as Parameters<typeof TrackProcessor>[0]);
@@ -115,7 +115,7 @@ test("captures through the worker, transferring a clone", async () => {
 
 	const first = await reader.read();
 	const second = await reader.read();
-	const after = Nano.toMicro(Nano(now()));
+	const after = now().since(Instant.ZERO).asMicros();
 	for (let i = 0; i < 20; i++) await Promise.resolve();
 	expect(spawned[0].pulls).toBe(2);
 

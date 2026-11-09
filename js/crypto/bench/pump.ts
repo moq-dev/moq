@@ -1,6 +1,6 @@
 // Sweep protected frame size x writes in flight through the serial pump, then open every frame.
 // Bun's WebCrypto stands in for the browser's, so compare runs on the same runtime.
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Broadcast, Time } from "@moq/net";
 import { Credential } from "../src/e2ee/index.ts";
 
@@ -29,7 +29,7 @@ for (const bytes of [160, 1_160, 16_384, 262_144]) {
 			});
 			const consumer = credential
 				.consume(generation.epoch)
-				.consume(net.subscribe({ delay: { max: Milli(60_000) } }), "video");
+				.consume(net.subscribe({ delay: { max: Duration.millis(60_000) } }), "video");
 			const producer = await generation.produce(net, "video");
 
 			const sealStart = performance.now();

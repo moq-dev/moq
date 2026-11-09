@@ -1143,30 +1143,72 @@ pub enum moq_connection_phase {
 	MOQ_CONNECTION_PHASE_CLOSED = 4,
 }
 
+/// The data of a phase with no live connection: [moq_connection_phase_data]'s `connecting`,
+/// `disconnected`, and `closed`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct moq_connection_offline {
+	/// Zero, or the negative code of the latest failed dial, dropped connection, or terminal
+	/// error, which [moq_error] and [moq_error_protocol] describe during the callback. A
+	/// terminal zero is a clean close.
+	pub failure: i32,
+}
+
+/// The data of `MOQ_CONNECTION_PHASE_CONNECTED`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct moq_connection_connected {
+	/// The live connection's negotiated draft name, backed by static storage.
+	pub version: moq_string,
+}
+
+/// The data of `MOQ_CONNECTION_PHASE_MIGRATING`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct moq_connection_migrating {
+	/// The serving connection's negotiated draft name, backed by static storage.
+	pub version: moq_string,
+	/// Zero, or the negative code of the replacement's latest failed dial, which [moq_error]
+	/// and [moq_error_protocol] describe during the callback.
+	pub failure: i32,
+}
+
+/// A [moq_connection_state]'s phase data: read only the member its `phase` names.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union moq_connection_phase_data {
+	/// Set by `MOQ_CONNECTION_PHASE_CONNECTING`.
+	pub connecting: moq_connection_offline,
+	/// Set by `MOQ_CONNECTION_PHASE_CONNECTED`.
+	pub connected: moq_connection_connected,
+	/// Set by `MOQ_CONNECTION_PHASE_DISCONNECTED`.
+	pub disconnected: moq_connection_offline,
+	/// Set by `MOQ_CONNECTION_PHASE_MIGRATING`.
+	pub migrating: moq_connection_migrating,
+	/// Set by `MOQ_CONNECTION_PHASE_CLOSED`.
+	pub closed: moq_connection_offline,
+}
+
 /// One coherent snapshot of a session's lifecycle, delivered to its `moq_state_callback`.
 ///
-/// The struct and its `protocol` are valid only during the callback, so copy what you keep.
+/// The struct is valid only during the callback, so copy what you keep.
 #[repr(C)]
 pub struct moq_connection_state {
-	/// The lifecycle phase.
+	/// The lifecycle phase, which names the `data` member to read.
 	pub phase: moq_connection_phase,
 	/// How many connections have been established, including reconnects.
 	pub connects: u64,
-	/// Zero, or the negative code of the latest failed dial, dropped connection, or terminal
-	/// error, which [moq_error] and [moq_error_protocol] describe during the callback. A
-	/// connect clears it; a terminal zero is a clean close.
-	pub failure: i32,
-	/// The live connection's negotiated draft name, or empty while none is serving.
-	pub protocol: moq_string,
+	/// The phase's own data.
+	pub data: moq_connection_phase_data,
 }
 
-/// Statistics and protocol sampled from the same connection by [moq_session_snapshot].
+/// Statistics and version sampled from the same connection by [moq_session_snapshot].
 #[repr(C)]
 pub struct moq_connection_snapshot {
 	/// Transport statistics, with per-metric availability flags.
 	pub stats: moq_connection_stats,
 	/// Negotiated draft name, backed by static storage valid for the process lifetime.
-	pub protocol: moq_string,
+	pub version: moq_string,
 }
 
 /// A snapshot of connection statistics, filled in by [moq_session_stats].
@@ -1592,7 +1634,7 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		let config = crate::client::Config::default();
 
 		let connect = config.connect.resolve();
-		dst.connect_timeout_us = micros(connect.timeout);
+		dst.connect_timeout_us = micros(connect.timeout.unwrap_or_default());
 		dst.has_connect_timeout = true;
 		dst.failover_delay_us = micros(connect.race);
 		dst.has_failover_delay = true;
@@ -1609,15 +1651,15 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		dst.has_backoff_initial = true;
 		dst.backoff_multiplier = config.connect.backoff.multiplier;
 		dst.has_backoff_multiplier = true;
-		dst.backoff_max_us = micros(config.connect.backoff.max());
+		dst.backoff_max_us = micros(config.connect.backoff.max().unwrap_or_default());
 		dst.has_backoff_max = true;
-		dst.backoff_timeout_us = micros(config.connect.backoff.timeout());
+		dst.backoff_timeout_us = micros(config.connect.backoff.timeout().unwrap_or_default());
 		dst.has_backoff_timeout = true;
 
 		let quic = config.quic.resolve();
 		dst.quic_max_streams = quic.max_streams;
 		dst.has_quic_max_streams = true;
-		dst.quic_idle_timeout_us = micros(quic.idle_timeout);
+		dst.quic_idle_timeout_us = micros(quic.idle_timeout.unwrap_or_default());
 		dst.has_quic_idle_timeout = true;
 		if let Some(keep_alive) = quic.keep_alive {
 			dst.quic_keep_alive_us = micros(keep_alive);
@@ -1696,10 +1738,10 @@ unsafe fn connect_session(
 /// since the origins outlive the underlying connection.
 ///
 /// `on_state` receives a [moq_connection_state] whenever the lifecycle changes: each
-/// connect, drop, migration, and failed dial, carrying the phase, the connect count, and
-/// why the latest attempt failed. Changes that land together arrive as one snapshot.
+/// connect, drop, migration, and failed dial, carrying the phase with its data and the
+/// connect count. Changes that land together arrive as one snapshot.
 ///
-/// The last call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after
+/// The last call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `data.closed.failure` zero after
 /// [moq_session_close] or the negative code that made reconnecting give up. By then the
 /// session handle is already released, and `on_state` and `user_data` are never touched
 /// again, so that terminal snapshot is the point to release `user_data`. It fires even
@@ -1774,10 +1816,10 @@ pub unsafe extern "C" fn moq_session_stats(session: u32, dst: *mut moq_connectio
 	})
 }
 
-/// Snapshot statistics and the negotiated protocol from the same live connection.
+/// Snapshot statistics and the negotiated version from the same live connection.
 ///
 /// Returns zero on success, or a negative code when the handle is unknown or offline
-/// between reconnects. On failure, `dst` is untouched. The protocol string points at
+/// between reconnects. On failure, `dst` is untouched. The version string points at
 /// static storage valid for the process lifetime and must not be freed.
 ///
 /// # Safety
@@ -1791,7 +1833,7 @@ pub unsafe extern "C" fn moq_session_snapshot(session: u32, dst: *mut moq_connec
 		let name = version.as_str();
 		*dst = moq_connection_snapshot {
 			stats: moq_connection_stats::from(&stats),
-			protocol: moq_string {
+			version: moq_string {
 				data: name.as_ptr().cast::<c_char>(),
 				len: name.len(),
 			},
@@ -2070,7 +2112,7 @@ pub unsafe extern "C" fn moq_session_request_peer_implementation(request: u32, d
 ///
 /// `on_state` reports the lifecycle like [moq_session_connect]'s: one connected snapshot
 /// once the handshake completes, since an accepted session is a single connection that
-/// never reconnects, then the terminal closed snapshot. Its `failure` is zero only after
+/// never reconnects, then the terminal closed snapshot. Its `data.closed.failure` is zero only after
 /// [moq_session_close], and otherwise the negative code of a failed handshake or the
 /// peer's close; read [moq_error_protocol] during the callback for the peer's close code.
 ///

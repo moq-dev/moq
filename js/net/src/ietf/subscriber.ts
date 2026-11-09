@@ -1,4 +1,4 @@
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -1091,7 +1091,7 @@ export class Subscriber {
 				timescale: ok.properties.timescale,
 				priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 				// No MAX_CACHE_DURATION sets no publisher limit, not the authored default.
-				maxAge: cache === undefined ? null : Milli(Number(cache)),
+				maxAge: cache === undefined ? null : Duration.millis(Number(cache)),
 				ietf: this.#session.version,
 			});
 			producer = staged.producer;
@@ -1626,7 +1626,7 @@ export class Subscriber {
 					timescale: ok.properties.timescale,
 					priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 					// No MAX_CACHE_DURATION sets no publisher limit, not the authored default.
-					maxAge: maxCacheDuration === undefined ? null : Milli(Number(maxCacheDuration)),
+					maxAge: maxCacheDuration === undefined ? null : Duration.millis(Number(maxCacheDuration)),
 					// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
 					ietf: version,
 				});

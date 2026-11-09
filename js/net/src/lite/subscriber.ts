@@ -1,4 +1,4 @@
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -1695,7 +1695,7 @@ export class Subscriber {
 			timescale: info.timescale ?? null,
 			// Publisher Max Age rides on the wire, so the local media-time budget
 			// matches what the upstream advertises (relays re-serve with the same bound).
-			maxAge: info.maxAge === undefined ? null : Milli(info.maxAge),
+			maxAge: info.maxAge === undefined ? null : Duration.millis(info.maxAge),
 			priority: info.priority,
 			refresh: info.refresh ?? null,
 			compression: info.compress ? "deflate" : "none",
@@ -1749,7 +1749,7 @@ export class Subscriber {
 		// budgets still coalesce and each caller keeps an independent mirror.
 		// A minted instance is an object, which JSON prints as {}, so key on its text and flag.
 		const pin = instance === undefined ? null : [Instance.text(instance), Instance.isMinted(instance)];
-		const key = JSON.stringify([consumed.id, broadcast, pin, track, String(sequence), options.maxDelay]);
+		const key = JSON.stringify([consumed.id, broadcast, pin, track, String(sequence), options.maxDelay?.asNanos()]);
 		let entry = this.#fetches.get(key);
 		let consumer: netGroup.Consumer;
 		if (entry && !entry.group.isClosed) {
@@ -1794,7 +1794,7 @@ export class Subscriber {
 		sequence: bigint,
 		priority: number,
 		group: netGroup.Producer,
-		maxDelay?: Milli,
+		maxDelay?: Duration,
 	): Promise<void> {
 		const refused = unauthorized(broadcast);
 		try {
@@ -1855,7 +1855,7 @@ export class Subscriber {
 		priority: number,
 		group: netGroup.Producer,
 		deadline: Deadline,
-		maxDelay?: Milli,
+		maxDelay?: Duration,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
 		const { instance, valid } = consumed;
 		const cancel = new AbortController();
@@ -1878,7 +1878,10 @@ export class Subscriber {
 						instance,
 						track,
 						priority,
-						maxDelay: hasFetchMaxDelay(this.version) ? maxDelay : undefined,
+						maxDelay:
+							hasFetchMaxDelay(this.version) && maxDelay !== undefined
+								? Math.ceil(maxDelay.asMillis())
+								: undefined,
 						group: sequence,
 					}).encode(stream.writer, this.version);
 					// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
@@ -2029,7 +2032,10 @@ export class Subscriber {
 		for (;;) {
 			const priority = fill.priority;
 			// Lite-07 FETCH carries the budget; older ones leave it to the publisher's max age.
-			const maxDelay = hasFetchMaxDelay(this.version) ? (fill.maxDelay ?? undefined) : undefined;
+			const budget = fill.maxDelay;
+			// Rounded up, since a budget shortened by rounding skips a group a reader still wants.
+			const maxDelay =
+				hasFetchMaxDelay(this.version) && budget !== null ? Math.ceil(budget.asMillis()) : undefined;
 			try {
 				// Wait for the grant as a subscribe or fetch does; nobody waiting ends the wait.
 				while (
@@ -2065,7 +2071,8 @@ export class Subscriber {
 				);
 			} catch (err) {
 				if (cancel.aborted || !fill.isWanted(sequence)) return undefined;
-				if (maxDelay !== undefined && (fill.maxDelay ?? Number.POSITIVE_INFINITY) > maxDelay) continue;
+				if (maxDelay !== undefined && (fill.maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY) > maxDelay)
+					continue;
 				fill.refuseGroups(sequence, sequence + 1n, error(err));
 				return undefined;
 			}
@@ -2300,7 +2307,10 @@ export class Subscriber {
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
 			order: msg.order,
-			delay: { max: Milli(msg.maxDelay), min: msg.minDelay === undefined ? null : Milli(msg.minDelay) },
+			delay: {
+				max: Duration.millis(msg.maxDelay),
+				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
+			},
 			ranges: entry.asked,
 		};
 
@@ -2720,7 +2730,7 @@ export class Subscriber {
 				if (!probe) break;
 				// Lite-03 carries no RTT; newer drafts retract it with a zero.
 				const prev = this.#probe.peek();
-				const rtt = probe.rtt !== undefined ? Milli(probe.rtt) : undefined;
+				const rtt = probe.rtt !== undefined ? Duration.millis(probe.rtt) : undefined;
 				this.#probe.set({
 					// `undefined` is the peer reporting "unknown"; a 0 would become a real ABR target.
 					estimatedRecvRate: probe.bitrate,

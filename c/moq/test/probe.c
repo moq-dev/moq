@@ -564,14 +564,15 @@ int main(void)
 	moq_session *redialing = await(&dialing, "retrying connect");
 	moq_task_free(task);
 	moq_connection_state *state = moq_session_state(redialing);
-	while (!state->failure) {
+	CHECK(state->phase.tag == MOQ_CONNECTION_PHASE_CONNECTING);
+	while (!state->phase.connecting.failure) {
 		state = next_state(redialing, state);
+		CHECK(state->phase.tag == MOQ_CONNECTION_PHASE_CONNECTING);
 	}
-	CHECK(state->phase == MOQ_CONNECTION_PHASE_CONNECTING);
-	CHECK(state->failure->tag == MOQ_ERROR_CONNECT);
+	CHECK(state->phase.connecting.failure->tag == MOQ_ERROR_CONNECT);
 	CHECK(state->connects == 0);
 	moq_session_cancel(redialing, 0);
-	while (state->phase != MOQ_CONNECTION_PHASE_CLOSED) {
+	while (state->phase.tag != MOQ_CONNECTION_PHASE_CLOSED) {
 		state = next_state(redialing, state);
 	}
 	CHECK(state->connects == 0);

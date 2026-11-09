@@ -220,8 +220,23 @@ typedef GrantConsumer = MoqGrantConsumer;
 /// What the peer lets this side do: publish and subscribe patterns, and an expiry.
 typedef Grant = MoqGrant;
 
-/// A connection lifecycle transition reported by [Session.state].
+/// Where a connection is in its lifecycle, carrying that phase's failure or version.
 typedef ConnectionPhase = MoqConnectionPhase;
+
+/// No session has connected yet; carries the latest failed dial.
+typedef ConnectionPhaseConnecting = ConnectingMoqConnectionPhase;
+
+/// A session is serving; carries its negotiated version.
+typedef ConnectionPhaseConnected = ConnectedMoqConnectionPhase;
+
+/// No session is serving while the connection redials; carries why.
+typedef ConnectionPhaseDisconnected = DisconnectedMoqConnectionPhase;
+
+/// The old session serves while its replacement dials; carries its version and the replacement's failure.
+typedef ConnectionPhaseMigrating = MigratingMoqConnectionPhase;
+
+/// The connection has stopped for good; carries the terminal error, if any.
+typedef ConnectionPhaseClosed = ClosedMoqConnectionPhase;
 
 /// One coherent connection lifecycle snapshot.
 typedef ConnectionState = MoqConnectionState;

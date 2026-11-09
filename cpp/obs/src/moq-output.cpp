@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -56,6 +57,19 @@ MoQError::Code FailureCode(const moq::Error &error)
 			return MoQError::Code::Unauthorized;
 	}
 	return MoQError::Code::Other;
+}
+
+// The failure a connection phase carries, or null when it carries none.
+const moq::Error *PhaseFailure(const moq::ConnectionPhase &phase)
+{
+	return std::visit(
+		[](const auto &data) -> const moq::Error * {
+			if constexpr (std::is_same_v<std::decay_t<decltype(data)>, moq::ConnectionPhase::kConnected>)
+				return nullptr;
+			else
+				return data.failure ? &*data.failure : nullptr;
+		},
+		phase.get_variant());
 }
 
 // Retune `encoder` to `bitrate_bps`, the way OBS's own RTMP dynamic bitrate does.
@@ -285,8 +299,9 @@ void MoQOutput::OnState(const std::shared_ptr<Attempt> &current, moq::expected<m
 	}
 	const auto &state = *result;
 	current->revision = state.revision;
-	current->live = state.phase == moq::ConnectionPhase::kConnected ||
-			state.phase == moq::ConnectionPhase::kMigrating;
+	const auto &phase = state.phase.get_variant();
+	current->live = std::holds_alternative<moq::ConnectionPhase::kConnected>(phase) ||
+			std::holds_alternative<moq::ConnectionPhase::kMigrating>(phase);
 	if (state.connects > 0 && !current->connected) {
 		auto elapsed = std::chrono::steady_clock::now() - current->started;
 		auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
@@ -297,9 +312,9 @@ void MoQOutput::OnState(const std::shared_ptr<Attempt> &current, moq::expected<m
 		std::lock_guard<std::mutex> lock(mutex);
 		connected = current->connected;
 		live = current->live;
-		if (state.failure) {
-			last_failure_code = FailureCode(*state.failure);
-			last_failure_reason = state.failure->to_string();
+		if (const auto *failure = PhaseFailure(state.phase)) {
+			last_failure_code = FailureCode(*failure);
+			last_failure_reason = failure->to_string();
 		} else if (current->live) {
 			last_failure_code = MoQError::None;
 			last_failure_reason.clear();
