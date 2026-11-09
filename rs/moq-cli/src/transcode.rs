@@ -11,7 +11,6 @@ use anyhow::Context;
 
 use crate::Net;
 use crate::args::MoqSide;
-use hang::moq_net;
 
 /// Ladder and codec options for the `transcode` verb.
 #[derive(usage_rs::Args, Clone)]
@@ -239,8 +238,8 @@ mod tests {
 		let following = Following {
 			origin: origin.consume(),
 			publish: publish.clone(),
-			source_path: hang::moq_net::Path::from_static("source"),
-			output_path: hang::moq_net::Path::from_static("derived"),
+			source_path: moq_net::Path::from_static("source"),
+			output_path: moq_net::Path::from_static("derived"),
 			config: Default::default(),
 		};
 		let task = tokio::spawn(following.run());
@@ -287,8 +286,8 @@ mod tests {
 		let following = Following {
 			origin: origin.consume(),
 			publish: publish.clone(),
-			source_path: hang::moq_net::Path::from_static("source"),
-			output_path: hang::moq_net::Path::from_static("derived"),
+			source_path: moq_net::Path::from_static("source"),
+			output_path: moq_net::Path::from_static("derived"),
 			config: Default::default(),
 		};
 		let task = tokio::spawn(following.run());

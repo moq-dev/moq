@@ -17,9 +17,9 @@ import {
 	type WebTransportProps,
 } from "./connect.ts";
 import { parse } from "./endpoint.ts";
-import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
+import type { Session } from "./session.ts";
 import { estimates, type Probe } from "./stats.ts";
 import { tick } from "./ticker.ts";
 import { heldOf } from "./tokens.ts";
@@ -212,14 +212,14 @@ export class Reload {
 	readonly error: Getter<Error | undefined>;
 
 	/** The currently established session, or undefined while disconnected. */
-	established = new Signal<Established | undefined>(undefined);
+	established = new Signal<Session | undefined>(undefined);
 
 	/**
 	 * The current connection's PROBE estimates, spanning reconnects.
 	 *
 	 * Undefined while disconnected: the estimates belong to a single connection.
 	 * Observation requests updates; `peek()` alone is passive.
-	 * See {@link Established.probe}.
+	 * See {@link Session.probe}.
 	 */
 	readonly probe: Getter<Probe | undefined>;
 	#probeSource = new Signal<Getter<Probe> | undefined>(undefined);
@@ -327,14 +327,14 @@ export class Reload {
 	#draining: Draining | undefined;
 
 	// Sessions this loop ended that are still draining, each until its close settles.
-	#ending = new Map<Established, Promise<void>>();
+	#ending = new Map<Session, Promise<void>>();
 
 	// The current run of migrations. A redirect back to an endpoint that already sent us away is
 	// a loop, however healthy each session looked. Reset when a session ends without a GOAWAY,
 	// outlives the capped delay, or a new sequence starts.
 	#redirects = new Redirects();
 
-	// Whether a connect attempt is in flight, so a retiring predecessor reports the right status.
+	// Whether a run is dialing: from its start until each connect attempt settles.
 	#dialing = false;
 
 	// The current wait between attempts, doubling per failure, and when the retry window expires.
@@ -529,22 +529,21 @@ export class Reload {
 			this.#givenUpHref = undefined;
 		}
 
-		// A drained predecessor still serves while its replacement dials.
-		if (!this.#draining) this.status.set("connecting");
+		this.#setDialing(true);
 
 		// This run's teardown, handed to connect() so a rerun cancels the attempt in flight.
 		const signal = effect.abort;
 
 		// The session this run serves, ended with the run. A drained one leaves this slot
 		// for #draining, which outlives the run.
-		let current: Established | undefined;
+		let current: Session | undefined;
 		effect.cleanup(() => {
 			if (current) {
 				this.#end(current);
-				if (this.established.peek() === current) this.established.set(undefined);
+				if (this.established.peek() === current) this.#serve(undefined);
 				current = undefined;
 			}
-			if (this.established.peek() === undefined) this.status.set("disconnected");
+			this.#setDialing(false);
 		});
 
 		effect.spawn(async () => {
@@ -561,9 +560,9 @@ export class Reload {
 					// spends it too.
 					this.#deadline ??= this.#window(now());
 
-					this.#dialing = true;
+					this.#setDialing(true);
 					this.#dialedTokens = this.tokens.peek();
-					let connection: Established;
+					let connection: Session;
 					try {
 						connection = await connect({
 							url: dialing,
@@ -579,8 +578,9 @@ export class Reload {
 							viewers: this.viewers,
 							signal,
 						});
-					} finally {
-						this.#dialing = false;
+					} catch (err) {
+						this.#setDialing(false);
+						throw err;
 					}
 
 					// Hand the connection to the effect. One that lands after this run is over never
@@ -592,8 +592,8 @@ export class Reload {
 					current = connection;
 
 					// The replacement serves now; a predecessor keeps draining its groups in flight.
-					this.established.set(connection);
-					this.status.set("connected");
+					this.#serve(connection);
+					this.#setDialing(false);
 					connected = now();
 
 					// A cancelled effect resolves undefined, so the sentinel tells the session
@@ -605,7 +605,7 @@ export class Reload {
 						console.warn(`connection closed, reconnecting: ${ended ? reason(ended) : "no error"}`);
 						this.#redirects.reset();
 						current = undefined;
-						if (this.established.peek() === connection) this.established.set(undefined);
+						if (this.established.peek() === connection) this.#serve(undefined);
 						this.#retry(effect, connected, ended ?? undefined);
 						return;
 					}
@@ -673,7 +673,7 @@ export class Reload {
 	 * to go next and leave the old session serving until it drains. Returns false when the
 	 * redirect is refused, which ends the sequence rather than redialing.
 	 */
-	#migrate(connection: Established, dialing: URL, drain: Drain): boolean {
+	#migrate(connection: Session, dialing: URL, drain: Drain): boolean {
 		const hashes = this.webtransport?.serverCertificateHashes?.length ?? 0;
 		const configured = hashes > 0 || this.webtransport?.serverCertificate !== undefined;
 		// The pin is a WebTransport option. A WebSocket that won the race never used it.
@@ -687,8 +687,7 @@ export class Reload {
 			// would ignore it, so stop here.
 			console.warn("GOAWAY redirect refused:", err);
 			this.#end(connection);
-			this.established.set(undefined);
-			this.status.set("disconnected");
+			this.#serve(undefined);
 			this.#giveUp(error(err));
 			return false;
 		}
@@ -706,9 +705,7 @@ export class Reload {
 		const draining = new Draining(connection, cap, () => {
 			if (this.#draining === draining) this.#draining = undefined;
 			// If nothing replaced it yet, nothing is serving.
-			if (this.established.peek() !== connection) return;
-			this.established.set(undefined);
-			this.status.set(this.#dialing ? "connecting" : "disconnected");
+			if (this.established.peek() === connection) this.#serve(undefined);
 		});
 		this.#draining = draining;
 		return true;
@@ -719,7 +716,7 @@ export class Reload {
 	 * deadline, unless the page is going away: nothing would run to finish them, and an abort
 	 * closes the transport now rather than leaving the browser to sever it.
 	 */
-	#end(connection: Established): void {
+	#end(connection: Session): void {
 		if (this.#suspended.peek()) {
 			connection.abort();
 			return;
@@ -728,6 +725,23 @@ export class Reload {
 		const ending = connection.close().catch(() => {});
 		this.#ending.set(connection, ending);
 		void ending.then(() => this.#ending.delete(connection));
+	}
+
+	/** Serve `connection`, or nothing. */
+	#serve(connection: Session | undefined): void {
+		this.established.set(connection);
+		this.#report();
+	}
+
+	#setDialing(dialing: boolean): void {
+		this.#dialing = dialing;
+		this.#report();
+	}
+
+	// The one derivation of status: serving, else dialing, else neither. A drained predecessor
+	// serves until it retires, so its replacement's dial reads as connected.
+	#report(): void {
+		this.status.set(this.established.peek() ? "connected" : this.#dialing ? "connecting" : "disconnected");
 	}
 
 	/** Stop serving from a drained predecessor, ending it if still open. */
@@ -754,7 +768,6 @@ export class Reload {
 	 * window: the window restarts once the wait is over.
 	 */
 	#restart(effect: Effect): void {
-		if (this.established.peek() === undefined) this.status.set("disconnected");
 		const wait = this.#backoff();
 		const tick = this.#tick.peek() + 1;
 		effect.timer(() => {
@@ -779,10 +792,6 @@ export class Reload {
 	 * `cause` the error that killed it, if it died with one.
 	 */
 	#retry(effect: Effect, connected: Instant | undefined, cause?: unknown): void {
-		// Report disconnected during the backoff rather than when the retry reruns the
-		// effect, unless a drained predecessor still serves until it retires.
-		if (this.established.peek() === undefined) this.status.set("disconnected");
-
 		// A healthy session's end clears the backoff and starts a fresh retry window: a one-off
 		// drop should reconnect promptly. Anything shorter is a peer that accepts and soon
 		// severs, which has to keep escalating or we hammer it forever at the initial delay.
@@ -942,12 +951,12 @@ export function pumpAnnounced(effect: Effect, upstream: Announce.Routes, produce
  * aborted at the window's end if still open.
  */
 class Draining {
-	#connection: Established;
+	#connection: Session;
 	#timer = new AbortController();
 	#onRetire: () => void;
 	#retired = false;
 
-	constructor(connection: Established, handover: Milli, onRetire: () => void) {
+	constructor(connection: Session, handover: Milli, onRetire: () => void) {
 		this.#connection = connection;
 		this.#onRetire = onRetire;
 		void sleep(Nano.fromMilli(handover), { signal: this.#timer.signal }).then(
@@ -964,7 +973,7 @@ class Draining {
 	}
 
 	/** Stop serving from the old session, returning it the first time for the caller to end. */
-	retire(): Established | undefined {
+	retire(): Session | undefined {
 		if (this.#retired) return undefined;
 		this.#retired = true;
 		this.#onRetire();

@@ -6,7 +6,7 @@ import { exchangeSetup } from "../../../../js/net/src/connection/handshake.ts";
 import type * as Ietf from "../../../../js/net/src/ietf/index.ts";
 import { NativeSession } from "../../../../js/net/src/ietf/session.ts";
 import { TrackStatusOk, TrackStatusRequest } from "../../../../js/net/src/ietf/track.ts";
-import Qmux from "../../../../js/qmux/src/index.ts";
+import { Session as Qmux } from "../../../../js/qmux/src/index.ts";
 
 console.debug = console.error;
 console.info = console.error;

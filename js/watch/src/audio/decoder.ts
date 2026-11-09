@@ -15,27 +15,20 @@ import {
 	Signal,
 } from "@moq/signals";
 import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
-import { hostedAssets } from "../assets";
+import { hosted } from "../assets";
 import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
-import { supportCacheKey } from "../support-probe";
 import type { Sync, Track } from "../sync";
 import { AudioBuffer } from "./buffer";
-import {
-	type DecoderConfig,
-	decoderConfigKey,
-	frameDuration,
-	type PlaybackIdentity,
-	packetDuration,
-	playbackIdentity,
-} from "./config";
+import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
 import { Handover } from "./handover";
 import { AUTO_MAX_DELAY, ringHold, target } from "./latency";
 import { Order } from "./order";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
+import { supported } from "./supported";
 import { Terminal } from "./terminal";
 
 type FrameRead = Extract<Container.Read, { kind: "frame" }>;
@@ -98,6 +91,8 @@ export interface Stats {
 	bytesReceived: number;
 	/** How many times playback ran dry mid-stream; a rising count means the delay is too low. */
 	underruns: number;
+	/** How many times playback skipped ahead, dropping buffered audio rather than playing it faster. */
+	skips: number;
 	/** Frames that arrived after their playout time. */
 	late: number;
 	/** Renditions that failed to decode. */
@@ -111,7 +106,7 @@ export interface Stats {
 }
 
 // The running totals before anything is counted.
-const EMPTY: Stats = { bytesReceived: 0, underruns: 0, late: 0, errors: 0, stalls: 0, stalled: Milli.zero };
+const EMPTY: Stats = { bytesReceived: 0, underruns: 0, skips: 0, late: 0, errors: 0, stalls: 0, stalled: Milli.zero };
 
 // What a decode attempt reads, and where its counts go.
 type Attempt = { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid; key: Key };
@@ -371,7 +366,7 @@ export class Decoder {
 			// `context.state`, because `AudioContext.close()` only flips `.state` to "closed" synchronously
 			// on Chrome (Firefox/Safari report "suspended").
 			const loaded = await effect.race(
-				RenderWorklet(hostedAssets()).then(async (url) => {
+				RenderWorklet(hosted.url).then(async (url) => {
 					await context.audioWorklet.addModule(url);
 					return true;
 				}),
@@ -423,6 +418,14 @@ export class Decoder {
 				const phase = this.#phase.peek();
 				const key = phase.kind === "running" ? phase.key : undefined;
 				this.#count(key, { underruns: added }, (stats) => ({ underruns: stats.underruns + added }));
+			});
+			let skipped = 0;
+			effect.run((inner) => {
+				const skips = inner.get(ring.skips);
+				const added = skips - skipped;
+				skipped = skips;
+				if (added <= 0) return;
+				this.#count(undefined, {}, (stats) => ({ skips: stats.skips + added }));
 			});
 
 			effect.set(this.#out.root, worklet);
@@ -576,7 +579,7 @@ export class Decoder {
 		const { consumer, read } = this.#consume(effect, sub, format, { config, path });
 
 		spawnFatal(effect, failure, async () => {
-			const loaded = await Util.Libav.polyfill();
+			const loaded = await Util.Libav.polyfill(hosted.url);
 			if (!loaded) return; // cancelled
 
 			const decoder = new AudioDecoder({
@@ -669,7 +672,7 @@ export class Decoder {
 		const { consumer, read } = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
 
 		spawnFatal(effect, failure, async () => {
-			const loaded = await Util.Libav.polyfill();
+			const loaded = await Util.Libav.polyfill(hosted.url);
 			if (!loaded) return; // cancelled
 
 			const decoder = new AudioDecoder({
@@ -1034,53 +1037,6 @@ export class Decoder {
 	/** Whether the WebCodecs audio decoder can play this config. */
 	static supported = supported;
 }
-
-/** Whether the WebCodecs audio decoder can play this config. */
-async function supported(config: Catalog.AudioConfig): Promise<boolean> {
-	if (!Catalog.containerSupported(config.container)) {
-		// `kind` is the literal "unknown" tag; the container the publisher actually named is in `raw`.
-		const kind = config.container.kind === "unknown" ? config.container.raw.kind : config.container.kind;
-		console.warn(`audio: ignoring rendition with unknown container: ${kind}`);
-		return false;
-	}
-
-	// Opus only runs at its native rates, so a catalog advertising anything else is wrong and Safari
-	// refuses to decode it. Warn rather than reject: Chrome and Firefox ignore the configured rate and
-	// play these streams fine, so rejecting would silence them for a publisher they handle today.
-	if (config.codec === "opus" && !Util.Opus.supportsRate(config.sampleRate)) {
-		console.warn(`audio: opus advertised at ${config.sampleRate}Hz, which some browsers cannot decode`);
-	}
-
-	// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
-	let description: Uint8Array | undefined;
-	if (config.codec !== "opus") {
-		if (config.description) {
-			description = Util.Hex.toBytes(config.description);
-		} else if (config.container.kind === "cmaf") {
-			try {
-				const Cmaf = await import("@moq/hang/cmaf");
-				description = Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
-			} catch (err) {
-				// A malformed init segment means we can't extract the codec
-				// description, so we can't probe support reliably. Reject the
-				// track rather than letting isConfigSupported pass on a
-				// description-less config and then having decode() fail later.
-				console.warn(`audio: malformed CMAF init segment for codec ${config.codec}`, err);
-				return false;
-			}
-		}
-	}
-	// Install the WebCodecs polyfill before probing, since playback would decode through it where
-	// AudioDecoder is missing (Node, Bun, older browsers). Loads nothing where WebCodecs audio is native.
-	await Util.Libav.polyfill();
-	const res = await AudioDecoder.isConfigSupported({
-		...config,
-		description,
-	});
-	return res.supported ?? false;
-}
-
-Object.assign(supported, { [supportCacheKey]: decoderConfigKey });
 
 // Run `task` for one decode attempt. A setup, read, or decode failure that is not the attempt's
 // cancellation fails its source through `failure`, which latches it and tears the attempt down.

@@ -170,24 +170,6 @@ export namespace Connection {
 		readonly timeout?: Milli;
 		readonly uri: string;
 	}
-	export interface Established {
-		abort(): void;
-		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
-		readonly auth: Auth.Handle;
-		close(): Promise<void>;
-		closed: Promise<Error | null>;
-		readonly draining: Signals.GetPromise<Connection.Drain>;
-		readonly peerImplementation: Promise<string | undefined>;
-		readonly probe: Signals.Getter<Connection.Probe>;
-		stats(): Promise<Connection.Stats>;
-		readonly transport: Connection.Transport;
-		readonly url: URL;
-		readonly version: string;
-	}
-	export interface Extensions {
-		auth?: boolean;
-		solicit?: boolean;
-	}
 	export interface Goaway {
 		handover?: Milli;
 		redirect?: Connection.Redirect;
@@ -213,6 +195,20 @@ export namespace Connection {
 		webtransport?: Connection.WebTransportProps;
 	}
 	export type Redirect = "follow" | "same-host" | "ignore";
+	export interface Session {
+		abort(): void;
+		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		readonly auth: Auth.Handle;
+		close(): Promise<void>;
+		closed: Promise<Error | null>;
+		readonly draining: Signals.GetPromise<Connection.Drain>;
+		readonly peerImplementation: Promise<string | undefined>;
+		readonly probe: Signals.Getter<Connection.Probe>;
+		stats(): Promise<Connection.Stats>;
+		readonly transport: Connection.Transport;
+		readonly url: URL;
+		readonly version: string;
+	}
 	export interface Stats {
 		bytesLost?: number;
 		bytesReceived?: number;
@@ -242,7 +238,7 @@ export namespace Connection {
 
 export class Connection {
 	constructor(props?: Connection.Props);
-	static readonly accept: ({ ... }: Connection.AcceptProps) => Promise<Connection.Established>;
+	static readonly accept: ({ ... }: Connection.AcceptProps) => Promise<Connection.Session>;
 	readonly allocator: Signals.Getter<Bandwidth.Handle | undefined>;
 	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 	readonly auth: Signals.Getter<Auth.Handle | undefined>;
@@ -250,7 +246,7 @@ export class Connection {
 	static readonly checkVersions: (versions: readonly string[]) => string[];
 	close(abort?: Error): void;
 	get closed(): Signals.GetPromise<Error | null>;
-	static readonly connect: ({ ... }: Connection.ConnectProps) => Promise<Connection.Established>;
+	static readonly connect: ({ ... }: Connection.ConnectProps) => Promise<Connection.Session>;
 	enabled: Signals.Signal<boolean>;
 	readonly error: Signals.Getter<Error | undefined>;
 	static readonly isWebTransportSupported: () => boolean;
@@ -281,7 +277,7 @@ export namespace Datagram {
 	}
 	export interface Info {
 		priority: number;
-		timescale?: Time.Timescale | null;
+		timescale: Time.Timescale | null;
 	}
 	export class Producer {
 		constructor(name: string);
@@ -395,7 +391,6 @@ export namespace Group {
 		get frameCount(): number;
 		get isClosed(): boolean;
 		nextFrame(): Promise<Frame.Consumer | undefined>;
-		readBool(): Promise<boolean | undefined>;
 		readFrame(): Promise<Group.Frame | undefined>;
 		readFrameSequence(options?: Group.ReadOptions): Promise<{
 			sequence: number;
@@ -516,9 +511,11 @@ export namespace Origin {
 	export interface RouteOptions {
 		auth?: Auth.Credential;
 		cost?: Origin.Cost;
-		epoch?: bigint;
 		hidden?: boolean;
-		instance?: Instance.Valid;
+		instance?: {
+			epoch: bigint;
+			id: Instance.Valid;
+		};
 	}
 	export interface Table extends Origin.Reader {
 		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
@@ -711,7 +708,7 @@ export namespace Track {
 	}
 	export class Fill {
 		[Symbol.dispose](): void;
-		accept(sequence: bigint, info?: Partial<Track.Info>): Group.Producer;
+		accept(sequence: bigint, info?: Track.Info): Group.Producer;
 		close(): void;
 		dropGroups(start: bigint, end: bigint): void;
 		readonly end: bigint;
@@ -730,13 +727,13 @@ export namespace Track {
 		start?: Track.Bound;
 	}
 	export interface Info {
-		compress?: boolean;
-		maxAge?: Milli;
+		compress: boolean;
+		maxAge: Milli | null;
 		priority: number;
-		refresh?: number;
-		timescale?: Time.Timescale | null;
+		refresh: number | null;
+		timescale: Time.Timescale | null;
 	}
-	export interface InfoInit extends Partial<Omit<Track.Info, "maxAge">> {
+	export interface InfoInit extends Partial<Track.Info> {
 		maxAge?: Milli | null;
 	}
 	export interface InfoOptions {
@@ -751,7 +748,6 @@ export namespace Track {
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
 		nextGroup(): Promise<Group.Consumer | undefined>;
-		readBool(): Promise<boolean | undefined>;
 		readFrame(): Promise<{
 			frame: number;
 			group: bigint;
@@ -832,8 +828,6 @@ export namespace Track {
 		priority?: number;
 		ranges?: Track.Range[];
 	}
-	export function infoDefaults(info?: Partial<Track.Info>): Track.Info;
-	export import rescale = Datagram.rescale;
 }
 
 export namespace Varint {

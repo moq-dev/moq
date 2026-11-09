@@ -3,38 +3,17 @@ import { isLocal, parse, sameHost, show } from "./endpoint.ts";
 
 const local = (url: string) => isLocal(parse(new URL(url)));
 
-test("local literals are recognized in every spelling the dial accepts", () => {
-	const spellings = [
-		"https://127.0.0.1/",
-		"https://localhost/",
-		"https://localhost./",
-		"https://a.localhost/",
-		"https://[::1]/",
-		"https://[::]/",
-		"https://10.0.0.1/",
-		"https://172.16.0.1/",
-		"https://192.168.1.1/",
-		"https://169.254.1.1/",
-		"https://0.0.0.0/",
-		"https://[::ffff:10.0.0.1]/",
-		"https://[fe80::1]/",
-		"https://[fc00::1]/",
-		"moqt://127.0.0.1/",
-		"moqt://[::ffff:127.0.0.1]/",
-		// Shorthand, hex, and decimal IPv4, which raw QUIC dials as 127.0.0.1.
-		"moql://127.1/",
-		"moql://0x7f000001/",
-		"moql://2130706433/",
-		"moql://0177.0.0.1/",
-		"moql://LOCALHOST/",
-		"moql://0/",
-	];
-	for (const url of spellings) expect(local(url), url).toBe(true);
+// Replays `rs/moq-net/fixtures/endpoints.json`, which moq-net's `is_local` replays too, so the
+// two classifiers cannot drift.
+const endpoints = (await Bun.file(
+	new URL("../../../../rs/moq-net/fixtures/endpoints.json", import.meta.url),
+).json()) as {
+	url: string;
+	local: boolean;
+}[];
 
-	for (const url of ["https://example.com/", "https://8.8.8.8/", "https://172.32.0.1/", "https://[2606:4700::1]/"]) {
-		expect(local(url), url).toBe(false);
-	}
-	expect(local("moql://8.8.8.8/")).toBe(false);
+test("local literals are recognized in every spelling the dial accepts", () => {
+	for (const { url, local: expected } of endpoints) expect(local(url), url).toBe(expected);
 });
 
 test("a URL with no host is refused, since nothing here dials one", () => {

@@ -14,7 +14,6 @@ use anyhow::{Context, ensure};
 use moq_mux::catalog::Stream;
 use moq_mux::catalog::hang::Container;
 use moq_mux::container::{Frame, Kind};
-use moq_tokio::moq_net;
 use tokio::io::AsyncBufReadExt;
 
 /// One frame: its pts in milliseconds and whether it opens a group.

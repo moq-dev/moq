@@ -3,8 +3,8 @@
 ## Goal
 
 The epics that open claims held in place during the 2026-11-05 milestone
-re-cut sit where the re-cut's rules put them. What remains of drop-set,
-rind, and stream-credit moves from m1 to m2; and the
+re-cut sit where the re-cut's rules put them. What remains of drop-set
+and stream-credit moves from m1 to m2; and the
 probe epic moves from m2 to m3. The "held" notes in the m1, m2, and cut gate
 READMEs are removed, along with each held entry's extra link from m2's or
 the gate's `Required`.

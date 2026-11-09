@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use anyhow::Context;
 use axum::http::Method;
 use futures::FutureExt;
-use hang::moq_net;
 use url::Url;
 
 use crate::moq::{ImportTarget, notify_ready};
@@ -497,9 +496,8 @@ mod test {
 
 	/// An announced import that fails, here on a timestamp reset, aborts its tracks and catalog
 	/// with the cause, so subscribers see the failure rather than a dropped producer.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_failed_import_aborts_its_tracks() {
-		kio::clock::host_time();
 		use moq_mux::container::{Frame, fmp4::Muxer};
 
 		let dir = tempfile::tempdir().unwrap();

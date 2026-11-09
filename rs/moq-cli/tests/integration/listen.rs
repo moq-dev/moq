@@ -3,7 +3,6 @@
 
 use std::{process::Stdio, time::Duration};
 
-use hang::moq_net;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Child;
 
@@ -122,7 +121,7 @@ async fn drains(stage: &str) {
 	let (connection, _origin) = connects(&listening, stage).await;
 	let draining = connection.draining().unwrap();
 	listening.signal();
-	let goaway = kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+	let goaway = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("no GOAWAY after SIGTERM")
 		.expect("CLI closed the session without GOAWAY");
@@ -182,7 +181,7 @@ async fn an_export_stage_ending_during_drain_waits_for_every_session() {
 	let draining = publisher.draining().unwrap();
 	let signalled = kio::clock::now();
 	listening.signal();
-	kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+	kio::clock::timeout(TIMEOUT, kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.unwrap()
 		.unwrap();

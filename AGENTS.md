@@ -37,6 +37,7 @@ The API is the most important thing to get right: a bad shape costs a breaking c
 PRs target `main`, where breaking API changes are allowed.
 `release` is what ships; touch it only to cut a release or backport a fix or benchmark (see `CONTRIBUTING.md`).
 Wire changes stay backwards compatible with *published* drafts/versions; an unpublished `-wip` version changes freely.
+moq.pro rolls out with relays on the newest and previous release side by side, so those two versions must interoperate as relays (today moq-lite-06 and moq-lite-07). A temporary migration for that is fine when it is clearly marked and easy to delete at the next version migration.
 Our libraries prefer moq-lite, so moq-transport compatibility only matters against third-party implementations.
 
 Build output may live outside the checkout and gets wiped, so scratch never goes in `target/`.

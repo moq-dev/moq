@@ -564,7 +564,7 @@ test("a clean end finishes a head nothing claimed", () => {
 	expect(j.open(() => producer)).toBe(producer);
 	producer.writeFrame({ payload: text("c") });
 	j.wrote();
-	j.finish();
+	j.finish(producer);
 	expect(j.outstanding).toBe(true);
 	j.end();
 	expect(producer.closed.peek()).toBeNull();
@@ -670,4 +670,30 @@ test("an evicted joined group is fetched again as standalone history", async () 
 	expect(await frames(group)).toEqual(["h0", "h1", "t2"]);
 	group.close();
 	consumer.close();
+});
+
+test("a second fetch stream after the track ended leaves the first head to its own stream", () => {
+	const j = new Join(0n, new Tail());
+	j.end();
+	const first = new track.Producer("catalog").createGroup(0n);
+	expect(j.open(() => first)).toBe(first);
+	const second = new track.Producer("catalog").createGroup(0n);
+	expect(j.open(() => second)).toBeUndefined();
+	// The second stream, discarding, ends first: the head is still the first stream's.
+	j.finish(undefined);
+	expect(first.closed.peek()).toBeUndefined();
+	first.writeFrame({ payload: text("c") });
+	j.finish(first);
+	expect(first.closed.peek()).toBeNull();
+});
+
+test("a discarding second fetch stream leaves a head being written alone", () => {
+	const j = new Join(0n, new Tail());
+	const first = new track.Producer("catalog").createGroup(0n);
+	expect(j.open(() => first)).toBe(first);
+	expect(j.open(() => new track.Producer("catalog").createGroup(0n))).toBeUndefined();
+	j.fail(new Error("reset"), undefined);
+	expect(first.closed.peek()).toBeUndefined();
+	expect(j.pending).toBe(false);
+	expect(j.outstanding).toBe(true);
 });

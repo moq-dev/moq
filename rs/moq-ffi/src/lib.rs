@@ -35,8 +35,9 @@ uniffi::setup_scaffolding!("moq");
 
 /// Stop the runtime workers before the host runtime goes away.
 ///
-/// Every task is dropped, so a call parked on the runtime resolves `Cancelled` and so does any
-/// later one; the handles stay safe to use and drop. This is for process exit, not a reset.
+/// Every task is dropped, so a call parked on the runtime resolves `Cancelled`, and so does any
+/// later call that needs the runtime or a background task it ran; the handles stay safe to use
+/// and drop. This is for process exit, not a reset.
 ///
 /// It exists because the runtime workers call back into the host to wake an awaiting future,
 /// and CPython (before 3.14) terminates a foreign thread that touches the interpreter once
