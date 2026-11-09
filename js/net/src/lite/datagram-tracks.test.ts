@@ -470,7 +470,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // between finishes the track rather than cutting it off: the publisher already ended it.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	// Quarantined: fails in the merge queue with "Session: remote error: 0" (lite-06 on #8280, lite-05 on
-	// #8276) even after #8321's budget mock. /quest/m0/test-flakes-2/datagram-close-end.md
+	// #8276 after #8321 re-enabled it). /quest/m0/test-flakes-2/datagram-close-end.md
 	test.skip(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
