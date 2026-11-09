@@ -185,6 +185,9 @@ struct Track {
 	/// The most recent refusal, reported when every source has refused, with the Retry
 	/// Interval an upstream refusal asked for.
 	refusal: Option<(Error, Option<Duration>)>,
+	/// Why the serving copy died mid-serve, while its re-splice is asked for. A refusal of
+	/// that re-splice reports this instead: the source closing is what ended the track.
+	lost: Option<Error>,
 	/// Whether anyone reads the track: a copy is only spliced in for a reader.
 	wanted: bool,
 	/// A detached source whose copy still feeds the track until the serving source's
@@ -268,6 +271,12 @@ impl Front {
 		self.serving.map(|(source, _)| source)
 	}
 
+	/// Why `track`'s serving copy died mid-serve, while its re-splice is still asked for.
+	/// A track the front ends meanwhile ends with this rather than the front's end.
+	pub(super) fn lost(&self, track: &str) -> Option<Error> {
+		self.tracks.get(track)?.lost.clone()
+	}
+
 	/// Whether the front is over.
 	#[cfg(test)]
 	fn ended(&self) -> bool {
@@ -307,6 +316,7 @@ impl Front {
 						state: TrackState::Parked { since: now },
 						refused: HashSet::new(),
 						refusal: None,
+						lost: None,
 						wanted: false,
 						ended: false,
 						draining: None,
@@ -523,6 +533,7 @@ impl Front {
 		match verdict {
 			Ok(()) => {
 				track.draining = None;
+				track.lost = None;
 				track.state = TrackState::Spliced { source };
 				actions.push(Action::Splice {
 					track: name.clone(),
@@ -578,6 +589,7 @@ impl Front {
 				if delivered && err.transient() && self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
+				track.lost = Some(err);
 				self.redispatch(name, actions);
 			}
 			// A content verdict survives every copy. Under a minted instance, even a route
@@ -614,7 +626,10 @@ impl Front {
 			return;
 		}
 		track.refused.insert(source);
-		track.refusal = Some(refusal);
+		track.refusal = Some(match track.lost.take() {
+			Some(lost) => (lost, None),
+			None => refusal,
+		});
 		// A source being replaced still serves it: keep reading that copy, and the
 		// refusal stands once it runs out.
 		if let Some(draining) = track.draining {
@@ -1157,6 +1172,35 @@ mod tests {
 			&[Action::Query {
 				track: name("video"),
 				source: 100,
+			}],
+		);
+	}
+
+	/// A source that loses a copy mid-serve and then refuses its re-splice, such as a
+	/// closing socket endpoint, ends the track with the loss, not the refusal.
+	#[test]
+	fn a_refused_resplice_reports_the_loss() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::TrackEnded {
+			track: name("video"),
+			source: 100,
+			closing: false,
+			result: Err(Error::Dropped),
+			delivered: true,
+		});
+		assert!(matches!(front.lost("video"), Some(Error::Dropped)));
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::NotFound),
+				retry: None,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::Dropped,
+				retry: None,
 			}],
 		);
 	}

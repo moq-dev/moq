@@ -4893,8 +4893,9 @@ impl kio::Task for FrontServe {
 							// they read to its end, since no front is left to replace it.
 							self.broadcast.close();
 							let mut in_flight = Vec::new();
-							for (_, mut io) in self.tracks.drain() {
+							for (name, mut io) in self.tracks.drain() {
 								let wanted = io.weak.is_wanted();
+								let err = self.front.lost(&name).unwrap_or_else(|| err.clone());
 								// A reader still waiting on its source's answer is in flight
 								// too: serve it the copy it asked, so it ends as that copy does.
 								let waiting = io.staged.take().or_else(|| io.query.take());
