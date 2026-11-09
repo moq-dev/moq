@@ -2584,7 +2584,9 @@ mod tests {
 		}
 		assert_eq!(revision, 10);
 		let (runs, _) = forgotten.since(9);
-		assert_eq!(runs.collect::<Vec<_>>(), [90..91]);
+		let runs: Vec<_> = runs.collect();
+		assert_eq!(runs.len(), 1);
+		assert_eq!(runs[0], 90..91);
 		assert_eq!(forgotten.since(10).0.count(), 0);
 	}
 
