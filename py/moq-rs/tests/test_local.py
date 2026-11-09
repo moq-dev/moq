@@ -1721,7 +1721,7 @@ def test_video_surface_unknown_kind() -> None:
     from moq._records import _surface
 
     assert _surface(None) is None
-    assert _surface(moq_ffi.MoqVideoSurface.PIXEL_BUFFER(7)) == moq.VideoSurfacePixelBuffer(7)
+    assert _surface(cast(Any, moq_ffi.MoqVideoSurface.PIXEL_BUFFER(7))) == moq.VideoSurfacePixelBuffer(7)
     assert _surface(cast(Any, object())) == moq.VideoSurfaceUnknown()
 
 

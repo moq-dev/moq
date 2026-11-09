@@ -84,13 +84,13 @@ from .types import (
     TrackInfo,
     VideoCodec,
     VideoDecodedFrame,
-    VideoSurface,
-    VideoSurfacePixelBuffer,
-    VideoSurfaceUnknown,
     VideoEncoderInput,
     VideoEncoderKind,
     VideoEncoderOutput,
     VideoPixelFormat,
+    VideoSurface,
+    VideoSurfacePixelBuffer,
+    VideoSurfaceUnknown,
     WebSocketConfig,
 )
 
