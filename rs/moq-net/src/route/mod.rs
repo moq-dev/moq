@@ -726,11 +726,18 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		}
 		// The sender forgets what it sent for a route it ended, so a restart
 		// starts from an empty view: apply the next batch to that, keeping the
-		// last view only for what it certified.
+		// last view only for what it certified. An uncertified claim lives only
+		// while the stream carries it, and the restart's batch names only what it
+		// still carries, so one kept here would never be withdrawn.
 		if reach.is_none()
 			&& let Some(heard) = self.heard.get_mut(&(id, from))
 		{
 			heard.raw = View::default();
+			let floors = &heard.view.floors;
+			heard
+				.view
+				.items
+				.retain(|claim, _| floors.keys().any(|region| within(claim, region)));
 		}
 		self.update([id]);
 	}

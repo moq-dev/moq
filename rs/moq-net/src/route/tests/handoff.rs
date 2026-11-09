@@ -1402,3 +1402,39 @@ fn a_covering_claim_moves_with_a_disjoint_interest() {
 	assert_eq!(false_ends(&sim.events), 0);
 	sim.check().unwrap();
 }
+
+/// A scoped relay certifies nothing across the third relay's whole interest, so
+/// that relay holds its claims uncertified. When the scoped relay ends the route
+/// and restarts it, its new snapshot is complete: a claim it carried before the
+/// end and dropped while the route was down must not survive at the receiver.
+#[test]
+fn a_restarted_floorless_route_drops_what_it_no_longer_carries() {
+	let (origin, local, x, z) = (0, 1, 2, 4);
+	let mut sim = two_scoped_uplinks();
+	sim.announce(origin, "live/a/x", 0, None);
+	// Keeps the route up once `live/a/x` goes.
+	sim.announce(origin, "live/a/y", 0, None);
+	sim.announce(origin, "live/b/z", 0, None);
+	assert!(sim.run());
+	let id = qualified("local", 7);
+	assert_eq!(sim.shows(z, id, "live/a/x"), Some(true));
+
+	// Keeps x from rerouting through z, which would withdraw its claims first.
+	sim.hold(z, x);
+	sim.disconnect(x, local);
+	assert!(sim.run());
+	// The relay forgets the origin and ends its route on z.
+	sim.collect(x, id);
+	assert!(sim.run());
+	sim.unannounce(origin, "live/a/x");
+	assert!(sim.run());
+	while sim.deliver_ack(z, x) {}
+	sim.connect(x, local);
+	assert!(sim.run());
+	sim.release(z, x);
+	assert!(sim.run());
+	assert_eq!(sim.shows(z, id, "live/a/y"), Some(true));
+	assert_eq!(sim.shows(z, id, "live/a/x"), None);
+	assert_eq!(revivals(&sim.events), 0);
+	sim.check().unwrap();
+}
