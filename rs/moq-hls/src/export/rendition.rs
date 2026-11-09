@@ -1646,7 +1646,7 @@ impl Fetch {
 	}
 
 	/// The bytes a [`sizing`](Self::sizing) fetch's groups carry, without decoding them, or
-	/// `None` when it is a stop or its media is gone. Holds at most one frame at a time.
+	/// `None` when it is a stop or its media is gone. Keeps no segment-wide accumulation.
 	pub(crate) fn poll_size(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<usize>>> {
 		let result = ready!(self.poll_groups(rendition, waiter)).map(|read| {
 			let size = self.sizing.as_ref().expect("a sizing fetch");

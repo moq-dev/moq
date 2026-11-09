@@ -541,7 +541,8 @@ impl Consumer {
 	}
 
 	/// The bytes the next segment's groups carry, so a caller can reserve memory before
-	/// [`next`](Self::next) builds its media, which re-frames those bytes into about as many.
+	/// [`next`](Self::next) builds its media, which is a little larger: the fragment adds ~12-16
+	/// bytes per frame plus a small fixed header, so treat this as a lower bound.
 	///
 	/// Counts each frame as it is read, without decoding or keeping any, so nothing is held while
 	/// the caller waits, and `next` reads them again. `Some(0)` for a gap, `None` once the
