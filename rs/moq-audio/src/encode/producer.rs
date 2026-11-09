@@ -1890,11 +1890,11 @@ mod tests {
 					"packets forward before the group fills"
 				);
 			}
-			assert!(partial.poll_read_frame(&moq_net::kio::Waiter::noop()).is_pending());
+			assert!(partial.poll_read_frame(&kio::Waiter::noop()).is_pending());
 
 			if deferred {
 				producer.reanchor();
-				assert!(partial.poll_read_frame(&moq_net::kio::Waiter::noop()).is_pending());
+				assert!(partial.poll_read_frame(&kio::Waiter::noop()).is_pending());
 			} else {
 				producer.discontinuity().unwrap();
 				assert!(partial.read_frame().await.unwrap().is_none());

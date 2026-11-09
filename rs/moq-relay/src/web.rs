@@ -2529,7 +2529,7 @@ mod tests {
 	async fn websocket_upgrade_advertises_the_configured_receive_windows() {
 		use bytes::Buf;
 		use futures::StreamExt;
-		use qmux::ws::tungstenite::{Message, client::IntoClientRequest};
+		use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 		// QMux's frame type, lengths, and QUIC transport parameter values use QUIC varints.
 		fn decode_quic(bytes: &mut bytes::Bytes) -> Result<u64, &'static str> {
@@ -2562,7 +2562,7 @@ mod tests {
 			request
 				.headers_mut()
 				.insert("sec-websocket-protocol", version.alpn().parse().unwrap());
-			let (mut socket, _) = qmux::ws::tokio_tungstenite::connect_async(request).await.unwrap();
+			let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
 			let Message::Binary(mut record) = kio::clock::timeout(std::time::Duration::from_secs(5), socket.next())
 				.await
 				.unwrap()
@@ -2857,9 +2857,9 @@ mod tests {
 				"{}",
 				String::from_utf8_lossy(&response)
 			);
-			let socket = qmux::ws::tokio_tungstenite::WebSocketStream::from_raw_socket(
+			let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
 				stream,
-				qmux::ws::tungstenite::protocol::Role::Client,
+				tokio_tungstenite::tungstenite::protocol::Role::Client,
 				None,
 			)
 			.await;
@@ -2900,9 +2900,7 @@ mod tests {
 						None => socket_step(upgrade_while_draining(web.stream, true)).await,
 					};
 					let draining = session.draining();
-					let goaway = socket_step(moq_net::kio::wait(|waiter| draining.poll(waiter)))
-						.await
-						.unwrap();
+					let goaway = socket_step(kio::wait(|waiter| draining.poll(waiter))).await.unwrap();
 					assert_eq!(goaway.uri(), "");
 					session.abort(moq_net::Error::Cancel);
 					socket_step(web.running).await.unwrap().unwrap();
@@ -3012,22 +3010,22 @@ mod tests {
 			let session = socket_step(upgrade_while_draining(web.stream, false)).await;
 			drop(pending);
 			let draining = session.draining();
-			let goaway = socket_step(moq_net::kio::wait(|waiter| draining.poll(waiter))).await;
+			let goaway = socket_step(kio::wait(|waiter| draining.poll(waiter))).await;
 			assert_eq!(goaway.unwrap().uri(), "");
 			session.abort(moq_net::Error::Cancel);
 			socket_step(web.running).await.unwrap().unwrap();
 		}
 
 		async fn refused_upgrade(stream: tokio::net::TcpStream) {
-			use qmux::ws::tungstenite::client::IntoClientRequest;
+			use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 			let mut request = format!("ws://{}/room", stream.peer_addr().unwrap())
 				.into_client_request()
 				.unwrap();
 			request
 				.headers_mut()
 				.insert("sec-websocket-protocol", "qmux-01.moq-lite-06".parse().unwrap());
-			let result = qmux::ws::tokio_tungstenite::client_async(request, stream).await;
-			let Err(qmux::ws::tungstenite::Error::Http(response)) = result else {
+			let result = tokio_tungstenite::client_async(request, stream).await;
+			let Err(tokio_tungstenite::tungstenite::Error::Http(response)) = result else {
 				panic!("an upgrade after drain admission closed was not refused");
 			};
 			assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);

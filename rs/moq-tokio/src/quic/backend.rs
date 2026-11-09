@@ -496,7 +496,7 @@ impl Client {
 
 		let session = match url.scheme() {
 			"https" => {
-				let mut request = web::proto::ConnectRequest::new(url.clone());
+				let mut request = web_transport_proto::ConnectRequest::new(url.clone());
 				for protocol in versions.alpns() {
 					request = request.with_protocol(protocol.to_string());
 				}
@@ -589,9 +589,10 @@ fn map_client_error(err: web::Error) -> Error {
 /// it just burns the reconnect budget on a URL that will never work.
 fn client_status(err: &web::Error) -> Option<u16> {
 	match err {
-		web::Error::Handshake(web::HandshakeError::Status(status)) => Some(status.as_u16()),
+		web::Error::Handshake(web::HandshakeError::Status(status)) => Some(*status),
 		web::Error::Handshake(web::HandshakeError::Connect(
-			web::proto::ConnectError::ErrorStatus(status) | web::proto::ConnectError::WrongStatus(Some(status)),
+			web_transport_proto::ConnectError::ErrorStatus(status)
+			| web_transport_proto::ConnectError::WrongStatus(Some(status)),
 		)) => Some(status.as_u16()),
 		_ => None,
 	}
@@ -838,7 +839,7 @@ pub(crate) async fn accept(
 			// The authority the client put in its CONNECT URL.
 			let authority = request.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 
-			let mut response = web::proto::ConnectResponse::OK;
+			let mut response = web_transport_proto::ConnectResponse::OK;
 			let mut link = link;
 			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 				response = response.with_protocol(protocol);

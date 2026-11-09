@@ -7,11 +7,10 @@
 //! accept it on a separate TCP port via [`Listener`], or pass an HTTP server's
 //! upgraded socket to [`accept`] before admitting the returned request.
 
-use qmux::ws::tokio_tungstenite;
-use qmux::ws::tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
+use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
 use url::Url;
 
 use crate::cli::Duration as CliDuration;
@@ -1207,7 +1206,7 @@ mod timeout_tests {
 				peer = qmux::ws::Upgraded::new(peer, ALPN).connect() => crate::spawn_qmux(peer.unwrap()),
 				result = accept.as_mut() => panic!("accepted before SETUP: {:?}", result.map(|_| ())),
 			};
-			let _stream = moq_net::kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
+			let _stream = kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
 				.await
 				.unwrap();
 			tokio::time::advance(timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT)).await;
