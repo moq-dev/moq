@@ -172,8 +172,8 @@ export default class MoqWatch extends HTMLElement {
 	 */
 	readonly connection: Moq.Connection;
 
-	/** Headless playback pipeline behind this element. */
-	readonly player: Player;
+	readonly #player: Player;
+
 	/** The broadcast being watched. */
 	readonly broadcast: Broadcast;
 
@@ -272,7 +272,7 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.connection.close());
 
-		this.player = new Player({
+		this.#player = new Player({
 			origin: this.connection.origin,
 			enabled: this.#enabled,
 			name: this.#name,
@@ -297,26 +297,26 @@ export default class MoqWatch extends HTMLElement {
 			viewer: { ...this.controls.viewer, viewers: this.connection.viewers },
 			text: { ...this.controls.text, container: this.#captionsOverlay },
 		});
-		this.signals.cleanup(() => this.player.close());
+		this.signals.cleanup(() => this.#player.close());
 
 		// Owned here rather than by the player, which only reads its origin: feedback publishes into it.
 		const echo = new Echo({
-			broadcast: this.player.broadcast,
+			broadcast: this.#player.broadcast,
 			origin: this.connection.origin,
 			enabled: this.#enabled,
 			name: this.#echo,
 			probe: this.connection.probe,
-			sources: [this.player.video, this.player.audio],
+			sources: [this.#player.video, this.#player.audio],
 		});
 		this.signals.cleanup(() => echo.close());
-		this.broadcast = this.player.broadcast;
-		this.video = this.player.video;
-		this.audio = this.player.audio;
-		this.renderer = this.player.renderer;
-		this.emitter = this.player.emitter;
-		this.text = this.player.text;
-		this.textRenderer = this.player.textRenderer;
-		this.sync = this.player.sync;
+		this.broadcast = this.#player.broadcast;
+		this.video = this.#player.video;
+		this.audio = this.#player.audio;
+		this.renderer = this.#player.renderer;
+		this.emitter = this.#player.emitter;
+		this.text = this.#player.text;
+		this.textRenderer = this.#player.textRenderer;
+		this.sync = this.#player.sync;
 
 		// Watch to see if the canvas element is added or removed.
 		const setCanvas = () => {
@@ -624,7 +624,7 @@ export default class MoqWatch extends HTMLElement {
 	 * and flush the audio buffer so the next utterance plays from its own first frame.
 	 */
 	reset(): void {
-		this.player.reset();
+		this.#player.reset();
 	}
 
 	/** The catalog format to read, mirrored by the `catalog-format` attribute; undefined detects it. */

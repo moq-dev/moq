@@ -1,6 +1,6 @@
 /** Sweep receive-queue draining over backlog size through the public session API. */
 import * as Frame from "../src/frame.ts";
-import Session from "../src/session.ts";
+import { Session } from "../src/session.ts";
 import type { WebSocketStreamCloseEvent } from "../src/web-socket-stream.ts";
 
 const packet = Frame.encode({ type: "datagram", data: new Uint8Array(1200) }, "qmux-01");

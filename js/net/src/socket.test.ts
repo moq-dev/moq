@@ -153,7 +153,7 @@ test("a peer route replaced between metadata and opening cannot inherit a socket
 
 test("track halves start reliable and ascending, preserve old messages and accept independent info", async () => {
 	const { local, remote } = await track();
-	expect((await local.producer.info()).maxAge).toBeUndefined();
+	expect((await local.producer.info()).maxAge).toBeNull();
 	expect(remote.consumer.subscription.peek()?.order).toBe("ascending");
 	expect(remote.consumer.subscription.peek()?.delay?.max).toEqual(Duration.millis(Number.MAX_SAFE_INTEGER));
 	for (let i = 0; i < 3; i++) local.producer.writeFrame(bytes(i));

@@ -4,7 +4,7 @@ import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import { authoredInfo, infoDefaults } from "../track.ts";
+import { authoredInfo } from "../track.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
 
@@ -52,7 +52,13 @@ test("TrackInfo for Rust's default Info matches cross-language wire bytes", asyn
 	// The default authored track is untimed, which lite-05 declares as milliseconds, and
 	// advertises the default zero max age.
 	const model = authoredInfo();
-	const info = new TrackInfo({ ...model, maxAge: model.maxAge?.asMillis(), timescale: model.timescale ?? undefined });
+	const info = new TrackInfo({
+		priority: model.priority,
+		maxAge: model.maxAge?.asMillis(),
+		timescale: model.timescale ?? undefined,
+		refresh: model.refresh ?? undefined,
+		compress: model.compress,
+	});
 	expect(await bytes((w) => info.encode(w, Version.DRAFT_05), Version.DRAFT_05)).toEqual(
 		new Uint8Array([0x05, 0x80, 0x00, 0x00, 0x43, 0xe8]),
 	);
@@ -199,7 +205,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 		if (version === Version.DRAFT_05) await old.bool();
 		const maxAge = Duration.millis(await old.u53());
 		expect(maxAge).toEqual(Duration.millis(Number.MAX_SAFE_INTEGER));
-		expect(infoDefaults({ maxAge }).maxAge).toEqual(maxAge);
+		expect(authoredInfo({ maxAge }).maxAge).toEqual(maxAge);
 		expect(await old.u53()).toBe(1000);
 	});
 	test(`legacy unlimited range decodes without unsafe numeric conversion on ${version}`, async () => {

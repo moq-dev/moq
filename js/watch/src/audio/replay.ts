@@ -82,10 +82,14 @@ export interface Quantum {
 	stalled: boolean;
 	/** The playhead after this quantum, on the media clock, in ms. */
 	timestamp: number;
+	/** Where the shared clock puts video as of this quantum (`Sync.now()`), on the media clock, in ms. */
+	clock?: number;
 	/** The delay `Sync` resolved as of this quantum, in ms: what the ring and the decode gate hold. */
 	delay: number;
 	/** The ring's cumulative underruns, as the player's stats count them: each run-dry and each short quantum. */
 	underruns: number;
+	/** The ring's cumulative skips, as the player's stats count them: each jump that dropped queued audio. */
+	skips: number;
 }
 
 /** Samples as the milliseconds `AudioBuffer` posts to the worklet. */
@@ -279,8 +283,10 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				output,
 				stalled: ring.stalled,
 				timestamp: ring.timestamp / 1000,
+				clock: sync.now()?.asMillis(),
 				delay: delay.asMillis(),
 				underruns: ring.underruns,
+				skips: ring.skips,
 			};
 		}
 	} finally {

@@ -7,7 +7,7 @@
 
 import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
-import { accept, connect, type Established } from "./connection/index.ts";
+import { accept, connect, type Session } from "./connection/index.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { FetchHeader } from "./ietf/fetch.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -117,13 +117,13 @@ async function aggregate(track: TrackProducer, predicate: (order: Order | undefi
 	while (!predicate(track.subscription.peek()?.order)) await track.subscription.changed();
 }
 
-interface Session {
-	client: Established;
-	server: Established;
+interface Pair {
+	client: Session;
+	server: Session;
 	transport: MockTransport;
 }
 
-async function session(protocol: string, origin: OriginProducer): Promise<Session> {
+async function session(protocol: string, origin: OriginProducer): Promise<Pair> {
 	const pair = createMockTransportPair(protocol);
 	const [client, server] = await Promise.all([
 		connect({ url, transport: pair.client }),

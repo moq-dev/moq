@@ -836,8 +836,10 @@ test("caps survive signing, and a key scope bounds only their paths", async () =
 	const key: Key = { ...Key.parse(encodeJwk(testKey)), scope: { root: "room", publish: ["**"], subscribe: ["**"] } };
 	const token = await Key.sign(key, {
 		root: "room",
-		publish: { path: ["alice/**"], rate: 8000 },
-		subscribe: { path: ["bob/**"], rate: 16000 },
+		publish: ["alice/**"],
+		publish_rate: 8000,
+		subscribe: ["bob/**"],
+		subscribe_rate: 16000,
 	});
 	const claims = await Key.verify(key, token);
 	expect(claims).toMatchObject({
@@ -851,6 +853,9 @@ test("caps survive signing, and a key scope bounds only their paths", async () =
 	const resigned = await Key.verify(key, await Key.sign(key, claims));
 	expect(resigned).toMatchObject({ publish_rate: 8000, subscribe_rate: 16000 });
 	await expect(Key.sign(key, { ...claims, publish_rate: 0 })).rejects.toThrow(/rate must be a positive integer/);
+	// The wire form is not a second spelling.
+	const wire = { root: "room", publish: { path: ["alice/**"], rate: 8000 } } as unknown as Claims;
+	await expect(Key.sign(key, wire)).rejects.toThrow(/pattern list/);
 });
 
 test("key scope treats absolute and rooted grants alike", async () => {

@@ -62,7 +62,10 @@ for (const [name, protocol, routed, timed] of transports) {
 		const cred = credential();
 		const generation = cred.produce();
 		const path = await cred.path("meeting.hang");
-		const broadcastRoute = publisher.route(path, { hidden: true, instance: Epoch.instance(generation.epoch) });
+		const broadcastRoute = publisher.route(path, {
+			hidden: true,
+			instance: { id: Epoch.instance(generation.epoch), epoch: 0n },
+		});
 		const broadcast = broadcastRoute.broadcast;
 		const video = await new Protected.Producer(broadcast, generation).createTrack("video", {
 			timescale: Time.Timescale.MILLI,
@@ -119,7 +122,10 @@ for (const [name, protocol] of [
 		const cred = credential();
 		const generation = cred.produce();
 		const path = await cred.path("meeting.hang");
-		const broadcastRoute = publisher.route(path, { hidden: true, instance: Epoch.instance(generation.epoch) });
+		const broadcastRoute = publisher.route(path, {
+			hidden: true,
+			instance: { id: Epoch.instance(generation.epoch), epoch: 0n },
+		});
 		const broadcast = broadcastRoute.broadcast;
 		const audio = await new Protected.Producer(broadcast, generation).createDatagrams("audio", {
 			timescale: Time.Timescale.MILLI,

@@ -136,6 +136,61 @@ describe("replay", () => {
 	});
 });
 
+/**
+ * How far the playhead trails the shared clock video plays from, in ms, for each quantum played once
+ * the first `settle` ms have passed, with the underruns the ring counted by the end.
+ */
+async function lag(trace: Arrival[], options: Options, settle: number) {
+	const lags: number[] = [];
+	let underruns = 0;
+	for await (const quantum of replay(trace, options)) {
+		if (quantum.at >= settle && !quantum.stalled && quantum.clock !== undefined) {
+			lags.push(quantum.clock - quantum.timestamp);
+		}
+		underruns = quantum.underruns;
+	}
+	lags.sort((a, b) => a - b);
+	return { lags, median: lags[lags.length >> 1], underruns };
+}
+
+// Audio and video keep separate clocks that align once the delay covers the arrivals. Settling audio
+// later than the clock would trade lip sync for fewer underruns, so these hold the line: at steady
+// state the playhead rests on or just ahead of the clock, and a target short of the spread underruns
+// rather than drifting behind it.
+describe("replay against the shared clock", () => {
+	let warn: Mock<typeof console.warn>;
+	beforeEach(() => {
+		warn = spyOn(console, "warn").mockImplementation(() => {});
+	});
+	afterEach(() => warn.mockRestore());
+
+	// The ring rests one frame ahead of the newest arrival's playout, as the trim that preceded the
+	// time stretch left it, so audio leads the clock by up to that frame and never trails it.
+	for (const [name, lateness] of [
+		["evenly paced", () => 30],
+		["flushed five frames at a time", (i: number) => 30 + (4 - (i % 5)) * 20],
+	] as const) {
+		it(`plays ${name} frames on the clock at auto, never behind it`, async () => {
+			const options: Options = { rate: RATE, config: CONFIG, delay: "auto", duration: observed(60) };
+			const { lags } = await lag(paced(60, lateness), options, 30_000);
+			expect(lags.length).toBeGreaterThan(0);
+			expect(lags[0]).toBeGreaterThanOrEqual(-25);
+			expect(lags.at(-1)).toBeLessThanOrEqual(0);
+		});
+	}
+
+	it("underruns a target short of the spread rather than settling behind the clock", async () => {
+		// 80 ms of spread against a 40 ms target: every flush runs the ring dry.
+		const trace = paced(60, (i) => 30 + (4 - (i % 5)) * 20);
+		const options: Options = { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(60) };
+		const { lags, median, underruns } = await lag(trace, options, 30_000);
+		expect(underruns).toBeGreaterThanOrEqual(trace.length / 5);
+		// Each refill catches back up within the frame after it, never by a whole flush.
+		expect(median).toBeLessThanOrEqual(20);
+		expect(lags.at(-1)).toBeLessThan(40);
+	});
+});
+
 describe("replay at auto", () => {
 	/** The delay the replay resolved once `seconds` of {@link paced} frames played out. */
 	async function settled(seconds: number, lateness: (i: number) => number): Promise<number> {

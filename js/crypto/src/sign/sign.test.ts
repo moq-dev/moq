@@ -55,7 +55,7 @@ async function publish(key: SecretKey, path: Path.Valid) {
 		track(name: string) {
 			const raw = route.broadcast.createTrack(name);
 			const scope = new Scope(path, signed.instance, name);
-			return { signed: Track.Producer.make(raw, key, scope, { next: 0n }, {}), raw };
+			return { signed: Track.Producer.make(raw, key, scope, { next: 0n }, { timescale: null }), raw };
 		},
 		async consume(expected: PublicKey): Promise<Signed.Consumer> {
 			return new Signed.Consumer(await active(net.subscriber, path), expected, path);

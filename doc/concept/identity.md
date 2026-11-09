@@ -32,8 +32,8 @@ no credential, and auth decides who may publish the path.
   keeps its instance on every route, which is what lets a subscription move
   between them.
 - **A stable instance is a promise.** A publisher may name its own instance
-  (`Route::with_instance(instance, epoch)` in Rust, `announce({ instance, epoch })`
-  in JavaScript) only if it continues the sequence space across restarts and
+  (`RouteOptions::with_instance(instance, epoch)` in Rust,
+  `origin.route(path, { instance: { id, epoch } })` in JavaScript) only if it continues the sequence space across restarts and
   announces a higher **epoch** each time, for example a counter persisted on
   disk. Breaking the promise splices unrelated groups into every reader's
   tracks. Two encoders with identical settings fed the same source still

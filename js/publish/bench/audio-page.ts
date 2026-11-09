@@ -84,7 +84,7 @@ async function measure(tracks: number, seconds: number, onDemand: boolean) {
 		origin: new Moq.Origin.Producer(),
 		name: Moq.Path.from("audio.hang"),
 		maxAge: Duration.millis(seconds * 1000),
-		onDemand,
+		onDemand: onDemand ? "retain" : "off",
 	});
 	const feeds = Array.from({ length: tracks }, () => new Feed());
 	const encoders = feeds.map((feed, index) => {

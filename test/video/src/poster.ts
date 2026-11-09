@@ -121,7 +121,7 @@ async function poster(audio: boolean, buffered: boolean) {
 			if (!context) throw new Error("no renderer canvas context");
 			const rgba = context.getImageData(32, 16, 1, 1).data;
 			return {
-				timestamp: player.renderer.out.frame.peek()?.timestamp,
+				timestamp: player.renderer.painted.peek()?.timestamp,
 				decoded: !!player.video.out.frame.peek(),
 				downloading: player.video.in.enabled.peek(),
 				playing: player.sync.playing.peek(),

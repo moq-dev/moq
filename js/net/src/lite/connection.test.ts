@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, Manual, yieldNow } from "@moq/clock";
-import Qmux from "@moq/qmux";
+import { Session as Qmux } from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { inspect } from "../connection/stats.ts";

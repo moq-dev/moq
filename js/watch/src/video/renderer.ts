@@ -29,6 +29,16 @@ export type RendererInput = {
 	backend: Getter<Video.Backend>;
 };
 
+/** Signals the renderer derives. */
+export type RendererOutput = {
+	/** The media timestamp of the most recently painted frame. */
+	timestamp: Getter<Duration | undefined>;
+	/** Whether the canvas should currently download per the configured distance and tab focus. */
+	visible: Getter<boolean>;
+	/** Why drawing stopped, or undefined while healthy. See {@link Video.RendererOutput.error}. */
+	error: Getter<Error | undefined>;
+};
+
 /** Constructor properties for {@link Renderer}. */
 export type RendererProps = Inputs<RendererInput> & {
 	/** Decoder supplying video frames. */
@@ -50,16 +60,15 @@ export class Renderer {
 	#video: Video.Renderer;
 
 	/** The derived outputs, read-only. */
-	readonly out: Readonlys<{
-		// The most recently rendered frame, updated after each rAF paint.
-		frame: Getter<VideoFrame | undefined>;
-		// The media timestamp of the most recently rendered frame.
-		timestamp: Getter<Duration | undefined>;
-		// Whether the canvas should currently download per the configured distance and tab focus.
-		visible: Getter<boolean>;
-		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererOutput.error}.
-		error: Getter<Error | undefined>;
-	}>;
+	readonly out: Readonlys<RendererOutput>;
+
+	/**
+	 * The most recently painted frame, updated after each rAF paint. A paused poster stops
+	 * downloading once one is painted.
+	 *
+	 * @internal A `VideoFrame` cannot leave the thread that paints it.
+	 */
+	readonly painted: Getter<VideoFrame | undefined>;
 
 	#signals = new Effect();
 
@@ -84,8 +93,8 @@ export class Renderer {
 		this.#signals.cleanup(() => this.#video.close());
 
 		const frame = this.#video.out.frame;
+		this.painted = frame;
 		this.out = readonlys({
-			frame,
 			timestamp: new Derived([frame], (frame) => (frame ? Duration.micros(frame.timestamp) : undefined)),
 			visible: this.#visible,
 			error: this.#video.out.error,

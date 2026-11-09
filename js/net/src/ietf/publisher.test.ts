@@ -1457,7 +1457,7 @@ test("a new instance at the same path clears a refusal", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
-	const broadcast = origin.route(Path.from("restarted"), { instance: Instance.random() });
+	const broadcast = origin.route(Path.from("restarted"), { instance: { id: Instance.random(), epoch: 0n } });
 
 	void pub.runPublishNamespaces();
 
@@ -4887,6 +4887,9 @@ for (const endObject of [BigInt(Number.MAX_SAFE_INTEGER), (1n << 60n) + 1n]) {
 }
 
 test("a fractional max age reaches MAX_CACHE_DURATION as whole milliseconds rounded up", () => {
-	const properties = trackProperties({ priority: 0, maxAge: Duration.micros(1500) }, true);
+	const properties = trackProperties(
+		{ compress: false, timescale: null, maxAge: Duration.micros(1500), priority: 0, refresh: null },
+		true,
+	);
 	expect(properties.maxCacheDuration).toBe(2n);
 });

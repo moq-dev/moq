@@ -24,22 +24,29 @@ mod pcm;
 #[cfg(test)]
 pub(crate) mod stub;
 
-/// An opened encoder: one frame of interleaved `f32` PCM in, one packet out.
+/// An opened encoder: frames of interleaved `f32` PCM in, packets out.
 ///
 /// Input arrives at the config's rate, in the crate's canonical channel order
 /// for the config's layout; a codec with another native order reorders it here.
 ///
-/// One packet per frame is part of the contract: the producer stamps packets by
-/// counting frames. A codec that pipelines output (MediaCodec) needs a `flush`
-/// and a zero-or-more return, which changes `Encoder::encode` too, so that lands
-/// with the first backend that needs it rather than as an always-empty method.
+/// Every frame becomes exactly one packet, in submission order, but a codec that
+/// pipelines (MediaCodec, AudioToolbox) may hold it past later submissions: the
+/// producer stamps each packet with the frame it pairs with by that order.
 ///
 /// Unwind safe because the published `Encoder` that boxes it is.
 pub(crate) trait Backend: Send + std::panic::UnwindSafe + std::panic::RefUnwindSafe {
-	/// Encode exactly one frame of the codec's frame size.
-	fn encode(&mut self, pcm: &[f32]) -> Result<Encoded, Error>;
+	/// Submit exactly one frame of the codec's frame size.
+	fn encode(&mut self, pcm: &[f32]) -> Result<(), Error>;
 
-	/// Drop codec history so the next frame codes as if it were the first.
+	/// Pop the oldest packet that is ready, or `None` while the codec holds the rest.
+	fn receive(&mut self) -> Result<Option<Encoded>, Error>;
+
+	/// Mark the end of input, so [`receive`](Self::receive) returns every packet
+	/// the codec still holds. The next frame submitted starts new input.
+	fn flush(&mut self) -> Result<(), Error>;
+
+	/// Drop codec history, held packets included, so the next frame codes as if
+	/// it were the first.
 	fn reset(&mut self);
 
 	/// Retune the live encoder to `bitrate` bits per second, a no-op at the current
@@ -166,8 +173,16 @@ mod tests {
 	struct Fake(&'static str);
 
 	impl Backend for Fake {
-		fn encode(&mut self, _pcm: &[f32]) -> Result<Encoded, Error> {
-			Ok(Encoded::new(bytes::Bytes::new()))
+		fn encode(&mut self, _pcm: &[f32]) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+			Ok(None)
+		}
+
+		fn flush(&mut self) -> Result<(), Error> {
+			Ok(())
 		}
 
 		fn reset(&mut self) {}

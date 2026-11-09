@@ -39,6 +39,11 @@ import type { Advertised, Advertisements } from "./wire.ts";
 /** What a null {@link Delay.max} goes out as, in milliseconds: the largest value every peer can read, as Rust sends for `None`. */
 export const NO_MAX_DELAY = Varint.MAX_U53;
 
+/** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
+export function datagramTrackInfo(info: datagram.Info): Info {
+	return { compress: false, timescale: info.timescale, maxAge: null, priority: info.priority, refresh: null };
+}
+
 /** A subscription's {@link Delay.max} in milliseconds as the wire carries it: null for no limit, omitted for zero. */
 export function maxDelayOf(subscription: Pick<Subscription, "delay">): number {
 	const max = subscription.delay?.max;

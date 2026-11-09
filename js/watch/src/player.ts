@@ -241,7 +241,7 @@ export class Player {
 				this.#videoEnabled.set(visible);
 			} else {
 				// Keep downloading a paused poster until a frame is painted, then stop.
-				this.#videoEnabled.set(visible && !effect.get(this.renderer.out.frame));
+				this.#videoEnabled.set(visible && !effect.get(this.renderer.painted));
 			}
 		});
 	}

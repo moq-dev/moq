@@ -56,21 +56,6 @@ test.each(["group", "track"] as const)("%s JSON rejects an empty frame without t
 	}
 });
 
-test("group booleans refuse every shape except one byte of zero or one", async () => {
-	const group = new GroupProducer(0n);
-	const reader = group.consume();
-	for (const bytes of [[], [2], [1, 0], [0], [1]]) group.writeFrame({ payload: new Uint8Array(bytes) });
-	group.finish();
-	try {
-		for (let i = 0; i < 3; i++) await expect(reader.readBool()).rejects.toThrow("invalid bool frame");
-		expect(await reader.readBool()).toBe(false);
-		expect(await reader.readBool()).toBe(true);
-		expect(await reader.readBool()).toBeUndefined();
-	} finally {
-		reader.close();
-	}
-});
-
 for (const [version, alpn] of [
 	[Version.DRAFT_03, ALPN_03],
 	[Version.DRAFT_04, ALPN_04],

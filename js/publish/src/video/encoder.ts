@@ -115,7 +115,7 @@ export type EncoderOutput = {
 	// Exposed so a local preview can re-encode with identical settings to mirror the wire output.
 	resolved: Signal<VideoEncoderConfig | undefined>;
 	// True while encoding: enabled and the rendition has a track, which with the broadcast's
-	// `onDemand` also takes a subscriber.
+	// `onDemand: "all"` also takes a subscriber.
 	active: Signal<boolean>;
 	// Cumulative output totals (frames, bytes, keyframes, skipped) measured while serving, and the
 	// target bitrate.
@@ -127,7 +127,7 @@ export type EncoderOutput = {
  *
  * Registers itself on the {@link Broadcast} under {@link name} (via `broadcast.video(name)`), resolves
  * the best codec/bitrate/dimensions for the capture, and encodes frames while enabled, so a late
- * subscriber or fetch finds the recent groups in the track's cache. The broadcast's `onDemand` encodes
+ * subscriber or fetch finds the recent groups in the track's cache. The broadcast's `onDemand: "all"` encodes
  * only while a subscriber is attached instead. A joining subscriber that wants a newer group gets a
  * fresh keyframe either way. Rename by constructing a new encoder; the name is not a signal.
  *
@@ -356,7 +356,7 @@ export class Encoder {
 		effect.proxy(rendition.config, this.out.catalog);
 		effect.proxy<Report.RenditionInput | undefined>(rendition.stats, this.out.stats);
 
-		// Encode while enabled and the broadcast hands over the track (with `onDemand`, a subscriber is attached).
+		// Encode while enabled and the broadcast hands over the track (with `onDemand: "all"`, a subscriber is attached).
 		effect.run((effect) => {
 			const enabled = effect.get(this.in.enabled);
 			const track = effect.get(rendition.track);
@@ -620,7 +620,7 @@ export class Encoder {
 				}
 			} finally {
 				if (encoder.state !== "closed") encoder.close();
-				// The broadcast owns this static track across gaps (a disable, or with `onDemand` a demand
+				// The broadcast owns this static track across gaps (a disable, or with `onDemand: "all"` a demand
 				// gap). Close the current group, marking the break so a later subscriber resumes on the same
 				// track without the pre-gap group reading as live. A fatal encoder error aborts the track instead.
 				if (track.closed.peek() === undefined) producer.discontinuity();

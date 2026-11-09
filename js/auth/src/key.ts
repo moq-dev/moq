@@ -194,8 +194,8 @@ function parse(jwk: string): Key {
  * `iat` is written only when the claims carry one, so an unset field stays off the
  * wire rather than being stamped with the current time.
  *
- * Takes the wire shape or the decoded {@link Claims}, so a cap may be either a capped
- * role or a `publish_rate`/`subscribe_rate` beside it.
+ * Takes each role as its patterns, capped by `publish_rate` or `subscribe_rate` beside
+ * it, as the decoded {@link Claims} spell them; the `{path, rate}` wire form is refused.
  *
  * Throws on a root spelled with an empty segment, a `\` escaping anything but `\` or
  * `/`, or more than 4096 bytes. Verifying stays lenient on the empty segments, so tokens
@@ -203,13 +203,18 @@ function parse(jwk: string): Key {
  */
 async function sign(
 	key: Key,
-	claims: z.input<typeof ClaimsSchema> & { publish_rate?: number; subscribe_rate?: number },
+	claims: Omit<z.input<typeof ClaimsSchema>, "publish" | "subscribe"> & {
+		publish?: string[];
+		publish_rate?: number;
+		subscribe?: string[];
+		subscribe_rate?: number;
+	},
 ): Promise<string> {
 	ensureOperationSupported(key, "sign");
 
 	// Scope-check and sign what the schema parsed, never the raw input: an untyped
 	// caller could pass legacy `put`/`get` fields the scope check would not see. The
-	// caps of decoded claims, as `verify` returns them, nest back into their roles first.
+	// caps nest back into their roles first, which the schema refuses a role already in.
 	let parsed: Claims;
 	try {
 		parsed = ClaimsSchema.parse(nestRates(claims));

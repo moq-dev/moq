@@ -67,6 +67,7 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const aChannels = statLine(audioCard.grid, "Channels");
 	const aBitrate = statLine(audioCard.grid, "Bitrate");
 	const aUnderruns = statLine(audioCard.grid, "Underruns");
+	const aSkips = statLine(audioCard.grid, "Skips");
 	const aLate = statLine(audioCard.grid, "Late frames");
 	track(parent, audioCard, {
 		catalog: watch.audio.source.out.catalog,
@@ -126,6 +127,8 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		// A non-zero count means the target is below what arrivals actually need.
 		const aUnder = aStats?.underruns ?? 0;
 		aUnderruns.textContent = watch.audio.out.stalled.peek() ? `${aUnder} (buffering)` : `${aUnder}`;
+		// Each one dropped buffered audio, too far above the target to stretch back onto it.
+		aSkips.textContent = aStats ? `${aStats.skips}` : "-";
 		aLate.textContent = aStats ? `${aStats.late}` : "-";
 
 		// Network. "Estimated max" is the congestion controller / PROBE estimate;

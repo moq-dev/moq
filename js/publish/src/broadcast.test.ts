@@ -305,7 +305,7 @@ test("on demand hands the producer to the rendition only while a subscriber is a
 		enabled: true,
 		origin: new Origin.Producer(),
 		name: Path.from("test.hang"),
-		onDemand: true,
+		onDemand: "all",
 	});
 	await settle();
 
@@ -559,7 +559,7 @@ test("changing maxAge publishes a new network broadcast", async () => {
 	expect((await broadcast.net.peek()?.track("video").info())?.maxAge).toEqual(Container.MAX_AGE);
 	maxAge.set(null);
 	await settle();
-	expect((await broadcast.net.peek()?.track("video").info())?.maxAge).toBeUndefined();
+	expect((await broadcast.net.peek()?.track("video").info())?.maxAge).toBeNull();
 
 	broadcast.close();
 });
@@ -1092,7 +1092,7 @@ test("an on-demand rendition declares the interval before encoding, and a media 
 		enabled: true,
 		origin: new Origin.Producer(),
 		name: Path.from("ondemand.hang"),
-		onDemand: true,
+		onDemand: "all",
 	});
 	const video = broadcast.video("video");
 	video.join.set(Duration.millis(2000));

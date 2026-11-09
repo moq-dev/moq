@@ -1056,11 +1056,11 @@ export function mount(root: ShadowRoot, connection: Moq.Connection, origin: Moq.
 				const visible =
 					effect.get(focused) === this.truck.id ||
 					(!effect.get(focused) && effect.get(hovered) === this.truck.id);
-				const frame = effect.get(this.truck.videoDecoder.out.frame);
+				const decoded = effect.get(this.truck.videoDecoder.out.timestamp) !== undefined;
 				const stalled = effect.get(this.truck.videoDecoder.out.stalled);
-				const live = visible && Boolean(frame) && !stalled;
-				q(".badge").textContent = live ? "Live" : frame ? "Interrupted" : "Connecting";
-				q(".video-state").textContent = frame ? "Camera interrupted" : "Waiting for camera";
+				const live = visible && decoded && !stalled;
+				q(".badge").textContent = live ? "Live" : decoded ? "Interrupted" : "Connecting";
+				q(".video-state").textContent = decoded ? "Camera interrupted" : "Waiting for camera";
 				q(".badge").dataset.live = String(live);
 				q(".video-state").hidden = live;
 			});

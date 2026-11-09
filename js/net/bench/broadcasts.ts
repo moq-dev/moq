@@ -135,7 +135,7 @@ for (const pinned of [false, true]) {
 			const reader = origin.consume();
 			const options = pinned ? { instance } : {};
 			const publishers = Array.from({ length: routeCount }, (_, index) =>
-				origin.route(Path.from(`room/${index}`), { instance }),
+				origin.route(Path.from(`room/${index}`), { instance: { id: instance, epoch: 0n } }),
 			);
 			const background = publishers.map((_, index) => reader.request(Path.from(`room/${index}`), options));
 			const requests = Array.from({ length: readerCount }, () => reader.request(Path.from("room/0"), options));
@@ -234,7 +234,7 @@ const nextInstance = Instance.parse("01900000-0000-7000-8000-000000000002");
 for (const pathCount of routeCounts) {
 	for (const readerCount of observerCounts) {
 		const origin = new Producer();
-		const dynamic = origin.routePrefix(Path.from("room"), { instance });
+		const dynamic = origin.routePrefix(Path.from("room"), { instance: { id: instance, epoch: 0n } });
 		const pending = dynamic.requested();
 		const requests = Array.from({ length: pathCount }, (_, index) =>
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),

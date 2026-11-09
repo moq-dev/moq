@@ -8,7 +8,7 @@
  */
 import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
-import Session from "@moq/qmux";
+import { Session } from "@moq/qmux";
 import { check, payload } from "../fixture.ts";
 import "./observe.ts";
 

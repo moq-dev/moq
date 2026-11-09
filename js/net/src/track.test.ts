@@ -7,8 +7,9 @@ import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./gro
 import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks, skipHole, staleHole } from "./internal.ts";
 import { textFrame } from "./mock.ts";
+import { rescale } from "./rescale.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import { authoredInfo, infoDefaults, rescale, Subscription, Producer as TrackProducer } from "./track.ts";
+import { authoredInfo, Subscription, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 
 const enc = new TextEncoder();
@@ -394,10 +395,10 @@ test("a fixed start is no join", () => {
 });
 
 test("refresh must be a u32 ratio", () => {
-	expect(() => infoDefaults({ refresh: -1 })).toThrow(RangeError);
-	expect(() => infoDefaults({ refresh: 0.5 })).toThrow(RangeError);
-	expect(() => infoDefaults({ refresh: 2 ** 32 })).toThrow(RangeError);
-	expect(infoDefaults({ refresh: 0 }).refresh).toBe(0);
+	expect(() => authoredInfo({ refresh: -1 })).toThrow(RangeError);
+	expect(() => authoredInfo({ refresh: 0.5 })).toThrow(RangeError);
+	expect(() => authoredInfo({ refresh: 2 ** 32 })).toThrow(RangeError);
+	expect(authoredInfo({ refresh: 0 }).refresh).toBe(0);
 });
 
 test("rescale matches the track's timeline, rounded down as Rust's convert does", () => {
@@ -533,27 +534,23 @@ test("priority -128..=127 is accepted and anything outside is refused", () => {
 	expect(() => producer.subscribe({ priority: 128 })).toThrow(RangeError);
 });
 
-test("infoDefaults re-validates timescale and the safe maxAge bound", () => {
-	expect(infoDefaults({ timescale: Timescale.MICRO }).timescale).toBe(Timescale.MICRO);
-	expect(infoDefaults({ maxAge: Duration.millis(Number.MAX_SAFE_INTEGER) }).maxAge).toEqual(
+test("authoredInfo re-validates timescale and the safe maxAge bound", () => {
+	expect(authoredInfo({ timescale: Timescale.MICRO }).timescale).toBe(Timescale.MICRO);
+	expect(authoredInfo({ maxAge: Duration.millis(Number.MAX_SAFE_INTEGER) }).maxAge).toEqual(
 		Duration.millis(Number.MAX_SAFE_INTEGER),
 	);
-	expect(() => infoDefaults({ timescale: 0 as Timescale })).toThrow(RangeError);
-	expect(() => infoDefaults({ timescale: (Number.MAX_SAFE_INTEGER + 1) as Timescale })).toThrow(RangeError);
-	expect(() => infoDefaults({ maxAge: Duration.millis(Number.MAX_SAFE_INTEGER + 1) })).toThrow(RangeError);
+	expect(() => authoredInfo({ timescale: 0 as Timescale })).toThrow(RangeError);
+	expect(() => authoredInfo({ timescale: (Number.MAX_SAFE_INTEGER + 1) as Timescale })).toThrow(RangeError);
+	expect(() => authoredInfo({ maxAge: Duration.millis(Number.MAX_SAFE_INTEGER + 1) })).toThrow(RangeError);
 });
 
-test("an authored track defaults to a zero max age, null is unlimited, and decoded absence stays unlimited", async () => {
+test("an authored track defaults to a zero max age, and null is unlimited", async () => {
 	expect((await new TrackProducer("omitted").accept().info()).maxAge).toEqual(Duration.ZERO);
 	expect((await new TrackProducer("undefined").accept({ maxAge: undefined }).info()).maxAge).toEqual(Duration.ZERO);
-	expect((await new TrackProducer("unlimited").accept({ maxAge: null }).info()).maxAge).toBeUndefined();
+	expect((await new TrackProducer("unlimited").accept({ maxAge: null }).info()).maxAge).toBeNull();
 	expect((await new TrackProducer("explicit").accept({ maxAge: Duration.millis(5000) }).info()).maxAge).toEqual(
 		Duration.millis(5000),
 	);
-	expect(authoredInfo({ maxAge: null }).maxAge).toBeUndefined();
-	// Decoded metadata has no authored default: absence is no publisher limit.
-	expect(infoDefaults({}).maxAge).toBeUndefined();
-	expect(infoDefaults({ maxAge: undefined }).maxAge).toBeUndefined();
 });
 
 // The catalog relies on this: a track that publishes one snapshot and never changes it stays
@@ -3804,8 +3801,8 @@ for (const [name, extra] of [
 	["IETF provenance", { ietf: IetfVersion.DRAFT_22 }],
 ] as const) {
 	test(`${name} survives normalization and skips the rewind check`, () => {
-		for (const timescale of [undefined, Timescale.MILLI]) {
-			const info = infoDefaults({ ...extra, timescale });
+		for (const timescale of [null, Timescale.MILLI]) {
+			const info = authoredInfo({ ...extra, timescale });
 			expect(info).toMatchObject(extra);
 			expect(info.timescale).toBe(timescale);
 		}

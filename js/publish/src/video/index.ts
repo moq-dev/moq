@@ -3,7 +3,7 @@ import type { Rendition as BaseRendition } from "../rendition";
 
 export * from "./capture";
 export * from "./encoder";
-export * from "./types";
+export type { Constraints, FrameSource, Source, SourceConfig, StreamTrack, TrackSettings } from "./types";
 
 /** A registered video rendition on a Broadcast. See {@link BaseRendition}. */
 export type Rendition = BaseRendition<Catalog.VideoConfig>;

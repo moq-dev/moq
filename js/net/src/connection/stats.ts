@@ -1,5 +1,5 @@
 import { Duration } from "@moq/clock";
-import type { Established } from "./established.ts";
+import type { Session } from "./session.ts";
 import { transportOf } from "./transport.ts";
 /**
  * Connection statistics: what the local transport counts, and what the peer reports.
@@ -176,10 +176,10 @@ export function canEstimate(quic: WebTransport): boolean {
 }
 
 // The sessions whose transport can report a send-rate estimate.
-const estimating = new WeakSet<Established>();
+const estimating = new WeakSet<Session>();
 
 /** Record whether `session`'s transport `quic` can report a send-rate estimate. @internal */
-export function detect(session: Established, quic: WebTransport): void {
+export function detect(session: Session, quic: WebTransport): void {
 	if (canEstimate(quic)) estimating.add(session);
 }
 
@@ -188,6 +188,6 @@ export function detect(session: Established, quic: WebTransport): void {
  *
  * @internal
  */
-export function estimates(session: Established): boolean {
+export function estimates(session: Session): boolean {
 	return estimating.has(session);
 }

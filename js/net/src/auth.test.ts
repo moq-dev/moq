@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Duplicate, type Grant, Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
-import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
+import { accept as acceptSession, connect as connectSession, type Session } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { AuthMessage as IetfAuthMessage, IetfAuthWire } from "./ietf/auth.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -51,8 +51,8 @@ async function settles(done: () => boolean): Promise<void> {
 }
 
 interface Pair {
-	client: Established;
-	server: Established;
+	client: Session;
+	server: Session;
 	transport: MockTransport;
 }
 
@@ -1110,8 +1110,8 @@ test("a listing waits for its token before reaching the wire", async () => {
 		expect(transport.sendStreams.bidi.length).toBe(opened);
 		const issued = unanswered.accept(grant([], ["room"]));
 		await adding;
-		expect(await tracks.next()).toEqual({ kind: "synced" });
 		expect(await tracks.next()).toMatchObject({ kind: "added", name: "video" });
+		expect(await tracks.next()).toEqual({ kind: "synced" });
 		tracks.close();
 		issued.close();
 	} finally {

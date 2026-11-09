@@ -4,9 +4,9 @@ import type { Pending } from "../auth_session.ts";
 import * as Ietf from "../ietf/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Reader } from "../stream.ts";
-import type { Established } from "./established.ts";
 import { offered } from "./extensions.ts";
 import { exchangeSetup } from "./handshake.ts";
+import type { Session } from "./session.ts";
 import { credential, extra, fallback, Held, hold } from "./tokens.ts";
 
 const URL_ = new URL("https://relay.example.com/room");
@@ -112,8 +112,8 @@ test("a token replaced before its answer is withdrawn at once", async () => {
 
 test("sessions sharing an auth handle present each configured token once", async () => {
 	const { fake, closed, presented, answer } = handle();
-	const first = { auth: fake } as unknown as Established;
-	const second = { auth: fake } as unknown as Established;
+	const first = { auth: fake } as unknown as Session;
+	const second = { auth: fake } as unknown as Session;
 	hold(first, credential(URL_, ["connection", "a"], true), ["connection", "a"]);
 	await answer("a");
 

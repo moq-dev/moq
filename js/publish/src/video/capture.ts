@@ -164,7 +164,13 @@ class Frames extends Fanout<VideoFrame> {
 						held.frame = frame.clone();
 						held.at = now();
 						controller.enqueue(frame);
-					} else controller.close();
+					} else {
+						// A finished source has no current picture to replay, so a reader attaching
+						// now gets a clean end. Frames already queued or replayed still drain.
+						held.frame?.close();
+						held.frame = undefined;
+						controller.close();
+					}
 				},
 				async cancel(reason) {
 					active.set(-1);

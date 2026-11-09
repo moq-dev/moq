@@ -17,10 +17,10 @@ import { Stream } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { wireOf } from "../wire.ts";
-import type { Established } from "./established.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { pumpAnnounced, Redirects, Reload, type ReloadDelay, type ReloadProps } from "./reload.ts";
+import type { Session } from "./session.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });
@@ -757,7 +757,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 
 		// Only the first session matters: the subscription lives on it.
 		const url = new URL("https://example.com/");
-		const dials: { server: Promise<Established>; quic: WebTransport }[] = [];
+		const dials: { server: Promise<Session>; quic: WebTransport }[] = [];
 		const fin = { hold: undefined as ReturnType<typeof holdFins> | undefined, closed: false };
 		const stub = function StubWebTransport() {
 			const pair = createMockTransportPair(Lite.ALPN_06);
@@ -855,7 +855,7 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 		Object.assign(globalThis, { window: win, document: Object.assign(new EventTarget(), { hidden: false }) });
 		const clock = new Manual();
 		const installed = clock.install();
-		const dials: { server: Promise<Established>; closed: boolean }[] = [];
+		const dials: { server: Promise<Session>; closed: boolean }[] = [];
 		const stub = function StubWebTransport(dialed: string | URL) {
 			const pair = createMockTransportPair(Lite.ALPN_06);
 			const dial = { server: accept(pair.server, new URL(dialed)), closed: false };
@@ -915,7 +915,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 	const original = globalThis.WebTransport;
 	const clock = new Manual();
 	const installed = clock.install();
-	const dials: { server: Promise<Established>; quic: WebTransport; closed: boolean }[] = [];
+	const dials: { server: Promise<Session>; quic: WebTransport; closed: boolean }[] = [];
 	const stub = function StubWebTransport(dialed: string | URL) {
 		const pair = createMockTransportPair(Lite.ALPN_06);
 		const dial = { server: accept(pair.server, new URL(dialed)), quic: pair.server, closed: false };
@@ -981,7 +981,7 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const url = new URL("https://example.com/");
-	const dials: { server: Promise<Established>; quic: WebTransport }[] = [];
+	const dials: { server: Promise<Session>; quic: WebTransport }[] = [];
 	const fin = { hold: undefined as ReturnType<typeof holdFins> | undefined, closed: false };
 	const stub = function StubWebTransport() {
 		const pair = createMockTransportPair(Lite.ALPN_07_WIP);

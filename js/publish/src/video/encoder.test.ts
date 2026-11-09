@@ -1371,14 +1371,15 @@ test("a join that a written group serves forces no keyframe, even one encoded wi
 
 // Groups encoded with nobody watching wait in the cache for a late subscriber's maxDelay, while on
 // demand a subscriber finds only what its arrival started.
-test.each([false, true])(
+test.each(["off", "all"] as const)(
 	"a late subscriber reaches groups encoded before it arrived unless on demand (%p)",
-	async (onDemand) => {
+	async (mode) => {
+		const onDemand = mode === "all";
 		using recording = await installRecording();
 		const broadcast = new Broadcast({
 			origin: new Moq.Origin.Producer(),
 			name: Moq.Path.from("eager.hang"),
-			onDemand,
+			onDemand: mode,
 		});
 		const encoder = new Encoder("video", { enabled: true, broadcast, capture: recording.capture as never });
 		let late: Moq.Track.Subscriber | undefined;
@@ -1436,7 +1437,7 @@ test("an on-demand rendition declares its join, and a media subscriber starts it
 	const broadcast = new Broadcast({
 		origin: new Moq.Origin.Producer(),
 		name: Moq.Path.from("join.hang"),
-		onDemand: true,
+		onDemand: "all",
 	});
 	const config = new Signal<Config | undefined>({ join: Duration.millis(3000) });
 	const encoder = new Encoder("video", {
