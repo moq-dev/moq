@@ -63,6 +63,8 @@ pub mod ws;
 pub use config::{Config, Protocol};
 pub use driver::Driver;
 pub use error::Error;
+#[cfg(feature = "ws")]
+pub use error::WebSocketError;
 pub use moq_quic::mux::Version;
 pub use moq_quic::{Limits, LimitsError};
 pub use session::{RecvStream, SendGroup, SendStream, Session};

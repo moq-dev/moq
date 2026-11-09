@@ -71,7 +71,10 @@ A route resolving a path is chosen in this order:
 2. Within one instance, only its highest epoch is eligible, even over a
    cheaper route. Readers continue across an epoch change without a seam,
    because the sequence space continues.
-3. Among different instances: the preferred link, then an identified chain
+3. Among eligible routes: a route from a peer that has not sent GOAWAY
+   (a draining peer's routes rank below every other, whatever their preference
+   or cost, and serve only as a last resort), then the preferred link, then an
+   identified chain
    over an anonymous one, then the lowest cost, then a broadcast published on
    this origin, then the shortest hop chain, then a hash of the full requested
    path with the route's origin node, which moq-lite 07 carries, or else with

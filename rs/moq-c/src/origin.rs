@@ -84,7 +84,6 @@ struct AnnouncedRecord {
 	_captures: Vec<String>,
 	capture_views: Vec<moq_string>,
 	kind: moq_announce_kind,
-	hops: Vec<u64>,
 	cost: u64,
 	/// The route's instance.
 	instance: String,
@@ -120,7 +119,6 @@ impl AnnouncedRecord {
 			_captures: captures,
 			capture_views,
 			kind,
-			hops: update.route.hops().collect(),
 			cost: update.route.cost().value(),
 			instance: update.route.instance().to_string(),
 		}
@@ -239,8 +237,6 @@ impl Origin {
 			captures_len: announced.capture_views.len(),
 			kind: announced.kind,
 			route: moq_route_info {
-				hops: announced.hops.as_ptr(),
-				hops_len: announced.hops.len(),
 				cost: announced.cost,
 				instance: moq_string {
 					data: announced.instance.as_ptr().cast::<c_char>(),

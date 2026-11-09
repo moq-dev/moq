@@ -470,6 +470,12 @@ pub fn route_info(
 	}
 }
 
+/// The hop ids a received route traversed, oldest first: crate-private chain state, for
+/// tests that check which path a route took.
+pub fn route_hops(route: &crate::origin::RouteInfo) -> Vec<u64> {
+	route.hops.iter().map(|hop| hop.id()).collect()
+}
+
 /// Land a claim with a peer's wire route, as a session does, for the origin bench.
 pub fn requests_route(
 	origin: &crate::origin::Producer,
@@ -491,6 +497,61 @@ pub struct Snapshot(#[allow(dead_code, reason = "held for its drop, which lands 
 /// Start a snapshot under `prefix`, as a session requesting announcements there does.
 pub fn snapshot(origin: &crate::origin::Producer, prefix: &str) -> Snapshot {
 	Snapshot(origin.snapshot(prefix))
+}
+
+/// One origin's lite-07 route node answering announce streams, for the routes bench.
+pub struct RouteNode {
+	node: crate::route::Node,
+	streams: Vec<crate::route::node::Stream>,
+	instance: crate::Instance,
+}
+
+impl RouteNode {
+	/// A node holding `claims` claims of its own under `live/`, answering one stream
+	/// per prefix in `streams`, each already sent its snapshot.
+	pub fn new(claims: usize, streams: &[&str]) -> Self {
+		let node = crate::route::Node::new(1, 1);
+		let instance = crate::Instance::random();
+		for i in 0..claims {
+			node.own(Path::new(&format!("live/{i}")).unwrap(), Some(Self::claim(&instance)));
+		}
+		let streams = (streams.iter())
+			.map(|prefix| {
+				let link = crate::route::Link::default();
+				node.answer(link, Path::new(prefix).unwrap()).unwrap()
+			})
+			.collect();
+		let node = Self {
+			node,
+			streams,
+			instance,
+		};
+		node.drain();
+		node
+	}
+
+	fn claim(instance: &crate::Instance) -> crate::route::node::Claim {
+		crate::route::node::Claim {
+			instance: instance.clone(),
+			epoch: 0,
+			cost: 0,
+			upstream: false,
+			learned: false,
+		}
+	}
+
+	/// Start or withdraw the node's own claim at `path`.
+	pub fn own(&self, path: &str, start: bool) {
+		let claim = start.then(|| Self::claim(&self.instance));
+		self.node.own(Path::new(path).unwrap(), claim);
+	}
+
+	/// Take every output queued on the streams, returning how many there were.
+	pub fn drain(&self) -> usize {
+		(self.streams.iter())
+			.map(|stream| std::iter::from_fn(|| stream.try_output()).count())
+			.sum()
+	}
 }
 
 /// What a client session fed into an origin hears it should ask its peer about, for

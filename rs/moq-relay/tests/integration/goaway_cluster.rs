@@ -178,10 +178,13 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 		.expect("track ended");
 	assert_eq!(read(&mut reading).await, (0, Some("a".into())));
 
-	// The cursor replays A's route first. After the GOAWAY, A's re-prices to DRAIN, so
-	// the next route at any other cost is B's.
+	// The cursor replays A's route first. After the GOAWAY, A's ranks last, so the next
+	// route under any other instance is B's.
 	let mut announced = consumer.routes();
-	within("A's route", announced.next()).await.expect("announce update");
+	let instance_a = match within("A's route", announced.next()).await.expect("announce update") {
+		moq_net::origin::RouteEvent::Start(update) => update.route.instance().clone(),
+		other => panic!("expected A's route, got {other:?}"),
+	};
 	session_a
 		.drain()
 		.send(moq_net::goaway::Goaway::redirect(net.url("b")))
@@ -194,7 +197,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 			if let moq_net::origin::RouteEvent::Start(update)
 			| moq_net::origin::RouteEvent::Update(update)
 			| moq_net::origin::RouteEvent::Restart(update) = event
-				&& update.route.cost() != moq_net::origin::Cost::DRAIN
+				&& *update.route.instance() != instance_a
 			{
 				break;
 			}
@@ -223,8 +226,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 
 /// An upstream GOAWAY with a redirect migrates the cluster dial to the sibling.
 /// The draining session keeps serving through the handover window, and the path
-/// never retracts on the cluster origin (route re-pricing and the sibling's
-/// announce surface as metadata updates, not churn).
+/// never retracts on the cluster origin (the sibling's announce surfaces as a
+/// metadata update, not churn).
 async fn cluster_migrates_on_upstream_goaway_inner() {
 	// ── the shared "live" broadcast both siblings can serve ─────────
 	let net = Net::new();
@@ -276,8 +279,8 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 	);
 
 	// Watch for retraction during the swap: the migration must never
-	// unannounce the path (metadata updates are expected: the drain
-	// re-prices the old route and the sibling announces its own).
+	// unannounce the path (metadata updates are expected: the sibling
+	// announces its own route, which outranks the draining one).
 	let recorded = memory::record(cluster.origin.consume().routes());
 
 	// ── sibling A drains with a redirect to sibling B ────────────────
@@ -319,8 +322,8 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 	within("A's session closes", session_a.closed()).await;
 
 	// No retraction leaked to the origin during the whole swap, once the mesh
-	// has settled. Metadata updates (the drain re-pricing, the sibling's route)
-	// are expected and harmless; an inactive event means the path flapped.
+	// has settled. Metadata updates (the sibling's route winning) are expected
+	// and harmless; an inactive event means the path flapped.
 	kio::clock::sim::idle().await;
 	let retracted = retractions(&recorded);
 	assert!(
@@ -553,7 +556,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	);
 
 	// ── announcement stability: the path never retracted under the swap ──
-	// Metadata updates (route re-pricing, the new leg's hops) are expected.
+	// Metadata updates (the new leg winning) are expected.
 	let retracted = retractions(&recorded);
 	assert!(
 		retracted.is_empty(),
