@@ -1145,6 +1145,7 @@ mod tests {
 				capacity: Duration::from_secs(3),
 				pad: false,
 				trim: false,
+				comfort: true,
 			},
 		);
 		cons.stretch(rate);
