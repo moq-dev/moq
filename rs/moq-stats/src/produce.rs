@@ -3031,7 +3031,9 @@ mod tests {
 
 	/// Read `reader` until its track ends, returning how it ended and the last
 	/// frame before that.
-	async fn drain_bucket(reader: &mut crate::consume::BucketConsumer) -> (crate::Result<()>, Option<crate::BucketFrame>) {
+	async fn drain_bucket(
+		reader: &mut crate::consume::BucketConsumer,
+	) -> (crate::Result<()>, Option<crate::BucketFrame>) {
 		let mut last = None;
 		loop {
 			match reader.next().await {

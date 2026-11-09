@@ -463,7 +463,10 @@ fn buckets(c: &mut Criterion) {
 					let mut relay = Relay::build(paths, 1, 10, 2, Some(buckets));
 					let row = sample(&mut relay);
 					let micros = row.elapsed.as_secs_f64() * 1e6;
-					println!("{paths:>5} {buckets:>7} {allocs:>11} {micros:>8.1}", allocs = row.allocs);
+					println!(
+						"{paths:>5} {buckets:>7} {allocs:>11} {micros:>8.1}",
+						allocs = row.allocs
+					);
 					relay
 				});
 				b.iter_custom(|iters| {

@@ -19,7 +19,7 @@ use moq_net::track::Resolving;
 use moq_net::{Instance, Path, broadcast, origin};
 
 use crate::{
-	Epoch, Bucket, BucketFrame, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage,
+	Bucket, BucketFrame, Epoch, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage,
 	parse_bucket_track, parse_node_path, prefix_track, presence_track, totals_track,
 };
 

@@ -81,7 +81,12 @@ impl Node {
 
 	/// Bump every path's byte counter and publish the whole snapshot.
 	fn publish(&mut self, bytes: u64) {
-		for usage in self.frame.tiers.values_mut().flat_map(|bucket| bucket.paths.values_mut()) {
+		for usage in self
+			.frame
+			.tiers
+			.values_mut()
+			.flat_map(|bucket| bucket.paths.values_mut())
+		{
 			usage.publisher.bytes += bytes;
 		}
 		self.bucket
