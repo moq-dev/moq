@@ -150,19 +150,18 @@ pub(super) struct Shared<S: ?Sized> {
 
 impl Shared<dyn ErasedSession> {
 	/// Reserve the credit of one more paused stream, unless it would push the paused total
-	/// over half the connection window, returning how much it reserved.
+	/// over half the connection window, returning how much it reserved. Without a connection
+	/// window a paused stream holds only its own credit, so it reserves nothing.
 	fn reserve(&self) -> Option<u64> {
 		let window = self.session.receive_window()?;
-		let charge = window
-			.connection
-			.map_or(window.stream, |connection| window.stream.min(connection.get()));
+		let Some(connection) = window.connection else {
+			return Some(0);
+		};
+		let charge = window.stream.min(connection.get());
+		let cap = connection.get() / 2;
 		self.paused
 			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |paused| {
-				let total = paused.checked_add(charge)?;
-				window
-					.connection
-					.is_none_or(|connection| total <= connection.get() / 2)
-					.then_some(total)
+				paused.checked_add(charge).filter(|total| *total <= cap)
 			})
 			.ok()?;
 		Some(charge)
@@ -1080,6 +1079,13 @@ mod test {
 		assert!(streams[2].pause(), "a resumed stream returned its share");
 		drop(streams.remove(1));
 		assert!(accept(&session).pause(), "so did a dropped one");
+
+		// Without a connection window nothing is shared, so every stream may pause.
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(None, u64::MAX)),
+		);
+		let mut streams: Vec<_> = (0..3).map(|_| accept(&session)).collect();
+		assert!(streams.iter_mut().all(|stream| stream.pause()));
 	}
 
 	/// A stream paces at the credit its session grants it, so a hop holds about what its

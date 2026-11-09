@@ -1105,12 +1105,14 @@ ws = false
 			std::ffi::OsString::from("moq-relay"),
 			std::ffi::OsString::from(&path),
 			std::ffi::OsString::from("--runtime-pin=true"),
+			std::ffi::OsString::from("--runtime-workers=auto"),
 			std::ffi::OsString::from("--web-ws=true"),
 			#[cfg(feature = "websocket")]
 			std::ffi::OsString::from("--connect-websocket-enabled=true"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert!(config.runtime.pin);
+		assert_eq!(config.runtime.workers, crate::runtime::Workers::Auto);
 		assert!(config.web.ws);
 		#[cfg(feature = "websocket")]
 		assert_eq!(config.connect.websocket.enabled, Some(true));

@@ -4887,11 +4887,15 @@ fn clamp_max_delay(mut max_delay: Duration, bound: Option<Duration>) -> Duration
 	max_delay
 }
 
-/// Clamp the aggregate's max delay budget to `bound`; see [`clamp_max_delay`].
+/// Clamp the aggregate's max delay budget to `bound`; see [`clamp_max_delay`]. A bound that
+/// doesn't lower the budget leaves it as is, so an unbounded demand stays `None` on the wire
+/// rather than becoming a huge value no version can carry.
 fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Option<Subscription> {
 	let mut combined = combined?;
-	if bound.is_some() {
-		combined.delay.max = Some(clamp_max_delay(combined.budget(), bound));
+	if let Some(bound) = bound
+		&& bound < combined.budget()
+	{
+		combined.delay.max = Some(bound);
 	}
 	Some(combined)
 }
@@ -12434,6 +12438,27 @@ mod test {
 		// even for a subscriber that defers to the max age alone.
 		assert_eq!(producer.tail_grace(Duration::from_secs(60)), Duration::from_secs(2));
 		assert_eq!(producer.tail_grace(Duration::MAX), Duration::from_secs(2));
+		waiting.await.unwrap();
+	}
+
+	/// A ceiling that doesn't lower an unbounded demand leaves it unbounded: a huge one
+	/// (`Some(Duration::MAX)`) must not reach the wire as a value no version can carry.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_huge_ceiling_keeps_an_unbounded_demand_unbounded() {
+		let broadcast = broadcast::Info {
+			cache_duration: Some(Duration::MAX),
+			..Default::default()
+		}
+		.produce();
+		let mut dynamic = broadcast.requests();
+		let consumer = broadcast.consume();
+		let unbounded = Subscription::default().with_delay(Delay::default().with_max(None));
+		let mut waiting = std::pin::pin!(consumer.track("test").unwrap().subscribe(unbounded));
+		assert!(futures::poll!(waiting.as_mut()).is_pending());
+		let request = dynamic.requested_track().await.unwrap();
+		assert_eq!(request.subscription().unwrap().delay.max, None);
+		request.accept(Info::timed());
 		waiting.await.unwrap();
 	}
 

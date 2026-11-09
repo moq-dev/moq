@@ -108,7 +108,7 @@ impl Serialize for Workers {
 impl<'de> Deserialize<'de> for Workers {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
 		#[derive(Deserialize)]
-		#[serde(untagged)]
+		#[serde(untagged, expecting = "`shared`, `auto`, or a nonzero worker count")]
 		enum Raw {
 			Count(u64),
 			Name(String),
@@ -157,6 +157,10 @@ mod tests {
 		);
 		assert!(parse("workers = 0").is_err());
 		assert!(parse("workers = \"eight\"").is_err());
+		for wrong in ["workers = -1", "workers = 1.5"] {
+			let err = parse(wrong).unwrap_err().to_string();
+			assert!(err.contains("`shared`, `auto`, or a nonzero worker count"), "{err}");
+		}
 
 		for workers in [Workers::Shared, Workers::Auto, Workers::Count(NonZeroU16::MIN)] {
 			assert_eq!(workers.to_string().parse(), Ok(workers));
