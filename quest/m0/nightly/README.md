@@ -54,4 +54,3 @@ near the paired threshold (re-check if one repeats), a one-off
 - [The qmux startup benchmark's fake peer sends transport parameters](/quest/m0/nightly/qmux-bench-peer.md) - Audio quality's WebSocket startup step stops timing out
 - [The moq-net session bench completes moq-transport-22 at 16 broadcasts](/quest/m0/nightly/session-bench-handshake.md) - the bench workload stops panicking on a handshake timeout
 - [Bisect the moq-audio bus and moq-mux parameter_sets regressions](/quest/m0/nightly/bench-regressions.md) - two real benchmark regressions are explained and fixed or accepted
-- [Moxygen conformance cells pass again](/quest/m0/nightly/moxygen-conformance.md) - the first-object signal and integer extensions survive, or moxygen's divergence is skipped with an upstream link

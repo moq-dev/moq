@@ -6705,7 +6705,6 @@ impl TrackServe {
 	fn serve_group(&mut self, group: group::Consumer, slice: GroupSlice) -> GroupServe {
 		let group = if self.compression { group.compressed() } else { group };
 		let sequence = group.sequence;
-		let wire = group.wire();
 		let msg = ietf::GroupHeader {
 			track_alias: self.request_id.0,
 			group_id: sequence,
@@ -6715,17 +6714,10 @@ impl TrackServe {
 			// model ranks higher-first and this wire field lower-first.
 			publisher_priority: super::priority::to_wire(self.track.info().priority),
 			// Carry per-object timestamps as extension headers (the Timestamp
-			// Object Property) only when TIMESCALE was declared.
+			// Object Property) only when TIMESCALE was declared. The relay state adds
+			// to these once it settles (see `GroupServe::poll_open`).
 			flags: ietf::GroupFlags {
-				has_extensions: self.compression
-					|| self.timescale.is_some()
-					|| wire.as_ref().is_some_and(|wire| wire.extensions),
-				first_object: wire
-					.as_ref()
-					.map_or(slice.skip == 0, |wire| wire.first_object && slice.skip <= wire.first_id),
-				// A stream capped by the range stops before the group may end, so its
-				// FIN cannot claim END_OF_GROUP.
-				has_end: slice.until.is_none() && wire.as_ref().is_none_or(|wire| wire.has_end),
+				has_extensions: self.compression || self.timescale.is_some(),
 				..Default::default()
 			},
 		};
@@ -7534,6 +7526,8 @@ struct GroupServe {
 	version: Version,
 	prior_object: Option<u64>,
 	slice: GroupSlice,
+	/// Whether `msg` and the read slice reflect the group's settled relay state.
+	described: bool,
 	bounds: Option<kio::Consumer<ServeRange>>,
 	/// Set when a narrowing gives this stream up.
 	retired: Arc<AtomicBool>,
@@ -7602,17 +7596,11 @@ impl GroupServe {
 		session: Transport,
 		msg: ietf::GroupHeader,
 		rank: Rank<GroupOf<Transport>>,
-		mut group: group::Consumer,
+		group: group::Consumer,
 		timescale: Option<Timescale>,
 		version: Version,
 		slice: GroupSlice,
 	) -> Self {
-		if group.wire().is_none() {
-			// Only the end: a start would clamp past a prefix the group never held,
-			// which `skip_to` leaves to fail as `Lagged`.
-			group.skip_to(slice.skip);
-			group = group.with_end(slice.until);
-		}
 		Self {
 			session,
 			opened: Default::default(),
@@ -7624,6 +7612,7 @@ impl GroupServe {
 			version,
 			prior_object: None,
 			slice,
+			described: false,
 			bounds: None,
 			retired: Default::default(),
 			ended: false,
@@ -7682,6 +7671,25 @@ impl GroupServe {
 		self
 	}
 
+	/// Fill in the header flags and the read slice from the group's relay state.
+	fn describe(&mut self, wire: Option<group::Wire>) {
+		let flags = &mut self.msg.flags;
+		flags.has_extensions |= wire.as_ref().is_some_and(|wire| wire.extensions);
+		flags.first_object = wire.as_ref().map_or(self.slice.skip == 0, |wire| {
+			wire.first_object && self.slice.skip <= wire.first_id
+		});
+		// A stream capped by the range stops before the group may end, so its FIN cannot
+		// claim END_OF_GROUP.
+		flags.has_end = self.slice.until.is_none() && wire.as_ref().is_none_or(|wire| wire.has_end);
+		if wire.is_none() {
+			// Only the end: a start would clamp past a prefix the group never held, which
+			// `skip_to` leaves to fail as `Lagged`.
+			self.group.skip_to(self.slice.skip);
+			self.group.end_at(self.slice.until);
+		}
+		self.described = true;
+	}
+
 	/// Wait for stream credit, then write the group header, leaving the machine serving.
 	/// Gives up once the group can no longer be sent, so a parked group never spends the
 	/// credit it was waiting for on a reset.
@@ -7699,6 +7707,12 @@ impl GroupServe {
 		}
 		// The current rank, so a move while parked applies to the stream as it opens.
 		let _ = self.rank.poll_moved(waiter);
+		// Before the stream, whose header describes it: a relayed group is visible before
+		// its own header has been read.
+		if !self.described {
+			let wire = ready!(self.group.poll_wire(waiter));
+			self.describe(wire);
+		}
 		let stream = match ready!(self.session.poll_open_group(
 			&mut self.open,
 			waiter,
@@ -8632,6 +8646,64 @@ mod group_priority_test {
 			FRAMES * PAYLOAD,
 		)
 		.await;
+	}
+
+	/// A relay ingest publishes a group before it reads the header that describes it, so the
+	/// egress header waits for that state rather than describing a plain group.
+	#[kio::test]
+	async fn a_group_header_waits_for_its_relay_state() {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone());
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			track::Info::default(),
+		);
+		let mut serve = TrackServe::new(
+			crate::driver::Transport::new(session.clone()),
+			track.subscribe(None),
+			RequestId(0),
+			Version::Draft18,
+			ServeRange::default(),
+			None,
+		);
+
+		let group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		assert!(futures::poll!(kio::wait(|waiter| serve.poll(waiter))).is_pending());
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: false,
+				first_id: 3,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		let mut frame = group
+			.create_object(frame::Header {
+				info: frame::Info {
+					size: 1,
+					timestamp: None,
+				},
+				fields: Some(std::sync::Arc::new(crate::model::object::Fields {
+					id: 3,
+					properties: Default::default(),
+				})),
+				inflated: None,
+			})
+			.unwrap();
+		frame.write(b"x".as_slice()).unwrap();
+		frame.finish().unwrap().finish().unwrap();
+		track.finish().unwrap();
+		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
+
+		let mut buf = bytes::Bytes::from(log.writes.lock().unwrap().clone());
+		let header = crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| ietf::GroupHeader::decode(r, v))
+			.expect("a group header");
+		assert!(header.flags.has_extensions);
+		assert!(!header.flags.first_object);
 	}
 
 	/// Serve one group of a track with `info` and decode the subgroup header it opens with.
