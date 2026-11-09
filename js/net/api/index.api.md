@@ -250,7 +250,7 @@ export class Connection {
 	static readonly checkVersions: (versions: readonly string[]) => string[];
 	close(abort?: Error): void;
 	get closed(): Signals.GetPromise<Error | null>;
-	static readonly connect: ({ ... }: Connection.ConnectProps) => Promise<Connection.Established>;
+	static readonly connect: (props: Connection.ConnectProps) => Promise<Connection.Established>;
 	enabled: Signals.Signal<boolean>;
 	readonly error: Signals.Getter<Error | undefined>;
 	static readonly isWebTransportSupported: () => boolean;

@@ -42,7 +42,8 @@ function handed(task: Promise<void>): Promise<void> {
 }
 
 /** Where a session is: open, delivering what it owes before it closes, or closed. */
-type Phase = { kind: "open" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
+/** `leaving` is open but draining at this side's own request; see the wire view's `leave`. */
+type Phase = { kind: "open" } | { kind: "leaving" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
 
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
@@ -97,8 +98,6 @@ export class Connection implements Established {
 
 	// The peer's GOAWAY, read off its SETUP stream.
 	#goaway = new Once<Drain>();
-	// Whether this side is moving to another session; see the wire view's `leave`.
-	#left = false;
 
 	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
 	readonly peerImplementation: Promise<string | undefined>;
@@ -191,7 +190,7 @@ export class Connection implements Established {
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 			handle,
-			draining: () => this.#left || this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
+			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -236,7 +235,7 @@ export class Connection implements Established {
 			exclusive: solicit === undefined,
 			// Drained locally only: this compatibility layer sends no client GOAWAY.
 			leave: () => {
-				this.#left = true;
+				if (this.#phase.kind === "open") this.#phase = { kind: "leaving" };
 			},
 			auth: this.#auth,
 		});
@@ -252,7 +251,8 @@ export class Connection implements Established {
 	/** Withdraw announcements and wait up to one second for delivery before closing. */
 	close(): Promise<void> {
 		switch (this.#phase.kind) {
-			case "open": {
+			case "open":
+			case "leaving": {
 				const done = withTimeout(
 					this.#publisher.withdraw(),
 					Nano.fromSecond(Second(1)),

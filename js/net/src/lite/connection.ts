@@ -83,7 +83,8 @@ export interface ConnectionProps {
 }
 
 /** Where a session is: open, delivering what it owes before it closes, or closed. */
-type Phase = { kind: "open" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
+/** `leaving` is open but draining at this side's own request; see the wire view's `leave`. */
+type Phase = { kind: "open" } | { kind: "leaving" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
 
 /**
  * Represents a connection to a MoQ server.
@@ -157,8 +158,6 @@ export class Connection implements Established {
 
 	// The peer's GOAWAY. Lite carries no deadline, so only the URI is set.
 	#goaway = new Once<Drain>();
-	// Whether this side sent its own GOAWAY; see the wire view's `leave`.
-	#left = false;
 
 	/**
 	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
@@ -219,7 +218,7 @@ export class Connection implements Established {
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 			handle,
-			draining: () => this.#left || this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
+			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -269,8 +268,8 @@ export class Connection implements Established {
 	}
 
 	#leave(): void {
-		if (this.#left) return;
-		this.#left = true;
+		if (this.#phase.kind !== "open") return;
+		this.#phase = { kind: "leaving" };
 		if (!hasGoaway(this.#version)) return;
 		const version = this.#version;
 		const send = async () => {
@@ -298,7 +297,8 @@ export class Connection implements Established {
 	 */
 	close(): Promise<void> {
 		switch (this.#phase.kind) {
-			case "open": {
+			case "open":
+			case "leaving": {
 				const done = withTimeout(
 					this.#publisher.drain(),
 					Nano.fromMilli(Milli(1000)),

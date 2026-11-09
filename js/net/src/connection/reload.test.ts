@@ -1481,8 +1481,8 @@ function linkedWebSocketStream(onServer: (socket: WebSocketStreamLike, protocol:
 
 // A link that fell back to WebSocket while WebTransport was unreachable probes it on a backoff
 // and, once it answers, leaves the fallback make-before-break: the old session tells its peer it
-// is moving with a GOAWAY and drains while the replacement dials, which lands on WebTransport,
-// and the status never reports a disconnect.
+// is moving with a GOAWAY and drains while the replacement finishes its handshake over the
+// probe's WebTransport session, with no second race, and the status never reports a disconnect.
 test("a WebSocket fallback returns to WebTransport once it is reachable", async () => {
 	using clock = manual();
 	const originalWebTransport = globalThis.WebTransport;
@@ -1534,8 +1534,8 @@ test("a WebSocket fallback returns to WebTransport once it is reachable", async 
 			await clock.advance(Nano.fromMilli(Milli(1_000)));
 		}
 		expect(reload.established.peek()?.transport).toBe("webtransport");
-		// The reachability probe plus the replacement, never another fallback.
-		expect(probes).toBe(2);
+		// The probe's session carries the replacement: one WebTransport dial, never another race.
+		expect(probes).toBe(1);
 		expect(sessions.filter((session) => session.transport === "websocket")).toHaveLength(1);
 		expect(await (await fallback.server).draining).toEqual({ uri: "" });
 		expect(statuses).not.toContain("disconnected");
