@@ -407,10 +407,6 @@ struct End {
 	/// clean end stands for good. Atomic so reporting it latches through a read guard; see
 	/// [`TrackState::latch_settled`].
 	settled: AtomicBool,
-	/// Whether the end was reached when a reclaim forgot runs of the drop set, which keeps it
-	/// reached: a received copy's tail counts a dropped gap as delivered, so forgetting the
-	/// run would make a reader that saw the end wait on it again.
-	reached: AtomicBool,
 }
 
 impl End {
@@ -634,8 +630,8 @@ pub(crate) struct TrackState {
 	// last group does not lose where the track ended.
 	outcome: Outcome,
 
-	// The sequences the live feed delivered: what a pending tail
-	// is judged by. Fetched copies never count, and eviction never touches it. A gap folds
+	// The sequences the live feed delivered, and the drops a reclaim forgot: what a pending
+	// tail is judged by. Fetched copies never count, and eviction never touches it. A gap folds
 	// away a subscription's grace after a later arrival opened it, as the session's tail
 	// does, so this holds only the gaps still worth waiting for.
 	arrivals: Ledger,
@@ -687,6 +683,8 @@ pub(crate) struct TrackState {
 	// eviction debt sheds the lowest runs, and the expiry scan forgets those older than the
 	// pool's window; either leaves their sequences unknown again.
 	drops_bill: cache::Extra,
+	// The runs reclaimed from `drops`, for readers that judged them to judge again.
+	forgotten: miss::Forgotten,
 	// How many copies the cache took in that the live feed didn't deliver: fetched backfill,
 	// and fetched heads joining a live group, which may give it a start. Neither is in the
 	// arrival ledger, so a time end parked on a gap looks again.
@@ -1458,7 +1456,6 @@ impl TrackState {
 		if !self.drops_expired(now) {
 			return;
 		}
-		self.latch_reached();
 		let kept = self.kept_drops();
 		let expired: Vec<_> = self
 			.drops_born
@@ -1467,7 +1464,7 @@ impl TrackState {
 			.map(|(run, _)| run.start..run.end.min(kept))
 			.collect();
 		for run in expired {
-			self.change_drops(run, None);
+			self.forget_drops(run);
 		}
 		self.drops_oldest = self
 			.drops_born
@@ -1475,15 +1472,6 @@ impl TrackState {
 			.filter(|(run, _)| run.start < kept)
 			.map(|(_, expires)| *expires)
 			.min();
-	}
-
-	/// Keep a reached end reached before a reclaim forgets runs; see [`End::reached`].
-	fn latch_reached(&self) {
-		if let Outcome::Ending(end) = &self.outcome
-			&& self.is_complete()
-		{
-			end.reached.store(true, Ordering::Relaxed);
-		}
 	}
 
 	/// Where the runs a reclaim may forget end: every run on a received copy, whose tail
@@ -1516,9 +1504,6 @@ impl TrackState {
 	fn shed_drops(&mut self, cap: u64) -> u64 {
 		let mut paid = 0u64;
 		let kept = self.kept_drops();
-		if self.debt > 0 && cap > 0 {
-			self.latch_reached();
-		}
 		while self.debt > 0 && paid < cap {
 			let Some(run) = self
 				.drops
@@ -1529,12 +1514,42 @@ impl TrackState {
 				break;
 			};
 			let billed = self.drops_bill.size();
-			self.change_drops(run, None);
+			self.forget_drops(run);
 			let freed = billed.saturating_sub(self.drops_bill.size());
 			self.debt -= freed.min(self.debt);
 			paid = paid.saturating_add(freed);
 		}
 		paid
+	}
+
+	/// Forget `run` of the drop set to reclaim it, accounting it in the arrivals as an evicted
+	/// group stays: the publisher accounted for it, so neither the tail nor a reader waits on
+	/// it again, and a reader that wants it asks a fill or judges it by its budget.
+	///
+	/// A reclaim never adds a run to the arrivals, so forgetting a flood of fragments costs
+	/// nothing there: a run touching no accounted one takes the gap below it too, given up
+	/// early as a fold would. Nothing below the tail's floor is accounted, since nothing waits
+	/// on it and accounting it would lower the floor onto gaps nobody waited for.
+	fn forget_drops(&mut self, run: ops::Range<u64>) {
+		self.change_drops(run.clone(), None);
+		self.forgotten.record(run.clone());
+		let floor = self.tail_floor();
+		let start = run.start.max(floor);
+		if start >= run.end {
+			return;
+		}
+		// The highest accounted run starting at or below the run's end touches it when it ends
+		// at or past its start; otherwise it is the run below.
+		let start = match self.arrivals.end_below(run.end) {
+			Some(end) if end >= start => start,
+			below => below.map_or(floor, |end| end.max(floor)),
+		};
+		let now = self.cache.pool().now_wall();
+		// Only a first run takes this as the age of the gap below it, which nothing opened yet:
+		// the tail's, so an end already reached stays reached.
+		let since = self.outcome.end().and_then(|end| end.tail).map_or(now, |tail| tail.min(now));
+		self.arrivals.account(start..run.end, since);
+		self.cache.wakes().arrived(start..run.end);
 	}
 
 	/// Remove an aborted slot, keeping a cut as a drop: reclaiming it must not erase a
@@ -3057,7 +3072,6 @@ impl TrackState {
 			error,
 			tail,
 			settled: AtomicBool::new(settled),
-			reached: AtomicBool::new(false),
 		});
 		self.cache.declare_end();
 		self.cache.wakes().arrived(fin..);
@@ -3109,13 +3123,10 @@ impl TrackState {
 	/// still open, so the track was cut off rather than ended.
 	fn is_complete(&self) -> bool {
 		match &self.outcome {
-			Outcome::Ending(end) => {
-				end.reached.load(Ordering::Relaxed)
-					|| end
-						.at
-						.final_sequence()
-						.is_some_and(|fin| self.reaches(fin) && !self.awaits_tail(fin))
-			}
+			Outcome::Ending(end) => end
+				.at
+				.final_sequence()
+				.is_some_and(|fin| self.reaches(fin) && !self.awaits_tail(fin)),
 			// A declared end the last producer dropped short of.
 			Outcome::Sealed(_) => true,
 			// An abort wins unless the end had already settled: a group below it was still open.
@@ -3190,19 +3201,16 @@ impl TrackState {
 		let grace = self.arrival_grace();
 		// Fetched backfill never reaches a reader in arrival order, so only the live feed's
 		// arrivals count. Without a declared start, the first one stands in for it.
-		let floor = match self.start {
-			Start::Declared(start) | Start::Resolved(start) | Start::Pending(Some(start)) => start,
-			// Where the feed starts is still unknown, so everything below the end not yet
-			// delivered or dropped is owed.
-			Start::Pending(None) => {
-				let missing = self
-					.arrivals
-					.gaps(0..fin)
-					.any(|(gap, _)| self.drops.gaps(&gap).next().is_some());
-				return missing.then(|| active.checked_add(grace));
-			}
-			Start::Unknown => self.arrivals.first().unwrap_or(0),
-		};
+		// Where the feed starts is still unknown, so everything below the end not yet
+		// delivered or dropped is owed.
+		if self.start == Start::Pending(None) {
+			let missing = self
+				.arrivals
+				.gaps(0..fin)
+				.any(|(gap, _)| self.drops.gaps(&gap).next().is_some());
+			return missing.then(|| active.checked_add(grace));
+		}
+		let floor = self.tail_floor();
 		// Nothing opened the gap above the last arrival, so its grace runs from `active`.
 		self.arrivals
 			.gaps(floor.min(fin)..fin)
@@ -3210,6 +3218,15 @@ impl TrackState {
 			.map(|(_, opened)| opened.unwrap_or(active).checked_add(grace))
 			// A gap that is never given up holds the end for good.
 			.reduce(|a, b| a.zip(b).map(|(a, b)| a.max(b)))
+	}
+
+	/// The lowest sequence a received copy's tail owes: where the feed starts, or before a
+	/// start is declared, its first arrival.
+	fn tail_floor(&self) -> u64 {
+		match self.start {
+			Start::Pending(None) => 0,
+			start => start.sequence().or(self.arrivals.first()).unwrap_or(0),
+		}
 	}
 
 	/// Wake `waiter` when a received copy's declared end stops waiting for its tail.
@@ -23787,11 +23804,6 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_reached_end_outlives_its_expired_drops() {
-		let patient = || {
-			Subscription::default()
-				.with_range(0..)
-				.with_delay(Delay::default().with_max(Duration::from_secs(3600)))
-		};
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
 		let mut producer = track_producer_pooled("test", pool.clone());
 		producer.received();
@@ -23811,6 +23823,94 @@ mod test {
 		let mut late = producer.subscribe(patient());
 		drain_groups(&mut late);
 		assert!(matches!(late.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	/// A received copy that reached its end through a dropped gap, after that run expires.
+	#[cfg(feature = "async")]
+	fn reached_then_expired() -> (Producer, Subscriber, cache::Pool) {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		producer.received();
+		let mut subscriber = producer.subscribe(patient());
+		write_group(&producer, 0);
+		producer.drop_groups(1..2, StreamError::Old);
+		write_group(&producer, 2);
+		producer.finish_at(Position::group(3), None).unwrap();
+		drain_groups(&mut subscriber);
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+		elapse(&producer, Duration::from_secs(40));
+		pool.sweep();
+		assert!(producer.state.read().drops.is_empty(), "the run expired");
+		(producer, subscriber, pool)
+	}
+
+	/// A subscription whose budget outlasts any run, so it would wait on a forgotten one.
+	#[cfg(feature = "async")]
+	fn patient() -> Subscription {
+		Subscription::default()
+			.with_range(0..)
+			.with_delay(Delay::default().with_max(Duration::from_secs(3600)))
+	}
+
+	/// A reached end refined mid-group by a peer that named the boundary first stays reached
+	/// after its dropped gap is forgotten, since the forgotten run stays accounted for.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refined_end_stays_reached_after_its_drops_expire() {
+		let (mut producer, _subscriber, _pool) = reached_then_expired();
+		producer.finish_at(Position { group: 2, frame: 1 }, None).unwrap();
+		let mut late = producer.subscribe(patient());
+		drain_groups(&mut late);
+		assert!(matches!(
+			late.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	/// A reached end settles an abort after its dropped gap is forgotten: readers end cleanly.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_abort_after_a_reached_end_drops_expire_ends_readers_cleanly() {
+		let (producer, mut subscriber, _pool) = reached_then_expired();
+		producer.abort(Error::Cancel).unwrap();
+		assert!(matches!(
+			subscriber.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	/// A reader that judged a dropped run before the pool forgot it, and has not read past it,
+	/// asks a fill for it once it is unknown again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reader_asks_a_fill_for_a_forgotten_run_it_judged() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let producer = track_producer_pooled("test", pool.clone());
+		producer.received();
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(patient());
+		write_group(&producer, 0);
+		producer.drop_groups(1..2, StreamError::Old);
+		write_group(&producer, 2);
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(first))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("group 0 is handed out");
+		};
+		assert_eq!(first.sequence, 0);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"a dropped run asks no fill"
+		);
+
+		elapse(&producer, Duration::from_secs(40));
+		pool.sweep();
+		assert!(producer.state.read().drops.is_empty(), "the run expired");
+		let _ = subscriber.poll_recv_group(&waiter);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the forgotten run is asked of a fill");
+		};
+		assert_eq!(fill.start().group..fill.end(), 1..2);
 	}
 
 	/// A source refusing a fill in disjoint groups pays for the runs it records, as a drop does.
@@ -23883,6 +23983,10 @@ mod test {
 			"only a prefix was shed"
 		);
 		assert_eq!(held.last().map(|run| run.start), Some(2 * (RUNS - 1)));
+		assert!(
+			!producer.state.read().arrivals.has_gaps(),
+			"the shed runs are accounted for without fragmenting the arrivals"
+		);
 		assert!(
 			producer.state.read().given_up(0).is_none(),
 			"a shed run is unknown again"

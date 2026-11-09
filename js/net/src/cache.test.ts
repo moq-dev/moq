@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import * as cache from "./cache.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
-import { hooks } from "./internal.ts";
+import { hooks, staleHole } from "./internal.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 // Run `fn` on a manual clock, stepped in milliseconds.
@@ -369,5 +369,41 @@ test("a kept local skip expires once the edge passes it or the track closes", as
 		const used = pool.used;
 		closed.close();
 		expect(pool.used).toBe(used - cache.RUN_OVERHEAD - cache.BORN_OVERHEAD);
+	});
+});
+
+// A received stale run the pool forgets is accounted for, as an evicted group is: no reader waits
+// on it from the live feed, so a reader that wants it asks a fill. Mirrors Rust
+// `a_reader_asks_a_fill_for_a_forgotten_run_it_judged`.
+test("a forgotten stale run is asked of a fill", async () => {
+	await withClock(async (clock) => {
+		const pool = new cache.Pool({ expiry: Milli(1_000) });
+		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		const requests = producer.requests();
+		producer.createGroup(0n).finish();
+		hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500));
+		producer.createGroup(3n).finish();
+		await clock.advance(2_000);
+
+		const reader = producer.subscribe({
+			ranges: [{ start: { absolute: 1n } }],
+			delay: { max: Milli(60_000) },
+			order: "ascending",
+		});
+		// The live group first, in arrival order; the next read asks for what it misses.
+		expect((await reader.recvGroup())?.sequence).toBe(3n);
+		const next = reader.recvGroup();
+		const asked: bigint[][] = [];
+		for (;;) {
+			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+			if (!fill) break;
+			asked.push([fill.start, fill.end]);
+		}
+		expect(asked).toEqual([[1n, 3n]]);
+
+		reader.close();
+		requests.close();
+		await next.catch(() => undefined);
 	});
 });

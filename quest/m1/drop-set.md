@@ -60,7 +60,8 @@ because runs keyed by group sequence convert mechanically to starts.
   reported runs (256 readers holding 65,536 each: about 0.75 ms per drop
   against 0.18 ms with one each). JS `#askFills` still walks every run above
   the edge on each probe while a fill handler serves the track; mirror Rust's
-  `Misses::unknown` memo there.
+  `Misses::unknown` memo there, and have the memo judge again what the track
+  forgets, as Rust's `Misses::judge` folds the track's `Forgotten` log.
 
 Mirror each case in `js/net`.
 In `js/net`, a group a sink buffers keeps its source wanted only while
@@ -87,14 +88,6 @@ Still to cover, beyond the memory work:
   (`rs/moq-net/src/model/track/fill.rs`) records what a fill's source gave up
   as a budget-independent drop, including OLD judged under that fill's own
   terms. Record it as a stale run, so it settles only the readers it covers.
-
-- **A forgotten run a reader already judged.** Found 2026-11-09 by review
-  on moq-dev/moq#8294: `Misses::judge` marks a dropped run judged, and only a
-  change of terms rejudges what it settled, through the runs the track still
-  holds. A run shed or expired after a reader judged it, but before the reader
-  read past it, becomes a hole that reader never asks for or gives up, so an
-  ordered reader behind it can wait on it. Rejudge what a forgotten run
-  leaves, without a full rescan per shed.
 
 Tests, on mock time through a relay, in Rust and mirrored in `js/net`:
 

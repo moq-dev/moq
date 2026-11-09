@@ -122,6 +122,11 @@ export class Ledger {
 		return run !== undefined && sequence < run.end ? run.end : undefined;
 	}
 
+	/** The exclusive end of the highest run starting at or below `sequence`. */
+	endBelow(sequence: bigint): bigint | undefined {
+		return this.#runs.getPairOrNextLower(sequence)?.[1].end;
+	}
+
 	/** Whether every sequence in `[start, end)` is accounted for. */
 	covers(start: bigint, end: bigint): boolean {
 		if (start >= end) return true;

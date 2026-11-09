@@ -1077,8 +1077,8 @@ export class Producer {
 	#wire?: Wire;
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
-	// The sequences the live feed delivered, as a group: what a pending tail is
-	// judged by. Eviction never touches it. A gap folds away a subscription's grace after a
+	// The sequences the live feed delivered, as a group or a drop, and the stale runs a reclaim
+	// forgot: what a pending tail is judged by. Eviction never touches it. A gap folds away a subscription's grace after a
 	// later arrival opened it, as the session's tail does, so this holds only the gaps still
 	// worth waiting for.
 	#arrivals = new Ledger();
@@ -1167,7 +1167,9 @@ export class Producer {
 			const run = this.#state.drops.all[0];
 			if (!run || run.start >= kept) break;
 			const billed = this.#dropsBilled;
-			this.#setDrops(run.start, min(run.end, kept));
+			const end = min(run.end, kept);
+			this.#setDrops(run.start, end);
+			this.#forgot([{ start: run.start, end }]);
 			paid += billed - this.#dropsBilled;
 		}
 		return paid;
@@ -1186,12 +1188,34 @@ export class Producer {
 			this.#state.drops.clear(expired);
 			this.#dropsBorn.clear(expired);
 			this.#billDrops();
+			this.#forgot(expired);
 		}
 		this.#dropsOldest = undefined;
 		for (const run of this.#dropsBorn.all) {
 			if (run.start < kept) this.#dropsOldest = Math.min(this.#dropsOldest ?? run.expires, run.expires);
 		}
 		return expired.length > 0;
+	}
+
+	// Account `forgotten`, runs a reclaim took out of the drop set, in the arrivals as an evicted
+	// group stays: the publisher accounted for them, so neither the tail nor a reader waits on
+	// them again, and a reader that wants one asks a fill or judges it by its budget. A reclaim
+	// never adds a run to the arrivals: a run touching no accounted one takes the gap below it
+	// too, given up early as a fold would. Nothing below the tail's floor is accounted, since
+	// accounting it would lower the floor onto gaps nobody waited for. Mirrors the Rust
+	// `TrackState::forget_drops`.
+	#forgot(forgotten: readonly Run[]): void {
+		const feed = this.#feedStart();
+		for (const run of forgotten) {
+			const floor = (feed === "pending" ? this.#wire?.served?.requested : feed) ?? this.#arrivals.first() ?? 0n;
+			let start = max(run.start, floor);
+			if (start >= run.end) continue;
+			// The highest run starting at or below the run's end touches it when it ends at or past
+			// its start; otherwise it is the run below.
+			const below = this.#arrivals.endBelow(run.end);
+			if (below === undefined || below < start) start = below === undefined ? floor : max(below, floor);
+			this.#arrive(start, run.end);
+		}
 	}
 
 	// Where the runs a reclaim may forget end: every run on a received copy, but only those below an
