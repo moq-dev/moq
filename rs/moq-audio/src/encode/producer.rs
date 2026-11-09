@@ -1,5 +1,7 @@
 //! Encode raw PCM and publish it as a moq audio track.
 
+use std::collections::VecDeque;
+
 use bytes::Bytes;
 
 use moq_mux::catalog::hang::CatalogExt;
@@ -95,6 +97,9 @@ pub struct Producer {
 	grouped: u64,
 	/// Samples emitted since the current anchor (reset by [`reanchor`](Self::reanchor)).
 	frames_produced: u64,
+	/// Stamps of the frames the codec has been given but has not yet returned a packet for,
+	/// oldest first: it returns one packet per frame in order, however late.
+	in_flight: VecDeque<Timestamp>,
 	/// Wall-clock anchor in microseconds, taken from the first frame after each
 	/// (re)start. Emitted PTS = `anchor + frames_produced / codec_rate`. `None`
 	/// until the first write so the next frame re-anchors to its timestamp.
@@ -253,6 +258,7 @@ impl Reserved {
 			group_samples: registered.group_samples,
 			grouped: 0,
 			frames_produced: 0,
+			in_flight: VecDeque::new(),
 			anchor_us: None,
 			pending_discontinuity: false,
 			decoder_boundary: true,
@@ -372,6 +378,7 @@ impl Producer {
 			&& let Ok(encoder) = self.codec.get_mut()
 		{
 			encoder.reset();
+			self.in_flight.clear();
 		}
 		// The resampler holds samples of its own, plus filter state primed by them.
 		// Left alone, `finish` would flush that pre-reset audio onto the track
@@ -486,11 +493,32 @@ impl Producer {
 		let encoder = self.codec.get_mut()?;
 		if reset {
 			encoder.reset();
+			self.in_flight.clear();
 		}
-		let packet = encoder.encode(samples)?;
-		self.activity = packet.activity;
-		self.publish(packet, timestamp)?;
-		self.decoder_boundary = false;
+		encoder.encode(samples)?;
+		self.publish_ready(Some(timestamp))
+	}
+
+	/// Publish every packet the codec has ready, each stamped with the frame it pairs with:
+	/// the oldest held stamp, then `submitted`, the frame just encoded, which is queued only
+	/// when the codec holds its packet, so a codec that holds nothing never fills the queue.
+	fn publish_ready(&mut self, mut submitted: Option<Timestamp>) -> Result<(), Error> {
+		while let Some(packet) = self.codec.get_mut()?.receive()? {
+			let Some(timestamp) = self.in_flight.pop_front().or_else(|| submitted.take()) else {
+				return Err(Error::Codec(format!(
+					"{} returned more packets than it was given frames",
+					self.encoder()?.name()
+				)));
+			};
+			self.activity = packet.activity;
+			// The codec and its timestamp queue already advanced past this packet, so no later
+			// write could stamp what follows: end the producer with the cause.
+			if let Err(err) = self.publish(packet, timestamp) {
+				return self.close(Err(err));
+			}
+			self.decoder_boundary = false;
+		}
+		self.in_flight.extend(submitted);
 		Ok(())
 	}
 
@@ -659,6 +687,14 @@ impl Producer {
 			Codec::Failed(cause) => return Err(cause.clone()),
 		}
 		let result = self.drain(err);
+		self.close(result)
+	}
+
+	/// Settle the codec as finished or failed with `result`, releasing encoding resources.
+	fn close(&mut self, result: Result<(), Error>) -> Result<(), Error> {
+		if !matches!(self.codec, Codec::Live(_)) {
+			return result;
+		}
 		self.codec = match &result {
 			Ok(()) => Codec::Finished,
 			Err(cause) => {
@@ -669,6 +705,7 @@ impl Producer {
 			}
 		};
 		self.pending = Vec::new();
+		self.in_flight = VecDeque::new();
 		self.remix = None;
 		self.resampler = None;
 		result
@@ -686,6 +723,7 @@ impl Producer {
 			&& let Ok(encoder) = self.codec.get_mut()
 		{
 			encoder.reset();
+			self.in_flight.clear();
 		}
 		// Whatever the resampler still holds belongs to this track: its last partial
 		// chunk, plus the audio its filter is running behind on. Dropping it here
@@ -698,6 +736,17 @@ impl Producer {
 		// so only the final partial frame reaches the encoder's terminal drain.
 		let anchor_us = self.anchor_us.unwrap_or(0);
 		self.publish_full_frames(anchor_us)?;
+		// What the codec still holds came from full frames, so it goes out at their stamps, leaving
+		// the terminal drain's packets to start where the source's partial tail does.
+		self.codec.get_mut()?.flush()?;
+		self.publish_ready(None)?;
+		if !self.in_flight.is_empty() {
+			return Err(Error::Codec(format!(
+				"{} kept {} packet(s) past its flush",
+				self.encoder()?.name(),
+				self.in_flight.len()
+			)));
+		}
 		// A gap no full frame carried, such as history expiring right before capture ended,
 		// still separates the final partial frame from the epoch before it.
 		if std::mem::take(&mut self.pending_discontinuity) && !self.decoder_boundary && !self.pending.is_empty() {
@@ -1210,6 +1259,7 @@ mod tests {
 			producer.finish().unwrap();
 			assert_eq!(backend.resources(), 0, "retired {index} codecs");
 			assert_eq!(producer.pending.capacity(), 0);
+			assert_eq!(producer.in_flight.capacity(), 0);
 			assert!(producer.remix.is_none());
 			assert!(producer.resampler.is_none());
 			assert_eq!(producer.bitrate(), bitrate);
@@ -1919,6 +1969,59 @@ mod tests {
 		assert_eq!(pts(1_000_000).await, vec![956_000, 977_333, 998_666, 1_020_000]);
 		// Priming before a zero anchor stamps at zero; the input still starts on time.
 		assert_eq!(pts(0).await, vec![0, 0, 0, 20_000]);
+	}
+
+	/// A codec that holds frames returns their packets late, and each still goes out at the stamp
+	/// of the frame it encoded, including the one only `finish` flushes out ahead of the drain.
+	#[tokio::test]
+	async fn held_packets_keep_their_frames_stamps() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let consumer = broadcast.consume();
+
+		let input = Input::new(48_000, Layout::Mono);
+		let options = Options {
+			track: Some("audio".to_string()),
+			config: Config::from_input(crate::encode::Codec::Aac, &input),
+			..Options::default()
+		};
+		let stub = crate::encode::backend::stub::install();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		drop(stub);
+
+		let track = consumer
+			.track("audio")
+			.unwrap()
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
+			.await
+			.unwrap();
+		let mut reader =
+			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
+
+		// The stub holds the third frame, so only `finish` releases it.
+		producer.write(&pcm_frame(&[0.1; 3 * 1024], 1_000_000)).unwrap();
+		producer.finish().unwrap();
+
+		let mut published = Vec::new();
+		while let Some(frame) = packet(&mut reader).await {
+			let index = u64::from_be_bytes(frame.payload[..].try_into().unwrap());
+			published.push((index, frame.timestamp.as_micros()));
+		}
+		// Each frame is stamped 2112 frames of priming early, the drain's three silent ones too.
+		assert_eq!(
+			published,
+			vec![
+				(0, 956_000),
+				(1, 977_333),
+				(2, 998_666),
+				(3, 1_020_000),
+				(4, 1_041_333),
+				(5, 1_062_666),
+			]
+		);
 	}
 
 	/// The encoder needs no correction for the resampler's own delay: it anchors

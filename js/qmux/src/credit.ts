@@ -25,8 +25,8 @@ export function replenishWindow(consumed: bigint, currentMax: bigint, window: bi
 export class Credit {
 	#used: bigint;
 	#max: bigint;
-	#closed = false;
-	#closeReason?: Error;
+	// Set once closed: the error every later claim rejects with.
+	#closed?: Error;
 	// A Set, so an aborted claim unlinks itself in O(1).
 	#waiters = new Set<{ resolve: () => void; reject: (err: Error) => void }>();
 
@@ -53,7 +53,7 @@ export class Credit {
 		if (limit === 0n) return 0n;
 
 		while (true) {
-			if (this.#closed) throw this.#closeReason ?? new Error("closed");
+			if (this.#closed) throw this.#closed;
 			signal?.throwIfAborted();
 
 			const claimed = this.tryClaim(limit);
@@ -65,11 +65,11 @@ export class Credit {
 
 	/** Wait until credit may be available, without claiming it. Rejects like {@link claim}. */
 	async wait(signal?: AbortSignal): Promise<void> {
-		if (this.#closed) throw this.#closeReason ?? new Error("closed");
+		if (this.#closed) throw this.#closed;
 		signal?.throwIfAborted();
 		if (this.#max > this.#used) return;
 		await this.#wait(signal);
-		if (this.#closed) throw this.#closeReason ?? new Error("closed");
+		if (this.#closed) throw this.#closed;
 		// The signal may have aborted between the wake and this resuming.
 		signal?.throwIfAborted();
 	}
@@ -109,11 +109,10 @@ export class Credit {
 	/** Close the credit, rejecting all pending and future `claim()` calls.
 	 *  `reason` (if provided) becomes the rejection error; the first reason wins. */
 	close(reason?: Error): void {
-		this.#closed = true;
-		this.#closeReason ??= reason ?? new Error("closed");
+		this.#closed ??= reason ?? new Error("closed");
 		const waiters = this.#waiters;
 		this.#waiters = new Set();
-		for (const { reject } of waiters) reject(this.#closeReason);
+		for (const { reject } of waiters) reject(this.#closed);
 	}
 
 	/** Get current available credit (max - used). */

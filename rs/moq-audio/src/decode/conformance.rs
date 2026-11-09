@@ -201,7 +201,9 @@ async fn every_backend_matches_independent_reference() {
 
 			let mut pcm = Vec::new();
 			for packet in &packets {
-				pcm.extend(decoder.decode(packet).unwrap().samples);
+				decoder.decode(packet).unwrap();
+				pcm.extend(decoder.receive().unwrap().expect("one output per packet").samples);
+				assert!(decoder.receive().unwrap().is_none(), "one output per packet");
 			}
 			compare(vector, decoder.name(), &pcm[delay..]);
 		}

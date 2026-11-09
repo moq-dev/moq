@@ -1,11 +1,14 @@
-# [L] moq play reaches zero steady-state underruns by time-stretching
+# [L] moq play converges inaudibly by time-stretching
 
 ## Goal
 
 `rs/moq-audio`'s playback converges on its playout target by time-stretching
 received audio, as WebRTC NetEq does, instead of running its ring dry and
 padding with silence or trimming buffered audio. `moq play`'s native rows in
-`test/audio-quality` reach zero underruns once the target settles. The
+`test/audio-quality` play with no audible glitch once the target settles,
+with underrun ceilings measured by `budgets.json`'s rule rather than fixed at
+zero, as decided 2026-11-06 on
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058). The
 stretch shares one algorithm and one set of test vectors with the browser's.
 
 Boundaries: no packet loss concealment, so a frame that never arrives is
@@ -23,15 +26,22 @@ received-audio accelerate and preemptive expand into the native playback
 callback. The estimator is unchanged. `doc/concept/audio-jitter.md` specifies
 the shared floating-point algorithm;
 `doc/concept/audio-jitter/stretch/corpus.json` supplies literal PCM vectors
-for both languages. The browser half remains
-[Watch](/quest/m1/audio-jitter-target/watch.md); neither implementation waits
-for the other.
+for both languages. The browser half landed in
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058).
 
 The port retains WebRTC's BSD notice and patent grant, 4 kHz analysis,
 50-sample correlation at lags 10 through 59, 14746/16384 normal and
 8192/16384 fast admission thresholds, passive-speech VAD, 20 ms decision
 band, 4x fast threshold, and 60 ms startup / 50 ms successful-stretch
-cooldowns. Analysis samples NetEq's 48 kHz FIR on a virtual clock for other
+cooldowns.
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) drains a declared
+end's tail unstretched, as finishing does. Its browser half decides on the
+ring's depth right after each arrival and never expands, since expanding on
+the depth between arrivals settled audio a burst behind the shared clock
+(decided 2026-11-08). Native playback still decides on `buffered`, so
+whether it settles behind its clock the same way is worth measuring once its
+rows report A/V lag.
+Analysis samples NetEq's 48 kHz FIR on a virtual clock for other
 device rates and uses floating-point peak refinement and fades. Those
 arithmetic adaptations are documented, not claimed bit-identical to int16
 WebRTC. No threshold was tuned.
@@ -44,8 +54,8 @@ capacity watermark and an incoming excess at the fast threshold trim.
 
 Remaining verification:
 
-- Native `test/audio-quality` rows must show zero steady-state underruns
-  once their targets settle. Keep a failed or void row explicit and fix
+- Native `test/audio-quality` rows must meet their measured underrun
+  ceilings once their targets settle. Keep a failed or void row explicit and fix
   any implementation cause before calling this complete.
 - Re-measure the provisional native budgets from seven scheduled nightly
   artifacts using `budgets.json`'s rule: worst clean run times 1.25, plus
@@ -110,4 +120,4 @@ bench waits below remain.
 
 ## Related
 
-- [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser stretch sharing this algorithm and its vectors
+- [Browser ceilings](/quest/m1/audio-jitter-target/browser-ceilings.md) - re-measures the browser rows with the stretch sharing this algorithm and its vectors

@@ -54,7 +54,7 @@ pub struct Config {
 	/// behavior when the extension is disabled).
 	///
 	/// It is recommended to set this value to
-	/// [`packet_threshold`](super::Config::packet_threshold), so the ACK a gap elicits lets us
+	/// the loss detection packet threshold of 3, so the ACK a gap elicits lets us
 	/// declare the missing packet lost; a smaller value elicits it a packet too early. Since the
 	/// default packet threshold is 3, this value defaults to 3.
 	pub reordering_threshold: VarInt,
