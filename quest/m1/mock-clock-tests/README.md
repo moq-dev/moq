@@ -49,6 +49,11 @@ tests land and move:
   still, and a cadence passes by `advance`. `wait_listed` and `assert_closed`
   need awaited events first. `socket_auth`'s test waits only for progress,
   so find which relay timer fires there.
+- **moq-ffi's `video_encoder_follows_a_shrinking_grant`**, which polls
+  `applied_bitrate()` every 10 ms while the follow thread retunes the
+  encoder. The applied target lives in `VideoProducer` under the rendition's
+  one lock, so the test needs an event from the follower, not a second
+  channel beside that lock.
 - **The OBS plugin tests** in `cpp/obs/test`, which neither runtime guard
   sees. `moq-output-test.cpp` and `moq-source-test.cpp` sleep 50 to 100 ms,
   then check that no further signal or frame arrived; `obs-moq-test.cpp`

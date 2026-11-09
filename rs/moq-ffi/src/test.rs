@@ -1953,7 +1953,7 @@ async fn track_request_demand_survives_accept() {
 	assert_eq!(demand.name(), "events");
 	assert!(demand.wanted().is_some());
 	let track = request.accept(None).unwrap();
-	assert!(matches!(request.demand(), Err(MoqError::Closed)));
+	assert!(matches!(request.demand(), Err(MoqError::AlreadyResponded)));
 	let consumer = subscribe.await.unwrap().unwrap();
 	demand.until_wanted().await.unwrap();
 	consumer.cancel();
@@ -2003,7 +2003,7 @@ async fn track_request_demand_ends_on_rejection() {
 	request.reject(404).unwrap();
 	assert!(subscribe.await.unwrap().is_err());
 	assert!(demand.until_wanted().await.is_err());
-	assert!(matches!(request.demand(), Err(MoqError::Closed)));
+	assert!(matches!(request.demand(), Err(MoqError::AlreadyResponded)));
 }
 
 #[tokio::test]
@@ -2305,7 +2305,7 @@ async fn dynamic_track_request_can_abort() {
 		.unwrap();
 
 	track.reject(404).unwrap();
-	assert!(matches!(track.name(), Err(MoqError::Closed)));
+	assert!(matches!(track.name(), Err(MoqError::AlreadyResponded)));
 
 	let result = kio::clock::timeout(TIMEOUT, subscribe)
 		.await
@@ -3128,6 +3128,45 @@ async fn requested_track_keeps_its_name() {
 	subscribe.abort();
 }
 
+/// An answered request refuses a second answer as such, and one whose answer failed after taking
+/// it reports that failure rather than looking answered.
+#[tokio::test]
+async fn a_track_request_reports_its_answer() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.requests().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let subscribe = |name: &'static str| {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.subscribe_track(name.into(), None).await })
+	};
+	let _first = subscribe("first");
+	let first = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.unwrap()
+		.unwrap();
+	first.accept(None).unwrap();
+	let rejected = first.reject(0);
+
+	let _second = subscribe("second");
+	let second = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.unwrap()
+		.unwrap();
+	let failed = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Requested {
+			request: second.clone(),
+		},
+		audio_init(MoqAudioFormat::Opus, vec![1, 2, 3]),
+	);
+	let failed = failed.map(|_| ());
+	assert!(matches!(failed, Err(MoqError::Codec { .. })), "{failed:?}");
+	let later = second.reject(0);
+	assert!(matches!(rejected, Err(MoqError::AlreadyResponded)), "{rejected:?}");
+	// The saved failure is the import's own error, reason included.
+	assert_eq!(format!("{later:?}"), format!("{failed:?}"));
+}
+
 #[tokio::test]
 async fn dynamic_track_request_can_publish_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -3164,7 +3203,7 @@ async fn dynamic_track_request_can_publish_media() {
 	)
 	.unwrap();
 	assert_eq!(media.demand().unwrap().name(), "requested-audio");
-	assert!(matches!(track.name(), Err(MoqError::Closed)));
+	assert!(matches!(track.name(), Err(MoqError::AlreadyResponded)));
 
 	let media_consumer = kio::clock::timeout(TIMEOUT, subscribe)
 		.await
@@ -5045,7 +5084,7 @@ async fn dynamic_broadcast_request() {
 	// A re-price keeps the instance the answer was announced under.
 	job.set_cost(7).unwrap();
 	assert_eq!(job.instance_id(), instance);
-	assert!(matches!(request.path(), Err(MoqError::Closed)));
+	assert!(matches!(request.path(), Err(MoqError::AlreadyResponded)));
 
 	let broadcast = kio::clock::timeout(TIMEOUT, requesting)
 		.await
@@ -5626,7 +5665,7 @@ async fn dynamic_broadcast_request_can_reject() {
 	assert_eq!(request.path().unwrap(), "missing");
 
 	request.reject(404).unwrap();
-	assert!(matches!(request.path(), Err(MoqError::Closed)));
+	assert!(matches!(request.path(), Err(MoqError::AlreadyResponded)));
 
 	let result = kio::clock::timeout(TIMEOUT, requesting)
 		.await
@@ -7496,6 +7535,7 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
+	kio::clock::host_time();
 	use crate::bandwidth::MoqAllocator;
 	use crate::video::*;
 
@@ -7546,23 +7586,18 @@ async fn video_encoder_follows_a_shrinking_grant() {
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
 
-	// The follow thread retunes the encoder, so wait for it to record the grant.
-	let applied = video.applied_bitrate();
-	let followed = kio::wait(|waiter| {
-		applied
-			.poll(waiter, |bitrate| match **bitrate {
-				1_000_000 => std::task::Poll::Ready(()),
-				_ => std::task::Poll::Pending,
-			})
-			.map(|followed| followed.is_ok())
-	});
-	let open = kio::clock::timeout(TIMEOUT, followed).await.unwrap_or_else(|_| {
-		panic!(
+	let deadline = kio::clock::Instant::now() + TIMEOUT;
+	loop {
+		if video.applied_bitrate() == 1_000_000 {
+			break;
+		}
+		assert!(
+			kio::clock::Instant::now() < deadline,
 			"encoder did not follow the shrinking grant, last applied {}",
-			*applied.read()
-		)
-	});
-	assert!(open, "the applied bitrate closed");
+			video.applied_bitrate()
+		);
+		kio::clock::sleep(Duration::from_millis(10)).await;
+	}
 
 	video.finish().unwrap();
 	broadcast.close().unwrap();
@@ -7655,13 +7690,13 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 
 	video.set_bitrate(1_000_000).unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
-	assert_eq!(*video.applied_bitrate().read(), 1_000_000);
+	assert_eq!(video.applied_bitrate(), 1_000_000);
 
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
-	assert_eq!(*video.applied_bitrate().read(), 1_000_000);
+	assert_eq!(video.applied_bitrate(), 1_000_000);
 
 	video.finish().unwrap();
 	broadcast.close().unwrap();
@@ -8031,6 +8066,18 @@ async fn shutdown_cancels_and_drops_cleanly() {
 	crate::moq_ffi_shutdown();
 	// Idempotent: the thread is already gone.
 	crate::moq_ffi_shutdown();
+
+	// A synchronous call fails like the parked asynchronous ones, on a driver shutdown dropped
+	// and on one created after it, which never ran.
+	let late = MoqOriginProducer::new(MoqOriginConfig::default());
+	let routed = server_origin
+		.route("late".into(), MoqRouteOptions::default())
+		.map(|_| ());
+	let unrun = late.route("late".into(), MoqRouteOptions::default()).map(|_| ());
+	assert!(
+		matches!(routed, Err(MoqError::Cancelled)) && matches!(unrun, Err(MoqError::Cancelled)),
+		"{routed:?} {unrun:?}"
+	);
 
 	let parked = kio::clock::timeout(TIMEOUT, parked)
 		.await
