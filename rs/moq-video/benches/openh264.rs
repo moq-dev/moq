@@ -8,7 +8,8 @@
 //!
 //! Run with `cargo bench -p moq-video --features openh264 --bench openh264`. A table comes
 //! first: allocations and allocated bytes per frame from an untimed pass, counting the
-//! codec's own and every frame's output. Criterion then times each case.
+//! Rust allocations of the codec wrapper and every frame's output, not OpenH264's
+//! native ones. Criterion then times each case.
 use std::alloc::{GlobalAlloc, Layout as AllocLayout, System};
 use std::hint::black_box;
 use std::sync::Arc;

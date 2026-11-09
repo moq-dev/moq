@@ -186,12 +186,17 @@ impl Nvdec {
 
 		// Taken out and put back so the callback's buffer keeps its capacity.
 		let mut displayed = std::mem::take(&mut self.state.ready);
+		// A failed map discards this parse's pictures so an error never precedes them.
+		let queued = self.ready.len();
 		let mapped = displayed.iter().try_for_each(|disp| {
 			self.ready.push_back(self.state.map_frame(disp)?);
 			Ok(())
 		});
 		displayed.clear();
 		self.state.ready = displayed;
+		if mapped.is_err() {
+			self.ready.truncate(queued);
+		}
 		mapped
 	}
 }

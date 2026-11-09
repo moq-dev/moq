@@ -419,8 +419,11 @@ impl Reader {
 				// nothing in between to wait on. A caller that treats a codec
 				// error as one lost picture and carries on then spins.
 				self.drained = true;
+				// Queue what the flush readied before reporting its error, so a
+				// later read still hands those pictures over.
+				let received = self.receive();
 				tail?;
-				self.receive()?;
+				received?;
 				continue;
 			};
 

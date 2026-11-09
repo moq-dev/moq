@@ -642,8 +642,8 @@ impl VideoEncoder {
 			return Ok(());
 		};
 		let frame = moq_video::Frame::new(surface, timestamp);
-		// A backend that pipelines hands back an earlier frame's output, so this is
-		// zero or more access units rather than one per call.
+		// A backend that pipelines readies an earlier frame's output, so `publish`
+		// drains zero or more access units rather than one per call.
 		block_on(encoder.encode(frame))?;
 		let before = self.producer.demand();
 		let published = publish(encoder, &mut self.producer);

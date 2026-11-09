@@ -164,6 +164,7 @@ pub(crate) trait Backend {
 
 	/// Flush and collect the tail.
 	#[cfg(test)]
+	#[allow(dead_code, reason = "only the platform backends' tests use it")]
 	fn flush_all(&mut self) -> Result<Vec<Frame>, Error> {
 		self.flush()?;
 		self.receive_all()
