@@ -79,9 +79,3 @@ const DEFAULT_DELAY: Duration = Duration::from_millis(500);
 pub use dial::Client;
 pub use error::{Error, Result};
 pub use server::{Conn, PUBLISH_IDLE_TIMEOUT, Play, Publish, Request, Server, Stream, accept_stream, configure_socket};
-
-/// Re-export of the `rustls` version [`Server::with_tls`] takes,
-/// so consumers construct a matching [`rustls::ServerConfig`] (a major `rustls`
-/// bump is a breaking change). Only available with the `tls` feature.
-#[cfg(feature = "tls")]
-pub use rustls;

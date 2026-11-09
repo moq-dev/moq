@@ -1571,6 +1571,16 @@ impl Rendition {
 pub(crate) struct Fetch {
 	row: segments::Row,
 	state: Fetching,
+	/// Set when only sizing the row: each frame is counted and dropped as it is read, never
+	/// decoded or kept for a fragment.
+	sizing: Option<Size>,
+}
+
+/// What a sizing [`Fetch`] counted so far, of the frames as its groups carry them.
+#[derive(Default)]
+struct Size {
+	frames: usize,
+	bytes: usize,
 }
 
 #[allow(
@@ -1606,7 +1616,21 @@ impl Fetch {
 		Self {
 			row,
 			state: Fetching::Start,
+			sizing: None,
 		}
+	}
+
+	/// A fetch that only sizes the row; see [`poll_size`](Self::poll_size).
+	pub(crate) fn sizing(row: segments::Row) -> Self {
+		Self {
+			sizing: Some(Size::default()),
+			..Self::new(row)
+		}
+	}
+
+	/// Whether this fetch only sizes the row.
+	pub(crate) fn sizes(&self) -> bool {
+		self.sizing.is_some()
 	}
 
 	/// The row fetched.
@@ -1616,12 +1640,54 @@ impl Fetch {
 
 	/// The row's CMAF fragment, or `None` when it is a stop or its media is gone.
 	pub(crate) fn poll(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
-		let result = ready!(self.poll_state(rendition, waiter));
+		let result = ready!(self.poll_fragment(rendition, waiter));
 		self.state = Fetching::Done;
 		Poll::Ready(result)
 	}
 
-	fn poll_state(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+	/// The bytes a [`sizing`](Self::sizing) fetch's groups carry, without decoding them, or
+	/// `None` when it is a stop or its media is gone. Keeps no segment-wide accumulation.
+	pub(crate) fn poll_size(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<usize>>> {
+		let result = ready!(self.poll_groups(rendition, waiter)).map(|read| {
+			let size = self.sizing.as_ref().expect("a sizing fetch");
+			(read && size.frames > 0).then_some(size.bytes)
+		});
+		self.state = Fetching::Done;
+		Poll::Ready(result)
+	}
+
+	fn poll_fragment(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+		debug_assert!(!self.sizes(), "a sizing fetch keeps no frames");
+		if !ready!(self.poll_groups(rendition, waiter))? {
+			return Poll::Ready(Ok(None));
+		}
+		let row = &self.row;
+		let Fetching::Groups {
+			epoch, muxer, frames, ..
+		} = &mut self.state
+		else {
+			unreachable!("read every group above");
+		};
+		if frames.is_empty() {
+			return Poll::Ready(Ok(None));
+		}
+		// The last presented sample has no successor to time it, so the fragment ends where the
+		// next group starts, unless its codec or a duration marker times it.
+		let end = row
+			.content
+			.and_then(|content| moq_net::Timestamp::from_micros(content.as_micros() as u64).ok());
+		let fragment = muxer.fragment(row.segment as u32, frames, end)?;
+		// Inline codec metadata was already decoded from these completed groups.
+		// Reuse it instead of fetching a newer, possibly unfinished group.
+		if let Some(bytes) = muxer.init()? {
+			rendition.cache_init(*epoch, bytes);
+		}
+		Poll::Ready(Ok(Some(fragment)))
+	}
+
+	/// Read every group of the row, keeping or counting its frames; `false` when it is a stop or
+	/// its media is gone.
+	fn poll_groups(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		let row = &self.row;
 		loop {
 			match &mut self.state {
@@ -1631,7 +1697,7 @@ impl Fetch {
 					// its groups is never cached for a run that started while they were being fetched.
 					let epoch = rendition.run().epoch;
 					if row.stop {
-						return Poll::Ready(Ok(None));
+						return Poll::Ready(Ok(false));
 					}
 					// A segment must be served whole. If its group span exceeds the safety cap (a
 					// publisher grouping far finer than its interval), 404 rather than silently
@@ -1642,14 +1708,14 @@ impl Fetch {
 							groups = ?row.groups,
 							"segment spans more groups than one request fetches; refusing to truncate"
 						);
-						return Poll::Ready(Ok(None));
+						return Poll::Ready(Ok(false));
 					}
 					self.state = Fetching::Track { binding, epoch };
 				}
 				Fetching::Track { binding, epoch } => {
 					let Some((broadcast, track)) = ready!(rendition.media.poll_track_or_refusal(binding, waiter))?
 					else {
-						return Poll::Ready(Ok(None));
+						return Poll::Ready(Ok(false));
 					};
 					self.state = Fetching::Groups {
 						_binding: binding.clone(),
@@ -1679,9 +1745,12 @@ impl Fetch {
 						},
 					};
 					let sequence = read.sequence;
-					let miss = match ready!(read.poll(waiter, muxer, broadcast))? {
-						Ok(mut read) => {
-							frames.append(&mut read);
+					let read = match &mut self.sizing {
+						Some(size) => ready!(read.poll_size(waiter, broadcast, size))?,
+						None => ready!(read.poll(waiter, muxer, broadcast))?.map(|mut read| frames.append(&mut read)),
+					};
+					let miss = match read {
+						Ok(()) => {
 							*group = None;
 							continue;
 						}
@@ -1693,32 +1762,12 @@ impl Fetch {
 						err = %miss,
 						"abandoning an advertised segment: a group is unavailable"
 					);
-					return Poll::Ready(Ok(None));
+					return Poll::Ready(Ok(false));
 				}
 				Fetching::Done => panic!("polled a finished segment fetch"),
 			}
 		}
-		let Fetching::Groups {
-			epoch, muxer, frames, ..
-		} = &mut self.state
-		else {
-			unreachable!("read every group above");
-		};
-		if frames.is_empty() {
-			return Poll::Ready(Ok(None));
-		}
-		// The last presented sample has no successor to time it, so the fragment ends where the
-		// next group starts, unless its codec or a duration marker times it.
-		let end = row
-			.content
-			.and_then(|content| moq_net::Timestamp::from_micros(content.as_micros() as u64).ok());
-		let fragment = muxer.fragment(row.segment as u32, frames, end)?;
-		// Inline codec metadata was already decoded from these completed groups.
-		// Reuse it instead of fetching a newer, possibly unfinished group.
-		if let Some(bytes) = muxer.init()? {
-			rendition.cache_init(*epoch, bytes);
-		}
-		Poll::Ready(Ok(Some(fragment)))
+		Poll::Ready(Ok(true))
 	}
 }
 
@@ -2621,6 +2670,37 @@ impl GroupRead {
 		Self {
 			sequence,
 			state: GroupReading::Fetching(track.fetch_group(sequence, None).into_inner()),
+		}
+	}
+
+	/// Count the group's frames and their bytes into `size` as they are read, keeping none; an
+	/// unservable group is an error as in [`poll`](Self::poll).
+	fn poll_size(
+		&mut self,
+		waiter: &kio::Waiter,
+		broadcast: &moq_net::broadcast::Consumer,
+		size: &mut Size,
+	) -> Poll<Result<std::result::Result<(), moq_net::Error>>> {
+		if let GroupReading::Fetching(fetching) = &mut self.state {
+			match ready!(kio::Task::poll(fetching, waiter)) {
+				Ok(group) => self.state = GroupReading::Reading(group, Vec::new()),
+				Err(err) if is_unservable(&err, broadcast) => return Poll::Ready(Ok(Err(err))),
+				Err(err) => return Poll::Ready(Err(err.into())),
+			}
+		}
+		let GroupReading::Reading(group, _) = &mut self.state else {
+			unreachable!("fetched above");
+		};
+		loop {
+			match ready!(group.poll_read_frame(waiter)) {
+				Ok(Some(frame)) => {
+					size.frames += 1;
+					size.bytes += frame.payload.len();
+				}
+				Ok(None) => return Poll::Ready(Ok(Ok(()))),
+				Err(err) if is_unservable(&err, broadcast) => return Poll::Ready(Ok(Err(err))),
+				Err(err) => return Poll::Ready(Err(err.into())),
+			}
 		}
 	}
 

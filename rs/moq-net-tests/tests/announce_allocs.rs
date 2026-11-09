@@ -16,7 +16,7 @@ use std::cell::Cell;
 use moq_net::{
 	Client, Path, Pattern, Patterns, Server, Version,
 	fuzz::{decode_path, decode_subscribe, encode_path, encode_subscribe},
-	kio, origin,
+	origin,
 	time::{Driver, Instant},
 	track,
 	transport::memory,

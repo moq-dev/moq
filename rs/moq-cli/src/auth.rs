@@ -1178,6 +1178,8 @@ mod tests {
 	/// Drive the same Usage grammar the binary exposes, rather than building
 	/// `Command` directly, so the flags stay part of what's under test.
 	async fn run(args: &[&str]) -> anyhow::Result<()> {
+		// `main` installs rind's provider before any subcommand, and reqwest reads it.
+		moq_tokio::crypto::install_default().unwrap();
 		let mut cli =
 			crate::args::Invocation::try_parse_from(args.iter().copied()).map_err(|err| anyhow::anyhow!("{err}"))?;
 		match cli.stages.remove(0) {
@@ -1882,11 +1884,10 @@ relay = ["https://relay.example"]
 
 		let mut internal_config = moq_relay::internal::Config::default();
 		internal_config.listen = Some("127.0.0.1:0".parse().unwrap());
-		let internal =
-			moq_relay::internal::Internal::new(internal_config, moq_tokio::moq_net::stats::Registry::disabled())
-				.with_sessions(sessions)
-				.bind()
-				.expect("bind internal listener");
+		let internal = moq_relay::internal::Internal::new(internal_config, moq_net::stats::Registry::disabled())
+			.with_sessions(sessions)
+			.bind()
+			.expect("bind internal listener");
 		let listen = internal.addr().expect("internal listener is configured");
 		tokio::spawn(async move {
 			let _ = internal.run().await;

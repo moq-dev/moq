@@ -314,7 +314,7 @@ test("a pending local request changing routes withdraws the old route's work", a
 test("cancelling an old instance waiter does not decrement a new instance's demand", async () => {
 	const origin = new Producer();
 	const instance = Instance.random();
-	const dynamic = origin.claim(Path.from("room"), { instance });
+	const dynamic = origin.claim(Path.from("room"), { instance: { id: instance, epoch: 0n } });
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const hold = new AbortController();
@@ -346,8 +346,8 @@ test.each(["answer", "release"] as const)(
 		const origin = new Producer();
 		const instance = Instance.random();
 		const prefix = Path.from("room");
-		const a = origin.claim(prefix, { instance, cost: 1n });
-		const b = origin.claim(prefix, { instance, cost: 5n });
+		const a = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: 1n });
+		const b = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: 5n });
 		const ar = a.requested();
 		const br = b.requested();
 		const held = origin.request(path);
@@ -355,7 +355,7 @@ test.each(["answer", "release"] as const)(
 		(await ar.next()).value.serve(source);
 		await settle();
 		// Another instance wins new requests. The old handle stays on its own instance.
-		const c = origin.claim(prefix, { instance: Instance.random(), cost: 0n });
+		const c = origin.claim(prefix, { instance: { id: Instance.random(), epoch: 0n }, cost: 0n });
 		a.close();
 		await settle();
 		const pending = (await br.next()).value;
@@ -407,8 +407,8 @@ test.each([0, 1])(
 			// Each instance undercuts the last, so it wins the path for the request made now.
 			const instance = Instance.parse(`instance-${i + 1}`);
 			const cost = BigInt(4 - 2 * i);
-			const primary = origin.claim(prefix, { instance, cost });
-			const standby = origin.claim(prefix, { instance, cost: cost + 1n });
+			const primary = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost });
+			const standby = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: cost + 1n });
 			const ar = primary.requested();
 			const br = standby.requested();
 			const held = origin.request(path);
@@ -418,7 +418,7 @@ test.each([0, 1])(
 			await settle();
 			entries.push({ primary, ar, br, held });
 		}
-		origin.claim(prefix, { instance: Instance.parse("instance-3"), cost: 0n });
+		origin.claim(prefix, { instance: { id: Instance.parse("instance-3"), epoch: 0n }, cost: 0n });
 		const pending = [];
 		for (const entry of entries) {
 			entry.primary.close();
@@ -642,7 +642,7 @@ test("queued cancellation preserves order, replacement identity, and empty-queue
 test("reset clears queued work while a handler is suspended and admits the new instance", async () => {
 	const origin = new Producer();
 	const instance = Instance.random();
-	const dynamic = origin.claim(Path.from("room"), { instance });
+	const dynamic = origin.claim(Path.from("room"), { instance: { id: instance, epoch: 0n } });
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const waits = [path, Path.from("room/obsolete")].map((name) => wire.demand(name, instance).catch(() => {}));

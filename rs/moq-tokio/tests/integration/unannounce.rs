@@ -3,8 +3,6 @@
 
 use std::time::Duration;
 
-use moq_tokio::moq_net;
-
 /// Subscribe to a published track, optionally unannounce (and let the origin
 /// process the retraction), then drop the subscriber and wait for the
 /// publisher's demand to go unused.

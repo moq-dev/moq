@@ -33,8 +33,5 @@ pub mod catalog;
 /// The container is the contents of each media track.
 pub mod container;
 
-/// Export the moq-net version we use.
-pub use moq_net;
-
 pub use catalog::Catalog;
 pub use error::*;

@@ -586,7 +586,7 @@ test("a failed encoder stays failed until the capture source changes", async () 
 		broadcast: {
 			audio: () => rendition,
 			order: new Order(),
-			in: { maxAge: new Signal(undefined), onDemand: new Signal(false) },
+			in: { maxAge: new Signal(undefined), onDemand: new Signal("off") },
 		} as never,
 		capture,
 		enabled,

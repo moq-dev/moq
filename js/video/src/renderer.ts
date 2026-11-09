@@ -1,6 +1,5 @@
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { Canvas2D } from "./canvas2d";
-import type { Dimensions, Presentation } from "./presentation";
 import { Gpu, probe } from "./webgpu";
 
 /**
@@ -22,9 +21,19 @@ export type RendererInput = {
 	/** The frame to draw. Borrowed: the renderer clones what it keeps. */
 	frame: Getter<VideoFrame | undefined>;
 	/** The canvas size in pixels. Undefined leaves the canvas size alone. */
-	display: Getter<Dimensions | undefined>;
-	/** The rotation and flip to draw the frame with. */
-	presentation: Getter<Presentation | undefined>;
+	display: Getter<{ width: number; height: number } | undefined>;
+	/** How to draw the frame: deinterlaced if needed, then rotated clockwise, then optionally mirrored. */
+	presentation: Getter<
+		| {
+				/** Clockwise rotation in degrees, rounded to the nearest quarter-turn. Defaults to 0. */
+				rotation?: number;
+				/** Mirror the rotated picture horizontally. Defaults to false. */
+				flip?: boolean;
+				/** The frame weaves two fields, so blend adjacent lines to hide the combing. Defaults to false. */
+				interlaced?: boolean;
+		  }
+		| undefined
+	>;
 	/** Which graphics API to draw with. Defaults to `"auto"`. */
 	backend: Getter<Backend>;
 };

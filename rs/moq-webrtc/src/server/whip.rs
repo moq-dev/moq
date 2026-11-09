@@ -25,14 +25,19 @@ pub use crate::server::Response;
 struct RouterState {
 	server: Server,
 	publisher: moq_net::origin::Producer,
+	ingest: moq_mux::Ingest,
 }
 
 /// Build the WHIP axum router. Only with the `server` feature.
 #[cfg(feature = "server")]
-pub(crate) fn router(server: Server, publisher: moq_net::origin::Producer) -> Router {
+pub(crate) fn router(server: Server, publisher: moq_net::origin::Producer, ingest: moq_mux::Ingest) -> Router {
 	Router::new()
 		.route("/{*path}", post(handle).delete(delete))
-		.with_state(RouterState { server, publisher })
+		.with_state(RouterState {
+			server,
+			publisher,
+			ingest,
+		})
 }
 
 #[cfg(feature = "server")]
@@ -43,7 +48,7 @@ async fn handle(
 	headers: HeaderMap,
 	body: Bytes,
 ) -> HttpResponse {
-	match accept_offer(&state.server, &state.publisher, &path, &headers, body).await {
+	match accept_offer(&state, &path, &headers, body).await {
 		Ok(response) => {
 			let Response {
 				resource_id,
@@ -71,19 +76,15 @@ async fn handle(
 /// Router glue: enforce the WHIP `Content-Type` then hand the raw offer to
 /// [`accept`], using the request path as the (unauthenticated) broadcast name.
 #[cfg(feature = "server")]
-async fn accept_offer(
-	server: &Server,
-	publisher: &moq_net::origin::Producer,
-	path: &str,
-	headers: &HeaderMap,
-	body: Bytes,
-) -> Result<Response> {
+async fn accept_offer(state: &RouterState, path: &str, headers: &HeaderMap, body: Bytes) -> Result<Response> {
 	if !is_sdp(headers) {
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
 	let broadcast = moq_net::Path::new(path)?;
-	accept(server, Request::new(publisher, broadcast, offer)).await
+	let mut request = Request::new(&state.publisher, broadcast, offer);
+	request.ingest = state.ingest.clone();
+	accept(&state.server, request).await
 }
 
 #[cfg(feature = "server")]
@@ -92,30 +93,32 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 }
 
 /// A WHIP publish for [`accept`]: the raw SDP offer, the producer and broadcast its media
-/// goes to, and an optional bitrate cap.
+/// goes to, how it is published, and an optional bitrate cap.
+#[non_exhaustive]
 pub struct Request<'a> {
-	publisher: &'a moq_net::origin::Producer,
-	broadcast: moq_net::Path,
-	offer: &'a str,
-	rate: rate::Limit,
+	/// The producer the media is published into.
+	pub publisher: &'a moq_net::origin::Producer,
+	/// The broadcast to publish, relative to the producer's root.
+	pub broadcast: moq_net::Path,
+	/// The raw SDP offer.
+	pub offer: &'a str,
+	/// How the ingested broadcast is published.
+	pub ingest: moq_mux::Ingest,
+	/// A live cap on the session's media (see [`accept`]), or `None` to never cap it.
+	pub rate: Option<moq_net::bandwidth::Limit>,
 }
 
 impl<'a> Request<'a> {
-	/// Publish the media negotiated by `offer` into `publisher` under `broadcast` (a path
-	/// relative to that producer's root), uncapped.
+	/// Publish the media negotiated by `offer` into `publisher` under `broadcast` with the
+	/// default [`Ingest`](moq_mux::Ingest), uncapped.
 	pub fn new(publisher: &'a moq_net::origin::Producer, broadcast: impl Into<moq_net::Path>, offer: &'a str) -> Self {
 		Self {
 			publisher,
 			broadcast: broadcast.into(),
 			offer,
-			rate: rate::Limit::unlimited(),
+			ingest: moq_mux::Ingest::default(),
+			rate: None,
 		}
-	}
-
-	/// Cap the session's media at `rate`, a live handle (see [`accept`]).
-	pub fn with_rate(mut self, rate: rate::Limit) -> Self {
-		self.rate = rate;
-		self
 	}
 }
 
@@ -142,17 +145,24 @@ impl<'a> Request<'a> {
 /// [`moq_net::Error::Unauthorized`] if the broadcast is
 /// outside the producer's scope.
 ///
-/// [`Request::with_rate`] caps the session's media; a request is uncapped by default. The answer
+/// [`Request::rate`] caps the session's media; a request is uncapped by default. The answer
 /// carries a `b=TIAS` line at the cap it holds when the offer is accepted, and the session
-/// repeats a REMB on every video line that negotiated one, following [`rate::Limit::set`]
-/// at once. Both steer to nine tenths of the cap, leaving room for audio and keyframe
-/// overshoot. A publisher that ignores them, sending media past the cap plus its burst,
-/// ends [`Response::run`] with [`Error::RateLimited`].
+/// repeats a REMB on every video line that negotiated one, following
+/// [`Limit::set`](moq_net::bandwidth::Limit::set) at once. Both steer to nine tenths of the
+/// cap, leaving room for audio and keyframe overshoot. A publisher that ignores them, sending
+/// media past the cap plus its burst, ends [`Response::run`] with [`Error::RateLimited`].
+/// moq-webrtc never renegotiates, so the TIAS stays at the starting cap: a session that
+/// starts uncapped steers only through REMB, and raising or lifting a starting cap frees the
+/// publisher only as far as that TIAS allows.
+///
+/// A peer that ends the session with a `DELETE` leaves its finished broadcast up for the
+/// ingest's [linger](moq_mux::Ingest::linger).
 pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	let Request {
 		publisher,
 		broadcast,
 		offer,
+		ingest,
 		rate,
 	} = request;
 	let offer = sdp::parse_offer(offer)?;
@@ -161,10 +171,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// any mux work. It announces only once negotiation succeeds (below).
 	// The session's sink holds the route, so it stays announced until the session ends.
 	let route = publisher.route(&broadcast, moq_net::origin::RouteOptions::hidden())?;
-	let config = moq_mux::catalog::Config::default()
-		.with_max_age(server.config().max_age)
-		.with_bandwidth(server.config().bandwidth.clone());
-	let sink = Box::new(IngestSink::routed(route.clone(), config)?);
+	let sink = Box::new(IngestSink::routed(route.clone(), ingest.catalog())?);
 
 	// Register a session on the shared media mux: known ICE credentials (so the
 	// demux routes this peer's STUN by ufrag), an inbox to read datagrams from,
@@ -191,17 +198,21 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 
 	let resource_id = sdp::new_resource_id();
 	let socket = crate::ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
-	let session = session::Session::ingest(rtc, socket, sink)?.with_rate(&rate);
+	let mut session = session::Session::ingest(rtc, socket, sink)?;
+	let mut cap = None;
+	if let Some(mut rate) = rate {
+		cap = rate.get();
+		session = session.with_rate(rate);
+	}
 
 	// Register before returning so a DELETE that races the first packet still
 	// finds the session; Response::run unregisters itself when it ends.
 	let cancel = server.register_session(resource_id.clone());
-	let cap = rate.get();
 	tracing::info!(%broadcast, %instance, cap = cap.map(|cap| cap.rate.as_bps()), "whip publish accepted");
 
 	let mut answer = sdp::render_answer(&answer);
 	if let Some(cap) = cap {
-		answer = sdp::cap_answer(&answer, cap.steer());
+		answer = sdp::cap_answer(&answer, rate::steer(cap));
 	}
 	Ok(Response {
 		resource_id: resource_id.clone(),
@@ -212,6 +223,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 			session: Some(session),
 			registration: Some(registration),
 			cancel: Some(cancel),
+			linger: ingest.linger,
 			role: "whip server",
 		},
 	})
@@ -231,7 +243,6 @@ fn status_for(err: &Error) -> StatusCode {
 	match err {
 		Error::InvalidSdp(_) | Error::InvalidPath(_) => StatusCode::BAD_REQUEST,
 		Error::UnsupportedCodec(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-		Error::SessionNotFound => StatusCode::NOT_FOUND,
 		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,
 	}
@@ -261,10 +272,11 @@ mod tests {
 	async fn a_capped_answer_carries_tias() {
 		let server = Server::new(crate::server::Config::default());
 		let origin = moq_tokio::origin::spawn();
-		let cap = rate::Cap::new(moq_net::bandwidth::Rate::from_mbps(1));
+		let cap = moq_net::bandwidth::Cap::new(moq_net::bandwidth::Rate::from_mbps(1));
 		let offer = offer();
 		let path = moq_net::Path::from_static("live/capped");
-		let capped = Request::new(&origin, path, &offer).with_rate(rate::Limit::new(cap));
+		let mut capped = Request::new(&origin, path, &offer);
+		capped.rate = Some(moq_net::bandwidth::Limit::new(cap));
 		let capped = accept(&server, capped).await.unwrap();
 		assert!(capped.answer.contains("\r\nb=TIAS:900000\r\n"), "{}", capped.answer);
 		str0m::change::SdpAnswer::from_sdp_string(&capped.answer).expect("str0m parses the capped answer");

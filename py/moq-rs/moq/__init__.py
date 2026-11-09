@@ -89,6 +89,9 @@ from .types import (
     VideoEncoderKind,
     VideoEncoderOutput,
     VideoPixelFormat,
+    VideoSurface,
+    VideoSurfacePixelBuffer,
+    VideoSurfaceUnknown,
     WebSocketConfig,
 )
 
@@ -164,6 +167,9 @@ __all__ = [
     "VideoEncoderKind",
     "VideoEncoderOutput",
     "VideoDecodedFrame",
+    "VideoSurface",
+    "VideoSurfacePixelBuffer",
+    "VideoSurfaceUnknown",
     "VideoPixelFormat",
     "Viewer",
     "Viewers",

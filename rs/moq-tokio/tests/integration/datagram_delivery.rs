@@ -11,7 +11,7 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use moq_tokio::moq_net::{self, Timestamp};
+use moq_net::Timestamp;
 use moq_tokio::quic::{driver, web};
 
 use crate::receive_credit::{dial, rand_seed};

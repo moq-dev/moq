@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use hang::moq_net;
 use object_store::path::{Path, PathPart};
 use object_store::{ObjectStore, ObjectStoreScheme};
 use url::Url;
@@ -385,9 +384,8 @@ mod tests {
 
 	/// `export archive` records each broadcast announced under its prefix into its own
 	/// `<path>/@<instance>`, and leaves out what is announced elsewhere.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn each_broadcast_records_under_its_own_key_prefix() {
-		kio::clock::host_time();
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
 
@@ -482,9 +480,8 @@ mod tests {
 
 	/// `import archive` republishes a recording `export archive` wrote under the given name and
 	/// instance, serving its stored groups.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn an_exported_broadcast_imports() {
-		kio::clock::host_time();
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
 

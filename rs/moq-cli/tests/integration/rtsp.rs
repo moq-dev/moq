@@ -5,7 +5,6 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use moq_rtsp::fake::{self, Media, Server};
-use moq_tokio::moq_net;
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 

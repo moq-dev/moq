@@ -547,8 +547,8 @@ impl Endpoint {
 	/// the handshake failed.
 	///
 	/// Until `finish_accept`, the attempt counts toward [`server::Config::max_incoming`], and
-	/// datagrams buffered for it toward [`server::Config::incoming_buffer_size`] and
-	/// [`server::Config::incoming_buffer_size_total`].
+	/// datagrams buffered for it toward [`server::Config::incoming_buffer_size`] and the 100 MiB
+	/// shared by every attempt.
 	///
 	/// On error, no endpoint state remains reserved for the attempt.
 	// box err to avoid clippy::result_large_err

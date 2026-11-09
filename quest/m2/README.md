@@ -131,6 +131,9 @@ Changed 2026-10-26 (maintainer): pure-Rust crypto moved to m3 until upstream
 graviola and ACME releases make it cheap, so the cut ships on aws-lc-rs.
 Dropping the `rsa` crate from moq-auth's production graph stays in m1.
 
+Changed 2026-11-08: the rind epic finished in m1, so the cut ships on rind
+with no C crypto; aws-lc-rs is out of the workspace.
+
 Added 2026-10-25 (maintainer): the studio's
 GPU encode and source import quests are in m1 so
 moq-video's GPU encode and import API changes, mainly encoders taking a GPU
@@ -194,20 +197,14 @@ quests that require them.
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out (held in m1 by an open claim)
 - [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Unbounded groups](/quest/m2/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
-- [moq-quic drops inherited surfaces with no consumer](/quest/m2/moq-quic-unused-surface.md) - unused accept, connection, and stream-id surfaces leave moq-quic's public API before the cut
 - [No sentinel values in public API](/quest/m2/no-sentinels.md) - receive windows, cache durations, reconnect timeouts, and the FFI test clock use `Option` instead of a huge value or zero
+- [moq-video codecs split submission from receive](/quest/m2/video-codec-receive.md) - video encoders and decoders submit, then `receive` one output, the shape moq-audio took, so no call allocates a `Vec` of outputs
+- [Connection state carries each phase's data](/quest/m2/connection-state-phases.md) - moq-tokio's `Observation`, moq-ffi's `MoqConnectionState`, and moq-c's `moq_connection_state` each hold one phase per value, so no field is readable in a phase where it means nothing
 - [moq-video takes devices, not environment variables](/quest/m2/video-devices.md) - VA-API and V4L2 device paths are config fields, and `moq_video::ENV` never ships
-- [Gateways share one ingest config and one rate cap](/quest/m2/gateway-ingest.md) - `moq_mux::Ingest` replaces 18 per-gateway setters, and the live rate cap moves to `moq_net::bandwidth`
-- [Native playout sync keeps tracks decoupled](/quest/m2/mux-sync.md) - `moq_mux::timeline` becomes `moq_mux::sync`, and one slow track no longer stalls or moves another
 - [JS time values are types, not numbers](/quest/m2/js-time-types.md) - every public JS duration and instant is a `Clock.Duration` or `Clock.Instant` object, so a unit mistake fails to compile
 - [Small API fixes before the cut](/quest/m2/api-shape/README.md) - one path and one spelling per item, names by role, and no dead or wrong-role public surface across net, transport, media, native, apps, JS, and bindings
-- [Public constructors spawn nothing, or say why](/quest/m2/spawn-constructors.md) - each public library entry point that spawns returns a driver its caller polls, or is listed as kept
-- [moq-audio codecs return zero or more outputs](/quest/m2/audio-codec-seam.md) - `encode` and `decode` return any number of outputs and gain `flush`, as moq-video's do
-- [A mix-minus removes several sources](/quest/m2/bus-minus-several.md) - a guest's return feed drops every copy of their own sound
-- [Plan: recovery boundaries](/quest/m2/intra-refresh-boundary.md) - the catalog's new `warmup` contract is settled before the cut publishes it
-- [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
 - [Finishing a producer returns a Finished handle](/quest/m2/finished-handle.md) - `finish(self)` consumes moq-net's and the media crates' producers, so appending after finish doesn't compile
 - [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, and moq-c at parity
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; browser padding is parked in m3 (held in m2 by open claims; moves to m3)
 - [Finish the milestone re-cut](/quest/m2/recut-held.md) - claim-held epics move to the milestone their kind and priority give them once their claims merge
-- [Nix clusters authenticate leaves with mTLS](/quest/m2/nix-cluster-mtls.md) - a clustered NixOS relay authenticates leaves with cluster-CA client certificates and `--mtls-link peer`, and the module stops minting an unbounded cluster JWT
+- [moq-tokio's resolved config reports "off" as None](/quest/m2/tokio-resolved-options.md) - resolved timeouts and backoff accessors use `Option` while the text knobs keep `0` = off

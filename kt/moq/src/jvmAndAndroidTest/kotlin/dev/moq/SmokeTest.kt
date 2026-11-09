@@ -1187,6 +1187,7 @@ class SmokeTest {
 
                         // The frame outlives its consumer's cancellation.
                         decoder.cancel()
+                        assertNull(frame.surface())
 
                         val planar = frame.pixels(VideoPixelFormat.I420)
                         assertEquals(

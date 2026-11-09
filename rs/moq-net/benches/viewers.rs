@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Timestamp, kio, origin};
+use moq_net::{Timestamp, origin};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {

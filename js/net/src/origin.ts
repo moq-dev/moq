@@ -1288,10 +1288,10 @@ export interface RouteOptions {
 	 */
 	auth?: Credential;
 	/**
-	 * Serve this stable instance in place of a freshly minted one.
+	 * Serve this stable instance `id` at `epoch`, in place of a freshly minted one.
 	 *
 	 * Only for a publisher that continues the instance's sequence space across restarts,
-	 * announcing a higher {@link epoch} each time, such as a counter persisted on disk. Readers
+	 * announcing a higher `epoch` each time, such as a counter persisted on disk. Readers
 	 * stitch every route of one instance together, so a publisher that restarts its group
 	 * sequences under an old instance splices unrelated groups into their tracks. The highest
 	 * epoch wins over every older one of the instance, cheaper or not. Naming an instance grants
@@ -1300,9 +1300,7 @@ export interface RouteOptions {
 	 * Do not start a named instance with `~`: that marks one a relay minted (see
 	 * {@link Instance.isMinted}), which signing refuses to bind and a catalog's instance check skips.
 	 */
-	instance?: Instance.Valid;
-	/** Which incarnation of {@link instance} this is; raise it on each restart. Ignored without an instance. */
-	epoch?: bigint;
+	instance?: { id: Instance.Valid; epoch: bigint };
 }
 
 /** Options for resolving one publisher instance with {@link Consumer.request}. */
@@ -1454,8 +1452,8 @@ export class Producer implements Table {
 		if (!created) throw new Error("origin is closed");
 		// Normalized first, so a bad cost throws before anything is created.
 		let info = WireRoute.normalize({
-			instance: options.instance ?? Instance.random(),
-			epoch: options.instance === undefined ? 0n : options.epoch,
+			instance: options.instance?.id ?? Instance.random(),
+			epoch: options.instance?.epoch ?? 0n,
 			cost: options.cost,
 			auth: options.auth,
 		});
@@ -1609,8 +1607,8 @@ export class Producer implements Table {
 	 */
 	claim(prefix: Path.Valid, options: RouteOptions = {}): Claim {
 		const info = WireRoute.normalize({
-			instance: options.instance,
-			epoch: options.epoch,
+			instance: options.instance?.id,
+			epoch: options.instance?.epoch,
 			cost: options.cost,
 			auth: options.auth,
 		});

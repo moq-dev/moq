@@ -524,6 +524,30 @@ class VideoDecodedFrame:
         """The picture converted to tightly packed CPU pixels in ``format``."""
         return self._inner.pixels(format)
 
-    def surface(self) -> MoqVideoSurface | None:
+    def surface(self) -> VideoSurface | None:
         """The decoder's platform surface, when the decoder output asked for one."""
-        return self._inner.surface()
+        return _surface(self._inner.surface())
+
+
+class VideoSurface:
+    """A decoded frame's platform surface; match it with a fallback arm, since new platforms add kinds."""
+
+
+@dataclass(frozen=True)
+class VideoSurfacePixelBuffer(VideoSurface):
+    """An Apple ``CVPixelBufferRef`` (IOSurface-backed NV12) address, valid while its frame lives."""
+
+    pointer: int
+
+
+@dataclass(frozen=True)
+class VideoSurfaceUnknown(VideoSurface):
+    """A surface kind this version of the package does not know yet."""
+
+
+def _surface(surface: MoqVideoSurface | None) -> VideoSurface | None:
+    if surface is None:
+        return None
+    if isinstance(surface, MoqVideoSurface.PIXEL_BUFFER):
+        return VideoSurfacePixelBuffer(surface.pointer)
+    return VideoSurfaceUnknown()

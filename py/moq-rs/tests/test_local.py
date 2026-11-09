@@ -1548,9 +1548,13 @@ async def test_read_frame_keeps_group_across_cancelled_call():
 def test_audio_encoder_returns_namespaced_records():
     """The codec-only encoder's results are named under ``moq.audio``."""
     encoder = moq.audio.Encoder(moq.audio.EncoderOutput(codec=moq.AudioCodec.opus(), sample_rate=48000, channels=1))
-    packet = encoder.encode([0.0] * encoder.frame_size)
+    encoder.encode([0.0] * encoder.frame_size)
+    packet = encoder.receive()
     assert isinstance(packet, moq.audio.Packet)
     assert packet.data
+    assert encoder.receive() is None
+    encoder.flush()
+    assert encoder.receive() is None
     finish = encoder.finish()
     assert isinstance(finish, moq.audio.EncoderFinish)
 
@@ -1566,7 +1570,9 @@ def test_audio_encoder_frame_init_and_bitrate():
     assert init.format == moq.media.AudioFormat.OPUS
     assert init.data[:8] == b"OpusHead"
     encoder.set_bitrate(32_000)
-    assert encoder.encode([0.0] * encoder.frame_size).data
+    encoder.encode([0.0] * encoder.frame_size)
+    packet = encoder.receive()
+    assert packet is not None and packet.data
 
     with pytest.raises(moq.Error.Audio):
         moq.audio.Encoder(replace(output, frame_duration=timedelta(milliseconds=15)))
@@ -1702,6 +1708,7 @@ async def test_decode_video_frame():
     decoder.cancel()
     assert isinstance(frame, moq.VideoDecodedFrame)
     assert frame.timestamp().scale == 1_000_000
+    assert frame.surface() is None
 
     i420 = frame.pixels(moq.VideoPixelFormat.I420)
 
@@ -1713,6 +1720,15 @@ async def test_decode_video_frame():
 
     video.finish()
     broadcast.close()
+
+
+def test_video_surface_unknown_kind() -> None:
+    """A surface kind this package predates maps to the fallback arm instead of failing."""
+    from moq._records import _surface
+
+    assert _surface(None) is None
+    assert _surface(cast(Any, moq_ffi.MoqVideoSurface.PIXEL_BUFFER(7))) == moq.VideoSurfacePixelBuffer(7)
+    assert _surface(cast(Any, object())) == moq.VideoSurfaceUnknown()
 
 
 async def test_broadcast_is_reachable_only_while_announced():

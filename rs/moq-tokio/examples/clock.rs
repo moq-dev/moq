@@ -171,11 +171,11 @@ impl Publisher {
 		// Everything but the second.
 		let base = now.format("%Y-%m-%d %H:%M:").to_string();
 
-		segment.write_frame(moq_tokio::moq_net::Timestamp::now(), base.clone())?;
+		segment.write_frame(moq_net::Timestamp::now(), base.clone())?;
 
 		loop {
 			let delta = now.format("%S").to_string();
-			segment.write_frame(moq_tokio::moq_net::Timestamp::now(), delta.clone())?;
+			segment.write_frame(moq_net::Timestamp::now(), delta.clone())?;
 
 			let next = now + chrono::Duration::try_seconds(1).unwrap();
 			let next = next.with_nanosecond(0).unwrap();

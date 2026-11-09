@@ -245,7 +245,7 @@ typealias VideoDecoderOutput = uniffi.moq.MoqVideoDecoderOutput
  * One decoded video frame, owning the decoder's surface until closed; `pixels(format)` converts it
  * to packed CPU pixels.
  */
-typealias VideoDecodedFrame = uniffi.moq.MoqVideoDecodedFrame
+typealias VideoDecodedFrame = dev.moq.video.DecodedFrame
 
 /** The PCM layout the caller feeds an audio producer. */
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput

@@ -139,9 +139,9 @@ for (const failovers of [0, 1, 16, 128])
 			const sources: Broadcast[] = [];
 			for (let i = 0; i < failovers; i++) {
 				const instance = Instance.random();
-				const primary = origin.claim(prefix, { instance, cost: 0n });
+				const primary = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: 0n });
 				const ar = primary.requested();
-				const br = origin.claim(prefix, { instance, cost: 1n }).requested();
+				const br = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: 1n }).requested();
 				const held = origin.request(path);
 				const source = new Broadcast();
 				sources.push(source);
@@ -151,8 +151,9 @@ for (const failovers of [0, 1, 16, 128])
 				entries.push({ primary, ar, br, held });
 			}
 			const instance = Instance.random();
-			origin.claim(prefix, { instance });
-			for (let i = 0; i < extraRoutes; i++) origin.claim(prefix, { instance, cost: BigInt(i + 1) });
+			origin.claim(prefix, { instance: { id: instance, epoch: 0n } });
+			for (let i = 0; i < extraRoutes; i++)
+				origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: BigInt(i + 1) });
 			const pending = [];
 			for (const entry of entries) {
 				entry.primary.close();

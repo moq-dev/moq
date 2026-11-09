@@ -21,7 +21,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::egress::{EgressClock, EgressSource, Format, WriteRequest};
-use crate::rate::{self, Cap, Meter};
+use crate::rate::{self, Meter};
 use crate::{Error, Result, codec};
 
 /// str0m's outbound video buffer depth (packets), which also backs NACK resends.
@@ -150,12 +150,12 @@ impl Session {
 
 	/// Meter an ingest against `limit`'s cap, following its updates, and steer the
 	/// publisher under it with REMB on every video line that negotiated it.
-	pub(crate) fn with_rate(mut self, limit: &rate::Limit) -> Self {
-		let limit = limit.subscribe();
-		let cap = *limit.borrow();
+	pub(crate) fn with_rate(mut self, mut limit: moq_net::bandwidth::Limit) -> Self {
+		// One read sets both the meter and the cap `changed` compares against.
+		let cap = limit.get();
 		self.rate = Some(IngestRate {
 			meter: Meter::new(cap, Instant::now()),
-			limit: Some(limit),
+			limit,
 			remb: Vec::new(),
 			next_remb: Instant::now(),
 			steered: cap.is_some(),
@@ -180,19 +180,23 @@ impl Session {
 		}
 	}
 
+	/// Drive the media session until it fails or the peer disconnects, which is `Ok`.
 	pub async fn run(&mut self) -> Result<()> {
 		let result = self.run_loop().await;
 		// Any end but the peer's DELETE, a disconnect or an offer that never connected
 		// included, ends the sink's tracks with its cause, so subscribers see the publisher
 		// go rather than its tracks dropped unfinished.
-		if let Err(err) = &result
-			&& let MediaRole::Ingest(sink) = &mut self.role
-		{
-			sink.abort(moq_net::Error::Transport(err.to_string()));
+		if let MediaRole::Ingest(sink) = &mut self.role {
+			let cause = match &result {
+				Ok(()) => "session closed".to_string(),
+				Err(err) => err.to_string(),
+			};
+			sink.abort(moq_net::Error::Transport(cause));
 		}
 		result
 	}
 
+	/// Returns `Ok` only when the peer disconnects.
 	async fn run_loop(&mut self) -> Result<()> {
 		loop {
 			let remb_at = self.rate.as_ref().and_then(IngestRate::remb_at);
@@ -226,24 +230,18 @@ impl Session {
 					crate::egress::dispatch(&mut self.agent.rtc_mut(), req, wallclock);
 				}
 
-				changed = async {
-					match self.rate.as_mut().and_then(|rate| rate.limit.as_mut()) {
-						Some(limit) => limit.changed().await.map(|()| *limit.borrow_and_update()),
+				cap = async {
+					match self.rate.as_mut() {
+						Some(rate) => rate.limit.changed().await,
 						None => std::future::pending().await,
 					}
 				} => {
 					let rate = self.rate.as_mut().expect("only a rated session watches its cap");
-					match changed {
-						Ok(cap) => {
-							tracing::debug!(?cap, "ingest cap updated");
-							rate.meter.set(cap, Instant::now());
-							rate.steered |= cap.is_some();
-							// REMB follows an update at once.
-							rate.next_remb = Instant::now();
-						}
-						// Every handle is gone, so the cap can no longer change: keep the last one.
-						Err(_) => rate.limit = None,
-					}
+					tracing::debug!(?cap, "ingest cap updated");
+					rate.meter.set(cap, Instant::now());
+					rate.steered |= cap.is_some();
+					// REMB follows an update at once.
+					rate.next_remb = Instant::now();
 				}
 
 				_ = async {
@@ -257,7 +255,7 @@ impl Session {
 					Ok(crate::ice::Event::Rtc(event)) => self.handle_event(event)?,
 					// No STUN servers are configured, so there is nothing to trickle.
 					Ok(_) => {}
-					Err(crate::ice::Error::Closed) => return Err(Error::SessionClosed),
+					Err(crate::ice::Error::Closed) => return Ok(()),
 					Err(crate::ice::Error::Timeout) => return Err(Error::IceTimeout),
 					Err(crate::ice::Error::Rtc(err)) => return Err(Error::Rtc(err)),
 				},
@@ -396,7 +394,7 @@ impl Session {
 		// A REMB ceiling holds until the next one replaces it, so a lifted cap keeps sending
 		// the largest REMB can carry rather than going quiet and leaving the old ceiling.
 		let bitrate = match rate.meter.cap() {
-			Some(cap) => str0m::bwe::Bitrate::bps(cap.steer().as_bps()),
+			Some(cap) => str0m::bwe::Bitrate::bps(rate::steer(cap).as_bps()),
 			None => str0m::bwe::Bitrate::MAX,
 		};
 		let mut rtc = self.agent.rtc_mut();
@@ -421,8 +419,8 @@ impl Session {
 /// steers the publisher under it.
 struct IngestRate {
 	meter: Meter,
-	/// Live cap updates; `None` once every handle is dropped.
-	limit: Option<tokio::sync::watch::Receiver<Option<Cap>>>,
+	/// Live cap updates.
+	limit: moq_net::bandwidth::Limit,
 	/// Video lines that negotiated REMB.
 	remb: Vec<str0m::media::Mid>,
 	next_remb: Instant,
@@ -570,21 +568,17 @@ fn to_u64(value: i128) -> u64 {
 	value.clamp(0, u64::MAX as i128) as u64
 }
 
-/// Log a finished session at the right level, then fold an ordinary peer disconnect
-/// ([`Error::SessionClosed`]) into `Ok` so only genuine failures error. Keeps normal
-/// WebRTC churn out of the warning stream. `role` labels the path (e.g. `"whip server"`).
+/// Log a finished session at the right level, keeping normal WebRTC churn out of the
+/// warning stream. `role` labels the path (e.g. `"whip server"`).
 pub(crate) fn end(role: &str, result: Result<()>) -> Result<()> {
 	match &result {
-		Ok(()) | Err(Error::SessionClosed) => tracing::debug!(role, "session ended"),
+		Ok(()) => tracing::debug!(role, "session ended"),
 		// An abandoned offer (peer answered but never connected) is normal churn, not
 		// a failure: keep it out of the warning stream.
 		Err(Error::IceTimeout) => tracing::debug!(role, "session ended: ICE never connected"),
 		Err(err) => tracing::warn!(%err, role, "session ended"),
 	}
-	match result {
-		Ok(()) | Err(Error::SessionClosed) => Ok(()),
-		Err(err) => Err(err),
-	}
+	result
 }
 
 /// Convert a str0m [`MediaTime`](str0m::media::MediaTime) to microseconds.

@@ -86,7 +86,7 @@ impl Openh264 {
 			.vui(vui);
 
 		let encoder = Encoder::with_api_config(OpenH264API::from_source(), cfg)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 init: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("openh264 init: {e}")))?;
 
 		tracing::info!(
 			encoder = NAME,
@@ -146,7 +146,7 @@ impl Openh264 {
 			api.set_option(ENCODER_OPTION_BITRATE, std::ptr::from_mut(&mut info).cast())
 		};
 		if status != 0 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"openh264 set bitrate to {bitrate}: status {status}"
 			)));
 		}
@@ -177,7 +177,7 @@ impl Backend for Openh264 {
 		let bitstream = self
 			.encoder
 			.encode(&yuv)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 encode: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("openh264 encode: {e}")))?;
 
 		// One Annex-B access unit per frame (low-delay, no B-frames). A skipped
 		// frame yields an empty bitstream.
