@@ -27,10 +27,8 @@ re-export it:
   [media](/quest/m2/api-shape/media.md) has already dropped it, as
   [moq-dev/moq#8214](https://github.com/moq-dev/moq/pull/8214) plans
 
-No new one lands either:
-[moq-quic-unused-surface](/quest/m2/moq-quic-unused-surface.md) names the
-moq-quic items moq-tokio, moq-uring, and qmux need instead of adding
-`pub use moq_quic;`.
+No new one lands either: moq-tokio, moq-uring, and qmux name the moq-quic
+items they need instead of adding `pub use moq_quic;`.
 
 Where a signature names a third-party type only in passing, moq wraps it,
 so the dependency leaves moq's public API altogether: `reject` takes moq's
@@ -64,7 +62,7 @@ skipping them silently, as rustdoc does; exporting their whole APIs).
 Decided 2026-11-07 (maintainer,
 [moq-dev/moq#8233](https://github.com/moq-dev/moq/pull/8233)): ✅ every
 whole-crate re-export goes, moq's own crates included, and
-moq-quic-unused-surface adds no `pub use moq_quic;`. The semver reason
+moq-tokio adds no `pub use moq_quic;`. The semver reason
 holds for any crate, and one rule needs no list. Rejected: only the ten
 the census decision first listed; only third-party crates. Either would
 need an exemption list in rust2's exporter, which is config.
@@ -83,9 +81,8 @@ handles, and `jni` the same way, since some may be wrappable.
 
 `moq_quic::Side` is the other type rust2's census found unnameable, through
 moq-tokio's `quic::driver` list naming `stream::Id` but not `Side`. Its
-only uses there, `stream::Id::{new, initiator}`, go in
-[moq-quic-unused-surface](/quest/m2/moq-quic-unused-surface.md), so this
-quest leaves it.
+only uses there, `stream::Id::{new, initiator}`, are now crate-private, so
+this quest leaves it.
 
 rust2's [whole-crate re-export wait](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-export/refusals/moq-reexports.md)
 and [unreachable types wait](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-export/refusals/moq-unreachable.md)

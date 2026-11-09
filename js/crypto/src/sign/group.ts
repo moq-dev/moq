@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { type Group as NetGroup, Track as NetTrack, type Time } from "@moq/net";
+import { Datagram as NetDatagram, type Group as NetGroup, type Track as NetTrack, type Time } from "@moq/net";
 import type { Pump } from "../pump.ts";
 import { Failure } from "./failure.ts";
 import type { PublicKey, SecretKey } from "./key.ts";
@@ -71,7 +71,7 @@ export class Producer {
 		if (this.#closed || this.#writer.closed) throw this.#writer.aborted ?? new Error("group is closed");
 		const owned = payload.slice();
 		// Signed at the track's timescale, and written that way so a local reader sees the signed value too.
-		const at = NetTrack.rescale(this.#writer.track, timestamp);
+		const at = NetDatagram.rescale(this.#writer.track, timestamp);
 		return this.#writer.pump.run(async () => {
 			this.#check();
 			const body = await this.#writer.scope.sign(this.#writer.key, this.sequence, this.#next, at, owned);

@@ -44,7 +44,7 @@ export function finish(
 		releaseAck = resolve;
 	});
 	const origin = new Moq.Origin.Producer();
-	let connection: Moq.Connection.Established | undefined;
+	let connection: Moq.Connection.Session | undefined;
 	const state: State = {
 		ready: false,
 		ended: false,

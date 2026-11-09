@@ -44,7 +44,7 @@ const ACCESS_TIMEOUT: Duration = Duration::from_secs(60);
 /// List the cameras. Unlike capture, enumeration needs no TCC grant: an
 /// unauthorized process still sees the devices, just not their frames.
 pub(super) fn cameras() -> Result<Vec<Camera>, Error> {
-	let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::Codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
+	let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
 	#[expect(
 		deprecated,
 		reason = "its replacement needs device-type constants that are macOS 14+, which would drop cameras on older systems"
@@ -61,7 +61,7 @@ pub(super) fn cameras() -> Result<Vec<Camera>, Error> {
 
 /// Open the default (or requested) camera and stream its frames.
 pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream, Error> {
-	let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::Codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
+	let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
 
 	// Gate on camera authorization before opening the device, so an unauthorized
 	// client gets a clear error (and a prompt on first run) instead of a silent
@@ -87,7 +87,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 	let device_id = unsafe { device.uniqueID() }.to_string();
 
 	let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }
-		.map_err(|e| Error::Codec(anyhow::anyhow!("camera input: {e:?}")))?;
+		.map_err(|e| Error::codec(anyhow::anyhow!("camera input: {e:?}")))?;
 
 	let chan = FrameChannel::new();
 	let delegate = Delegate::new(chan.clone(), device_id.clone());
@@ -113,11 +113,11 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 	let configuration = SessionConfiguration::new(&session);
 	unsafe {
 		if !session.canAddInput(&input) {
-			return Err(Error::Codec(anyhow::anyhow!("cannot add camera input")));
+			return Err(Error::codec(anyhow::anyhow!("cannot add camera input")));
 		}
 		session.addInput(&input);
 		if !session.canAddOutput(&output) {
-			return Err(Error::Codec(anyhow::anyhow!("cannot add video output")));
+			return Err(Error::codec(anyhow::anyhow!("cannot add video output")));
 		}
 		session.addOutput(&output);
 	}
@@ -130,7 +130,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 		Ok(Ok(Some(frame))) => frame,
 		Ok(Err(error)) => return Err(error),
 		Ok(Ok(None)) | Err(_) => {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"no frames from camera {device_id} within {FIRST_FRAME_TIMEOUT:?} (permission denied?)"
 			)));
 		}

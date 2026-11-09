@@ -8,8 +8,8 @@ import { announcedView } from "../src/announced.test-util";
 import * as Announce from "../src/announced.ts";
 import { AuthSession } from "../src/auth_session.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
-import type { Established } from "../src/connection/established.ts";
 import { forwardAnnounced } from "../src/connection/forward.ts";
+import type { Session } from "../src/connection/session.ts";
 import { WireRoute } from "../src/hop.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
@@ -65,7 +65,7 @@ for (const touched of ["covering", "single"] as const) {
 				new Path.Patterns(heads.map((head) => Path.Pattern.subtree(head))),
 			);
 			const session = new FakeSession();
-			forwardAnnounced(session as unknown as Established, scoped);
+			forwardAnnounced(session as unknown as Session, scoped);
 
 			// Watching everything narrows to one request per head.
 			const table = await announcedView(origin);
@@ -117,7 +117,7 @@ for (const watchers of [8, 128, 2048]) {
 		const origin = new Producer();
 		const attached = Array.from({ length: sessions }, () => {
 			const session = new FakeSession();
-			forwardAnnounced(session as unknown as Established, origin);
+			forwardAnnounced(session as unknown as Session, origin);
 			return session;
 		});
 		const held = Array.from({ length: watchers }, (_, index) =>

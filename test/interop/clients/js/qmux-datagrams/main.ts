@@ -1,5 +1,5 @@
 /** Datagrams from a QMux session over the browser's native `WebSocketStream`. @module */
-import Session from "../../../../../js/qmux/src/index.ts";
+import { Session } from "../../../../../js/qmux/src/index.ts";
 
 /** Dial `url`, send `count` one-byte datagrams back to back, then a stream that marks the end. */
 export async function run(url: string, protocol: string, count: number, burst: boolean): Promise<void> {
