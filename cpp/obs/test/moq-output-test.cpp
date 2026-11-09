@@ -361,7 +361,7 @@ encoder_packet audioPacket(std::vector<uint8_t> &payload, int64_t pts)
 // The output's broadcast as the relay serves it, or null once the wait times out.
 std::shared_ptr<moq::BroadcastConsumer> relayBroadcast(TestRelay &relay)
 {
-	auto announced = TestOk(relay.origin->consume()->follow("room", std::nullopt), "follow");
+	auto announced = TestOk(relay.origin->consume()->follow("room", nullptr), "follow");
 	auto available = announced->available();
 	if (available.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
 		return nullptr;
@@ -411,7 +411,7 @@ struct MoQOutputStatsTest {
 		const auto *present = std::get_if<moq::AnnounceEvent::kPresent>(&event->get_variant());
 		if (!present)
 			return std::nullopt;
-		return present->announce.route.instance;
+		return present->announce.route.instance->text();
 	}
 
 	static std::shared_ptr<moq::Session> Session(MoQOutput &output)

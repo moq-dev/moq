@@ -31,16 +31,11 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// RouteOptions is how a [Route] advertises itself: Hidden until [Route.Announce], its static
-	// production Cost (lower wins) and, optionally, a stable Instance. The zero value is visible at
-	// once, at cost 0, under a fresh instance the route keeps for its lifetime, so a restarted
-	// publisher is a new stream viewers restart onto. Set Instance only for a publisher that
-	// continues its group sequences across restarts and raises Epoch on each: readers stitch every
-	// route of one instance together, so restarting the sequences under an old instance splices
-	// unrelated groups into their tracks.
-	RouteOptions = ffi.MoqRouteOptions
 	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream) and its static production and link cost (lower wins).
 	RouteInfo = ffi.MoqRouteInfo
+	// Instance names one continuous stream at a path. Compare two with Eq: a session mints one
+	// for a route whose wire carries none, and it differs from a named instance with the same Text.
+	Instance = ffi.MoqInstance
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (Captures), and the RouteInfo serving it. It carries no broadcast;
 	// resolve a path with [OriginConsumer.Request]. Captures is a required slice,
@@ -185,6 +180,11 @@ const (
 	// CongestionControlNone runs no congestion control and no pacing, for tests and controlled links.
 	CongestionControlNone = ffi.MoqCongestionControlNone
 )
+
+// ParseInstance names an instance with text, failing with ErrInvalidInstance when it is empty.
+func ParseInstance(text string) (*Instance, error) {
+	return ffi.MoqInstanceParse(text)
+}
 
 // Versions lists the protocol versions offered by default, most preferred
 // first, spelled the way ClientConfig.Versions takes them.

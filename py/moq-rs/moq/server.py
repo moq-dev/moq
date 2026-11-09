@@ -10,6 +10,7 @@ from moq_ffi import MoqQuicConfig, MoqRequest, MoqServer, MoqServerConfig, MoqSe
 from ._records import _implementation, _strs
 from .origin import OriginProducer, Route
 from .session import Session
+from .types import Instance
 
 # The network transport carrying an incoming session.
 Transport = MoqTransport
@@ -205,7 +206,7 @@ class Server:
         return Request(request)
 
     def route(
-        self, path: str, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0
+        self, path: str, *, hidden: bool = False, cost: int = 0, instance: Instance | None = None, epoch: int = 0
     ) -> Route:
         """Create a route at ``path`` owning a broadcast served to incoming sessions; hold it
         to keep it announced.

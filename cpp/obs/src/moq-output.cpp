@@ -225,7 +225,7 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
-		instance = (*next_route)->instance_id();
+		instance = (*next_route)->instance_id()->text();
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);

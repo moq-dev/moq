@@ -159,14 +159,20 @@ typealias Frame = uniffi.moq.MoqFrame
 typealias Timestamp = uniffi.moq.MoqTimestamp
 
 /**
+ * Names one continuous stream at a path: `Instance.parse` names one, only a session mints one, and
+ * equality also compares `isMinted()`, so pin a reported stream with the instance, not its text.
+ */
+typealias Instance = uniffi.moq.MoqInstance
+
+/**
  * How a [Route] advertises itself: `hidden` until `announce`, its static production cost (lower
- * wins), an optional stable instance (null mints a fresh one the route keeps for its lifetime), and
- * the epoch, which only matters with a stable instance.
+ * wins), an optional stable [Instance] (null mints a fresh one the route keeps for its lifetime),
+ * and the epoch, which only matters with a stable instance.
  */
 typealias RouteOptions = uniffi.moq.MoqRouteOptions
 
 /**
- * The read-only facts on a received route: the instance of the stream it serves, relay hop ids
+ * The read-only facts on a received route: the [Instance] of the stream it serves, relay hop ids
  * (oldest first), and static production and link cost (lower wins).
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo

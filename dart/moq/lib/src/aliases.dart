@@ -55,7 +55,7 @@ typedef OriginConsumer = MoqOriginConsumer;
 /// A requested broadcast not yet answered: serve a held broadcast, route a new one, or reject it.
 typedef BroadcastRequest = MoqBroadcastRequest;
 
-/// How a route advertises itself: hidden until announced, its static cost, and a stable instance.
+/// How a route advertises itself: hidden until announced, its static cost, and a stable [Instance].
 typedef RouteOptions = MoqRouteOptions;
 
 /// A stream of announce events under a prefix.
@@ -69,6 +69,12 @@ typedef Following = MoqFollowing;
 
 /// The read-only facts on a received route: a static cost and the stream's instance.
 typedef RouteInfo = MoqRouteInfo;
+
+/// One continuous stream at a path: `Instance.parse` names one, and only a session mints one.
+///
+/// Two are equal only when their text and minted flag both match, so pass an
+/// instance a route reported back as is, rather than re-parsing its text.
+typedef Instance = MoqInstance;
 
 /// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
