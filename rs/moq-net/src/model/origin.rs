@@ -129,9 +129,9 @@ pub struct Config {
 	/// This caps how long a superseded group stays fresh here, and the delivery budget,
 	/// without changing the publisher's [`max_age`](track::Info::max_age) metadata. Wall-clock
 	/// reclamation of idle content is separate: [`Self::pool`]'s
-	/// [`expiry`](cache::Pool::expiry) window. [`Duration::MAX`] (the default)
-	/// imposes no ceiling, leaving each track's own window in force.
-	pub cache_duration: Duration,
+	/// [`expiry`](cache::Pool::expiry) window. `None` (the default) imposes no ceiling,
+	/// leaving each track's own window in force.
+	pub cache_duration: Option<Duration>,
 
 	/// How long an announce cursor holds a changed route before delivering it.
 	///
@@ -168,7 +168,7 @@ impl Default for Config {
 			route_key: None,
 			max_hops: MAX_HOP_LIMIT,
 			pool,
-			cache_duration: Duration::MAX,
+			cache_duration: None,
 			update_hold: DEFAULT_UPDATE_HOLD,
 		}
 	}
@@ -2105,8 +2105,8 @@ pub struct Producer {
 	pool: cache::Pool,
 
 	// Max age ceiling inherited by broadcasts created under this origin (see
-	// [`Config::cache_duration`]). `Duration::MAX` (no ceiling) by default.
-	cache_duration: Duration,
+	// [`Config::cache_duration`]). No ceiling by default.
+	cache_duration: Option<Duration>,
 
 	// Ingress stats context. Broadcasts created through this producer are attributed
 	// to it (writes counted on the subscriber/ingress side). Empty (no-op) unless a
@@ -2321,7 +2321,7 @@ impl Producer {
 			root: Path::default(),
 			shared: SendCell::new(kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD, None))),
 			pool: cache::Pool::default(),
-			cache_duration: Duration::MAX,
+			cache_duration: None,
 			stats: stats::Session::default(),
 			link: Link::Local,
 			preference: Preference::default(),
@@ -7098,7 +7098,7 @@ pub struct Consumer {
 	// The cache policy remote fronts inherit, mirroring what
 	// `route` gives a local front.
 	pool: cache::Pool,
-	cache_duration: Duration,
+	cache_duration: Option<Duration>,
 
 	// Non-owning submission handle to the origin's [`Driver`], for the front
 	// watcher a routed `request` spawns. Non-owning so a lingering

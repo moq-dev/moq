@@ -53,22 +53,24 @@ pub struct Backoff {
 	pub initial: Duration,
 	/// Growth of the delay after each failure. 0 or 1 keeps it constant. Defaults to 2.
 	pub multiplier: u32,
-	/// Cap on the delay, which caps `initial` too. Zero leaves it uncapped. Defaults to 5 s.
-	pub max: Duration,
+	/// Cap on the delay, which caps `initial` too. `None` leaves it uncapped. Defaults to 5 s.
+	pub max: Option<Duration>,
 	/// How long a session must stay up to count as healthy. Must be nonzero. Defaults to 1 s.
 	///
 	/// A healthy session's end resets the delay and the timeout. One that ends sooner is a
 	/// failed attempt, so a peer that accepts and then drops every session still escalates
 	/// the delay and exhausts the timeout.
 	pub healthy: Duration,
-	/// How long to keep retrying before giving up. Zero retries forever. Defaults to 10 s.
+	/// How long to keep retrying before giving up. `None` (the default) retries forever, so
+	/// an outage of any length recovers on its own; a caller that can react to a persistent
+	/// failure sets one. Zero still makes the first walk, and gives up when it fails.
 	///
 	/// No new walk of the peer's addresses starts once it has passed, but one under way
 	/// finishes: each address but the last gets up to 5 s, and the last runs to
 	/// [`Config::timeout`], so a handshake slower than this still lands. Giving up can
 	/// therefore take up to one whole walk longer. Resets after a healthy session outside a
 	/// redirect loop.
-	pub timeout: Duration,
+	pub timeout: Option<Duration>,
 }
 
 impl Default for Backoff {
@@ -76,9 +78,9 @@ impl Default for Backoff {
 		Self {
 			initial: Duration::from_secs(1),
 			multiplier: 2,
-			max: Duration::from_secs(5),
+			max: Some(Duration::from_secs(5)),
 			healthy: Duration::from_secs(1),
-			timeout: Duration::from_secs(10),
+			timeout: None,
 		}
 	}
 }
@@ -139,8 +141,8 @@ pub struct Config {
 	pub goaway: Goaway,
 	/// What a GOAWAY naming no URI does.
 	pub restart: Restart,
-	/// The deadline for one dial and its handshake. Zero waits forever. Defaults to 30 s.
-	pub timeout: Duration,
+	/// The deadline for one dial and its handshake. `None` waits forever. Defaults to 30 s.
+	pub timeout: Option<Duration>,
 	/// End when the first session ends instead of redialing. Defaults to false.
 	///
 	/// A GOAWAY then ends it cleanly: with no replacement to dial, leaving is the answer.
@@ -156,7 +158,7 @@ impl Default for Config {
 			backoff: Backoff::default(),
 			goaway: Goaway::default(),
 			restart: Restart::default(),
-			timeout: Duration::from_secs(30),
+			timeout: Some(Duration::from_secs(30)),
 			once: false,
 			pinned: false,
 		}
@@ -350,7 +352,7 @@ pub struct Reconnect<A, E> {
 }
 
 enum Phase {
-	/// Check the retry window, then walk the targets.
+	/// Walk the targets, unless the tokens ended.
 	Start,
 	/// Ask the caller to dial the target at `index`.
 	Next {
@@ -484,7 +486,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			let handover = self.predecessor.as_ref().map(|predecessor| predecessor.deadline);
 
 			match &mut self.phase {
-				Phase::Start => self.start(now),
+				Phase::Start => self.start(),
 				Phase::Next { index } => {
 					let index = *index;
 					return self.dial(now, index);
@@ -523,13 +525,19 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 					if now < *until {
 						return Action::Wait(earliest(Some(*until), handover));
 					}
-					let restart = *restart;
-					self.retry.delay = Pacing::new(&self.config.backoff).next(self.retry.delay);
-					if restart {
+					if *restart {
 						// After the wait, so the window counts only the time after the peer
 						// stops answering.
 						self.retry.start = now;
+					} else if let Some(window) = self.config.backoff.timeout
+						&& now.saturating_duration_since(self.retry.start) >= window
+					{
+						// Checked when the wait ends, not when it began, so a late poll (a
+						// stalled runtime, a sleeping device) never dials past the window.
+						self.done(Err(self.exhausted(window)));
+						continue;
 					}
+					self.retry.delay = Pacing::new(&self.config.backoff).next(self.retry.delay);
 					self.phase = Phase::Start;
 				}
 				Phase::Done => return Action::Wait(None),
@@ -572,12 +580,10 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		}
 	}
 
-	/// Start a walk, unless the retry window is spent or the tokens ended.
-	fn start(&mut self, now: Instant) {
-		let timeout = self.config.backoff.timeout;
-		if !timeout.is_zero() && now.saturating_duration_since(self.retry.start) >= timeout {
-			return self.done(Err(self.exhausted()));
-		}
+	/// Start a walk, unless the tokens ended. Only a retry's backoff checks the window, so
+	/// the first dial of a run, a healthy migration, and a restart's redial always happen,
+	/// even under a zero window.
+	fn start(&mut self) {
 		// An ended auth handle refuses every later session, so no dial can recover. A fresh
 		// watch only reports an error once its handle has ended.
 		if let Some(tokens) = &self.tokens
@@ -601,7 +607,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 
 		// The connect deadline covers the dial and the handshake, for every transport: it is
 		// the only bound some of them have. The fixed bound applies only with a fallback.
-		let connect = Some(self.config.timeout).filter(|timeout| !timeout.is_zero());
+		let connect = self.config.timeout;
 		let attempt = (index + 1 < self.targets.len()).then_some(ATTEMPT);
 		let deadline = match (attempt, connect) {
 			(Some(attempt), Some(connect)) if connect <= attempt => Some((now + connect, Failure::Timeout(connect))),
@@ -771,11 +777,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		}
 		// A restart's pacing is not capped by the window: a delay longer than the window
 		// would otherwise spend it all and end the loop without a redial.
-		let window = if restarting {
-			Duration::ZERO
-		} else {
-			self.config.backoff.timeout
-		};
+		let window = if restarting { None } else { self.config.backoff.timeout };
 		let reason = if looped {
 			"peer redirected back in a loop; retrying after backoff"
 		} else {
@@ -813,10 +815,15 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		self.back_off(now, self.config.backoff.timeout, false, "reconnecting after backoff");
 	}
 
-	/// Wait out the next jittered delay, capped by what remains of `window`.
-	fn back_off(&mut self, now: Instant, window: Duration, restart: bool, reason: &'static str) {
-		let Some(wait) = self.retry.wait(now, window) else {
-			return self.done(Err(self.exhausted()));
+	/// Wait out the next jittered delay, capped by what remains of `window`, if any.
+	fn back_off(&mut self, now: Instant, window: Option<Duration>, restart: bool, reason: &'static str) {
+		let wait = self.retry.wait();
+		let wait = match window {
+			None => wait,
+			Some(window) => match window.checked_sub(now.saturating_duration_since(self.retry.start)) {
+				Some(left) => wait.min(left),
+				None => return self.done(Err(self.exhausted(window))),
+			},
 		};
 		tracing::warn!(?wait, "{reason}");
 		self.phase = Phase::Backoff {
@@ -833,9 +840,10 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		}
 	}
 
-	fn exhausted(&self) -> E {
+	/// Giving up once the retry `window` ran out.
+	fn exhausted(&self, window: Duration) -> E {
 		Failure::Exhausted {
-			after: self.config.backoff.timeout,
+			after: window,
 			last: self.retry.last.as_ref().map(ToString::to_string),
 		}
 		.into()
@@ -869,7 +877,7 @@ struct Pacing {
 
 impl Pacing {
 	fn new(backoff: &Backoff) -> Self {
-		let max = Some(backoff.max).filter(|max| !max.is_zero());
+		let max = backoff.max;
 		Self {
 			initial: max.map_or(backoff.initial, |max| backoff.initial.min(max)),
 			max,
@@ -921,14 +929,9 @@ impl<E> Retry<E> {
 		healthy
 	}
 
-	/// Jitter the next delay and cap it at what remains of `window`. `None` means the
-	/// window is spent; a zero window never is.
-	fn wait(&self, now: Instant, window: Duration) -> Option<Duration> {
-		let wait = self.delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
-		if window.is_zero() {
-			return Some(wait);
-		}
-		Some(wait.min(window.checked_sub(now.saturating_duration_since(self.start))?))
+	/// The next delay, jittered.
+	fn wait(&self) -> Duration {
+		self.delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0)
 	}
 }
 

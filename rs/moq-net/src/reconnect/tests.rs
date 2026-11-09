@@ -179,10 +179,10 @@ async fn drive<A: Target>(
 	None
 }
 
-fn config(initial: Duration, timeout: Duration) -> Config {
+fn config(initial: Duration, timeout: Option<Duration>) -> Config {
 	let mut config = Config::default();
 	config.backoff.initial = initial;
-	config.backoff.max = MAX;
+	config.backoff.max = Some(MAX);
 	config.backoff.timeout = timeout;
 	config
 }
@@ -209,7 +209,7 @@ async fn an_immediate_close_loop_escalates_until_the_timeout() {
 	const TIMEOUT: Duration = Duration::from_secs(2);
 	let peer = url("tcp://peer:1/");
 	let started = kio::clock::now();
-	let mut machine = Reconnect::new(config(INITIAL, TIMEOUT), vec![peer.clone()], started).unwrap();
+	let mut machine = Reconnect::new(config(INITIAL, Some(TIMEOUT)), vec![peer.clone()], started).unwrap();
 	let mut run = Run::default();
 
 	let err = drive(&mut machine, &[(peer, Peer::Close)], &mut run, |_| false)
@@ -235,7 +235,7 @@ async fn an_immediate_close_loop_escalates_until_the_timeout() {
 async fn an_immediate_restart_loop_escalates_without_giving_up() {
 	const TIMEOUT: Duration = Duration::from_millis(500);
 	let peer = url("tcp://peer:1/");
-	let mut machine = Reconnect::new(config(INITIAL, TIMEOUT), vec![peer.clone()], kio::clock::now()).unwrap();
+	let mut machine = Reconnect::new(config(INITIAL, Some(TIMEOUT)), vec![peer.clone()], kio::clock::now()).unwrap();
 	let mut run = Run::default();
 
 	let ended = drive(&mut machine, &[(peer, Peer::Goaway(String::new()))], &mut run, |run| {
@@ -263,7 +263,7 @@ async fn an_immediate_redirect_loop_escalates_until_the_timeout() {
 		(b.clone(), Peer::Goaway(a.to_string())),
 	];
 	let started = kio::clock::now();
-	let mut machine = Reconnect::new(config(INITIAL, TIMEOUT), vec![a.clone()], started).unwrap();
+	let mut machine = Reconnect::new(config(INITIAL, Some(TIMEOUT)), vec![a.clone()], started).unwrap();
 	let mut run = Run::default();
 
 	let err = drive(&mut machine, &peers, &mut run, |_| false)
@@ -293,7 +293,7 @@ async fn a_zero_initial_redials_at_once() {
 	let peer = url("tcp://peer:1/");
 	let first = kio::clock::now();
 	let mut machine = Reconnect::new(
-		config(Duration::ZERO, Duration::from_secs(1)),
+		config(Duration::ZERO, Some(Duration::from_secs(1))),
 		vec![peer.clone()],
 		first,
 	)
@@ -307,6 +307,56 @@ async fn a_zero_initial_redials_at_once() {
 	for (_, at) in &run.accepts {
 		assert_eq!(*at, first, "a zero initial waited before a retry");
 	}
+}
+
+/// A zero window is a real bound, not "unlimited": the first walk still dials, and its
+/// failure gives up at once. A peer that keeps serving is unaffected.
+#[kio::test]
+async fn a_zero_timeout_gives_up_when_the_first_walk_fails() {
+	let peer = url("tcp://peer:1/");
+	let started = kio::clock::now();
+	let mut machine = Reconnect::new(config(INITIAL, Some(Duration::ZERO)), vec![peer.clone()], started).unwrap();
+	let mut run = Run::default();
+	let err = drive(
+		&mut machine,
+		&[(peer.clone(), Peer::Fail(Verdict::Retry))],
+		&mut run,
+		|_| false,
+	)
+	.await
+	.unwrap()
+	.expect_err("a failed walk kept retrying");
+	assert!(matches!(err, TestError::Policy(Failure::Exhausted { .. })), "{err}");
+	assert_eq!(run.dials, std::slice::from_ref(&peer), "the first walk dialed once");
+	assert_eq!(kio::clock::now(), started, "gave up without waiting");
+
+	let mut machine = Reconnect::new(config(INITIAL, Some(Duration::ZERO)), vec![peer.clone()], started).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+	assert!(machine.session().is_some(), "a zero window refused the first dial");
+}
+
+/// The window is checked when a retry's wait ends, not when it began: a poll that comes
+/// late, as after the device slept, gives up rather than dialing past the window.
+#[test]
+fn a_late_poll_past_the_window_gives_up() {
+	let started = Instant::now();
+	let config = config(INITIAL, Some(Duration::from_secs(1)));
+	let mut machine = Reconnect::<Url, TestError>::new(config, vec![url("tcp://peer:1/")], started).unwrap();
+	let waiter = kio::Waiter::noop();
+	assert!(matches!(machine.poll(started, &waiter), Action::Dial(_)));
+	machine.failed(started, TestError::Dial, Verdict::Retry);
+	assert!(matches!(machine.poll(started, &waiter), Action::Retrying(_)));
+	assert!(matches!(machine.poll(started, &waiter), Action::Wait(Some(until)) if until <= started + INITIAL));
+
+	let action = machine.poll(started + Duration::from_secs(2), &waiter);
+	assert!(
+		matches!(action, Action::Done(Err(TestError::Policy(Failure::Exhausted { .. })))),
+		"{action:?}"
+	);
 }
 
 /// The first address that answers wins, however many dead ones precede it.
@@ -339,7 +389,7 @@ async fn only_an_address_with_a_fallback_is_bounded() {
 	let targets = vec![url("tcp://a:1/"), url("tcp://b:1/")];
 	let peers = [(targets[0].clone(), Peer::Hang), (targets[1].clone(), Peer::Hang)];
 	let mut config = Config::default();
-	config.backoff.timeout = Duration::from_secs(1);
+	config.backoff.timeout = Some(Duration::from_secs(1));
 	let started = kio::clock::now();
 	let mut machine = Reconnect::new(config, targets.clone(), started).unwrap();
 	let mut run = Run::default();
@@ -350,9 +400,10 @@ async fn only_an_address_with_a_fallback_is_bounded() {
 		.expect_err("nothing answered");
 	assert_eq!(run.events, ["abandon", "abandon", "retrying"]);
 	assert_eq!(run.dials, targets, "a walk under way finishes past the retry window");
-	assert_eq!(kio::clock::now() - started, ATTEMPT + config.timeout);
+	let connect = config.timeout.unwrap();
+	assert_eq!(kio::clock::now() - started, ATTEMPT + connect);
 	// The give-up names the last address's connect timeout as its cause.
-	let last = Failure::Timeout(config.timeout).to_string();
+	let last = Failure::Timeout(connect).to_string();
 	assert!(
 		matches!(&err, TestError::Policy(Failure::Exhausted { last: Some(cause), .. }) if *cause == last),
 		"{err}"
@@ -369,7 +420,7 @@ async fn a_settled_answer_stops_the_walk() {
 		(targets[1].clone(), Peer::Serve),
 	];
 	let mut machine = Reconnect::new(
-		config(INITIAL, Duration::from_secs(1)),
+		config(INITIAL, Some(Duration::from_secs(1))),
 		targets.clone(),
 		kio::clock::now(),
 	)
@@ -394,14 +445,14 @@ async fn an_unusable_address_ends_only_a_walk_without_hope() {
 		(targets[0].clone(), Peer::Fail(Verdict::Retry)),
 		(targets[1].clone(), Peer::Fail(Verdict::Unusable)),
 	];
-	let mut machine = Reconnect::new(config(INITIAL, Duration::ZERO), targets.clone(), kio::clock::now()).unwrap();
+	let mut machine = Reconnect::new(config(INITIAL, None), targets.clone(), kio::clock::now()).unwrap();
 	let mut run = Run::default();
 	drive(&mut machine, &peers, &mut run, |run| run.dials.len() == 4).await;
 	assert_eq!(run.events, ["retrying"], "an unlimited window keeps retrying");
 
 	let lone = url("tcp://c:1/");
 	let started = kio::clock::now();
-	let mut machine = Reconnect::new(config(INITIAL, Duration::ZERO), vec![lone.clone()], started).unwrap();
+	let mut machine = Reconnect::new(config(INITIAL, None), vec![lone.clone()], started).unwrap();
 	let err = drive(
 		&mut machine,
 		&[(lone, Peer::Fail(Verdict::Unusable))],
@@ -420,7 +471,7 @@ async fn an_unusable_address_ends_only_a_walk_without_hope() {
 async fn a_refusal_retries_only_new_tokens() {
 	let peer = url("tcp://peer:1/");
 	let tokens = auth::Tokens::new(vec!["old".parse().unwrap()]);
-	let mut machine = Reconnect::new(config(INITIAL, Duration::ZERO), vec![peer.clone()], kio::clock::now())
+	let mut machine = Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now())
 		.unwrap()
 		.with_tokens(tokens.clone());
 
@@ -447,7 +498,7 @@ async fn a_refusal_retries_only_new_tokens() {
 async fn an_ended_auth_handle_ends_the_policy() {
 	let peer = url("tcp://peer:1/");
 	let tokens = auth::Tokens::new(Vec::new());
-	let mut machine = Reconnect::new(config(INITIAL, Duration::ZERO), vec![peer.clone()], kio::clock::now())
+	let mut machine = Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now())
 		.unwrap()
 		.with_tokens(tokens.clone());
 	let mut run = Run::default();
@@ -656,7 +707,7 @@ async fn a_connect_cancels_the_offline_a_retirement_queued() {
 #[kio::test]
 async fn a_waited_restart_redials_only_once_the_session_closes() {
 	let peer = url("tcp://peer:1/");
-	let mut config = config(INITIAL, Duration::from_secs(1));
+	let mut config = config(INITIAL, Some(Duration::from_secs(1)));
 	config.restart = Restart::Wait;
 	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
 	let mut run = Run::default();
@@ -741,10 +792,10 @@ fn invalid_configs_are_refused() {
 	));
 }
 
-/// Each knob means one thing at zero: no wait, no cap, no growth. None of them touches
-/// the healthy bar, which is what keeps an immediate close a failed attempt.
+/// Each knob turns off one way: no wait, no cap, no growth. None of them touches the
+/// healthy bar, which is what keeps an immediate close a failed attempt.
 #[test]
-fn zero_turns_each_pacing_knob_off() {
+fn each_pacing_knob_turns_off() {
 	let defaults = Backoff::default();
 
 	let pacing = Pacing::new(&Backoff {
@@ -755,16 +806,13 @@ fn zero_turns_each_pacing_knob_off() {
 	assert_eq!(pacing.next(pacing.initial), Duration::ZERO, "zero initial never waits");
 	assert_eq!(pacing.healthy, defaults.healthy);
 
-	let pacing = Pacing::new(&Backoff {
-		max: Duration::ZERO,
-		..defaults
-	});
+	let pacing = Pacing::new(&Backoff { max: None, ..defaults });
 	assert_eq!(pacing.max, None);
 	let mut delay = pacing.initial;
 	for _ in 0..10 {
 		delay = pacing.next(delay);
 	}
-	assert_eq!(delay, defaults.initial * 1024, "zero max leaves the delay uncapped");
+	assert_eq!(delay, defaults.initial * 1024, "no max leaves the delay uncapped");
 	assert_eq!(pacing.settled(), defaults.healthy);
 
 	let pacing = Pacing::new(&Backoff {
@@ -779,7 +827,7 @@ fn zero_turns_each_pacing_knob_off() {
 
 	// A cap below the first delay caps it too.
 	let pacing = Pacing::new(&Backoff {
-		max: Duration::from_millis(300),
+		max: Some(Duration::from_millis(300)),
 		..defaults
 	});
 	assert_eq!(pacing.initial, Duration::from_millis(300));
@@ -791,7 +839,7 @@ fn pacing_grows_to_the_cap() {
 	let pacing = Pacing::new(&Backoff {
 		initial: Duration::from_millis(100),
 		multiplier: 2,
-		max: Duration::from_millis(400),
+		max: Some(Duration::from_millis(400)),
 		..Default::default()
 	});
 
