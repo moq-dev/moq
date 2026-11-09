@@ -9,8 +9,6 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use tokio::sync::{oneshot, watch};
 
-use hang::moq_net;
-
 static CAT: LazyLock<gst::DebugCategory> =
 	LazyLock::new(|| gst::DebugCategory::new("moq-src", gst::DebugColorFlags::empty(), Some("MoQ Source Element")));
 
@@ -851,7 +849,7 @@ impl Session {
 		// Stop closes the connection only after the session ends, so the dial races shutdown here.
 		let mut shutdown = self.shutdown.clone();
 		tokio::select! {
-			established = moq_net::kio::wait(|waiter| connection.poll_established(waiter)) => established?,
+			established = kio::wait(|waiter| connection.poll_established(waiter)) => established?,
 			_ = shutdown.changed() => return Ok(()),
 		}
 
@@ -1360,7 +1358,7 @@ impl Follower {
 		let mut stop = self.playback.stop.clone();
 		// The catalog's own broadcast is ready at once, so its renditions play even when the
 		// catalog closed before this follower ran.
-		match instances.poll_next(&moq_net::kio::Waiter::noop()) {
+		match instances.poll_next(&kio::Waiter::noop()) {
 			std::task::Poll::Ready(Ok(Some(instance))) => self.start(instance),
 			std::task::Poll::Ready(Err(err)) => {
 				gst::warning!(CAT, "lost {}: {err:?}", self.path);
@@ -3855,7 +3853,7 @@ mod session_tests {
 	}
 
 	fn is_closed(connection: &moq_tokio::Connection) -> bool {
-		connection.poll_closed(&moq_net::kio::Waiter::noop()).is_ready()
+		connection.poll_closed(&kio::Waiter::noop()).is_ready()
 	}
 
 	fn started(element: &super::super::MoqSrc) -> (SessionController, moq_tokio::Connection) {

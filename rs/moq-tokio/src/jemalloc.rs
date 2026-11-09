@@ -1,15 +1,44 @@
 //! On-demand jemalloc heap profiling, for chasing leaks in a running process.
 //!
-//! Spawn [`run`] to dump a profile whenever the process gets SIGUSR1.
+//! Install [`Allocator`] as the `#[global_allocator]`, then spawn [`run`] to dump a profile
+//! whenever the process gets SIGUSR1.
 //!
 //! Sampling does not have to be running for that to work. `MALLOC_CONF=prof:true` alone builds
 //! the profiling backend without sampling anything, and the first SIGUSR1 starts it. That keeps
 //! the steady-state cost off a process nobody is profiling: sampling accrues per-allocation
 //! metadata for as long as it runs, which on a busy process is hundreds of megabytes.
 
-use tikv_jemalloc_ctl::raw;
+use std::alloc::{GlobalAlloc, Layout};
 
-pub use tikv_jemallocator;
+use tikv_jemalloc_ctl::raw;
+use tikv_jemallocator::Jemalloc;
+
+/// The jemalloc allocator [`run`] profiles, for a binary's `#[global_allocator]`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Allocator;
+
+// Each method forwards to jemalloc's, under the same contract.
+unsafe impl GlobalAlloc for Allocator {
+	#[inline]
+	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+		unsafe { Jemalloc.alloc(layout) }
+	}
+
+	#[inline]
+	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+		unsafe { Jemalloc.alloc_zeroed(layout) }
+	}
+
+	#[inline]
+	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+		unsafe { Jemalloc.dealloc(ptr, layout) }
+	}
+
+	#[inline]
+	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+		unsafe { Jemalloc.realloc(ptr, layout, new_size) }
+	}
+}
 
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, tokio::task::JoinError> {
 	tokio::task::spawn_blocking(work).await

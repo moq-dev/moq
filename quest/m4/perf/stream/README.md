@@ -25,7 +25,7 @@ Facts from the 2026-10-22 audit, so quests don't re-litigate them:
 - The relay's WebSocket path is axum (hyper, `axum-server`, tokio-rustls),
   then axum's tungstenite 0.29, converted zero-copy into qmux's tungstenite
   0.30 (`rs/moq-relay/src/websocket.rs`). The relay therefore compiles two
-  tungstenite versions. qmux re-exports `tokio_tungstenite` and `tungstenite`
+  tungstenite versions. qmux names `tokio_tungstenite` and `tungstenite` types
   in its public API (`rs/qmux/src/ws.rs`).
 - tungstenite itself costs a zero-filled 128 KiB read buffer, a copy into
   its `out_buffer` on write, and a memmove after a partial write. The layers

@@ -547,7 +547,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		sub_connection
 			.draining()
 			.expect("connected")
-			.poll(&moq_net::kio::Waiter::noop())
+			.poll(&kio::Waiter::noop())
 			.is_pending(),
 		"BOTTOM must not propagate the upstream GOAWAY downstream"
 	);

@@ -4236,6 +4236,7 @@ name = "moq-bench"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "humantime",
  "kio",
  "libc",
@@ -4339,6 +4340,7 @@ dependencies = [
  "moq-hls",
  "moq-json",
  "moq-mux",
+ "moq-net",
  "moq-relay",
  "moq-rtmp",
  "moq-rtsp",
@@ -4348,6 +4350,7 @@ dependencies = [
  "moq-transcode",
  "moq-video",
  "moq-webrtc",
+ "mp4-atom",
  "mpeg2ts",
  "object_store",
  "percent-encoding",
@@ -4369,6 +4372,7 @@ dependencies = [
  "url",
  "usage-rs",
  "vt100",
+ "wgpu",
  "winit",
  "workspace-hack",
 ]
@@ -4417,6 +4421,7 @@ version = "0.4.12"
 dependencies = [
  "bytes",
  "hang",
+ "jni",
  "kio",
  "libc",
  "moq-audio",
@@ -4484,6 +4489,7 @@ dependencies = [
  "moq-net",
  "moq-tokio",
  "mp4-atom",
+ "object_store",
  "percent-encoding",
  "rand 0.10.3",
  "reqwest",
@@ -4640,6 +4646,7 @@ dependencies = [
 name = "moq-net-tests"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "futures",
  "kio",
  "moq-json",
@@ -4765,12 +4772,14 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "toml 1.1.8+spec-1.1.0",
  "tower-service",
  "tracing",
  "tracing-subscriber",
  "url",
  "usage-rs",
+ "web-transport-proto",
  "workspace-hack",
 ]
 
@@ -4970,6 +4979,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "toml 1.1.8+spec-1.1.0",
  "tracing",
  "tracing-android",

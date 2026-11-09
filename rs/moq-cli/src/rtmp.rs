@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Context;
-use hang::moq_net;
 use moq_rtmp::{Client, Request, Server};
 use url::Url;
 

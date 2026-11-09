@@ -4,8 +4,6 @@
 //! and `Server::serve_publish`/`serve_consume`); this module carries the systemd
 //! readiness notification used by every endpoint plus the MoQ side of an import.
 
-use hang::moq_net;
-
 /// The MoQ side of an import: where a gateway publishes, under what name, the
 /// max age it declares on the media tracks it mints, how long a clean end stays
 /// up, and the connection allocator those tracks claim on.

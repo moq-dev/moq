@@ -7,8 +7,6 @@
 
 use std::time::Duration;
 
-use moq_tokio::moq_net;
-
 /// A client whose reconnect loop escalates fast enough to assert on inside a test.
 fn client(backoff: moq_tokio::Backoff) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();

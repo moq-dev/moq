@@ -16,7 +16,6 @@ use axum::{Json, Router};
 use moq_auth::{Event, Grant, Pattern, Patterns, Request};
 use moq_relay::session::{Filter, List, Nudged};
 use moq_relay::{Connection, auth, cluster, internal, web};
-use moq_tokio::moq_net;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
