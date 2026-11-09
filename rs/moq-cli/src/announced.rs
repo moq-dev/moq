@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::io::IsTerminal;
 
 use anyhow::Context;
-use hang::moq_net::{self, announce::Event};
+use moq_net::announce::Event;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::args::MoqSide;

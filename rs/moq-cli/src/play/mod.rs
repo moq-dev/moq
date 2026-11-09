@@ -44,7 +44,7 @@ pub use args::Args;
 /// Play a broadcast through a window or an audio-only speaker.
 #[cfg(feature = "play")]
 pub async fn run(
-	origin: hang::moq_net::origin::Consumer,
+	origin: moq_net::origin::Consumer,
 	broadcast: String,
 	args: Args,
 	network: tokio::task::JoinSet<anyhow::Result<()>>,

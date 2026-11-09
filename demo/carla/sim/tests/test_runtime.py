@@ -611,10 +611,21 @@ def test_session_announces_after_populating_tracks() -> None:
     assert calls == ["status", "announce"]
 
 
-def test_a_driver_keeps_the_world_stepping_with_nobody_watching() -> None:
+async def expect_held(session: runtime.TruckSession, held: set[str]) -> None:
+    """Let the session's tasks run until the world's holds are `held`."""
+    for _ in range(10):
+        if session._clock.held == held:
+            return
+        await asyncio.sleep(0)
+    pytest.fail(f"holds never became {held}, still {session._clock.held}")
+
+
+def test_a_driver_keeps_the_world_stepping_with_nobody_watching(monkeypatch: pytest.MonkeyPatch) -> None:
     """Video demand and the lease are independent; the gate must hold for both."""
 
     async def scenario() -> None:
+        # Time stands still, so only the watchdog command below ends the lease.
+        monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: 0.0)
         commands = asyncio.Queue()
         commands.put_nowait(
             Command(kind="drive", driver_id="holder", session="holder", sequence=1, state=DriveState(throttle=0.5))
@@ -631,17 +642,17 @@ def test_a_driver_keeps_the_world_stepping_with_nobody_watching() -> None:
         session._actuate = lambda: None
         session._publish = lambda: None
 
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(session._loop(), timeout=0.1)
+        task = asyncio.create_task(session._loop())
+        try:
+            await expect_held(session, {"drive:truck1"})
 
-        assert session._clock.held == {"drive:truck1"}
-
-        # The watchdog hands the truck back, and the hold goes with the lease.
-        session._commands.put_nowait(Command(kind="watchdog_expired"))
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(session._loop(), timeout=0.1)
-
-        assert session._clock.held == set()
+            # The watchdog hands the truck back, and the hold goes with the lease.
+            session._commands.put_nowait(Command(kind="watchdog_expired"))
+            await expect_held(session, set())
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     asyncio.run(scenario())
 
@@ -690,20 +701,13 @@ def test_a_status_subscriber_keeps_the_world_stepping() -> None:
         session._status = DemandPublisher()
         watcher = asyncio.create_task(session._watch_status_demand())
 
-        async def expect_held(held: set[str]) -> None:
-            for _ in range(10):
-                if session._clock.held == held:
-                    return
-                await asyncio.sleep(0)
-            pytest.fail(f"holds never became {held}, still {session._clock.held}")
-
         try:
             session._status.use.set()
-            await expect_held({"status:truck1"})
+            await expect_held(session, {"status:truck1"})
             session._status.unuse.set()
-            await expect_held(set())
+            await expect_held(session, set())
             session._status.use.set()
-            await expect_held({"status:truck1"})
+            await expect_held(session, {"status:truck1"})
         finally:
             watcher.cancel()
             with contextlib.suppress(asyncio.CancelledError):

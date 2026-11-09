@@ -18,7 +18,6 @@ use bytes::Bytes;
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
-use hang::moq_net;
 
 use super::listed::{Listed, Watch};
 use super::pad::{CapsOutcome, Names, ProducerOptions, PushOutcome, caps_supported};
@@ -1463,7 +1462,7 @@ mod tests {
 		catalog: &mut moq_mux::catalog::Consumer,
 	) -> std::task::Poll<moq_mux::Result<Option<moq_mux::catalog::hang::Catalog>>> {
 		use moq_mux::catalog::Stream;
-		catalog.poll_next(&moq_net::kio::Waiter::noop())
+		catalog.poll_next(&kio::Waiter::noop())
 	}
 
 	#[test]
@@ -1546,7 +1545,7 @@ mod tests {
 				let subscriber = futures::executor::block_on(broadcast.track(name).unwrap().subscribe(None)).unwrap();
 				let mut consumer =
 					moq_mux::container::Consumer::new(subscriber, moq_mux::catalog::hang::Container::Legacy(kind));
-				let std::task::Poll::Ready(Ok(Some(read))) = consumer.poll_read(&moq_net::kio::Waiter::noop()) else {
+				let std::task::Poll::Ready(Ok(Some(read))) = consumer.poll_read(&kio::Waiter::noop()) else {
 					panic!("published media frame")
 				};
 				let moq_mux::container::Read::Frame { frame, .. } = read else {

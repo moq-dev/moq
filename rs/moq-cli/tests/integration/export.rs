@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 
-use hang::moq_net;
 use moq_mux::container::ts;
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -97,7 +96,7 @@ async fn relay() -> Relay {
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.listen.version = std::iter::once(LITE_07.parse().unwrap())
-		.chain(hang::moq_net::Versions::all().iter().copied())
+		.chain(moq_net::Versions::all().iter().copied())
 		.collect();
 	config.auth.public = vec![moq_auth::Pattern::all()];
 	let relay = moq_relay::Relay::load(config).await.expect("test relay");

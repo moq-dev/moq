@@ -16,8 +16,7 @@ resolve.
 Planned 2026-11-08 (maintainer, approved follow-up of
 [moq-dev/moq#8265](https://github.com/moq-dev/moq/pull/8265), which makes
 moq-net's reconnect policy take `Option` and keeps moq-tokio's config layer
-on zero). Milestone: m2, since it breaks moq-tokio's public API; start after
-#8265 merges.
+on zero). Milestone: m2, since it breaks moq-tokio's public API.
 
 On `main`: `Backoff::max()` documents "zero leaves the delay uncapped" and
 `timeout()` "zero meaning unlimited" (`rs/moq-tokio/src/connection.rs`);
@@ -31,3 +30,7 @@ other `Resolved` structs for the same pattern while there.
 
 Public API: moq-tokio's resolved fields and accessors become `Option`.
 Migrate: compare against `None` instead of `Duration::ZERO`. Wire: none.
+
+## Waiting
+
+- moq-dev/moq: [moq-dev/moq#8265](https://github.com/moq-dev/moq/pull/8265) merges, since this finishes the change it makes to moq-net. Check with `gh pr view 8265 --json state`; delete this section once it reads `MERGED`.

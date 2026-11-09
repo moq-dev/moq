@@ -13,6 +13,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
+import { hosted } from "../assets";
 import type { Broadcast } from "../broadcast";
 import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
@@ -569,7 +570,7 @@ export class Encoder {
 		const superseded = effect.abort;
 		effect.spawn(async () => {
 			try {
-				await Util.Libav.polyfill();
+				await Util.Libav.polyfill(hosted.url);
 				if (superseded.aborted) return;
 				let description: Catalog.Hex | undefined;
 				let failure: Error | undefined;
@@ -694,7 +695,7 @@ export class Encoder {
 		effect.cleanup(() => order.leave(this.#estimator));
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
-			await Util.Libav.polyfill();
+			await Util.Libav.polyfill(hosted.url);
 
 			effect.run((effect: Effect) => {
 				const aborted = effect.abort;

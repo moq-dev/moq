@@ -28,7 +28,6 @@ mod transcode;
 mod web;
 
 use args::{Command, Export, ExportSink, Import, ImportSource, Invocation, MoqSide, TsImport, TsProgram};
-use hang::moq_net;
 use publish::Publish;
 use subscribe::{Subscribe, SubscribeArgs};
 
@@ -39,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
-static ALLOC: moq_tokio::jemalloc::tikv_jemallocator::Jemalloc = moq_tokio::jemalloc::tikv_jemallocator::Jemalloc;
+static ALLOC: moq_tokio::jemalloc::Allocator = moq_tokio::jemalloc::Allocator;
 
 /// Everything needed to build MoQ clients/servers.
 #[derive(Clone)]
@@ -615,7 +614,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					let echo = import
 						.echo_path
 						.as_deref()
-						.map(hang::moq_net::path::Relative::new)
+						.map(moq_net::path::Relative::new)
 						.transpose()?
 						.map(hang::catalog::Echo::new);
 					if let Some(mut publish) =
@@ -1613,7 +1612,6 @@ mod tests {
 	/// A raw TCP bind is a complete server side even when no QUIC bind is set.
 	#[tokio::test(start_paused = true)]
 	async fn tcp_only_moq_side_starts_a_server() {
-		kio::clock::host_time();
 		let invocation = Invocation::try_parse_from([
 			"moq",
 			"--listen-tcp-bind",
