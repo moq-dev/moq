@@ -385,7 +385,7 @@ impl Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig> {
 		let mut next = rendition.fresh(container, self.inner.info().clone(), interval)?;
 		next.buffer_duration = self.buffer_duration;
 		next.set(config)?;
-		self.finish()?;
+		self.end_with(None)?;
 		*self = next;
 		Ok(())
 	}
@@ -930,9 +930,13 @@ where
 		Ok(())
 	}
 
-	/// Finish the track, flushing any buffered frames and closing any open group.
-	pub fn finish(&mut self) -> crate::Result<()> {
-		self.end_with(None)
+	/// Finish the track, flushing any buffered frames and closing any open group, and return
+	/// the [`Finished`] track.
+	///
+	/// A finish that fails ends the track with the cause instead, so it can't be retried.
+	pub fn finish(mut self) -> crate::Result<Finished<C, R>> {
+		self.end_with(None)?;
+		Ok(Finished { producer: self })
 	}
 
 	/// [`finish`](Self::finish) the track with `err`, for a source that failed after
@@ -941,11 +945,13 @@ where
 	/// Unlike [`abort`](Self::abort), every group written stays readable and keeps being
 	/// served; a reader reaching the end gets `err` instead of the end of stream. Over IETF
 	/// moq-transport, a remote subscriber is told only of a generic internal error.
-	pub fn fail(&mut self, err: moq_net::Error) -> crate::Result<()> {
-		self.end_with(Some(err))
+	pub fn fail(mut self, err: moq_net::Error) -> crate::Result<Finished<C, R>> {
+		self.end_with(Some(err))?;
+		Ok(Finished { producer: self })
 	}
 
-	fn end_with(&mut self, err: Option<moq_net::Error>) -> crate::Result<()> {
+	/// Flush and end the track, cleanly or with `err`, for an owner that keeps this producer.
+	pub(crate) fn end_with(&mut self, err: Option<moq_net::Error>) -> crate::Result<()> {
 		if let Err(cause) = self.cut(None) {
 			// A track that cannot close its last group ends with the cause rather than staying open.
 			let _ = self.inner.clone().abort(cause.reason());
@@ -978,7 +984,7 @@ where
 		if self.inner.finished().is_some() || self.inner.is_closed() {
 			return Ok(());
 		}
-		self.finish()
+		self.end_with(None)
 	}
 
 	/// Abort the track and any open group with the given error.
@@ -998,6 +1004,48 @@ where
 	/// Create a consumer for this track.
 	pub fn consume(&self) -> moq_net::track::Subscriber {
 		self.inner.subscribe(None)
+	}
+}
+
+/// A media track whose producer [finished](Producer::finish) it: every frame is written, and it
+/// can still be read or aborted, but not written to.
+///
+/// Dropping it releases the track like dropping a [`Producer`]: it leaves its broadcast's listing,
+/// and a catalog rendition it owns leaves the catalog.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_write(track: moq_mux::container::Finished<moq_mux::catalog::hang::Container>) {
+/// track.discontinuity().unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it releases the track and its catalog rendition"]
+pub struct Finished<C: Container, R = ()> {
+	producer: Producer<C, R>,
+}
+
+impl<C: Container, R: Clone + Send + 'static> Finished<C, R>
+where
+	crate::Error: From<C::Error>,
+{
+	/// The track's name, unique within its broadcast.
+	pub fn name(&self) -> &str {
+		self.producer.inner.name()
+	}
+
+	/// The properties the track was created with.
+	pub fn info(&self) -> &moq_net::track::Info {
+		self.producer.inner.info()
+	}
+
+	/// Create a consumer for this track.
+	pub fn consume(&self) -> moq_net::track::Subscriber {
+		self.producer.inner.subscribe(None)
+	}
+
+	/// Release the track's cache, reporting `err` to readers that have not drained it; see
+	/// [`moq_net::track::Finished::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.producer.abort(err);
 	}
 }
 

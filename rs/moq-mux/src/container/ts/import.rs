@@ -1905,11 +1905,18 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 	}
 
-	/// Flush any buffered PES and finish every track.
+	/// Flush any buffered PES, finish every track, and return the [`Finished`] import.
 	///
-	/// A finish that fails aborts every track with the cause, and later calls return it again.
-	/// A finish that succeeded is final: calling it again does nothing.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	/// A finish that fails aborts every track with the cause, so it can't be retried.
+	pub fn finish(mut self) -> anyhow::Result<Finished<E>> {
+		self.finish_in_place()?;
+		Ok(Finished { import: self })
+	}
+
+	/// [`finish`](Self::finish) for an owner that keeps the importer, as
+	/// [`Programs`](super::Programs) keeps each program's. A finish that fails returns the cause to
+	/// every later call; one that succeeded does nothing when called again.
+	pub(super) fn finish_in_place(&mut self) -> anyhow::Result<()> {
 		match &self.input {
 			crate::container::Input::Open => {}
 			crate::container::Input::Finished => return Ok(()),
@@ -2071,11 +2078,39 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 }
 
+/// A TS import that [finished](Import::finish): every track has ended, and they can still be
+/// read or aborted, but it takes no more input.
+///
+/// Dropping it releases the tracks and their catalog renditions, as dropping the [`Import`] does.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut import: moq_mux::container::ts::Finished) {
+/// import.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it releases the tracks and their catalog renditions"]
+pub struct Finished<E: catalog::Catalog = ()> {
+	import: Import<E>,
+}
+
+impl<E: catalog::Catalog> Finished<E> {
+	/// What every elementary stream delivered; see [`Import::stats`].
+	pub fn stats(&self) -> stats::Snapshot {
+		self.import.stats()
+	}
+
+	/// Release every track's cache, reporting `err` to readers that have not drained it; see
+	/// [`Import::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
+	}
+}
+
 impl<E: catalog::Catalog> Drop for Import<E> {
 	/// End the input unless it already ended.
 	fn drop(&mut self) {
 		if matches!(self.input, crate::container::Input::Open)
-			&& let Err(err) = self.finish()
+			&& let Err(err) = self.finish_in_place()
 		{
 			tracing::warn!(%err, "failed to finish a dropped TS import");
 		}
@@ -2461,7 +2496,7 @@ impl<E: catalog::Catalog> SectionStream<E> {
 	}
 
 	fn finish(&mut self) -> anyhow::Result<()> {
-		self.track.finish()?;
+		self.track.end_with(None)?;
 		Ok(())
 	}
 
@@ -2713,7 +2748,7 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 	}
 
 	fn finish(&mut self) -> anyhow::Result<()> {
-		self.track.finish()?;
+		self.track.end_with(None)?;
 		Ok(())
 	}
 

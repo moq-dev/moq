@@ -18,12 +18,12 @@
 //! `broadcast.unique_track(suffix, catalog.track_info())`, so the max age the catalog
 //! declares reaches the track.
 
-mod container;
+pub mod container;
 mod format;
 mod init;
 mod track;
 
-pub use container::*;
+pub use container::Container;
 pub use format::{AudioFormat, ContainerFormat, Format, Kind, VideoFormat};
 pub use init::{AudioInit, ContainerInit, VideoInit};
 pub use track::*;

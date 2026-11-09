@@ -1088,8 +1088,8 @@ impl<E: CatalogExt> Producer<E> {
 		if let Some(err) = &state.closed {
 			return Err(err.clone());
 		}
-		let result = self.outputs.hang.finish().map_err(crate::Error::from).and_then(|_| {
-			// The shared outputs keep their own clone, whose appends the end refuses.
+		// The shared outputs keep their own clones, whose appends the end refuses.
+		let result = self.outputs.hang.clone().finish().map_err(crate::Error::from).and_then(|_| {
 			let msf = self.outputs.msf_track.clone().finish();
 			msf.map(drop).map_err(crate::Error::from)
 		});

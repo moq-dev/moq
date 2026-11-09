@@ -1688,16 +1688,19 @@ fn open_sample<E: crate::catalog::hang::CatalogExt>(
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
-	/// Finish all tracks, flushing current groups.
+	/// Finish all tracks, flushing current groups, and return the [`Finished`] import.
 	///
 	/// A fragment whose samples are still arriving was truncated: its open frames abort, failing
 	/// their groups, every track still finishes, and this returns
 	/// [`UnexpectedEof`](mp4_atom::Error::UnexpectedEof). After a decode error, this ends the
-	/// accepted media without reading more input; it does not clear that error for later decodes.
-	/// Either way every track has ended. A finish that failed returns the same error to every
-	/// later call; one that succeeded refuses later input with
-	/// [`Finished`](crate::Error::Finished), or with the decode error it followed.
-	pub fn finish(&mut self) -> Result<()> {
+	/// accepted media without reading more input. Either way every track has ended, so a failed
+	/// finish can't be retried.
+	pub fn finish(mut self) -> Result<Finished<E>> {
+		self.finish_in_place()?;
+		Ok(Finished { import: self })
+	}
+
+	fn finish_in_place(&mut self) -> Result<()> {
 		match &self.input {
 			crate::container::Input::Finished => return Ok(()),
 			crate::container::Input::Failed(err) => return Err(err.clone()),
@@ -1848,6 +1851,29 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 struct Deferred {
 	seek: Option<u64>,
 	discontinuity: bool,
+}
+
+/// An fMP4 import that [finished](Import::finish): every track has ended, and they can still be
+/// read or aborted, but it takes no more input.
+///
+/// Dropping it retires the tracks and their catalog renditions, as dropping the [`Import`] does.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut import: moq_mux::container::fmp4::Finished) {
+/// import.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it retires the tracks and their catalog renditions"]
+pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
+	import: Import<E>,
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
+	/// Release every track's cache, reporting `err` to readers that have not drained it; see
+	/// [`Import::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
+	}
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {

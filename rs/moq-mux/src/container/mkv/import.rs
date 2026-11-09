@@ -906,14 +906,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Finish all tracks, flushing current groups.
+	/// Finish all tracks, flushing current groups, and return the [`Finished`] import.
 	///
 	/// Input that ends inside an element other than an unknown-size Segment or Cluster is refused as
 	/// truncated, but the tracks still end with what was accepted, as they do after a refused
-	/// [`decode`](Self::decode). Either way every track has ended. A finish that failed returns
-	/// the same error to every later call; one that succeeded refuses later input with
-	/// [`Finished`](crate::Error::Finished), or with the refusal it followed.
-	pub fn finish(&mut self) -> Result<()> {
+	/// [`decode`](Self::decode). Either way every track has ended, so a failed finish can't be
+	/// retried.
+	pub fn finish(mut self) -> Result<Finished<E>> {
+		self.finish_in_place()?;
+		Ok(Finished { import: self })
+	}
+
+	fn finish_in_place(&mut self) -> Result<()> {
 		let mut result = match &self.input {
 			crate::container::Input::Finished => return Ok(()),
 			crate::container::Input::Failed(err) => return Err(err.clone()),
@@ -966,6 +970,29 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		{
 			frame.abort(err);
 		}
+	}
+}
+
+/// An MKV import that [finished](Import::finish): every track has ended, and they can still be
+/// read or aborted, but it takes no more input.
+///
+/// Dropping it retires the tracks and their catalog renditions, as dropping the [`Import`] does.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut import: moq_mux::container::mkv::Finished) {
+/// import.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it retires the tracks and their catalog renditions"]
+pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
+	import: Import<E>,
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
+	/// Release every track's cache, reporting `err` to readers that have not drained it; see
+	/// [`Import::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
 	}
 }
 
