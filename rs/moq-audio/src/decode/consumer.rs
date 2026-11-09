@@ -406,7 +406,20 @@ impl Consumer {
 			let rate = self.decoder.sample_rate();
 			let epoch = *self.epoch.get_or_insert(mux_frame.timestamp);
 			let delay = self.decoder.delay_remaining();
-			let decoded = self.decoder.decode(&mux_frame.payload)?;
+			self.decoder.decode(&mux_frame.payload)?;
+			// Each packet is placed by its own samples, which a decoder that holds or splits
+			// its output would hand back somewhere else.
+			let contract = |name: &str| {
+				Error::Codec(format!(
+					"{name} did not ready exactly one output for one packet, and playback places exactly one"
+				))
+			};
+			let Some(decoded) = self.decoder.receive()? else {
+				return Err(contract(self.decoder.name()));
+			};
+			if self.decoder.receive()?.is_some() {
+				return Err(contract(self.decoder.name()));
+			}
 			// Anchored only once a packet decodes: a refused one primed nothing. The track's
 			// first packet has no history to warm up from: the codec's pre-skip, trimmed by
 			// the decoder, is all the priming its encoder declared.
@@ -1281,7 +1294,7 @@ mod tests {
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_scale(packet * encoder.frame_size() as u64, 48_000).unwrap(),
 					duration: None,
-					payload: encoder.encode(&pcm).unwrap().payload,
+					payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
 					keyframe: true,
 				})
 				.unwrap();
@@ -1822,7 +1835,7 @@ mod tests {
 		let silence = vec![0.0; encoder.frame_size()];
 		let mut first_dtx = None;
 		for index in 0..40u64 {
-			let packet = encoder.encode(if index == 0 { &active } else { &silence }).unwrap();
+			let packet = crate::single(encoder.encode_all(if index == 0 { &active } else { &silence }).unwrap());
 			let timestamp = Timestamp::from_scale(index * encoder.frame_size() as u64, 48_000).unwrap();
 			if first_dtx.is_none() && packet.activity.is_dtx() {
 				first_dtx = Some(timestamp);
@@ -2017,11 +2030,11 @@ mod tests {
 		// One coded packet, then a withheld one to follow it. Taken from the same
 		// encoder rather than published in between, so nothing fills the resampler's
 		// chunk between the two.
-		let active = encoder.encode(&vec![0.5f32; encoder.frame_size()]).unwrap();
+		let active = crate::single(encoder.encode_all(&vec![0.5f32; encoder.frame_size()]).unwrap());
 		assert!(active.activity.is_active());
 		let silence = vec![0.0f32; encoder.frame_size()];
 		let dtx = (0..200)
-			.map(|_| encoder.encode(&silence).unwrap())
+			.map(|_| crate::single(encoder.encode_all(&silence).unwrap()))
 			.find(|packet| packet.activity.is_dtx())
 			.expect("silence should enter Opus DTX");
 
@@ -2166,7 +2179,7 @@ mod tests {
 				.write(moq_mux::container::Frame {
 					timestamp,
 					duration: None,
-					payload: encoder.encode(&pcm).unwrap().payload,
+					payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
 					keyframe: true,
 				})
 				.unwrap();
@@ -2359,7 +2372,7 @@ mod tests {
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(0).unwrap(),
 				duration: None,
-				payload: encoder.encode(&vec![0.25f32; encoder.frame_size()]).unwrap().payload,
+				payload: crate::single(encoder.encode_all(&vec![0.25f32; encoder.frame_size()]).unwrap()).payload,
 				keyframe: true,
 			})
 			.unwrap();
@@ -2475,7 +2488,7 @@ mod tests {
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_scale(packet * encoder.frame_size() as u64, 48_000).unwrap(),
 					duration: None,
-					payload: encoder.encode(&pcm).unwrap().payload,
+					payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
 					keyframe: true,
 				})
 				.unwrap();
@@ -2538,10 +2551,22 @@ mod tests {
 				.unwrap();
 			producer.cut(None).unwrap();
 		};
-		write(&mut producer, 0, encoder.encode(&pcm).unwrap().payload);
-		write(&mut producer, 1, encoder.encode(&pcm).unwrap().payload);
+		write(
+			&mut producer,
+			0,
+			crate::single(encoder.encode_all(&pcm).unwrap()).payload,
+		);
+		write(
+			&mut producer,
+			1,
+			crate::single(encoder.encode_all(&pcm).unwrap()).payload,
+		);
 		producer.discontinuity().unwrap();
-		write(&mut producer, 2, encoder.encode(&pcm).unwrap().payload);
+		write(
+			&mut producer,
+			2,
+			crate::single(encoder.encode_all(&pcm).unwrap()).payload,
+		);
 		producer.finish().unwrap();
 
 		let first = next_frame(&mut consumer).await.unwrap().expect("first decoded frame");
@@ -2625,7 +2650,7 @@ mod tests {
 		// Every packet counts here; the warmup tests cover trimming.
 		catalog.warmup = None;
 		let pcm = vec![0.0f32; encoder.frame_size() * encoder.codec_channels() as usize];
-		let packet = encoder.encode(&pcm).unwrap();
+		let packet = crate::single(encoder.encode_all(&pcm).unwrap());
 
 		// Re-describe the same rendition as CMAF and publish it that way.
 		let muxer = moq_mux::container::fmp4::Muxer::audio(&catalog).unwrap();

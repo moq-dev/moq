@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64::Engine;
-use hang::moq_net;
 use kio::clock::Instant;
 use kio::clock::timeout_at;
 use tokio::io::{AsyncWrite, AsyncWriteExt};

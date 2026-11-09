@@ -13,8 +13,6 @@ use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
 
-use hang::moq_net;
-
 use super::MoqSink as Element;
 
 pub(crate) static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
@@ -595,7 +593,7 @@ mod tests {
 	}
 
 	fn is_closed(connection: &moq_tokio::Connection) -> bool {
-		connection.poll_closed(&moq_net::kio::Waiter::noop()).is_ready()
+		connection.poll_closed(&kio::Waiter::noop()).is_ready()
 	}
 
 	// A dial still running once the element reached NULL would outlive the state change an application

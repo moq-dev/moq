@@ -744,7 +744,7 @@ impl Lease {
 		// may have ended with a reason a replacement outlived.
 		match &mut self.refresh {
 			None => {
-				if let std::task::Poll::Ready(ended) = self.consumer.poll_closed(&moq_net::kio::Waiter::noop()) {
+				if let std::task::Poll::Ready(ended) = self.consumer.poll_closed(&kio::Waiter::noop()) {
 					reason = ended;
 				}
 				self.consumer.close(reason, bytes)

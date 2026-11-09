@@ -1,8 +1,8 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, createElement } from "react";
+import { act, createElement, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { type Dispose, Signal, type Subscriber } from "./index.ts";
+import { Derived, type Dispose, type Getter, Signal, type Subscriber } from "./index.ts";
 import { useSignal, useValue } from "./react.ts";
 
 // Signal notifications are coalesced onto a microtask.
@@ -129,4 +129,82 @@ test("useSignal's setter takes values and functional updates", async () => {
 
 	await act(async () => root.unmount());
 	expect(signal.active).toBe(0);
+});
+
+test("useValue re-renders after an in-place mutate", async () => {
+	const signal = new Signal({ count: 0 });
+	const seen: number[] = [];
+	const View = ({ source }: { source: Signal<{ count: number }> }) => {
+		seen.push(useValue(source).count);
+		return null;
+	};
+
+	const root = await mount(createElement(View, { source: signal }));
+	expect(seen.at(-1)).toBe(0);
+
+	await write(() =>
+		signal.mutate((value) => {
+			value.count++;
+		}),
+	);
+	expect(seen.at(-1)).toBe(1);
+
+	await act(async () => root.unmount());
+});
+
+test("useValue follows a Derived that builds a new object per read", async () => {
+	const signal = new Signal(1);
+	const derived = new Derived([signal], (n) => ({ n }));
+	const seen: number[] = [];
+	const View = ({ source }: { source: Getter<{ n: number }> }) => {
+		seen.push(useValue(source).n);
+		return null;
+	};
+
+	const errors = spyOn(console, "error").mockImplementation(() => {});
+	try {
+		const root = await mount(createElement(View, { source: derived }));
+		expect(seen.at(-1)).toBe(1);
+		const renders = seen.length;
+
+		await write(() => signal.set(2));
+		expect(seen.at(-1)).toBe(2);
+		expect(seen.length).toBe(renders + 1);
+
+		await act(async () => root.unmount());
+		expect(errors).not.toHaveBeenCalled();
+	} finally {
+		errors.mockRestore();
+	}
+});
+
+test("useValue sees a write between render and subscribe", async () => {
+	const signal = new Signal(1);
+	const seen: number[] = [];
+	const View = ({ source }: { source: Signal<number> }) => {
+		const value = useValue(source);
+		seen.push(value);
+		// Runs after the render but before useSyncExternalStore subscribes.
+		useLayoutEffect(() => source.set(2), [source]);
+		return null;
+	};
+
+	const root = await mount(createElement(View, { source: signal }));
+	expect(seen.at(-1)).toBe(2);
+	await act(async () => root.unmount());
+});
+
+test("useValue reads a silent write when its parent re-renders", async () => {
+	const signal = new Signal(0);
+	const seen: number[] = [];
+	const View = ({ source }: { source: Signal<number>; tick: number }) => {
+		seen.push(useValue(source));
+		return null;
+	};
+
+	const root = await mount(createElement(View, { source: signal, tick: 0 }));
+	signal.set(1, false);
+	await act(async () => root.render(createElement(View, { source: signal, tick: 1 })));
+	expect(seen.at(-1)).toBe(1);
+	await act(async () => root.unmount());
 });

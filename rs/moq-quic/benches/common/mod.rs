@@ -492,7 +492,7 @@ impl Pair {
 					.conns
 					.values()
 					.chain(pair.clients.iter().flat_map(|c| c.conns.values()))
-					.all(|c| !c.is_handshaking())
+					.all(|c| !moq_quic::fuzz::is_handshaking(c))
 		});
 		pair.settle();
 		pair
@@ -745,8 +745,7 @@ fn transport(receive_window: VarInt, send_window: u64, probe: bool) -> transport
 	let mut transport = transport::Config::default();
 	transport.congestion = Arc::new(Unlimited { probe });
 	// Pinned, so black hole detection cannot shrink packets after a benchmark's losses.
-	transport.initial_mtu = 1452;
-	transport.min_mtu = 1452;
+	moq_quic::fuzz::pin_mtu(&mut transport, 1452);
 	transport.idle_timeout = None;
 	transport.limits.max_streams = NonZeroU64::new(4096);
 	transport.limits.stream_receive_window = NonZeroU64::new(16 << 20);

@@ -175,9 +175,8 @@ fn a_wildcard_endpoint_handshakes_on_a_secondary_address() {
 			.build()
 			.expect("runtime");
 		runtime.block_on(async move {
-			let request = moq_tokio::quic::web::proto::ConnectRequest::new(
-				url::Url::parse(&format!("https://{addr}/")).expect("url"),
-			);
+			let request =
+				web_transport_proto::ConnectRequest::new(url::Url::parse(&format!("https://{addr}/")).expect("url"));
 			kio::clock::timeout(TIMEOUT, crate::support::web_connect(request, Default::default()))
 				.await
 				.expect("handshake stalled")

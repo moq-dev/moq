@@ -1,6 +1,5 @@
 //! Socket convention interop through a relay, with a harness-owned drain acknowledgment.
 use anyhow::{Context, ensure};
-use moq_tokio::moq_net;
 use tokio::io::AsyncBufReadExt;
 
 #[tokio::main(flavor = "current_thread")]

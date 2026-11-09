@@ -49,7 +49,7 @@ impl Recorder {
 	}
 
 	/// Present the newest due frame, just as the window does on a redraw.
-	pub fn present(&self, media: &super::media::Media<Self>) -> Option<hang::moq_net::Timestamp> {
+	pub fn present(&self, media: &super::media::Media<Self>) -> Option<moq_net::Timestamp> {
 		self.present_frame(media).map(|frame| frame.timestamp)
 	}
 

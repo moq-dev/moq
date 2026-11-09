@@ -1006,7 +1006,7 @@ mod metadata_tests {
 		let binding = MoqGroupProducer::from_inner(group);
 		drop(binding);
 		assert!(matches!(
-			consumer.poll_read_frame(&moq_net::kio::Waiter::noop()),
+			consumer.poll_read_frame(&kio::Waiter::noop()),
 			std::task::Poll::Ready(Err(moq_net::Error::Unroutable))
 		));
 	}

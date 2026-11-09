@@ -31,7 +31,6 @@ use std::time::Duration;
 use futures::FutureExt;
 
 use moq_relay::{Config, Relay};
-use moq_tokio::moq_net;
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
 /// and superseded groups stay readable.
