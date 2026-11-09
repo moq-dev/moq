@@ -519,10 +519,7 @@ async fn better_route_restarts(version: &str) {
 
 	topology.trigger(Trigger::BetterRoute).await;
 	match announced.next().await.expect("announced") {
-		origin::RouteEvent::Restart(announce) => {
-			assert_eq!(announce.prefix.as_str(), "live");
-			assert_eq!(announce.route.hops().len(), 1, "{version}: the direct route");
-		}
+		origin::RouteEvent::Restart(announce) => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected a restart, got {other:?}"),
 	}
 

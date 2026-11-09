@@ -26,7 +26,3 @@ recomputing it. #8293's benchmark covers only the origin; extend it to the
 receiving relay, so both axes are swept per the repository's fan-out rule.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [Route session integration](/quest/m2/cluster-routing/routes/session.md) - the incremental origin and per-stream presentation this builds on
