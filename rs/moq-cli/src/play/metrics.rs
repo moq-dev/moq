@@ -20,7 +20,9 @@ use moq_audio::playback::{Observation, Observer};
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use moq_mux::timeline::Consumer;
+use moq_mux::sync::Consumer;
+
+use super::timeline::Playhead;
 
 /// How often a sample is taken, the browser probe's interval.
 const INTERVAL: Duration = Duration::from_millis(250);
@@ -107,6 +109,7 @@ impl Totals {
 pub(super) struct Metrics {
 	file: BufWriter<File>,
 	presentation: Consumer,
+	playhead: Playhead,
 	observers: mpsc::UnboundedReceiver<Observer>,
 	current: Option<(Observer, Totals)>,
 	/// What closed engines counted, added to the current one's totals.
@@ -122,6 +125,7 @@ impl Metrics {
 	pub(super) fn create(
 		path: &Path,
 		presentation: Consumer,
+		playhead: Playhead,
 	) -> anyhow::Result<(Self, mpsc::UnboundedSender<Observer>)> {
 		let file = File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
 		let (observe, observers) = mpsc::unbounded_channel();
@@ -130,6 +134,7 @@ impl Metrics {
 		let metrics = Self {
 			file: BufWriter::new(file),
 			presentation,
+			playhead,
 			observers,
 			current: None,
 			base: Totals::default(),
@@ -203,17 +208,14 @@ impl Metrics {
 		};
 		// Read straight after the device clock, so the two pair up.
 		let now = Instant::now();
-		let (playhead, target) = {
-			let presentation = &self.presentation;
-			(presentation.playhead(now), presentation.target())
-		};
+		let (playhead, delay) = (self.playhead.at(now), self.presentation.delay());
 
 		let sample = Sample {
 			at: ms(now.duration_since(self.start)),
 			render: observation.as_ref().map(|(o, base)| ms(base.clock + o.clock)),
 			timestamp: playhead.map(ms),
 			stalled: observation.as_ref().map(|(o, _)| o.stalled),
-			delay: target.map(ms),
+			delay: Some(ms(delay)),
 			output_latency: observation.as_ref().and_then(|(o, _)| o.latency).map(ms),
 			quanta: observation.as_ref().map(|(o, base)| base.quanta + o.quanta),
 			quiet: observation.as_ref().map(|(o, base)| base.quiet + o.quiet),
