@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::MoqError;
-use crate::ffi::Task;
+use crate::ffi::{OneShot, Task};
 use crate::origin::MoqOriginProducer;
 use crate::session::{MoqQuicConfig, MoqSession};
 
@@ -338,7 +338,7 @@ impl MoqServer {
 }
 
 struct RequestState {
-	request: Option<moq_tokio::server::Request>,
+	request: OneShot<moq_tokio::server::Request>,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
@@ -397,8 +397,8 @@ mod transport_tests {
 /// An incoming MoQ session that can be accepted or rejected.
 ///
 /// Origin arguments are captured when [`accept`](Self::accept) starts. A second
-/// response fails with [`MoqError::AlreadyResponded`], and calls after
-/// [`cancel`](Self::cancel) fail with [`MoqError::Cancelled`].
+/// response fails with [`MoqError::AlreadyResponded`], or with the first one's error if it
+/// failed, and calls after [`cancel`](Self::cancel) fail with [`MoqError::Cancelled`].
 #[derive(uniffi::Object)]
 pub struct MoqRequest {
 	task: Task<RequestState>,
@@ -422,7 +422,7 @@ impl MoqRequest {
 		let peer_implementation = request.peer_implementation().map(str::to_string);
 		Ok(Arc::new(Self {
 			task: Task::new(RequestState {
-				request: Some(request),
+				request: OneShot::new(request),
 				publish,
 				consume,
 			}),
@@ -490,7 +490,8 @@ impl MoqRequest {
 	///
 	/// A null origin inherits the server's configured origin; a supplied origin replaces it.
 	/// Pass a fresh origin for isolation, or the same fresh origin on both sides to share it.
-	/// Returns `AlreadyResponded` after a response and `Cancelled` after cancellation.
+	/// Returns `AlreadyResponded` after a response, the response's error if it failed, and
+	/// `Cancelled` after cancellation.
 	#[uniffi::method(default(publish = None, consume = None))]
 	pub async fn accept(
 		&self,
@@ -500,9 +501,9 @@ impl MoqRequest {
 		// Foreign runtime threads can have a 512 KiB stack. Keep the transport
 		// handshake out of the nested Task::run futures polled on that stack.
 		self.task
-			.run(move |mut state| {
+			.run(move |state| {
 				Box::pin(async move {
-					let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
+					let (request, answering) = state.request.take()?;
 					// Materialize both origin sides so the session can publish/subscribe and the
 					// FFI can hand back a publisher/consumer.
 					let (publish, subscribe) = crate::origin::resolve_pair(
@@ -516,8 +517,8 @@ impl MoqRequest {
 						.await
 						.map_err(|err| MoqError::Connect {
 							reason: format!("{err}"),
-						})?;
-					Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))
+						});
+					answering.settle(session.map(|session| Arc::new(MoqSession::accepted(session, publish, subscribe))))
 				})
 			})
 			.await
@@ -528,19 +529,19 @@ impl MoqRequest {
 	/// Codes 401 and 403 map to the protocol's unauthorized error; every other
 	/// code is sent as an application error.
 	///
-	/// Returns `AlreadyResponded` if `accept()` or `reject()` has already been called.
+	/// Returns `AlreadyResponded` if `accept()` or `reject()` has already been called, or that
+	/// call's error if it failed.
 	pub async fn reject(&self, code: u16) -> Result<(), MoqError> {
 		self.task
-			.run(move |mut state| async move {
-				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
+			.run(move |state| async move {
+				let (request, answering) = state.request.take()?;
 				let reject = match code {
 					401 | 403 => moq_net::SessionError::Unauthorized,
 					code => moq_net::SessionError::App(code),
 				};
-				request.reject(reject).await.map_err(|err| MoqError::Reject {
+				answering.settle(request.reject(reject).await.map_err(|err| MoqError::Reject {
 					reason: format!("{err}"),
-				})?;
-				Ok(())
+				}))
 			})
 			.await
 	}
