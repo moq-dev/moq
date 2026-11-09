@@ -452,14 +452,15 @@ async fn late_better_path(mesh: &str, client: &str) -> (Vec<Kind>, Vec<Kind>) {
 }
 
 /// A relay that first hears a broadcast over a longer path moves to the shorter
-/// one when it arrives, and a client watching it sees nothing change: lite-07
-/// relays route by the publisher's origin node, so the move is a next hop the
-/// relay picks, under the same claim and instance.
+/// one when it arrives, under the same claim and instance: lite-07 relays route by
+/// the publisher's origin node, so the move is a next hop the relay picks. The route
+/// travels with the claim, so the shorter one arrives late too, and a client of
+/// either version sees the cheaper path as an update in place.
 #[kio::test]
-async fn late_better_path_is_invisible() {
+async fn late_better_path_updates_in_place() {
 	for client in ["moq-lite-06", "moq-lite-07-wip"] {
 		let (published, closed) = late_better_path("moq-lite-07-wip", client).await;
-		assert_eq!(published, [Kind::Start], "{client}");
+		assert_eq!(published, [Kind::Start, Kind::Update], "{client}");
 		assert_eq!(closed, [Kind::End], "{client}");
 	}
 }
@@ -569,24 +570,48 @@ fn random_mesh(seed: u64) -> (Vec<Link>, usize) {
 	(edges, rng.range(0, n as u64 - 1) as usize)
 }
 
-/// One clean close on each of 200 seeded random meshes: how many relays
-/// announce the broadcast again before their last retraction (by restarting
-/// onto a stale path, or by reviving it after retracting), how many of those
-/// revive, and how many updates they send beyond the one retraction. Hop chains
-/// counted (231, 3, 290); routed by origin node, none.
-#[kio::test]
-#[ignore = "quarantined: takes 40s+ alone and times out under load; quest/m0/test-flakes-2/mesh-withdraw-runtime.md"]
-async fn random_meshes_retract_once() {
-	assert_eq!(withdrawal_counts(false).await, (0, 0, 0));
+/// One clean close on each of 200 seeded random meshes, sharded so each test
+/// fits the gate: every seed costs about 100 ms of debug-build CPU, nearly all of
+/// it the mesh converging on its node claims before anything is published.
+///
+/// `random` counts how many relays announce the broadcast again before their
+/// last retraction (by restarting onto a stale path, or by reviving it after
+/// retracting), how many of those revive, and how many updates they send beyond
+/// the one retraction. Hop chains counted (231, 3, 290); routed by origin node,
+/// none.
+///
+/// `capped` uses the same topologies and terminal states with room for the
+/// diameter and two extra hops, including the publishing client outside the
+/// relay graph. Hop chains counted (177, 0, 192).
+macro_rules! random_meshes {
+	($($shard:ident: $seeds:expr),* $(,)?) => {
+		mod random_meshes_retract_once {
+			$(
+				mod $shard {
+					#[kio::test]
+					async fn random() {
+						assert_eq!(super::super::withdrawal_counts(false, $seeds).await, (0, 0, 0));
+					}
+
+					#[kio::test]
+					async fn capped() {
+						assert_eq!(super::super::withdrawal_counts(true, $seeds).await, (0, 0, 0));
+					}
+				}
+			)*
+		}
+	};
 }
 
-/// The same topologies and terminal states with room for the diameter and two
-/// extra hops, including the publishing client outside the relay graph. Hop
-/// chains counted (177, 0, 192).
-#[kio::test]
-#[ignore = "quarantined: takes 40s+ alone and times out under load; quest/m0/test-flakes-2/mesh-withdraw-runtime.md"]
-async fn capped_random_meshes_retract_once() {
-	assert_eq!(withdrawal_counts(true).await, (0, 0, 0));
+random_meshes! {
+	seeds_000: 0..25,
+	seeds_025: 25..50,
+	seeds_050: 50..75,
+	seeds_075: 75..100,
+	seeds_100: 100..125,
+	seeds_125: 125..150,
+	seeds_150: 150..175,
+	seeds_175: 175..200,
 }
 
 fn diameter(edges: &[Link]) -> usize {
@@ -617,9 +642,9 @@ fn diameter(edges: &[Link]) -> usize {
 		.unwrap()
 }
 
-async fn withdrawal_counts(capped: bool) -> (usize, usize, usize) {
+async fn withdrawal_counts(capped: bool, seeds: std::ops::Range<u64>) -> (usize, usize, usize) {
 	let (mut hunted, mut revived, mut extra) = (0, 0, 0);
-	for seed in 0..200 {
+	for seed in seeds {
 		let (edges, publisher) = random_mesh(seed);
 		let mut config = origin::Config::default();
 		if capped {

@@ -83,7 +83,8 @@ export interface ConnectionProps {
 }
 
 /** Where a session is: open, delivering what it owes before it closes, or closed. */
-type Phase = { kind: "open" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
+/** `leaving` is open but draining at this side's own request; see the wire view's `leave`. */
+type Phase = { kind: "open" } | { kind: "leaving" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
 
 /**
  * Represents a connection to a MoQ server.
@@ -259,10 +260,26 @@ export class Connection implements Session {
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
 			exclusive: false,
+			leave: () => this.#leave(),
 			auth: this.#auth,
 		});
 
 		void this.#run();
+	}
+
+	#leave(): void {
+		if (this.#phase.kind !== "open") return;
+		this.#phase = { kind: "leaving" };
+		if (!hasGoaway(this.#version)) return;
+		const version = this.#version;
+		const send = async () => {
+			const stream = await Stream.open(this.#quic, { version });
+			await stream.writer.u53(StreamId.Goaway);
+			await new Goaway("").encode(stream.writer, version);
+			stream.writer.close();
+		};
+		// A session closing first has nothing left to tell.
+		send().catch((err: unknown) => console.debug("failed to send GOAWAY:", err));
 	}
 
 	/** Our tokens and grants; see {@link Session.auth}. */
@@ -280,7 +297,8 @@ export class Connection implements Session {
 	 */
 	close(): Promise<void> {
 		switch (this.#phase.kind) {
-			case "open": {
+			case "open":
+			case "leaving": {
 				const done = withTimeout(
 					this.#publisher.drain(),
 					Nano.fromMilli(Milli(1000)),

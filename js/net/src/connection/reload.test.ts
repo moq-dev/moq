@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { Session as Qmux, type WebSocketStreamLike } from "@moq/qmux";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { Viewers } from "../bandwidth.ts";
@@ -1475,5 +1476,154 @@ test("a delay field with no meaning is refused when the loop is built", () => {
 		expect(() => new Reload({ url: new URL("https://example.com/"), delay }), JSON.stringify(delay)).toThrow(
 			RangeError,
 		);
+	}
+});
+
+/**
+ * An in-memory `WebSocketStream`, which qmux prefers when the platform has one, whose server
+ * side `onServer` takes once the client's handshake is offered. The server picks the first
+ * subprotocol the client offers.
+ */
+function linkedWebSocketStream(onServer: (socket: WebSocketStreamLike, protocol: string) => void) {
+	return function StubWebSocketStream(url: string, options?: { protocols?: string[] }) {
+		const protocol = options?.protocols?.[0] ?? "";
+		const up = new TransformStream<Uint8Array | string, Uint8Array | string>();
+		const down = new TransformStream<Uint8Array | string, Uint8Array | string>();
+		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
+		const close = () => {
+			closed.resolve({ closeCode: 1000, reason: "" });
+			up.writable.abort().catch(() => {});
+			down.writable.abort().catch(() => {});
+		};
+		onServer(
+			{
+				url,
+				opened: Promise.resolve({ readable: up.readable, writable: down.writable, protocol, extensions: "" }),
+				closed: closed.promise,
+				close,
+			},
+			protocol,
+		);
+		return {
+			url,
+			opened: Promise.resolve({ readable: down.readable, writable: up.writable, protocol, extensions: "" }),
+			closed: closed.promise,
+			close,
+		};
+	};
+}
+
+// A link that fell back to WebSocket while WebTransport was unreachable probes it on a backoff
+// and, once it answers, leaves the fallback make-before-break: the old session tells its peer it
+// is moving with a GOAWAY and drains while the replacement finishes its handshake over the
+// probe's WebTransport session, with no second race, and the status never reports a disconnect.
+test("a WebSocket fallback returns to WebTransport once it is reachable", async () => {
+	using clock = manual();
+	const originalWebTransport = globalThis.WebTransport;
+	const originalStream = (globalThis as { WebSocketStream?: unknown }).WebSocketStream;
+	const url = new URL("https://fallback-returns.example.com/");
+
+	let blocked = true;
+	let probes = 0;
+	const sessions: { transport: string; server: Promise<Session> }[] = [];
+	globalThis.WebTransport = function StubWebTransport(dialed: string | URL) {
+		if (blocked) {
+			const refused = Promise.reject(new Error("UDP blocked"));
+			refused.catch(() => {});
+			return { ready: refused, closed: refused, close() {} };
+		}
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		const server = accept(pair.server, new URL(dialed));
+		server.catch(() => {});
+		sessions.push({ transport: "webtransport", server });
+		probes++;
+		return pair.client;
+	} as unknown as typeof WebTransport;
+	(globalThis as { WebSocketStream?: unknown }).WebSocketStream = linkedWebSocketStream((socket, protocol) => {
+		const transport = Qmux.accept(socket, { protocol }) as unknown as WebTransport;
+		// The negotiated protocol is known once the socket opens.
+		sessions.push({ transport: "websocket", server: transport.ready.then(() => accept(transport, url)) });
+	});
+
+	const statuses: string[] = [];
+	const reload = new Reload({ url, versions: [Lite.ALPN_06], delay: { initial: Milli(0) } });
+	const watch = new Effect();
+	watch.subscribe(reload.status, (status) => statuses.push(status));
+	try {
+		// The fallback joins the race after WebTransport's head start.
+		for (let i = 0; i < 10 && reload.established.peek()?.transport !== "websocket"; i++) {
+			await clock.advance(Nano.fromMilli(Milli(100)));
+		}
+		expect(reload.established.peek()?.transport).toBe("websocket");
+		const fallback = sessions[0];
+		if (!fallback) throw new Error("no fallback session");
+
+		// Every probe fails while WebTransport is unreachable; the fallback keeps serving.
+		await clock.advance(Nano.fromMilli(Milli(70_000)));
+		expect(reload.established.peek()?.transport).toBe("websocket");
+
+		blocked = false;
+		// Past the fourth probe's longest wait after the third.
+		for (let i = 0; i < 80 && reload.established.peek()?.transport !== "webtransport"; i++) {
+			await clock.advance(Nano.fromMilli(Milli(1_000)));
+		}
+		expect(reload.established.peek()?.transport).toBe("webtransport");
+		// The probe's session carries the replacement: one WebTransport dial, never another race.
+		expect(probes).toBe(1);
+		expect(sessions.filter((session) => session.transport === "websocket")).toHaveLength(1);
+		expect(await (await fallback.server).draining).toEqual({ uri: "" });
+		expect(statuses).not.toContain("disconnected");
+	} finally {
+		watch.close();
+		reload.close();
+		for (const session of sessions) (await session.server.catch(() => undefined))?.abort();
+		globalThis.WebTransport = originalWebTransport;
+		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = originalStream;
+	}
+});
+
+// A WebSocket win is provisional: once the session it carried ends, the redial gives
+// WebTransport its head start again, since the outage that lost the race may be over.
+test("a WebSocket session ending restores WebTransport's head start", async () => {
+	using clock = manual();
+	const originalWebTransport = globalThis.WebTransport;
+	const originalStream = (globalThis as { WebSocketStream?: unknown }).WebSocketStream;
+	const url = new URL("https://fallback-ends.example.com/");
+
+	const dials: Instant[] = [];
+	const servers: Promise<Session>[] = [];
+	globalThis.WebTransport = function BlockedWebTransport() {
+		const refused = Promise.reject(new Error("UDP blocked"));
+		refused.catch(() => {});
+		return { ready: refused, closed: refused, close() {} };
+	} as unknown as typeof WebTransport;
+	(globalThis as { WebSocketStream?: unknown }).WebSocketStream = linkedWebSocketStream((socket, protocol) => {
+		dials.push(now());
+		const transport = Qmux.accept(socket, { protocol }) as unknown as WebTransport;
+		servers.push(transport.ready.then(() => accept(transport, url)));
+	});
+
+	const reload = new Reload({ url, versions: [Lite.ALPN_06], delay: { initial: Milli(0) } });
+	try {
+		for (let i = 0; i < 10 && reload.established.peek()?.transport !== "websocket"; i++) {
+			await clock.advance(Nano.fromMilli(Milli(100)));
+		}
+		const first = servers[0];
+		if (!first) throw new Error("no fallback session");
+		// Let the server's half of the handshake finish before ending it.
+		await clock.advance(Nano.fromMilli(Milli(100)));
+		(await first).abort();
+		const ended = now();
+		for (let i = 0; i < 20 && dials.length < 2; i++) {
+			await clock.advance(Nano.fromMilli(Milli(100)));
+		}
+		const redial = dials[1];
+		if (redial === undefined) throw new Error("never redialed the fallback");
+		expect(Instant.durationSince(redial, ended)).toBeGreaterThanOrEqual(Nano.fromMilli(Milli(500)));
+	} finally {
+		reload.close();
+		for (const server of servers) (await server.catch(() => undefined))?.abort();
+		globalThis.WebTransport = originalWebTransport;
+		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = originalStream;
 	}
 });

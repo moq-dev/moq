@@ -7,6 +7,11 @@
 //! watches each live session for its close and GOAWAY itself, keeps a drained
 //! predecessor serving through its handover, and drops neither on the caller's behalf
 //! until it reports [`Action::Done`].
+//!
+//! A caller whose session landed on a fallback transport says so with
+//! [`Reconnect::fallback`]. The machine then asks for [`Action::Probe`]s of the preferred
+//! transport on a slow backoff and, once one gets through, moves to it through the same
+//! handover a GOAWAY uses, so nothing the old session carries drops.
 
 mod redirect;
 #[cfg(test)]
@@ -29,6 +34,16 @@ use redirect::{Redirects, Shown, endpoint};
 /// attempt with a later address to fall back on is worth bounding: cutting the last one
 /// short just turns a slow connect into a failed one, on every reconnect cycle.
 const ATTEMPT: Duration = Duration::from_secs(5);
+
+/// The wait before the first probe of the preferred transport, before jitter.
+///
+/// Each failed probe doubles it, up to [`PROBE_MAX`]. A brief outage thus ends within
+/// seconds to minutes of the preferred transport returning, while a target that never
+/// reaches it pays for one handshake attempt every five minutes.
+const PROBE_INITIAL: Duration = Duration::from_secs(10);
+
+/// The longest wait between probes of the preferred transport, before jitter.
+const PROBE_MAX: Duration = Duration::from_secs(300);
 
 /// When to redial after a failure, and when to give up.
 ///
@@ -315,7 +330,8 @@ pub enum Action<A, E> {
 	/// [`Reconnect::failed`], polling meanwhile. Build each session's client with
 	/// [`Attempt::client`].
 	Dial(Attempt<A>),
-	/// Drop the dial in flight: it ran out its deadline, which already counted as its failure.
+	/// Drop the dial or probe in flight: it ran out its deadline, which already counted as
+	/// its failure.
 	Abandon,
 	/// The live session got a GOAWAY and now drains as the [`predecessor`](Reconnect::predecessor)
 	/// while a replacement is dialed.
@@ -329,6 +345,11 @@ pub enum Action<A, E> {
 	Retrying(E),
 	/// Poll again by this instant, or on a wake.
 	Wait(Option<Instant>),
+	/// The live session runs on a fallback, set by [`Reconnect::fallback`]. Reach this
+	/// attempt's peer over the preferred transport alone, without the MoQ handshake, and
+	/// report it with [`Reconnect::probed`]. Drop it if the live session ends first: on
+	/// [`Action::Migrating`], [`Action::Offline`], or [`Action::Done`].
+	Probe(Attempt<A>),
 	/// The policy gave up with an error, or ended cleanly. Every later poll waits forever.
 	Done(Result<(), E>),
 }
@@ -382,6 +403,61 @@ struct Live {
 	/// Dropped once a restart is waited out: it is a latch, so it would keep firing.
 	goaway: Option<goaway::Consumer>,
 	presented: Option<auth::Dial>,
+	/// Set while the session runs on a fallback transport.
+	probe: Option<Probe>,
+}
+
+/// Probing the preferred transport while the live session runs on a fallback.
+struct Probe {
+	/// The wait before the next probe, before jitter.
+	delay: Duration,
+	state: Probing,
+}
+
+enum Probing {
+	/// The next probe is due at this instant.
+	Due(Instant),
+	/// A probe is in flight, abandoned at its deadline.
+	Dialing {
+		deadline: Option<Instant>,
+		presented: Option<auth::Dial>,
+	},
+}
+
+/// What a [`Probe`] asks for at an instant.
+enum ProbePoll {
+	Wait(Option<Instant>),
+	Due,
+	/// The probe in flight ran out its deadline and was scored as a failure.
+	Abandon,
+}
+
+impl Probe {
+	fn new(now: Instant) -> Self {
+		Self {
+			delay: PROBE_INITIAL,
+			state: Probing::Due(now + jitter(PROBE_INITIAL)),
+		}
+	}
+
+	fn poll(&mut self, now: Instant) -> ProbePoll {
+		match &self.state {
+			Probing::Due(at) if now >= *at => ProbePoll::Due,
+			Probing::Due(at) => ProbePoll::Wait(Some(*at)),
+			Probing::Dialing { deadline: Some(at), .. } if now >= *at => {
+				tracing::debug!("probe of the preferred transport timed out");
+				self.failed(now);
+				ProbePoll::Abandon
+			}
+			Probing::Dialing { deadline, .. } => ProbePoll::Wait(*deadline),
+		}
+	}
+
+	/// Schedule the next probe after a failed one, doubling the wait up to the cap.
+	fn failed(&mut self, now: Instant) {
+		self.delay = self.delay.saturating_mul(2).min(PROBE_MAX);
+		self.state = Probing::Due(now + jitter(self.delay));
+	}
 }
 
 struct Walk<E> {
@@ -516,9 +592,15 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 					{
 						ended = Some(Ended::Closed(err));
 					}
-					match ended {
-						Some(ended) => self.end(now, ended),
+					if let Some(ended) = ended {
+						self.end(now, ended);
+						continue;
+					}
+					match live.probe.as_mut().map(|probe| probe.poll(now)) {
 						None => return Action::Wait(handover),
+						Some(ProbePoll::Wait(at)) => return Action::Wait(earliest(at, handover)),
+						Some(ProbePoll::Abandon) => return Action::Abandon,
+						Some(ProbePoll::Due) => return self.probe(now),
 					}
 				}
 				Phase::Backoff { until, restart } => {
@@ -568,7 +650,97 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			since: now,
 			index: dialing.index,
 			presented: dialing.presented,
+			probe: None,
 		}));
+	}
+
+	/// Report that the live session runs on a fallback transport, at `now`.
+	///
+	/// The policy then asks for [`Action::Probe`] dials of the preferred transport, the
+	/// first 5 to 10 s from now and the rest on a doubling backoff capped at one every 5
+	/// minutes, until one connects. Ignored unless a session is live, or when connecting once.
+	pub fn fallback(&mut self, now: Instant) {
+		if self.config.once {
+			return;
+		}
+		if let Phase::Live(live) = &mut self.phase {
+			live.probe = Some(Probe::new(now));
+		}
+	}
+
+	/// Report whether the probe asked for reached the preferred transport, at `now`.
+	///
+	/// On `Ok`, the fallback session sends its own GOAWAY and drains as the
+	/// [`predecessor`](Self::predecessor), queuing [`Action::Migrating`], and the probe becomes
+	/// the dial in flight: finish the MoQ handshake over the transport it reached and report it
+	/// with [`connected`](Self::connected) or [`failed`](Self::failed). The fallback drains
+	/// first because the tokens back one session at a time, and keeps serving until the
+	/// replacement does. Returns whether the probe became that dial: one reported with none in
+	/// flight, as after [`Action::Abandon`], is ignored, and one reported once the peer's GOAWAY
+	/// arrived yields to it.
+	pub fn probed(&mut self, now: Instant, result: Result<(), E>) -> bool {
+		let Phase::Live(live) = &mut self.phase else {
+			return false;
+		};
+		let Some(probe) = live.probe.as_mut() else {
+			return false;
+		};
+		let Probing::Dialing { presented, .. } = &mut probe.state else {
+			return false;
+		};
+		if let Err(err) = result {
+			tracing::debug!(%err, "preferred transport still unreachable");
+			probe.failed(now);
+			return false;
+		}
+		// The peer's GOAWAY wins over a probe that got through with it, so its redirect is
+		// never lost: the next poll acts on it.
+		if let Some(Poll::Ready(_)) = live.goaway.as_ref().map(|goaway| goaway.poll(&kio::Waiter::noop())) {
+			probe.failed(now);
+			return false;
+		}
+		let presented = presented.take();
+		let index = live.index;
+		tracing::info!(peer = %Shown(self.targets[index].url()), "preferred transport reachable; leaving the fallback");
+
+		let connect = self.config.timeout;
+		let Phase::Live(old) = std::mem::replace(
+			&mut self.phase,
+			Phase::Dialing(Dialing {
+				index,
+				deadline: connect.map(|connect| (now + connect, Failure::Timeout(connect))),
+				presented,
+			}),
+		) else {
+			unreachable!("matched above");
+		};
+		// A GOAWAY naming no URI: the peer learns we are moving, and the session stops
+		// taking new work, which frees the tokens for its replacement.
+		if old.session.drain().send(goaway::Goaway::new()).is_err() {
+			tracing::debug!("the fallback session was already draining");
+		}
+		// The fallback session served all along, so a long one still earns the healthy reset.
+		self.retry.settle(
+			now,
+			now.saturating_duration_since(old.since),
+			&Pacing::new(&self.config.backoff),
+		);
+		if let Some(older) = self.predecessor.take() {
+			older.retire();
+		}
+		self.predecessor = Some(Predecessor {
+			deadline: now + self.config.goaway.handover,
+			session: old.session,
+			closing: false,
+		});
+		// Only now, once the fallback stops taking new work: a probe that never gets through
+		// leaves the serving session's tokens and their grants alone.
+		let Phase::Dialing(dialing) = &self.phase else {
+			unreachable!("set above");
+		};
+		self.commit(dialing.presented.as_ref());
+		self.queue.push_back(Action::Migrating);
+		true
 	}
 
 	/// Report that the dial asked for failed with `err`, judged as `verdict`.
@@ -594,16 +766,46 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		self.phase = Phase::Next { index: 0 };
 	}
 
-	fn dial(&mut self, now: Instant, index: usize) -> Action<A, E> {
+	/// The attempt dialing the target at `index`, and the tokens it presents, read without
+	/// touching the live session's tokens.
+	fn attempt(&self, index: usize) -> (Attempt<A>, Option<auth::Dial>) {
 		let target = self.targets[index].clone();
-		tracing::info!(peer = %Shown(target.url()), "connecting");
-
-		// Read before the dial starts its session's driver, so a request the session sends
-		// early waits on the held tokens' answers rather than being refused outside the
-		// connection credential's grant.
-		let presented = self.tokens.as_ref().map(|tokens| tokens.dial(target.url()));
+		let presented = self.tokens.as_ref().map(|tokens| tokens.preview(target.url()));
 		let token = presented.as_ref().and_then(|presented| presented.token.clone());
 		let auth = self.tokens.as_ref().map(auth::Tokens::handle);
+		(Attempt { target, token, auth }, presented)
+	}
+
+	/// Make `presented` the tokens' latest dial. Called before the dial's session driver
+	/// starts, so a request the session sends early waits on the held tokens' answers rather
+	/// than being refused outside the connection credential's grant.
+	fn commit(&self, presented: Option<&auth::Dial>) {
+		if let (Some(tokens), Some(presented)) = (&self.tokens, presented) {
+			tokens.commit(presented);
+		}
+	}
+
+	/// Ask for a probe of the live session's target over the preferred transport.
+	fn probe(&mut self, now: Instant) -> Action<A, E> {
+		let Phase::Live(live) = &self.phase else {
+			unreachable!("only a live session probes");
+		};
+		let (attempt, presented) = self.attempt(live.index);
+		tracing::debug!(peer = %Shown(attempt.target.url()), "probing the preferred transport");
+		let deadline = self.config.timeout.map(|timeout| now + timeout);
+		if let Phase::Live(live) = &mut self.phase
+			&& let Some(probe) = live.probe.as_mut()
+		{
+			probe.state = Probing::Dialing { deadline, presented };
+		}
+		Action::Probe(attempt)
+	}
+
+	fn dial(&mut self, now: Instant, index: usize) -> Action<A, E> {
+		let (dial, presented) = self.attempt(index);
+		self.commit(presented.as_ref());
+		let target = &dial.target;
+		tracing::info!(peer = %Shown(target.url()), "connecting");
 
 		// The connect deadline covers the dial and the handshake, for every transport: it is
 		// the only bound some of them have. The fixed bound applies only with a fallback.
@@ -621,7 +823,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			deadline,
 			presented,
 		});
-		Action::Dial(Attempt { target, token, auth })
+		Action::Dial(dial)
 	}
 
 	/// The dial in flight failed: move on to the next target, or end the walk.
@@ -856,6 +1058,11 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 	}
 }
 
+/// Between half of `delay` and all of it, so a fleet knocked offline together spreads out.
+fn jitter(delay: Duration) -> Duration {
+	delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0)
+}
+
 fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.min(b)),
@@ -931,7 +1138,7 @@ impl<E> Retry<E> {
 
 	/// The next delay, jittered.
 	fn wait(&self) -> Duration {
-		self.delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0)
+		jitter(self.delay)
 	}
 }
 
