@@ -7173,7 +7173,7 @@ impl Consumer {
 	pub(crate) fn node_id(&self) -> Option<NonZeroU64> {
 		let node = self.shared.lock().route_node.clone();
 		let id = match node {
-			Some(node) => Some(node.declared()),
+			Some((node, _)) => Some(node.declared()),
 			None => crate::route::node::declared_for(self.hop),
 		};
 		id.and_then(NonZeroU64::new)
