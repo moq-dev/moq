@@ -317,9 +317,20 @@ fn is_local(url: &Url) -> bool {
 		// crate dials but `http`/`https`/`ws`/`wss`) parses its host as a domain
 		// even when it is an address literal, so the literal check can't be left to
 		// the URL parser. `crate::resolve::Candidates` handles the same thing.
-		Some(url::Host::Domain(host)) => match host.parse::<std::net::IpAddr>() {
-			Ok(ip) => is_local_ip(ip),
-			Err(_) => host == "localhost" || host.ends_with(".localhost"),
+		// Reading it back through `https://` decodes every IPv4 spelling the dial
+		// accepts (`127.1`, `0x7f000001`, `0177.0.0.1`), not just the dotted quad.
+		Some(url::Host::Domain(host)) => match Url::parse(&format!("https://{host}/"))
+			.ok()
+			.as_ref()
+			.and_then(Url::host)
+		{
+			Some(url::Host::Ipv4(ip)) => is_local_ip(ip.into()),
+			Some(url::Host::Ipv6(ip)) => is_local_ip(ip.into()),
+			_ => {
+				// A trailing dot names the same host.
+				let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+				host == "localhost" || host.ends_with(".localhost")
+			}
 		},
 		Some(url::Host::Ipv4(ip)) => is_local_ip(ip.into()),
 		Some(url::Host::Ipv6(ip)) => is_local_ip(ip.into()),
@@ -1559,6 +1570,13 @@ mod tests {
 			"https://[fe80::1]/",
 			"https://[fc00::1]/",
 			"https://0.0.0.0/",
+			"https://localhost./",
+			"moqt://127.1/",
+			"moqt://0x7f000001/",
+			"moqt://2130706433/",
+			"moqt://0177.0.0.1/",
+			"moqt://10.1/",
+			"moqt://localhost./",
 		];
 		for url in local {
 			assert!(is_local(&url.parse().unwrap()), "{url} should be local");

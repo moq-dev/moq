@@ -79,6 +79,14 @@ test("local literals are recognized in every spelling", () => {
 		"moqt://127.0.0.1/",
 		"moqt://[::ffff:127.0.0.1]/",
 		"unix:///tmp/moq.sock",
+		"https://localhost./",
+		"https://127.1/",
+		"moqt://127.1/",
+		"moqt://0x7f000001/",
+		"moqt://2130706433/",
+		"moqt://0177.0.0.1/",
+		"moqt://10.1/",
+		"moql://localhost./",
 	];
 	for (const url of local) expect(isLocal(new URL(url)), url).toBe(true);
 
