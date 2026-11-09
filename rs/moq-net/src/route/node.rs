@@ -316,6 +316,28 @@ fn ordered(changes: Changes) -> Vec<(Path, Option<Claim>)> {
 	starts.into_iter().chain(ends).collect()
 }
 
+/// The node's state, locked. A stream's wakes wait until the lock is released: a waker
+/// may poll the stream's session inline, and the session calls back into the node.
+struct Locked<'a> {
+	// Dropped first, being declared first, so the held wakes go out unlocked.
+	state: MutexGuard<'a, State>,
+	_hold: kio::Hold,
+}
+
+impl std::ops::Deref for Locked<'_> {
+	type Target = State;
+
+	fn deref(&self) -> &State {
+		&self.state
+	}
+}
+
+impl std::ops::DerefMut for Locked<'_> {
+	fn deref_mut(&mut self) -> &mut State {
+		&mut self.state
+	}
+}
+
 struct State {
 	router: Router<Key, Claim>,
 	next_key: Key,
@@ -393,8 +415,11 @@ impl Node {
 		Self::new(id, rng.random())
 	}
 
-	fn lock(&self) -> MutexGuard<'_, State> {
-		self.state.lock().unwrap_or_else(|poison| poison.into_inner())
+	fn lock(&self) -> Locked<'_> {
+		Locked {
+			_hold: kio::hold(),
+			state: self.state.lock().unwrap_or_else(|poison| poison.into_inner()),
+		}
 	}
 
 	/// The identity this node declares, which a rotation replaces.

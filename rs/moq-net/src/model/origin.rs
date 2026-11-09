@@ -3684,6 +3684,9 @@ impl kio::Task for FeedOwnClaims {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		// Wakes wait for the feeder's lock, which a tail expression's guard drops before
+		// the hold; see `Consumer::route_node`.
+		let _hold = kio::hold();
 		lock_own(&self.0).poll(waiter)
 	}
 }
@@ -7168,6 +7171,9 @@ impl Consumer {
 		let existing = self.shared.lock().route_node.clone();
 		let (node, own) = existing.unwrap_or_else(|| self.create_route_node());
 		if let Some(own) = own.upgrade() {
+			// Catching up wakes the node's streams and the feeder's own cursors. Those wakes
+			// wait for the feeder's lock: a waker may poll a session inline, which calls back here.
+			let _hold = kio::hold();
 			lock_own(&own).catch_up();
 		}
 		node
@@ -10496,6 +10502,73 @@ mod tests {
 			registry.snapshot().traffic().is_empty(),
 			"nothing was sent to the session"
 		);
+	}
+
+	/// A stream the route node wakes may have its session polled inline, calling back
+	/// into the node, so no wake goes out under the feeder's lock or the node's: neither
+	/// when `route_node` catches the feeder up nor when the driver feeds it.
+	#[test]
+	fn the_route_node_wakes_its_streams_unlocked() {
+		struct Reenter {
+			consumer: Consumer,
+			reentered: AtomicUsize,
+			locked: AtomicBool,
+		}
+		impl Wake for Reenter {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				let feeder = self.consumer.shared.lock().route_node.clone().unwrap().1;
+				// Re-entering a lock this thread holds would deadlock the test instead of failing it.
+				if feeder.upgrade().unwrap().try_lock().is_err() {
+					self.locked.store(true, Ordering::SeqCst);
+					return;
+				}
+				self.consumer.route_node().declared();
+				self.reentered.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+
+		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
+		let link = crate::route::Link {
+			proxy: true,
+			..Default::default()
+		};
+		let stream = producer.route_node().answer(link, Path::empty()).unwrap();
+		let reenter = Arc::new(Reenter {
+			consumer: producer.consume(),
+			reentered: AtomicUsize::new(0),
+			locked: AtomicBool::new(false),
+		});
+		let waiter = kio::Waiter::new(Waker::from(reenter.clone()));
+		let park = || {
+			while stream.try_output().is_some() {}
+			assert!(stream.poll_output(&waiter).is_pending());
+		};
+
+		park();
+		let _alice = producer.announce("room/alice", RouteInfo::new()).unwrap();
+		producer.route_node();
+		assert!(
+			!reenter.locked.load(Ordering::SeqCst),
+			"catching up woke under the feeder's lock"
+		);
+		assert_eq!(
+			reenter.reentered.load(Ordering::SeqCst),
+			1,
+			"catching up woke no stream"
+		);
+
+		driver.poll(Instant::ZERO, &kio::Waiter::noop()).unwrap();
+		park();
+		let _bob = producer.announce("room/bob", RouteInfo::new()).unwrap();
+		driver.poll(Instant::ZERO, &kio::Waiter::noop()).unwrap();
+		assert!(
+			!reenter.locked.load(Ordering::SeqCst),
+			"the driver woke under the feeder's lock"
+		);
+		assert_eq!(reenter.reentered.load(Ordering::SeqCst), 2, "the driver woke no stream");
 	}
 
 	/// At equal cost the local broadcast wins.

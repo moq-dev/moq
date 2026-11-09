@@ -71,7 +71,7 @@ pub use producer::{Producer, Unwanted};
 pub use queue::{PushError, Queue};
 pub use shared::Shared;
 pub use task::{Task, TaskKey, Tasks};
-pub use waiter::{Park, Waiter, WaiterList, wait};
+pub use waiter::{Hold, Park, Waiter, WaiterList, hold, wait};
 pub use watch::Watch;
 pub use weak::{ConsumerWeak, ProducerWeak, Weak};
 
