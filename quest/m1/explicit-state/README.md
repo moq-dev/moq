@@ -69,7 +69,6 @@ which collapses that state and waits on [Drop set](/quest/m1/drop-set.md).
 
 ## Required
 
-- [js/qmux close](/quest/m1/explicit-state/qmux-close.md) - a graceful remote close ends qmux streams cleanly
 - [FFI handle state](/quest/m1/explicit-state/ffi-state.md) - moq-ffi's tasks and server, moq-c's ids, and the language wrappers hold one state each
 - [moq-net phase data](/quest/m1/explicit-state/net-phases.md) - moq-net's session and subscription state machines keep each phase's data in its variant
 

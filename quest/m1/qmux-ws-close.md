@@ -29,7 +29,3 @@ Decided 2026-11-08 (maintainer, /quest-plan of an external code audit of `9f51fa
   terminal path settles every half at once.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [js/qmux close](/quest/m1/explicit-state/qmux-close.md) - the session close above this transport
