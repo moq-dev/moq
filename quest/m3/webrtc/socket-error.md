@@ -26,9 +26,7 @@ Where it goes wrong today:
    fails with `ice::Error::Closed`, the same variant as an ICE disconnect or
    a dead `Rtc`.
 3. `Session::run_loop` (`rs/moq-webrtc/src/session.rs`) maps `Closed` to
-   `Ok(())` (with #8268; before it, to `Error::SessionClosed`, which
-   `session::end` folded into `Ok`). `p2p`'s `Error::ice` maps it to its own
-   `Closed`.
+   `Ok(())`. `p2p`'s `Error::ice` maps it to its own `Closed`.
 
 The cause no caller can see is step 1: the reader drops the error. Fix it there.
 The reader hands its `io::Error` to the agent, for example as the queue's last

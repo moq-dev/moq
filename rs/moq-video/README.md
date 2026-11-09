@@ -129,7 +129,8 @@ way, awaited.
 
 Public entry points:
 
-- `encode::publish_capture(...)` captures a webcam, encodes it, and publishes it:
+- `encode::publish_capture(...)` captures a webcam, encodes it, and publishes it,
+  returning a `Publication` that reports its state and the `Driver` to run:
   the track and catalog are advertised up front, and the camera stays open
   whether or not anyone is watching. With `Capture::on_demand`, the camera opens
   only while a subscriber is watching and is released when the last one leaves.
