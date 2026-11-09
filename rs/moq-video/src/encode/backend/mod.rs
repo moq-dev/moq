@@ -616,7 +616,7 @@ mod tests {
 	const REFUSING: Candidate = Candidate {
 		name: "driverless",
 		codecs: &[Codec::H264],
-		open: |_| Err(Error::Codec(anyhow::anyhow!("driver libraries not found"))),
+		open: |_| Err(Error::codec(anyhow::anyhow!("driver libraries not found"))),
 		cuts: true,
 		#[cfg(target_os = "linux")]
 		vulkan: false,

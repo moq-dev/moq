@@ -365,7 +365,7 @@ async fn a_route_auth_renews_its_announce(version: &'static str) {
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn patterns(prefixes: &[&str]) -> Patterns {
@@ -376,11 +376,15 @@ fn patterns(prefixes: &[&str]) -> Patterns {
 }
 
 fn grant(publish: &[&str], subscribe: &[&str]) -> Grant {
-	Grant {
-		publish: patterns(publish),
-		subscribe: patterns(subscribe),
-		expires: None,
-	}
+	grant_of(patterns(publish), patterns(subscribe))
+}
+
+/// A grant of exactly these paths that never expires.
+fn grant_of(publish: Patterns, subscribe: Patterns) -> Grant {
+	let mut grant = Grant::default();
+	grant.publish = publish;
+	grant.subscribe = subscribe;
+	grant
 }
 
 /// Wait for a watch to hold a grant satisfying `f`.
@@ -1421,11 +1425,7 @@ async fn a_grant_too_large_for_one_message_is_unsupported(version: &'static str)
 			.collect();
 		let mut issued = serve(pair.requests.take().unwrap(), move |token| match token {
 			b"" => Some(grant(&["a"], &[])),
-			b"huge" => Some(Grant {
-				publish: huge.clone(),
-				subscribe: Patterns::new(),
-				expires: None,
-			}),
+			b"huge" => Some(grant_of(huge.clone(), Patterns::new())),
 			_ => None,
 		});
 		let (_, _setup) = issued.next().await.unwrap();
@@ -1461,11 +1461,7 @@ async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'stat
 		let huge: Patterns = (0..20)
 			.map(|i| Pattern::subtree(&format!("{i}{}", "x".repeat(4000))).unwrap())
 			.collect();
-		updated.update(Grant {
-			publish: huge,
-			subscribe: Patterns::new(),
-			expires: None,
-		});
+		updated.update(grant_of(huge, Patterns::new()));
 		let err = token.closed().await;
 		assert!(matches!(err, Error::Unsupported), "{err:?}");
 		assert_eq!(token.grant().peek(), None);
@@ -1501,11 +1497,7 @@ async fn pattern_grants_arrive_exactly(version: &'static str) {
 				b"root" => (pattern_set(&[""]), pattern_set(&["**"])),
 				_ => return None,
 			};
-			Some(Grant {
-				publish,
-				subscribe,
-				expires: None,
-			})
+			Some(grant_of(publish, subscribe))
 		};
 		let mut issued = serve(pair.requests.take().unwrap(), table);
 		let (_, _setup) = issued.next().await.unwrap();

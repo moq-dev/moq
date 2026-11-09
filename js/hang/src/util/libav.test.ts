@@ -57,7 +57,7 @@ test("the fallback decodes AAC without a native AudioDecoder", async () => {
 			installed = value;
 			// Ask once the library has installed every global, as a concurrent caller would see them.
 			early ??= Promise.resolve()
-				.then(polyfill)
+				.then(() => polyfill())
 				.then(async () => (await AudioDecoder.isConfigSupported(config)).supported);
 		},
 	});

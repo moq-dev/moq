@@ -14,6 +14,9 @@ from moq_ffi import (
     MoqAudioSampleFormat as AudioSampleFormat,
 )
 from moq_ffi import (
+    MoqCompression as Compression,
+)
+from moq_ffi import (
     MoqConnectionPhase as ConnectionPhase,
 )
 from moq_ffi import (
@@ -75,6 +78,9 @@ from ._records import (
     Timestamp,
     TrackInfo,
     VideoDecodedFrame,
+    VideoSurface,
+    VideoSurfacePixelBuffer,
+    VideoSurfaceUnknown,
     WebSocketConfig,
 )
 
@@ -85,6 +91,7 @@ __all__ = [
     "AudioSampleFormat",
     "Backoff",
     "ClientTls",
+    "Compression",
     "ConnectionStats",
     "ConnectionPhase",
     "ConnectionState",
@@ -111,6 +118,9 @@ __all__ = [
     "VideoEncoderKind",
     "VideoEncoderOutput",
     "VideoDecodedFrame",
+    "VideoSurface",
+    "VideoSurfacePixelBuffer",
+    "VideoSurfaceUnknown",
     "VideoPixelFormat",
     "WebSocketConfig",
 ]

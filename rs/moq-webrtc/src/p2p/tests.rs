@@ -427,14 +427,14 @@ async fn a_drain_waits_for_an_establishing_peer() {
 		.await
 		.unwrap();
 
-	let activity = moq_net::server::Activity::default();
+	let admission = moq_net::server::Admission::default();
 	let mut config = moq_tokio::server::Config::default();
-	config.activity = activity.clone();
+	config.admission = admission.clone();
 	let listener = config.init_streams().unwrap().listen().await.unwrap();
 	let mut accept = std::pin::pin!(answerer.accept(&listener));
 	// The answer is not applied yet, so the channel cannot open.
 	assert!(futures::poll!(accept.as_mut()).is_pending());
-	let mut closed = std::pin::pin!(activity.close());
+	let mut closed = std::pin::pin!(admission.close());
 	assert!(
 		futures::poll!(closed.as_mut()).is_pending(),
 		"the drain skipped the establishing peer"

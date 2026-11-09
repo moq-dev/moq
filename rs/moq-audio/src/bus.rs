@@ -3,7 +3,7 @@
 //! A [`Bus`] holds sources, each a [`Live`] or [`Positioned`] channel fed with
 //! PCM and controlled by a [`Strip`] of gain, mute, pan, sync delay, and level
 //! meter, and [`Mix`]es, each the sum of the sources routed into it. A
-//! [`Minus`] is a mix-minus: one mix with one of its sources taken out, for a
+//! [`Minus`] is a mix-minus: one mix with some of its sources taken out, for a
 //! guest's return feed. Every mix
 //! publishes interleaved `f32` at the bus's [`Config`] to any number of
 //! independent [`Reader`]s.
@@ -239,7 +239,8 @@ struct Routed {
 struct MinusState {
 	id: u64,
 	parent: usize,
-	excluded: Strip,
+	/// Deduplicated, so each is subtracted at most once.
+	excluded: Vec<Strip>,
 	output: Output,
 }
 
@@ -513,7 +514,8 @@ impl Driver {
 	/// Call it as the clock advances, with exactly that much time's worth of
 	/// frames: the bus has no clock of its own, so this is what paces every
 	/// source. A source with nothing buffered contributes silence. Each mix
-	/// costs only the sources routed into it, and a mix-minus one more.
+	/// costs only the sources routed into it, and a mix-minus one more per
+	/// source it removes.
 	pub fn advance(&mut self, frames: usize) {
 		if frames == 0 {
 			return;
@@ -556,12 +558,14 @@ impl Driver {
 			let buffer = &mut minus.output.buffer;
 			buffer.clear();
 			buffer.extend_from_slice(&parent.output.buffer);
-			let excluded = key(&minus.excluded);
-			if parent.routed.contains(&excluded)
-				&& let Some(source) = sources.get(&excluded)
-			{
-				for (out, sample) in buffer.iter_mut().zip(&source.block) {
-					*out -= *sample;
+			for strip in &minus.excluded {
+				let excluded = key(strip);
+				if parent.routed.contains(&excluded)
+					&& let Some(source) = sources.get(&excluded)
+				{
+					for (out, sample) in buffer.iter_mut().zip(&source.block) {
+						*out -= *sample;
+					}
 				}
 			}
 			minus.output.publish(*position, channels, self.retention);
@@ -775,12 +779,20 @@ impl Mix {
 		routes
 	}
 
-	/// A mix-minus: this mix without `strip`'s source, for that source's own
-	/// return feed.
+	/// A mix-minus: this mix without the sources of `strips`, such as every
+	/// source carrying one guest's sound, for that guest's return feed.
 	///
-	/// It follows this mix's routing, and costs one subtraction per block
-	/// rather than a second sum. Keeps this mix alive while it lives.
-	pub fn minus(&self, strip: &Strip) -> Minus {
+	/// It follows this mix's routing, and costs one subtraction per removed
+	/// source per block rather than a second sum. A strip listed twice is
+	/// removed once. Keeps this mix alive while it lives.
+	pub fn minus<'a>(&self, strips: impl IntoIterator<Item = &'a Strip>) -> Minus {
+		// Collected before locking the mixer, since the caller's iterator may lock it.
+		let mut seen = HashSet::new();
+		let excluded: Vec<Strip> = strips
+			.into_iter()
+			.filter(|strip| seen.insert(key(strip)))
+			.cloned()
+			.collect();
 		let (id, history, level) = match self.shared.bus.upgrade() {
 			Some(bus) => {
 				let id = bus.next.fetch_add(1, Ordering::Relaxed);
@@ -789,7 +801,7 @@ impl Mix {
 				mixer.minuses.push(MinusState {
 					id,
 					parent: self.shared.slot,
-					excluded: strip.clone(),
+					excluded,
 					output,
 				});
 				(id, history, level)
@@ -830,7 +842,7 @@ impl Mix {
 	}
 }
 
-/// A mix-minus, built by [`Mix::minus`]: a mix without one of its sources.
+/// A mix-minus, built by [`Mix::minus`]: a mix without some of its sources.
 ///
 /// Cheap to clone. It ends when its last handle drops.
 #[derive(Clone)]
@@ -1426,50 +1438,48 @@ mod tests {
 		assert!(all_near(&last[1], 0.125));
 	}
 
-	/// A mix-minus is its parent without one source, and follows the parent's
-	/// routing as it changes.
+	/// A mix-minus is its parent without each of its sources, and follows the
+	/// parent's routing as it changes.
 	#[test]
-	fn a_mix_minus_drops_one_source() {
+	fn a_mix_minus_drops_its_sources() {
 		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
 		let (mut host, host_strip) = source(&bus);
-		let (mut guest, guest_strip) = source(&bus);
+		let (mut camera, camera_strip) = source(&bus);
+		let (mut screen, screen_strip) = source(&bus);
 		let (mut music, music_strip) = source(&bus);
 		let program = bus.mix();
-		for strip in [&host_strip, &guest_strip, &music_strip] {
+		for strip in [&host_strip, &camera_strip, &screen_strip, &music_strip] {
 			program.route(strip);
 		}
-		let guest_return = program.minus(&guest_strip);
+		// Listing a strip twice removes it once, and the strips may come from an
+		// iterator that reads the bus.
+		let guest_return = program.minus(
+			[&camera_strip, &screen_strip, &camera_strip]
+				.into_iter()
+				.filter(|strip| program.routes(strip)),
+		);
 		let mut minus_reader = guest_return.reader();
 		let mut program_reader = program.reader();
 
-		let mut sources = [(&mut host, 0.25), (&mut guest, 0.125), (&mut music, 0.0625)];
-		let last = feed(
-			&mut driver,
-			&mut sources,
-			&mut [&mut program_reader, &mut minus_reader],
-			20,
-		);
-		assert!(all_near(&last[0], 0.4375));
+		let mut sources = [
+			(&mut host, 0.25),
+			(&mut camera, 0.125),
+			(&mut screen, 0.03125),
+			(&mut music, 0.0625),
+		];
+		let mut readers = [&mut program_reader, &mut minus_reader];
+		let last = feed(&mut driver, &mut sources, &mut readers, 20);
+		assert!(all_near(&last[0], 0.46875));
 		assert!(all_near(&last[1], 0.3125));
 
 		program.unroute(&music_strip);
-		let last = feed(
-			&mut driver,
-			&mut sources,
-			&mut [&mut program_reader, &mut minus_reader],
-			5,
-		);
+		let last = feed(&mut driver, &mut sources, &mut readers, 5);
 		assert!(all_near(&last[1], 0.25));
 
-		// Excluding a source the parent does not route leaves the parent as is.
-		program.unroute(&guest_strip);
-		let last = feed(
-			&mut driver,
-			&mut sources,
-			&mut [&mut program_reader, &mut minus_reader],
-			5,
-		);
-		assert!(all_near(&last[0], 0.25));
+		// Excluding a source the parent does not route leaves the rest removed.
+		program.unroute(&camera_strip);
+		let last = feed(&mut driver, &mut sources, &mut readers, 5);
+		assert!(all_near(&last[0], 0.28125));
 		assert!(all_near(&last[1], 0.25));
 
 		// The mix-minus keeps its parent mixed after the parent's handle drops.
@@ -1713,7 +1723,7 @@ mod tests {
 			ready(&mut bus.mix().reader()).is_none(),
 			"a mix made after the driver ends at once"
 		);
-		assert!(ready(&mut kept.minus(&Strip::default()).reader()).is_none());
+		assert!(ready(&mut kept.minus([&Strip::default()]).reader()).is_none());
 	}
 
 	/// The bus runs on whatever clock its caller owns. Paced by `kio::clock` on

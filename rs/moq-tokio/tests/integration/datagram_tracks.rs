@@ -203,10 +203,7 @@ async fn run(relay: bool, js_publishes: bool) {
 
 		let (mut child, mut lines) = spawn("subscribe");
 		expect_line(&mut lines, "subscribed").await;
-		let mut priority = None;
-		while priority != Some(PRIORITY) {
-			priority = kio::wait(|waiter| audio.poll_priority(waiter, priority)).await;
-		}
+		while audio.priority_changed().await != Some(PRIORITY) {}
 		for (sequence, micros, payload) in AUDIO {
 			audio
 				.insert(datagram::Datagram {
@@ -241,7 +238,7 @@ async fn run(relay: bool, js_publishes: bool) {
 }
 
 #[tokio::test]
-#[ignore = "requires Bun; run by just test datagram-tracks in the interop workflow"]
+#[ignore = "JS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md"]
 async fn datagram_tracks_javascript() {
 	for relay in [false, true] {
 		for js_publishes in [false, true] {

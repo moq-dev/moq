@@ -88,6 +88,9 @@ impl Client {
 	/// deadline is the bound, and dropping the future drops the request. Every later
 	/// request for the session ([`attach`](Self::attach), revalidate, end) is bounded
 	/// on its own, since nothing else bounds it.
+	///
+	/// The end POST runs on the tokio runtime after the lease drops; await
+	/// [`reported`](lease::Consumer::reported) before shutting the runtime down.
 	pub async fn connect(&self, request: Request) -> crate::Result<lease::Consumer> {
 		if request.auth.is_some() {
 			return Err(Error::Refused(Default::default()));
@@ -97,6 +100,8 @@ impl Client {
 	}
 
 	/// Verify another credential for this connection and report its own end when it closes.
+	///
+	/// Like [`connect`](Self::connect), the end POST needs the runtime alive after the lease drops.
 	pub async fn attach(&self, connection: &lease::Consumer, request: Request) -> crate::Result<lease::Consumer> {
 		let context = connection.context().ok_or(Error::Refused(Default::default()))?;
 		let context = context.attach(&request, &self.identity)?;
@@ -357,6 +362,8 @@ async fn admit<S: Post>(server: S, mut request: Request, context: Context) -> cr
 		producer: Some(producer),
 		started: Instant::now(),
 	};
+	// Spawned rather than returned: reqwest already needs a tokio runtime, and the driver must
+	// outlive the session to report its end.
 	tokio::spawn(driver.run());
 
 	Ok(consumer)

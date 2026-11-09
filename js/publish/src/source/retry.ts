@@ -33,15 +33,8 @@ export class Retry {
 	readonly #rerun = new Signal(0);
 
 	// Deliberately plain fields: effect reruns must not unwind them, or the budget never runs out.
-	#failures = 0;
 	#settings: unknown[] | undefined;
-	#delay = Retry.DELAY.initial;
-
-	// How long the next attempt still owes the backoff, set by `failed` and paid by `begin`.
-	#wait: DOMHighResTimeStamp | undefined;
-
-	// The cause of the latest failure. Only surfaced once the budget is spent, so a retry stays quiet.
-	#error: Error | undefined;
+	#state: State = fresh();
 
 	/**
 	 * Subscribe the capture effect and report whether an attempt is worth making right now.
@@ -60,14 +53,15 @@ export class Retry {
 
 		if (settings.some((setting, i) => setting !== this.#settings?.[i])) {
 			this.#settings = settings;
-			this.#clear();
+			this.#state = fresh();
 		}
 
-		if (this.#failures > Retry.LIMIT) return false;
+		const state = this.#state;
+		if (state.kind === "spent") return false;
 
-		const wait = this.#wait;
+		const wait = state.wait;
 		if (wait !== undefined) {
-			this.#wait = undefined;
+			this.#state = { ...state, wait: undefined };
 			effect.timer(() => this.#rerun.update((rerun) => rerun + 1), Nano.fromMilli(Milli(wait)));
 			return false;
 		}
@@ -77,14 +71,17 @@ export class Retry {
 
 	/** Spends budget and reruns the effect, returning whether another attempt is allowed. */
 	failed(error: Error): boolean {
-		this.#error = error;
-		this.#failures += 1;
-		const retry = this.#failures <= Retry.LIMIT;
-		// Equal jitter, so a page with several captures doesn't reopen them all on the same tick.
-		this.#wait = retry ? this.#delay * (0.5 + Math.random() / 2) : undefined;
-		this.#delay = Math.min(this.#delay * Retry.DELAY.multiplier, Retry.DELAY.max);
+		const state = this.#state;
+		if (state.kind === "trying" && state.failures < Retry.LIMIT) {
+			// Equal jitter, so a page with several captures doesn't reopen them all on the same tick.
+			const wait = state.delay * (0.5 + Math.random() / 2);
+			const delay = Math.min(state.delay * Retry.DELAY.multiplier, Retry.DELAY.max);
+			this.#state = { kind: "trying", failures: state.failures + 1, delay, wait };
+		} else {
+			this.#state = { kind: "spent", error };
+		}
 		this.#rerun.update((rerun) => rerun + 1);
-		return retry;
+		return this.#state.kind === "trying";
 	}
 
 	/**
@@ -92,8 +89,7 @@ export class Retry {
 	 * Undefined while another attempt is allowed, including during backoff.
 	 */
 	spent(): Error | undefined {
-		if (this.#failures <= Retry.LIMIT) return undefined;
-		return this.#error;
+		return this.#state.kind === "spent" ? this.#state.error : undefined;
 	}
 
 	/** Spend budget because the track ended. Reported via {@link spent} once nothing remains. */
@@ -112,23 +108,17 @@ export class Retry {
 		if (cause.name === "NotReadableError" || cause.name === "AbortError") {
 			return this.failed(cause);
 		}
-		this.#error = cause;
-		this.terminal();
-		return false;
-	}
-
-	/** Stop attempting this capture until its settings, device list, or permission changes. */
-	terminal(): void {
-		this.#failures = Retry.LIMIT + 1;
-		this.#wait = undefined;
+		// Stop attempting this capture until its settings, device list, or permission changes.
+		this.#state = { kind: "spent", error: cause };
 		this.#rerun.update((rerun) => rerun + 1);
+		return false;
 	}
 
 	/** The attempt produced a live track. Reruns the effect if it dies. */
 	succeeded(effect: Effect, track: MediaStreamTrack): void {
 		effect.timer(
 			() => {
-				this.#clear();
+				this.#state = fresh();
 			},
 			Nano.fromMilli(Milli(Retry.SETTLED)),
 		);
@@ -138,17 +128,23 @@ export class Retry {
 
 	/** Refund the budget, because something changed that makes another attempt worth trying. */
 	refund(): void {
-		if (this.#failures === 0 && this.#wait === undefined) return;
+		const state = this.#state;
+		if (state.kind === "trying" && state.failures === 0 && state.wait === undefined) return;
 
-		this.#clear();
+		this.#state = fresh();
 		this.#rerun.update((rerun) => rerun + 1);
 	}
+}
 
-	/** Forget the failures so far, along with the pause they earned. */
-	#clear(): void {
-		this.#failures = 0;
-		this.#wait = undefined;
-		this.#delay = Retry.DELAY.initial;
-		this.#error = undefined;
-	}
+// Where a capture's budget stands. Its cause is kept only once spent, so a retry stays quiet.
+type State =
+	// Attempts allowed: the failures so far, the next backoff, and the pause the next attempt still
+	// owes, set by `failed` and paid by `begin`.
+	| { kind: "trying"; failures: number; delay: number; wait?: DOMHighResTimeStamp }
+	// Out of budget until the settings, device list, or permission change.
+	| { kind: "spent"; error: Error };
+
+// No failures, and none of the pause they earn.
+function fresh(): State {
+	return { kind: "trying", failures: 0, delay: Retry.DELAY.initial };
 }

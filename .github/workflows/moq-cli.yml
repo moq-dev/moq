@@ -22,6 +22,9 @@ jobs:
     with:
       crate: moq-cli
       bin: moq
+      # armv7 serves boards running a 32-bit OS, whose SoC codecs v4l2 reaches.
+      linux-targets: '["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "armv7-unknown-linux-gnueabihf"]'
+      linux-features: v4l2
     permissions:
       contents: write
       actions: write

@@ -53,7 +53,7 @@ pub(crate) struct Inner {
 }
 
 pub(crate) struct State {
-	pub(crate) active: Option<moq_net::server::Active>,
+	pub(crate) active: Option<moq_net::server::Admitted>,
 	/// Wakes the driver when the endpoint fed the connection (a received
 	/// datagram, an unreachable peer) so it answers and re-arms its timers, or
 	/// failed it from outside. Handles need no wake of their own: whatever
@@ -350,17 +350,6 @@ impl Connection {
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let conn = self.shared.conn.borrow();
 		moq_net::transport::ReceiveWindow::new(conn.receive_window(), conn.stream_receive_window())
-	}
-
-	/// The peer's stream credit in `dir`, as this connection last heard it.
-	pub(crate) fn stream_credit(&self, dir: moq_net::transport::Dir) -> moq_net::transport::StreamCredit {
-		let dir = match dir {
-			moq_net::transport::Dir::Uni => Dir::Uni,
-			moq_net::transport::Dir::Bi => Dir::Bi,
-		};
-		let mut conn = self.shared.conn.borrow_mut();
-		let streams = conn.streams();
-		moq_net::transport::StreamCredit::new(streams.credit(dir), streams.blocked(dir))
 	}
 }
 
@@ -722,6 +711,8 @@ impl Driver {
 			// connection after this turn's checks still re-polls us.
 			waiter.register(&mut state.driver);
 		}
+		// Every packet this turn seals pays one DIT toggle rather than one per rind call.
+		let _dit = moq_crypto::cpu::Dit::hold();
 
 		loop {
 			self.endpoint_events();

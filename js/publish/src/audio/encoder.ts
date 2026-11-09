@@ -13,6 +13,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
+import { hosted } from "../assets";
 import type { Broadcast } from "../broadcast";
 import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
@@ -136,7 +137,7 @@ export type EncoderOutput = {
 	// source that isn't a track.
 	root: Signal<AudioNode | undefined>;
 	// True while encoding capture: enabled and unmuted with a captured format and a track, which also
-	// takes a subscriber unless the broadcast's `onDemand` is false. Retained audio encoded for a
+	// takes a subscriber unless the broadcast's `onDemand` is `"off"`. Retained audio encoded for a
 	// subscriber while paused does not count.
 	active: Signal<boolean>;
 	// Cumulative output totals (frames, bytes) measured while serving, and the target bitrate.
@@ -156,7 +157,7 @@ type Pipeline = {
  *
  * Registers itself on the {@link Broadcast} under {@link name} (via `broadcast.audio(name)`), pumps PCM
  * off the source via a {@link Capture}, and retains raw PCM while enabled. A subscriber triggers encoding of that history followed by
- * live audio; leaving resumes buffering without ending the epoch. The broadcast's `onDemand: false`
+ * live audio; leaving resumes buffering without ending the epoch. The broadcast's `onDemand: "off"`
  * keeps encoding continuously instead. Rename by constructing a new encoder; the name is not a signal.
  */
 export class Encoder {
@@ -268,13 +269,10 @@ export class Encoder {
 	#slot = new Signal<Slot<Catalog.AudioConfig> | undefined>(undefined);
 	// The slot while no network broadcast is serving the rendition.
 	#local = new Slot<Catalog.AudioConfig>();
-	// Whether the rendition was disabled since a config last resolved, so it keeps advertising its last
-	// config as disabled until the re-enabled capture resolves a new one. A capture that never reopens
-	// leaves it disabled, which is accurate: no frames are coming.
-	#paused = false;
-	// Whether it was muted since a config last resolved, so it keeps advertising its last config,
-	// enabled, while a released capture is closed and until the reopened one resolves.
-	#muted = false;
+	// Whether the rendition was disabled or muted since a config last resolved, so it keeps advertising
+	// its last config until a new one resolves. Whether that config reads as enabled follows the
+	// current knobs alone, never how the gap began.
+	#held = false;
 
 	constructor(name: string, props?: EncoderProps) {
 		// `source` moved to Audio.Capture, which renditions share. TypeScript catches this, but a
@@ -486,7 +484,7 @@ export class Encoder {
 			// the current subscriber and every later one get it rather than a track that stays silent.
 			const fatal = effect.get(this.#out.error);
 
-			const onDemand = effect.get(broadcast.in.onDemand) ?? true;
+			const onDemand = effect.get(broadcast.in.onDemand) !== "off";
 			const demanded = !!track && effect.get(track.demand().wanted) !== undefined;
 			// Demand from fetches alone carries no subscription, so no budget beyond the retention.
 			const max = track && effect.get(track.subscription)?.delay?.max;
@@ -572,7 +570,7 @@ export class Encoder {
 		const superseded = effect.abort;
 		effect.spawn(async () => {
 			try {
-				await Util.Libav.polyfill();
+				await Util.Libav.polyfill(hosted.url);
 				if (superseded.aborted) return;
 				let description: Catalog.Hex | undefined;
 				let failure: Error | undefined;
@@ -629,23 +627,24 @@ export class Encoder {
 		effect.cleanup(() => this.#failures.update((n) => n - 1));
 	}
 
-	// Publish the probed config before the first frame reaches the track. A disabled rendition keeps its
-	// last config, since a disable may also release the capture, and stays disabled after re-enabling
-	// until the reopened capture reports its format. A muted one keeps it enabled throughout.
+	// Publish the probed config before the first frame reaches the track. A disabled or muted rendition
+	// keeps its last config, since either may also release the capture. It reads as enabled only while
+	// muted, which keeps subscribers attached for the next word; otherwise nothing is coming until the
+	// reopened capture reports its format, so a capture that never reopens leaves it disabled.
 	#runCatalog(effect: Effect): void {
 		const estimate = effect.get(this.#estimate);
 		const enabled = effect.get(this.in.enabled) && !effect.get(this.#out.error);
+		const muted = effect.get(this.muted);
 		const slot = this.#current(effect);
-		if (!enabled) this.#paused = true;
-		if (effect.get(this.muted)) this.#muted = true;
+		if (!enabled || muted) this.#held = true;
 		const config = enabled ? effect.get(this.#config)?.catalog : undefined;
 		if (!config) {
-			const last = this.#paused || this.#muted ? slot.last : undefined;
-			effect.set(this.#out.catalog, last && { ...last, ...estimate, ...(this.#paused && { enabled: false }) });
+			const last = this.#held ? slot.last : undefined;
+			const stillEnabled = enabled && muted;
+			effect.set(this.#out.catalog, last && { ...last, ...estimate, ...(!stillEnabled && { enabled: false }) });
 			return;
 		}
-		this.#paused = false;
-		this.#muted = false;
+		this.#held = false;
 
 		// The catalog bitrate is the most this track has been configured for, so lowering the knob
 		// retunes the encoder without lowering what the catalog advertises.
@@ -696,7 +695,7 @@ export class Encoder {
 		effect.cleanup(() => order.leave(this.#estimator));
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
-			await Util.Libav.polyfill();
+			await Util.Libav.polyfill(hosted.url);
 
 			effect.run((effect: Effect) => {
 				const aborted = effect.abort;

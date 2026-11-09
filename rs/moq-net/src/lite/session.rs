@@ -415,7 +415,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			.then(|| SendSetup::new(session.clone(), our_setup, version, stats.clone())),
 		goaway: Some(SendGoaway::new(session.clone(), goaway, version, stats.clone())),
 		session_stream: setup_stream.map(|stream| stream.with_stats(&stats)),
-		ending: None,
+		ended: None,
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber, early, client),
 		session,
@@ -448,8 +448,8 @@ pub(crate) struct Driver {
 	/// The legacy session stream (pre-lite-03). Only its *error* ends the race, so
 	/// the publisher and subscriber keep running while it sits idle.
 	session_stream: Option<Stream<Transport, Version>>,
-	/// The first terminal outcome, retained while received streams drain.
-	ending: Option<Result<(), Error>>,
+	/// How the session ended, once it did: received streams drain, then this is the result.
+	ended: Option<Result<(), Error>>,
 	publisher: Publisher,
 	subscriber: SubscriberDriver,
 	/// For the terminal close: the machine's last act reports the outcome to
@@ -462,39 +462,18 @@ pub(crate) struct Driver {
 
 impl Driver {
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if self.ending.is_none() {
-			let res = std::task::ready!(self.poll_protocol(waiter));
-			self.auth.handle.close(match &res {
-				Ok(()) => Error::Cancel,
-				Err(err) => err.clone(),
-			});
-			match &res {
-				Err(err @ (Error::Transport(_) | Error::IdleTimeout)) => {
-					tracing::info!("session terminated");
-					self.session.abort(err, SessionError::Internal.to_code(), "");
-				}
-				Err(err) => {
-					tracing::warn!(%err, "session error");
-					self.session.abort(
-						err,
-						crate::lite::error::to_session_code(&SessionError::from(err)),
-						err.to_string().as_ref(),
-					);
-				}
-				_ => {
-					tracing::info!("session closed");
-					self.session.abort(&Error::Cancel, SessionError::Cancel.to_code(), "");
-				}
+		let res = match &self.ended {
+			Some(res) => res.clone(),
+			None => {
+				let res = std::task::ready!(self.poll_protocol(waiter));
+				self.end(res)
 			}
-			self.ending = Some(res);
-			self.withholding = None;
-		}
+		};
 		// Closing the transport first bounds every read, including when a control
 		// stream ended the protocol while the connection itself was still live.
 		// Keep control machines and their subscription entries until data drains,
 		// whichever side closed it.
 		std::task::ready!(self.subscriber.poll_drain(waiter));
-		let res = self.ending.take().expect("draining a terminal session");
 		// A clean close, by dropping or draining here or by the peer, cuts off what is
 		// still arriving with the cancelled session either way.
 		self.subscriber.abort(match &res {
@@ -502,6 +481,35 @@ impl Driver {
 			_ => &Error::Session(SessionError::Cancel),
 		});
 		Poll::Ready(res)
+	}
+
+	/// Close the transport over the protocol's result `res`, which ends the session.
+	fn end(&mut self, res: Result<(), Error>) -> Result<(), Error> {
+		self.auth.handle.close(match &res {
+			Ok(()) => Error::Cancel,
+			Err(err) => err.clone(),
+		});
+		match &res {
+			Err(err @ (Error::Transport(_) | Error::IdleTimeout)) => {
+				tracing::info!("session terminated");
+				self.session.abort(err, SessionError::Internal.to_code(), "");
+			}
+			Err(err) => {
+				tracing::warn!(%err, "session error");
+				self.session.abort(
+					err,
+					crate::lite::error::to_session_code(&SessionError::from(err)),
+					err.to_string().as_ref(),
+				);
+			}
+			_ => {
+				tracing::info!("session closed");
+				self.session.abort(&Error::Cancel, SessionError::Cancel.to_code(), "");
+			}
+		}
+		self.ended = Some(res.clone());
+		self.withholding = None;
+		res
 	}
 
 	/// Start withdrawing this session's announcements.

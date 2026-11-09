@@ -17,6 +17,8 @@ import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
+const INFO: track.Info = { compression: "none", timescale: null, maxAge: null, priority: 0, refresh: null };
+
 const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
 const path = Path.from("live");
 const enc = new TextEncoder();
@@ -541,7 +543,7 @@ test("a resumed fork shares an on-demand track request", async () => {
 test("a lagging same-instance replica resumes from one publisher's bytes exactly once", async () => {
 	const { clock, installed } = manual();
 	const publisher = new Producer();
-	const originalRoute = publisher.route(path, { instance: INSTANCE });
+	const originalRoute = publisher.route(path, { instance: { id: INSTANCE, epoch: 0n } });
 	const original = originalRoute.broadcast;
 	const source = original.createTrack("seq", { maxAge: null });
 	const origin = new Producer();
@@ -1833,7 +1835,7 @@ test("a front serving another front reports the inner serving route's drop", asy
 
 for (const [field, first, second] of [
 	["priority", { priority: 1 }, { priority: 2 }],
-	["compression", { compress: true }, { compress: false }],
+	["compression", { compression: "deflate" }, { compression: "none" }],
 	["refresh", { refresh: 4 }, {}],
 ] as const) {
 	test(`track info keeps one ${field} answer across routes`, async () => {
@@ -3267,7 +3269,7 @@ test.each(["handed out", "buffered"])("an end below a group another copy %s leav
 test.each([
 	["fails", (answer: Lister) => answer.abort(new Error("old route failed"))],
 	["ends", (answer: Lister) => answer.end()],
-	["changes", (answer: Lister) => answer.add("gone", { priority: 0 })],
+	["changes", (answer: Lister) => answer.add("gone", INFO)],
 ])("a listing follows the source that took over as the old one's listing %s", async (_, end) => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -3309,8 +3311,8 @@ test("a concluded front's listing keeps its closed source's finishes", async () 
 	const a = new BroadcastProducer();
 	const from = a.consume();
 	const answer = wireOf(from).lister();
-	answer.add("seq", { priority: 0 });
-	answer.add("live", { priority: 0 });
+	answer.add("seq", INFO);
+	answer.add("live", INFO);
 	answer.synced();
 	front.serve(from);
 	const tracks = front.consumer.tracks();

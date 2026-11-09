@@ -104,6 +104,13 @@ export const METRICS = {
 		description:
 			"The player's own count, which its stats panel shows: each time the ring ran dry mid-playback and re-stalled to refill, plus each quantum it filled only part-way. `underruns` leaves out the run-dry ones, since the quanta after them render while stalled.",
 	},
+	player_skips: {
+		unit: "count",
+		clock: "render",
+		aggregations: ["total", "per_min"],
+		description:
+			"The player's own count of skips: each jump that dropped buffered audio rather than playing it faster. `skip_aheads` infers them from the playhead, which reads a sustained time stretch as one too.",
+	},
 	skip_aheads: {
 		unit: "count",
 		clock: "viewer",
@@ -118,6 +125,19 @@ export const METRICS = {
 		description:
 			"Media time the skip-aheads jumped over without playing. Audio dropped before it reached the ring moves no playhead and is not counted.",
 	},
+	trimmed_ms: {
+		unit: "ms",
+		clock: "media",
+		aggregations: ["total", "per_min"],
+		description:
+			"The player's own count of media its skips dropped unplayed. Unlike `discarded_ms`, a time stretch's accelerate is not in it.",
+	},
+	accelerated_ms: {
+		unit: "ms",
+		clock: "media",
+		aggregations: ["total", "per_min"],
+		description: "The player's own count of media its time stretch removed by playing faster.",
+	},
 	stalled: {
 		unit: "share",
 		clock: "viewer",
@@ -131,6 +151,13 @@ export const METRICS = {
 		aggregations: ["share"],
 		description:
 			"Share of rendered quanta under the silence floor at the player's output, whatever the cause. The published tone is never quiet, so any of it is a gap or a stall.",
+	},
+	av_lag_ms: {
+		unit: "ms",
+		clock: "media",
+		aggregations: ["p50", "p95"],
+		description:
+			"How far the audio playhead trails the shared clock video plays from (`sync.now()`), sampled while playing: latency audio adds beyond the resolved target. Negative is audio ahead. Unset natively.",
 	},
 	target_ms: {
 		unit: "ms",
@@ -383,6 +410,8 @@ export type Sample = {
 	 * is only a sink with nothing written yet, or none at all.
 	 */
 	stalled?: boolean;
+	/** `sync.now()`: where the shared clock puts video, on the `media` clock. Unset natively. */
+	clock?: Ms;
 	/** `sync.out.delay`: the resolved playout target. Natively, the target the speaker is held on. */
 	delay?: Ms;
 	/**
@@ -390,6 +419,16 @@ export type Sample = {
 	 * Unset natively.
 	 */
 	playerUnderruns?: number;
+	/**
+	 * `audio.out.stats.skips`, cumulative: the player's own count of jumps that dropped buffered audio
+	 * rather than playing it faster. Natively, each trim of the ring, skip at the stretch's fast
+	 * threshold, or write a full ring refused.
+	 */
+	playerSkips?: number;
+	/** `audio.out.stats.trimmed`, cumulative: the media those skips dropped unplayed. */
+	trimmed?: Ms;
+	/** `audio.out.stats.accelerated`, cumulative: media the time stretch removed by playing faster. */
+	accelerated?: Ms;
 	/** The current connection PROBE round trip. */
 	rtt?: Ms;
 	/** The selected rendition's advertised jitter at this sample. */

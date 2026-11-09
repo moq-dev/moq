@@ -21,11 +21,11 @@ are fetched from the store on request, and a growing archive is followed until
 its producer marks it complete.
 
 ```bash
-cargo add moq-archive
+cargo add moq-archive object_store
 ```
 
 ```rust
-use moq_archive::object_store::memory::InMemory;
+use object_store::memory::InMemory;
 
 // `broadcast` is a `moq_net::broadcast::Consumer`.
 let store = moq_archive::Store::new(InMemory::new(), "recordings/demo");

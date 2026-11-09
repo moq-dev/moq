@@ -270,3 +270,25 @@ test("a disable and re-enable reuse the decoder support verdict and publish the 
 		source.close();
 	}
 });
+
+test("defaults to the decoder's probe when no supported input is given", async () => {
+	// Present both globals so the libav polyfill stays unloaded and the probe reaches this stub.
+	const globals = globalThis as unknown as Record<string, unknown>;
+	const original = { AudioDecoder: globals.AudioDecoder, AudioEncoder: globals.AudioEncoder };
+	globals.AudioEncoder = {};
+	globals.AudioDecoder = {
+		isConfigSupported: async (c: AudioDecoderConfig) => ({ supported: c.codec === "opus", config: c }),
+	};
+	const source = new Source({ broadcast: broadcast({ rejected: config("flac"), mic: config("opus") }).broadcast });
+	try {
+		await settled(source);
+		expect(Object.keys(source.out.available.peek())).toEqual(["mic"]);
+		expect(source.out.track.peek()).toBe("mic");
+	} finally {
+		source.close();
+		for (const [name, value] of Object.entries(original)) {
+			if (value === undefined) delete globals[name];
+			else globals[name] = value;
+		}
+	}
+});

@@ -22,11 +22,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use moq_auth::{Event, Grant, Pattern, Patterns, Request};
+use moq_net::stats;
 #[cfg(feature = "websocket")]
 use moq_relay::web;
 use moq_relay::{Config, Connection, Relay, auth, cluster};
-use moq_tokio::moq_net;
-use moq_tokio::moq_net::stats;
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -687,7 +686,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	// Each label's (active sessions, sent bytes, received bytes), from one report.
 	let labels = || {
 		let mut report = stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, moq_net::time::Instant::now());
 		report
 			.sessions
 			.into_iter()
@@ -1221,10 +1220,8 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 			Some(registration),
 		)));
 	}
-	assert_eq!(
-		observer.changed().await,
-		moq_relay::shutdown::Tally { open: 2, ending: 0 }
-	);
+	let tally = observer.changed().await;
+	assert_eq!((tally.open, tally.ending), (2, 0));
 	for view in registry.list(&Default::default()) {
 		assert_eq!(view.closed, None);
 		assert!(serde_json::to_value(view).unwrap().get("closed").is_none());
@@ -1233,7 +1230,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 	trigger.start();
 	let started = kio::clock::now();
 	for client in &clients {
-		kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| client.draining().poll(waiter)))
+		kio::clock::timeout(TIMEOUT, kio::wait(|waiter| client.draining().poll(waiter)))
 			.await
 			.expect("GOAWAY timeout")
 			.expect("a GOAWAY");
@@ -1242,10 +1239,8 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 	let closed = kio::clock::wall();
 	clients[0].abort(moq_net::Error::Cancel);
 	script.ends_at_least(1, "first end").await;
-	assert_eq!(
-		observer.changed().await,
-		moq_relay::shutdown::Tally { open: 1, ending: 1 }
-	);
+	let tally = observer.changed().await;
+	assert_eq!((tally.open, tally.ending), (1, 1));
 	let views = registry.list(&Default::default());
 	assert_eq!(views.iter().filter(|view| view.closed == Some(closed)).count(), 1);
 	let view = views.iter().find(|view| view.closed.is_some()).unwrap();
@@ -1259,10 +1254,8 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 	});
 	clock.advance(drain_timeout - Duration::from_secs(1));
 	script.ends_at_least(2, "deadline end").await;
-	assert_eq!(
-		observer.changed().await,
-		moq_relay::shutdown::Tally { open: 0, ending: 2 }
-	);
+	let tally = observer.changed().await;
+	assert_eq!((tally.open, tally.ending), (0, 2));
 	assert!(
 		!drained.is_finished(),
 		"drain ended before the server answered the ends"
@@ -1280,12 +1273,8 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 		supervised.await.expect("supervisor task").expect("drained session");
 	}
 	assert_eq!(
-		summary,
-		moq_relay::shutdown::Drained {
-			forced: 1,
-			ending: 1,
-			elapsed: Duration::from_secs(6),
-		}
+		(summary.forced, summary.ending, summary.elapsed),
+		(1, 1, Duration::from_secs(6))
 	);
 	assert_eq!(observer.tally(), Default::default());
 	assert!(registry.list(&Default::default()).is_empty());
@@ -1696,7 +1685,8 @@ async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::le
 	)]
 	let parked = tokio::time::timeout(Duration::from_secs(1), client.closed()).await;
 	assert!(parked.is_err(), "the paused driver closed the transport");
-	assert_eq!(observer.tally(), moq_relay::shutdown::Tally { open: 1, ending: 0 });
+	let tally = observer.tally();
+	assert_eq!((tally.open, tally.ending), (1, 0));
 	let views = registry.list(&Default::default());
 	assert_eq!(views.len(), 1, "registration left before its transport closed");
 	assert_eq!(views[0].closed, None);
@@ -2114,7 +2104,7 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 			let script = Script::new(grant);
 			let auth = build_auth(script.spawn().await);
 			let mut options = cluster::Options::default();
-			options.session.announces = 1;
+			options.client.announces = 1;
 			options.peer.announces = 2;
 			let cluster = crate::spawn_cluster(options);
 			let consumer = cluster.origin.consume();

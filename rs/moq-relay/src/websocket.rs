@@ -1,9 +1,9 @@
 use bytes::Bytes;
 use hyper_util::rt::TokioIo;
-use qmux::ws::tokio_tungstenite::WebSocketStream;
-use qmux::ws::tungstenite::{self, protocol::Role};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::{self, protocol::Role};
 
 use axum::{
 	extract::{ConnectInfo, Extension, OriginalUri, Request, State},
@@ -41,7 +41,7 @@ pub(crate) async fn serve_ws(
 	// upgrade enters here; after the drain commits, it receives 503 instead.
 	let active = admission
 		.and_then(|Extension(admission)| admission.take())
-		.or_else(|| state.shutdown.activity.enter())
+		.or_else(|| state.shutdown.admission.enter())
 		.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 	let protocol = negotiate_subprotocol(request.headers(), &versions)?;
 
@@ -286,9 +286,9 @@ mod tests {
 
 	#[test]
 	fn supported_subprotocols_lists_full_matrix() {
-		let drafts: Vec<_> = [0xff000012, 0xff000014, 0xff000016]
+		let drafts: Vec<_> = ["moq-transport-18", "moq-transport-20", "moq-transport-22"]
 			.into_iter()
-			.map(|code| moq_net::Version::from_code(code).unwrap().alpn())
+			.map(|name| name.parse::<moq_net::Version>().unwrap().alpn())
 			.collect();
 
 		let list = supported_subprotocols(&moq_net::Versions::all());
@@ -692,13 +692,13 @@ mod tests {
 		let (server_to_client, client_incoming) = mpsc::unbounded_channel();
 		let frozen = Arc::new(AtomicBool::new(false));
 
-		let activity = moq_net::server::Activity::default();
+		let admission = moq_net::server::Admission::default();
 		let mut options = moq_tokio::websocket::Options::new(
 			"ws://localhost/".parse().unwrap(),
 			moq_net::Server::new()
 				.with_versions(moq_net::Versions::all())
 				.with_timeout(None),
-			activity.enter().unwrap(),
+			admission.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
 		let server = tokio::spawn(moq_tokio::websocket::accept(
@@ -746,13 +746,13 @@ mod tests {
 		let (server_to_client, client_incoming) = mpsc::unbounded_channel();
 		let timeout = Duration::from_secs(10);
 
-		let activity = moq_net::server::Activity::default();
+		let admission = moq_net::server::Admission::default();
 		let mut options = moq_tokio::websocket::Options::new(
 			"ws://localhost/".parse().unwrap(),
 			moq_net::Server::new()
 				.with_versions(moq_net::Versions::all())
 				.with_timeout(Some(timeout)),
-			activity.enter().unwrap(),
+			admission.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
 		let start = kio::clock::now();

@@ -21,7 +21,7 @@ fn main() {
 		for payload_bytes in [1_024, 65_536] {
 			let frames: Vec<_> = (0..300)
 				.map(|index| moq_mux::container::Frame {
-					timestamp: hang::moq_net::Timestamp::from_millis(index * 33).unwrap(),
+					timestamp: moq_net::Timestamp::from_millis(index * 33).unwrap(),
 					duration: None,
 					payload: bytes::Bytes::from(vec![128; payload_bytes]),
 					keyframe: index % 30 == 0,

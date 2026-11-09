@@ -126,6 +126,12 @@ pub(super) struct Entry {
 	applied: f32,
 	/// [`ring::Consumer::comfort`] as of the last read.
 	comfort: u64,
+	/// [`ring::Consumer::skips`] as of the last read.
+	skips: u64,
+	/// [`ring::Consumer::trimmed`] as of the last read.
+	trimmed: u64,
+	/// [`ring::Consumer::accelerated`] as of the last read.
+	accelerated: u64,
 }
 
 /// Something the audio thread is done with and must not free itself.
@@ -256,6 +262,9 @@ impl Mixer {
 					let entry = Entry {
 						id,
 						comfort: cons.comfort(),
+						skips: cons.skips(),
+						trimmed: cons.trimmed(),
+						accelerated: cons.accelerated(),
 						cons,
 						gain,
 						completion,
@@ -327,6 +336,8 @@ impl Mixer {
 			let mut tail = 0;
 			// The most comfort noise any sink still being written played.
 			let mut comfort = 0;
+			// What those sinks discarded, summed.
+			let (mut skips, mut trimmed, mut accelerated) = (0, 0, 0);
 
 			for entry in entries.iter_mut() {
 				// Read even at zero volume: this is live audio, so a muted sink
@@ -345,6 +356,17 @@ impl Mixer {
 				};
 				let comforted = entry.cons.comfort();
 				let filled = comforted - std::mem::replace(&mut entry.comfort, comforted);
+				let jumps = entry.cons.skips();
+				let jumps = jumps - std::mem::replace(&mut entry.skips, jumps);
+				let cut = entry.cons.trimmed();
+				let cut = cut - std::mem::replace(&mut entry.trimmed, cut);
+				let sped = entry.cons.accelerated();
+				let sped = sped - std::mem::replace(&mut entry.accelerated, sped);
+				if entry.completion.writing() {
+					skips += jumps;
+					trimmed += cut as usize;
+					accelerated += sped as usize;
+				}
 				match read {
 					Some(read) if entry.completion.writing() => {
 						playing = true;
@@ -383,6 +405,7 @@ impl Mixer {
 				(playing, supplied) = (true, tail);
 			}
 			ledger.add(&bus[..samples], channels, supplied, playing, comfort);
+			ledger.shed(skips, trimmed, accelerated);
 
 			// Tap the mix on its way out. Overflow means the microphone stopped
 			// draining, which the canceller notices on its own; there is nothing
@@ -917,5 +940,30 @@ mod tests {
 			"{:?}, want {played} frames",
 			observation.comfort
 		);
+	}
+
+	/// A queue trimmed back to its latency is reported as discarded audio,
+	/// distinct from what the stretch sheds.
+	#[test]
+	fn a_trim_is_timed_as_discarded_audio() {
+		let mut harness = Harness::new(Layout::Stereo);
+		let mut observer = observe::Observer::new(harness.observe.clone()).unwrap();
+		let mut out = vec![0.0f32; 512 * STEREO];
+
+		let (_, mut prod) = harness.add(Arc::new(Gain::new()));
+		harness.fill(&mut out[..STEREO]);
+		// Past three quarters of the second of headroom above the 10 ms latency.
+		push(&mut prod, 0.5, 40_000);
+		harness.fill(&mut out);
+
+		let observation = observer.read().unwrap();
+		// The 10 ms prime and the push, less the buffer read and the latency kept.
+		let trimmed = 480 + 40_000 - 512 - 480;
+		assert_eq!(
+			observation.trimmed,
+			Duration::from_secs_f64(trimmed as f64 / RATE as f64)
+		);
+		assert_eq!(observation.skips, 1);
+		assert_eq!(observation.accelerated, Duration::ZERO);
 	}
 }

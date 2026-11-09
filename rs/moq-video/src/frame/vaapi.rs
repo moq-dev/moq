@@ -111,11 +111,11 @@ pub(crate) fn device(codec: Codec) -> Option<&'static Path> {
 pub(crate) fn import(buffer: &DmaBuf) -> Result<(VaapiDmaBuf, DmaBufExport), Error> {
 	let export = buffer
 		.export()
-		.map_err(|e| Error::Codec(anyhow::anyhow!("export a DMA-BUF for VA-API: {e}")))?;
+		.map_err(|e| Error::codec(anyhow::anyhow!("export a DMA-BUF for VA-API: {e}")))?;
 	let fd: OwnedFd = export
 		.as_fd()
 		.try_clone_to_owned()
-		.map_err(|e| Error::Codec(anyhow::anyhow!("duplicate a DMA-BUF descriptor: {e}")))?;
+		.map_err(|e| Error::codec(anyhow::anyhow!("duplicate a DMA-BUF descriptor: {e}")))?;
 	let descriptor = VaapiDmaBuf {
 		drm_format: buffer.format().as_raw(),
 		modifier: buffer.modifier(),
@@ -229,10 +229,10 @@ pub(crate) fn resize(buffer: &DmaBuf, size: Size) -> Result<DmaBuf, Error> {
 		drop(lease);
 		resized.map_err(|e| {
 			REFUSED.with(|refused| refused.borrow_mut().insert(key));
-			Error::Codec(e.context("scale a DMA-BUF with the VA-API video processor"))
+			Error::codec(e.context("scale a DMA-BUF with the VA-API video processor"))
 		})
 	})?;
-	adopt(exported, label).map_err(Error::Codec)
+	adopt(exported, label).map_err(Error::codec)
 }
 
 /// Describes an exported picture as a [`DmaBuf`]: the driver's format modifier,
@@ -338,7 +338,7 @@ impl DmaBufFrame for Exported {
 		let frame = self.frame.lock().expect("poisoned");
 		let nv12 = frame
 			.download()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("read a VA-API surface back: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("read a VA-API surface back: {e:?}")))?;
 		let i420 = I420::from_nv12(&nv12.data, crate::Size::new(nv12.width, nv12.height))?;
 		Ok(match self.color {
 			Some(color) => i420.with_color(color),

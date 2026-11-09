@@ -15,8 +15,8 @@ pub enum RefusalKind {
 	Request,
 	/// The grant covers none of the requested operations.
 	Forbidden,
-	/// The LAN membership proof was missing or invalid.
-	Lan,
+	/// A membership proof was missing or invalid.
+	Membership,
 	/// The verified credential expired before admission.
 	Expired,
 }
@@ -28,7 +28,7 @@ impl RefusalKind {
 		Self::Unavailable,
 		Self::Request,
 		Self::Forbidden,
-		Self::Lan,
+		Self::Membership,
 		Self::Expired,
 	];
 	/// The stable stats and metrics name.
@@ -38,7 +38,7 @@ impl RefusalKind {
 			Self::Unavailable => "unavailable",
 			Self::Request => "request",
 			Self::Forbidden => "forbidden",
-			Self::Lan => "lan",
+			Self::Membership => "membership",
 			Self::Expired => "expired",
 		}
 	}
@@ -57,8 +57,8 @@ pub struct Refusals {
 	pub request: u64,
 	/// The grant covers none of the requested operations.
 	pub forbidden: u64,
-	/// The LAN membership proof was missing or invalid.
-	pub lan: u64,
+	/// A membership proof was missing or invalid.
+	pub membership: u64,
 	/// The verified credential expired before admission.
 	pub expired: u64,
 }
@@ -71,7 +71,7 @@ impl Refusals {
 			RefusalKind::Unavailable => self.unavailable,
 			RefusalKind::Request => self.request,
 			RefusalKind::Forbidden => self.forbidden,
-			RefusalKind::Lan => self.lan,
+			RefusalKind::Membership => self.membership,
 			RefusalKind::Expired => self.expired,
 		}
 	}
@@ -81,7 +81,7 @@ impl Refusals {
 		self.unavailable += other.unavailable;
 		self.request += other.request;
 		self.forbidden += other.forbidden;
-		self.lan += other.lan;
+		self.membership += other.membership;
 		self.expired += other.expired;
 	}
 	/// Whether any cumulative count went backwards.
@@ -90,7 +90,7 @@ impl Refusals {
 			|| self.unavailable < previous.unavailable
 			|| self.request < previous.request
 			|| self.forbidden < previous.forbidden
-			|| self.lan < previous.lan
+			|| self.membership < previous.membership
 			|| self.expired < previous.expired
 	}
 }
@@ -101,7 +101,7 @@ pub(super) struct RefusalCounters {
 	unavailable: AtomicU64,
 	request: AtomicU64,
 	forbidden: AtomicU64,
-	lan: AtomicU64,
+	membership: AtomicU64,
 	expired: AtomicU64,
 }
 
@@ -112,7 +112,7 @@ impl RefusalCounters {
 			RefusalKind::Unavailable => &self.unavailable,
 			RefusalKind::Request => &self.request,
 			RefusalKind::Forbidden => &self.forbidden,
-			RefusalKind::Lan => &self.lan,
+			RefusalKind::Membership => &self.membership,
 			RefusalKind::Expired => &self.expired,
 		}
 	}
@@ -122,7 +122,7 @@ impl RefusalCounters {
 			unavailable: self.unavailable.load(Ordering::Relaxed),
 			request: self.request.load(Ordering::Relaxed),
 			forbidden: self.forbidden.load(Ordering::Relaxed),
-			lan: self.lan.load(Ordering::Relaxed),
+			membership: self.membership.load(Ordering::Relaxed),
 			expired: self.expired.load(Ordering::Relaxed),
 		}
 	}

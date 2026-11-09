@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
@@ -115,7 +115,7 @@ test("lite-07 bounds and prioritizes independent createWritable datagram queues"
 	const source = new Origin();
 	const publication = source.route(path, { hidden: true });
 	const datagrams = publication.broadcast.createDatagrams("audio");
-	publication.broadcast.createTrack("audio", { compress: true });
+	publication.broadcast.createTrack("audio", { compression: "deflate" });
 	publication.announce();
 	const other = publication.broadcast.createDatagrams("other", { priority: 7 });
 	const pair = createMockTransportPair(ALPN_07_WIP, { datagramWritable: "createWritable" });
@@ -486,22 +486,22 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		// microtasks. A write-budget yield is a host task that the drain below can't advance,
 		// so under CPU load the publisher's answer could still be stalled when the abort lands.
 		const budget = spyOn(Budget.prototype, "poll").mockImplementation(() => undefined);
-		try {
-			await reader.info();
-			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
-			datagrams.finish();
-			// The mock delivers the end in microtasks, all within this host task.
-			for (let i = 0; i < 10000; i++) await Promise.resolve();
-			client.abort();
-			expect(await reader.recv()).toBeUndefined();
-		} finally {
+		// Runs even when the test times out with a wait still pending.
+		onTestFinished(() => {
 			budget.mockRestore();
 			reader.close();
 			remote.close();
 			client.abort();
 			server.abort();
 			source.close();
-		}
+		});
+		await reader.info();
+		while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+		datagrams.finish();
+		// The mock delivers the end in microtasks, all within this host task.
+		for (let i = 0; i < 10000; i++) await Promise.resolve();
+		client.abort();
+		expect(await reader.recv()).toBeUndefined();
 	});
 }
 

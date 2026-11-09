@@ -34,7 +34,7 @@ fn registry(broadcasts: usize, tiers: usize) -> Registry {
 		.map(|t| {
 			let session = registry
 				.tier(stats::Tier::new(moq_net::Path::new(&format!("tier{t}")).unwrap()))
-				.session(moq_net::Path::from_static("root"));
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root")));
 			let mut cursor = producer.consume().with_stats(session).routes();
 			// Each announce the cursor replays records under its tier.
 			while cursor.next().now_or_never().flatten().is_some() {}
@@ -54,7 +54,7 @@ fn report(c: &mut Criterion) {
 	for (broadcasts, tiers) in SHAPES {
 		let fixture = registry(broadcasts, tiers);
 		let mut report = stats::Report::default();
-		fixture.registry.report(&mut report);
+		fixture.registry.report(&mut report, moq_net::time::Instant::now());
 		assert_eq!(
 			report.traffic.len(),
 			broadcasts * tiers,
@@ -64,7 +64,7 @@ fn report(c: &mut Criterion) {
 		group.bench_with_input(
 			BenchmarkId::from_parameter(format!("{broadcasts}x{tiers}")),
 			&fixture,
-			|b, fixture| b.iter(|| fixture.registry.report(&mut report)),
+			|b, fixture| b.iter(|| fixture.registry.report(&mut report, moq_net::time::Instant::now())),
 		);
 	}
 	group.finish();
@@ -115,8 +115,11 @@ fn session_report(c: &mut Criterion) {
 				let contexts: Vec<_> = (0..labels)
 					.flat_map(|label| {
 						let handle = handle.clone();
-						(0..sessions)
-							.map(move |_| handle.session(moq_net::Path::new(&format!("project/key/{label}")).unwrap()))
+						(0..sessions).map(move |_| {
+							handle.session(moq_net::stats::SessionInfo::new(
+								moq_net::Path::new(&format!("project/key/{label}")).unwrap(),
+							))
+						})
 					})
 					.collect();
 				let wires: Vec<_> = contexts
@@ -131,7 +134,7 @@ fn session_report(c: &mut Criterion) {
 					})
 					.collect();
 				let mut report = stats::Report::default();
-				registry.report(&mut report);
+				registry.report(&mut report, moq_net::time::Instant::now());
 				assert_eq!(report.sessions.len(), labels);
 				for row in &report.sessions {
 					assert_eq!(row.presence.sessions_started, sessions as u64);
@@ -141,7 +144,7 @@ fn session_report(c: &mut Criterion) {
 				group.throughput(Throughput::Elements((labels * sessions) as u64));
 				group.bench_function(
 					BenchmarkId::from_parameter(format!("{labels}x{sessions}/connections={connections}")),
-					|b| b.iter(|| registry.report(&mut report)),
+					|b| b.iter(|| registry.report(&mut report, moq_net::time::Instant::now())),
 				);
 				std::hint::black_box((contexts, wires));
 			}
@@ -162,8 +165,11 @@ fn retag(c: &mut Criterion) {
 			let mut contexts: Vec<_> = (0..labels)
 				.flat_map(|label| {
 					let handle = handle.clone();
-					(0..sessions)
-						.map(move |_| handle.session(moq_net::Path::new(&format!("project/key/{label}")).unwrap()))
+					(0..sessions).map(move |_| {
+						handle.session(moq_net::stats::SessionInfo::new(
+							moq_net::Path::new(&format!("project/key/{label}")).unwrap(),
+						))
+					})
 				})
 				.collect();
 			let moving = contexts.split_off(contexts.len() - sessions);

@@ -198,7 +198,7 @@ impl Relay {
 				server.listen = listen.clone();
 				server.tls = served.clone();
 				server.quic = config.quic.clone();
-				server.activity = shutdown.activity.clone();
+				server.admission = shutdown.admission.clone();
 				server.demux = demux.clone();
 				Some(moq_tokio::worker::Workers::bind(server, worker).context("failed to start the QUIC workers")?)
 			}
@@ -237,7 +237,7 @@ impl Relay {
 		server_config.listen = listen;
 		server_config.tls = served;
 		server_config.quic = config.quic.clone();
-		server_config.activity = shutdown.activity.clone();
+		server_config.admission = shutdown.admission.clone();
 		#[cfg(feature = "_quic")]
 		{
 			server_config.demux = demux.clone();
@@ -294,7 +294,7 @@ impl Relay {
 		let mut cluster_options = cluster::Options::new(config.cluster)
 			.with_cache(cache)
 			.with_stats(config.stats);
-		cluster_options.session = config.limits.client;
+		cluster_options.client = config.limits.client;
 		cluster_options.peer = config.limits.peer;
 		let (cluster, driver) = cluster::Cluster::new(cluster_options)?;
 		let mut cluster = cluster.with_connect(config.connect.clone(), config.quic.clone());
@@ -429,21 +429,19 @@ impl Relay {
 	/// The WebRTC media path (ICE, DTLS, and RTP) arriving on the QUIC port,
 	/// for an embedder's WebRTC stack to serve and answer through the same port.
 	///
-	/// Until a feed is taken, and once every feed is dropped, that traffic is
-	/// dropped and counted. Fails when no tokio listener serves QUIC: a stream-only
-	/// relay, or one on the io_uring workers, which do not split the port yet.
+	/// Until it is taken, and once it is dropped, that traffic is
+	/// dropped and counted. `None` once taken, or when no tokio listener serves
+	/// QUIC: a stream-only relay, or one on the io_uring workers, which do not
+	/// split the port yet.
 	#[cfg(feature = "_quic")]
-	pub fn webrtc(&self) -> anyhow::Result<moq_tokio::quic::demux::WebRtc> {
-		let demux = self
-			.demux
-			.as_ref()
-			.context("the WebRTC media path needs QUIC served by the tokio runtime")?;
-		Ok(demux.webrtc())
+	pub fn webrtc(&mut self) -> Option<moq_tokio::quic::demux::WebRtc> {
+		self.demux.take().map(|demux| demux.webrtc())
 	}
 
 	/// The RTMP and RTMPS connections the public web listeners classify, for the
 	/// embedder to serve; see [`web::Web::rtmp`]. Untaken, they are logged and closed.
-	pub fn rtmp(&mut self) -> web::rtmp::Incoming {
+	/// `None` once taken.
+	pub fn rtmp(&mut self) -> Option<web::rtmp::Incoming> {
 		self.web.rtmp()
 	}
 
@@ -915,7 +913,7 @@ mod tests {
 		use futures::FutureExt;
 		let window = std::time::Duration::from_secs(10);
 		let (trigger, shutdown) = crate::shutdown::Observer::new(window);
-		let _pending = shutdown.activity.enter();
+		let _pending = shutdown.admission.enter();
 		trigger.start();
 		let draining = super::drain(trigger, shutdown, None);
 		tokio::pin!(draining);
@@ -936,7 +934,7 @@ mod tests {
 		// Either arm is ready, so an unbiased wait would pass some runs.
 		for _ in 0..32 {
 			let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
-			let _active = shutdown.activity.enter();
+			let _active = shutdown.admission.enter();
 			trigger.start();
 			let mut signals = crate::shutdown::Signals::new().unwrap();
 			crate::shutdown::raise(libc::SIGTERM).await;
@@ -979,15 +977,15 @@ mod tests {
 	async fn arrival_as_the_drain_empties_is_counted_or_refused() {
 		use futures::FutureExt;
 		let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
-		let activity = shutdown.activity.clone();
-		let last = activity.enter().expect("admission open before the drain");
+		let admission = shutdown.admission.clone();
+		let last = admission.enter().expect("admission open before the drain");
 		trigger.start();
 		let draining = super::drain(trigger, shutdown, None);
 		tokio::pin!(draining);
 		assert!(draining.as_mut().now_or_never().is_none());
 
 		// Arrives before the last connection leaves: it is counted.
-		let arrival = activity.enter().expect("admitted before the drain committed");
+		let arrival = admission.enter().expect("admitted before the drain committed");
 		drop(last);
 		assert!(
 			draining.as_mut().now_or_never().is_none(),
@@ -998,7 +996,7 @@ mod tests {
 		drop(arrival);
 		assert!(draining.as_mut().now_or_never().is_some());
 		assert!(
-			activity.enter().is_none(),
+			admission.enter().is_none(),
 			"admitted a connection after the drain committed to exit"
 		);
 	}

@@ -7,7 +7,7 @@
 Content signing and end-to-end encryption for [Media over QUIC](https://moq.dev), mirroring the
 Rust `moq-crypto` crate. `Sign` signs every frame so relays cannot forge it, and `E2ee` encrypts
 groups, datagrams, and track names so relays cannot read them. Both wrap `@moq/net` and check each
-timestamp with `@moq/net`'s `Track.rescale(info, timestamp)` before signing or encrypting, so a frame either accepts is
+timestamp with `@moq/net`'s `Datagram.rescale(info, timestamp)` before signing or encrypting, so a frame either accepts is
 one `@moq/net` accepts.
 
 ## Signing
@@ -95,7 +95,7 @@ const generation = credential.produce();
 // The route's instance names the generation's epoch, so subscribers find the key.
 const route = origin.route(await credential.path("meeting.hang"), {
 	hidden: true,
-	instance: Epoch.instance(generation.epoch),
+	instance: { id: Epoch.instance(generation.epoch), epoch: 0n },
 });
 const video = await new Broadcast.Producer(route.broadcast, generation).createTrack("video", {
 	timescale: Time.Timescale.MILLI,

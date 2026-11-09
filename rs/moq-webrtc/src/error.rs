@@ -10,14 +10,6 @@ pub enum Error {
 	#[error("unsupported codec: {0}")]
 	UnsupportedCodec(String),
 
-	/// No live session matched the resource id (e.g. a DELETE for an unknown id).
-	#[error("session not found")]
-	SessionNotFound,
-
-	/// The peer closed the session; the media session ended without a failure.
-	#[error("session closed")]
-	SessionClosed,
-
 	/// ICE never connected before the establishment deadline, or before the DTLS
 	/// handshake gave up waiting for it.
 	#[error("ICE did not connect in time")]

@@ -32,6 +32,9 @@ function open(): {
 				stalled,
 				anchored: timestamp !== undefined,
 				underruns: 0,
+				skips: 0,
+				trimmed: Milli.zero,
+				accelerated: Milli.zero,
 				silent: false,
 				epoch,
 			};
@@ -433,7 +436,18 @@ function fake(delay: Milli, buffered = false) {
 		buffered,
 	});
 	const state = (timestamp: Micro, stalled: boolean, epoch: number) => {
-		const data: State = { type: "state", timestamp, stalled, anchored: true, underruns: 0, silent: false, epoch };
+		const data: State = {
+			type: "state",
+			timestamp,
+			stalled,
+			anchored: true,
+			underruns: 0,
+			skips: 0,
+			trimmed: Milli.zero,
+			accelerated: Milli.zero,
+			silent: false,
+			epoch,
+		};
 		port.dispatchEvent(new MessageEvent("message", { data }));
 	};
 	return { buffer, sent, state };

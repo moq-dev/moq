@@ -24,8 +24,8 @@ const DELAY_MAX: Duration = Duration::from_secs(10);
 /// lateness the estimate can represent.
 const AUTO_MAX_DELAY: Duration = Duration::from_secs(2);
 
-/// How far video alone trails the live edge under `auto`. The estimate is
-/// audio's; video follows the speaker whenever there is one.
+/// How far playback trails the live edge under `auto` while audio holds no
+/// estimate, as when there is none: video has no estimator of its own.
 const AUTO_VIDEO_DELAY: Duration = Duration::from_millis(100);
 
 /// How far playback trails the live edge.
@@ -84,9 +84,10 @@ pub struct Args {
 	/// Write what the speaker played to this file, one JSON sample per line every 250ms.
 	///
 	/// Each line has the playhead, the playout target, the render quanta the speaker played
-	/// and how many were quiet, and the gaps and stalls since the line before, in the metric
-	/// schema of `test/audio-quality`, whose analyzer reduces it to underruns, skips, and
-	/// silence. Audio only, so it needs `--video off`.
+	/// and how many were quiet, the received audio trimmed and accelerated away, and the gaps
+	/// and stalls since the line before, in the metric schema of `test/audio-quality`, whose
+	/// analyzer reduces it to underruns, trims, and silence. Audio only, so it needs
+	/// `--video off`.
 	#[usage(long, value_name = "PATH", value_hint = usage_rs::ValueHint::FilePath, extensions("ndjson"))]
 	pub metrics: Option<PathBuf>,
 }
@@ -112,7 +113,7 @@ impl Args {
 		self.fixed_delay().unwrap_or(AUTO_MAX_DELAY)
 	}
 
-	/// How far video trails the live edge while no speaker is setting the pace.
+	/// How far playback trails the live edge while no audio estimate sets it.
 	pub(super) fn video_delay(&self) -> Duration {
 		self.fixed_delay().unwrap_or(AUTO_VIDEO_DELAY)
 	}

@@ -6,24 +6,9 @@ use crate::protocol::validate_protocol;
 use crate::transport::WsTransport;
 use moq_net::transport::Address;
 use moq_quic::Side;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite};
 
 use crate::{Config, Driver, Error, Session, Version, alpn};
-
-/// The `tokio-tungstenite` version this crate is built against.
-///
-/// [`Client::with_connector`] and [`Upgraded`] take `tokio-tungstenite` types
-/// directly, so use this re-export rather than a separately pinned dependency -
-/// a different minor version is a distinct crate to the compiler and fails to
-/// typecheck against these APIs.
-pub use tokio_tungstenite;
-
-/// The `tungstenite` version this crate is built against, matching
-/// [`tokio_tungstenite`].
-///
-/// [`Client::with_config`] and [`Upgraded`] name `tungstenite` types, and
-/// [`Error::WebSocket`] wraps a `tungstenite::Error`.
-pub use tokio_tungstenite::tungstenite;
 
 /// The largest WebSocket message or frame a session under `config` reads.
 ///

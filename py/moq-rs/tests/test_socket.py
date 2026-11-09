@@ -74,7 +74,7 @@ async def test_refusal_and_cancelled_wait_leave_endpoint_usable():
     incoming.reject()
     with pytest.raises(moq.Error.NotFound):
         await dial
-    with pytest.raises(moq.Error.Closed):
+    with pytest.raises(moq.Error.AlreadyResponded):
         incoming.reject()
     client, server = await tcp(a, b)
     assert client.session == server.session
@@ -254,6 +254,6 @@ async def test_tcp_ready_paces_a_writer_behind_a_slow_reader():
 
 
 if __name__ == "__main__":
-    from moq.testing import Clock
+    from clock import Clock
 
     asyncio.run(late_peer(Clock()))
