@@ -241,7 +241,7 @@ export class AudioRingBuffer {
 		const latency = this.#latencySamples;
 		const queued = end - this.#readIndex + this.#stretch.available;
 		if (end - this.#readIndex > this.capacity) {
-			this.#skip(end - this.capacity);
+			this.#skip(end - this.capacity, start);
 		} else if (band && pause && pause.start <= this.#readIndex && queued > latency + this.#chunk) {
 			// Skip only the silence past the queued floor, which the staged window counts toward, so the
 			// read index only moves forward and never re-stages PCM the window already holds.
@@ -255,7 +255,7 @@ export class AudioRingBuffer {
 					latency + Math.floor(((this.capacity - latency) * 3) / 4),
 				)
 		) {
-			this.#skip(end - latency);
+			this.#skip(end - latency, start);
 		}
 
 		// Fill gaps with zeros if there's a discontinuity
@@ -343,10 +343,13 @@ export class AudioRingBuffer {
 	}
 
 	// Move the read index forward to `index`, dropping any queued audio it passes, staged included,
-	// and the front of an incoming chunk when `index` lies past the write index.
-	#skip(index: number): void {
-		if (index > this.#readIndex && this.length > 0) this.#skips++;
-		if (index > this.#readIndex) this.#trimmed += this.#discarded(index);
+	// and the front of the incoming chunk at `start` when `index` lies past it. An empty ring only
+	// re-anchors over a gap it never held: neither counter moves, as in moq-audio.
+	#skip(index: number, start: number): void {
+		if (index > this.#readIndex && this.length > 0) {
+			this.#skips++;
+			this.#trimmed += this.#discarded(index, start);
+		}
 		// The staged window lies behind the new index, so it is dropped with the rest, as moq-audio's
 		// trim discards staged output first.
 		const length = this.length;
@@ -359,14 +362,17 @@ export class AudioRingBuffer {
 		this.#prune();
 	}
 
-	// Media a skip to `index` drops: the unplayed share of the staged window and everything up to
-	// `index`, less declared silence.
-	#discarded(index: number): number {
+	// Media a skip to `index` drops: the unplayed share of the staged window, what the ring holds up
+	// to `index`, and the incoming chunk's front below it, less declared silence. The gap between the
+	// write index and the chunk at `start` was never held, so it is no trim.
+	#discarded(index: number, start: number): number {
 		const stretch = this.#stretch;
-		let dropped = index - this.#readIndex;
+		const held = Math.min(index, this.#writeIndex);
+		const front = Math.max(start, this.#writeIndex);
+		let dropped = held - this.#readIndex + Math.max(0, index - front);
 		if (stretch.available > 0 && !this.#windowQuiet) dropped += (stretch.available * this.#window) / stretch.length;
 		for (const pause of this.#pauses) {
-			dropped -= Math.max(0, Math.min(index, pause.end) - Math.max(this.#readIndex, pause.start));
+			dropped -= Math.max(0, Math.min(held, pause.end) - Math.max(this.#readIndex, pause.start));
 		}
 		return dropped;
 	}

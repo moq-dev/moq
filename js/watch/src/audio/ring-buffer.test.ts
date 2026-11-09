@@ -1001,6 +1001,25 @@ describe("time stretch", () => {
 		expect(buffer.trimmed).toBeCloseTo(250 - 100 - (QUANTUM * 1000) / RATE, 6);
 	});
 
+	it("trims only what the ring held, never the gap a re-anchor jumps", () => {
+		const buffer = live(100);
+		write(buffer, 0 as Milli, frames(100), { value: 0.25 });
+		read(buffer, QUANTUM, 1);
+		// A group past its age budget: the next audio lands 2 s on, past the ring's capacity.
+		write(buffer, 2000 as Milli, frames(20), { value: 0.5 });
+		expect(buffer.skips).toBe(1);
+		expect(buffer.trimmed).toBeCloseTo(100 - (QUANTUM * 1000) / RATE, 6);
+	});
+
+	it("counts nothing when an empty ring re-anchors", () => {
+		const buffer = live(100);
+		write(buffer, 0 as Milli, frames(100), { value: 0.25 });
+		while (buffer.length > 0) read(buffer, QUANTUM, 1);
+		write(buffer, 3000 as Milli, frames(20), { value: 0.5 });
+		expect(buffer.skips).toBe(0);
+		expect(buffer.trimmed).toBe(Milli.zero);
+	});
+
 	it("counts a re-anchor that drops only the staged window as a skip", () => {
 		const buffer = live(100);
 		// Four whole 30 ms windows, so once the playhead passes 90 ms the ring is empty and only the
