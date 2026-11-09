@@ -38,10 +38,10 @@ test("an instance-pinned follower refuses another instance", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
 	const instance = Instance.random();
-	const firstRoute = origin.route(path, { instance });
+	const firstRoute = origin.route(path, { instance: { id: instance, epoch: 0n } });
 	const first = firstRoute.broadcast;
 	const request = origin.follow(path, { instance });
-	const secondRoute = origin.route(path, { instance: Instance.random() });
+	const secondRoute = origin.route(path, { instance: { id: Instance.random(), epoch: 0n } });
 	const second = secondRoute.broadcast;
 	await settle();
 	expect(request.active.peek()?.instance).not.toBe(secondRoute.instance);
@@ -55,7 +55,7 @@ test("a follower changes its handle on an in-place instance restart", async () =
 	const origin = new Producer();
 	const path = Path.from("room/audio");
 	const before = Instance.random();
-	const broadcastRoute = origin.route(path, { instance: before });
+	const broadcastRoute = origin.route(path, { instance: { id: before, epoch: 0n } });
 	const broadcast = broadcastRoute.broadcast;
 	const request = origin.follow(path);
 	const old = request.active.peek();
@@ -362,7 +362,7 @@ test("a visible job route answers its waiting requesters at once", async () => {
 	const later = origin.request(path);
 	const next = (await requests.next()).value;
 	if (!next) throw new Error("expected another request");
-	const again = next.route({ instance: Instance.parse("stable"), epoch: 2n });
+	const again = next.route({ instance: { id: Instance.parse("stable"), epoch: 2n } });
 	await settle();
 	expect(again.instance).toBe(Instance.parse("stable"));
 	expect(later.active.peek()?.instance).toBe(again.instance);
@@ -631,7 +631,7 @@ test("an instance-pinned follower resumes when its instance returns after a gap"
 	const source = new BroadcastProducer();
 	const keeper = source.consume();
 	const serve = (instance: Instance.Valid, broadcast: BroadcastProducer) => {
-		const route = origin.routePrefix(path, { instance: instance });
+		const route = origin.routePrefix(path, { instance: { id: instance, epoch: 0n } });
 		void (async () => {
 			for await (const request of route.requested()) request.serve(broadcast.consume());
 		})();
@@ -852,8 +852,8 @@ test.each(["request", "follow"] as const)("a %s pinned to a losing instance reso
 	const origin = new Producer();
 	const path = Path.from("room/audio");
 	const pinned = Instance.random();
-	const losing = origin.routePrefix(path, { instance: pinned, cost: 9n });
-	const winning = origin.routePrefix(path, { instance: Instance.random(), cost: 1n });
+	const losing = origin.routePrefix(path, { instance: { id: pinned, epoch: 0n }, cost: 9n });
+	const winning = origin.routePrefix(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
 	const asked = losing.requested();
 	const requested = origin[method](path, { instance: pinned });
 	const pending = (await asked.next()).value;
@@ -892,8 +892,8 @@ test("a peer's pin is served by a local broadcast that loses the path", async ()
 	const wire = wireOf(origin.consume());
 	const path = Path.from("room/audio");
 	const pinned = Instance.random();
-	const publication = origin.route(path, { instance: pinned, cost: 9n });
-	const winning = origin.routePrefix(path, { instance: Instance.random(), cost: 1n });
+	const publication = origin.route(path, { instance: { id: pinned, epoch: 0n }, cost: 9n });
+	const winning = origin.routePrefix(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
 	expect(wire.local(path)).toBeUndefined();
 	expect(wire.local(path, pinned)).toBeDefined();
 	expect(await wire.demand(path, pinned)).toBeDefined();
@@ -1124,7 +1124,7 @@ test("one job ending leaves another job's instance alone", async () => {
 test("a claim naming its instance gives each job a fresh one", async () => {
 	const origin = new Producer();
 	const stable = Instance.parse("stable");
-	const claim = origin.routePrefix(Path.from("room"), { instance: stable, epoch: 1n });
+	const claim = origin.routePrefix(Path.from("room"), { instance: { id: stable, epoch: 1n } });
 	const requests = claim.requested();
 	const request = origin.request(Path.from("room/alice"));
 	const pending = (await requests.next()).value;

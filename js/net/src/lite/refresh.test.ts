@@ -43,7 +43,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		const active = request.active.peek();
 		if (!active) throw new Error("broadcast missing");
 		const remote = active.track("data");
-		expect((await remote.info()).refresh).toBe(alpn === ALPN_07_WIP ? 1 : undefined);
+		expect((await remote.info()).refresh).toBe(alpn === ALPN_07_WIP ? 1 : null);
 		const baseline = remote.subscribe();
 		const group = producer.appendGroup();
 		group.writeFrame({ payload: new Uint8Array(3) });

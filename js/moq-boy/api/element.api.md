@@ -1,19 +1,19 @@
 # `@moq/boy/element`
 
 ```ts
-import { Game } from "@moq/boy";
-import { Moq } from "@moq/boy";
+import { Connection } from "@moq/net";
+import { Origin } from "@moq/net";
+import { Signal } from "@moq/signals";
 
 export default class extends HTMLElement {
 	constructor();
 	attributeChangedCallback(name: "url" | "prefix" | "prefix-game", _oldValue: string | null, newValue: string | null): void;
 	connectedCallback(): void;
-	readonly connection: Moq.Connection;
+	readonly connection: Connection;
 	disconnectedCallback(): void;
-	readonly expanded: Moq.Signals.Signal<string | undefined>;
-	readonly games: Moq.Signals.Signal<ReadonlyMap<string, Game>>;
+	readonly expanded: Signal<string | undefined>;
 	static observedAttributes: readonly ["url", "prefix", "prefix-game"];
-	readonly origin: Moq.Origin.Producer;
+	readonly origin: Origin.Producer;
 	get prefixGame(): string;
 	set prefixGame(value: string);
 	get prefixPath(): string;

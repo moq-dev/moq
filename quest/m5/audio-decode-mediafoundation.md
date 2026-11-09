@@ -22,7 +22,7 @@ ones. Behind the decode seam as the first candidate on `target_os =
 - Verification runs on a Windows host; the per-PR CI only compiles the
   platform code (`just rs windows`).
 
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [audio-codec-seam](/quest/m2/audio-codec-seam.md) makes moq-audio's codecs return zero or more outputs with `flush` before the cut, so this backend adds no break.
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): moq-audio's codecs return zero or more outputs with `flush` before the cut, so this backend adds no break. `decode::Consumer` still places each packet by the one output it returns and refuses any other count, so if this backend holds or splits output, it also teaches the consumer to place that output.
 
 ## Related
 
