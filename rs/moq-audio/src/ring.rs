@@ -157,12 +157,6 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 		refill: false,
 		prime: latency,
 		consumed: 0,
-		rendered: 0,
-		seen: latency,
-		newest: latency,
-		deepest: [latency; 2],
-		second: 0,
-		half: 0,
 		position: 0,
 		cleared: 0,
 		cushioned: 0,
@@ -495,7 +489,7 @@ impl Convert {
 pub(crate) struct Consumer {
 	ring: HeapCons<f32>,
 	channels: usize,
-	stretch: Option<Box<crate::stretch::Stretch>>,
+	stretch: Option<Box<Native>>,
 	/// Whether the window staged in the stretcher is startup cushion.
 	staged_prime: bool,
 	/// An actual underrun waits for received PCM, emitting emergency silence
@@ -504,23 +498,6 @@ pub(crate) struct Consumer {
 	/// The startup cushion is silence, not received audio to stretch.
 	prime: usize,
 	consumed: usize,
-	/// Frames handed to the output, ever. `consumed` less this is what the
-	/// stretch removed (net of what it added) and what was discarded.
-	rendered: usize,
-	/// The writer's `written` when the reader last looked.
-	seen: usize,
-	/// The newest arrival, as `written - rendered` when the reader saw it, so
-	/// its depth is that plus `rendered - consumed`: the depth then, less what
-	/// the stretch removed or the reader discarded since. See
-	/// [`excess`](Self::excess).
-	newest: usize,
-	/// The deepest arrival of the previous second rendered and of this one, in
-	/// the same form.
-	deepest: [usize; 2],
-	/// A second at the reader's rate, set with the stretcher.
-	second: usize,
-	/// Frames rendered into the current second.
-	half: usize,
 	/// Frames taken off the ring plus the comfort noise of each resume played
 	/// out: the writer's `written`, as far as the reader has reached.
 	position: usize,
@@ -543,52 +520,21 @@ pub(crate) struct Consumer {
 impl Consumer {
 	/// Allocate the native playout stretcher before handing this ring to a device.
 	pub(crate) fn stretch(&mut self, rate: u32) {
-		self.stretch = Some(Box::new(crate::stretch::Stretch::new(rate, self.channels)));
-		self.second = rate as usize;
-		self.shared.stretch.store(true, Ordering::Relaxed);
-	}
-
-	/// Frames to stretch the next window by: removed while positive, added while
-	/// negative.
-	///
-	/// The depth is read where audio has just arrived, as the browser's ring
-	/// does. Between arrivals the queue drains toward the next one, which says
-	/// nothing about how far the playhead trails the newest audio, so steering
-	/// on the current depth would expand into every gap and settle audio a
-	/// burst behind the shared clock. Any arrival deeper than the target
-	/// accelerates. Only when every arrival over the last one to two seconds
-	/// fell short does it expand: a publisher clock slower than the device's,
-	/// or a raised target, rather than one late arrival.
-	///
-	/// The reader sees an arrival at its next callback, so the depth it reads
-	/// includes up to one device period the device has since played.
-	fn excess(&mut self) -> isize {
+		// Whatever the writer has pushed so far, the primed silence at least,
+		// arrived before the first window.
 		let written = self.shared.written.load(Ordering::Acquire);
-		let depth = |anchor: usize| anchor.wrapping_add(self.rendered).wrapping_sub(self.consumed) as isize;
-		if written != self.seen {
-			self.seen = written;
-			self.newest = written.wrapping_sub(self.rendered);
-			if depth(self.newest) > depth(self.deepest[1]) {
-				self.deepest[1] = self.newest;
-			}
-		}
-		let target = self.shared.target.load(Ordering::Relaxed) as isize;
-		let newest = depth(self.newest) - target;
-		if newest > 0 {
-			return newest;
-		}
-		(depth(self.deepest[0]).max(depth(self.deepest[1])) - target).min(0)
-	}
-
-	/// Count `frames` handed to the output, starting the next second's deepest
-	/// arrival at the newest once a second has rendered.
-	fn render(&mut self, frames: usize) {
-		self.rendered = self.rendered.wrapping_add(frames);
-		self.half += frames;
-		if self.second > 0 && self.half >= self.second {
-			self.half -= self.second;
-			self.deepest = [self.deepest[1], self.newest];
-		}
+		self.stretch = Some(Box::new(Native {
+			stretch: crate::stretch::Stretch::new(rate, self.channels),
+			arrivals: Arrivals {
+				rendered: 0,
+				seen: written,
+				newest: written,
+				deepest: [written; 2],
+				second: rate as usize,
+				half: 0,
+			},
+		}));
+		self.shared.stretch.store(true, Ordering::Relaxed);
 	}
 
 	/// Fill `output` with queued interleaved frames, and silence past them.
@@ -688,14 +634,14 @@ impl Consumer {
 		let channels = self.channels;
 		let mut done = 0;
 		while done < output.len() {
-			if let Some(stretch) = self.stretch.as_mut().filter(|stretch| stretch.available() > 0) {
-				let frames = stretch.read(&mut output[done..]);
+			if let Some(native) = self.stretch.as_mut().filter(|native| native.stretch.available() > 0) {
+				let frames = native.stretch.read(&mut output[done..]);
+				native.arrivals.render(frames);
 				if !self.staged_prime {
 					self.comfort.played(&output[done..done + frames * channels]);
 				}
 				done += frames * channels;
 				self.consumed = self.consumed.wrapping_add(frames);
-				self.render(frames);
 				continue;
 			}
 
@@ -705,7 +651,9 @@ impl Consumer {
 				if ahead == 0 {
 					let room = (output.len() - done) / channels;
 					let frames = self.cushion(Some(&mut output[done..]), room);
-					self.render(frames);
+					if let Some(native) = &mut self.stretch {
+						native.arrivals.render(frames);
+					}
 					done += frames * channels;
 					continue;
 				}
@@ -714,8 +662,7 @@ impl Consumer {
 			// A declared end's tail drains as received: running dry after it is
 			// silence, not an underrun, so nothing should expand toward the target.
 			let declared = self.declared();
-			let excess = self.excess();
-			let Some(stretch) = self.stretch.as_mut() else {
+			let Some(native) = self.stretch.as_mut() else {
 				let frames = frames.min((output.len() - done) / channels);
 				if frames == 0 {
 					break;
@@ -727,10 +674,15 @@ impl Consumer {
 				self.comfort.played(&output[done + prime * channels..done + read]);
 				self.position = self.position.wrapping_add(frames);
 				self.consumed = self.consumed.wrapping_add(frames);
-				self.render(frames);
 				done += read;
 				continue;
 			};
+			let excess = native.arrivals.excess(
+				self.shared.written.load(Ordering::Acquire),
+				self.consumed,
+				self.shared.target.load(Ordering::Relaxed),
+			);
+			let stretch = &mut native.stretch;
 			let frames = frames.min(stretch.window);
 			if frames == 0 {
 				break;
@@ -788,13 +740,13 @@ impl Consumer {
 		}
 		let buffered = self.ring.occupied_len() / self.channels;
 		let cushion = self.resume().map_or(0, |(_, frames)| frames);
-		buffered + cushion + self.stretch.as_ref().map_or(0, |stretch| stretch.available())
+		buffered + cushion + self.stretch.as_ref().map_or(0, |native| native.stretch.available())
 	}
 
 	/// Drop up to `frames` queued frames unread, returning how many of them were
 	/// pushed rather than the startup silence or a resume's comfort noise.
 	pub(crate) fn discard(&mut self, frames: usize) -> usize {
-		let staged = self.stretch.as_mut().map_or(0, |stretch| stretch.discard(frames));
+		let staged = self.stretch.as_mut().map_or(0, |native| native.stretch.discard(frames));
 		self.consumed = self.consumed.wrapping_add(staged);
 		let mut pushed = if self.staged_prime { 0 } else { staged };
 		let mut left = frames - staged;
@@ -820,6 +772,79 @@ impl Consumer {
 		}
 		self.shared.consumed.store(self.consumed, Ordering::Relaxed);
 		pushed
+	}
+}
+
+/// Native playback's stretcher and the arrivals it decides on.
+struct Native {
+	stretch: crate::stretch::Stretch,
+	arrivals: Arrivals,
+}
+
+/// Where audio arrives in the queue, which native playback stretches toward
+/// its target.
+///
+/// The depth is read where audio has just arrived, as the browser's ring
+/// does. Between arrivals the queue drains toward the next one, which says
+/// nothing about how far the playhead trails the newest audio, so steering on
+/// the current depth would expand into every gap and settle audio a burst
+/// behind the shared clock. Any arrival deeper than the target accelerates.
+/// Only when every arrival over the last one to two seconds fell short does it
+/// expand: a publisher clock slower than the device's, or a raised target,
+/// rather than one late arrival.
+///
+/// The reader sees an arrival at its next callback, so the depth it reads
+/// includes up to one device period the device has since played.
+struct Arrivals {
+	/// Frames handed to the output, ever. The reader's `consumed` less this is
+	/// what the stretch removed (net of what it added) and what was discarded.
+	rendered: usize,
+	/// The writer's `written` when the reader last looked.
+	seen: usize,
+	/// The newest arrival, as `written - rendered` when the reader saw it, so
+	/// its depth is that plus `rendered - consumed`: the depth then, less what
+	/// the stretch removed or the reader discarded since.
+	newest: usize,
+	/// The deepest arrival of the previous second rendered and of this one, in
+	/// the same form.
+	deepest: [usize; 2],
+	/// A second at the reader's rate.
+	second: usize,
+	/// Frames rendered into the current second.
+	half: usize,
+}
+
+impl Arrivals {
+	/// Frames to stretch the next window by toward `target`: removed while
+	/// positive, added while negative. `written` is the writer's latest and
+	/// `consumed` the reader's.
+	fn excess(&mut self, written: usize, consumed: usize, target: usize) -> isize {
+		let rendered = self.rendered;
+		let depth = |anchor: usize| anchor.wrapping_add(rendered).wrapping_sub(consumed) as isize;
+		if written != self.seen {
+			self.seen = written;
+			self.newest = written.wrapping_sub(rendered);
+			if depth(self.newest) > depth(self.deepest[1]) {
+				self.deepest[1] = self.newest;
+			}
+		}
+		let target = target as isize;
+		let newest = depth(self.newest) - target;
+		if newest > 0 {
+			return newest;
+		}
+		(depth(self.deepest[0]).max(depth(self.deepest[1])) - target).min(0)
+	}
+
+	/// Count `frames` handed to the output, starting the next second's deepest
+	/// arrival at the newest once a second has rendered.
+	fn render(&mut self, frames: usize) {
+		self.rendered = self.rendered.wrapping_add(frames);
+		self.half += frames;
+		if self.second > 0 && self.half >= self.second {
+			self.half -= self.second;
+			self.deepest = [self.deepest[1], self.newest];
+		}
 	}
 }
 
