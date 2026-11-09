@@ -8,8 +8,8 @@
  * let you drill into one. A restarted relay announces a new instance at the same
  * path, which each node's follower hands out afresh, so its history starts over.
  *
- * Per node we read `group.json`, the whole node's group at the relay's default
- * `depth = 0`: `{ epoch, tiers: { <tier>: { paths, labels } } }`, a JSON snapshot
+ * Per node we read the listed `group.<epoch>.json`, the whole node's group at
+ * the relay's default `depth = 0`, following the track listing to each new run: `{ epoch, tiers: { <tier>: { paths, labels } } }`, a JSON snapshot
  * with merge-patch deltas. From the default tier we take each path's `publisher`
  * (egress, relay -> downstream viewers) and `subscriber` (ingress, upstream
  * publishers -> relay), and each stats label's sessions.
@@ -180,6 +180,9 @@ discovery.run((effect) => {
 	});
 });
 
+// The depth-0 group's track, one per counter run.
+const GROUP_TRACK = /^group\.[^/]+\.json$/;
+
 function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: Net.Path.Valid, node: string) {
 	// Follow the node across instances: a restarted one counts from zero, so its series starts
 	// afresh rather than splicing onto the old one's.
@@ -200,14 +203,27 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 		clusterMembership = "";
 		if (!consumer) return;
 
-		const group = new Json.Snapshot.Consumer<GroupFrame>({ track: consumer.track("group.json") });
-		instance.cleanup(() => group.close());
+		// Each counter run is its own `group.<epoch>.json` track, found through the listing.
+		const tracks = consumer.tracks();
+		instance.cleanup(() => tracks.close());
+		let group: Json.Snapshot.Consumer<GroupFrame> | undefined;
+		instance.cleanup(() => group?.close());
 		instance.spawn(async () => {
 			for (;;) {
-				const state = await instance.race(group.latest());
-				if (state === undefined) break;
-				nodeStats.mutate((s) => {
-					if (s[node]) s[node] = nodeStatsOf(state.value ?? {});
+				const event = await instance.race(tracks.next());
+				if (!event) break;
+				if (event.kind !== "added" || !GROUP_TRACK.test(event.name)) continue;
+				group?.close();
+				const reader = new Json.Snapshot.Consumer<GroupFrame>({ track: consumer.track(event.name) });
+				group = reader;
+				instance.spawn(async () => {
+					for (;;) {
+						const state = await instance.race(reader.latest());
+						if (state === undefined || group !== reader) break;
+						nodeStats.mutate((s) => {
+							if (s[node]) s[node] = nodeStatsOf(state.value ?? {});
+						});
+					}
 				});
 			}
 		});

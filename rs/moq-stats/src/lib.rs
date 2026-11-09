@@ -316,7 +316,7 @@ mod tests {
 	#[test]
 	fn group_epoch_wire_values() {
 		// Readers keep the text opaque, including values that are not UUIDs.
-		for text in ["0192f4e6-7b8a-7c3d-9e1f-2a3b4c5d6e7f", "legacy", "~minted", "é/\0"] {
+		for text in ["0192f4e6-7b8a-7c3d-9e1f-2a3b4c5d6e7f", "legacy", "~minted", "é.\0"] {
 			let json = serde_json::json!({ "epoch": text, "tiers": {} });
 			let frame: GroupFrame = serde_json::from_value(json.clone()).unwrap();
 			assert_eq!(frame.epoch.as_str(), text);
@@ -326,6 +326,8 @@ mod tests {
 
 		for epoch in [
 			serde_json::json!(""),
+			// An epoch names a track segment, so it holds no `/`.
+			serde_json::json!("a/b"),
 			serde_json::json!(null),
 			serde_json::json!(1),
 			serde_json::json!([]),
@@ -431,6 +433,18 @@ mod tests {
 			"prefix.json.z",
 		] {
 			assert_eq!(parse_prefix_track(name), None, "{name}");
+		}
+	}
+
+	#[test]
+	fn group_track_names_round_trip() {
+		for (group, epoch) in [("", "0192f4e6-7b8a-7c3d-9e1f-2a3b4c5d6e7f"), ("acme", "legacy"), ("acme/live", "é.\0")] {
+			let epoch: Epoch = epoch.parse().unwrap();
+			let name = group_track(Path::new(group).unwrap(), &epoch);
+			assert_eq!(parse_group_track(&name), Some((Path::new(group).unwrap(), epoch)), "{name}");
+		}
+		for name in ["group.json", "acme/group.json", "acme/group..json", "/group.x.json", "acme/totals.json"] {
+			assert_eq!(parse_group_track(name), None, "{name}");
 		}
 	}
 
