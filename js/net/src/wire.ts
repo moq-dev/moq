@@ -62,7 +62,7 @@ export interface OriginProducer {
 	/** Whether an advertised prefix overlaps the handle's allowed paths. */
 	accepts(prefix: Path.Valid): boolean;
 	/** Land a route a peer announced, taken as given and never forwarded back to a peer. */
-	receive(prefix: Path.Valid, route?: Partial<WireRoute>): origin.Route;
+	receive(prefix: Path.Valid, route?: Partial<WireRoute>): origin.Claim;
 	attach(discovery: boolean): Dispose;
 	/**
 	 * Hold the origin's announcement streams overlapping `prefix` unsynced until
@@ -77,7 +77,7 @@ export interface OriginProducer {
 	routes(path: Path.Valid): boolean;
 }
 
-/** The protocol-facing operations behind an origin route. */
+/** The protocol-facing operations behind an origin route or claim. */
 export interface Route {
 	/** The metadata the route is advertised with, or undefined while hidden. */
 	readonly info: WireRoute | undefined;
@@ -177,7 +177,7 @@ export function wireOf(handle: broadcast.Producer): Produced;
 export function wireOf(handle: broadcast.Producer | broadcast.Consumer): Broadcast;
 export function wireOf(handle: origin.Producer): OriginProducer;
 export function wireOf(handle: origin.Consumer): OriginConsumer;
-export function wireOf(handle: origin.Route): Route;
+export function wireOf(handle: origin.Route | origin.Claim): Route;
 export function wireOf(handle: import("./connection/session.ts").Session): Established;
 /** Return the package-private view for a handle. */
 export function wireOf(handle: object): View {

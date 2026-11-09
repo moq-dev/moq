@@ -96,7 +96,7 @@ import (
 // opusInit, packet, pts (90 kHz ticks), and rgba come from your encoder or capture source.
 // Hidden until the catalog is filled; keep the route reachable while publishing.
 route, _ := client.Route("my-stream.hang", moq.RouteOptions{Hidden: true})
-broadcast, _ := route.Broadcast()
+broadcast := route.Broadcast()
 audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusInit})
 timestamp := moq.Timestamp{Value: 960, Scale: 48_000} // 20 ms on the Opus sample clock
 _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: &timestamp})
@@ -124,8 +124,8 @@ The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
 one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
-- **Context cancellation.** Every call that can block takes a `context.Context` first, and cancelling it tears down the native work, not just your wait. A call (`Request`, `Next`, `ReadFrame`, `Server.Accept`) aborts alone and leaves its object usable; a range loop over a consumer's stream cancels the stream when its context ends, while `Route.All` and `Server.All` leave the route advertised and the listener open.
-- **Keep owners reachable.** An origin from `moq.NewOriginProducer` has no `Close`. It ends when the garbage collector reaches its last owner (each producer and `Route`), and its consumers then fail with `moq.ErrClosed`. A `Route` the collector reclaims is retracted, so keep it reachable while it should stay announced, or end it with `Cancel()`.
+- **Context cancellation.** Every call that can block takes a `context.Context` first, and cancelling it tears down the native work, not just your wait. A call (`Request`, `Next`, `ReadFrame`, `Server.Accept`) aborts alone and leaves its object usable; a range loop over a consumer's stream cancels the stream when its context ends, while `Claim.All` and `Server.All` leave the claim advertised and the listener open.
+- **Keep owners reachable.** An origin from `moq.NewOriginProducer` has no `Close`. It ends when the garbage collector reaches its last owner (each producer, `Route`, and `Claim`), and its consumers then fail with `moq.ErrClosed`. A `Route` or `Claim` the collector reclaims is retracted, so keep it reachable while it should stay announced, or end it with `Cancel()`.
 - **Bandwidth ownership.** An encoder you manage can reserve a share of the session's bandwidth. Reuse its reservation when the ceiling changes; before abandoning or replacing it, call `Update(0)` to return its share and automatic probe ceiling without waiting for garbage collection. The track can stay subscribed and the reservation can be reused.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `Cut()`: after every frame, or less often to batch frames into fewer groups.
 - **Timeline breaks.** On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.

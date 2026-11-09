@@ -178,10 +178,6 @@ bool MoQOutput::Start()
 		return false;
 	}
 	auto next_broadcast = (*next_route)->broadcast();
-	if (!next_broadcast) {
-		LOG_ERROR("Failed to create broadcast: %s", next_broadcast.error().to_string().c_str());
-		return false;
-	}
 
 	// Advanced settings live on the service alongside the URL and path. With the group
 	// switched off the client keeps the library defaults.
@@ -235,7 +231,7 @@ bool MoQOutput::Start()
 		std::lock_guard<std::mutex> lock(media_mutex);
 		origin = next_origin;
 		route = *next_route;
-		broadcast = *next_broadcast;
+		broadcast = next_broadcast;
 	}
 
 	// NOTE: You could publish the same broadcasts to multiple sessions if you want (redundant ingest).

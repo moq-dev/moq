@@ -199,7 +199,7 @@ int publish(
     moq::RouteOptions hidden;
     hidden.hidden = true;
     auto route = ok(session->publish()->route(path, hidden), "route");
-    auto broadcast = ok(route->broadcast(), "route broadcast");
+    auto broadcast = route->broadcast();
     auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "catalog producer");
     auto media = ok(
         moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::kAvc3, {}}),
@@ -261,7 +261,7 @@ int publish(
         std::puts("finish ended");
         std::fflush(stdout);
         auto health_route = ok(session->publish()->route(path + ".health", hidden), "health route");
-        auto health = ok(health_route->broadcast(), "health broadcast");
+        auto health = health_route->broadcast();
         auto track = ok(health->publish_track("live", std::nullopt), "health track");
         const std::string payload = "session-alive";
         ok(track->write_frame({std::vector<uint8_t>(payload.begin(), payload.end()), std::nullopt}), "health write");

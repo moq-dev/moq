@@ -150,10 +150,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 		return err
 	}
 	defer route.Cancel()
-	producer, err := route.Broadcast()
-	if err != nil {
-		return err
-	}
+	producer := route.Broadcast()
 	defer producer.Close()
 
 	catalog, err := moqmedia.NewCatalogProducer(producer)
@@ -246,10 +243,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 		return err
 	}
 	defer healthRoute.Cancel()
-	health, err := healthRoute.Broadcast()
-	if err != nil {
-		return err
-	}
+	health := healthRoute.Broadcast()
 	defer health.Close()
 	live, err := health.PublishTrack("live", nil)
 	if err != nil {

@@ -188,10 +188,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer route.Cancel()
-	broadcast, err := route.Broadcast()
-	if err != nil {
-		t.Fatal(err)
-	}
+	broadcast := route.Broadcast()
 	defer broadcast.Close()
 
 	track, err := broadcast.PublishTrack("data", timedInfo())

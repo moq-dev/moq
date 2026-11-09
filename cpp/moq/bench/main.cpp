@@ -101,7 +101,7 @@ void throughput(Case c, double budget, std::vector<Result> &results)
 	moq::RouteOptions hidden;
 	hidden.hidden = true;
 	auto route = ok(origin->route("bench", hidden));
-	auto broadcast = ok(route->broadcast());
+	auto broadcast = route->broadcast();
 	std::vector<std::shared_ptr<moq::TrackProducer>> tracks;
 	std::vector<std::shared_ptr<moq::TrackConsumer>> consumers;
 	moq::TrackInfo info;

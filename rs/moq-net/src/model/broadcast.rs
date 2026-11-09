@@ -629,7 +629,7 @@ impl RequestValidity {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn for_source(route: &crate::origin::Route, path: &crate::Path) -> Self {
+	pub(crate) fn for_source(route: &crate::origin::Claim, path: &crate::Path) -> Self {
 		route
 			.request_validity(path)
 			.map(|selected| Self::Selected(std::sync::Arc::new(selected)))

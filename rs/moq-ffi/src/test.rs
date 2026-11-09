@@ -274,7 +274,7 @@ impl std::ops::Deref for Announced {
 fn create_announced(origin: &MoqOriginProducer, path: &str) -> Announced {
 	let route = origin.route(path.into(), MoqRouteOptions::default()).unwrap();
 	Announced {
-		broadcast: route.broadcast().unwrap(),
+		broadcast: route.broadcast(),
 		_route: route,
 	}
 }
@@ -444,7 +444,7 @@ async fn route_options_reach_the_announced_route() {
 	assert_eq!(info.cost, 4);
 	assert_eq!(info.instance, route.instance_id());
 
-	route.broadcast().unwrap().close().unwrap();
+	route.broadcast().close().unwrap();
 }
 
 #[tokio::test]
@@ -477,7 +477,7 @@ async fn route_options_name_an_instance_or_refuse() {
 		Err(MoqError::InvalidInstance { .. })
 	));
 	assert!(matches!(
-		origin.route_prefix("refused".into(), empty),
+		origin.claim("refused".into(), empty),
 		Err(MoqError::InvalidInstance { .. })
 	));
 
@@ -516,17 +516,6 @@ async fn a_new_route_at_a_path_restarts_its_followers() {
 
 	first.cancel();
 	second.cancel();
-}
-
-#[tokio::test]
-async fn an_exact_route_yields_no_requests_and_a_prefix_route_no_broadcast() {
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let exact = origin.route("live".into(), Default::default()).unwrap();
-	assert!(exact.requested().await.unwrap().is_none());
-	let prefix = origin.route_prefix("room".into(), Default::default()).unwrap();
-	assert!(matches!(prefix.broadcast(), Err(MoqError::Internal { .. })));
-	exact.cancel();
-	prefix.cancel();
 }
 
 /// A media track reserves through its demand, so an app that publishes
@@ -3370,7 +3359,7 @@ async fn a_hidden_route_is_invisible_until_announced() {
 		matches!(&update, MoqAnnounceEvent::Present { announce } if announce.prefix == "live"),
 		"{update:?}"
 	);
-	route.broadcast().unwrap().close().unwrap();
+	route.broadcast().close().unwrap();
 }
 
 /// Waiting for an exact path must hand the broadcast back named by that path, the base a
@@ -3730,9 +3719,9 @@ async fn resolve_honors_the_reference_instance() {
 	};
 
 	let catalog_route = origin.route("a/pub".into(), options.clone()).unwrap();
-	let catalog = catalog_route.broadcast().unwrap();
+	let catalog = catalog_route.broadcast();
 	let source_route = origin.route("a/source".into(), options).unwrap();
-	let source = source_route.broadcast().unwrap();
+	let source = source_route.broadcast();
 	let _video = source.publish_track("video".into(), None).unwrap();
 	let plain = create_announced(&origin, "a/plain");
 
@@ -3816,7 +3805,7 @@ async fn announce_and_withdraw_toggle_discovery() {
 		.expect("timed out requesting the reannounced broadcast")
 		.expect("a reannounced broadcast resolves");
 
-	route.broadcast().unwrap().close().unwrap();
+	route.broadcast().close().unwrap();
 }
 
 /// The route alone keeps its broadcast announced: dropping the broadcast handle retracts
@@ -3826,21 +3815,20 @@ async fn the_route_keeps_its_broadcast_announced() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let live = origin.route("live".into(), MoqRouteOptions::default()).unwrap();
-	let broadcast = live.broadcast().unwrap();
-	assert!(Arc::ptr_eq(&broadcast, &live.broadcast().unwrap()));
+	let broadcast = live.broadcast();
+	assert!(Arc::ptr_eq(&broadcast, &live.broadcast()));
 	drop(broadcast);
 	await_announced(&consumer, "live").await;
 
 	let dropped = origin.route("dropped".into(), MoqRouteOptions::default()).unwrap();
-	let dropped_broadcast = dropped.broadcast().unwrap();
+	let dropped_broadcast = dropped.broadcast();
 	await_announced(&consumer, "dropped").await;
 	drop(dropped);
 	let cancelled = origin.route("cancelled".into(), MoqRouteOptions::default()).unwrap();
-	let cancelled_broadcast = cancelled.broadcast().unwrap();
+	let cancelled_broadcast = cancelled.broadcast();
 	await_announced(&consumer, "cancelled").await;
 	cancelled.cancel();
 	assert!(matches!(cancelled.announce(), Err(MoqError::Cancelled)));
-	assert!(matches!(cancelled.requested().await, Err(MoqError::Cancelled)));
 	for path in ["dropped", "cancelled"] {
 		let unroutable = kio::clock::timeout(TIMEOUT, consumer.request(path.into(), None))
 			.await
@@ -3852,7 +3840,7 @@ async fn the_route_keeps_its_broadcast_announced() {
 		broadcast.close().unwrap();
 	}
 
-	live.broadcast().unwrap().close().unwrap();
+	live.broadcast().close().unwrap();
 	let unroutable = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("an unroutable request answers at once");
@@ -3866,7 +3854,7 @@ async fn a_closed_route_leaves_its_replacement_alone() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let stale = origin.route("live".into(), MoqRouteOptions::default()).unwrap();
-	stale.broadcast().unwrap().close().unwrap();
+	stale.broadcast().close().unwrap();
 
 	let replacement = origin.route("live".into(), MoqRouteOptions::default()).unwrap();
 	assert!(matches!(stale.announce(), Err(MoqError::Closed)));
@@ -3877,7 +3865,7 @@ async fn a_closed_route_leaves_its_replacement_alone() {
 		.expect("timed out requesting the replacement")
 		.expect("the replacement still resolves");
 
-	replacement.broadcast().unwrap().close().unwrap();
+	replacement.broadcast().close().unwrap();
 }
 
 #[tokio::test]
@@ -5045,13 +5033,13 @@ async fn follow() {
 	_broadcast.close().unwrap();
 }
 
-fn serve(origin: &MoqOriginProducer, prefix: &str) -> Arc<MoqRoute> {
-	origin.route_prefix(prefix.into(), MoqRouteOptions::default()).unwrap()
+fn serve(origin: &MoqOriginProducer, prefix: &str) -> Arc<MoqClaim> {
+	origin.claim(prefix.into(), MoqRouteOptions::default()).unwrap()
 }
 
-/// The next request beneath a prefix route, failing the test once it yields none.
-async fn requested(route: &MoqRoute) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
-	Ok(route.requested().await?.expect("the prefix route ended"))
+/// The next request beneath a claim, failing the test once it yields none.
+async fn requested(claim: &MoqClaim) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
+	Ok(claim.requested().await?.expect("the claim ended"))
 }
 
 #[tokio::test]
@@ -5072,7 +5060,7 @@ async fn dynamic_broadcast_request() {
 	assert_eq!(request.path().unwrap(), "dynamic/broadcast");
 
 	let job = request.route(hidden()).unwrap();
-	let served = job.broadcast().unwrap();
+	let served = job.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
 	// Only announce answers the requester, under the claim's instance and after admission.
 	let instance = job.instance_id();
@@ -5131,7 +5119,7 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "live/cam");
 	let job = request.route(MoqRouteOptions::default()).unwrap();
-	let served = job.broadcast().unwrap();
+	let served = job.broadcast();
 	kio::clock::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for the request to resolve")
@@ -5172,7 +5160,7 @@ async fn dynamic_keeps_the_origin_alive() {
 		.expect("the handler must still receive requests")
 		.unwrap();
 	let job = request.route(MoqRouteOptions::default()).unwrap();
-	let served = job.broadcast().unwrap();
+	let served = job.broadcast();
 	kio::clock::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for the request to resolve")
@@ -6239,7 +6227,7 @@ async fn follow_retries_a_dropped_wait() {
 		.expect("the retry waited for another instance")
 		.unwrap()
 		.unwrap();
-	served.broadcast().unwrap().close().unwrap();
+	served.broadcast().close().unwrap();
 }
 
 /// Another instance taking over while `available()` resolves is the one it hands out, and
@@ -6328,7 +6316,7 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		"the claim above did not answer the same instance"
 	);
 	drop((served, dynamic));
-	first_route.broadcast().unwrap().close().unwrap();
+	first_route.broadcast().close().unwrap();
 }
 
 /// An instance pins both resolutions to one publisher instance: a request for another one is
@@ -6404,8 +6392,8 @@ async fn an_instance_pins_request_and_follow() {
 		"the follower handed out another instance"
 	);
 	drop(takeover);
-	first.broadcast().unwrap().close().unwrap();
-	second.broadcast().unwrap().close().unwrap();
+	first.broadcast().close().unwrap();
+	second.broadcast().close().unwrap();
 }
 
 /// Dropping a handed-out handle changes nothing about the path, so the follower hands out

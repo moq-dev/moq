@@ -688,7 +688,7 @@ mod tests {
 		tokio::spawn(write_echo(origin.consume(), String::new(), out));
 
 		let claim = origin
-			.route_prefix("viewer.echo", moq_net::origin::RouteOptions::default())
+			.claim("viewer.echo", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		kio::clock::timeout(Duration::from_secs(1), claim.requested())
 			.await

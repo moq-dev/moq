@@ -986,7 +986,7 @@ pub struct moq_section {
 /// How a route advertises itself: its visibility at creation, a static cost and, optionally,
 /// a stable instance.
 ///
-/// Pass one to [moq_origin_route], [moq_origin_route_prefix], or [moq_broadcast_request_route].
+/// Pass one to [moq_origin_route], [moq_origin_claim], or [moq_broadcast_request_route].
 /// The hop chain is the origin's to build, so a local publisher cannot claim relay hops it
 /// never took. Zeroed (or NULL) is the default: visible at once, cost 0, under a fresh
 /// instance. `instance` is borrowed for the duration of the call.
@@ -1011,8 +1011,8 @@ pub struct moq_route_options {
 	/// Which run of a stable `instance` this is: only its highest epoch is eligible, cheaper
 	/// or not. Ignored without one.
 	pub epoch: u64,
-	/// Create the route hidden: it exists for nobody until [moq_route_announce]. For a
-	/// publisher that fills its catalog first.
+	/// Create the route or claim hidden: it exists for nobody until [moq_route_announce] or
+	/// [moq_claim_announce]. For a publisher that fills its catalog first.
 	pub hidden: bool,
 }
 
@@ -2183,29 +2183,29 @@ pub unsafe extern "C" fn moq_origin_route(
 	})
 }
 
-/// Create a route over `prefix` that serves the requests beneath it.
+/// Claim `prefix` on an origin, serving the requests beneath it.
 ///
-/// A route claims `prefix` and every path beneath it (the empty prefix claims
+/// A claim covers `prefix` and every path beneath it (the empty prefix claims
 /// every path). A service that only serves some of them advertises the
 /// covering prefix and rejects the rest as they are requested. NULL `options` is the
 /// default.
 ///
-/// `on_request` is required: a NULL callback is refused before the route is advertised.
+/// `on_request` is required: a NULL callback is refused before the claim is advertised.
 /// It is invoked with a positive request handle for each pending broadcast (answer it with
 /// [moq_broadcast_request_serve], [moq_broadcast_request_route], or
 /// [moq_broadcast_request_reject]), then exactly once more with a terminal code: `0`
-/// (stopped cleanly, after [moq_route_free] or the origin closing) or a negative error.
+/// (stopped cleanly, after [moq_claim_free] or the origin closing) or a negative error.
 /// After the terminal (`<= 0`) callback, `user_data` is never touched again.
 ///
-/// Returns a positive route handle on success, or a negative code on failure.
+/// Returns a positive claim handle on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that prefix is a valid pointer to prefix_len bytes of data.
 /// - `options` may be NULL, or must point at a readable [moq_route_options].
-/// - `on_request` must be non-NULL; a missing callback is refused before the route is advertised.
+/// - `on_request` must be non-NULL; a missing callback is refused before the claim is advertised.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_request` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_route_prefix(
+pub unsafe extern "C" fn moq_origin_claim(
 	origin: u32,
 	prefix: *const c_char,
 	prefix_len: usize,
@@ -2218,15 +2218,14 @@ pub unsafe extern "C" fn moq_origin_route_prefix(
 		let prefix = unsafe { ffi::parse_str(prefix, prefix_len)? };
 		let options = unsafe { parse_route_options(options)? };
 		let on_request = unsafe { ffi::OnStatus::new(user_data, on_request)? };
-		State::lock().origin.route_prefix(origin, prefix, options, on_request)
+		State::lock().origin.claim(origin, prefix, options, on_request)
 	})
 }
 
-/// The broadcast an exact route owns, to fill with the `moq_publish_*` functions.
+/// The broadcast a route owns, to fill with the `moq_publish_*` functions.
 ///
-/// Returns the same positive broadcast handle on every call, or a negative code: a prefix
-/// route owns none (`MOQ_ERROR_BROADCAST_NOT_FOUND`), and neither does a route whose
-/// broadcast [moq_publish_close] ended.
+/// Returns the same positive broadcast handle on every call, or a negative code:
+/// `MOQ_ERROR_BROADCAST_NOT_FOUND` once [moq_publish_close] ended the broadcast.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_route_broadcast(route: u32) -> i32 {
 	ffi::enter(move || {
@@ -2242,11 +2241,10 @@ pub extern "C" fn moq_route_broadcast(route: u32) -> i32 {
 
 /// The stream a route serves now.
 ///
-/// Named options keep one instance. Unnamed, a prefix route moves to a fresh one each time a
-/// job holding its current one ends. A route from [moq_broadcast_request_route] takes its
-/// prefix route's current one when it first announces or when this first reads it. Read first,
+/// Named options keep one instance. A route from [moq_broadcast_request_route] takes its
+/// claim's current one when it first announces or when this first reads it. Read first,
 /// the job announces under it, and [moq_route_announce] fails with an unroutable error once the
-/// prefix route has moved past it, so a signer built from it stays valid.
+/// claim has moved past it, so a signer built from it stays valid.
 /// Withdrawing and announcing again keep it. The destination borrows the route's storage
 /// until the next [moq_route_instance] on the route or [moq_route_free].
 ///
@@ -2267,7 +2265,7 @@ pub unsafe extern "C" fn moq_route_instance(route: u32, dst: *mut moq_string) ->
 ///
 /// A route from [moq_broadcast_request_route] also answers the requesters waiting on its
 /// path. Fails once its broadcast closed, and when a request's route can never announce
-/// because the request was released or its prefix route retracted meanwhile.
+/// because the request was released or its claim retracted meanwhile.
 ///
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -2308,10 +2306,7 @@ pub extern "C" fn moq_route_set_cost(route: u32, cost: u64) -> i32 {
 
 /// Release a route handle, retracting the route.
 ///
-/// An exact route's broadcast handle stays the caller's until [moq_publish_close]. A prefix
-/// route stops serving: requests not yet delivered are rejected, and its `on_request`
-/// callback fires once more with a terminal `0`, which is where `user_data` should be
-/// released.
+/// The broadcast handle stays the caller's until [moq_publish_close].
 ///
 /// Returns zero on success, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]
@@ -2325,7 +2320,81 @@ pub extern "C" fn moq_route_free(route: u32) -> i32 {
 	})
 }
 
-/// The path of a broadcast request delivered to a [moq_origin_route_prefix] callback.
+/// The stream a claim serves now.
+///
+/// Named options keep one instance. Unnamed, the claim moves to a fresh one each time a job
+/// holding its current one ends. The destination borrows the claim's storage until the next
+/// [moq_claim_instance] on the claim or [moq_claim_free].
+///
+/// Returns zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must point at a writable [moq_string].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_claim_instance(claim: u32, dst: *mut moq_string) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().origin.claim_instance(claim, dst)
+	})
+}
+
+/// Make a claim visible, or keep it so.
+///
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_claim_announce(claim: u32) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		State::lock().origin.claim_with(claim, |claim| claim.announce())
+	})
+}
+
+/// Hide a claim from everyone, keeping its instance.
+///
+/// Requests beneath it are rejected meanwhile, and [moq_claim_announce] brings it back.
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_claim_withdraw(claim: u32) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		State::lock().origin.claim_with(claim, |claim| {
+			claim.withdraw();
+			Ok(())
+		})
+	})
+}
+
+/// Re-price a claim in place: lower wins among routes covering the same prefix.
+///
+/// A hidden claim keeps the price for when it next announces. Returns zero on success, or
+/// a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_claim_set_cost(claim: u32, cost: u64) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		State::lock().origin.claim_with(claim, |claim| claim.set_cost(cost))
+	})
+}
+
+/// Release a claim handle, retracting the claim.
+///
+/// Requests not yet delivered are rejected, and its `on_request` callback fires once more
+/// with a terminal `0`, which is where `user_data` should be released.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_claim_free(claim: u32) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		// Dropped outside the lock: retracting refuses the requests still waiting.
+		let claim = State::lock().origin.claim_take(claim)?;
+		drop(claim);
+		Ok(())
+	})
+}
+
+/// The path of a broadcast request delivered to a [moq_origin_claim] callback.
 ///
 /// The destination borrows the request's storage: copy it out before
 /// [moq_broadcast_request_serve], [moq_broadcast_request_route],
@@ -2344,11 +2413,11 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 	})
 }
 
-/// Serve a held consumer under the prefix route's instance without announcing an exact route.
+/// Serve a held consumer under the claim's instance without announcing an exact route.
 ///
 /// Every answer at this path must continue the same sequences and bytes. Start a new
-/// prefix route for different content, or route a job, whose end moves the prefix route to
-/// another instance.
+/// claim for different content, or route a job, whose end moves the claim to another
+/// instance.
 /// Consumes the request handle; the consumer remains owned by the caller.
 /// Returns zero on success, or a negative error.
 #[unsafe(no_mangle)]
@@ -2369,11 +2438,11 @@ pub extern "C" fn moq_broadcast_request_serve(request: u32, broadcast: u32) -> i
 /// Answer a broadcast request with the path's own exact route, owning a new broadcast.
 ///
 /// Consumes the request handle and returns a positive route handle, or a negative error.
-/// Unless `options` names an instance, the route takes the one its prefix route lends when
-/// it first announces or [moq_route_instance] first reads it, so readers that resolved the path through the prefix route continue
-/// on it; its end then moves the prefix route to a fresh instance, so a job that restarts is
-/// a new stream. A prefix route that names its instance lends none, and the route mints its
-/// own. Created visible, it announces now and answers the waiting requesters;
+/// Unless `options` names an instance, the route takes the one its claim lends when it first
+/// announces or [moq_route_instance] first reads it, so readers that resolved the path through
+/// the claim continue on it; its end then moves the claim to a fresh instance, so a job that
+/// restarts is a new stream. A claim that names its instance lends none, and the route mints
+/// its own. Created visible, it announces now and answers the waiting requesters;
 /// created hidden, they wait until [moq_route_announce], so the job can fill its catalog
 /// first, and freeing the route before then refuses them. Ending the route withdraws only
 /// this path. Unreadable `options` fail without consuming the request.
@@ -2604,7 +2673,7 @@ pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 /// Owns discovery of the path and retries route churn while resolving one publisher instance.
 /// It fails as unroutable once discovery has synced without a covering route, including a
 /// hidden route not announced yet. No separate announcement stream is needed.
-/// Serve on-demand paths with [moq_origin_route_prefix].
+/// Serve on-demand paths with [moq_origin_claim].
 ///
 /// `instance` is the only stream to accept, or NULL (or empty) for any. A request pinned to an
 /// instance that does not serve the path is unroutable.
