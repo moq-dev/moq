@@ -120,7 +120,7 @@ impl Rung {
 		let mut config = self.transcode.encoder(self.info.size, framerate);
 		config.bitrate = Some(self.info.bitrate);
 		config.color = Some(color);
-		config.resize = Some(self.transcode.resize);
+		config.resize = Some(self.transcode.resize.clone());
 		// Every source group boundary is a cut; the join is only a backstop
 		// against pathologically long source groups.
 		config.join = std::time::Duration::from_secs(8);
