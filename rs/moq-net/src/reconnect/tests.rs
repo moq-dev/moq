@@ -327,7 +327,7 @@ async fn a_zero_timeout_gives_up_when_the_first_walk_fails() {
 	.unwrap()
 	.expect_err("a failed walk kept retrying");
 	assert!(matches!(err, TestError::Policy(Failure::Exhausted { .. })), "{err}");
-	assert_eq!(run.dials, [peer.clone()], "the first walk dialed once");
+	assert_eq!(run.dials, std::slice::from_ref(&peer), "the first walk dialed once");
 	assert_eq!(kio::clock::now(), started, "gave up without waiting");
 
 	let mut machine = Reconnect::new(config(INITIAL, Some(Duration::ZERO)), vec![peer.clone()], started).unwrap();
