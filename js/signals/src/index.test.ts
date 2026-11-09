@@ -122,6 +122,97 @@ describe("Signal", () => {
 		dispose();
 	});
 
+	test("a silent write never hides a later change from a new listener", async () => {
+		const signal = new Signal(0);
+		signal.set(1, false); // nobody listens
+
+		const seen: number[] = [];
+		const dispose = signal.subscribe((v) => seen.push(v));
+		expect(signal.peek()).toBe(1); // the listener starts from 1
+
+		signal.set(0);
+		await settle();
+		expect(seen).toEqual([0]);
+		dispose();
+	});
+
+	test("cyclic and very deep values compare without throwing", async () => {
+		const cyclic = () => {
+			const value: { self?: unknown; n: number } = { n: 1 };
+			value.self = value;
+			return value;
+		};
+		const deep = () => {
+			let value: unknown = 0;
+			for (let i = 0; i < 100_000; i++) value = { value };
+			return value;
+		};
+
+		const signal = new Signal<unknown>(cyclic());
+		let notified = 0;
+		const dispose = signal.subscribe(() => notified++);
+		const errors = spyOn(console, "error").mockImplementation(() => {});
+		try {
+			// Past the depth bound, equal values compare unequal: an extra notification is safe.
+			signal.set(cyclic());
+			await settle();
+			signal.set(deep());
+			await settle();
+			signal.set(deep());
+			await settle();
+			expect(notified).toBe(3);
+			expect(errors).not.toHaveBeenCalled();
+		} finally {
+			errors.mockRestore();
+			dispose();
+		}
+	});
+
+	test("watch delivers the current value once, even when a write lands first", async () => {
+		const signal = new Signal(0);
+		const seen: number[] = [];
+		const dispose = signal.watch((v) => seen.push(v));
+		signal.set(1);
+		await settle();
+		expect(seen).toEqual([1]);
+
+		signal.set(2);
+		await settle();
+		expect(seen).toEqual([1, 2]);
+		dispose();
+	});
+
+	test("watch delivers the current value once when a flush is already queued", async () => {
+		const signal = new Signal(0);
+		const other = signal.subscribe(() => {});
+		signal.set(1);
+		const seen: number[] = [];
+		const dispose = signal.watch((v) => seen.push(v));
+		await settle();
+		expect(seen).toEqual([1]);
+		dispose();
+		other();
+	});
+
+	test("watch delivers the current value when a queued flush nets no change", async () => {
+		const signal = new Signal(0);
+		const seen: number[] = [];
+		const dispose = signal.watch((v) => seen.push(v));
+		signal.set(1);
+		signal.set(0);
+		await settle();
+		expect(seen).toEqual([0]);
+		dispose();
+	});
+
+	test("disposing a watch right away cancels its first delivery", async () => {
+		const signal = new Signal(0);
+		const seen: number[] = [];
+		signal.watch((v) => seen.push(v))();
+		await settle();
+		expect(seen).toEqual([]);
+	});
+
 	test("any number of subscribers is legitimate", async () => {
 		const signal = new Signal(0);
 		let notified = 0;

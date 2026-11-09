@@ -24,8 +24,8 @@ name: Nightly
 # doing. A per-PR arm would fail on unrelated load often enough to be ignored;
 # nightly it competes with nothing, and a regression surfaces a day late against
 # a budget that still means something. The recorded-trace replays are the
-# exception: deterministic and seconds long, so audio-quality.yml also gates
-# release PRs on them.
+# exception: deterministic and seconds long, so `just ci` gates every diff that
+# can move them, and audio-quality.yml reruns them here.
 #
 # Main PRs run only the landing gate's selection as a signal, so every
 # path-filtered gate (Android, C, C++, X11, the audio replays, the OSS
