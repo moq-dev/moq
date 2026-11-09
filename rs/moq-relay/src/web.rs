@@ -914,15 +914,20 @@ impl<'de> serde::Deserialize<'de> for FetchGroup {
 }
 
 /// Admit a one-shot HTTP read: the auth server sees the path, the raw query, the
-/// SNI on HTTPS, the peer, and any certificate. Only a grant that may
+/// SNI on HTTPS, the dialed host, the peer, and any certificate. Only a grant that may
 /// subscribe counts as a request; the returned origin meters reads under its token.
 // The `Err` is axum's own `ErrorResponse`, so there is nothing here to box.
 #[expect(clippy::result_large_err, reason = "the error type is axum's, not ours")]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "one fact per axum extractor the handlers pass through"
+)]
 async fn admit_http(
 	state: &WebState,
 	path: String,
 	query: AuthQuery,
 	uri: &http::Uri,
+	headers: &http::HeaderMap,
 	server_name: Option<Extension<ServerName>>,
 	remote: net::SocketAddr,
 	mtls: Option<Extension<MtlsPeer>>,
@@ -937,6 +942,7 @@ async fn admit_http(
 		.map(str::to_owned)
 		.or_else(|| query.jwt.map(|jwt| format!("jwt={jwt}")));
 	request.server_name = server_name.map(|Extension(ServerName(name))| name);
+	request.host = dialed_host(uri, headers);
 	request.remote = Some(remote);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	// The listener's timeout bounds admission as it bounds the request headers. An
@@ -959,9 +965,28 @@ async fn admit_http(
 	Ok((lease.with_stats(stats), origin))
 }
 
+/// The host an HTTP request dialed, without its port: the HTTP/2 `:authority`, else
+/// the `Host` header.
+fn dialed_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
+	uri.authority()
+		.map(|authority| authority.host().to_owned())
+		.or_else(|| {
+			headers
+				.get(http::header::HOST)
+				.and_then(|host| host.to_str().ok())
+				.and_then(|host| host.parse::<http::uri::Authority>().ok())
+				.map(|authority| authority.host().to_owned())
+		})
+		.filter(|host| !host.is_empty())
+}
+
 /// Serve the announced broadcasts for a given prefix.
 // The `Err` is axum's own `ErrorResponse`, so there is nothing here to box.
 #[expect(clippy::result_large_err, reason = "the error type is axum's, not ours")]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "one axum extractor per fact the admission needs"
+)]
 async fn serve_announced(
 	path: Option<Path<String>>,
 	Query(query): Query<AuthQuery>,
@@ -969,6 +994,7 @@ async fn serve_announced(
 	server_name: Option<Extension<ServerName>>,
 	ConnectInfo(remote): ConnectInfo<net::SocketAddr>,
 	uri: http::Uri,
+	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<String> {
 	let prefix = match path {
@@ -976,7 +1002,7 @@ async fn serve_announced(
 		None => String::new(),
 	};
 
-	let (lease, origin) = admit_http(&state, prefix, query, &uri, server_name, remote, mtls).await?;
+	let (lease, origin) = admit_http(&state, prefix, query, &uri, &headers, server_name, remote, mtls).await?;
 	let mut announced = origin.routes();
 	let mut broadcasts = Vec::new();
 
@@ -1000,6 +1026,10 @@ async fn serve_announced(
 /// Serve the given group for a given track
 // The `Err` is axum's own `ErrorResponse`, so there is nothing here to box.
 #[expect(clippy::result_large_err, reason = "the error type is axum's, not ours")]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "one axum extractor per fact the admission needs"
+)]
 async fn serve_fetch(
 	Path(path): Path<String>,
 	Query(params): Query<FetchParams>,
@@ -1007,6 +1037,7 @@ async fn serve_fetch(
 	server_name: Option<Extension<ServerName>>,
 	ConnectInfo(remote): ConnectInfo<net::SocketAddr>,
 	uri: http::Uri,
+	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<ServeGroup> {
 	// The path containts a broadcast/track
@@ -1018,7 +1049,17 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let (lease, origin) = admit_http(&state, path.join("/"), params.auth, &uri, server_name, remote, mtls).await?;
+	let (lease, origin) = admit_http(
+		&state,
+		path.join("/"),
+		params.auth,
+		&uri,
+		&headers,
+		server_name,
+		remote,
+		mtls,
+	)
+	.await?;
 	// The token's root is the canonical (alias-resolved) broadcast path.
 	let broadcast = lease.token().root.to_string();
 
@@ -1301,6 +1342,7 @@ mod tests {
 						None,
 						remote,
 						"/fetch/room/video".parse().unwrap(),
+						http::HeaderMap::new(),
 						State(state.clone()),
 					)
 					.await
@@ -1315,6 +1357,7 @@ mod tests {
 						None,
 						remote,
 						"/announced/room".parse().unwrap(),
+						http::HeaderMap::new(),
 						State(state.clone()),
 					)
 					.await
@@ -1367,6 +1410,7 @@ mod tests {
 			None,
 			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/fetch/room/video".parse().unwrap(),
+			http::HeaderMap::new(),
 			State(state.clone()),
 		)
 		.await;
@@ -1378,6 +1422,7 @@ mod tests {
 			None,
 			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/announced/room".parse().unwrap(),
+			http::HeaderMap::new(),
 			State(state.clone()),
 		)
 		.await;
@@ -1452,6 +1497,7 @@ mod tests {
 					None,
 					ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 					format!("/fetch/room/video?tier={tier}").parse().unwrap(),
+					http::HeaderMap::new(),
 					State(state.clone()),
 				)
 				.await
@@ -1468,6 +1514,7 @@ mod tests {
 				None,
 				ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 				format!("/announced/room?tier={tier}").parse().unwrap(),
+				http::HeaderMap::new(),
 				State(state.clone()),
 			)
 			.await
@@ -1563,6 +1610,7 @@ mod tests {
 			None,
 			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/fetch/room/video?group=0".parse().unwrap(),
+			http::HeaderMap::new(),
 			State(state),
 		)
 		.await
@@ -1604,6 +1652,7 @@ mod tests {
 			None,
 			peer(),
 			"/fetch/room/video".parse().unwrap(),
+			http::HeaderMap::new(),
 			State(state.clone()),
 		)
 		.await;
@@ -1615,6 +1664,7 @@ mod tests {
 			None,
 			peer(),
 			"/announced/room".parse().unwrap(),
+			http::HeaderMap::new(),
 			State(state.clone()),
 		)
 		.await;
@@ -1968,7 +2018,7 @@ mod tests {
 
 	/// `server_name` is the SNI that selected the certificate, on an HTTP read and a
 	/// WebSocket alike, never the `Host` the client wrote; plain HTTP has no SNI, so it
-	/// reports none rather than the header. Real sockets, so this runs on the wall clock.
+	/// reports none rather than the header. `host` carries the header on both. Real sockets, so this runs on the wall clock.
 	#[cfg(all(unix, feature = "websocket"))]
 	#[tokio::test]
 	async fn server_name_is_the_sni_never_the_host() {
@@ -2021,6 +2071,11 @@ mod tests {
 			let admission = admissions.next().await.expect("an HTTP admission");
 			assert_eq!(admission.request.transport, moq_auth::Transport::Http);
 			assert_eq!(admission.request.server_name.as_deref(), expected, "HTTP, tls={tls}");
+			assert_eq!(
+				admission.request.host.as_deref(),
+				Some("tenant.example"),
+				"HTTP, tls={tls}"
+			);
 			// Unanswered, the read fails as unavailable; only the request mattered.
 			drop(admission);
 			let _ = stream.read_to_end(&mut Vec::new()).await;
@@ -2036,6 +2091,11 @@ mod tests {
 			assert_eq!(
 				admission.request.server_name.as_deref(),
 				expected,
+				"WebSocket, tls={tls}"
+			);
+			assert_eq!(
+				admission.request.host.as_deref(),
+				Some("tenant.example"),
 				"WebSocket, tls={tls}"
 			);
 			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(

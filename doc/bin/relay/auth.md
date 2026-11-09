@@ -43,6 +43,11 @@ never filled from a `Host` header or a WebTransport authority. The client still 
 the relay serves, so a hostname-scoped server binds the tenant to the
 credential, not to `server_name` alone.
 
+`host` is the host the client dialed, without its port: the `Host` header or
+URL authority on HTTP, WebSocket, and WebTransport, and the SNI on raw QUIC and
+`tls://`. Unlike `server_name` it is present over plaintext, so a server that
+scopes tenants by hostname can read `host`; it is just as client-chosen.
+
 **Connect.** A 2xx with a grant admits. A 403 can carry JSON such as
 `{"reason":"expired","root":"rooms/123","tier":"edge"}`. The reason is
 `refused`, `forbidden`, `expired`, or `malformed` (the token does not parse);

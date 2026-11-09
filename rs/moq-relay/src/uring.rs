@@ -815,6 +815,12 @@ impl crate::incoming::Sealed for Request {
 		request.local = Some(self.local);
 		// Only the SNI, like the tokio listener: the CONNECT host selected no certificate.
 		request.server_name = self.sni.clone();
+		request.host = self
+			.url
+			.as_ref()
+			.and_then(|url| url.host_str())
+			.map(str::to_owned)
+			.or_else(|| self.sni.clone());
 		request.alpn = self.alpn.clone();
 		request.tls = self.identity.as_ref().and_then(auth::peer);
 		request
