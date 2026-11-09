@@ -1,5 +1,7 @@
 //! Uncompressed little-endian `f32` PCM, described entirely by the catalog.
 
+use std::collections::VecDeque;
+
 use super::Backend;
 use crate::decode::Decoded;
 use crate::{Activity, Error, Layout, pcm};
@@ -10,6 +12,8 @@ pub(super) struct Pcm {
 	sample_rate: u32,
 	layout: Layout,
 	bytes_per_frame: usize,
+	/// Outputs submitted but not yet received, which reuse their slots across calls.
+	ready: VecDeque<Decoded>,
 }
 
 impl Pcm {
@@ -35,12 +39,13 @@ impl Pcm {
 			sample_rate: catalog.sample_rate,
 			layout: Layout::from_channels(catalog.channel_count)?,
 			bytes_per_frame: pcm::frame_bytes(1, catalog.channel_count)?,
+			ready: VecDeque::new(),
 		}))
 	}
 }
 
 impl Backend for Pcm {
-	fn decode(&mut self, packet: &[u8]) -> Result<Decoded, Error> {
+	fn decode(&mut self, packet: &[u8]) -> Result<(), Error> {
 		if packet.is_empty() || !packet.len().is_multiple_of(self.bytes_per_frame) {
 			return Err(Error::Misaligned {
 				got: packet.len(),
@@ -54,13 +59,23 @@ impl Backend for Pcm {
 			.iter()
 			.map(|sample| f32::from_le_bytes(*sample))
 			.collect();
-		Ok(Decoded {
+		self.ready.push_back(Decoded {
 			samples,
 			activity: Activity::Active,
-		})
+		});
+		Ok(())
+	}
+
+	fn receive(&mut self) -> Result<Option<Decoded>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
+		Ok(())
 	}
 
 	fn reset(&mut self) -> Result<(), Error> {
+		self.ready.clear();
 		Ok(())
 	}
 

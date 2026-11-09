@@ -127,7 +127,7 @@ where
 	match geo_rx.await {
 		Ok(Ok(geometry)) => Ok((geometry, guard)),
 		Ok(Err(err)) => Err(err),
-		Err(_) => Err(Error::Codec(anyhow::anyhow!(
+		Err(_) => Err(Error::codec(anyhow::anyhow!(
 			"capture thread exited before reporting geometry"
 		))),
 	}

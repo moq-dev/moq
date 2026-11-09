@@ -24,8 +24,8 @@ export interface Datagram {
 
 /** Publisher properties fixed for the lifetime of a datagram track. */
 export interface Info {
-	/** Timestamp units per second, or omitted for an untimed track. */
-	timescale?: Timescale | null;
+	/** Timestamp units per second, or `null` for an untimed track. */
+	timescale: Timescale | null;
 	/** Publisher priority, higher first, breaking ties between subscriber priorities. */
 	priority: number;
 }
@@ -116,7 +116,7 @@ export class Producer {
 			const state = this.#state;
 			if (state.closed.peek() !== undefined) throw state.closed.peek() ?? new Error("datagram track is closed");
 			if (state.info.peek() !== undefined) throw new Error("datagram track is already accepted");
-			const timescale = properties.timescale == null ? undefined : Timescale(properties.timescale);
+			const timescale = properties.timescale == null ? null : Timescale(properties.timescale);
 			state.info.set(Object.freeze({ timescale, priority: priority(properties.priority ?? 0) }));
 			return this;
 		} catch (error) {

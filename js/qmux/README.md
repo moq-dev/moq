@@ -15,7 +15,7 @@ npm install @moq/qmux
 Use as a drop-in `WebTransport` replacement:
 
 ```ts
-import Session from "@moq/qmux"
+import { Session } from "@moq/qmux"
 
 const transport = new Session("https://example.com/endpoint")
 await transport.ready
@@ -46,7 +46,7 @@ the value to accept from what the client offered, and the session reads the wire
 off the socket.
 
 ```ts
-import Session, { selectSubprotocol } from "@moq/qmux"
+import { Session, selectSubprotocol } from "@moq/qmux"
 
 Deno.serve((req) => {
 	const protocol = selectSubprotocol(req.headers.get("sec-websocket-protocol"), {

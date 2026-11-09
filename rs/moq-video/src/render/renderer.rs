@@ -138,7 +138,7 @@ impl Completion {
 					drop(keepalive);
 				}
 			})
-			.map_err(|err| Error::Render(anyhow::anyhow!("start GPU completion worker: {err}")))?;
+			.map_err(|err| Error::render(anyhow::anyhow!("start GPU completion worker: {err}")))?;
 
 		Ok(Self {
 			device: device.clone(),

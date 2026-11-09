@@ -23,14 +23,12 @@
 // a result the caller never sees is disposed of rather than left live with no
 // owner.
 //
-// What a cancel tears down depends on the call. A one-shot call (a subscribe, a
-// fetch, Request, Resolve, a TrackDemand's or Fill's WantedChanged,
-// Server.Accept) aborts on its own and leaves the
-// object it was made on usable, so the same
-// broadcast, producer, or server takes the next call. A stream read (any Next,
-// RecvGroup, ReadFrame, or the iterators over them) instead cancels the stream
-// it reads, which is what a range loop over a cancelled context wants: the
-// consumer is finished, not merely this read. Cancel a stream read only when you
-// are done with the stream; to bound one read, cancel the whole consumer's
-// context.
+// A cancel aborts only the call it bounds and leaves the object usable, so the
+// same broadcast, producer, consumer, or server takes the next call. A stream
+// read (any Next, RecvGroup, ReadFrame) may lose the item it was about to
+// return. A range loop over a consumer's stream (All, Groups, Frames) is the
+// exception: when its context ends, it cancels the stream too, since the loop
+// is done with it. Route.All and Server.All leave the route advertised and the
+// listener open. Calls that own a session or listener (Dial, Listen, a session's
+// Closed) tear it down when cancelled.
 package moq

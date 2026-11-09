@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group};
 use moq_net::bandwidth::{Allocator, Consumer, Producer, Rate, Reservation, Viewers};
-use moq_net::{broadcast, fuzz, kio, track};
+use moq_net::{broadcast, fuzz, track};
 
 /// Reservations sharing the allocator.
 const RESERVATIONS: [usize; 4] = [1, 10, 1_000, 10_000];

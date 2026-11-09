@@ -89,12 +89,12 @@ pub(crate) struct Nvenc {
 
 impl Nvenc {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
-		Encoder::load().map_err(|error| Error::Codec(anyhow::anyhow!("NVENC unavailable: {error}")))?;
+		Encoder::load().map_err(|error| Error::codec(anyhow::anyhow!("NVENC unavailable: {error}")))?;
 
 		// cudarc still panics while loading a missing CUDA driver. Probe it before
 		// creating the context so automatic codec selection can fall through.
 		if !cuda_driver_present() {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"CUDA driver library not found (libcuda); NVENC unavailable"
 			)));
 		}
@@ -104,14 +104,14 @@ impl Nvenc {
 
 		let cuda = input_context(config.input)?;
 		let encoder = Encoder::initialize_with_cuda(cuda.clone())
-			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC init: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("NVENC init: {e}")))?;
 
 		// Start from the preset, then set rate control and GOP.
 		let (preset_guid, label) = nvenc_preset(config.preset);
 		let tuning = NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_LOW_LATENCY;
 		let mut preset = encoder
 			.get_preset_config(codec_guid, preset_guid, tuning)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC preset config: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("NVENC preset config: {e}")))?;
 
 		let cfg = &mut preset.presetCfg;
 		let interval = config.keyframe_interval();
@@ -214,7 +214,7 @@ impl Nvenc {
 		// frame registers directly; the CPU path interleaves I420 chroma on write.
 		let session = encoder
 			.start_session(NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12, init)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC start session: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("NVENC start session: {e}")))?;
 
 		tracing::info!(
 			encoder = NAME,
@@ -279,7 +279,7 @@ impl Backend for Nvenc {
 		let output = self
 			.session
 			.create_output_bitstream()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC output bitstream: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("NVENC output bitstream: {e}")))?;
 
 		let params = moq_nvenc::EncodePictureParams {
 			input_timestamp: self.timestamp,
@@ -308,12 +308,12 @@ impl Backend for Nvenc {
 						cuda.pitch,
 					)
 				}
-				.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC register CUDA frame: {e}")))?;
+				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC register CUDA frame: {e}")))?;
 
 				let submission = self
 					.session
 					.encode_picture(resource, output, params)
-					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC encode: {e}")))?;
+					.map_err(|e| Error::codec(anyhow::anyhow!("NVENC encode: {e}")))?;
 				drain_output(submission)?
 			}
 			// Everything else goes through a CPU NV12 input buffer.
@@ -321,7 +321,7 @@ impl Backend for Nvenc {
 				let mut input = self
 					.session
 					.create_input_buffer()
-					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC input buffer: {e}")))?;
+					.map_err(|e| Error::codec(anyhow::anyhow!("NVENC input buffer: {e}")))?;
 
 				let i420 = frame.to_i420()?;
 
@@ -336,7 +336,7 @@ impl Backend for Nvenc {
 				// width (interleaved U+V) at the luma pitch.
 				let mut lock = input
 					.lock()
-					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock input: {e}")))?;
+					.map_err(|e| Error::codec(anyhow::anyhow!("NVENC lock input: {e}")))?;
 				let pitch = lock.pitch() as usize;
 				// SAFETY: offsets stay within the pitch*height*3/2 NV12 buffer and
 				// each source plane is exactly row_bytes * rows.
@@ -349,7 +349,7 @@ impl Backend for Nvenc {
 				let submission = self
 					.session
 					.encode_picture(input, output, params)
-					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC encode: {e}")))?;
+					.map_err(|e| Error::codec(anyhow::anyhow!("NVENC encode: {e}")))?;
 				drain_output(submission)?
 			}
 		};
@@ -379,7 +379,7 @@ impl Backend for Nvenc {
 		// control mode set at open still applies, only the target moves.
 		self.session
 			.reconfigure(bitrate.min(u32::MAX as u64) as u32)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC set bitrate to {bitrate}: {e}")))
+			.map_err(|e| Error::codec(anyhow::anyhow!("NVENC set bitrate to {bitrate}: {e}")))
 	}
 
 	fn can_cut(&self) -> bool {
@@ -401,25 +401,25 @@ impl Backend for Nvenc {
 fn drain_output<I>(submission: moq_nvenc::Submission<I>) -> Result<Vec<u8>, Error> {
 	let (data, _input, _output) = submission
 		.finish()
-		.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock output: {e}")))?;
+		.map_err(|e| Error::codec(anyhow::anyhow!("NVENC lock output: {e}")))?;
 	Ok(data)
 }
 
 /// Match the declared Vulkan device before allocating an NVENC session.
 fn input_context(input: Option<vulkan::Device>) -> Result<Arc<CudaContext>, Error> {
 	let Some(device) = input else {
-		return CudaContext::new(0).map_err(|e| Error::Codec(anyhow::anyhow!("CUDA init: {e:?}")));
+		return CudaContext::new(0).map_err(|e| Error::codec(anyhow::anyhow!("CUDA init: {e:?}")));
 	};
 	matching_driver(device)?;
-	let count = CudaContext::device_count().map_err(|e| Error::Codec(anyhow::anyhow!("CUDA enumerate: {e:?}")))?;
+	let count = CudaContext::device_count().map_err(|e| Error::codec(anyhow::anyhow!("CUDA enumerate: {e:?}")))?;
 	for ordinal in 0..count {
 		let physical = cudarc::driver::result::device::get(ordinal)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA device {ordinal}: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA device {ordinal}: {e:?}")))?;
 		let uuid = cudarc::driver::result::device::get_uuid(physical)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA UUID: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA UUID: {e:?}")))?;
 		if uuid.bytes.map(|byte| u8::from_ne_bytes(byte.to_ne_bytes())) == device.device_uuid {
 			return CudaContext::new(ordinal as usize)
-				.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA input device {ordinal}: {e:?}")));
+				.map_err(|e| Error::codec(anyhow::anyhow!("CUDA input device {ordinal}: {e:?}")));
 		}
 	}
 	Err(Error::Unsupported(format!(

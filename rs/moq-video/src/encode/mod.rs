@@ -4,8 +4,9 @@
 //! for which backends cover each on this platform.
 //!
 //! Entry points, high to low level:
-//! - `publish_capture` captures and publishes a webcam (turnkey). Requires the
-//!   `capture` feature.
+//! - `publish_capture` captures and publishes a webcam (turnkey), returning a
+//!   `Publication` that reports its state and the `Driver` that runs it.
+//!   Requires the `capture` feature.
 //! - [`Encoder`] encodes raw [`Frame`](crate::Frame)s you supply into
 //!   [`Encoded`] access units, and [`Producer`] publishes those (bring your own
 //!   frames). Build both for the same [`Codec`].
@@ -47,7 +48,7 @@ pub use encoded::Encoded;
 pub use encoder::{Applied, Codec, Config, Encoder, Kind, Preset};
 pub use producer::Producer;
 #[cfg(feature = "capture")]
-pub use producer::{Capture, publish_capture};
+pub use producer::{Capture, Driver, Publication, State, Status, publish_capture};
 pub use sink::Sink;
 
 #[cfg(test)]
