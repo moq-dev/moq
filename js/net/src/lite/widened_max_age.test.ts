@@ -213,11 +213,11 @@ test("an update keeping the budget drops the stale groups again on lite-07", asy
 	}
 	expect(await received(reader, 2)).toEqual([3n, 4n]);
 
-	// Only the priority changes: groups 1 and 2 are still stale, so they are dropped again. The
+	// Only the priority changes (the budget is resent, since an update replaces it): groups 1 and 2 are still stale, so they are dropped again. The
 	// track ends only once that re-drop has reached the reader, so the end is a FIN, not a reset
 	// of the reply still writing; a missing re-drop fails here instead of waiting out the grace.
 	const reached = redropped(reader);
-	reader.update({ priority: 5 });
+	reader.update({ priority: 5, delay: { max: Milli(1500) } });
 	await reached;
 	producer.finish();
 	producer.close();
