@@ -324,9 +324,11 @@ type SessionProps = {
 
 /**
  * Servers (host and port) the WebSocket fallback dials where WebSocket won the last race, so the
- * next dial there skips QUIC's head start. Both transports still race, and a WebTransport win
- * deletes the entry, since UDP gets through again. Keyed like moq-tokio's: whether UDP reaches a
- * server does not depend on the path or query, which may hold a rotating credential.
+ * next dial there skips QUIC's head start. Both transports still race. The entry is provisional:
+ * a WebTransport win or {@link reachable} probe deletes it, since UDP gets through again, and so
+ * does the end of the MoQ session the winning WebSocket carried, so a redial after an outage gives WebTransport
+ * its head start. Keyed like moq-tokio's: whether UDP reaches a server does not depend on the
+ * path or query, which may hold a rotating credential.
  */
 const websocketWon = new Set<string>();
 
@@ -344,11 +346,22 @@ const NEVER_ABORTED = new AbortController().signal;
  *
  * @returns A promise that resolves to an established session
  */
-export async function connect({ url, ...props }: ConnectProps): Promise<Session> {
+export function connect(props: ConnectProps): Promise<Session> {
+	return establish(props);
+}
+
+/**
+ * {@link connect}, finishing the MoQ handshake over `reached`, a WebTransport session a
+ * {@link reachable} probe opened, instead of racing the transports.
+ *
+ * @internal
+ */
+export async function establish({ url, ...props }: ConnectProps, reached?: Reached): Promise<Session> {
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	props.versions = normalizeVersions(props);
 	if (props.transport && props.versions) throw new TypeError("versions cannot reconfigure a supplied transport");
 	const signal = props.signal ?? NEVER_ABORTED;
+	if (signal.aborted) reached?.transport.close();
 	signal.throwIfAborted();
 	// Fail before dialing; the session checks again when it attaches.
 	if (props.auth) vacant(props.auth);
@@ -370,8 +383,8 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Session>
 				})
 			: () => {};
 
-	const tokens = props.tokens ?? [];
-	const pending = connectInner(url, tokens, props, abort);
+	const tokens = reached?.tokens ?? props.tokens ?? [];
+	const pending = connectInner(url, tokens, props, abort, reached?.transport);
 	try {
 		// A `pending` rejection propagates unless the abort or timeout beat it to the finish line.
 		const connected = await Promise.race([pending, abort.then(() => undefined)]);
@@ -393,12 +406,68 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Session>
 	}
 }
 
+/**
+ * A WebTransport session a {@link reachable} probe opened, and the tokens its dial presented.
+ *
+ * @internal
+ */
+export class Reached {
+	readonly transport: WebTransport;
+	readonly tokens: readonly string[];
+
+	constructor(transport: WebTransport, tokens: readonly string[]) {
+		this.transport = transport;
+		this.tokens = tokens;
+	}
+}
+
+/**
+ * Open a bare WebTransport session to `url`, for a session on the WebSocket fallback deciding
+ * to move back. It presents what a dial would and runs no MoQ handshake: {@link establish}
+ * finishes that over it, or the caller closes it. Reaching it clears the WebSocket win.
+ * Resolves undefined on failure, after `props.timeout`, or once `signal` aborts.
+ *
+ * @internal
+ */
+export async function reachable(
+	url: URL,
+	props: Pick<ConnectProps, "tokens" | "versions" | "webtransport" | "websocket" | "timeout">,
+	signal: AbortSignal,
+): Promise<Reached | undefined> {
+	if (!isWebTransportSupported() || signal.aborted) return undefined;
+	const tokens = props.tokens ?? [];
+	const offered = offer(normalizeVersions(props));
+	const dialUrl = parse(credential(url, tokens, offered.setupToken).url).url;
+	const { promise: cancel, resolve } = Promise.withResolvers<void>();
+	const onAbort = () => resolve();
+	signal.addEventListener("abort", onAbort, { once: true });
+	const limit = props.timeout ?? DEFAULT_TIMEOUT;
+	const disarm = limit > 0 ? after(Nano.fromMilli(Milli(limit)), resolve) : () => {};
+	try {
+		const target = await resolveWebTransport(dialUrl, cancel, offered.alpns, props.webtransport);
+		const quic = target && (await dialWebTransport(target, cancel));
+		if (!quic) return undefined;
+		if (signal.aborted) {
+			quic.close();
+			return undefined;
+		}
+		websocketWon.delete(websocketKey(props.websocket?.url ? new URL(props.websocket.url) : dialUrl));
+		return new Reached(quic, tokens);
+	} catch {
+		return undefined;
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+		disarm();
+	}
+}
+
 /** Dial `raw`, resolving with the session and the credential the winning transport presented. */
 async function connectInner(
 	raw: URL,
 	tokens: readonly string[],
 	props: Omit<ConnectProps, "url">,
 	abort: Promise<void>,
+	reached?: WebTransport,
 ): Promise<[Session, Presentation]> {
 	const offered = offer(props.versions);
 	const dial = credential(raw, tokens, offered.setupToken);
@@ -420,6 +489,52 @@ async function connectInner(
 		return [await connectTransport(url, transport, wiring(dial), offered.setup), dial];
 	}
 
+	const websocketUrl = fallbackDial?.url ?? url;
+	const server = websocketKey(websocketUrl);
+	// A probe already reached WebTransport, so there is nothing to race.
+	const session = reached ?? (await dialRace(url, websocketUrl, server, props, offered, abort));
+	if (!session) throw new Error("no transport available");
+
+	// Abort the setup handshake without leaking the selected transport.
+	void abort.then(() => session.close());
+
+	// Record who won the race to this server, so QUIC's next head start follows the last result.
+	if (session instanceof Qmux) {
+		console.debug(show(parse(url)), "connected via WebSocket");
+		websocketWon.add(server);
+	} else {
+		console.debug(show(parse(url)), "connected via WebTransport");
+		websocketWon.delete(server);
+	}
+
+	// The remaining setup is identical whether the transport was raced or supplied.
+	const protocol = (session as { protocol?: string }).protocol || undefined;
+	if (offered.explicit && protocol && !offered.alpns.includes(protocol)) {
+		session.close();
+		throw new Error(`server selected an unoffered protocol: ${protocol}`);
+	}
+	if (offered.explicit && !protocol && offered.setup.length === 0) {
+		session.close();
+		throw new Error("server negotiated no protocol, and no offered version negotiates in SETUP");
+	}
+	const won = session instanceof Qmux && fallbackDial ? fallbackDial : dial;
+	const connection = await connectTransport(url, session as WebTransport, wiring(won), offered.setup);
+	if (session instanceof Qmux) {
+		const forget = () => websocketWon.delete(server);
+		void connection.closed.then(forget, forget);
+	}
+	return [connection, won];
+}
+
+/** Race WebTransport against the WebSocket fallback to `url`, resolving with the winner. */
+async function dialRace(
+	url: URL,
+	websocketUrl: URL,
+	server: string,
+	props: Omit<ConnectProps, "url">,
+	offered: Offer,
+	abort: Promise<void>,
+): Promise<WebTransport | Qmux | undefined> {
 	// Stop transports after one connects or the caller aborts.
 	const { promise: raced, resolve: done } = Promise.withResolvers<void>();
 	const cancel = Promise.race([raced, abort]);
@@ -430,8 +545,6 @@ async function connectInner(
 
 	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket won the last race
 	// to this server. NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
-	const websocketUrl = fallbackDial?.url ?? url;
-	const server = websocketKey(websocketUrl);
 	const headstart =
 		!webtransport || websocketWon.has(server) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
 	const maxStreams = BigInt(props.websocket?.maxStreams ?? DEFAULT_MAX_STREAMS);
@@ -475,32 +588,7 @@ async function connectInner(
 	// transport, so cancelling cannot close it; the rest close themselves on cancel.
 	closeLosers(contenders, session);
 
-	if (!session) throw new Error("no transport available");
-
-	// Abort the setup handshake without leaking the selected transport.
-	void abort.then(() => session.close());
-
-	// Record who won the race to this server, so QUIC's next head start follows the last result.
-	if (session instanceof Qmux) {
-		console.debug(show(parse(url)), "connected via WebSocket");
-		websocketWon.add(server);
-	} else {
-		console.debug(show(parse(url)), "connected via WebTransport");
-		websocketWon.delete(server);
-	}
-
-	// The remaining setup is identical whether the transport was raced or supplied.
-	const protocol = (session as { protocol?: string }).protocol || undefined;
-	if (offered.explicit && protocol && !offered.alpns.includes(protocol)) {
-		session.close();
-		throw new Error(`server selected an unoffered protocol: ${protocol}`);
-	}
-	if (offered.explicit && !protocol && offered.setup.length === 0) {
-		session.close();
-		throw new Error("server negotiated no protocol, and no offered version negotiates in SETUP");
-	}
-	const won = session instanceof Qmux && fallbackDial ? fallbackDial : dial;
-	return [await connectTransport(url, session as WebTransport, wiring(won), offered.setup), won];
+	return session;
 }
 
 async function connectTransport(

@@ -149,6 +149,7 @@ async fn drive<A: Target>(
 				run.events.push("retrying");
 				continue;
 			}
+			Action::Probe(_) => unreachable!("no test driven here reports a fallback"),
 			Action::Wait(_) => unreachable!("next never returns a wait"),
 		};
 		let url = attempt.target().url().clone();
@@ -733,6 +734,172 @@ async fn a_waited_restart_redials_only_once_the_session_closes() {
 	})
 	.await;
 	assert_eq!(run.events, ["offline"]);
+}
+
+/// A live session on a fallback, ready to probe, with its peer's server side.
+async fn on_fallback(config: Config) -> (Reconnect<Url, TestError>, Session) {
+	let peer = url("https://peer:1/");
+	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+	machine.fallback(kio::clock::now());
+	(machine, run.servers.remove(0))
+}
+
+/// The next action, which must be a probe; returns when it was asked for.
+async fn probe(machine: &mut Reconnect<Url, TestError>) -> Instant {
+	match next(machine).await {
+		Action::Probe(_) => kio::clock::now(),
+		other => panic!("expected a probe, got {other:?}"),
+	}
+}
+
+/// A session on a fallback probes the preferred transport and, once a probe gets through,
+/// moves to it make-before-break: the fallback session sends a GOAWAY and drains as the
+/// predecessor while the probe finishes its handshake, closes as soon as the replacement
+/// serves and it carries nothing, and nothing goes offline in between.
+#[kio::test]
+async fn a_fallback_session_moves_to_the_preferred_transport() {
+	let started = kio::clock::now();
+	let (mut machine, fallback_server) = on_fallback(Config::default()).await;
+
+	let first = probe(&mut machine).await;
+	let waited = first - started;
+	assert!(
+		waited >= PROBE_INITIAL / 2 && waited <= PROBE_INITIAL,
+		"the first probe waited {waited:?}"
+	);
+	// The preferred transport is still out, so the fallback keeps serving.
+	assert!(!machine.probed(kio::clock::now(), Err(TestError::Dial)));
+	assert!(machine.predecessor().is_none());
+
+	let second = probe(&mut machine).await;
+	assert!(second - first >= PROBE_INITIAL, "the wait never doubled");
+	let fallback = machine.session().unwrap().clone();
+	assert!(machine.probed(kio::clock::now(), Ok(())));
+	assert!(matches!(next(&mut machine).await, Action::Migrating));
+	assert!(
+		machine.predecessor().is_some(),
+		"the fallback session must drain rather than drop"
+	);
+	assert!(fallback.poll_closed(&kio::Waiter::noop()).is_pending());
+	// The fallback's peer learns it is moving.
+	kio::clock::sim::idle().await;
+	assert!(matches!(
+		fallback_server.draining().poll(&kio::Waiter::noop()),
+		Poll::Ready(Ok(_))
+	));
+	let (preferred, _preferred_server) = handshake().await;
+	machine.connected(kio::clock::now(), preferred);
+
+	// Idle, so the predecessor closes once the preferred session serves.
+	assert!(matches!(next(&mut machine).await, Action::Retired));
+	assert!(fallback.poll_closed(&kio::Waiter::noop()).is_ready());
+	assert!(machine.predecessor().is_none());
+	assert!(
+		machine
+			.session()
+			.unwrap()
+			.poll_closed(&kio::Waiter::noop())
+			.is_pending()
+	);
+	// Off the fallback, nothing probes anymore.
+	assert!(matches!(
+		machine.poll(kio::clock::now(), &kio::Waiter::noop()),
+		Action::Wait(None)
+	));
+}
+
+/// A peer GOAWAY that arrives with a successful probe wins: the probe is dropped, and the
+/// policy follows the peer's redirect rather than a move of its own.
+#[kio::test]
+async fn a_peer_goaway_wins_over_a_probe() {
+	let (mut machine, fallback_server) = on_fallback(Config::default()).await;
+	probe(&mut machine).await;
+	fallback_server
+		.drain()
+		.send(goaway::Goaway::new())
+		.expect("the fallback peer sends a GOAWAY");
+	kio::clock::sim::idle().await;
+	assert!(
+		!machine.probed(kio::clock::now(), Ok(())),
+		"the probe hid the peer's GOAWAY"
+	);
+	assert!(
+		!matches!(next(&mut machine).await, Action::Probe(_)),
+		"the GOAWAY was never acted on"
+	);
+}
+
+/// A target that never reaches the preferred transport keeps its fallback session and
+/// probes no faster than the doubling backoff allows, capped at one every five minutes.
+#[kio::test]
+async fn a_target_without_the_preferred_transport_probes_no_faster_than_the_bound() {
+	let (mut machine, _fallback) = on_fallback(Config::default()).await;
+	let mut last = probe(&mut machine).await;
+	let mut delay = PROBE_INITIAL;
+	for _ in 0..8 {
+		assert!(!machine.probed(kio::clock::now(), Err(TestError::Dial)));
+		delay = (delay * 2).min(PROBE_MAX);
+		let at = probe(&mut machine).await;
+		let gap = at - last;
+		assert!(
+			gap >= delay / 2 && gap <= delay,
+			"a probe waited {gap:?}, outside the jittered {delay:?}"
+		);
+		last = at;
+	}
+	assert_eq!(delay, PROBE_MAX, "the backoff never reached its cap");
+	assert!(machine.session().is_some(), "the fallback must keep serving");
+}
+
+/// A probe that outlasts the connect timeout is abandoned and counts as a failed one.
+#[kio::test]
+async fn a_hung_probe_is_abandoned_at_the_connect_timeout() {
+	let config = Config {
+		timeout: Some(Duration::from_secs(3)),
+		..Default::default()
+	};
+	let (mut machine, _fallback) = on_fallback(config).await;
+	let asked = probe(&mut machine).await;
+	assert!(matches!(next(&mut machine).await, Action::Abandon));
+	assert_eq!(kio::clock::now() - asked, Duration::from_secs(3));
+	// A late answer from the abandoned probe changes nothing.
+	assert!(!machine.probed(kio::clock::now(), Ok(())));
+	let again = probe(&mut machine).await;
+	assert!(again - asked >= PROBE_INITIAL, "the abandoned probe never backed off");
+}
+
+/// The fallback session ending stops the probing: the redial that follows races afresh.
+#[kio::test]
+async fn a_probe_ends_with_its_fallback_session() {
+	let (mut machine, fallback) = on_fallback(config(INITIAL, Some(Duration::from_secs(1)))).await;
+	probe(&mut machine).await;
+	drop(fallback);
+	assert!(matches!(next(&mut machine).await, Action::Offline(_)));
+	assert!(
+		!machine.probed(kio::clock::now(), Ok(())),
+		"a probe outlived its session"
+	);
+	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
+}
+
+/// Connecting once never probes: moving to another session is a second one.
+#[kio::test]
+async fn connecting_once_never_probes() {
+	let config = Config {
+		once: true,
+		..Default::default()
+	};
+	let (mut machine, _fallback) = on_fallback(config).await;
+	kio::clock::sleep(PROBE_MAX * 2).await;
+	assert!(matches!(
+		machine.poll(kio::clock::now(), &kio::Waiter::noop()),
+		Action::Wait(None)
+	));
 }
 
 /// The policy must not log or report a credential riding in a dial URL.
