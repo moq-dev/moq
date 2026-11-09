@@ -54,6 +54,8 @@ pub(super) struct Video<O> {
 	pub changed: Arc<tokio::sync::Notify>,
 	pub output: O,
 	pub max_delay: Duration,
+	/// The rendition's catalog `delay`, held as this track's playout target.
+	pub delay: tokio::sync::watch::Receiver<Option<Duration>>,
 }
 
 /// The max-delay decoder of a rendition with a catalog `warmup`, and the track it
@@ -193,7 +195,15 @@ impl<O: Output> Video<O> {
 								..Default::default()
 							});
 						}
-						if active && buffers.len() == 1 && role.received(role.map(frame.timestamp)?, Instant::now()) {
+						// Video has no jitter estimate, so its target is the encoder delay alone,
+						// which holds audio back with it.
+						let held = self.delay.borrow().is_some_and(|delay| role.set_target(delay));
+						let anchored =
+							active && buffers.len() == 1 && role.received(role.map(frame.timestamp)?, Instant::now());
+						if held {
+							self.changed.notify_one();
+						}
+						if held || anchored {
 							self.output.send(Event::Wake);
 						}
 						let back = buffers.back_mut().unwrap();
@@ -739,6 +749,7 @@ mod tests {
 			changed: media.drained.clone(),
 			output: media.output.clone(),
 			max_delay,
+			delay: tokio::sync::watch::channel(None).1,
 		}
 	}
 
@@ -806,6 +817,67 @@ mod tests {
 		}
 		producer.finish().unwrap();
 		(min, max)
+	}
+
+	/// A video rendition's catalog `delay` holds audio back with it, and a rise moves both.
+	#[tokio::test]
+	async fn a_video_encoder_delay_delays_audio_to_match() {
+		tokio::time::pause();
+		let jitter = Duration::from_millis(50);
+		let media = media(jitter);
+		let start = Instant::now();
+		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
+		audio.received(moq_net::Timestamp::ZERO, start);
+		audio.set_target(jitter);
+		assert_eq!(media.presentation.due(moq_net::Timestamp::ZERO), Some(start + jitter));
+
+		let (encoder, delay) = tokio::sync::watch::channel(Some(Duration::from_millis(200)));
+		let budget = Duration::from_secs(1);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = track
+			.consume()
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(budget)),
+			)
+			.await
+			.unwrap();
+		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data);
+		let track_consumer = moq_mux::container::Consumer::new(subscriber, format());
+		let mut producer = moq_mux::container::Producer::new(track, format());
+		let settle = async || {
+			for _ in 0..10 {
+				tokio::task::yield_now().await;
+			}
+		};
+		let video = Video {
+			delay,
+			..playback(&media, budget)
+		};
+		let task = tokio::spawn(video.run(track_consumer, Buffered::default(), None));
+		producer.write(frame(0, true)).unwrap();
+		settle().await;
+		assert_eq!(
+			media.presentation.due(moq_net::Timestamp::ZERO),
+			Some(start + Duration::from_millis(200)),
+			"audio plays in sync with the delayed video"
+		);
+
+		encoder.send_replace(Some(Duration::from_millis(300)));
+		producer.write(frame(33, false)).unwrap();
+		settle().await;
+		let clock = media.presentation.consume();
+		assert_eq!(
+			clock.delay(),
+			Duration::from_millis(300),
+			"a rising catalog delay moves the schedule"
+		);
+
+		producer.finish().unwrap();
+		task.await.unwrap().unwrap();
+		assert_eq!(clock.delay(), jitter, "released with its track");
 	}
 
 	async fn burst(speaker: bool, paused_window: bool) {

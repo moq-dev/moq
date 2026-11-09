@@ -205,6 +205,12 @@ impl<O: Output> Media<O> {
 								{
 									playback.retire(Kind::Audio);
 								}
+								if let Some(demand) = &video_demand {
+									demand.hold(&self.args, snapshot.video.renditions.get(&demand.name).and_then(|config| config.delay));
+								}
+								if let Some(demand) = &audio_demand {
+									demand.hold(&self.args, snapshot.audio.renditions.get(&demand.name).and_then(|config| config.delay));
+								}
 								playback.received(snapshot);
 							},
 							None => {
@@ -342,21 +348,26 @@ impl<O: Output> Media<O> {
 								refresh = refresh.is_some(),
 								"playing video rendition"
 							);
+							let (delay, held) = tokio::sync::watch::channel(None);
 							let video = Video {
 								presentation: self.presentation.clone(),
 								frames: self.video.clone(),
 								changed: self.drained.clone(),
 								output: self.output.clone(),
 								max_delay,
+								delay: held,
 							};
 							let (stop, stopped) = tokio::sync::oneshot::channel();
 							let (retire, retired) = tokio::sync::oneshot::channel();
-							video_demand = Some(Demand {
+							let demand = Demand {
 								name: name.clone(),
 								track: reference.clone(),
 								stop,
 								retire: Some(retire),
-							});
+								delay,
+							};
+							demand.hold(&self.args, config.delay);
+							video_demand = Some(demand);
 							tasks.spawn(async move {
 								// Video holds no tail beyond the frames already queued for the window,
 								// so a retirement stops it too.
@@ -419,7 +430,9 @@ impl<O: Output> Media<O> {
 							if speaker.is_none() {
 								speaker = Some(device.get_or_try_init(|| self.output.speaker()).await?.clone());
 							}
+							let (delay, held) = tokio::sync::watch::channel(None);
 							let audio = AudioPlayback {
+								delay: held,
 								speaker: speaker.clone().expect("opened above"),
 								presentation: self.presentation.clone(),
 								playhead: self.playhead.clone(),
@@ -429,12 +442,15 @@ impl<O: Output> Media<O> {
 							};
 							let (stop, stopped) = tokio::sync::oneshot::channel();
 							let (retire, retired) = tokio::sync::oneshot::channel();
-							audio_demand = Some(Demand {
+							let demand = Demand {
 								name: name.clone(),
 								track: reference.clone(),
 								stop,
 								retire: Some(retire),
-							});
+								delay,
+							};
+							demand.hold(&self.args, config.delay);
+							audio_demand = Some(demand);
 							tasks.spawn(async move {
 								// A dropped sender retires nothing.
 								let retired = async {
@@ -489,6 +505,8 @@ struct Demand {
 	stop: tokio::sync::oneshot::Sender<()>,
 	/// Ends the rendition as though its track finished, taken once sent.
 	retire: Option<tokio::sync::oneshot::Sender<()>>,
+	/// The catalog `delay` the rendition holds, `None` under a fixed `--delay`.
+	delay: tokio::sync::watch::Sender<Option<Duration>>,
 }
 
 impl Demand {
@@ -501,6 +519,19 @@ impl Demand {
 		};
 		let _ = retire.send(());
 		true
+	}
+
+	/// Hold the rendition's newest catalog `delay`, unless the delay is fixed.
+	/// It only grows, so a stale snapshot never lowers it.
+	fn hold(&self, args: &Args, delay: Option<Duration>) {
+		let delay = delay.filter(|_| args.fixed_delay().is_none());
+		self.delay.send_if_modified(|held| {
+			let raised = delay > *held;
+			if raised {
+				*held = delay;
+			}
+			raised
+		});
 	}
 }
 
@@ -535,6 +566,8 @@ struct AudioPlayback<O: Output> {
 	/// The depth the sink opens on, which also sizes its ring.
 	latency: Duration,
 	output: O,
+	/// The rendition's catalog `delay`, added to the jitter target this track holds.
+	delay: tokio::sync::watch::Receiver<Option<Duration>>,
 }
 
 /// Play a track until it ends, or until `retired` resolves, which ends it where
@@ -551,6 +584,7 @@ async fn play_audio<O: Output>(
 		playhead,
 		latency,
 		output,
+		delay: encoder,
 	} = playback;
 
 	// The playout delay is the consumer's to size, from how unevenly packets arrive,
@@ -827,7 +861,9 @@ async fn play_audio<O: Output>(
 			// steers, never what moves it. The target is this track's own jitter
 			// target, which playback holds unless another track asks for more.
 			let mut moved = role.received(mapped, arrived_at);
-			moved |= role.set_target(input.latency);
+			// The publisher's encoder delay is on top of the arrival jitter, so the
+			// clock holds both while the sink keeps sizing for jitter alone.
+			moved |= role.set_target(input.latency + encoder.borrow().unwrap_or_default());
 			// The depth that makes this frame's end sound when the shared clock says
 			// it is due, so the callback stretches the speaker onto the clock: behind
 			// it after a stall, it plays faster until it catches up. Floored at what
@@ -938,6 +974,7 @@ mod tests {
 		.unwrap();
 		let recorder = Recorder::default();
 		let playback = AudioPlayback {
+			delay: tokio::sync::watch::channel(None).1,
 			changed: Default::default(),
 			speaker: recorder.clone(),
 			presentation: Presentation::new(AUDIO_BUFFER_MIN),
@@ -974,6 +1011,7 @@ mod tests {
 		.unwrap();
 		let recorder = Recorder::default();
 		let playback = AudioPlayback {
+			delay: tokio::sync::watch::channel(None).1,
 			changed: Default::default(),
 			speaker: recorder.clone(),
 			presentation: Presentation::new(delay),
@@ -1050,6 +1088,7 @@ mod tests {
 		.unwrap();
 		let recorder = Recorder::default();
 		let playback = AudioPlayback {
+			delay: tokio::sync::watch::channel(None).1,
 			changed: Default::default(),
 			speaker: recorder.clone(),
 			presentation: Presentation::new(delay),
@@ -1189,6 +1228,7 @@ mod tests {
 		.await
 		.unwrap();
 		let audio_play = AudioPlayback {
+			delay: tokio::sync::watch::channel(None).1,
 			changed: media.drained.clone(),
 			speaker: recorder.clone(),
 			presentation: media.presentation.clone(),
@@ -1202,6 +1242,7 @@ mod tests {
 			changed: media.drained.clone(),
 			output: recorder.clone(),
 			max_delay: delay,
+			delay: tokio::sync::watch::channel(None).1,
 		};
 		let audio_task = tokio::spawn(async move {
 			play_audio(consumer, audio_play, std::future::pending()).await.unwrap();
@@ -1315,6 +1356,7 @@ mod tests {
 		.await
 		.unwrap();
 		let audio_play = AudioPlayback {
+			delay: tokio::sync::watch::channel(None).1,
 			changed: media.drained.clone(),
 			speaker: recorder.clone(),
 			presentation: media.presentation.clone(),
@@ -1328,6 +1370,7 @@ mod tests {
 			changed: media.drained.clone(),
 			output: recorder.clone(),
 			max_delay: delay,
+			delay: tokio::sync::watch::channel(None).1,
 		};
 		let audio_task = tokio::spawn(async move {
 			play_audio(consumer, audio_play, std::future::pending())
@@ -1477,6 +1520,7 @@ mod tests {
 		.unwrap();
 		let recorder = Recorder::default();
 		let playback = AudioPlayback {
+			delay: tokio::sync::watch::channel(None).1,
 			changed: Default::default(),
 			speaker: recorder.clone(),
 			presentation: Presentation::new(delay),
@@ -1558,6 +1602,7 @@ mod tests {
 		.unwrap();
 		let recorder = Recorder::default();
 		let playback = AudioPlayback {
+			delay: tokio::sync::watch::channel(None).1,
 			changed: Default::default(),
 			speaker: recorder.clone(),
 			presentation: Presentation::new(delay),
@@ -1615,6 +1660,7 @@ mod tests {
 		let presentation = Presentation::new(delay);
 		let changed = Arc::new(tokio::sync::Notify::new());
 		let playback = AudioPlayback {
+			delay: tokio::sync::watch::channel(None).1,
 			changed: changed.clone(),
 			speaker: recorder.clone(),
 			presentation: presentation.clone(),
@@ -1693,6 +1739,7 @@ mod tests {
 			changed: media.drained.clone(),
 			output: recorder.clone(),
 			max_delay: delay,
+			delay: tokio::sync::watch::channel(None).1,
 		};
 		let video_task = tokio::spawn(video_play.run(
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
@@ -2432,6 +2479,7 @@ mod tests {
 				changed: media.drained.clone(),
 				output: recorder.clone(),
 				max_delay: delay,
+				delay: tokio::sync::watch::channel(None).1,
 			}
 			.run(track, decoder, None),
 		);
