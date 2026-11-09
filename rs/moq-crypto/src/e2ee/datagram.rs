@@ -129,9 +129,10 @@ impl Producer {
 		self.inner.priority()
 	}
 
-	/// Resolves to [`Self::priority`] once it differs from `last`.
-	pub fn poll_priority(&self, waiter: &kio::Waiter, last: Option<i8>) -> Poll<Option<i8>> {
-		self.inner.poll_priority(waiter, last)
+	/// [`priority`](Self::priority) once it differs from what this handle last returned:
+	/// immediately on the first call, then on each change.
+	pub fn poll_priority_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<i8>> {
+		self.inner.poll_priority_changed(waiter)
 	}
 
 	/// Finish the track.

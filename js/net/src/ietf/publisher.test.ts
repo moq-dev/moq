@@ -1457,7 +1457,7 @@ test("a new instance at the same path clears a refusal", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
-	const broadcast = origin.route(Path.from("restarted"), { instance: Instance.random() });
+	const broadcast = origin.route(Path.from("restarted"), { instance: { id: Instance.random(), epoch: 0n } });
 
 	void pub.runPublishNamespaces();
 
@@ -4575,6 +4575,56 @@ test("draft-22: narrowing gives up an excluded group's open stream", async () =>
 		open.finish();
 		client.close();
 		track.finish();
+		track.close();
+		fx.close();
+	}
+});
+
+test("draft-22: an update reopening a drained subscription serves its tail", async () => {
+	const fx = fixture();
+	// The SUBSCRIBE's fill waits for stream credit, holding the request open past the track's end.
+	const credit = Promise.withResolvers<void>();
+	const createUni = fx.pair.server.createUnidirectionalStream.bind(fx.pair.server);
+	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async (options) => {
+		await credit.promise;
+		return createUni(options);
+	});
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("head"), timestamp: Timestamp.now() });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 5n, startObject: 0n },
+			fill: { filter: { kind: "absolute", startGroup: 0n, startObject: 0n }, rangeFilters: false },
+		}),
+	);
+	try {
+		// The open group stays open: the end falls after it.
+		track.finish();
+		const parameters = new Parameters();
+		parameters.subscriptionFilter = { kind: "absolute", startGroup: 0n, startObject: 0n };
+		parameters.fillParameters = Filter.encodeFill({ rangeFilters: false }, fx.version);
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
+		credit.resolve();
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(client.reader, fx.version);
+		open.writeFrame({ payload: new TextEncoder().encode("tail"), timestamp: Timestamp.now() });
+		open.finish();
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		const done = await PublishDone.decode(client.reader, fx.version);
+		// Both fills, the tail's group, then END_OF_TRACK once they closed.
+		expect(done.streamCount).toBe(4n);
+		expect((await readServed(fx.uni, 3)).sort()).toEqual(["head", "head", "tail"]);
+		expect(await readEndOfTrack(await nextUni(fx.uni))).toBe(1n);
+	} finally {
+		open.finish();
+		client.close();
 		track.close();
 		fx.close();
 	}

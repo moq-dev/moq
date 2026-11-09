@@ -260,7 +260,7 @@ async fn rust_ffi() {
 			max_age_unlimited: false,
 			refresh: None,
 			timescale: Some(1_000_000),
-			compress: false,
+			compression: None,
 		};
 		let tracks: Vec<_> = (0..case.publishers)
 			.map(|p| broadcast.publish_track(p.to_string(), Some(timed.clone())).unwrap())

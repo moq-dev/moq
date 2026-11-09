@@ -21,17 +21,13 @@ pub use fragmenter::*;
 pub use import::*;
 pub use muxer::*;
 
-/// Re-export of the [`mp4_atom`] crate, whose types appear in this module's public API.
-/// A major version bump of `mp4_atom` is a breaking change for moq-mux.
-pub use mp4_atom;
-
 /// The largest text sample [`Import`] holds whole.
 ///
 /// A text sample is rewritten only once its last byte arrives, so a larger one is refused before
-/// any of it is staged. It matches the transport's per-group bound,
-/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), which the rewritten sample must fit.
+/// any of it is staged. It matches moq-net's 32 MiB frame bound,
+/// which the rewritten sample must fit.
 /// Media samples stream into their frames and have no such bound.
-const MAX_HELD_BYTES: usize = moq_net::group::MAX_CACHE_BYTES as usize;
+const MAX_HELD_BYTES: usize = 32 * 1024 * 1024;
 
 /// The largest metadata box body parsed on import or from received CMAF.
 ///
@@ -240,8 +236,8 @@ pub enum Error {
 		size: usize,
 	},
 
-	/// A text sample is rewritten whole, so one larger than the transport's per-group bound,
-	/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), is refused before any of its bytes
+	/// A text sample is rewritten whole, so one larger than moq-net's 32 MiB frame bound
+	/// is refused before any of its bytes
 	/// are staged.
 	#[error("text sample of {0} bytes is more than the {MAX_HELD_BYTES} an importer holds")]
 	TextSampleTooLarge(usize),

@@ -37,7 +37,7 @@ struct Accepting {
 /// State shared by the handles, the demux task, and the per-connection
 /// teardown tasks.
 pub(crate) struct Inner {
-	activity: moq_net::server::Activity,
+	admission: moq_net::server::Admission,
 	/// The socket's worker, where every task of this endpoint runs.
 	owner: Owner,
 	socket: Rc<udp::Socket>,
@@ -115,7 +115,7 @@ impl Endpoint {
 		)?;
 
 		let inner = Rc::new(Inner {
-			activity: config.activity,
+			admission: config.admission,
 			owner,
 			socket: Rc::new(socket),
 			local,
@@ -280,6 +280,8 @@ impl Inner {
 		let mut buf = Vec::new();
 
 		let mut fed = Fed::default();
+		// Every datagram in this receive opens under one DIT toggle rather than one per rind call.
+		let _dit = moq_crypto::cpu::Dit::hold();
 
 		// moq-quic takes each datagram as an owned `BytesMut`: copy the whole
 		// completion out of the receive pool once and split it per datagram.
@@ -377,7 +379,7 @@ impl Inner {
 
 		// Closed for drain: refuse so the peer redials elsewhere instead of
 		// retransmitting into a server that is leaving.
-		let Some(active) = self.activity.enter() else {
+		let Some(active) = self.admission.enter() else {
 			buf.clear();
 			let transmit = self.endpoint.borrow_mut().refuse(incoming, buf);
 			self.respond(&transmit, buf);

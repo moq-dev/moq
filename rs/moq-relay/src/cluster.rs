@@ -1022,7 +1022,7 @@ struct LanAuth {
 #[non_exhaustive]
 pub struct Options {
 	/// Session limits for ordinary client sessions.
-	pub session: crate::limits::Client,
+	pub client: crate::limits::Client,
 	/// Session and QUIC limits for authenticated peers and outbound cluster links.
 	pub peer: crate::limits::Peer,
 	/// Cluster identity, peers, and discovery.
@@ -1305,7 +1305,7 @@ fn dialer<'a>(cluster: &'a Cluster, token: &'a ClusterToken) -> impl FnMut(DialT
 /// remote peers.
 #[derive(Clone)]
 pub struct Cluster {
-	session_limits: moq_net::session::Limits,
+	client_limits: moq_net::session::Limits,
 	peer_limits: moq_net::session::Limits,
 	peer_quic: crate::limits::Quic,
 	config: Config,
@@ -1387,7 +1387,7 @@ impl Cluster {
 		if lease.token().peer {
 			self.peer_limits
 		} else {
-			self.session_limits
+			self.client_limits
 		}
 	}
 
@@ -1434,7 +1434,7 @@ impl Cluster {
 		let Options {
 			config,
 			cache,
-			session,
+			client,
 			peer,
 			stats,
 			#[cfg(feature = "test-support")]
@@ -1488,7 +1488,7 @@ impl Cluster {
 		let nodes = crate::nodes::Nodes::default();
 		tracing::info!(hop_id = %origin.hop(), "cluster initialized");
 		let cluster = Cluster {
-			session_limits: session.resolve(),
+			client_limits: client.resolve(),
 			peer_limits: peer.resolve(),
 			peer_quic: peer.quic,
 			config,
@@ -1592,7 +1592,10 @@ impl Cluster {
 			)));
 		}
 
-		let stats = self.stats.tier(token.tier.clone()).session(&token.label);
+		let stats = self
+			.stats
+			.tier(token.tier.clone())
+			.session(moq_net::stats::SessionInfo::new(&token.label));
 		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = ?token.root,
 			publish = ?publisher.as_ref().map(origin::Producer::allowed),
 			subscribe = ?subscriber.as_ref().map(origin::Producer::allowed),
@@ -1756,11 +1759,6 @@ impl Cluster {
 		grant
 	}
 
-	/// Whether a protocol version carries the request path used to mark a mesh dial.
-	pub(crate) fn carries_request_path(version: &moq_net::Version) -> bool {
-		!version.is_lite() || version.code() >= 0xff0dad05
-	}
-
 	/// Reject version restrictions that leave a LAN dial with no request path.
 	pub fn validate_lan_versions(
 		client: &moq_tokio::connect::Config,
@@ -1771,7 +1769,7 @@ impl Cluster {
 		anyhow::ensure!(
 			client
 				.iter()
-				.any(|version| Self::carries_request_path(version) && server.contains(version)),
+				.any(|version| version.has_request_path() && server.contains(version)),
 			"--cluster-lan needs --connect-version and --listen-version to share a version that carries a request path (moq-lite-05 and newer, or any moq-transport version)"
 		);
 		Ok(())
@@ -1816,7 +1814,7 @@ impl Cluster {
 			);
 			if let Some(connect) = &self.connect {
 				anyhow::ensure!(
-					connect.versions().iter().any(Self::carries_request_path),
+					connect.versions().iter().any(moq_net::Version::has_request_path),
 					"--cluster-lan needs --connect-version to include a version that carries a request path (moq-lite-05 and newer, or any moq-transport version)"
 				);
 			} else {
@@ -2263,7 +2261,10 @@ impl Cluster {
 		};
 		// The link is one presence across reconnects: each session it dials records how it
 		// ended, and the last one to end decides whether the link failed.
-		let stats = self.stats.tier(self.cluster_tier()).session(Path::empty());
+		let stats = self
+			.stats
+			.tier(self.cluster_tier())
+			.session(moq_net::stats::SessionInfo::new(Path::empty()));
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
@@ -2335,7 +2336,7 @@ impl Cluster {
 			connect.version = connect
 				.versions()
 				.iter()
-				.filter(|version| Self::carries_request_path(version))
+				.filter(|version| version.has_request_path())
 				.copied()
 				.collect();
 		}
@@ -2359,9 +2360,11 @@ impl Cluster {
 	#[cfg(all(test, feature = "cluster-lan"))]
 	fn dial_lan_target(&self, target: &DialTarget) -> anyhow::Result<moq_tokio::Connection> {
 		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
+		let origin = self.origin.clone().with_link(origin::Link::Peer);
 		let mut client = self
 			.peer_client(true, Some(target))?
-			.with_origin(self.origin.clone().with_link(origin::Link::Peer));
+			.with_publisher(&origin)
+			.with_subscriber(origin);
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}
@@ -2578,7 +2581,7 @@ mod tests {
 	#[tokio::test]
 	async fn session_limits_follow_the_admitted_grant() {
 		let mut options = Options::default();
-		options.session.announces = 2;
+		options.client.announces = 2;
 		options.peer.announces = 20;
 		let cluster = Cluster::spawn(options).unwrap();
 		for (peer, upstream, expected) in [(false, false, 2), (true, false, 20), (true, true, 20)] {

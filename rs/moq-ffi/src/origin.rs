@@ -5,7 +5,7 @@ use std::task::{Poll, ready};
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
-use crate::ffi::{Background, Polled};
+use crate::ffi::{Background, OneShot, Polled};
 use crate::producer::MoqBroadcastProducer;
 
 /// Config used when creating an origin.
@@ -152,7 +152,7 @@ pub struct MoqRoute {
 #[derive(uniffi::Object)]
 /// A pending broadcast request on a prefix route, answered by serving, routing, or rejecting it.
 pub struct MoqBroadcastRequest {
-	inner: std::sync::Mutex<Option<moq_net::origin::Request>>,
+	inner: OneShot<moq_net::origin::Request>,
 	driver: Background,
 }
 
@@ -547,13 +547,9 @@ impl MoqRoute {
 impl MoqBroadcastRequest {
 	fn new(request: moq_net::origin::Request, driver: Background) -> Self {
 		Self {
-			inner: std::sync::Mutex::new(Some(request)),
+			inner: OneShot::new(request),
 			driver,
 		}
-	}
-
-	fn take(&self) -> Result<moq_net::origin::Request, MoqError> {
-		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)
 	}
 }
 
@@ -561,9 +557,7 @@ impl MoqBroadcastRequest {
 impl MoqBroadcastRequest {
 	/// The requested broadcast path.
 	pub fn path(&self) -> Result<String, MoqError> {
-		let guard = self.inner.lock().unwrap();
-		let request = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(request.path().to_string())
+		self.inner.peek(|request| request.path().to_string())
 	}
 
 	/// Answer with the path's own exact route, owning a new broadcast.
@@ -580,10 +574,11 @@ impl MoqBroadcastRequest {
 		let _guard = crate::ffi::enter();
 		let (options, visible) = MoqRoute::exact_options(options)?;
 		self.driver.check()?;
-		let request = self.take()?;
-		let result = request.route(options);
-		self.driver.check()?;
-		Ok(Arc::new(MoqRoute::exact(result?, self.driver.clone(), visible)?))
+		self.inner.answer(|request| {
+			let result = request.route(options);
+			self.driver.check()?;
+			Ok(Arc::new(MoqRoute::exact(result?, self.driver.clone(), visible)?))
+		})
 	}
 
 	/// Serve a held broadcast under the prefix route's instance without announcing an exact route.
@@ -595,17 +590,19 @@ impl MoqBroadcastRequest {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
 		broadcast.driver.check()?;
-		self.take()?.serve(&broadcast.inner);
-		self.driver.check()?;
-		Ok(())
+		self.inner.answer(|request| {
+			request.serve(&broadcast.inner);
+			self.driver.check()
+		})
 	}
 
 	/// Reject the request with an application error code.
 	pub fn reject(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let request = self.take()?;
-		request.reject(moq_net::Error::App(error_code));
-		Ok(())
+		self.inner.answer(|request| {
+			request.reject(moq_net::Error::App(error_code));
+			Ok(())
+		})
 	}
 }
 
@@ -684,7 +681,7 @@ mod supervision_tests {
 		let (resolved, ()) = tokio::join!(consumer.request("room/camera".into(), None), async {
 			let request = requests.requested().await.unwrap().unwrap();
 			request.serve(&held).unwrap();
-			assert!(matches!(request.serve(&held), Err(MoqError::Closed)));
+			assert!(matches!(request.serve(&held), Err(MoqError::AlreadyResponded)));
 		});
 		assert!(resolved.is_ok());
 		assert!(!held.inner.is_closed(), "serving leaves the caller's consumer usable");

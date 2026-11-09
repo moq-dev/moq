@@ -10,7 +10,7 @@ import { encodable } from "./group.ts";
 const payload = new TextEncoder().encode("one shared compression window ".repeat(100));
 
 test("synchronous writers store slices; plain readers share one charged inflated copy", async () => {
-	const track = new Track("compressed").accept({ compress: true });
+	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.appendGroup();
 	const first = group.mirror();
 	const second = group.mirror();
@@ -95,7 +95,7 @@ for (const readPlain of [false, true]) {
 }
 
 test("empty frames preserve the window", async () => {
-	const track = new Track("compressed").accept({ compress: true });
+	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.createGroup(0n);
 	group.writeFrame({ payload });
 	group.writeFrame({ payload: new Uint8Array() });
@@ -109,7 +109,7 @@ test("empty frames preserve the window", async () => {
 });
 
 test("a cut compressed group preserves its committed frames before returning its error", async () => {
-	const track = new Track("compressed").accept({ compress: true });
+	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.appendGroup();
 	const reader = group.mirror();
 	group.writeFrame({ payload });
@@ -122,7 +122,7 @@ test("a cut compressed group preserves its committed frames before returning its
 });
 
 test("a shared plain read cannot change a later synchronous write's admission", async () => {
-	const track = new Track("compressed").accept({ compress: true });
+	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.appendGroup();
 	const reader = group.mirror();
 	// The largest local frame whose worst-case slice fits the frame cap.
@@ -139,7 +139,7 @@ test("a shared plain read cannot change a later synchronous write's admission", 
 });
 
 test("refresh measures stored slices without inflating a compressed group", () => {
-	const track = new Track("compressed").accept({ compress: true });
+	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.appendGroup();
 	const payload = Uint8Array.from({ length: 1024 }, (_, index) => index % 251);
 	for (let index = 0; index < 3; index++) group.writeFrame({ payload });

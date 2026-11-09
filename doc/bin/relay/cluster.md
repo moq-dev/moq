@@ -318,6 +318,36 @@ without the hidden extension, cannot. Dials retry forever with jittered backoff
 capped at 30s, so a rejected peer is loud in the logs rather than fatal. See
 [Authentication](/bin/relay/auth#mtls).
 
+The NixOS module (`services.moq-relay` in this repository's flake) wires the
+same setup: `cluster.ca` and `auth.enable` on the relay peers dial into, and
+`cluster.certFile` and `cluster.keyFile` on each relay that dials. Bring the CA
+and certificates yourself, at paths outside the Nix store that the service user
+can read. The cluster CA only issues client certificates; each relay still
+serves a certificate its peers trust, so a leaf verifies the root it dials:
+
+```nix
+# root
+services.moq-relay = {
+  enable = true;
+  auth.enable = true;
+  tls.certs = [ { chain = "/etc/moq/root.pem"; key = "/run/secrets/moq-root.key"; } ];
+  cluster.ca = [ "/etc/moq/cluster-ca.pem" ];
+};
+
+# leaf
+services.moq-relay = {
+  enable = true;
+  auth.enable = true;
+  tls.certs = [ { chain = "/etc/moq/leaf.pem"; key = "/run/secrets/moq-leaf.key"; } ];
+  cluster = {
+    mode = "leaf";
+    rootUrl = [ "https://root.example.com:4443" ];
+    certFile = "/run/secrets/moq-cluster.pem";
+    keyFile = "/run/secrets/moq-cluster.key";
+  };
+};
+```
+
 Each dialed session binds its own UDP socket on an ephemeral port of
 `connect.bind`'s address. Once `connect.backoff.timeout` (10s by default; `0`
 takes that default here) passes without a session, the redial leaves from a

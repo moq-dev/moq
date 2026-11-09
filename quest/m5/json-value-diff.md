@@ -21,7 +21,7 @@ Compare three variants:
 2. The `Value` diff: serialize `T` to a `Value` once, then diff it against the
    previous `Value`.
 3. Compression only: deltas off, a full snapshot per frame in the same group,
-   and group DEFLATE through the track's `with_compress`.
+   and group DEFLATE through the track's `with_compression(Compression::Deflate)`.
 
 Measure each on producer CPU, consumer CPU, wire bytes after DEFLATE,
 allocations, and code size (`cargo llvm-lines` on a consumer crate such as

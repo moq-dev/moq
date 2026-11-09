@@ -143,7 +143,8 @@ broadcast, _ := route.Broadcast()
 // Every JSON write is stamped, so the track is timed. JSON is small and repetitive, so
 // compress it on the wire.
 scale := uint64(1_000)
-track, _ := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compress: true})
+deflate := moq.CompressionDeflate
+track, _ := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compression: &deflate})
 status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{})
 catalog, _ := moqmedia.NewCatalogProducer(broadcast)
 now, _ := catalog.Now()
@@ -167,7 +168,7 @@ the session closed, i.e. not a real failure) and `moq.IsAuthError(err)` (HTTP
 Every call that can block takes a `context.Context` and aborts cleanly when it is
 cancelled, leaving nothing running in the background. A one-shot call (a subscribe,
 a fetch, `Request`, `Resolve`, `WantedChanged`, `Server.Accept`) aborts on
-its own and leaves the object usable; a stream read cancels the stream it reads.
+its own and leaves the object usable, a stream read included; a range loop over a consumer's stream cancels the stream when its context ends, while `Route.All` and `Server.All` leave the route advertised and the listener open.
 See the package doc for details.
 
 ## Raw datagrams

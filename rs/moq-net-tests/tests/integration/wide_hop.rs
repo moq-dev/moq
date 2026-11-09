@@ -13,7 +13,7 @@ fn produce(hop: u64) -> origin::Producer {
 	config.pool = cache::Pool::unbounded();
 	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// A draft-18 peer declaring `u64::MAX` keeps its session and its place in the path.

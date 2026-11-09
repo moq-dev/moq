@@ -718,9 +718,20 @@ pub struct moq_track_info {
 	/// Whether `refresh` is set. When false, a joining subscriber never asks for a new group.
 	pub refresh_present: bool,
 
-	/// Whether each group is DEFLATE-compressed on the wire to peers that support it.
-	/// Readers always see the original frames.
-	pub compress: bool,
+	/// `moq_compression` discriminant: how each group is compressed on the wire to peers that
+	/// support it. Zero sends frames as written. Readers always see the original frames.
+	pub compression: u32,
+}
+
+/// How a track's frames are compressed, with the values TRACK_INFO carries.
+#[repr(C)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_compression {
+	/// Frames travel as written.
+	MOQ_COMPRESSION_NONE = 0,
+	/// Each group is one DEFLATE stream, which suits small, repetitive frames like JSON.
+	MOQ_COMPRESSION_DEFLATE = 1,
 }
 
 impl TryFrom<&moq_track_info> for moq_net::track::Info {
@@ -738,7 +749,12 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		if info.refresh_present {
 			out = out.with_refresh(info.refresh);
 		}
-		Ok(out.with_compress(info.compress))
+		let compression = match info.compression {
+			v if v == moq_compression::MOQ_COMPRESSION_NONE as u32 => moq_net::track::Compression::None,
+			v if v == moq_compression::MOQ_COMPRESSION_DEFLATE as u32 => moq_net::track::Compression::Deflate,
+			_ => return Err(Error::InvalidCode),
+		};
+		Ok(out.with_compression(compression))
 	}
 }
 

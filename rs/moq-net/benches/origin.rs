@@ -50,7 +50,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Instance, Pattern, Patterns, Timestamp, auth, broadcast, kio, origin, track};
+use moq_net::{Instance, Pattern, Patterns, Timestamp, auth, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -1230,10 +1230,9 @@ fn runtime() -> tokio::runtime::Runtime {
 
 /// Everything under `room/`, which leaves out only the `muted` subscription.
 fn room() -> auth::Grant {
-	auth::Grant {
-		subscribe: Pattern::subtree("room").unwrap().into(),
-		..auth::Grant::all()
-	}
+	let mut grant = auth::Grant::all();
+	grant.subscribe = Pattern::subtree("room").unwrap().into();
+	grant
 }
 
 /// Steady-state delivery through a session's gates: one round across every

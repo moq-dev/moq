@@ -58,11 +58,11 @@ pub(in crate::capture) async fn open(config: &Config) -> Result<Stream, Error> {
 				match result {
 					Ok(Ok(())) => chan.close(),
 					Ok(Err(error)) => chan.fail(error),
-					Err(_) => chan.fail(Error::Codec(anyhow::anyhow!("WGC capture thread panicked"))),
+					Err(_) => chan.fail(Error::codec(anyhow::anyhow!("WGC capture thread panicked"))),
 				}
 			}
 		})
-		.map_err(|error| Error::Codec(anyhow::anyhow!("start WGC thread: {error}")))?;
+		.map_err(|error| Error::codec(anyhow::anyhow!("start WGC thread: {error}")))?;
 	let guard = Guard {
 		signal,
 		handle: Some(handle),
@@ -356,7 +356,7 @@ impl Capture {
 					.map_err(|e| error("read WGC timestamp", e))?
 					.Duration;
 				let micros =
-					u64::try_from(ticks).map_err(|_| Error::Codec(anyhow::anyhow!("negative WGC timestamp")))? / 10;
+					u64::try_from(ticks).map_err(|_| Error::codec(anyhow::anyhow!("negative WGC timestamp")))? / 10;
 				let timestamp = moq_net::Timestamp::from_micros(micros)?;
 				let surface = frame.0.Surface().map_err(|e| error("read WGC surface", e))?;
 				let access: IDirect3DDxgiInterfaceAccess = surface.cast().map_err(|e| error("query WGC surface", e))?;
@@ -584,7 +584,7 @@ fn error(context: &str, error: windows::core::Error) -> Error {
 	if error.code() == E_ACCESSDENIED {
 		Error::PermissionDenied(format!("{context}: {error}"))
 	} else {
-		Error::Codec(anyhow::anyhow!("{context}: {error}"))
+		Error::codec(anyhow::anyhow!("{context}: {error}"))
 	}
 }
 

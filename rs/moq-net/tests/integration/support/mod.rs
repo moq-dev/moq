@@ -27,10 +27,8 @@ pub async fn unwanted(mut demand: track::Demand) -> moq_net::Result<()> {
 /// nobody reads it.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub async fn datagram_priority(producer: &datagram::Producer, want: Option<i8>) {
-	let mut priority = producer.priority();
-	while priority != want {
-		priority = moq_net::kio::wait(|waiter| producer.poll_priority(waiter, priority)).await;
-	}
+	let mut watch = producer.clone();
+	while watch.priority_changed().await != want {}
 }
 
 /// Wait until `consumer` sees a route announced at exactly `path`, and return it.
@@ -106,23 +104,20 @@ pub trait Draining {
 
 impl Draining for goaway::Consumer {
 	fn peek(&self) -> Option<goaway::Goaway> {
-		match self.poll(&moq_net::kio::Waiter::noop()) {
+		match self.poll(&kio::Waiter::noop()) {
 			std::task::Poll::Ready(Ok(goaway)) => Some(goaway),
 			_ => None,
 		}
 	}
 
 	async fn recv(&self) -> Option<goaway::Goaway> {
-		moq_net::kio::wait(|waiter| self.poll(waiter)).await.ok()
+		kio::wait(|waiter| self.poll(waiter)).await.ok()
 	}
 }
 
-/// Every version this crate speaks, found by wire code, including the opt-in `-wip`
-/// drafts that [`moq_net::Versions::all`] leaves out.
+/// Every version this crate speaks, including the opt-in `-wip` drafts that
+/// [`moq_net::Versions::all`] leaves out.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub fn every_version() -> Vec<moq_net::Version> {
-	(0xff0dad00..=0xff0dadff)
-		.chain(0xff000000..=0xff0000ff)
-		.filter_map(moq_net::Version::from_code)
-		.collect()
+	moq_net::Version::ALL.to_vec()
 }

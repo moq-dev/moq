@@ -26,7 +26,7 @@ fn uncapped() -> ReceiveWindow {
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 /// A publisher's track and a relay's subscription to it, over one peering.

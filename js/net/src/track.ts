@@ -45,7 +45,6 @@ import {
 	type TrackRequestOptions,
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
-import { rescale } from "./rescale.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
@@ -120,6 +119,13 @@ export interface Position {
 }
 
 /**
+ * How a track's frames are compressed, mirroring the Rust `track::Compression`: `"deflate"` makes
+ * each group one DEFLATE stream (draft-lcurley-moq-flate), which suits small, repetitive frames
+ * like JSON.
+ */
+export type Compression = "none" | "deflate";
+
+/**
  * A track's immutable publisher properties, fixed for the lifetime of the track.
  *
  * A producer declares these once from an {@link InfoInit} (via {@link Request.accept} or
@@ -127,43 +133,40 @@ export interface Position {
  * (resolved from the wire TRACK_INFO on lite-05+). They map 1:1 onto TRACK_INFO.
  */
 export interface Info {
-	/** Compress frame payloads per group on lite-07; other sessions receive plain frames. Defaults to false. */
-	compress?: boolean;
+	/** How frame payloads are compressed per group on lite-07; other sessions receive plain frames. */
+	compression: Compression;
 	/**
-	 * Units per second for this track's frame timestamps, or omitted (`undefined` or `null`,
-	 * which mean the same) for an untimed track, whose frames carry no timestamp.
+	 * Units per second for this track's frame timestamps, or `null` for an untimed track, whose
+	 * frames carry no timestamp.
 	 *
-	 * There is no default: a timed track declares its scale, such as {@link Timescale | Timescale.MILLI},
-	 * or {@link Timescale | Timescale.MICRO} for media that needs sub-millisecond timing. Reported in
+	 * A timed track declares its scale, such as {@link Timescale | Timescale.MILLI}, or
+	 * {@link Timescale | Timescale.MICRO} for media that needs sub-millisecond timing. Reported in
 	 * TRACK_INFO on Lite05+ and as the TIMESCALE property on moq-transport. A track received
 	 * without one (moq-lite before Lite05, or moq-transport without TIMESCALE) is untimed,
 	 * and stays untimed when served onward.
 	 */
-	timescale?: Timescale | null;
+	timescale: Timescale | null;
 	/**
-	 * Publisher Max Age: how long, in milliseconds, a superseded group stays fresh. It is
-	 * stale once either clock reaches the budget: the wall-clock time since its successor
-	 * arrived at this hop, or how far its successor's first timestamp trails the live edge.
-	 * The newest group is never stale, and an untimed track is judged by the wall clock alone.
-	 * Reported in TRACK_INFO (Lite05+) so relays re-serve with the same bound. Absence sets
-	 * no publisher limit, as on a track received without one; zero serves only the live edge.
-	 * This clamps each subscriber budget. An authored track gets zero unless its
-	 * {@link InfoInit.maxAge} asks for more. A freshness bound, not retention: a hop's cache
-	 * bounds the bytes it keeps with its own window. Rounded up to a whole millisecond by
-	 * {@link infoDefaults}, which refuses a negative or non-finite value and a result past
-	 * `Number.MAX_SAFE_INTEGER`.
+	 * Publisher Max Age: how long, in milliseconds, a superseded group stays fresh, or `null` for
+	 * no publisher limit. It is stale once either clock reaches the budget: the wall-clock time
+	 * since its successor arrived at this hop, or how far its successor's first timestamp trails
+	 * the live edge. The newest group is never stale, and an untimed track is judged by the wall
+	 * clock alone. Reported in TRACK_INFO (Lite05+) so relays re-serve with the same bound. A
+	 * track received without one has no limit; zero serves only the live edge.
+	 * This clamps each subscriber budget. A freshness bound, not retention: a hop's cache bounds
+	 * the bytes it keeps with its own window.
 	 */
-	maxAge?: Milli;
-	/** Tie-break priority between subscriptions of equal subscriber priority (`-128..=127`, higher first). Defaults to `0`. */
+	maxAge: Milli | null;
+	/** Tie-break priority between subscriptions of equal subscriber priority (`-128..=127`, higher first). */
 	priority: number;
 	/**
 	 * How many times its first frame a group's later stored bytes may grow before a joining
-	 * subscriber asks for a new group, or omitted to never ask. A join against a newest group
+	 * subscriber asks for a new group, or `null` to never ask. A join against a newest group
 	 * whose bytes after its first frame exceed this many times the first frame moves
 	 * {@link Demand.wanted} past it. The joiner still receives the cached group while the new
 	 * one is pending. `0` asks on any join after a delta. An integer in `0..2^32`.
 	 */
-	refresh?: number;
+	refresh: number | null;
 	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
 	ietf?: IetfVersion;
 	/**
@@ -175,31 +178,38 @@ export interface Info {
 }
 
 /**
- * What an author supplies to create a track: any {@link Info} field, each defaulting as
- * {@link infoDefaults} does, except {@link maxAge}.
- *
- * Received metadata is an {@link Info}, whose absent `maxAge` means no publisher limit. To serve
- * one onward unchanged, pass `{ ...info, maxAge: info.maxAge ?? null }`.
+ * What an author supplies to create a track: any {@link Info} field. `compression` defaults to
+ * `"none"`, `timescale` and `refresh` to `null`, `priority` to `0`, and `maxAge` to zero. A
+ * received {@link Info} serves onward unchanged.
  */
-export interface InfoInit extends Partial<Omit<Info, "maxAge">> {
+export interface InfoInit extends Partial<Info> {
 	/**
-	 * The publisher max age; see {@link Info.maxAge}. Omitted or `undefined` is zero, so readers
-	 * get only the live edge; `null` sets no publisher limit (the wire omits it), and a number
-	 * is that bound. A track whose readers reach back for superseded groups sets it explicitly.
+	 * The publisher max age; see {@link Info.maxAge}. Omitted is zero, so readers get only the
+	 * live edge; `null` sets no publisher limit (the wire omits it). A track whose readers reach
+	 * back for superseded groups sets it explicitly. Rounded up to a whole millisecond; a
+	 * negative or non-finite value, or one past `Number.MAX_SAFE_INTEGER`, is refused.
 	 */
 	maxAge?: Milli | null;
 }
 
 /**
- * Resolve an author's {@link InfoInit} into the {@link Info} a producer commits.
+ * Resolve an author's {@link InfoInit} into the {@link Info} a producer commits, validating each field.
  * @internal
  */
 export function authoredInfo(init: InfoInit = {}): Info {
-	const { maxAge, ...rest } = init;
-	return infoDefaults({ ...rest, maxAge: maxAge === undefined ? Milli.zero : (maxAge ?? undefined) });
+	if (init.compression !== undefined && init.compression !== "none" && init.compression !== "deflate")
+		throw new TypeError(`unknown compression: ${init.compression}`);
+	const maxAge = init.maxAge === undefined ? Milli.zero : init.maxAge;
+	return {
+		compression: init.compression ?? "none",
+		timescale: init.timescale == null ? null : Timescale(init.timescale),
+		maxAge: maxAge === null ? null : wireMillis("maxAge", maxAge),
+		priority: priorityValue(init.priority ?? DEFAULT_PRIORITY),
+		refresh: init.refresh == null ? null : refreshRatio(init.refresh),
+		...(init.ietf === undefined ? {} : { ietf: init.ietf }),
+		...(init.unchecked ? { unchecked: true } : {}),
+	};
 }
-
-export { rescale };
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
 //
@@ -223,26 +233,6 @@ function priorityValue(value: number): number {
 		throw new RangeError(`priority must be an integer in -128..=127: ${value}`);
 	}
 	return value;
-}
-
-/**
- * Fill in any unset {@link Info} fields with their defaults, as for received metadata: an absent
- * `maxAge` stays absent, meaning no publisher limit. An authored track resolves its
- * {@link InfoInit} at {@link Producer.accept} instead, where an omitted `maxAge` is zero.
- */
-export function infoDefaults(info: Partial<Info> = {}): Info {
-	if (info.compress !== undefined && typeof info.compress !== "boolean")
-		throw new TypeError("compress must be a boolean");
-	const timescale = info.timescale == null ? undefined : Timescale(info.timescale);
-	return {
-		compress: info.compress ?? false,
-		timescale,
-		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
-		priority: priorityValue(info.priority ?? DEFAULT_PRIORITY),
-		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
-		...(info.ietf === undefined ? {} : { ietf: info.ietf }),
-		...(info.unchecked ? { unchecked: true } : {}),
-	};
 }
 
 function refreshRatio(value: number): number {
@@ -924,7 +914,6 @@ let ordered_: {
 	readFrame(subscriber: Subscriber): Promise<({ group: bigint; frame: number } & Frame) | undefined>;
 	readString(subscriber: Subscriber): Promise<string | undefined>;
 	readJson(subscriber: Subscriber): Promise<unknown | undefined>;
-	readBool(subscriber: Subscriber): Promise<boolean | undefined>;
 };
 
 // Constructs a Demand from within this module; assigned in the class's static block.
@@ -1070,10 +1059,7 @@ export class Producer {
 		this.#fills = new FillState({
 			name,
 			accept: (sequence, info) => {
-				// A fill's info is the publisher's metadata, whose absent maxAge means no publisher
-				// limit, not an authored track's zero.
-				if (info !== undefined && this.#state.info.peek() === undefined)
-					this.accept({ ...info, maxAge: info.maxAge ?? null });
+				if (info !== undefined && this.#state.info.peek() === undefined) this.accept(info);
 				return this.#createGroup(sequence, 0);
 			},
 			drop: (start, end, error) => this.#drop(start, end, { error }),
@@ -1373,7 +1359,7 @@ export class Producer {
 		try {
 			for (const { group } of this.#cache) {
 				hooks.bindGroupTimed(group, resolved);
-				hooks.bindGroupCompression(group, resolved.compress ?? false);
+				hooks.bindGroupCompression(group, resolved.compression === "deflate");
 			}
 		} catch (err) {
 			this.abort(err instanceof Error ? err : new Error(String(err)));
@@ -1429,7 +1415,7 @@ export class Producer {
 	#join(): void {
 		const ratio = this.#state.info.peek()?.refresh;
 		const latest = this.#state.latest;
-		if (ratio === undefined || latest === undefined) return;
+		if (ratio == null || latest === undefined) return;
 		const group = this.#cached.get(latest)?.group;
 		if (!group || !hooks.overRefresh(group, ratio)) return;
 		this.#refresh = true;
@@ -1793,7 +1779,7 @@ export class Producer {
 		const info = this.#state.info.peek();
 		if (info) {
 			hooks.bindGroupTimed(group, info);
-			hooks.bindGroupCompression(group, info.compress ?? false);
+			hooks.bindGroupCompression(group, info.compression === "deflate");
 		}
 	}
 
@@ -2024,7 +2010,7 @@ export class Producer {
 		const update = this.#state.update.peek();
 		const maxDelay = update ? maxDelayOf(update) : Milli.zero;
 		const maxAge = this.#state.info.peek()?.maxAge;
-		return grace(maxAge === undefined ? maxDelay : Milli(Math.min(maxDelay, maxAge)));
+		return grace(maxAge == null ? maxDelay : Milli(Math.min(maxDelay, maxAge)));
 	}
 
 	// Tell every reader whether the pending tail still owes a group below the end.
@@ -2377,7 +2363,7 @@ export class Subscriber {
 
 		const update = this.#state.update.peek();
 		const requested = this.#fetchBudget ?? (update ? maxDelayOf(update) : 0);
-		const fresh = info?.maxAge;
+		const fresh = info?.maxAge ?? undefined;
 		return {
 			budget: fresh === undefined ? requested : Math.min(requested, fresh),
 			bounded: fresh !== undefined && requested >= fresh,
@@ -3337,7 +3323,6 @@ export class Subscriber {
 			readFrame: (subscriber) => subscriber.#readFrame(),
 			readString: (subscriber) => subscriber.#readString(),
 			readJson: (subscriber) => subscriber.#readJson(),
-			readBool: (subscriber) => subscriber.#readBool(),
 		};
 	}
 
@@ -4097,15 +4082,6 @@ export class Subscriber {
 		return JSON.parse(next);
 	}
 
-	/** Reads the next frame and decodes it as a one-byte boolean, throwing on a malformed frame. */
-	async #readBool(): Promise<boolean | undefined> {
-		const next = await this.#readFrame();
-		if (!next) return undefined;
-		const payload = next.payload;
-		if (payload.byteLength !== 1 || !(payload[0] === 0 || payload[0] === 1)) throw new Error("invalid bool frame");
-		return payload[0] === 1;
-	}
-
 	/**
 	 * Read this track's groups in sequence order instead of arrival order.
 	 *
@@ -4268,10 +4244,5 @@ export class Ordered {
 	/** Read the next frame and parse it as JSON. */
 	readJson(): Promise<unknown | undefined> {
 		return ordered_.readJson(this.#subscriber);
-	}
-
-	/** Read the next frame and decode it as a one-byte boolean, throwing on a malformed frame. */
-	readBool(): Promise<boolean | undefined> {
-		return ordered_.readBool(this.#subscriber);
 	}
 }

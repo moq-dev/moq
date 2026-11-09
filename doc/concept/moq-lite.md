@@ -67,9 +67,9 @@ with its fixed properties, a synced mark, then tracks as they
 come and go. Listing is discovery, not delivery: subscribe to each track you
 want, and its groups still cached upstream reach you late. A broadcast lists
 the tracks its publisher creates, never one served only on request, and a path
-served under a prefix claim has nothing to list. Like announcements, a relay
-syncs on what it holds now, so a fresh relay syncs empty and its upstream's
-tracks follow.
+served under a prefix claim has nothing to list. A relay lists its upstream's
+tracks as they arrive and syncs when its upstream does, so a track listed after
+the synced mark is new at the source, through any number of hops.
 
 Each route carries the chain of relay identities it passed through, which is
 how forwarding loops are caught, and a cost, which is how a subscriber picks

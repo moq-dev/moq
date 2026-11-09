@@ -60,13 +60,18 @@ impl AsyncWrite for Stream {
 pub(crate) struct Handoff(Arc<Mutex<Option<mpsc::Sender<Stream>>>>);
 
 impl Handoff {
-	/// A handoff and the consumer it feeds.
+	/// The consumer this handoff feeds, or `None` once one was taken.
 	///
 	/// One slot: each connection waits on its own task for the embedder to take it,
 	/// which the listener's idle deadline bounds like any other stalled handshake.
-	pub(crate) fn new() -> (Self, Incoming) {
+	pub(crate) fn incoming(&self) -> Option<Incoming> {
+		let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		if slot.is_some() {
+			return None;
+		}
 		let (tx, rx) = mpsc::channel(1);
-		(Self(Arc::new(Mutex::new(Some(tx)))), Incoming(rx))
+		*slot = Some(tx);
+		Some(Incoming(rx))
 	}
 
 	/// Refuse every later connection once the returned guard drops.

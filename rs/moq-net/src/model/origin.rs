@@ -2231,8 +2231,14 @@ impl Producer {
 	}
 
 	/// Whether a moq-lite-07 session publishing through a consumer of this handle (and
-	/// of any handle derived from it) carries its peer's traffic to other origins; see
-	/// [`Consumer::with_proxy`], which overrides it for one consumer.
+	/// of any handle derived from it) carries its peer's traffic to other origins: off,
+	/// the peer is sent only the routes to this node's own claims; on, the routes it
+	/// learned from other peers too.
+	///
+	/// A relay turns it on for every session. An application publishing its own
+	/// broadcasts leaves it off, so a peer never routes through it to reach anyone
+	/// else. Older versions advertise everything either way, since their hop chains
+	/// cannot tell this node's claims from what it forwards.
 	pub fn with_proxy(mut self, proxy: bool) -> Self {
 		self.proxy = proxy;
 		self
@@ -7111,22 +7117,8 @@ impl Consumer {
 		node
 	}
 
-	/// Whether a moq-lite-07 session publishing through this handle (and any handle
-	/// derived from it) carries its peer's traffic to other origins: off, the peer is
-	/// sent only the routes to this node's own claims; on, the routes it learned from
-	/// other peers too.
-	///
-	/// A relay turns it on for every session. An application publishing its own
-	/// broadcasts leaves it off, so a peer never routes through it to reach anyone
-	/// else. Older versions advertise everything either way, since their hop chains
-	/// cannot tell this node's claims from what it forwards.
-	pub fn with_proxy(mut self, proxy: bool) -> Self {
-		self.proxy = proxy;
-		self
-	}
-
-	/// Whether this handle carries its peer's traffic to other origins; see
-	/// [`Self::with_proxy`].
+	/// Whether this handle carries its peer's traffic to other origins, taken from
+	/// the [`Producer::with_proxy`] it was consumed from.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn proxy(&self) -> bool {
 		self.proxy
@@ -9220,7 +9212,7 @@ mod tests {
 			.with_stats(
 				registry
 					.tier(stats::Tier::default())
-					.session(crate::Path::from_static("p1")),
+					.session(crate::stats::SessionInfo::new(crate::Path::from_static("p1"))),
 			)
 			.with_hidden(true);
 
@@ -9229,7 +9221,7 @@ mod tests {
 		project.request(".svc/foo", None).await.expect("resolves");
 
 		let mut report = stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, crate::time::Instant::now());
 		let paths: Vec<_> = report
 			.traffic
 			.iter()
@@ -9253,7 +9245,7 @@ mod tests {
 		let consumer = producer.consume().with_stats(
 			registry
 				.tier(stats::Tier::default())
-				.session(crate::Path::from_static("viewer")),
+				.session(crate::stats::SessionInfo::new(crate::Path::from_static("viewer"))),
 		);
 		let broadcast = consumer.request("room/alice", None).await.expect("resolves");
 		let bytes = || -> u64 {
@@ -10351,7 +10343,7 @@ mod tests {
 		let producer = origin(1).produce().with_stats(
 			registry
 				.tier(stats::Tier::default())
-				.session(crate::Path::from_static("root")),
+				.session(crate::stats::SessionInfo::new(crate::Path::from_static("root"))),
 		);
 		let announces = || {
 			registry
@@ -15730,7 +15722,7 @@ mod tests {
 			.with_stats(
 				registry
 					.tier(stats::Tier::default())
-					.session(Path::from_static("project")),
+					.session(crate::stats::SessionInfo::new(Path::from_static("project"))),
 			);
 		let mut selected = consumer.routes();
 		selected.expect_next_active("cam.chat").await;
@@ -15758,13 +15750,13 @@ mod tests {
 		let mut group = reader.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"frame");
 		let mut report = stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, crate::time::Instant::now());
 		assert_eq!(report.traffic.len(), 1);
 		assert_eq!(report.traffic[0].path.as_str(), "project/cam.chat");
 		assert_eq!(report.traffic[0].publisher.announces_started, 1);
 		assert_eq!(report.traffic[0].publisher.bytes, 5);
 		drop(selected);
-		registry.report(&mut report);
+		registry.report(&mut report, crate::time::Instant::now());
 		assert_eq!(report.traffic[0].publisher.announces_ended, 1);
 
 		// Discovery of a request still sees a covering route that enumeration omits.

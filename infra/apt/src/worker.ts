@@ -5,7 +5,7 @@
 //   /dists/stable/InRelease                           signed metadata
 //   /dists/stable/Release                             metadata
 //   /dists/stable/Release.gpg                         detached signature
-//   /dists/stable/main/binary-{amd64,arm64}/Packages{,.gz}
+//   /dists/stable/main/binary-{amd64,arm64,armhf}/Packages{,.gz}
 //   /pool/main/<binary>/<binary>_<ver>_<arch>.deb     actual packages
 
 interface Env {

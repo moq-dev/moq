@@ -38,13 +38,16 @@ than at run. Then verify the shipped artifact runs `moq devices`,
 `moq play`, and a `transcode` command on each platform, since a feature that compiles into the binary and
 then fails to open a device is the same gap one layer down.
 
-Also enable `v4l2` in the Linux ARM release build, so a released binary on a
-Raspberry Pi 4 publishes from `moq import capture` through the V4L2 M2M
+Also enable `v4l2` in the Linux ARM release builds, so a released binary on a
+Raspberry Pi 4 (or a 32-bit board on the armv7 release) publishes from `moq import capture` through the V4L2 M2M
 hardware encoder (`rs/moq-video/src/v4l2.rs`, already run on a Pi 4's
 `bcm2835-codec`) with no GStreamer detour. That Pi 4 run covered only
 640x360 once, so the Pi 4 check also covers `set_bitrate` on a running
 encoder (congestion control retunes through it) and 1080p, which codes as
 1088 rows and relies on the compose rectangle to crop back.
+
+`moq-cli.yml` already passes `linux-features: v4l2` to `release-binary.yml`,
+a no-op until `capture` is on; `release` replaces it there.
 
 Add a board hardware note to `doc/bin/cli.md` next to the capture build
 instructions: Raspberry Pi 5 has no video encoder and Jetson Orin Nano ships

@@ -57,8 +57,6 @@ anyhow = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
 kio = { path = "../kio", features = ["manual", "runtime", "sim"] }
 moq-auth = { path = ".", features = ["client", "serve"] }
-moq-auth-published = { package = "moq-auth", version = "=0.2.1", default-features = false }
-moq-token = "0.7"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-test = { workspace = true }

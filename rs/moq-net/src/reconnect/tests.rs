@@ -422,7 +422,7 @@ async fn a_refusal_retries_only_new_tokens() {
 	let tokens = auth::Tokens::new(vec!["old".parse().unwrap()]);
 	let mut machine = Reconnect::new(config(INITIAL, Duration::ZERO), vec![peer.clone()], kio::clock::now())
 		.unwrap()
-		.with_tokens(tokens.clone(), version().into());
+		.with_tokens(tokens.clone());
 
 	let Action::Dial(_) = next(&mut machine).await else {
 		panic!("expected a dial")
@@ -449,7 +449,7 @@ async fn an_ended_auth_handle_ends_the_policy() {
 	let tokens = auth::Tokens::new(Vec::new());
 	let mut machine = Reconnect::new(config(INITIAL, Duration::ZERO), vec![peer.clone()], kio::clock::now())
 		.unwrap()
-		.with_tokens(tokens.clone(), version().into());
+		.with_tokens(tokens.clone());
 	let mut run = Run::default();
 
 	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {

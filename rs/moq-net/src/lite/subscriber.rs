@@ -2414,8 +2414,6 @@ struct TracksRecv {
 	/// A listing is a subscribe: it waits for a token that may cover the broadcast, and
 	/// ends once the session stops allowing it.
 	gate: crate::auth::Gate,
-	/// The gate let the listing through, and this hop synced its readers.
-	admitted: bool,
 	/// Until the peer answers, what the source must still hold: the selected instance
 	/// until the request is out, then no replacement, since a TRACKS request without an
 	/// instance lists whichever one won the path when it arrived.
@@ -2449,11 +2447,6 @@ impl TracksRecv {
 		ready!(self.gate.poll_ready(waiter));
 		if self.gate.poll_denied(waiter).is_ready() {
 			return Poll::Ready(Err(Error::Unauthorized));
-		}
-		if !std::mem::replace(&mut self.admitted, true) {
-			// Synced with this hop, which holds nothing yet: a relay never waits on its
-			// upstream, so the peer's tracks follow as live adds.
-			source.lister.synced();
 		}
 		let version = source.subscriber.version;
 		let stream = match &mut self.stream {
@@ -2508,10 +2501,11 @@ impl TracksRecv {
 					source.lister.finish(&name)?;
 				}
 				Listing::Synced => {
-					// This hop synced its readers when the listing began; only the order matters here.
 					if std::mem::replace(&mut self.synced, true) {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
+					// Synced when the peer is, so a track listed after it is new upstream too.
+					source.lister.synced();
 				}
 			}
 		}
@@ -2569,7 +2563,6 @@ impl SourceServe {
 							self.path.clone(),
 							crate::auth::Direction::Subscribe,
 						),
-						admitted: false,
 						unanswered: Some(self.dynamic.validity().start()),
 					});
 				}
@@ -6450,7 +6443,7 @@ mod tests {
 					priority: 0,
 					max_age: None,
 					timescale: Some(Timescale::MILLI),
-					compress: false,
+					compression: crate::track::Compression::None,
 				}
 				.encode(&mut crate::coding::Encoder::new(&mut info, version.into()), version)
 				.unwrap();
@@ -6476,7 +6469,7 @@ mod tests {
 				priority: 0,
 				max_age: Some(Duration::from_secs(1)),
 				timescale: Some(Timescale::MILLI),
-				compress: false,
+				compression: crate::track::Compression::None,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut info, version.into()), version)
 			.unwrap();
@@ -6751,7 +6744,8 @@ mod tests {
 	}
 
 	/// A listing is a subscribe: it waits for a token that may cover the broadcast before
-	/// syncing its readers or asking the peer, which would refuse it until then.
+	/// asking the peer, which would refuse it until then. Its readers sync only when the
+	/// peer does.
 	#[kio::test]
 	async fn a_listing_waits_for_its_token() {
 		let auth = crate::auth::Link::new(true);
@@ -6771,10 +6765,7 @@ mod tests {
 		drop(token);
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
 		assert_eq!(session.log.bi_opens(), 1);
-		assert!(matches!(
-			tracks.next().now_or_never(),
-			Some(Ok(Some(crate::broadcast::TracksEvent::Synced)))
-		));
+		assert!(tracks.next().now_or_never().is_none(), "synced before the peer");
 	}
 
 	/// An instance retired while its listing waits for a token lists nothing: a TRACKS
@@ -6811,10 +6802,7 @@ mod tests {
 
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
 		assert_eq!(session.log.bi_opens(), 1);
-		assert!(matches!(
-			tracks.next().now_or_never(),
-			Some(Ok(Some(crate::broadcast::TracksEvent::Synced)))
-		));
+		assert!(tracks.next().now_or_never().is_none());
 
 		selection.replace();
 		let _ = kio::Task::poll(&mut serve, &kio::Waiter::noop());
@@ -6849,10 +6837,7 @@ mod tests {
 
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
 		assert_eq!(session.log.bi_opens(), 1);
-		assert!(matches!(
-			tracks.next().now_or_never(),
-			Some(Ok(Some(crate::broadcast::TracksEvent::Synced)))
-		));
+		assert!(tracks.next().now_or_never().is_none());
 
 		auth.handle().authorize(&crate::auth::Grant::default());
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
@@ -12527,7 +12512,7 @@ impl kio::Task for FetchServeRun {
 					// fetch we can serve.
 					// Until TRACK_INFO says, the group may be compressed, which only a whole
 					// group decodes: ask for all of it.
-					let plain = matches!(self.info.peek(), Some(Ok(info)) if !info.compress);
+					let plain = matches!(self.info.peek(), Some(Ok(info)) if !info.compressed());
 					let frame_start = match self.serve.subscriber.version.has_frame_bounds() {
 						true if plain => request.frame_start(),
 						true => 0,

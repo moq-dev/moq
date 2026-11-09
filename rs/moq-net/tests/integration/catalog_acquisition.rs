@@ -10,7 +10,7 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 fn origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, cost: u64) -> MockPair {

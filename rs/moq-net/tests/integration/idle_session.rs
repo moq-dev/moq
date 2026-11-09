@@ -57,7 +57,7 @@ async fn viewer(
 fn origin() -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 	support::harness::spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 #[kio::test]
@@ -181,7 +181,7 @@ async fn wire_collection_never_arms_the_idle_sampler() {
 		let mut options = MockConnectOptions::new(version.parse().unwrap());
 		options.server_stats = registry
 			.tier(Default::default())
-			.session(moq_net::Path::from_static("room"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("room")));
 		options.server_polls = Some(polls.clone());
 		let pair = connect_mock(options).await;
 		kio::clock::sleep(Duration::from_secs(1)).await;
@@ -191,7 +191,7 @@ async fn wire_collection_never_arms_the_idle_sampler() {
 			pair.server_transport.wire().set_sent_bytes(tick);
 			pair.server_transport.wire().set_received_bytes(tick * 2);
 			let mut report = moq_net::stats::Report::default();
-			registry.report(&mut report);
+			registry.report(&mut report, moq_net::time::Instant::now());
 			assert_eq!(
 				(report.sessions[0].presence.wire_tx, report.sessions[0].presence.wire_rx),
 				(tick, tick * 2)

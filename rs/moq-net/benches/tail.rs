@@ -10,7 +10,7 @@
 use std::{hint::black_box, task::Poll, time::Duration};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{broadcast, group, kio, track};
+use moq_net::{broadcast, group, track};
 
 /// Tracks each holding a reader at the tail.
 const TRACKS: [usize; 3] = [1, 32, 1024];

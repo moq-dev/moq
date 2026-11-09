@@ -12,8 +12,9 @@ Decided 2026-10-13, replacing the unconditional direct-first policy:
 
 - Applications explicitly choose which discovered peers to connect to and
   assign per-connection priority. Priority wins before configured additive
-  cost; links cost one by default and zero is refused (decided 2026-10-13). No automatic dial-all, cache price,
-  warm/cold route state, or RTT-based repricing by default.
+  cost; links cost one by default and zero is refused (decided 2026-10-13). No automatic dial-all or
+  RTT-based repricing by default. A browser sends no warm routes; those pass
+  only between relays ([cache-aware routing](/quest/m3/cache-routing/README.md)).
 - Within a priority, compare complete route cost including the origin's
   prefix seed. A direct routing node loses when its total route is more
   expensive. Equal distinct routes retain deterministic path hashing; newest

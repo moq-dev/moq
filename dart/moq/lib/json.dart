@@ -4,7 +4,7 @@
 /// snapshot and stream producers also advertise it in the broadcast's catalog,
 /// which has no window mode), and a consumer takes over a `TrackConsumer` that
 /// has not read a group yet. Values cross as JSON strings. Compression is the
-/// track's: publish JSON with `MoqTrackInfo(compress: true)`, and a consumer
+/// track's: publish JSON with `MoqTrackInfo(compression: MoqCompression.deflate)`, and a consumer
 /// reads it with no option of its own. Every write (a snapshot update, a stream
 /// append, a window push or pop) takes a timestamp on the broadcast clock, the
 /// epoch every track in the broadcast shares, so the track needs a timescale;
@@ -18,7 +18,7 @@
 ///   broadcast: broadcast,
 ///   track: broadcast.publishTrack(
 ///     name: 'status',
-///     info: MoqTrackInfo(timescale: 1000, compress: true),
+///     info: MoqTrackInfo(timescale: 1000, compression: MoqCompression.deflate),
 ///   ),
 ///   config: moq_json.SnapshotConfig(),
 /// );

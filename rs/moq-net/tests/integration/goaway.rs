@@ -24,7 +24,7 @@ fn timed() -> moq_net::track::Info {
 fn produce_origin() -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Maximum time any single test may run before being treated as a deadlock.

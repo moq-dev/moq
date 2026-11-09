@@ -28,6 +28,14 @@ Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
   need qmux-01 or later), and extend it to allow 02.
 - Move the version list into one place that the relay and moq-tokio share,
   as the comment beside `QMUX01_ONLY_ALPNS` asks.
+- Added 2026-11-08 (maintainer, approved follow-up of
+  [moq-dev/moq#8224](https://github.com/moq-dev/moq/pull/8224)): the relay
+  now derives its subprotocols from `moq_net::Versions`, keeping every
+  moq-transport version off qmux-00 (`supported_subprotocols` in
+  `rs/moq-relay/src/websocket.rs`), but moq-tokio's dial side still keeps the
+  hand-written `QMUX01_ONLY_ALPNS = ["moqt-18", "moqt-20", "moqt-22"]`
+  (`rs/moq-tokio/src/websocket.rs`). Derive it from the version the same
+  way, so a new draft needs one edit.
 - Test: a JS and a Rust client each negotiate qmux-02 against the relay and
   a moq-tokio server. A client that offers only qmux-01 still connects.
 

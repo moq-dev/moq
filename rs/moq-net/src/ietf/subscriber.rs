@@ -774,7 +774,10 @@ impl Target {
 /// metadata differs. A sealed TIMESCALE travels downstream unchanged, so it must too.
 fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info {
 	let mut info = track::Info::default()
-		.with_compress(properties.compress)
+		.with_compression(match properties.compress {
+			true => crate::track::Compression::Deflate,
+			false => crate::track::Compression::None,
+		})
 		.with_timescale(properties.timescale)
 		.with_max_age(properties.max_cache_duration)
 		// A track without the property gets the default.
@@ -19666,7 +19669,7 @@ mod compression_negotiation_tests {
 			assert!(refused(&properties, version, true).is_none(), "{version}");
 		}
 		let info = accepted_info(&properties, Version::Draft22);
-		assert!(info.compress);
+		assert_eq!(info.compression, crate::track::Compression::Deflate);
 		assert!(info.properties.unwrap().values.is_empty());
 	}
 }

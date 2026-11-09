@@ -278,11 +278,9 @@ impl Web {
 	/// RTMP opens with a byte no HTTP request or TLS ClientHello starts with, and an
 	/// RTMPS client negotiates no ALPN, so both share the web ports. Until this is
 	/// called, or once the returned consumer is dropped, they are logged and closed.
-	/// A later call replaces the earlier consumer.
-	pub fn rtmp(&mut self) -> rtmp::Incoming {
-		let (handoff, incoming) = rtmp::Handoff::new();
-		self.rtmp = handoff;
-		incoming
+	/// `None` once taken.
+	pub fn rtmp(&mut self) -> Option<rtmp::Incoming> {
+		self.rtmp.incoming()
 	}
 
 	/// Serve `tls://` on the HTTPS listener with `acceptor`, usually
@@ -466,7 +464,7 @@ impl Web {
 				crate::listener::Config {
 					health: health.clone(),
 					timeout: state.timeout,
-					activity: Some(state.shutdown.activity.clone()),
+					admission: Some(state.shutdown.admission.clone()),
 				},
 				WebAcceptor::plain(ws, rtmp.clone(), state.clone()),
 			)?;
@@ -483,7 +481,7 @@ impl Web {
 				crate::listener::Config {
 					health: health.clone(),
 					timeout: state.timeout,
-					activity: Some(state.shutdown.activity.clone()),
+					admission: Some(state.shutdown.admission.clone()),
 				},
 				WebAcceptor::tls(
 					crate::listener::Tls {
@@ -687,7 +685,7 @@ impl WebAcceptor {
 			.admission
 			.clone()
 			.and_then(|admission| admission.take())
-			.or_else(|| state.shutdown.activity.enter())
+			.or_else(|| state.shutdown.admission.enter())
 		else {
 			return;
 		};
@@ -1387,7 +1385,7 @@ mod tests {
 		decider.await.unwrap();
 
 		let mut report = Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, moq_net::time::Instant::now());
 		let [entry] = report.sessions.as_slice() else {
 			panic!("expected one attributed entry: {:?}", report.sessions);
 		};
@@ -1493,7 +1491,7 @@ mod tests {
 		}
 		let _leases = decider.await.unwrap();
 		let mut report = Report::default();
-		state.cluster.stats.report(&mut report);
+		state.cluster.stats.report(&mut report, moq_net::time::Instant::now());
 		assert_eq!(report.traffic.len(), 2);
 		assert_eq!(report.sessions.len(), 2);
 		for label in ["first", "second"] {
@@ -2231,7 +2229,7 @@ mod tests {
 				.with_listen(&listen(None))
 				.bind()
 				.unwrap();
-			let incoming = rtmp.then(|| web.rtmp());
+			let incoming = rtmp.then(|| web.rtmp().expect("taken once"));
 			let Addrs {
 				http: Some(http),
 				https: Some(https),
@@ -2442,7 +2440,7 @@ mod tests {
 	/// sockets, so this runs on the wall clock and bounds the answer from below.
 	#[tokio::test]
 	async fn an_unanswered_http_admission_is_refused_at_the_timeout() {
-		kio::clock::host_time();
+		kio::clock::host_time(); // real HTTP sockets
 		use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 		let timeout = std::time::Duration::from_millis(200);
@@ -2531,7 +2529,7 @@ mod tests {
 	async fn websocket_upgrade_advertises_the_configured_receive_windows() {
 		use bytes::Buf;
 		use futures::StreamExt;
-		use qmux::ws::tungstenite::{Message, client::IntoClientRequest};
+		use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 		// QMux's frame type, lengths, and QUIC transport parameter values use QUIC varints.
 		fn decode_quic(bytes: &mut bytes::Bytes) -> Result<u64, &'static str> {
@@ -2564,7 +2562,7 @@ mod tests {
 			request
 				.headers_mut()
 				.insert("sec-websocket-protocol", version.alpn().parse().unwrap());
-			let (mut socket, _) = qmux::ws::tokio_tungstenite::connect_async(request).await.unwrap();
+			let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
 			let Message::Binary(mut record) = kio::clock::timeout(std::time::Duration::from_secs(5), socket.next())
 				.await
 				.unwrap()
@@ -2833,7 +2831,7 @@ mod tests {
 			fn holds_drain(&self) {
 				use futures::FutureExt;
 				assert!(
-					self.shutdown.activity().close().now_or_never().is_none(),
+					self.shutdown.admission().close().now_or_never().is_none(),
 					"a TCP-accepted web connection was absent from the drain before its upgrade"
 				);
 			}
@@ -2859,9 +2857,9 @@ mod tests {
 				"{}",
 				String::from_utf8_lossy(&response)
 			);
-			let socket = qmux::ws::tokio_tungstenite::WebSocketStream::from_raw_socket(
+			let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
 				stream,
-				qmux::ws::tungstenite::protocol::Role::Client,
+				tokio_tungstenite::tungstenite::protocol::Role::Client,
 				None,
 			)
 			.await;
@@ -2902,9 +2900,7 @@ mod tests {
 						None => socket_step(upgrade_while_draining(web.stream, true)).await,
 					};
 					let draining = session.draining();
-					let goaway = socket_step(moq_net::kio::wait(|waiter| draining.poll(waiter)))
-						.await
-						.unwrap();
+					let goaway = socket_step(kio::wait(|waiter| draining.poll(waiter))).await.unwrap();
 					assert_eq!(goaway.uri(), "");
 					session.abort(moq_net::Error::Cancel);
 					socket_step(web.running).await.unwrap().unwrap();
@@ -2953,17 +2949,17 @@ mod tests {
 				.with_no_client_auth();
 			client.alpn_protocols = vec![b"h2".to_vec()];
 			let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
-			let activity = moq_net::server::Activity::default();
+			let admission = moq_net::server::Admission::default();
 			let bound = moq_tokio::bind::tcp("127.0.0.1:0".parse().unwrap()).unwrap();
 			let addr = bound.local_addr().unwrap();
 			let listener =
-				crate::listener::Listener::new(bound, moq_tokio::accept::Health::new("h2"), Some(activity.clone()))
+				crate::listener::Listener::new(bound, moq_tokio::accept::Health::new("h2"), Some(admission.clone()))
 					.unwrap();
 			let ((accepted, _), connected) =
 				socket_step(async { tokio::try_join!(listener.accept_stream(), tokio::net::TcpStream::connect(addr)) })
 					.await
 					.unwrap();
-			assert!(activity.close().now_or_never().is_none(), "TLS was not counted");
+			assert!(admission.close().now_or_never().is_none(), "TLS was not counted");
 			let tls = crate::listener::Tls {
 				http: RustlsConfig::from_config(tls),
 				serve,
@@ -2980,7 +2976,7 @@ mod tests {
 			.unwrap();
 			assert_eq!(stream.tls().unwrap().alpn_protocol(), Some(&b"h2"[..]));
 			assert!(
-				activity.close().now_or_never().is_some(),
+				admission.close().now_or_never().is_some(),
 				"h2 awaited request headers before releasing its admission"
 			);
 		}
@@ -3008,28 +3004,28 @@ mod tests {
 		#[tokio::test(start_paused = true)]
 		async fn later_keep_alive_upgrade_enters_from_the_handler() {
 			let mut web = DrainingWeb::new(false, true).await;
-			let pending = web.shutdown.activity().enter().unwrap();
+			let pending = web.shutdown.admission().enter().unwrap();
 			socket_step(plain_request(&mut web.stream)).await;
 			web.trigger.start();
 			let session = socket_step(upgrade_while_draining(web.stream, false)).await;
 			drop(pending);
 			let draining = session.draining();
-			let goaway = socket_step(moq_net::kio::wait(|waiter| draining.poll(waiter))).await;
+			let goaway = socket_step(kio::wait(|waiter| draining.poll(waiter))).await;
 			assert_eq!(goaway.unwrap().uri(), "");
 			session.abort(moq_net::Error::Cancel);
 			socket_step(web.running).await.unwrap().unwrap();
 		}
 
 		async fn refused_upgrade(stream: tokio::net::TcpStream) {
-			use qmux::ws::tungstenite::client::IntoClientRequest;
+			use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 			let mut request = format!("ws://{}/room", stream.peer_addr().unwrap())
 				.into_client_request()
 				.unwrap();
 			request
 				.headers_mut()
 				.insert("sec-websocket-protocol", "qmux-01.moq-lite-06".parse().unwrap());
-			let result = qmux::ws::tokio_tungstenite::client_async(request, stream).await;
-			let Err(qmux::ws::tungstenite::Error::Http(response)) = result else {
+			let result = tokio_tungstenite::client_async(request, stream).await;
+			let Err(tokio_tungstenite::tungstenite::Error::Http(response)) = result else {
 				panic!("an upgrade after drain admission closed was not refused");
 			};
 			assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
@@ -3042,7 +3038,7 @@ mod tests {
 			socket_step(plain_request(&mut web.stream)).await;
 			// Keep the listener running while admission is closed, exposing the
 			// same boundary a connection can reach just before Relay::run stops it.
-			socket_step(web.shutdown.activity().close()).await;
+			socket_step(web.shutdown.admission().close()).await;
 			socket_step(refused_upgrade(web.stream)).await;
 			let mut fresh = socket_step(tokio::net::TcpStream::connect(addr)).await.unwrap();
 			socket_step(plain_request(&mut fresh)).await;

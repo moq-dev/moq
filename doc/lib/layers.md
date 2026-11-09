@@ -87,7 +87,7 @@ The catalog has no window mode, so a window track is not advertised there.
 Go code usually imports it under an alias, next to `encoding/json`.
 
 Compression is the track's, not this layer's: publish a JSON track with
-`compress` set on its track info, and a consumer reads it like any other.
+`compression` set on its track info, and a consumer reads it like any other.
 Opaque bytes go on a raw net track.
 
 ## audio

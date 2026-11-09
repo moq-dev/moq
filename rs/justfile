@@ -55,6 +55,7 @@ lint *args:
     cargo sort --check --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
     cargo hakari generate --diff
     python3 sh/rs/hakari.py
+    python3 sh/rs/crypto.py
 
 # Auto-fix clippy/format/shear/sort.
 [positional-arguments]
@@ -301,15 +302,15 @@ coroutines:
     run bash sh/rs/coroutines.sh rs/moq-auth/Cargo.toml -- --no-default-features
     finish
 
-# Prove moq-crypto's key-only build, which moq-auth depends on, leaves out the transport and aws-lc-rs, then lint and test it alone; a workspace build unifies the default features back in.
+# Prove moq-crypto's key-only build, which moq-auth depends on, leaves out the transport, then lint and test it alone; a workspace build unifies the default features back in.
 crypto-key:
     #!/usr/bin/env bash
     set -euo pipefail
     source sh/checks.sh
     key_only_dependencies() {
         graph=$(cargo tree --locked -p moq-crypto --no-default-features --features serde -e normal --prefix none) || return
-        if grep -E '^(aws-lc-rs|moq-net) ' <<<"$graph"; then
-            echo "moq-crypto without sign or e2ee must not depend on moq-net or aws-lc-rs" >&2
+        if grep -E '^moq-net ' <<<"$graph"; then
+            echo "moq-crypto without sign or e2ee must not depend on moq-net" >&2
             return 1
         fi
     }
@@ -570,7 +571,7 @@ codspeed:
         --features moq-audio/bus,moq-net/fuzz,moq-quic/fuzz \
         --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
         --bench catalog --bench containers --bench decode_clock --bench export --bench jitter \
-        --bench parameter_sets --bench timeline --bench ts_programs --bench ts_schedule --bench ts_video \
+        --bench parameter_sets --bench sync --bench ts_programs --bench ts_schedule --bench ts_video \
         --bench announce --bench auth --bench bandwidth --bench canonical --bench frame --bench interests \
         --bench priority --bench retirement --bench schedule --bench stats --bench synced --bench tail \
         --bench tracks --bench varint --bench viewers --bench matching \

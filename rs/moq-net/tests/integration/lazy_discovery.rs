@@ -26,7 +26,7 @@ const ANNOUNCE: u8 = 1;
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// A server publishing `a/x` and `b/y`, and a client fed into `subscriber` asking
@@ -103,7 +103,7 @@ impl Lazy {
 /// Read until the stream syncs, returning the prefixes it then holds.
 async fn synced(announced: &mut origin::Routes) -> Vec<String> {
 	let mut seen = Vec::new();
-	while !announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready() {
+	while !announced.poll_synced(&kio::Waiter::noop()).is_ready() {
 		let event = kio::clock::timeout(SETTLE, announced.next())
 			.await
 			.expect("synced in time")

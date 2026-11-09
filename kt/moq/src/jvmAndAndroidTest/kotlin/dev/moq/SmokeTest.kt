@@ -587,7 +587,10 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val config = WindowConfig()
             val track =
-                broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL, compress = true))
+                broadcast.publishTrack(
+                    "log",
+                    TrackInfo(timescale = 1_000_000uL, compression = Compression.DEFLATE),
+                )
             val producer = WindowProducer(track, config)
             val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null))
             for (n in 1..3) producer.push(
@@ -1188,6 +1191,7 @@ class SmokeTest {
 
                         // The frame outlives its consumer's cancellation.
                         decoder.cancel()
+                        assertNull(frame.surface())
 
                         val planar = frame.pixels(VideoPixelFormat.I420)
                         assertEquals(

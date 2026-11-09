@@ -82,19 +82,15 @@ impl Credential {
 	}
 
 	fn wire(&self, role: Option<Role>) -> auth::Grant {
-		auth::Grant {
-			publish: if role == Some(Role::Subscriber) {
-				Default::default()
-			} else {
-				self.grant.publish.clone()
-			},
-			subscribe: if role == Some(Role::Publisher) {
-				Default::default()
-			} else {
-				self.grant.subscribe.clone()
-			},
-			expires: self.expires,
+		let mut grant = auth::Grant::default();
+		if role != Some(Role::Subscriber) {
+			grant.publish = self.grant.publish.clone();
 		}
+		if role != Some(Role::Publisher) {
+			grant.subscribe = self.grant.subscribe.clone();
+		}
+		grant.expires = self.expires;
+		grant
 	}
 }
 
@@ -688,7 +684,7 @@ mod tests {
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let stats = registry
 			.tier(moq_net::stats::Tier::default())
-			.session(moq_net::Path::from_static("room"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("room")));
 		let lease = super::super::Lease::new("/room", consumer)
 			.unwrap()
 			.with_stats(stats.clone());
@@ -905,7 +901,7 @@ mod tests {
 			let registry = moq_net::stats::Registry::new(Default::default());
 			let stats = registry
 				.tier(moq_net::stats::Tier::default())
-				.session(moq_net::Path::from_static("room"));
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("room")));
 			let lease = super::super::Lease::new("/room", consumer).unwrap().with_stats(stats);
 			let (client, supervising) = sessions(lease).await;
 			producer.revoke(reason.clone());
@@ -1118,7 +1114,7 @@ mod tests {
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let stats = registry
 			.tier(moq_net::stats::Tier::default())
-			.session(moq_net::Path::from_static("room"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("room")));
 		let (client, session, mut lease) = connect(lease.unwrap().with_stats(stats)).await;
 		let auth = client.auth();
 		let (token, ()) = tokio::join!(

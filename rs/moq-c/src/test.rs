@@ -1984,7 +1984,7 @@ fn publish_track_invalid_broadcast() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert!(moq_publish_track_group(9999) < 0);
@@ -2019,7 +2019,7 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
@@ -2038,7 +2038,7 @@ fn track_info_max_age() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 	let max_age = |info: moq_track_info| moq_net::track::Info::try_from(&info).unwrap().max_age;
 
@@ -2356,13 +2356,16 @@ fn raw_track_publish_consume() {
 
 /// Wait until a datagram producer has a reader.
 fn wait_datagram_reader(track: u32) {
-	let datagrams = State::lock()
+	let mut datagrams = State::lock()
 		.publish
 		.datagram_producer(Id::try_from(track).unwrap())
 		.expect("a datagram track");
-	let reader = kio::wait(|waiter| match datagrams.poll_priority(waiter, None) {
-		std::task::Poll::Ready(Some(_)) => std::task::Poll::Ready(()),
-		_ => std::task::Poll::Pending,
+	let reader = kio::wait(|waiter| {
+		loop {
+			if std::task::ready!(datagrams.poll_priority_changed(waiter)).is_some() {
+				return std::task::Poll::Ready(());
+			}
+		}
 	});
 	crate::ffi::RUNTIME
 		.block_on(async { kio::clock::timeout(TIMEOUT, reader).await })
@@ -2481,9 +2484,12 @@ fn a_datagram_only_track_is_read() {
 			dg_cb.ptr,
 		)
 	});
-	let reader = kio::wait(|waiter| match datagrams.poll_priority(waiter, None) {
-		std::task::Poll::Ready(Some(_)) => std::task::Poll::Ready(()),
-		_ => std::task::Poll::Pending,
+	let reader = kio::wait(|waiter| {
+		loop {
+			if std::task::ready!(datagrams.poll_priority_changed(waiter)).is_some() {
+				return std::task::Poll::Ready(());
+			}
+		}
 	});
 	crate::ffi::RUNTIME
 		.block_on(async { kio::clock::timeout(TIMEOUT, reader).await })
@@ -2642,7 +2648,7 @@ fn raw_track_subscription_options_and_update() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 	let track =
 		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
@@ -2777,7 +2783,7 @@ fn raw_track_time_anchor() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 	let track =
 		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
@@ -3757,7 +3763,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 	let payload = b"tail";
@@ -4568,7 +4574,7 @@ fn track_demand_reports_the_wanted_group() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: true,
-		compress: false,
+		compression: 0,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 
@@ -4978,7 +4984,7 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 	let group_cb = Callback::new();
