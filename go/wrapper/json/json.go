@@ -5,7 +5,7 @@
 // their broadcast's catalog, which has no window mode), and a consumer takes
 // over a [moq.TrackConsumer] that has not read a group yet. The track can come
 // from a request as well as by name. Compression is the track's: publish JSON
-// with [moq.TrackInfo] Compress set, and a consumer reads it with no option of
+// with [moq.TrackInfo] Compression set, and a consumer reads it with no option of
 // its own. Every write (a snapshot update, a stream append, a window push or
 // pop) takes a timestamp on the broadcast clock, the epoch every track in the
 // broadcast shares (read it with media.CatalogProducer.Now), so the track needs

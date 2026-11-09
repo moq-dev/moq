@@ -45,7 +45,7 @@ fn origin(hop: u64, pool: &cache::Pool) -> origin::Producer {
 	config.pool = pool.clone();
 	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 /// Write `payload` once `group`'s fastest reader leaves room, or return `false` once no

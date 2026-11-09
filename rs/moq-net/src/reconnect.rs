@@ -260,28 +260,47 @@ pub enum ConfigError {
 }
 
 /// One dial the caller runs for [`Reconnect`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Attempt<A> {
 	target: A,
-	url: Url,
-	token: Option<crate::setup::Token>,
+	/// The connection credential, from [`Reconnect::with_tokens`].
+	token: Option<String>,
+	auth: Option<auth::Handle>,
 }
 
-impl<A> Attempt<A> {
+impl<A: std::fmt::Debug> std::fmt::Debug for Attempt<A> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		// The credential stays out of logs.
+		f.debug_struct("Attempt")
+			.field("target", &self.target)
+			.field("token", &self.token.as_ref().map(|token| token.len()))
+			.finish_non_exhaustive()
+	}
+}
+
+impl<A: Target> Attempt<A> {
 	/// The address to dial.
 	pub fn target(&self) -> &A {
 		&self.target
 	}
 
-	/// The URL to dial, carrying the connection credential in its query when an offered
-	/// version has no SETUP token.
-	pub fn url(&self) -> &Url {
-		&self.url
-	}
-
-	/// The connection credential for [`Client::with_token`](crate::Client::with_token), if any.
-	pub fn token(&self) -> Option<&crate::setup::Token> {
-		self.token.as_ref()
+	/// `client` set up for this dial: the target's URL, the connection credential in SETUP
+	/// and, when one of `client`'s versions cannot carry it there, the URL's query, and the
+	/// session built on the tokens' handle.
+	pub fn client(&self, client: &crate::Client) -> crate::Client {
+		let mut client = client.clone();
+		let mut url = self.target.url().clone();
+		if let Some(token) = &self.token {
+			url = auth::locate(&url, token, &client.versions);
+			client = client.with_token(crate::setup::Token {
+				kind: crate::setup::Token::OUT_OF_BAND,
+				value: token.clone().into_bytes(),
+			});
+		}
+		if let Some(auth) = &self.auth {
+			client = client.with_auth(auth.clone());
+		}
+		client.with_url(url)
 	}
 }
 
@@ -291,8 +310,8 @@ impl<A> Attempt<A> {
 #[derive(Debug)]
 pub enum Action<A, E> {
 	/// Dial this attempt and report it with [`Reconnect::connected`] or
-	/// [`Reconnect::failed`], polling meanwhile. Building each session on the tokens'
-	/// handle, from [`Reconnect::with_tokens`], is the caller's.
+	/// [`Reconnect::failed`], polling meanwhile. Build each session's client with
+	/// [`Attempt::client`].
 	Dial(Attempt<A>),
 	/// Drop the dial in flight: it ran out its deadline, which already counted as its failure.
 	Abandon,
@@ -319,7 +338,7 @@ pub enum Action<A, E> {
 pub struct Reconnect<A, E> {
 	config: Config,
 	targets: Vec<A>,
-	tokens: Option<(auth::Tokens, crate::Versions)>,
+	tokens: Option<auth::Tokens>,
 	retry: Retry<E>,
 	redirects: Redirects,
 	phase: Phase,
@@ -408,12 +427,12 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		})
 	}
 
-	/// Present `tokens` on every dial offering `versions`.
+	/// Present `tokens` on every dial, through [`Attempt::client`].
 	///
 	/// A refused credential then earns another dial once the tokens change, and an ended
 	/// tokens handle ends the policy at its next walk.
-	pub fn with_tokens(mut self, tokens: auth::Tokens, versions: crate::Versions) -> Self {
-		self.tokens = Some((tokens, versions));
+	pub fn with_tokens(mut self, tokens: auth::Tokens) -> Self {
+		self.tokens = Some(tokens);
 		self
 	}
 
@@ -528,7 +547,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		let Phase::Dialing(dialing) = std::mem::replace(&mut self.phase, Phase::Start) else {
 			unreachable!("checked above");
 		};
-		if let Some((tokens, _)) = &self.tokens {
+		if let Some(tokens) = &self.tokens {
 			tokens.connected(&session);
 		}
 		// A predecessor that retired mid-dial queued an offline this session now contradicts.
@@ -561,7 +580,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		}
 		// An ended auth handle refuses every later session, so no dial can recover. A fresh
 		// watch only reports an error once its handle has ended.
-		if let Some((tokens, _)) = &self.tokens
+		if let Some(tokens) = &self.tokens
 			&& let Poll::Ready(Err(err)) = tokens.handle().grant().poll_changed(&kio::Waiter::noop())
 		{
 			return self.done(Err(err.into()));
@@ -576,14 +595,9 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		// Read before the dial starts its session's driver, so a request the session sends
 		// early waits on the held tokens' answers rather than being refused outside the
 		// connection credential's grant.
-		let presented = self
-			.tokens
-			.as_ref()
-			.map(|(tokens, versions)| tokens.dial(target.url(), versions));
-		let (url, token) = match &presented {
-			Some(presented) => (presented.url.clone(), presented.token.clone()),
-			None => (target.url().clone(), None),
-		};
+		let presented = self.tokens.as_ref().map(|tokens| tokens.dial(target.url()));
+		let token = presented.as_ref().and_then(|presented| presented.token.clone());
+		let auth = self.tokens.as_ref().map(auth::Tokens::handle);
 
 		// The connect deadline covers the dial and the handshake, for every transport: it is
 		// the only bound some of them have. The fixed bound applies only with a fallback.
@@ -601,7 +615,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			deadline,
 			presented,
 		});
-		Action::Dial(Attempt { target, url, token })
+		Action::Dial(Attempt { target, token, auth })
 	}
 
 	/// The dial in flight failed: move on to the next target, or end the walk.
@@ -814,7 +828,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 	/// Whether the tokens changed since `presented` read them, so a refusal earns another dial.
 	fn changed(&self, presented: Option<&auth::Dial>) -> bool {
 		match (&self.tokens, presented) {
-			(Some((tokens, _)), Some(presented)) => tokens.changed(presented),
+			(Some(tokens), Some(presented)) => tokens.changed(presented),
 			_ => false,
 		}
 	}

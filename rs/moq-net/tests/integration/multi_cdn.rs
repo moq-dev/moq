@@ -37,7 +37,7 @@ const A_COST: u64 = 100;
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.

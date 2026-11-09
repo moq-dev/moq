@@ -75,6 +75,8 @@ public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
 /// Publisher-side track properties: priority, group ordering, max age,
 /// and timescale.
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
+/// How a track's frames are compressed on the wire: `.deflate`, or `nil` in `TrackInfo` for none.
+public typealias Compression = MoqFFI.MoqCompression
 
 /// A snapshot of connection statistics (RTT, bandwidth estimates, byte/packet
 /// counters). Fields are `nil` when the transport backend doesn't report them.

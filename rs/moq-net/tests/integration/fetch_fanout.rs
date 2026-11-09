@@ -11,7 +11,7 @@ use support::harness::{MockConnectOptions, connect_mock};
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 #[kio::test]

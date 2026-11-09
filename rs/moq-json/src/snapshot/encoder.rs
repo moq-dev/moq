@@ -70,10 +70,10 @@ pub struct Config {
 	///
 	/// A delta that would pass it rolls a fresh snapshot instead, and a snapshot past it is refused
 	/// with [`FrameTooLarge`](moq_net::Error::FrameTooLarge). Lowering it lets a test reach the limit
-	/// without megabytes of JSON; a value above moq-net's cache limit is clamped to it, since moq-net
-	/// refuses a larger group anyway.
+	/// without megabytes of JSON; a value above 32 MiB, what moq-net's group cache holds, is clamped
+	/// to it.
 	///
-	/// Defaults to [`moq_net::group::MAX_CACHE_BYTES`].
+	/// Defaults to 32 MiB.
 	pub max_group_bytes: u64,
 }
 
@@ -95,7 +95,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			deltas: true,
-			max_group_bytes: moq_net::group::MAX_CACHE_BYTES,
+			max_group_bytes: crate::MAX_GROUP_BYTES,
 		}
 	}
 }
@@ -241,7 +241,7 @@ impl<T> Encoder<T> {
 	/// Create an encoder with a cold baseline, so the first [`update`](Self::update) is a snapshot.
 	pub fn new(config: Config) -> Self {
 		Self {
-			max_group_bytes: config.max_group_bytes.min(moq_net::group::MAX_CACHE_BYTES),
+			max_group_bytes: config.max_group_bytes.min(crate::MAX_GROUP_BYTES),
 			config,
 			last: None,
 			scratch: RefCell::new(crate::diff::Scratch::memoized()),
@@ -942,7 +942,7 @@ mod test {
 	#[test]
 	fn the_budget_is_clamped_to_the_cache_limit() {
 		let encoder = Encoder::<Value>::new(Config::default().with_max_group_bytes(u64::MAX));
-		assert_eq!(encoder.max_group_bytes, moq_net::group::MAX_CACHE_BYTES);
+		assert_eq!(encoder.max_group_bytes, crate::MAX_GROUP_BYTES);
 	}
 
 	/// A value whose serialization changes on every call, standing in for a `Serialize` impl backed by

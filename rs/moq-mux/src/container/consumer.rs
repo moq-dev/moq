@@ -232,7 +232,7 @@ enum Startup {
 const CONTIGUITY_TOLERANCE: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// The default decoded-byte cap: one group at the transport's size cap.
-pub(crate) const DEFAULT_MAX_BUFFER: usize = moq_net::group::MAX_CACHE_BYTES as usize;
+pub(crate) const DEFAULT_MAX_BUFFER: usize = 32 * 1024 * 1024;
 
 /// The decoded bytes a consumer's groups hold, shared with each group so one dropped by any path
 /// refunds what it held.

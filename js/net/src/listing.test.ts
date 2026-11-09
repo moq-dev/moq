@@ -6,7 +6,7 @@ import type { Tracks } from "./listing.ts";
 import type { Info } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
-const INFO: Info = { compress: false, timescale: null, maxAge: null, priority: 0, refresh: null };
+const INFO: Info = { compression: "none", timescale: null, maxAge: null, priority: 0, refresh: null };
 
 /** Lets queued microtasks and the listing's signal notifications run. */
 function settle(): Promise<void> {

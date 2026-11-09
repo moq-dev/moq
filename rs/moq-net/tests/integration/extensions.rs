@@ -24,7 +24,7 @@ const AUTH: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn declined(f: impl FnOnce(&mut Extensions)) -> Extensions {

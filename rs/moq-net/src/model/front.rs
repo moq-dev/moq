@@ -1268,7 +1268,7 @@ mod tests {
 				..info()
 			},
 			track::Info {
-				compress: true,
+				compression: crate::track::Compression::Deflate,
 				..info()
 			},
 			track::Info {
