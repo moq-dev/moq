@@ -3,6 +3,9 @@ import { ringCapacity } from "./latency";
 
 export class AudioRingBuffer {
 	#buffer: Float32Array[];
+	// Per slot, whether it holds received audio rather than the zeros filling a gap or a declared
+	// silence, so a trim counts only what it discards of the former.
+	#received: Uint8Array;
 	#writeIndex = 0;
 	#readIndex = 0;
 
@@ -72,6 +75,7 @@ export class AudioRingBuffer {
 		const capacity = ringCapacity(this.rate);
 		if (this.#latencySamples > capacity) throw new Error("latency exceeds capacity");
 
+		this.#received = new Uint8Array(capacity);
 		this.#buffer = [];
 		for (let i = 0; i < this.channels; i++) {
 			this.#buffer[i] = new Float32Array(capacity);
@@ -206,13 +210,13 @@ export class AudioRingBuffer {
 		const limit = band ? Math.min(this.#latencySamples + this.#chunk, this.capacity) : this.capacity;
 		if (end - this.#readIndex > limit) {
 			const readIndex = end - (band ? Math.min(this.#latencySamples, this.capacity) : this.capacity);
-			// Only written audio counts: not a discontinuity's gap, nor a declared silence's zeros.
-			const dropped = Math.min(readIndex, this.#writeIndex);
-			let trimmed = Math.max(0, dropped - this.#readIndex);
-			for (const pause of this.#pauses) {
-				trimmed -= Math.max(0, Math.min(pause.end, dropped) - Math.max(pause.start, this.#readIndex));
+			// Received audio the new playhead passes: what was buffered, less any gap or declared
+			// silence in it, and the front of this chunk when the playhead lands inside it.
+			const buffered = Math.min(readIndex, this.#writeIndex);
+			for (let i = this.#readIndex; i < buffered; i++) {
+				if (i >= start || this.#received[i % this.capacity]) this.#trimmed++;
 			}
-			this.#trimmed += trimmed;
+			this.#trimmed += Math.max(0, Math.min(readIndex, end) - Math.max(start, this.#writeIndex));
 			this.#readIndex = readIndex;
 			this.#prune();
 		}
@@ -231,6 +235,7 @@ export class AudioRingBuffer {
 					dst[writePos] = 0;
 				}
 			}
+			for (let i = 0; i < gapSize; i++) this.#received[(this.#writeIndex + i) % this.capacity] = 0;
 		}
 
 		// Write the actual samples
@@ -246,6 +251,7 @@ export class AudioRingBuffer {
 				dst[writePos] = src[i];
 			}
 		}
+		for (let i = 0; i < samples; i++) this.#received[(start + i) % this.capacity] = 1;
 
 		// Update write index, but only if we're moving forward
 		if (end > this.#writeIndex) {

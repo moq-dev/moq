@@ -308,6 +308,36 @@ describe("ring buffer wrapping", () => {
 	});
 });
 
+describe("trimmed", () => {
+	// A 10 ms target at 1 kHz tolerates one chunk above it before dropping back to it.
+	const playing = () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 10 as Milli });
+		write(buffer, 0 as Milli, 10, { channels: 1, value: 1 });
+		expect(buffer.stalled).toBe(false);
+		return buffer;
+	};
+
+	it("counts the front of the incoming chunk the playhead skips", () => {
+		const buffer = playing();
+		write(buffer, 10 as Milli, 20, { channels: 1, value: 2 });
+		expect(buffer.trimmed).toBe(Milli(0));
+		// The playhead jumps from 0 to 40: the 30 buffered and the chunk's first 10.
+		write(buffer, 30 as Milli, 20, { channels: 1, value: 3 });
+		expect(buffer.trimmed).toBe(Milli(40));
+	});
+
+	it("leaves out a gap's zeros", () => {
+		const buffer = playing();
+		write(buffer, 10 as Milli, 5, { channels: 1, value: 2 });
+		// The playhead jumps from 0 to 25 over the 15 buffered; 15 to 29 is a gap of zeros.
+		write(buffer, 30 as Milli, 5, { channels: 1, value: 3 });
+		expect(buffer.trimmed).toBe(Milli(15));
+		// From 25 to 70: 25 to 29 gap, 30 to 34 received, 35 to 59 gap, 60 to 69 the chunk's front.
+		write(buffer, 60 as Milli, 20, { channels: 1, value: 4 });
+		expect(buffer.trimmed).toBe(Milli(15 + 5 + 10));
+	});
+});
+
 describe("multi-channel handling", () => {
 	it("should handle stereo data correctly", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 2, latency: 100 as Milli });
