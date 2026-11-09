@@ -1,7 +1,6 @@
-"""Test-only control of the native MoQ clock.
+"""Test-only control of the native MoQ clock, kept beside the tests and out of the wheel.
 
-Needs a ``moq-ffi`` built with its ``testing`` feature, as ``just py test`` does;
-released wheels leave it out.
+Needs a ``moq-ffi`` built with its ``testing`` feature, as ``just py test`` does.
 """
 
 import ctypes

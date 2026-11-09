@@ -25,7 +25,7 @@ public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
 public typealias VideoDecoderOutput = MoqVideoDecoderOutput
 /// One decoded video frame, owning the decoder's surface until released;
 /// `pixels(format:)` converts it to packed CPU pixels.
-public typealias VideoDecodedFrame = MoqVideoDecodedFrame
+public typealias VideoDecodedFrame = Video.DecodedFrame
 /// The decoded PCM layout, its delay (playout and group staleness), and whether the
 /// playout delay is estimated.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput

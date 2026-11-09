@@ -35,4 +35,3 @@ carries them per phase.
 ## Related
 
 - [Lifecycles are explicit state](/quest/m1/explicit-state/README.md) - the epic this item split from
-- [Bindings' small surface fixes](/quest/m2/api-shape/bindings.md) - other breaking binding fixes before the cut

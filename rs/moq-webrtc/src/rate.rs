@@ -1,20 +1,17 @@
-//! Bitrate caps for WHIP ingest.
+//! Holding a WHIP ingest to its [`Cap`].
 //!
-//! An embedder hands [`whip::accept`](crate::whip::accept) a [`Limit`] through
-//! [`Request::with_rate`](crate::whip::Request::with_rate), and moq-webrtc steers the
-//! publisher's encoder under its [`Cap`]: a `b=TIAS`
-//! line in the SDP answer, and periodic REMB where the publisher negotiated
-//! it. WebRTC has no receiver backpressure, so a publisher that ignores both is metered
-//! and closed with [`Error::RateLimited`](crate::Error::RateLimited) past the cap plus its
-//! burst.
+//! An embedder hands [`whip::accept`](crate::whip::accept) a
+//! [`Limit`](moq_net::bandwidth::Limit) in its [`Request`](crate::whip::Request), and
+//! moq-webrtc steers the publisher's encoder under the cap: a `b=TIAS` line in the SDP
+//! answer, and periodic REMB where the publisher negotiated it. WebRTC has no receiver
+//! backpressure, so a publisher that ignores both is metered here and closed with
+//! [`Error::RateLimited`](crate::Error::RateLimited) past the cap plus its burst.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::time::Duration;
 
 use kio::clock::Instant;
-use moq_net::bandwidth::Rate;
-use tokio::sync::watch;
+use moq_net::bandwidth::{Cap, Rate};
 
 /// The share of the cap moq-webrtc steers the encoder to.
 ///
@@ -30,106 +27,14 @@ const STEER: f64 = 0.9;
 /// packet, 2 seconds by default, which moq-webrtc keeps; audio waits half that.
 const ASSEMBLY: Duration = Duration::from_secs(2);
 
-/// A bitrate cap: the sustained rate media may arrive at, and the burst above it.
-///
-/// The cap counts media payload, the depacketized frames a publisher sends. RTP, SRTP,
-/// and UDP overhead sits outside it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Cap {
-	/// The sustained rate.
-	pub rate: Rate,
-	/// How far ahead of `rate` media may run, as time at `rate`. Defaults to
-	/// [`Cap::DEFAULT_BURST`], as on QUIC.
-	pub burst: Duration,
+/// The rate the encoder is steered to, in the answer and in REMB: never above the cap.
+pub(crate) fn steer(cap: Cap) -> Rate {
+	cap.rate.scaled(STEER)
 }
 
-impl Cap {
-	/// About one second of the cap.
-	pub const DEFAULT_BURST: Duration = Duration::from_secs(1);
-
-	/// A cap at `rate` with the default burst.
-	pub const fn new(rate: Rate) -> Self {
-		Self {
-			rate,
-			burst: Self::DEFAULT_BURST,
-		}
-	}
-
-	/// This cap with a burst of `burst` at its rate.
-	pub const fn with_burst(mut self, burst: Duration) -> Self {
-		self.burst = burst;
-		self
-	}
-
-	/// The rate the encoder is steered to, in the answer and in REMB: never above the cap.
-	pub(crate) fn steer(self) -> Rate {
-		self.rate.scaled(STEER)
-	}
-
-	/// The burst in bytes.
-	fn burst_bytes(self) -> f64 {
-		self.rate.as_bps() as f64 / 8.0 * self.burst.as_secs_f64()
-	}
-}
-
-impl From<Rate> for Cap {
-	fn from(rate: Rate) -> Self {
-		Self::new(rate)
-	}
-}
-
-/// A live cap for one WHIP session.
-///
-/// Clones share the cap. [`Limit::set`] applies to a running session at once: the
-/// meter switches to the new cap, and the next REMB goes out immediately, lifting its
-/// ceiling when the cap is lifted. The SDP answer's TIAS is fixed at the cap set when the
-/// offer was accepted, since moq-webrtc never renegotiates: a session that starts uncapped
-/// steers only through REMB, and raising or lifting a starting cap frees the publisher
-/// only as far as that TIAS allows.
-#[derive(Clone)]
-pub struct Limit {
-	cap: Arc<watch::Sender<Option<Cap>>>,
-}
-
-impl Limit {
-	/// A handle starting at `cap`, or uncapped for `None`.
-	pub fn new(cap: impl Into<Option<Cap>>) -> Self {
-		Self {
-			cap: Arc::new(watch::Sender::new(cap.into())),
-		}
-	}
-
-	/// An uncapped handle.
-	pub fn unlimited() -> Self {
-		Self::new(None)
-	}
-
-	/// Replace the cap; `None` lifts it.
-	pub fn set(&self, cap: impl Into<Option<Cap>>) {
-		self.cap.send_replace(cap.into());
-	}
-
-	/// The current cap, if any.
-	pub fn get(&self) -> Option<Cap> {
-		*self.cap.borrow()
-	}
-
-	pub(crate) fn subscribe(&self) -> watch::Receiver<Option<Cap>> {
-		self.cap.subscribe()
-	}
-}
-
-impl Default for Limit {
-	fn default() -> Self {
-		Self::unlimited()
-	}
-}
-
-impl std::fmt::Debug for Limit {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_tuple("Limit").field(&self.get()).finish()
-	}
+/// The cap's burst in bytes.
+fn burst_bytes(cap: Cap) -> f64 {
+	cap.rate.as_bps() as f64 / 8.0 * cap.burst.as_secs_f64()
 }
 
 /// A token bucket over received media payload: full at the burst, refilled at the rate.
@@ -163,7 +68,7 @@ impl Meter {
 	pub fn new(cap: Option<Cap>, now: Instant) -> Self {
 		Self {
 			cap,
-			tokens: cap.map_or(0.0, Cap::burst_bytes),
+			tokens: cap.map_or(0.0, burst_bytes),
 			last: now,
 			full: VecDeque::new(),
 		}
@@ -179,8 +84,8 @@ impl Meter {
 		self.refill(now);
 		self.tokens = match (self.cap, cap) {
 			(_, None) => 0.0,
-			(None, Some(cap)) => cap.burst_bytes(),
-			(Some(_), Some(cap)) => self.tokens.min(cap.burst_bytes()),
+			(None, Some(cap)) => burst_bytes(cap),
+			(Some(_), Some(cap)) => self.tokens.min(burst_bytes(cap)),
 		};
 		if cap.is_none() {
 			self.full.clear();
@@ -215,7 +120,7 @@ impl Meter {
 		};
 
 		let rate = cap.rate.as_bps() as f64 / 8.0;
-		let burst = cap.burst_bytes();
+		let burst = burst_bytes(cap);
 		let tokens = self.tokens + rate * elapsed.as_secs_f64();
 		if tokens > burst {
 			// The bucket filled partway through and discarded credit from then until now.
@@ -284,7 +189,7 @@ mod tests {
 	fn steering_never_exceeds_the_cap() {
 		for bps in [0, 1, 8_000, 2_500_000, u64::MAX] {
 			let cap = Cap::new(Rate::from_bps(bps));
-			assert!(cap.steer() <= cap.rate, "{bps}");
+			assert!(steer(cap) <= cap.rate, "{bps}");
 		}
 	}
 
@@ -445,16 +350,5 @@ mod tests {
 		meter.set(Some(cap()), t0 + Duration::from_secs(1));
 		assert!(meter.charge_at(1000, t0 + Duration::from_secs(1)).is_ok());
 		assert!(meter.charge_at(1, t0 + Duration::from_secs(1)).is_err());
-	}
-
-	#[test]
-	fn the_handle_shares_live_updates() {
-		let limit = Limit::unlimited();
-		let mut rx = limit.clone().subscribe();
-		assert_eq!(limit.get(), None);
-		limit.clone().set(cap());
-		assert!(rx.has_changed().unwrap());
-		assert_eq!(*rx.borrow_and_update(), Some(cap()));
-		assert_eq!(limit.get(), Some(cap()));
 	}
 }

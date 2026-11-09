@@ -1086,6 +1086,7 @@ pub struct MoqVideoDecoderOutput {
 /// the surface belongs to the decoder's pool, and releasing the frame is what
 /// lets the decoder reuse it.
 #[derive(Clone, Copy, uniffi::Enum)]
+#[non_exhaustive]
 pub enum MoqVideoSurface {
 	/// An Apple `CVPixelBufferRef` from VideoToolbox, IOSurface-backed NV12.
 	PixelBuffer {
