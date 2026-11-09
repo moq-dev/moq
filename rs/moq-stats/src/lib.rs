@@ -28,7 +28,7 @@
 //! [`totals_track`], [`presence_track`], and [`prefix_track`].
 //!
 //! Each group of leading broadcast-path segments is a compressed
-//! `<group>/group.json` track of [`GroupFrame`]s carrying the group's per-path
+//! `<group>/group.<epoch>.json` track of [`GroupFrame`]s, one per counter run, carrying the group's per-path
 //! [`Traffic`] and per-label [`Presence`], listed through the broadcast's
 //! track listing while the group is live; compute and parse names with
 //! [`group_track`] and [`parse_group_track`]. The full contract (paths,
@@ -174,8 +174,9 @@ const PRESENCE: &str = "presence.json";
 /// The last segment of a prefix track's name.
 const PREFIX: &str = "prefix.json";
 
-/// The last segment of a group track's name.
-const GROUP: &str = "group.json";
+/// The last segment of a group track's name is `group.<epoch>.json`.
+const GROUP_PREFIX: &str = "group.";
+const GROUP_SUFFIX: &str = ".json";
 
 /// The totals track name: `totals.json`.
 pub fn totals_track() -> String {
@@ -194,16 +195,50 @@ pub fn prefix_track(path: impl Into<Path>) -> String {
 	keyed_track(&path.into(), PREFIX)
 }
 
-/// The group track name for a group: `<group>/group.json`, or `group.json` for
-/// the empty group.
-pub fn group_track(group: impl Into<Path>) -> String {
-	keyed_track(&group.into(), GROUP)
+/// The track name for one counter run of a group: `<group>/group.<epoch>.json`,
+/// or `group.<epoch>.json` for the empty group.
+///
+/// Each run has its own name, so no name is ever reused and its group 0 is
+/// where the run's counters start, for every reader and every relay cache. A
+/// reader finds the current run through the broadcast's track listing.
+pub fn group_track(group: impl Into<Path>, epoch: &Epoch) -> String {
+	keyed_track(&group.into(), &format!("{GROUP_PREFIX}{epoch}{GROUP_SUFFIX}"))
 }
 
-/// The group a group track name carries; `None` for any other name. The
-/// inverse of [`group_track`], for reading a stats broadcast's track listing.
-pub fn parse_group_track(name: &str) -> Option<Path> {
-	parse_keyed_track(name, GROUP)
+/// The group and counter run a group track name carries; `None` for any other
+/// name. The inverse of [`group_track`], for reading a stats broadcast's track
+/// listing.
+pub fn parse_group_track(name: &str) -> Option<(Path, Epoch)> {
+	let (key, kind) = match name.rsplit_once('/') {
+		Some((key, kind)) if !key.is_empty() => (key, kind),
+		Some(_) => return None,
+		None => ("", name),
+	};
+	let epoch = kind.strip_prefix(GROUP_PREFIX)?.strip_suffix(GROUP_SUFFIX)?;
+	Some((Path::new(key).ok()?, epoch.parse().ok()?))
+}
+
+/// The name of `group`'s run that `broadcast` lists now, or a name it does not
+/// list, whose subscription fails like any unlisted track's.
+#[cfg(test)]
+pub(crate) async fn listed_group_track(broadcast: &moq_net::broadcast::Consumer, group: &Path) -> String {
+	use moq_net::broadcast::TracksEvent;
+	let mut listed = None;
+	if let Ok(mut tracks) = broadcast.tracks() {
+		while let Ok(Some(event)) = tracks.next().await {
+			match event {
+				TracksEvent::Added { name, .. } if parse_group_track(&name).is_some_and(|(g, _)| g == *group) => {
+					listed = Some(name.to_string());
+				}
+				TracksEvent::Removed { name } | TracksEvent::Finished { name } if listed.as_deref() == Some(&*name) => {
+					listed = None;
+				}
+				TracksEvent::Synced => break,
+				_ => {}
+			}
+		}
+	}
+	listed.unwrap_or_else(|| group_track(group.clone(), &"unlisted".parse().expect("an epoch")))
 }
 
 /// `<key>/<kind>`, or `<kind>` for the empty key.

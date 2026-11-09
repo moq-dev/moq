@@ -65,9 +65,9 @@ impl Consumer {
 	/// fails with [`NotFound`](moq_net::Error::NotFound) unless the group is
 	/// listed.
 	#[cfg(test)]
-	pub(crate) fn group(&self, group: impl Into<Path>) -> Result<GroupConsumer> {
+	pub(crate) async fn group(&self, group: impl Into<Path>) -> Result<GroupConsumer> {
 		Ok(GroupConsumer {
-			inner: self.subscribe(&crate::group_track(group))?,
+			inner: self.subscribe(&crate::listed_group_track(&self.broadcast, &group.into()).await)?,
 		})
 	}
 
@@ -291,7 +291,10 @@ mod tests {
 		assert_eq!(frame[""].sessions.active(), 1);
 
 		// At depth 0 the one group is the empty one.
-		let mut group = consumer.group(moq_net::Path::from_static("")).expect("subscribe group");
+		let mut group = consumer
+			.group(moq_net::Path::from_static(""))
+			.await
+			.expect("subscribe group");
 		let frame = group.next().await.expect("read").expect("frame");
 		let tier = &frame.tiers[""];
 		assert_eq!(tier.publisher.bytes, 50);

@@ -203,7 +203,7 @@ but a group's comes in two encodings:
 | Track | Frame keyed by | Entry |
 | --- | --- | --- |
 | `totals.json` | tier | [Totals](#totals) for the whole node |
-| `[<group>/]group.json` | | [Group](#group): one group's totals, paths, and labels, every tier |
+| `[<group>/]group.<epoch>.json` | | [Group](#group): one group's totals, paths, and labels, every tier |
 | `[<label>/]presence.json` | tier | [Presence](#presence): sessions under one stats label |
 | `[<path>/]prefix.json` | tier | [Prefix](#prefix) traffic under one broadcast prefix |
 
@@ -213,10 +213,11 @@ Every track uses the one [encoding](#encoding). `totals.json` always exists.
 
 The relay buckets traffic into groups by the first `depth` segments of each
 broadcast path, and sessions by the first `depth` segments of each stats label;
-a path shorter than `depth` groups under all of its segments. Each group is a
-`<group>/group.json` track (`group.json` for the empty group, the only one at
-depth 0) carrying all of the group's tiers, both directions, and its sessions,
-so a reader holds one subscription per group.
+a path shorter than `depth` groups under all of its segments. Each counter run
+of a group is a `<group>/group.<epoch>.json` track (`group.<epoch>.json` for the
+empty group, the only one at depth 0), named by the run's `epoch` and carrying
+all of the group's tiers, both directions, and its sessions, so a reader holds
+one subscription per group.
 
 A reader discovers the live groups from the broadcast's track listing (TRACKS
 in moq-lite 07). At depth 0 the one group's track is listed for the producer's
@@ -229,11 +230,12 @@ announce traffic across a cluster. Over a hop that cannot carry a listing
 refuses) the listing is empty or refused; a reader that knows a group's name
 can still subscribe to it while it is listed, and is refused otherwise.
 
-A group that returns after its linger is a new instance of its track: its
-frames carry a new `epoch` and count from zero, and its group numbers, which
-count publish intervals, continue past the old instance's. Holding a group's
-track doesn't count as an entry, so a reader follows the listing to the next
-instance. A frame too large to cache ends only that group's track.
+A group that returns after its linger is a new counter run under a new track:
+its frames carry a new `epoch`, which also names the track, and count from
+zero. No track name is ever reused, so each run numbers its groups from 0, and
+group 0 is where its counters start, for every reader and relay cache. Holding
+a group's track doesn't count as an entry, so a reader follows the listing to
+the next run. A frame too large to cache ends only that group's track.
 
 ### Requested tracks
 

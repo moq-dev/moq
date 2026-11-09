@@ -8,6 +8,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -18,8 +19,8 @@ use moq_net::track::Resolving;
 use moq_net::{Instance, Path, broadcast, origin};
 
 use crate::{
-	Epoch, Group, GroupFrame, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage, group_track,
-	parse_node_path, prefix_track, presence_track, totals_track,
+	Epoch, Group, GroupFrame, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage,
+	parse_group_track, parse_node_path, prefix_track, presence_track, totals_track,
 };
 
 /// Configuration for an [`Consumer`]. Construct with [`Config::new`] and chain
@@ -135,7 +136,8 @@ impl Consumer {
 	/// lists it; see [`Self::totals`].
 	pub fn group(&self, group: impl Into<Path>) -> GroupConsumer {
 		GroupConsumer {
-			inner: self.merged(group_track(group)),
+			// Each counter run is its own track, found through the listing.
+			inner: self.merged(group.into().as_str().to_string()),
 		}
 	}
 
@@ -491,7 +493,8 @@ trait Shape: Default {
 	/// The merged frame.
 	type Merged: Default + Clone;
 	/// Whether the track is read only while the node's broadcast lists it, so
-	/// a reader waits for its next listing instead of re-resolving.
+	/// a reader waits for its next listing instead of re-resolving. A listed
+	/// shape's name is the group it reads, under whichever run's track is listed.
 	const LISTED: bool;
 
 	/// Take a fresh frame.
@@ -717,8 +720,8 @@ struct Node<S: Shape> {
 	reader: Reader<S::Frame>,
 	/// The resolved broadcast's track listing, for a [`Shape::LISTED`] track.
 	listing: Option<broadcast::Tracks>,
-	/// Whether the listing offered the track since the reader last subscribed.
-	offered: bool,
+	/// The track the listing offered since the reader last subscribed.
+	offered: Option<Arc<str>>,
 	/// The announced path, relative to the announce cursor: what a re-resolve
 	/// after the reader ends requests again.
 	path: Path,
@@ -740,7 +743,7 @@ impl<S: Shape> Node<S> {
 	fn depart(&mut self) -> bool {
 		self.reader = Reader::Ended;
 		self.listing = None;
-		self.offered = false;
+		self.offered = None;
 		self.shape.depart()
 	}
 
@@ -769,7 +772,8 @@ struct Merged<S: Shape> {
 	origin: origin::Consumer,
 	announce: moq_net::origin::Routes,
 	prefix: Path,
-	/// Track name subscribed on each node broadcast.
+	/// Track name subscribed on each node broadcast, or the group a
+	/// [`Shape::LISTED`] shape reads.
 	name: String,
 	config: moq_json::snapshot::consumer::Config,
 	/// One entry per live or recently departed node broadcast, keyed by
@@ -934,7 +938,7 @@ impl<S: Shape> Merged<S> {
 				entry.insert(Node {
 					reader: resolve(&self.origin, path, instance.clone()),
 					listing: None,
-					offered: false,
+					offered: None,
 					instance,
 					path: path.clone(),
 					shape: S::default(),
@@ -975,13 +979,17 @@ fn advance<S: Shape>(
 		while let Some(listing) = &mut node.listing {
 			match listing.poll_next(waiter) {
 				Poll::Ready(Ok(Some(broadcast::TracksEvent::Added { name: listed, .. }))) => {
-					node.offered |= &*listed == name;
+					if parse_group_track(&listed).is_some_and(|(group, _)| group.as_str() == name) {
+						node.offered = Some(listed);
+					}
 				}
 				Poll::Ready(Ok(Some(
 					broadcast::TracksEvent::Removed { name: listed }
 					| broadcast::TracksEvent::Finished { name: listed },
 				))) => {
-					node.offered &= &*listed != name;
+					if node.offered.as_ref() == Some(&listed) {
+						node.offered = None;
+					}
 				}
 				Poll::Ready(Ok(Some(broadcast::TracksEvent::Synced))) => {}
 				Poll::Ready(result) => {
@@ -999,7 +1007,7 @@ fn advance<S: Shape>(
 				Poll::Ready(Ok(broadcast)) if S::LISTED => match broadcast.tracks() {
 					Ok(listing) => {
 						node.listing = Some(listing);
-						node.offered = false;
+						node.offered = None;
 						node.reader = Reader::Waiting;
 					}
 					Err(err) => {
@@ -1032,11 +1040,10 @@ fn advance<S: Shape>(
 					node.reader = resolve(origin, &node.path, node.instance.clone());
 					continue;
 				};
-				if !node.offered {
+				let Some(offered) = node.offered.take() else {
 					return changed;
-				}
-				node.offered = false;
-				match listing.broadcast().track(name) {
+				};
+				match listing.broadcast().track(&offered) {
 					Ok(track) => node.reader = subscribing(track, config),
 					Err(err) => {
 						tracing::debug!(?err, name, "stats: node missing track");
@@ -1236,7 +1243,7 @@ mod tests {
 
 	/// A stats producer publishing one node's broadcast on `origin`, grouped at
 	/// depth 1 (so feeding a broadcast under `<group>/...` publishes a
-	/// `<group>/group.json` track on `.stats/node/<node>`).
+	/// `<group>/group.<epoch>.json` track on `.stats/node/<node>`).
 	fn node_producer(origin: &origin::Producer, node: &str) -> Producer {
 		crate::produce::spawned(Producer::new(
 			produce::Config::new()
@@ -1353,7 +1360,10 @@ mod tests {
 			let source = origin.route(path.as_str(), options).expect("announce");
 			let track = source
 				.broadcast()
-				.create_track(group_track(moq_net::Path::new(group).unwrap()), timed())
+				.create_track(
+					crate::group_track(moq_net::Path::new(group).unwrap(), &group_epoch()),
+					timed(),
+				)
 				.expect("create track");
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {

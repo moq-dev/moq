@@ -52,7 +52,10 @@ impl Node {
 		let track = source
 			.broadcast()
 			.create_track(
-				group_track(moq_net::Path::from_static("acme")),
+				group_track(
+					moq_net::Path::from_static("acme"),
+					&"01900000-0000-7000-8000-000000000001".parse().unwrap(),
+				),
 				moq_net::track::Info::default()
 					.with_max_age(None)
 					.with_timescale(moq_net::Timescale::MILLI),

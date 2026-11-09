@@ -436,6 +436,9 @@ impl<V: Serialize> Serialize for Frame<V> {
 /// left. A track opens at most one group per interval: a snapshot due in an
 /// interval that already has one waits for the next.
 ///
+/// A group track's name is never reused, so it numbers its groups from 0
+/// instead ([`Self::counted`]): group 0 is where the run's counters start.
+///
 /// The numbering is why this wraps the encoder rather than a
 /// `moq_json::snapshot::Producer`, which numbers its own groups.
 struct Snapshot<T> {
@@ -444,6 +447,10 @@ struct Snapshot<T> {
 	group: Option<moq_net::group::Producer>,
 	/// The sequence of the newest group written, which a refresh has to pass.
 	largest: Option<u64>,
+	/// The interval the newest group opened in, which the next group has to pass.
+	opened: Option<u64>,
+	/// Number groups from 0 rather than by interval.
+	counted: bool,
 	deltas: bool,
 	/// The newest snapshot payload written, and what the last update wrote
 	/// (zero when nothing). Bench builds only.
@@ -461,11 +468,19 @@ impl<T: Serialize> Snapshot<T> {
 			encoder: moq_json::snapshot::Encoder::new(config),
 			group: None,
 			largest: None,
+			opened: None,
+			counted: false,
 			#[cfg(feature = "bench")]
 			held: 0,
 			#[cfg(feature = "bench")]
 			wrote: 0,
 		}
+	}
+
+	/// Number groups from 0, for a track whose name no earlier run used.
+	fn counted(mut self) -> Self {
+		self.counted = true;
+		self
 	}
 
 	fn demand(&self) -> moq_net::track::Demand {
@@ -512,16 +527,20 @@ impl<T: Serialize> Snapshot<T> {
 		let len = frame.payload.len();
 		let timestamp = moq_net::Timestamp::from(stamp.at);
 		if frame.keyframe {
-			let sequence = stamp.group;
 			// The interval already has its group: the uncommitted frame is encoded again next tick.
-			if self.largest.is_some_and(|largest| sequence <= largest) {
+			if self.opened.is_some_and(|opened| stamp.group <= opened) {
 				return Ok(None);
 			}
+			let sequence = match self.counted {
+				true => self.largest.map_or(0, |largest| largest + 1),
+				false => stamp.group,
+			};
 			if let Some(mut group) = self.group.take() {
 				group.finish()?;
 			}
 			self.group = Some(self.track.create_group(moq_net::group::Info { sequence })?);
 			self.largest = Some(sequence);
+			self.opened = Some(stamp.group);
 			#[cfg(feature = "bench")]
 			{
 				self.held = len;
@@ -876,14 +895,16 @@ struct PathUsage {
 
 impl GroupTrack {
 	fn create(broadcast: &broadcast::Producer, group: &Path) -> Result<Self, moq_net::Error> {
-		let name = crate::group_track(group);
+		// A new counter run under its own name: readers keep its counters apart from
+		// an earlier epoch's, and its group 0 is where they start.
+		let epoch = Epoch::mint();
+		let name = crate::group_track(group, &epoch);
 		let track = broadcast.create_track(name.as_str(), info())?;
 		Ok(Self {
 			name,
-			snapshot: Snapshot::new(track, config()),
+			snapshot: Snapshot::new(track, config()).counted(),
 			body: GroupBody {
-				// A new counter run: readers keep its counters apart from an earlier epoch's.
-				epoch: Epoch::mint(),
+				epoch,
 				tiers: Frame::default(),
 			},
 			live: false,
@@ -1788,7 +1809,7 @@ mod tests {
 	/// The latest buffered frame on group `group`'s track.
 	async fn read_group(broadcast: &moq_net::broadcast::Consumer, group: &str) -> crate::GroupFrame {
 		let track = broadcast
-			.track(&crate::group_track(moq_net::Path::new(group).unwrap()))
+			.track(&crate::listed_group_track(broadcast, &moq_net::Path::new(group).unwrap()).await)
 			.expect("track");
 		let mut reader = moq_json::snapshot::Consumer::<crate::GroupFrame>::new(track, Default::default());
 		reader.latest().await.expect("read").expect("frame").value
@@ -2013,7 +2034,11 @@ mod tests {
 			panic!("expected one announce");
 		};
 		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
-		let mut old = subscribe(&stats, &crate::group_track(moq_net::Path::from_static(""))).await;
+		let mut old = subscribe(
+			&stats,
+			&crate::listed_group_track(&stats, &moq_net::Path::from_static("")).await,
+		)
+		.await;
 		while try_next_frame(&mut old).is_some() {}
 
 		let second = node_producer(&origin);
@@ -2314,7 +2339,7 @@ mod tests {
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;
 		let handle = broadcast
-			.track(&crate::group_track(moq_net::Path::from_static("")))
+			.track(&crate::listed_group_track(&broadcast, &moq_net::Path::from_static("")).await)
 			.expect("track");
 		let mut track = moq_json::snapshot::Consumer::<crate::GroupFrame>::new(handle.clone(), Default::default());
 		handle.info().await.expect("subscribe");
@@ -3011,7 +3036,7 @@ mod tests {
 				broadcast::TracksEvent::Removed { name } | broadcast::TracksEvent::Finished { name } => (name, false),
 				broadcast::TracksEvent::Synced => continue,
 			};
-			if let Some(group) = crate::parse_group_track(&name) {
+			if let Some((group, _)) = crate::parse_group_track(&name) {
 				return (group.as_str().to_string(), listed);
 			}
 		}
@@ -3061,7 +3086,7 @@ mod tests {
 		drop(acme);
 		let lingering = start + Duration::from_secs(9);
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
-		let mut acme = stats.group(moq_net::Path::from_static("acme")).unwrap();
+		let mut acme = stats.group(moq_net::Path::from_static("acme")).await.unwrap();
 		let mut frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
 		while !frame.tiers[""].labels.is_empty() {
 			frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
@@ -3075,7 +3100,7 @@ mod tests {
 			("acme".into(), false)
 		);
 		assert!(pumping_at(&mut drain, lingered, acme.next()).await.unwrap().is_none());
-		let mut beta_reader = stats.group(moq_net::Path::from_static("beta")).unwrap();
+		let mut beta_reader = stats.group(moq_net::Path::from_static("beta")).await.unwrap();
 		let frame = pumping_at(&mut drain, lingered, beta_reader.next())
 			.await
 			.unwrap()
@@ -3098,27 +3123,36 @@ mod tests {
 	}
 
 	/// A group that returns after its linger starts a new counter run: a new
-	/// epoch counted from zero, so a reader summing each epoch never counts the
-	/// old one twice, and group numbers that continue past the old run's.
+	/// epoch counted from zero under its own track name, so a reader summing each
+	/// epoch never counts the old one twice, and its group 0 is where its
+	/// counters start.
 	#[tokio::test(start_paused = true)]
 	async fn a_relisted_group_starts_a_new_epoch_from_zero() {
 		let (producer, origin) = grouped_producer(Duration::ZERO);
 		let registry = producer.registry();
 		let (_, broadcast) = announced(&origin).await;
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
-		let sequence = async |broadcast: &moq_net::broadcast::Consumer| {
-			let mut track = subscribe(broadcast, "acme/group.json").await;
-			track.next_group().await.unwrap().unwrap().sequence
+		// The listed run's name, and the sequence of its first group.
+		let run = async |broadcast: &moq_net::broadcast::Consumer| {
+			let name = crate::listed_group_track(broadcast, &moq_net::Path::from_static("acme")).await;
+			let mut track = subscribe(broadcast, &name).await;
+			let mut first = None;
+			while let Some(group) = futures::FutureExt::now_or_never(track.next_group()) {
+				let sequence = group.unwrap().unwrap().sequence;
+				first = Some(first.map_or(sequence, |first: u64| first.min(sequence)));
+			}
+			(name, first)
 		};
 
 		let session = registry
 			.tier(Tier::default())
 			.session(moq_net::Path::from_static("acme/live"));
 		drive_tick().await;
-		let mut reader = stats.group(moq_net::Path::from_static("acme")).expect("listed");
+		let mut reader = stats.group(moq_net::Path::from_static("acme")).await.expect("listed");
 		let first = reader.next().await.unwrap().unwrap();
 		assert_eq!(first.tiers[""].sessions.sessions_started, 1);
-		let old_sequence = sequence(&broadcast).await;
+		let (old_name, old_first) = run(&broadcast).await;
+		assert_eq!(old_first, Some(0), "a run's first group is group 0");
 
 		drop(session);
 		for _ in 0..3 {
@@ -3136,6 +3170,7 @@ mod tests {
 		drive_tick().await;
 		let second = stats
 			.group(moq_net::Path::from_static("acme"))
+			.await
 			.expect("listed again")
 			.next()
 			.await
@@ -3149,10 +3184,9 @@ mod tests {
 			second.tiers[""].sessions.sessions_started, 1,
 			"a new epoch counts from zero"
 		);
-		assert!(
-			sequence(&broadcast).await > old_sequence,
-			"group numbers continue past the old run"
-		);
+		let (new_name, new_first) = run(&broadcast).await;
+		assert_ne!(new_name, old_name, "a run never reuses a track name");
+		assert_eq!(new_first, Some(0), "the new run starts at group 0 too");
 		assert_eq!(
 			default_totals(&broadcast).await.sessions.sessions_started,
 			2,
@@ -3185,8 +3219,12 @@ mod tests {
 		let _big = registry
 			.tier(Tier::default())
 			.session(moq_net::Path::from_static("big"));
-		let mut acme = stats.group(moq_net::Path::from_static("acme")).unwrap();
-		let mut big = stats.group(moq_net::Path::from_static("big")).unwrap();
+		let mut acme = pumping(&mut drain, stats.group(moq_net::Path::from_static("acme")))
+			.await
+			.unwrap();
+		let mut big = pumping(&mut drain, stats.group(moq_net::Path::from_static("big")))
+			.await
+			.unwrap();
 		assert!(pumping(&mut drain, acme.next()).await.unwrap().is_some());
 		assert!(pumping(&mut drain, big.next()).await.unwrap().is_some());
 
@@ -3229,6 +3267,7 @@ mod tests {
 
 		let frame = stats
 			.group(moq_net::Path::from_static("acme"))
+			.await
 			.unwrap()
 			.next()
 			.await
@@ -3242,6 +3281,7 @@ mod tests {
 
 		let frame = stats
 			.group(moq_net::Path::from_static("beta"))
+			.await
 			.unwrap()
 			.next()
 			.await
@@ -3252,6 +3292,7 @@ mod tests {
 
 		let frame = stats
 			.group(moq_net::Path::from_static("feed"))
+			.await
 			.unwrap()
 			.next()
 			.await

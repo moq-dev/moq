@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// the relay accepts (and every cluster dial). The producer publishes a single
 /// `<prefix>/node/<node>` broadcast (or `<prefix>/node` when [`Self::node`] is
 /// unset) on the cluster origin, under a fresh instance each run. The broadcast
-/// carries a `totals.json` track of per-tier totals, one `<group>/group.json`
+/// carries a `totals.json` track of per-tier totals, one `<group>/group.<epoch>.json`
 /// track per [`Self::depth`] group with its per-path traffic and per-label
 /// sessions, and presence and prefix tracks on request, each a compressed JSON
 /// track; see `moq_stats` for the wire format and per-field semantics.
@@ -66,8 +66,8 @@ pub struct Config {
 	pub node: Option<String>,
 
 	/// Number of leading broadcast-path segments to bucket stats by, one
-	/// `<group>/group.json` track per bucket on the node's broadcast. Defaults
-	/// to 0: a single `group.json` track for the whole node. Set to 1 to
+	/// `<group>/group.<epoch>.json` track per bucket on the node's broadcast. Defaults
+	/// to 0: a single `group.<epoch>.json` track for the whole node. Set to 1 to
 	/// publish a per-first-segment track (e.g. per tenant), so a consumer
 	/// subscribes to just that group rather than slurping every node's full
 	/// stats.
