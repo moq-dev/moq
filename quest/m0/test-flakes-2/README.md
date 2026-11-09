@@ -252,4 +252,3 @@ Public API: none. Wire: none.
 - [js/net's lite-07 re-dropped re-offer test holds up under load](/quest/m0/test-flakes-2/redropped-reoffer.md) - update 3 is ordered before the re-offer opens by an event, not a yield count, and its `test.skip` is removed
 - [moq-net's random-mesh withdrawal tests fit the gate](/quest/m0/test-flakes-2/mesh-withdraw-runtime.md) - the 200-seed mesh tests cost seconds of CPU, and their `#[ignore]` is removed
 - [js/net's datagram session-close-after-end test holds up under load](/quest/m0/test-flakes-2/datagram-close-end.md) - the abort is ordered after the end by an event the client observes, and its `test.skip` is removed
-- [moq-rs's Python TCP close test settles on a promised error](/quest/m0/test-flakes-2/tcp-close-unroutable.md) - the reader's error after an endpoint close is one the socket contract promises, and its `pytest.mark.skip` is removed
