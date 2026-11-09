@@ -13,8 +13,9 @@ use super::args::Args;
 use super::media::Media;
 use super::metrics::Metrics;
 use super::output::Output;
+use super::timeline::Playhead;
 use super::window::Event;
-use moq_mux::timeline::Producer as Presentation;
+use moq_mux::sync::Producer as Presentation;
 
 /// The speaker and the run loop's events, plus `--metrics`' observer feed.
 #[derive(Clone)]
@@ -52,9 +53,10 @@ pub(crate) async fn run(
 ) -> anyhow::Result<()> {
 	let (events, mut received) = mpsc::unbounded_channel();
 	let presentation = Presentation::new(args.video_delay());
+	let playhead = Playhead::default();
 	let (mut metrics, observe) = match &args.metrics {
 		Some(path) => {
-			let (metrics, observe) = Metrics::create(path, presentation.consume())?;
+			let (metrics, observe) = Metrics::create(path, presentation.consume(), playhead.clone())?;
 			(Some(metrics), Some(observe))
 		}
 		None => (None, None),
@@ -65,6 +67,7 @@ pub(crate) async fn run(
 			origin,
 			broadcast,
 			presentation,
+			playhead,
 			args,
 			video: Arc::new(Mutex::new(VecDeque::new())),
 			drained: Arc::new(Notify::new()),

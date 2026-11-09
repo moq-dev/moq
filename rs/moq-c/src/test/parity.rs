@@ -595,18 +595,26 @@ fn audio_encoder_without_a_broadcast() {
 
 	// Stereo by default, so a frame is twice the frame size in interleaved samples.
 	let pcm = vec![0.0f32; frame_size as usize * 2];
+	let mut packet: moq_frame = unsafe { std::mem::zeroed() };
 	let mut packets = 0;
 	for _ in 0..3 {
-		let count = unsafe { moq_audio_encoder_encode(encoder, pcm.as_ptr(), pcm.len()) };
-		assert!(count >= 0, "encode failed: {count}");
-		packets += count;
+		assert_eq!(unsafe { moq_audio_encoder_encode(encoder, pcm.as_ptr(), pcm.len()) }, 0);
+		assert_eq!(unsafe { moq_audio_encoder_receive(encoder, &mut packet) }, 1);
+		assert!(packet.payload_size > 0);
+		assert_eq!(unsafe { moq_audio_encoder_receive(encoder, &mut packet) }, 0);
+		packets += 1;
 	}
+	assert_eq!(moq_audio_encoder_flush(encoder), 0);
+	assert_eq!(
+		unsafe { moq_audio_encoder_receive(encoder, &mut packet) },
+		0,
+		"libopus holds no packet"
+	);
 	let mut padding = 0;
 	let drained = unsafe { moq_audio_encoder_finish(encoder, pcm.as_ptr(), pcm.len() / 2, &mut padding) };
 	assert!(drained >= 0, "finish failed: {drained}");
 	assert!(packets + drained > 0, "the encoder produced packets");
 	if drained > 0 {
-		let mut packet: moq_frame = unsafe { std::mem::zeroed() };
 		assert_eq!(unsafe { moq_audio_encoder_packet(encoder, 0, &mut packet) }, 0);
 		assert!(packet.payload_size > 0);
 		assert!(unsafe { moq_audio_encoder_packet(encoder, drained as u32, &mut packet) } < 0);

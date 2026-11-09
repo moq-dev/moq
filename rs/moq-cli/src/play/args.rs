@@ -24,8 +24,8 @@ const DELAY_MAX: Duration = Duration::from_secs(10);
 /// lateness the estimate can represent.
 const AUTO_MAX_DELAY: Duration = Duration::from_secs(2);
 
-/// How far video alone trails the live edge under `auto`. The estimate is
-/// audio's; video follows the speaker whenever there is one.
+/// How far playback trails the live edge under `auto` while audio holds no
+/// estimate, as when there is none: video has no estimator of its own.
 const AUTO_VIDEO_DELAY: Duration = Duration::from_millis(100);
 
 /// How far playback trails the live edge.
@@ -124,7 +124,7 @@ impl Args {
 		self.fixed_delay().unwrap_or(AUTO_MAX_DELAY)
 	}
 
-	/// How far video trails the live edge while no speaker is setting the pace.
+	/// How far playback trails the live edge while no audio estimate sets it.
 	pub(super) fn video_delay(&self) -> Duration {
 		self.fixed_delay().unwrap_or(AUTO_VIDEO_DELAY)
 	}

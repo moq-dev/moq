@@ -87,6 +87,9 @@ pub struct Applied {
 	/// The backend controls that took effect, for display, e.g.
 	/// `"p1, low-latency tuning, no B-frames, CBR, 1-frame VBV"`. Not a parse target.
 	pub controls: String,
+	/// Whether [`Encoder::cut`] can force a group boundary; one that cannot (a V4L2
+	/// driver without the force-keyframe control) refuses every cut.
+	pub cut: bool,
 }
 
 impl Applied {
@@ -115,6 +118,8 @@ impl Applied {
 		Self {
 			preset: Some(preset),
 			controls: controls.into(),
+			// The encoder reports `cut` from the backend's `can_cut`.
+			cut: false,
 		}
 	}
 
@@ -129,6 +134,7 @@ impl Applied {
 		Self {
 			preset: None,
 			controls: controls.into(),
+			cut: false,
 		}
 	}
 }
@@ -304,7 +310,7 @@ impl Config {
 			Codec::H265 => moq_mux::codec::h265::config(&annexb),
 		};
 		let mut rendition = parsed.map_err(|err| {
-			Error::Codec(anyhow::anyhow!(
+			Error::codec(anyhow::anyhow!(
 				"{} emitted no usable parameter sets: {err}",
 				sink.name()
 			))
@@ -325,6 +331,17 @@ impl Config {
 	/// so the samples match what the bitstream claims.
 	pub(crate) fn resolved_color(&self) -> Color {
 		self.color.unwrap_or_else(|| Color::infer(self.size()))
+	}
+
+	/// The resize options, scaling on this encoder's VA-API node unless they name one.
+	fn resize(&self) -> Option<crate::resize::Config> {
+		#[allow(unused_mut)]
+		let mut resize = self.resize.clone()?;
+		#[cfg(target_os = "linux")]
+		if resize.vaapi.is_none() {
+			resize.vaapi = self.vaapi.clone();
+		}
+		Some(resize)
 	}
 
 	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
@@ -396,7 +413,7 @@ impl Encoder {
 			color: config.resolved_color(),
 			pending_cut: false,
 			join: Join::new(config),
-			resize: config.resize,
+			resize: config.resize(),
 			#[cfg(target_os = "linux")]
 			input: config.input,
 			_thread_bound: PhantomData,
@@ -409,9 +426,12 @@ impl Encoder {
 	}
 
 	/// The latency and compression controls the backend applied for
-	/// [`Config::preset`], fixed for the session's lifetime.
+	/// [`Config::preset`], and whether it cuts, fixed for the session's lifetime.
 	pub fn applied(&self) -> Applied {
-		self.backend.applied()
+		Applied {
+			cut: self.backend.can_cut(),
+			..self.backend.applied()
+		}
 	}
 
 	/// The resolution this encoder emits; external Vulkan inputs may be larger.
@@ -529,16 +549,16 @@ impl Encoder {
 		#[cfg(not(target_os = "linux"))]
 		let external = false;
 		let resized;
-		let frame = match self.resize {
+		let frame = match &self.resize {
 			Some(config) if !external && frame.size() != self.size => {
-				resized = frame.resize(self.size, &config)?;
+				resized = frame.resize(self.size, config)?;
 				&resized
 			}
 			_ => frame,
 		};
 		let size = frame.size();
 		if !external && size != self.size {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"frame {size} does not match encoder {}",
 				self.size
 			)));
@@ -1246,7 +1266,7 @@ mod tests {
 			color: config.resolved_color(),
 			pending_cut: false,
 			join: Join::new(config),
-			resize: config.resize,
+			resize: config.resize(),
 			#[cfg(target_os = "linux")]
 			input: None,
 			_thread_bound: PhantomData,
@@ -1664,7 +1684,7 @@ mod tests {
 
 	impl Backend for Failing {
 		fn encode(&mut self, _frame: &Frame, _cut: bool) -> Result<Vec<Encoded>, Error> {
-			Err(Error::Codec(anyhow::anyhow!("no")))
+			Err(Error::codec(anyhow::anyhow!("no")))
 		}
 
 		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {

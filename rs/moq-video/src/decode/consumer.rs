@@ -488,7 +488,10 @@ mod tests {
 		};
 		let rendition = config.probe().await.unwrap();
 		let reserved = source_catalog.reserve().with_interval(config.effective_join());
-		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
+		let track = source_broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut producer = EncodeProducer::new(track, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for index in 0..2 {

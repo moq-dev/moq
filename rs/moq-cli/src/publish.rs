@@ -690,21 +690,24 @@ impl Publish {
 					let catalog = catalog.clone();
 					async move {
 						match video {
-							Some(options) => moq_video::encode::publish_capture(broadcast, catalog, options)
-								.await
-								.map_err(anyhow::Error::from),
+							Some(options) => {
+								let (_publication, driver) =
+									moq_video::encode::publish_capture(broadcast, catalog, options)?;
+								driver.run().await.map_err(anyhow::Error::from)
+							}
 							None => Ok(()),
 						}
 					}
 				};
 				let audio_fut = async move {
 					match audio {
-						Some((config, encode, on_demand)) => {
+						Some((config, encode, retain)) => {
 							let capture = moq_audio::capture::Producer::open(config).await?;
 							let mut options = moq_audio::encode::Capture::new(capture.consume());
 							options.encode = encode;
-							options.on_demand = on_demand;
-							let (_control, driver) = moq_audio::encode::Control::new(broadcast, catalog, options)?;
+							options.retain = retain;
+							let (_publication, driver) =
+								moq_audio::encode::publish_capture(broadcast, catalog, options)?;
 							let mut publish = std::pin::pin!(driver.run());
 							tokio::select! {
 								result = capture.run() => {

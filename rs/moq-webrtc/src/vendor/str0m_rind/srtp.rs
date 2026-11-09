@@ -56,7 +56,7 @@ fn ecb_round(algorithm: &'static cipher::Algorithm, key: &[u8], input: &[u8], ou
 
 impl SupportedAes128CmSha1_80 for RindSrtp {
 	fn create_cipher(&self, key: [u8; 16], _encrypt: bool) -> Box<dyn Aes128CmSha1_80Cipher> {
-		Box::new(Cm(AesCtr::new(&cipher::AES_128, &key).unwrap()))
+		Box::new(Cm(AesCtr::new(&cipher::AES_128, &key, 16).unwrap()))
 	}
 }
 
@@ -88,13 +88,10 @@ impl Cm {
 			.ok_or_else(|| CryptoError::Other("AES-CM output too short".into()))?;
 		output.copy_from_slice(input);
 
-		// SRTP's 128-bit counter block splits into rind's 96-bit nonce and
-		// 32-bit counter. str0m's IVs leave the low 16 bits zero, so a packet
-		// never carries past the counter; one that would is refused.
-		let (nonce, counter) = iv.split_first_chunk::<12>().unwrap();
-		let counter = u32::from_be_bytes(counter.try_into().unwrap());
+		// SRTP AES-CM counts over the IV's low 16 bits, which str0m leaves
+		// zero, so rind refuses a packet past 2^16 blocks rather than wrap.
 		self.0
-			.apply_keystream(nonce, counter, output)
+			.apply_keystream(iv, output)
 			.map_err(|e| CryptoError::Other(format!("AES-CM failed: {e:?}")))
 	}
 }

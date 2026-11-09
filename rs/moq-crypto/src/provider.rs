@@ -18,7 +18,12 @@ pub fn provider() -> Result<Provider, UnsupportedCpu> {
 	// CPU features never change while the process runs, so the first answer is the answer.
 	static PROVIDER: OnceLock<Result<Provider, UnsupportedCpu>> = OnceLock::new();
 	PROVIDER
-		.get_or_init(|| rind_rustls::default_provider().map(Arc::new).map_err(UnsupportedCpu))
+		.get_or_init(|| {
+			crate::cpu::check()?;
+			let provider =
+				rind_rustls::default_provider().expect("rind-rustls refuses only the CPUs rind::cpu::check refuses");
+			Ok(Arc::new(provider))
+		})
 		.clone()
 }
 

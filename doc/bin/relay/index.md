@@ -110,13 +110,13 @@ relay.with_web(web).run().await?;
   ICE, DTLS, and RTP arrive on it, and its `send` answers from the same
   port. On a wildcard bind with several local addresses, set the reply's
   `Transmit.src_ip` to the `Datagram.local` it answers; left `None`, the kernel
-  picks the source address, which the peer may not accept. It fails unless the
-  tokio runtime serves QUIC: on a stream-only relay, and with `runtime.io_uring`,
-  whose workers do not split the port yet.
-- To serve RTMP on the web ports, take `relay.rtmp()` and pass each accepted
-  stream to `moq_rtmp::accept_stream`. The HTTP and HTTPS listeners hand it
-  plaintext RTMP, and RTMPS (TLS with no ALPN) already decrypted; untaken, the
-  relay closes them.
+  picks the source address, which the peer may not accept. It is `None` once
+  taken, and unless the tokio runtime serves QUIC: on a stream-only relay, and
+  with `runtime.io_uring`, whose workers do not split the port yet.
+- To serve RTMP on the web ports, take `relay.rtmp()` (`None` once taken) and
+  pass each accepted stream to `moq_rtmp::accept_stream`. The HTTP and HTTPS
+  listeners hand it plaintext RTMP, and RTMPS (TLS with no ALPN) already
+  decrypted; untaken, the relay closes them.
 
 See [docs.rs/moq-relay](https://docs.rs/moq-relay) and
 [`rs/moq-relay/examples/embed.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/examples/embed.rs).

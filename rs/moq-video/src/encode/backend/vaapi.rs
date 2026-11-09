@@ -103,7 +103,7 @@ impl Vaapi {
 				interval,
 			)
 		};
-		let encoder = Encoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI encoder init: {e:?}")))?;
+		let encoder = Encoder::new(vaapi).map_err(|e| Error::codec(anyhow::anyhow!("VAAPI encoder init: {e:?}")))?;
 
 		tracing::info!(
 			encoder = NAME,
@@ -167,7 +167,7 @@ impl Vaapi {
 		i420_to_nv12(&i420, &mut self.nv12);
 		self.encoder
 			.encode_nv12(&self.nv12, cut)
-			.map_err(|e| Error::Codec(e.context("VAAPI encode")))
+			.map_err(|e| Error::codec(e.context("VAAPI encode")))
 	}
 }
 
@@ -209,7 +209,7 @@ impl Backend for Vaapi {
 		// applies from the next one without an IDR.
 		self.encoder
 			.set_bitrate(bitrate.min(u32::MAX as u64) as u32)
-			.map_err(|e| Error::Codec(e.context("VAAPI bitrate change")))
+			.map_err(|e| Error::codec(e.context("VAAPI bitrate change")))
 	}
 
 	fn can_cut(&self) -> bool {

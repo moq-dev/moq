@@ -145,7 +145,7 @@ enum Phase {
 
 /// The error every call reports once the encoder has failed.
 fn failed() -> Error {
-	Error::Codec(anyhow::anyhow!(
+	Error::codec(anyhow::anyhow!(
 		"the V4L2 encoder could not start or stop its queues and takes no more frames"
 	))
 }
@@ -231,7 +231,7 @@ impl V4l2 {
 			},
 		)?;
 		if coded.pixelformat != v4l2::H264 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"V4L2 encoder answered an H264 request with {}",
 				v4l2::name(coded.pixelformat)
 			)));
@@ -342,7 +342,7 @@ impl V4l2 {
 				return Ok(index);
 			}
 			if Instant::now() >= deadline {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"V4L2 encoder held every input buffer for {BUFFER_TIMEOUT:?}"
 				)));
 			}
@@ -481,7 +481,7 @@ impl V4l2 {
 			if out.len() > before {
 				deadline = Instant::now() + FLUSH_TIMEOUT;
 			} else if Instant::now() >= deadline {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"V4L2 encoder did not finish its drain within {FLUSH_TIMEOUT:?}, holding {} frame(s)",
 					self.pending.len()
 				)));
@@ -524,7 +524,7 @@ impl V4l2 {
 			if out.len() > before {
 				deadline = Instant::now() + FLUSH_TIMEOUT;
 			} else if Instant::now() >= deadline {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"V4L2 encoder held {} frame(s) for {FLUSH_TIMEOUT:?} without encoding them",
 					self.pending.len()
 				)));
@@ -540,7 +540,7 @@ impl Backend for V4l2 {
 			return Err(failed());
 		}
 		if frame.size() != self.size {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"V4L2 encoder opened for {} was given a {} frame",
 				self.size,
 				frame.size()
@@ -557,7 +557,7 @@ impl Backend for V4l2 {
 			self.device
 				.set_control(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 0)
 				.map_err(|err| {
-					Error::Codec(anyhow::anyhow!(
+					Error::codec(anyhow::anyhow!(
 						"driver refused the keyframe request it advertised: {err}"
 					))
 				})?;
@@ -937,7 +937,7 @@ fn h264_level(config: &Config) -> Result<i32, Error> {
 		})
 		.map(|level| level.code as i32)
 		.ok_or_else(|| {
-			Error::Codec(anyhow::anyhow!(
+			Error::codec(anyhow::anyhow!(
 				"{size} at {}fps and {kbps} kbit/s exceeds H.264 level 6.2",
 				config.framerate
 			))

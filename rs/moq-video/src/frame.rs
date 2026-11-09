@@ -522,7 +522,7 @@ impl Surface {
 		size.validate("RGBA frame")?;
 		let expected = size.byte_len(4, "RGBA frame")?;
 		if rgba.len() != expected {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"RGBA buffer is {} bytes, expected {expected} for {size}",
 				rgba.len()
 			)));
@@ -530,7 +530,7 @@ impl Surface {
 		Ok(Surface::I420(I420::from_rgba(
 			rgba,
 			size.width.checked_mul(4).ok_or_else(|| {
-				Error::Codec(anyhow::anyhow!(
+				Error::codec(anyhow::anyhow!(
 					"RGBA frame {size}: row stride is too large to represent"
 				))
 			})?,
@@ -612,7 +612,7 @@ impl Surface {
 			// encoder to import. If VA-API is missing or refuses the buffer,
 			// download and resize on the CPU.
 			#[cfg(all(target_os = "linux", feature = "vaapi"))]
-			Surface::DmaBuf(buffer) if output == crate::Output::Native => match vaapi::resize(buffer, size) {
+			Surface::DmaBuf(buffer) if output == crate::Output::Native => match vaapi::resize(buffer, size, config.vaapi.as_deref()) {
 				Ok(scaled) => Surface::DmaBuf(scaled),
 				Err(err) => {
 					static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -800,7 +800,7 @@ impl I420 {
 		size.validate("I420")?;
 		let expected = Self::len(size)?;
 		if data.len() != expected {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"I420 {size} needs {expected} bytes, got {}",
 				data.len()
 			)));
@@ -861,7 +861,7 @@ impl I420 {
 		size.validate("I420")?;
 		let luma = size.byte_len(1, "I420")?;
 		luma.checked_add(luma / 2)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("I420 {size}: byte length is too large to represent")))
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("I420 {size}: byte length is too large to represent")))
 	}
 
 	/// Convert RGBA (`stride` bytes per row, >= `width * 4`) to I420 in
@@ -875,7 +875,7 @@ impl I420 {
 		let (range, matrix) = color.yuv();
 		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
 		rgba_to_yuv420(&mut planar, rgba, stride, range, matrix, YuvConversionMode::Balanced)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("rgba_to_yuv420 failed for {width}x{height}: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("rgba_to_yuv420 failed for {width}x{height}: {e}")))?;
 		Self::pack(&planar, size, Some(color))
 	}
 
@@ -893,7 +893,7 @@ impl I420 {
 		let (range, matrix) = color.yuv();
 		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
 		bgra_to_yuv420(&mut planar, bgra, stride, range, matrix, YuvConversionMode::Balanced)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("bgra_to_yuv420 failed for {width}x{height}: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("bgra_to_yuv420 failed for {width}x{height}: {e}")))?;
 		Self::pack(&planar, size, Some(color))
 	}
 
@@ -919,18 +919,18 @@ impl I420 {
 		let (w, h) = (width as usize, height as usize);
 		let (cw, ch) = (w / 2, h / 2);
 		if y_stride < w || uv_stride < cw {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"I420 {size}: strides {y_stride}/{uv_stride} are smaller than plane widths {w}/{cw}"
 			)));
 		}
 		let y_need = y_stride
 			.checked_mul(h)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("I420 {size}: luma plane length overflows")))?;
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("I420 {size}: luma plane length overflows")))?;
 		let uv_need = uv_stride
 			.checked_mul(ch)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("I420 {size}: chroma plane length overflows")))?;
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("I420 {size}: chroma plane length overflows")))?;
 		if y.len() < y_need || u.len() < uv_need || v.len() < uv_need {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"I420 {size}: source planes are shorter than their declared strides"
 			)));
 		}
@@ -964,7 +964,7 @@ impl I420 {
 		size.validate("RGB frame")?;
 		let Size { width, height } = size;
 		let stride = width.checked_mul(3).ok_or_else(|| {
-			Error::Codec(anyhow::anyhow!(
+			Error::codec(anyhow::anyhow!(
 				"RGB frame {size}: row stride is too large to represent"
 			))
 		})?;
@@ -972,7 +972,7 @@ impl I420 {
 		let (range, matrix) = color.yuv();
 		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
 		rgb_to_yuv420(&mut planar, rgb, stride, range, matrix, YuvConversionMode::Balanced)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("rgb_to_yuv420 failed for {width}x{height}: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("rgb_to_yuv420 failed for {width}x{height}: {e}")))?;
 		Self::pack(&planar, size, Some(color))
 	}
 
@@ -990,12 +990,12 @@ impl I420 {
 		let mut decoder = zune_jpeg::JpegDecoder::new(ZCursor::new(jpeg));
 		let rgb = decoder
 			.decode()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("MJPEG decode: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("MJPEG decode: {e:?}")))?;
 		let (w, h) = decoder
 			.dimensions()
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("MJPEG frame had no dimensions")))?;
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("MJPEG frame had no dimensions")))?;
 		if w as u32 != size.width || h as u32 != size.height {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"MJPEG frame is {w}x{h}, not the negotiated {size}"
 			)));
 		}
@@ -1019,7 +1019,7 @@ impl I420 {
 			height,
 		};
 		yuyv422_to_yuv420(&mut planar, &packed)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("yuyv422_to_yuv420 failed for {width}x{height}: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("yuyv422_to_yuv420 failed for {width}x{height}: {e}")))?;
 		// A chroma resample, not a color conversion: these samples are in
 		// whatever space the camera produced, which the caller names if it can.
 		Self::pack(&planar, size, None)
@@ -1040,7 +1040,7 @@ impl I420 {
 		let chroma = luma / 4;
 		let need = Self::len(size)?;
 		if nv12.len() < need {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"NV12 buffer too small: {} < {need} for {width}x{height}",
 				nv12.len()
 			)));
@@ -1087,12 +1087,12 @@ impl I420 {
 		             dh: u32|
 		 -> Result<(), Error> {
 			let src = ImageRef::new(sw, sh, src, PixelType::U8)
-				.map_err(|e| Error::Codec(anyhow::anyhow!("resize source: {e}")))?;
+				.map_err(|e| Error::codec(anyhow::anyhow!("resize source: {e}")))?;
 			let mut dst = Image::from_slice_u8(dw, dh, dst, PixelType::U8)
-				.map_err(|e| Error::Codec(anyhow::anyhow!("resize destination: {e}")))?;
+				.map_err(|e| Error::codec(anyhow::anyhow!("resize destination: {e}")))?;
 			resizer
 				.resize(&src, &mut dst, &options)
-				.map_err(|e| Error::Codec(anyhow::anyhow!("resize: {e}")))
+				.map_err(|e| Error::codec(anyhow::anyhow!("resize: {e}")))
 		};
 
 		let Size { width, height } = size;
@@ -1444,7 +1444,7 @@ pub mod android {
 			let buffer = self
 				.image
 				.hardware_buffer()
-				.map_err(|e| Error::Codec(anyhow::anyhow!("AImage_getHardwareBuffer failed: {e}")))?;
+				.map_err(|e| Error::codec(anyhow::anyhow!("AImage_getHardwareBuffer failed: {e}")))?;
 			// The getter borrows: it hands back the image's own handle without
 			// touching the refcount, so the caller needs a reference of its own.
 			Ok(buffer.acquire())
@@ -1482,7 +1482,7 @@ pub mod android {
 		/// One plane's bytes and the two strides needed to walk them.
 		fn plane(&self, index: i32) -> Result<Plane<'_>, Error> {
 			let fail = |what: &str, e: ndk::media_error::MediaError| {
-				Error::Codec(anyhow::anyhow!("AImage_getPlane{what} failed for plane {index}: {e}"))
+				Error::codec(anyhow::anyhow!("AImage_getPlane{what} failed for plane {index}: {e}"))
 			};
 			Ok(Plane {
 				data: self.image.plane_data(index).map_err(|e| fail("Data", e))?,
@@ -1523,9 +1523,9 @@ pub mod android {
 						.and_then(|col| offset.checked_add(col))
 				})
 				.and_then(|offset| offset.checked_add(1))
-				.ok_or_else(|| Error::Codec(anyhow::anyhow!("image plane strides overflow the address space")))?;
+				.ok_or_else(|| Error::codec(anyhow::anyhow!("image plane strides overflow the address space")))?;
 			if self.data.len() < needed {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"image plane is {} bytes, needs {needed} for {width}x{height} at ({left}, {top}), row stride {}, and pixel stride {}",
 					self.data.len(),
 					self.row,
@@ -1659,13 +1659,13 @@ pub mod apple {
 			let scaler = {
 				let mut scalers = SCALERS
 					.lock()
-					.map_err(|_| Error::Codec(anyhow::anyhow!("pixel-transfer scaler cache lock poisoned")))?;
+					.map_err(|_| Error::codec(anyhow::anyhow!("pixel-transfer scaler cache lock poisoned")))?;
 				scalers.get_or_insert_with((width, height), || Scaler::new(width, height))?
 			};
 
 			let result = scaler
 				.lock()
-				.map_err(|_| Error::Codec(anyhow::anyhow!("pixel-transfer scaler lock poisoned")))?
+				.map_err(|_| Error::codec(anyhow::anyhow!("pixel-transfer scaler lock poisoned")))?
 				.resize(self);
 			drop(scaler);
 			if let Ok(mut scalers) = SCALERS.lock() {
@@ -1731,7 +1731,7 @@ pub mod apple {
 			if format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
 				&& format != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
 			{
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"cannot download pixel format {format:#x}; expected NV12"
 				)));
 			}
@@ -1743,7 +1743,7 @@ pub mod apple {
 
 			let status = unsafe { CVPixelBufferLockBaseAddress(&self.buffer, LOCK_READ_ONLY) };
 			if status != 0 {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"CVPixelBufferLockBaseAddress failed: {status}"
 				)));
 			}
@@ -1806,7 +1806,7 @@ pub mod apple {
 			let session = NonNull::new(session_ptr)
 				.filter(|_| status == 0)
 				.map(|ptr| unsafe { CFRetained::from_raw(ptr) })
-				.ok_or_else(|| Error::Codec(anyhow::anyhow!("VTPixelTransferSessionCreate failed: {status}")))?;
+				.ok_or_else(|| Error::codec(anyhow::anyhow!("VTPixelTransferSessionCreate failed: {status}")))?;
 
 			let attributes = pool_attributes(width, height)?;
 			let mut pool_ptr: *mut CVPixelBufferPool = std::ptr::null_mut();
@@ -1821,7 +1821,7 @@ pub mod apple {
 			let pool = NonNull::new(pool_ptr)
 				.filter(|_| status == 0)
 				.map(|ptr| unsafe { CFRetained::from_raw(ptr) })
-				.ok_or_else(|| Error::Codec(anyhow::anyhow!("CVPixelBufferPoolCreate failed: {status}")))?;
+				.ok_or_else(|| Error::codec(anyhow::anyhow!("CVPixelBufferPoolCreate failed: {status}")))?;
 
 			Ok(Self {
 				session,
@@ -1843,11 +1843,11 @@ pub mod apple {
 			let output = NonNull::new(output_ptr)
 				.filter(|_| status == 0)
 				.map(|ptr| unsafe { CFRetained::from_raw(ptr) })
-				.ok_or_else(|| Error::Codec(anyhow::anyhow!("CVPixelBufferPoolCreatePixelBuffer failed: {status}")))?;
+				.ok_or_else(|| Error::codec(anyhow::anyhow!("CVPixelBufferPoolCreatePixelBuffer failed: {status}")))?;
 
 			let status = unsafe { self.session.transfer_image(&source.buffer, &output) };
 			if status != 0 {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"VTPixelTransferSessionTransferImage failed: {status}"
 				)));
 			}
@@ -1859,9 +1859,9 @@ pub mod apple {
 	/// Build a reusable NV12 IOSurface pool for one output size.
 	fn pool_attributes(width: u32, height: u32) -> Result<CFRetained<CFDictionary>, Error> {
 		let width =
-			i32::try_from(width).map_err(|_| Error::Codec(anyhow::anyhow!("pixel-buffer width is too large")))?;
+			i32::try_from(width).map_err(|_| Error::codec(anyhow::anyhow!("pixel-buffer width is too large")))?;
 		let height =
-			i32::try_from(height).map_err(|_| Error::Codec(anyhow::anyhow!("pixel-buffer height is too large")))?;
+			i32::try_from(height).map_err(|_| Error::codec(anyhow::anyhow!("pixel-buffer height is too large")))?;
 		let format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange as i32;
 
 		let width = cf_number(width)?;
@@ -1877,7 +1877,7 @@ pub mod apple {
 				&objc2_core_foundation::kCFTypeDictionaryValueCallBacks,
 			)
 		}
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build IOSurface attributes dictionary")))?;
+		.ok_or_else(|| Error::codec(anyhow::anyhow!("failed to build IOSurface attributes dictionary")))?;
 
 		let mut keys = [
 			(unsafe { kCVPixelBufferPixelFormatTypeKey } as *const CFString).cast::<c_void>(),
@@ -1902,7 +1902,7 @@ pub mod apple {
 			)
 		}
 		.ok_or_else(|| {
-			Error::Codec(anyhow::anyhow!(
+			Error::codec(anyhow::anyhow!(
 				"failed to build pixel-buffer pool attributes dictionary"
 			))
 		})
@@ -1910,7 +1910,7 @@ pub mod apple {
 
 	fn cf_number(value: i32) -> Result<CFRetained<CFNumber>, Error> {
 		unsafe { CFNumber::new(None, CFNumberType::SInt32Type, (&value as *const i32).cast::<c_void>()) }
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build CFNumber")))
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("failed to build CFNumber")))
 	}
 
 	struct UnlockGuard<'a>(&'a CVPixelBuffer);
@@ -2001,12 +2001,12 @@ pub mod apple {
 		let buffer = NonNull::new(ptr)
 			.filter(|_| status == 0)
 			.map(|p| unsafe { CFRetained::from_raw(p) })
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("CVPixelBufferCreate failed: {status}")))?;
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("CVPixelBufferCreate failed: {status}")))?;
 
 		let flags = CVPixelBufferLockFlags(0);
 		let status = unsafe { CVPixelBufferLockBaseAddress(&buffer, flags) };
 		if status != 0 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"CVPixelBufferLockBaseAddress failed: {status}"
 			)));
 		}
@@ -2092,7 +2092,7 @@ pub mod d3d11 {
 	use crate::{Color, Error, Size};
 
 	fn err(ctx: &str, e: windows::core::Error) -> Error {
-		Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
+		Error::codec(anyhow::anyhow!("{ctx}: {e}"))
 	}
 
 	/// Create a hardware Direct3D11 device on `adapter`, or the default one,
@@ -2121,7 +2121,7 @@ pub mod d3d11 {
 			)
 			.map_err(|e| err("D3D11CreateDevice", e))?;
 		}
-		let device = device.ok_or_else(|| Error::Codec(anyhow::anyhow!("D3D11CreateDevice returned null")))?;
+		let device = device.ok_or_else(|| Error::codec(anyhow::anyhow!("D3D11CreateDevice returned null")))?;
 
 		let multithread = device
 			.cast::<ID3D10Multithread>()
@@ -2213,7 +2213,7 @@ pub mod d3d11 {
 			let mut desc = D3D11_TEXTURE2D_DESC::default();
 			unsafe { source.GetDesc(&mut desc) };
 			if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM || desc.Width < size.width || desc.Height < size.height {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"invalid WGC BGRA surface geometry or format"
 				)));
 			}
@@ -2276,7 +2276,7 @@ pub mod d3d11 {
 					.CreateTexture2D(&desc, None, Some(&mut staging))
 					.map_err(|e| err("CreateTexture2D (staging)", e))?;
 			}
-			let staging = staging.ok_or_else(|| Error::Codec(anyhow::anyhow!("CreateTexture2D returned null")))?;
+			let staging = staging.ok_or_else(|| Error::codec(anyhow::anyhow!("CreateTexture2D returned null")))?;
 
 			unsafe {
 				context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &self.texture, 0, None);
@@ -2365,7 +2365,7 @@ pub mod d3d11 {
 		let scaler = {
 			let mut scalers = SCALERS
 				.lock()
-				.map_err(|_| Error::Codec(anyhow::anyhow!("video-processor cache lock poisoned")))?;
+				.map_err(|_| Error::codec(anyhow::anyhow!("video-processor cache lock poisoned")))?;
 			scalers
 				.get_or_insert_with(key, || {
 					Ok::<_, std::convert::Infallible>(ScalerState::discover(device, plan))
@@ -2374,11 +2374,11 @@ pub mod d3d11 {
 		};
 		let mut state = scaler
 			.lock()
-			.map_err(|_| Error::Codec(anyhow::anyhow!("video processor lock poisoned")))?;
+			.map_err(|_| Error::codec(anyhow::anyhow!("video processor lock poisoned")))?;
 		let result = match &*state {
 			ScalerState::Ready(scaler) => scaler.scale(source),
 			ScalerState::Unsupported { reason, .. } => {
-				return Err(Error::Codec(anyhow::anyhow!("GPU processing is unsupported: {reason}")));
+				return Err(Error::codec(anyhow::anyhow!("GPU processing is unsupported: {reason}")));
 			}
 		};
 		let texture = match result {
@@ -2506,7 +2506,7 @@ pub mod d3d11 {
 				let support = unsafe { enumerator.CheckVideoProcessorFormat(format) }
 					.map_err(|e| err("CheckVideoProcessorFormat", e))?;
 				if support & required.0 as u32 == 0 {
-					return Err(Error::Codec(anyhow::anyhow!(
+					return Err(Error::codec(anyhow::anyhow!(
 						"video processor does not support {format:?} as {required:?}"
 					)));
 				}
@@ -2560,7 +2560,7 @@ pub mod d3d11 {
 			let mut desc = D3D11_TEXTURE2D_DESC::default();
 			unsafe { source.GetDesc(&mut desc) };
 			if desc.Format != self.input_format {
-				return Err(ScaleError::Transient(Error::Codec(anyhow::anyhow!(
+				return Err(ScaleError::Transient(Error::codec(anyhow::anyhow!(
 					"video processor input format changed"
 				))));
 			}
@@ -2584,7 +2584,7 @@ pub mod d3d11 {
 					.map_err(|e| ScaleError::Unsupported(err("CreateVideoProcessorInputView", e)))?;
 			}
 			let input =
-				input.ok_or_else(|| ScaleError::Unsupported(Error::Codec(anyhow::anyhow!("input view is null"))))?;
+				input.ok_or_else(|| ScaleError::Unsupported(Error::codec(anyhow::anyhow!("input view is null"))))?;
 
 			let output_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
 				ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
@@ -2599,7 +2599,7 @@ pub mod d3d11 {
 					.map_err(|e| ScaleError::Unsupported(err("CreateVideoProcessorOutputView", e)))?;
 			}
 			let view =
-				view.ok_or_else(|| ScaleError::Unsupported(Error::Codec(anyhow::anyhow!("output view is null"))))?;
+				view.ok_or_else(|| ScaleError::Unsupported(Error::codec(anyhow::anyhow!("output view is null"))))?;
 
 			let streams = [D3D11_VIDEO_PROCESSOR_STREAM {
 				Enable: true.into(),
@@ -2649,7 +2649,7 @@ pub mod d3d11 {
 				.CreateTexture2D(&desc, None, Some(&mut texture))
 				.map_err(|e| err("CreateTexture2D", e))?;
 		}
-		texture.ok_or_else(|| Error::Codec(anyhow::anyhow!("CreateTexture2D returned null")))
+		texture.ok_or_else(|| Error::codec(anyhow::anyhow!("CreateTexture2D returned null")))
 	}
 
 	/// Upload packed I420 as an NV12 texture on `device`, the inverse of

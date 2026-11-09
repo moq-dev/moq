@@ -162,7 +162,7 @@ impl V4l2 {
 			},
 		)?;
 		if coded.pixelformat != v4l2::H264 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"V4L2 decoder answered an H264 request with {}",
 				v4l2::name(coded.pixelformat)
 			)));
@@ -196,7 +196,7 @@ impl V4l2 {
 				break index;
 			}
 			if Instant::now() >= deadline {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"V4L2 decoder held every input buffer for {BUFFER_TIMEOUT:?}"
 				)));
 			}
@@ -208,7 +208,7 @@ impl V4l2 {
 			// The buffer goes back on the free list: losing one to a single oversized
 			// access unit would shrink the pool for the rest of the stream.
 			self.coded.reclaim(index);
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"access unit of {} bytes exceeds the V4L2 decoder's {capacity} byte buffer",
 				access_unit.len()
 			)));
@@ -309,7 +309,7 @@ impl V4l2 {
 
 		let offered = self.device.formats(Dir::Capture)?;
 		let Some(&pixelformat) = v4l2::RAW.iter().find(|code| offered.contains(code)) else {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"V4L2 decoder defaults to {} and offers no 8-bit 4:2:0 format for this stream",
 				v4l2::name(format.pixelformat)
 			)));
@@ -443,7 +443,7 @@ impl V4l2 {
 			if reclaimed > 0 || frames.len() > before {
 				deadline = Instant::now() + DRAIN_TIMEOUT;
 			} else if Instant::now() >= deadline {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"V4L2 decoder did not finish its drain within {DRAIN_TIMEOUT:?}, holding {} access unit(s)",
 					self.coded.outstanding()
 				)));
@@ -568,7 +568,7 @@ impl Backend for V4l2 {
 				if Instant::now() >= deadline {
 					let waited = since.elapsed();
 					if waited >= SOURCE_CHANGE_LIMIT {
-						return Err(Error::Codec(anyhow::anyhow!(
+						return Err(Error::codec(anyhow::anyhow!(
 							"V4L2 decoder did not report the stream's size within {waited:?}"
 						)));
 					}

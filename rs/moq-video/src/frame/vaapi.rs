@@ -17,7 +17,7 @@
 //! let go: its surface is the next one written at that size.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -106,11 +106,11 @@ pub(crate) fn device(codec: Codec, named: Option<&Path>) -> Option<PathBuf> {
 pub(crate) fn import(buffer: &DmaBuf) -> Result<(VaapiDmaBuf, DmaBufExport), Error> {
 	let export = buffer
 		.export()
-		.map_err(|e| Error::Codec(anyhow::anyhow!("export a DMA-BUF for VA-API: {e}")))?;
+		.map_err(|e| Error::codec(anyhow::anyhow!("export a DMA-BUF for VA-API: {e}")))?;
 	let fd: OwnedFd = export
 		.as_fd()
 		.try_clone_to_owned()
-		.map_err(|e| Error::Codec(anyhow::anyhow!("duplicate a DMA-BUF descriptor: {e}")))?;
+		.map_err(|e| Error::codec(anyhow::anyhow!("duplicate a DMA-BUF descriptor: {e}")))?;
 	let descriptor = VaapiDmaBuf {
 		drm_format: buffer.format().as_raw(),
 		modifier: buffer.modifier(),
@@ -157,20 +157,23 @@ pub(crate) fn is_rgb(format: DrmFormat) -> bool {
 }
 
 thread_local! {
-	/// The video processor this thread scales with, opened on the first resize.
+	/// The video processors this thread scales with, by render node (`None` for
+	/// one that finds its own), each opened on its first resize.
 	///
 	/// Per thread because a processor keeps its contexts behind an `Rc`. Each
-	/// thread that resizes pays for one display and one context per size. A
-	/// failed open is kept too, so a machine without VA-API finds that out once
+	/// thread that resizes pays for one display per node and one context per size.
+	/// A failed open is kept too, so a machine without VA-API finds that out once
 	/// per thread rather than once per frame.
-	static PROCESSOR: RefCell<Option<Result<Processor, String>>> = const { RefCell::new(None) };
+	static PROCESSORS: RefCell<HashMap<Option<PathBuf>, Result<Processor, String>>> = RefCell::new(HashMap::new());
 
-	/// Buffer layouts the video processor refused on this thread, by format and
-	/// modifier, so a buffer it cannot read goes straight to the CPU path.
-	static REFUSED: RefCell<HashSet<(DrmFormat, u64)>> = RefCell::new(HashSet::new());
+	/// Buffer layouts a video processor refused on this thread, by node, format,
+	/// and modifier, so a buffer it cannot read goes straight to the CPU path.
+	static REFUSED: RefCell<HashSet<(Option<PathBuf>, DrmFormat, u64)>> = RefCell::new(HashSet::new());
 }
 
 /// Scales `buffer` to `size` on the GPU, returning an NV12 DMA-BUF.
+///
+/// Scales on the `named` render node, otherwise the shared one.
 ///
 /// The color handling matches the CPU resize. A YUV input keeps whatever space
 /// it was labelled with, including none. A packed RGB input is converted into
@@ -182,12 +185,15 @@ thread_local! {
 /// Fails when this thread has no video processor, when the processor refused
 /// this buffer's format and modifier before, and when the export, the import,
 /// or the blit fails. The caller falls back to the CPU.
-pub(crate) fn resize(buffer: &DmaBuf, size: Size) -> Result<DmaBuf, Error> {
-	let key = (buffer.format(), buffer.modifier());
+pub(crate) fn resize(buffer: &DmaBuf, size: Size, named: Option<&Path>) -> Result<DmaBuf, Error> {
+	let node = named
+		.map(Path::to_path_buf)
+		.or_else(|| shared().map(|shared| shared.node.clone()));
+	let key = (node, buffer.format(), buffer.modifier());
 	if REFUSED.with(|refused| refused.borrow().contains(&key)) {
 		return Err(Error::Unsupported(format!(
 			"the VA-API video processor refused {:?} with modifier {:#x}",
-			key.0, key.1
+			key.1, key.2
 		)));
 	}
 	let (input_space, output_space, label) = match is_rgb(buffer.format()) {
@@ -201,14 +207,15 @@ pub(crate) fn resize(buffer: &DmaBuf, size: Size) -> Result<DmaBuf, Error> {
 		}
 	};
 
-	let exported = PROCESSOR.with(|slot| -> Result<ExportedFrame, Error> {
-		let mut slot = slot.borrow_mut();
+	let exported = PROCESSORS.with(|processors| -> Result<ExportedFrame, Error> {
+		let mut processors = processors.borrow_mut();
 		// Checked before exporting, so a machine without VA-API does not pay a
 		// fence wait and a descriptor duplicate on every frame to learn it again.
-		let processor = slot
-			.get_or_insert_with(|| {
-				match shared() {
-					Some(shared) => Processor::new(&shared.node),
+		let processor = processors
+			.entry(key.0.clone())
+			.or_insert_with_key(|node| {
+				match node {
+					Some(node) => Processor::new(node),
 					None => Processor::open(),
 				}
 				.map_err(|e| format!("{e:#}"))
@@ -224,10 +231,10 @@ pub(crate) fn resize(buffer: &DmaBuf, size: Size) -> Result<DmaBuf, Error> {
 		drop(lease);
 		resized.map_err(|e| {
 			REFUSED.with(|refused| refused.borrow_mut().insert(key));
-			Error::Codec(e.context("scale a DMA-BUF with the VA-API video processor"))
+			Error::codec(e.context("scale a DMA-BUF with the VA-API video processor"))
 		})
 	})?;
-	adopt(exported, label).map_err(Error::Codec)
+	adopt(exported, label).map_err(Error::codec)
 }
 
 /// Describes an exported picture as a [`DmaBuf`]: the driver's format modifier,
@@ -333,7 +340,7 @@ impl DmaBufFrame for Exported {
 		let frame = self.frame.lock().expect("poisoned");
 		let nv12 = frame
 			.download()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("read a VA-API surface back: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("read a VA-API surface back: {e:?}")))?;
 		let i420 = I420::from_nv12(&nv12.data, crate::Size::new(nv12.width, nv12.height))?;
 		Ok(match self.color {
 			Some(color) => i420.with_color(color),

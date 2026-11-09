@@ -710,7 +710,7 @@ where
 {
 	tokio::task::spawn_blocking(f)
 		.await
-		.map_err(|err| Error::Codec(anyhow::anyhow!("capture enumeration thread failed: {err}")))?
+		.map_err(|err| Error::codec(anyhow::anyhow!("capture enumeration thread failed: {err}")))?
 }
 
 #[cfg(test)]

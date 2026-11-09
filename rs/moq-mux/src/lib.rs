@@ -28,7 +28,7 @@
 //! - [`Pacer`] maps each exported frame's media timestamp to the wall-clock
 //!   instant it should be delivered at, for byte streams whose spacing is
 //!   part of the format (MPEG-TS).
-//! - [`timeline`] shares one audio-led playout clock with video presenters.
+//! - [`sync`] holds a broadcast's tracks on one playout clock without letting a slow one stall the rest.
 //! - [`rate`] turns bandwidth grants into stable media bitrate targets shared
 //!   by audio, video, and transcode senders.
 //! - [`follow`] follows a broadcast across the publisher instances that
@@ -61,7 +61,7 @@ pub mod rate;
 pub mod select;
 mod source;
 mod stats;
-pub mod timeline;
+pub mod sync;
 
 pub use clock::Clock;
 pub use error::*;

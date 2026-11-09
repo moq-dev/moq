@@ -6,9 +6,9 @@
 //! ranked exactly as the transport will send their streams, and only the first in line asks
 //! the transport for credit, so returning credit goes to the most important open.
 //!
-//! An open can also wait on something other than credit, such as a WebTransport stream's
-//! header, so the line asks the transport's [`StreamCredit`] whether the peer is what it waits
-//! for.
+//! A transport's open waits only for the peer's credit, writing anything it puts in front of a
+//! stream, such as a WebTransport header, as the stream's first data. So a pending head of the
+//! line means the peer's credit has run out.
 //!
 //! The session also lists the group streams it has open, each with its rank and whether the
 //! peer has acknowledged everything written to it. A unidirectional open waiting for the peer's
@@ -22,9 +22,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::Poll;
 
-use super::boxed::{self, Transport};
+use super::boxed;
 use super::poll::SendOptions;
-use super::{Dir, StreamCredit};
+
+/// Which streams a session opens: one-way, or both ways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Dir {
+	/// Unidirectional streams.
+	Uni,
+	/// Bidirectional streams.
+	Bi,
+}
 
 /// Where an open or an open stream ranks: the order the transport sends its stream in.
 ///
@@ -122,9 +130,9 @@ impl Line {
 		self.waiting.keys().next().copied()
 	}
 
-	/// Say why the line starts waiting: the peer's stream credit, unless the transport reports
-	/// otherwise, and what the session's open group streams could make room with.
-	fn start(credit: Option<StreamCredit>, lines: &Lines) {
+	/// Say that the line starts waiting for the peer's stream credit, and what the session's open
+	/// group streams could make room with.
+	fn start(lines: &Lines) {
 		if !tracing::enabled!(tracing::Level::DEBUG) {
 			return;
 		}
@@ -132,23 +140,12 @@ impl Line {
 		let open_streams = open.len();
 		let acknowledged = open.iter().filter(|stream| stream.acknowledged == Some(true)).count();
 		let lowest = open.first().map(|stream| stream.rank);
-		match credit {
-			Some(credit) if !credit.blocked => {
-				tracing::debug!(
-					available = credit.available,
-					open_streams,
-					acknowledged,
-					?lowest,
-					"opens wait in priority order for the transport"
-				)
-			}
-			_ => tracing::debug!(
-				open_streams,
-				acknowledged,
-				?lowest,
-				"out of the peer's stream credit: opens wait in priority order"
-			),
-		}
+		tracing::debug!(
+			open_streams,
+			acknowledged,
+			?lowest,
+			"out of the peer's stream credit: opens wait in priority order"
+		);
 	}
 
 	fn join(&mut self, rank: Rank) -> Key {
@@ -184,27 +181,16 @@ impl Line {
 
 /// The lines of one session's opens, and the group streams it has open, shared by every task
 /// opening on it.
+#[derive(Default)]
 pub(crate) struct Lines {
 	uni: Mutex<Line>,
 	bi: Mutex<Line>,
 	listing: Mutex<Listing>,
 	/// The last turn handed to a send group, so every group's turn is its own.
 	turns: AtomicU64,
-	/// Whose stream credit the opens wait for.
-	pub(super) transport: Transport,
 }
 
 impl Lines {
-	pub(super) fn new(transport: Transport) -> Self {
-		Self {
-			uni: Default::default(),
-			bi: Default::default(),
-			listing: Default::default(),
-			turns: AtomicU64::new(0),
-			transport,
-		}
-	}
-
 	/// A turn after every one handed out before.
 	pub(super) fn next_turn(&self) -> u64 {
 		self.turns.fetch_add(1, Ordering::Relaxed) + 1
@@ -224,13 +210,8 @@ impl Lines {
 		self.listing().streams.remove(&key);
 	}
 
-	/// Reset the lowest-ranked open group stream each waiting open not yet owed a reset preempts,
-	/// unless the transport reports it refused no open, so the open waits on something else,
-	/// such as a WebTransport header.
+	/// Reset the lowest-ranked open group stream each waiting open not yet owed a reset preempts.
 	fn make_room(&self, line: &mut Line) {
-		if boxed::stream_credit(&self.transport, Dir::Uni).is_some_and(|credit| !credit.blocked) {
-			return;
-		}
 		let owed: Vec<Rank> = line.waiting.keys().skip(line.resets).map(|key| key.rank.0).collect();
 		if owed.is_empty() {
 			return;
@@ -324,7 +305,7 @@ impl Open {
 				if let Poll::Ready(res) = open(waiter) {
 					return Poll::Ready(took_turn(res, lines, options));
 				}
-				Line::start(boxed::stream_credit(&lines.transport, dir), lines);
+				Line::start(lines);
 				let key = line.join(rank);
 				line.waiting.get_mut(&key).expect("just joined").register(waiter);
 				self.place = Some((lines.clone(), dir, key));
@@ -392,14 +373,6 @@ impl Drop for Open {
 		if let Some((lines, dir, key)) = self.place.take() {
 			lines.line(dir).leave(key);
 		}
-	}
-}
-
-#[cfg(test)]
-impl Default for Lines {
-	/// Lines without a transport, which therefore never says why they wait.
-	fn default() -> Self {
-		Self::new(std::sync::Weak::<boxed::Shared<super::memory::Session>>::new())
 	}
 }
 
@@ -551,40 +524,6 @@ mod tests {
 		credit.lock().unwrap().grant(1);
 		assert!(next.poll(&lines, &credit));
 		assert!(lines.line(Dir::Uni).waiting.is_empty());
-	}
-
-	/// A session reports the peer's stream credit through its line's transport, blocked once
-	/// an open in line was refused, and nothing once the transport is gone.
-	#[test]
-	fn the_line_reads_the_transports_credit() {
-		use super::super::{memory, poll::Session as _};
-
-		let (a, _b) = memory::pair(memory::Config {
-			max_concurrent_uni_streams: Some(1),
-			..Default::default()
-		});
-		let session = boxed::Session::new(a);
-		let waiter = kio::Waiter::noop();
-		let options = || SendOptions {
-			group: None,
-			priority: 0,
-		};
-		let mut first = Open::default();
-		let opened = session.poll_open_uni(&mut first, &waiter, options());
-		assert!(matches!(opened, Poll::Ready(Ok(_))));
-		assert_eq!(session.stream_credit(Dir::Uni), Some(StreamCredit::new(0, false)));
-
-		let mut second = Open::default();
-		assert!(session.poll_open_uni(&mut second, &waiter, options()).is_pending());
-		assert_eq!(session.stream_credit(Dir::Uni), Some(StreamCredit::new(0, true)));
-		let transport = session.opens.transport.clone();
-		assert_eq!(
-			boxed::stream_credit(&transport, Dir::Uni),
-			Some(StreamCredit::new(0, true))
-		);
-
-		drop((second, session));
-		assert_eq!(boxed::stream_credit(&transport, Dir::Uni), None);
 	}
 
 	/// Out of credit, each waiting open resets the lowest stream below it, one reset in flight

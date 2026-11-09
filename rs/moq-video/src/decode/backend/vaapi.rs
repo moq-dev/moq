@@ -117,7 +117,7 @@ impl Vaapi {
 				moq_vaapi::Codec::H265,
 				Some((VAProfile::VAProfileHEVCMain, "H.265 Main".to_owned())),
 			),
-			other => return Err(Error::Codec(anyhow::anyhow!("VAAPI cannot decode {}", other.label()))),
+			other => return Err(Error::codec(anyhow::anyhow!("VAAPI cannot decode {}", other.label()))),
 		};
 		if let Some((profile, name)) = required
 			&& offered(codec, config.vaapi.as_deref(), profile) == Some(false)
@@ -129,7 +129,7 @@ impl Vaapi {
 			codec,
 			device: vaapi::device(codec, config.vaapi.as_deref()),
 		};
-		let decoder = Decoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
+		let decoder = Decoder::new(vaapi).map_err(|e| Error::codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
 
 		// The renderer imports the NV12 this exports, so `Render` keeps it too
 		// in a build that has the renderer; without one it would only download.
@@ -198,7 +198,7 @@ impl Vaapi {
 				Ok(frames)
 			}
 			Err(err) if self.export == Export::Exporting => {
-				Err(Error::Codec(err.context("VAAPI decode to a shared surface")))
+				Err(Error::codec(err.context("VAAPI decode to a shared surface")))
 			}
 			Err(err) => {
 				tracing::warn!(%err, "VAAPI cannot hand out decoded surfaces; downloading them instead");
@@ -221,7 +221,7 @@ impl Backend for Vaapi {
 		let decoded = self
 			.decoder
 			.decode(&access_unit, timestamp)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI decode: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("VAAPI decode: {e:?}")))?;
 
 		convert(decoded)
 	}
@@ -235,7 +235,7 @@ impl Backend for Vaapi {
 		let decoded = self
 			.decoder
 			.flush()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI flush: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("VAAPI flush: {e:?}")))?;
 
 		convert(decoded)
 	}
