@@ -2353,9 +2353,7 @@ test("scoped wire views filter and rebase advertisements and blind requests", ()
 
 test("a scoped dynamic is announced only to readers its scope can serve", async () => {
 	const origin = new Producer();
-	const dynamic = origin
-		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/chat")]))
-		.claim(Path.empty());
+	const dynamic = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/chat")])).claim(Path.empty());
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/chat")]));
 	const video = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/video")]));
 	await new Promise<void>((resolve) => setImmediate(resolve));
