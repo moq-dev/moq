@@ -1,8 +1,16 @@
 /** Compare eager and cold lazy fallback startup with real WebSocket negotiation. */
 import { basename } from "node:path";
 import { gzipSync } from "node:zlib";
-import { selectSubprotocol } from "@moq/qmux";
+import { Session, selectSubprotocol, type WebSocketStreamCloseEvent, type WebSocketStreamCloseInfo } from "@moq/qmux";
 import { type Browser, chromium } from "playwright";
+
+/** Per-connection state from the upgrade; `open` attaches the frame feed. */
+interface Peer {
+	url: string;
+	protocol: string;
+	closed: PromiseWithResolvers<WebSocketStreamCloseEvent>;
+	incoming?: ReadableStreamDefaultController<Uint8Array>;
+}
 
 const build = await Bun.build({
 	entrypoints: [`${import.meta.dir}/qmux-eager.ts`, `${import.meta.dir}/qmux-lazy.ts`],
@@ -16,14 +24,15 @@ const files = new Map(
 		build.outputs.map(async (file) => [basename(file.path), gzipSync(await file.arrayBuffer())] as const),
 	),
 );
-const server = Bun.serve({
+const server = Bun.serve<Peer>({
 	port: 0,
 	fetch(request, server) {
 		const path = new URL(request.url).pathname;
 		if (path === "/qmux") {
 			const protocol = selectSubprotocol(request.headers.get("Sec-WebSocket-Protocol"), {});
 			if (!protocol) return new Response("unsupported QMux protocol", { status: 400 });
-			if (server.upgrade(request, { headers: { "Sec-WebSocket-Protocol": protocol } })) return;
+			const data: Peer = { url: request.url, protocol, closed: Promise.withResolvers() };
+			if (server.upgrade(request, { data, headers: { "Sec-WebSocket-Protocol": protocol } })) return;
 			return new Response("upgrade required", { status: 400 });
 		}
 		const code = files.get(path.slice(1));
@@ -34,7 +43,46 @@ const server = Bun.serve({
 			headers: { "Content-Type": "text/html" },
 		});
 	},
-	websocket: { message() {} },
+	websocket: {
+		// Accept the upgraded socket like a real server, so Session sends its transport parameters first.
+		open(ws) {
+			const peer = ws.data;
+			const session = Session.accept({
+				url: peer.url,
+				opened: Promise.resolve({
+					protocol: peer.protocol,
+					extensions: "",
+					readable: new ReadableStream<Uint8Array>({
+						start: (controller) => {
+							peer.incoming = controller;
+						},
+					}),
+					writable: new WritableStream<Uint8Array>({
+						write: (bytes) => {
+							ws.send(bytes);
+						},
+					}),
+				}),
+				closed: peer.closed.promise,
+				close: (info?: WebSocketStreamCloseInfo) => ws.close(info?.closeCode, info?.reason),
+			});
+			// The client only sees the socket close, so log the server-side cause, such as a handshake timeout.
+			session.closed.catch((err: unknown) => console.error("qmux fake peer:", err));
+		},
+		message(ws, message) {
+			// QMux is binary-only. Close rather than throw, so the session ends with the close.
+			if (typeof message === "string") {
+				ws.close(1003, "QMux frames are binary");
+				return;
+			}
+			if (!ws.data.incoming) throw new Error("QMux frame before the socket opened");
+			ws.data.incoming.enqueue(message);
+		},
+		close(ws, code, reason) {
+			ws.data.incoming?.close();
+			ws.data.closed.resolve({ closeCode: code, reason });
+		},
+	},
 });
 let browser: Browser | undefined;
 try {
