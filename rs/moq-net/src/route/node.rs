@@ -134,13 +134,19 @@ struct Outbox {
 struct Pending {
 	/// A ROUTE_END goes first, ending the route the reader holds and its claims.
 	ended: bool,
+	/// The last batch for the route the reader holds, read just before its ROUTE_END:
+	/// its floor certifies the withdrawals that ended the route.
+	closing: Option<Batch>,
 	/// The last finite reach since, which starts the route if the reader holds none.
 	finite: Option<Reach>,
 	/// The route was held after that.
 	held: bool,
 	/// The batches since, merged: each claim's last change, and the last floor.
-	batch: Option<(Changes, Option<Rev>)>,
+	batch: Option<Batch>,
 }
+
+/// Merged batches: each claim's last change, and the last floor.
+type Batch = (Changes, Option<Rev>);
 
 /// Each claim's last change, by path.
 type Changes = BTreeMap<Path, Option<Claim>>;
@@ -173,8 +179,13 @@ impl Outbox {
 				// that keeps any end before, an end of a start it never read is acked.
 				let ended = entry.ended;
 				let acked = !holds || ended;
+				let closing = match ended {
+					true => entry.closing.take(),
+					false => entry.batch.take().filter(|_| holds),
+				};
 				*entry = Pending {
 					ended: holds,
+					closing,
 					..Pending::default()
 				};
 				if !holds && let Some((seq, _)) = self.pending.remove(&id) {
@@ -264,6 +275,13 @@ impl Outbox {
 	/// Queue one identity's pending entry to read, as the router would have sent it.
 	fn take(&mut self, id: Id, pending: Pending) {
 		if pending.ended {
+			if let Some(closing) = pending.closing {
+				self.ready.push_back(Output::Batch {
+					id,
+					changes: ordered(closing.0),
+					floor: closing.1,
+				});
+			}
 			self.delivered.remove(&id);
 			self.ready.push_back(Output::Route { id, reach: None });
 		}
@@ -278,20 +296,24 @@ impl Outbox {
 			});
 		}
 		if let Some((merged, floor)) = pending.batch {
-			// As the router orders a batch: what starts or changes, then what ends.
-			let (ends, starts): (Vec<_>, Vec<_>) = merged.into_iter().partition(|(_, claim)| claim.is_none());
+			let changes = ordered(merged);
 			if let Some(sent) = self.delivered.get_mut(&id) {
-				for (path, _) in &starts {
-					sent.insert(path.clone());
-				}
-				for (path, _) in &ends {
-					sent.remove(path);
+				for (path, claim) in &changes {
+					match claim {
+						Some(_) => sent.insert(path.clone()),
+						None => sent.remove(path),
+					};
 				}
 			}
-			let changes = starts.into_iter().chain(ends).collect();
 			self.ready.push_back(Output::Batch { id, changes, floor });
 		}
 	}
+}
+
+/// A batch's changes as the router orders them: what starts or changes, then what ends.
+fn ordered(changes: Changes) -> Vec<(Path, Option<Claim>)> {
+	let (ends, starts): (Vec<_>, Vec<_>) = changes.into_iter().partition(|(_, claim)| claim.is_none());
+	starts.into_iter().chain(ends).collect()
 }
 
 struct State {
@@ -359,10 +381,15 @@ impl Node {
 		}
 	}
 
-	/// A node with a random identity.
-	pub fn random() -> Self {
+	/// A node declaring the origin's hop id, so the origin has one identity on every
+	/// wire. A declared identity is never qualified, so an id carrying that marker
+	/// loses it, or is replaced by a random one if nothing is left.
+	pub fn origin(hop: std::num::NonZeroU64) -> Self {
 		let mut rng = kio::clock::rng();
-		let id = rng.random_range(1..QUALIFIED);
+		let id = match hop.get() & !QUALIFIED {
+			0 => rng.random_range(1..QUALIFIED),
+			id => id,
+		};
 		Self::new(id, rng.random())
 	}
 
@@ -697,9 +724,14 @@ impl State {
 }
 
 /// The lite-06 hop a router identity travels as, so a relay translating its routes
-/// for a lite-06 peer recognizes them coming back.
+/// for a lite-06 peer recognizes them coming back. A declared identity is the
+/// origin's own hop id; a qualified key is folded into the 53 bits a generated hop
+/// id keeps.
 pub(crate) fn hop(id: Id) -> crate::Hop {
-	// FNV-1a over the identity, folded into the 53 bits a hop id keeps.
+	if id & QUALIFIED == 0 {
+		return crate::Hop::from(std::num::NonZeroU64::new(id).expect("a non-zero identity"));
+	}
+	// FNV-1a over the identity.
 	let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
 	for byte in id.to_le_bytes() {
 		hash ^= u64::from(byte);
@@ -1087,6 +1119,62 @@ mod tests {
 		);
 		edge.echo(7);
 		assert_eq!(relay.retained().echoes, 0);
+	}
+
+	/// A route goes on a stream only while it has a claim the stream's interest
+	/// meets. Once the last one is withdrawn, the reader reads the floor certifying
+	/// the withdrawal before the route's end, even when both queued unread.
+	#[test]
+	fn a_route_ends_after_the_floor_certifying_its_last_claim() {
+		let instance = Instance::random();
+		let origin = Node::new(1, 1);
+		let edge = origin.answer(Link::default(), Path::empty()).unwrap();
+		let other = origin.answer(Link::default(), p("other")).unwrap();
+		assert_eq!(outputs(&edge), [], "no claim, no route");
+
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
+		assert_eq!(outputs(&edge).len(), 2, "the route, then its claim");
+		assert_eq!(outputs(&other), [], "the interest meets no claim");
+
+		origin.own(p("live/x"), None);
+		assert_eq!(
+			outputs(&edge),
+			[
+				Output::Batch {
+					id: 1,
+					changes: vec![(p("live/x"), None)],
+					floor: Some(2),
+				},
+				Output::Route { id: 1, reach: None },
+			]
+		);
+	}
+
+	/// A peer that withholds ROUTE_END echoes holds one end per identity however
+	/// often its only claim flaps: the route starts again only once the end is echoed.
+	#[test]
+	fn a_route_restarts_only_once_its_end_is_echoed() {
+		let instance = Instance::random();
+		let origin = Node::new(1, 1);
+		let edge = origin.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
+		outputs(&edge);
+		// The peer reads everything, and echoes nothing.
+		let mut ends = 0;
+		for _ in 0..100 {
+			origin.own(p("live/x"), None);
+			origin.own(p("live/x"), Some(claim(&instance, 0)));
+			ends += (outputs(&edge).into_iter())
+				.filter(|output| matches!(output, Output::Route { reach: None, .. }))
+				.count();
+		}
+		assert_eq!(ends, 1);
+		assert_eq!(origin.retained().echoes, 1);
+
+		edge.echo(1);
+		let read = outputs(&edge);
+		assert!(matches!(read[0], Output::Route { id: 1, reach: Some(_) }), "{read:?}");
+		assert_eq!(read.len(), 2, "the route, then its claim");
 	}
 
 	#[test]

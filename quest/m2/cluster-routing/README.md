@@ -57,7 +57,7 @@ Decided with the maintainer, 2026-10-13:
   2026-10-14; own identities included 2026-10-26, since they are no longer
   proven.) The issuer-qualified subject key was dropped 2026-11-02
   (maintainer); since 2026-11-04 a scoped peer's identities are keyed by the
-  route key it proves ([Route session integration](/quest/m2/cluster-routing/routes/session.md)).
+  route key it proves ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)).
 - Matching explicit epochs authorize resume. Epochless changes retain
   Restart and fresh resolution; neither node identity nor a healthy
   alternate grants permission to splice content.

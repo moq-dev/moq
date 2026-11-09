@@ -211,7 +211,7 @@ fn routes(origin: &origin::Producer) -> BTreeMap<String, Vec<u64>> {
 		let origin::RouteEvent::Start(announce) = event else {
 			panic!("an initial set is only starts: got {event:?}");
 		};
-		let hops = announce.route.hops().collect();
+		let hops = moq_net::fuzz::route_hops(&announce.route);
 		routes.insert(announce.prefix.as_str().to_string(), hops);
 	}
 	routes

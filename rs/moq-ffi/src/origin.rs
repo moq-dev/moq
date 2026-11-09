@@ -77,7 +77,7 @@ impl TryFrom<MoqRouteOptions> for moq_net::origin::RouteOptions {
 	}
 }
 
-/// The read-only facts on a received route: hops, a static cost, and the stream's instance.
+/// The read-only facts on a received route: a static cost and the stream's instance.
 ///
 /// Carried by `MoqAnnounceConsumer` events. A route claims capability, not
 /// inventory: by convention a publisher creates each broadcast's exact route,
@@ -85,14 +85,8 @@ impl TryFrom<MoqRouteOptions> for moq_net::origin::RouteOptions {
 /// with `MoqOriginProducer::route_prefix` and answers whatever is requested beneath it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MoqRouteInfo {
-	/// Hop ids of the relay hops the route traversed, oldest first. 0 is the
-	/// anonymous mark.
-	pub hops: Vec<u64>,
 	/// Preference among routes covering the same prefix: lower wins.
 	pub cost: u64,
-	/// Whether the chain holds a 0 anywhere. An anonymous route ranks below every
-	/// fully identified one, whatever the costs say.
-	pub anonymous: bool,
 	/// The stream the route serves: routes with one instance are one continuous stream.
 	pub instance: String,
 }
@@ -100,9 +94,7 @@ pub struct MoqRouteInfo {
 impl From<moq_net::origin::RouteInfo> for MoqRouteInfo {
 	fn from(route: moq_net::origin::RouteInfo) -> Self {
 		Self {
-			hops: route.hops().collect(),
 			cost: route.cost().value(),
-			anonymous: route.is_anonymous(),
 			instance: route.instance().to_string(),
 		}
 	}
@@ -175,7 +167,7 @@ pub struct MoqAnnounce {
 	pub prefix: String,
 	/// What each wildcard matched, empty when the filter has no wildcards.
 	pub captures: Vec<String>,
-	/// The route serving the prefix: its instance, hops, and a static cost.
+	/// The route serving the prefix: its instance and a static cost.
 	pub route: MoqRouteInfo,
 }
 

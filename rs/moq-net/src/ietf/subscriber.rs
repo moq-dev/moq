@@ -1095,8 +1095,8 @@ pub(super) struct Subscriber {
 	state: Lock<State>,
 	tasks: Tasks,
 	version: Version,
-	// Set once the peer sends a GOAWAY; this session's routes then cost
-	// Cost::DRAIN, so a replacement session outranks it. Requests keep opening,
+	// Set once the peer sends a GOAWAY; this session's routes then rank last
+	// (draining), so a replacement session outranks it. Requests keep opening,
 	// deliberately past draft-22 section 9.2's SHOULD NOT: refusing them would
 	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
@@ -2862,9 +2862,7 @@ impl Subscriber {
 			return Ok(None);
 		}
 		let mut route = entry.route.clone();
-		if self.going_away.is_set() {
-			route.cost = crate::origin::Cost::DRAIN;
-		}
+		route.draining |= self.going_away.is_set();
 		entry.dynamic = Some(self.origin.forward(path, route)?);
 		entry.generation += 1;
 		tracing::info!(route = %crate::path::Rooted(self.origin.root(), path), "namespace authorized again");
@@ -2906,9 +2904,7 @@ impl Subscriber {
 
 		// A namespace published after the peer's GOAWAY starts out draining, so
 		// a late arrival on a dying connection can't take over as primary.
-		if self.going_away.is_set() {
-			route.cost = crate::origin::Cost::DRAIN;
-		}
+		route.draining = self.going_away.is_set();
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(entry) => {
@@ -3043,20 +3039,20 @@ impl Subscriber {
 		tasks.poll(waiter)
 	}
 
-	/// Re-price one attached route to a draining cost (the peer sent a GOAWAY):
-	/// every other candidate outranks it while it stays selectable as the last
-	/// path. Idempotent, since the signal stays set.
+	/// Rank one attached route last (the peer sent a GOAWAY): every other candidate
+	/// outranks it while it stays selectable as the last path, at its real cost.
+	/// Idempotent, since the signal stays set.
 	fn drain_route(&self, path: &Path) {
 		let mut state = self.state.lock();
 		let Some(entry) = state.broadcasts.get_mut(path) else {
 			return;
 		};
-		if entry.route.cost == crate::origin::Cost::DRAIN {
+		if entry.route.draining {
 			return;
 		}
-		entry.route.cost = crate::origin::Cost::DRAIN;
+		entry.route.draining = true;
 		for (_, route) in &mut entry.adverts {
-			route.cost = crate::origin::Cost::DRAIN;
+			route.draining = true;
 		}
 		if let Some(dynamic) = &entry.dynamic {
 			let _ = dynamic.update(entry.route.clone());

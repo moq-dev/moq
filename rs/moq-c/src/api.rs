@@ -1000,18 +1000,12 @@ pub struct moq_route_options {
 	pub hidden: bool,
 }
 
-/// The read-only facts on a received route: hops, a static cost, and the stream's instance.
+/// The read-only facts on a received route: a static cost and the stream's instance.
 ///
 /// Carried by [moq_announce_event]. Its pointers borrow the announcement's storage.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct moq_route_info {
-	/// Hop ids of the relay hops the route traversed, oldest first. 0 is the
-	/// anonymous mark, which ranks the route below every fully identified one.
-	/// A route announced on this origin has none.
-	pub hops: *const u64,
-	/// The number of entries in `hops`.
-	pub hops_len: usize,
 	/// Preference among routes covering the same prefix: lower wins.
 	pub cost: u64,
 	/// The stream the route serves: routes with one instance are one continuous stream.

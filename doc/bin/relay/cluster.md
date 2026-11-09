@@ -204,9 +204,11 @@ connect = [
 ```
 
 Prices aren't static. A publisher can re-price a live announcement, which is
-how a standby transcoder pool seeds a high cost and drops it once it's working,
-and a relay receiving a GOAWAY re-prices every route learned from that peer to
-the maximum so new subscriptions go elsewhere while existing ones finish. A
+how a standby transcoder pool seeds a high cost and drops it once it's working.
+A GOAWAY is not a price: a relay receiving one ranks every route learned from
+that peer below every other eligible route, whatever the costs say, so new
+subscriptions go elsewhere while existing ones finish. The drain is that relay's
+own state, so it still advertises the routes onward at their real cost. A
 relay keeps its session to a peer draining to restart until that peer closes
 it, and redials only then, so it reaches the replacement rather than the
 draining process.
