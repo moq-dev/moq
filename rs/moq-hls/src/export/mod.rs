@@ -3534,10 +3534,7 @@ mod tests {
 		assert!(segments.init().await.unwrap().is_some(), "init is buildable");
 
 		// Sizing reports the segment's wire bytes before its media is built, without advancing.
-		let size = kio::clock::timeout(Duration::from_secs(5), segments.next_size())
-			.await
-			.expect("first segment finalizes")
-			.unwrap();
+		let size = segments.next_size().await.unwrap();
 		assert_eq!(size, Some(5), "one 4-byte frame and its 1-byte timestamp");
 
 		let first = kio::clock::timeout(Duration::from_secs(5), segments.next())
