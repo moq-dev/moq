@@ -3427,12 +3427,12 @@ mod tests {
 			0,
 			&moq_tokio::connection::Observation {
 				revision: 1,
-				phase: moq_tokio::connection::Phase::Connected,
 				connects: 1,
-				failure: None,
-				version: None,
 				last_connected: Some(kio::clock::now()),
-				transport: Some(moq_tokio::Transport::Quic),
+				phase: moq_tokio::connection::Phase::Connected {
+					transport: moq_tokio::Transport::Quic,
+					version: moq_net::Version::ALL[0],
+				},
 			},
 		);
 		drop(session);

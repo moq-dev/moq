@@ -316,8 +316,28 @@ typealias GrantConsumer = uniffi.moq.MoqGrantConsumer
 /** What the peer lets this side do: publish and subscribe patterns, and an expiry. */
 typealias Grant = uniffi.moq.MoqGrant
 
-/** A connection lifecycle transition reported by [Session.state]. */
+/** Where a connection is in its lifecycle, carrying that phase's failure or version. */
 typealias ConnectionPhase = uniffi.moq.MoqConnectionPhase
+
+// Kotlin cannot reach a sealed class's subtypes through its typealias, so each
+// variant gets its own.
+/** No session has connected yet; carries the latest failed dial. */
+typealias ConnectionPhaseConnecting = uniffi.moq.MoqConnectionPhase.Connecting
+
+/** A session is serving; carries its negotiated version. */
+typealias ConnectionPhaseConnected = uniffi.moq.MoqConnectionPhase.Connected
+
+/** No session is serving while the connection redials; carries why. */
+typealias ConnectionPhaseDisconnected = uniffi.moq.MoqConnectionPhase.Disconnected
+
+/**
+ * The old session serves while its replacement dials; carries its version and the replacement's
+ * failure.
+ */
+typealias ConnectionPhaseMigrating = uniffi.moq.MoqConnectionPhase.Migrating
+
+/** The connection has stopped for good; carries the terminal error, if any. */
+typealias ConnectionPhaseClosed = uniffi.moq.MoqConnectionPhase.Closed
 
 /** One coherent connection lifecycle snapshot. */
 typealias ConnectionState = uniffi.moq.MoqConnectionState
