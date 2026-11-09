@@ -12,7 +12,11 @@ so it only needs to stay green.
 
 - moq-dev/moq: a scheduled Interop run on `main` passes. Check with
   `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`.
-  Triage any red run, then delete this quest once one passes.
+  Triage any red run, then delete this quest once one passes. Its pass skips
+  the datagram and replacement cases until
+  [routes/js.md](/quest/m2/cluster-routing/routes/js.md) lands, as
+  [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) set; delete on
+  that pass only if those skips stay accepted.
 
 ## Plan
 
@@ -102,4 +106,28 @@ moq-watch's `buffer`, which
 `lookahead`. Fixed in this quest's PR: the case tests `lookahead`, and a new
 check confirms `buffer` reports its rename and recovers once removed.
 
+Scheduled run
+[42491651687](https://github.com/moq-dev/moq/actions/runs/42491651687)
+(2026-11-08, at e2271bad9c) failed two steps, and neither is a flake. Both come
+from the JS lite-07 route wire, which Rust moved to but JS has not ported, so
+they are owned by [routes/js.md](/quest/m2/cluster-routing/routes/js.md), not
+this quest:
+
+- Datagram tracks: `datagram_tracks_javascript` times out in its first case
+  (relay false, JS publishes false). It fails every time on main's content
+  (`just test datagram-tracks`), not under load.
+- Media output and lifecycle: chromium's `replacement` case crashes both
+  moq-lite-07-wip pages with `page crashed`. It fails every time on main's
+  content (`just test media --media-cases replacement`), though it passed on an
+  older base.
+
+[moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) skipped the
+datagram step and quarantined `replacement` by default, which this quest's
+triage confirms. On main's content, `just test media` passes; the datagram test
+still fails until the port lands. No new quest or retry is needed here.
+
 Public API: none. Wire: none.
+
+## Related
+
+- [The JS lite-07 route port](/quest/m2/cluster-routing/routes/js.md) - ports the JS route wire, which restores the datagram step and the `replacement` case
