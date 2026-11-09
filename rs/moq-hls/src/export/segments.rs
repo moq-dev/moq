@@ -512,7 +512,7 @@ pub struct Consumer {
 	/// The reset epoch and next append position; errors leave it unchanged.
 	position: (u64, u64),
 	feed: Option<Feed>,
-	/// The next row's media being fetched, kept across polls.
+	/// The next row's media being fetched or sized, kept across polls.
 	fetch: Option<Fetch>,
 }
 
@@ -540,6 +540,36 @@ impl Consumer {
 		kio::wait(|waiter| self.rendition.poll_latest_init(waiter, &mut load)).await
 	}
 
+	/// The bytes the next segment's groups carry, so a caller can reserve memory before
+	/// [`next`](Self::next) builds its media, which is a little larger: the fragment adds ~12-16
+	/// bytes per frame plus a small fixed header, so treat this as a lower bound.
+	///
+	/// Counts each frame as it is read, without decoding or keeping any, so nothing is held while
+	/// the caller waits, and `next` reads them again. `Some(0)` for a gap, `None` once the
+	/// rendition ends cleanly. Fails as `next` would on a missing segment, and never advances the
+	/// cursor.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next_size(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<usize>>> {
+		if self.fetch.as_ref().is_some_and(|fetch| !fetch.sizes()) {
+			self.fetch = None;
+		}
+		loop {
+			let Some(fetch) = &mut self.fetch else {
+				let Some(row) = ready!(self.poll_row(waiter))? else {
+					return Poll::Ready(Ok(None));
+				};
+				if row.stop {
+					return Poll::Ready(Ok(Some(0)));
+				}
+				self.fetch = Some(Fetch::sizing(row));
+				continue;
+			};
+			let size = ready!(fetch.poll_size(&self.rendition, waiter));
+			let segment = self.fetch.take().expect("fetching above").row().segment;
+			return Poll::Ready(size?.ok_or(crate::Error::SegmentUnavailable { segment }).map(Some));
+		}
+	}
+
 	/// The next segment, with its media; `None` only once the rendition ends cleanly, so a
 	/// recording that reads to `None` is complete.
 	///
@@ -559,6 +589,9 @@ impl Consumer {
 	/// media is never read under the old rows.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Segment>>> {
+		if self.fetch.as_ref().is_some_and(Fetch::sizes) {
+			self.fetch = None;
+		}
 		let (row, media) = loop {
 			let Some(fetch) = &mut self.fetch else {
 				let Some(row) = ready!(self.poll_row(waiter))? else {

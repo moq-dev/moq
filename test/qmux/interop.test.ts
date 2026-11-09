@@ -2,7 +2,7 @@
 // The Rust side is the in-tree qmux crate's interop examples, built by `just test qmux`.
 import { expect, test } from "bun:test";
 import { join } from "node:path";
-import Session, { selectSubprotocol, type Version } from "@moq/qmux";
+import { Session, selectSubprotocol, type Version } from "@moq/qmux";
 import { BunSocketStream } from "./bun-socket.ts";
 
 const BIN = process.env.QMUX_INTEROP_BIN;

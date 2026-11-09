@@ -107,7 +107,7 @@ name = "containers"
 harness = false
 
 [[bench]]
-name = "timeline"
+name = "sync"
 harness = false
 
 [[bench]]

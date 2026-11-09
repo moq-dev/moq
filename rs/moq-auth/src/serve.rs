@@ -1077,7 +1077,10 @@ mod tests {
 		let addr = listener.local_addr().unwrap();
 		tokio::spawn(async move { server.serve(listener).await });
 
-		let http = reqwest::Client::new();
+		let http = reqwest::Client::builder()
+			.use_preconfigured_tls(crate::crypto::tls().unwrap())
+			.build()
+			.unwrap();
 		for (userinfo, admitted) in [
 			("", false),
 			("relay:wrong@", false),

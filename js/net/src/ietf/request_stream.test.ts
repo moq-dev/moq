@@ -236,3 +236,35 @@ test("a request waiting for stream credit outlasts its deadline, which runs from
 		installed.close();
 	}
 });
+
+test("a refusal that fails to write still ends the request", async () => {
+	const failed = new Error("stop sending");
+	const stream = new Stream({
+		readable: new ReadableStream<Uint8Array>(),
+		writable: new WritableStream<Uint8Array>({
+			write: () => {
+				throw failed;
+			},
+		}),
+		version: Version.DRAFT_22,
+	});
+	const aborts = spyOn(stream, "abort");
+	const session = { version: Version.DRAFT_22, client: true } as unknown as Session;
+	const request = new RequestStream(stream, session);
+	await expect(request.refuse("fetch", refusal)).rejects.toBe(failed);
+	expect(aborts).toHaveBeenCalledTimes(1);
+	await request.ended;
+
+	const bare = new Stream({
+		readable: new ReadableStream<Uint8Array>(),
+		writable: new WritableStream<Uint8Array>({
+			write: () => {
+				throw failed;
+			},
+		}),
+		version: Version.DRAFT_22,
+	});
+	const bareAborts = spyOn(bare, "abort");
+	await expect(refuse(bare, Version.DRAFT_22, "fetch", refusal)).rejects.toBe(failed);
+	expect(bareAborts).toHaveBeenCalledTimes(1);
+});

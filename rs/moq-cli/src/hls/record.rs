@@ -597,7 +597,6 @@ async fn append(path: &Path, contents: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use hang::moq_net;
 
 	type Video = moq_mux::container::Producer<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>;
 

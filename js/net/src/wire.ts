@@ -184,7 +184,7 @@ export function wireOf(handle: broadcast.Producer | broadcast.Consumer): Broadca
 export function wireOf(handle: origin.Producer): OriginProducer;
 export function wireOf(handle: origin.Consumer): OriginConsumer;
 export function wireOf(handle: origin.Route): Route;
-export function wireOf(handle: import("./connection/established.ts").Established): Established;
+export function wireOf(handle: import("./connection/session.ts").Session): Established;
 /** Return the package-private view for a handle. */
 export function wireOf(handle: object): View {
 	const view = views.get(handle);

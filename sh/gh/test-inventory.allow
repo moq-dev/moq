@@ -36,7 +36,10 @@ ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m5
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m5/video-hardware.md
 
 # Quarantined flakes, re-enabled by the quest that fixes them.
-ignore moq-ffi::media::read_tests::raw_media_catalog_warmup_reaches_the_subscription /quest/m0/test-flakes-2/ffi-warmup-wall-clock.md
+ignore moq-net::mesh_withdraw::random_meshes_retract_once /quest/m0/test-flakes-2/mesh-withdraw-runtime.md
+ignore moq-net::mesh_withdraw::capped_random_meshes_retract_once /quest/m0/test-flakes-2/mesh-withdraw-runtime.md
 
 # Need another implementation to speak the route wire; the quest ports it.
 ignore moq-net::test_interop::lite_tracks_interop /quest/m2/cluster-routing/routes/js.md
+ignore moq-tokio::datagram_tracks::datagram_tracks_javascript /quest/m2/cluster-routing/routes/js.md
+recipe test::datagram-tracks /quest/m2/cluster-routing/routes/js.md

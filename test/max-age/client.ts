@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { Milli } from "@moq/clock";
-import Session from "@moq/qmux";
+import { Session } from "@moq/qmux";
 import { connect } from "../../js/net/src/connection/connect.ts";
 import { Producer } from "../../js/net/src/origin.ts";
 import * as Path from "../../js/net/src/path.ts";
@@ -48,8 +48,8 @@ try {
 		assert(broadcast);
 		for (const [i, age] of ages.entries()) {
 			const track = broadcast.track(String(i)).subscribe();
-			// A track received without a max age has no publisher limit: absent, not null.
-			assert.equal((await track.info()).maxAge, age ?? undefined, `${protocol} track ${i}`);
+			// A track received without a max age has no publisher limit.
+			assert.equal((await track.info()).maxAge, age, `${protocol} track ${i}`);
 			track.close();
 		}
 		request.close();

@@ -1,9 +1,10 @@
 import { resolve } from "path";
 import { defineConfig } from "vite";
+import { libav } from "../common/vite-plugin-libav.ts";
 import { worklet } from "../common/vite-plugin-worklet.ts";
 
 export default defineConfig({
-	plugins: [worklet()],
+	plugins: [worklet(), libav()],
 	build: {
 		lib: {
 			entry: {

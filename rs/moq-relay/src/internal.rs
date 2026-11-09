@@ -9,7 +9,7 @@
 //! - `/metrics` - this node's own traffic counters as OpenMetrics text
 //!   exposition, plus the accept-loop health of its TCP listeners
 //!   ([`with_listeners`](Internal::with_listeners)) and the per-worker health of
-//!   its io_uring runtime ([`with_uring`](Internal::with_uring)), and the
+//!   its io_uring runtime, and the
 //!   progress of a shutdown drain ([`with_shutdown`](Internal::with_shutdown)). A distinct plane
 //!   from both the customer `web` surface and the MoQ `.stats` broadcast: the same
 //!   atomics, but a different transport and audience (an ops scraper, not a
@@ -48,13 +48,12 @@ use prometheus_client::{
 	metrics::{MetricType, counter::ConstCounter, gauge::ConstGauge},
 };
 
-/// One io_uring worker's counters, as [`with_uring`](Internal::with_uring) takes
-/// them.
+/// One io_uring worker's counters, as `Internal::with_uring` takes them.
 ///
 /// Uninhabited when the relay is built without the io_uring listener, so the
 /// list is always empty there and the renderer skips itself, rather than
-/// `cfg`-ing the two fields, the two struct literals that fill them, the
-/// builder and the renderer's signature separately.
+/// `cfg`-ing the two fields, the two struct literals that fill them, and the
+/// renderer's signature separately.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 type UringWorker = moq_uring::metrics::Metrics;
 
@@ -233,10 +232,8 @@ impl Internal {
 	/// Register them before the threads start, so a worker that never came up
 	/// (or has died) still has a series that has stopped moving rather than no
 	/// series at all.
-	///
-	/// Off the io_uring build the item type is uninhabited, so there is nothing
-	/// to register and nothing is rendered.
-	pub fn with_uring(mut self, workers: impl IntoIterator<Item = UringWorker>) -> Self {
+	#[cfg(all(target_os = "linux", feature = "_uring"))]
+	pub(crate) fn with_uring(mut self, workers: impl IntoIterator<Item = UringWorker>) -> Self {
 		self.uring.extend(workers);
 		self
 	}
@@ -1574,6 +1571,7 @@ mod tests {
 	/// and forking both the socket options and the disabled-listener contract.
 	#[tokio::test]
 	async fn serve_hosts_merged_routes_alongside_the_defaults() {
+		moq_tokio::crypto::install_default().unwrap();
 		let listen = Some("127.0.0.1:0".parse().unwrap());
 		let internal = Internal::new(Config { listen }, moq_net::stats::Registry::disabled())
 			.bind()

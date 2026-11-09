@@ -193,7 +193,7 @@ async function watch(config: Media): Promise<{ first_frame_ms: number }> {
 	}, 250);
 	const first = new Promise<number>((resolve) => {
 		let last: number | undefined;
-		const stop = player?.renderer.out.frame.subscribe((frame) => {
+		const stop = player?.renderer.painted.subscribe((frame) => {
 			// A resize or catalog change repaints the same frame; count each frame once.
 			if (!frame || frame.timestamp === last) return;
 			last = frame.timestamp;

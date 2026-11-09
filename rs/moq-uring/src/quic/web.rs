@@ -23,10 +23,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, ready};
 
 use bytes::{Buf, Bytes, BytesMut};
-/// HTTP types used when accepting or refusing a session.
-pub use http;
-/// The HTTP/3 and WebTransport wire types used by this API.
-pub use web_transport_proto as proto;
+use web_transport_proto as proto;
 /// The HTTP/3 ALPN used by WebTransport.
 pub const ALPN: &str = "h3";
 
@@ -240,7 +237,7 @@ impl Request {
 	pub async fn respond(mut self, response: impl Into<proto::ConnectResponse>) -> Result<Session, Error> {
 		let response = response.into();
 		if response.status != http::StatusCode::OK {
-			return Err(HandshakeError::Status(response.status).into());
+			return Err(HandshakeError::Status(response.status.as_u16()).into());
 		}
 		if let Some(protocol) = &response.protocol
 			&& !self.request.protocols.contains(protocol)
@@ -272,11 +269,12 @@ impl Request {
 	/// ours) stay open until then: RFC 9114 makes closing one a connection
 	/// error, so tearing them down here would show the peer an H3 failure
 	/// instead of the status it was sent.
-	pub async fn reject(mut self, status: http::StatusCode) -> Result<(), Error> {
-		if !status.is_client_error() && !status.is_server_error() {
-			return Err(HandshakeError::Status(status).into());
-		}
-		let response = proto::ConnectResponse::new(status);
+	pub async fn reject(mut self, status: u16) -> Result<(), Error> {
+		let code = http::StatusCode::from_u16(status)
+			.ok()
+			.filter(|code| code.is_client_error() || code.is_server_error())
+			.ok_or(HandshakeError::Status(status))?;
+		let response = proto::ConnectResponse::new(code);
 		let mut buf = Vec::new();
 		response.encode(&mut buf).map_err(HandshakeError::from)?;
 		write_all(&mut self.send, &buf).await?;

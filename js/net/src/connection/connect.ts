@@ -1,5 +1,5 @@
 import { Elapsed, Milli, Nano, sleep, timeout } from "@moq/clock";
-import Session, { type SessionOptions as QmuxOptions, type Version as QmuxVersion } from "@moq/qmux";
+import { Session as Qmux, type SessionOptions as QmuxOptions, type Version as QmuxVersion } from "@moq/qmux";
 import { type Getter, race } from "@moq/signals";
 import type * as Auth from "../auth.ts";
 import { vacant } from "../auth_session.ts";
@@ -14,10 +14,10 @@ import * as Hex from "../util/hex.ts";
 import { after } from "../util/timer.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import { parse, show } from "./endpoint.ts";
-import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import type { Session } from "./session.ts";
 import { inspect } from "./stats.ts";
 import { credential, fallback, hold, type Presentation } from "./tokens.ts";
 
@@ -346,7 +346,7 @@ const NEVER_ABORTED = new AbortController().signal;
  *
  * @returns A promise that resolves to an established session
  */
-export function connect(props: ConnectProps): Promise<Established> {
+export function connect(props: ConnectProps): Promise<Session> {
 	return establish(props);
 }
 
@@ -356,7 +356,7 @@ export function connect(props: ConnectProps): Promise<Established> {
  *
  * @internal
  */
-export async function establish({ url, ...props }: ConnectProps, reached?: Reached): Promise<Established> {
+export async function establish({ url, ...props }: ConnectProps, reached?: Reached): Promise<Session> {
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	props.versions = normalizeVersions(props);
 	if (props.transport && props.versions) throw new TypeError("versions cannot reconfigure a supplied transport");
@@ -468,7 +468,7 @@ async function connectInner(
 	props: Omit<ConnectProps, "url">,
 	abort: Promise<void>,
 	reached?: WebTransport,
-): Promise<[Established, Presentation]> {
+): Promise<[Session, Presentation]> {
 	const offered = offer(props.versions);
 	const dial = credential(raw, tokens, offered.setupToken);
 	const url = parse(dial.url).url;
@@ -499,7 +499,7 @@ async function connectInner(
 	void abort.then(() => session.close());
 
 	// Record who won the race to this server, so QUIC's next head start follows the last result.
-	if (session instanceof Session) {
+	if (session instanceof Qmux) {
 		console.debug(show(parse(url)), "connected via WebSocket");
 		websocketWon.add(server);
 	} else {
@@ -517,9 +517,9 @@ async function connectInner(
 		session.close();
 		throw new Error("server negotiated no protocol, and no offered version negotiates in SETUP");
 	}
-	const won = session instanceof Session && fallbackDial ? fallbackDial : dial;
+	const won = session instanceof Qmux && fallbackDial ? fallbackDial : dial;
 	const connection = await connectTransport(url, session as WebTransport, wiring(won), offered.setup);
-	if (session instanceof Session) {
+	if (session instanceof Qmux) {
 		const forget = () => websocketWon.delete(server);
 		void connection.closed.then(forget, forget);
 	}
@@ -534,7 +534,7 @@ async function dialRace(
 	props: Omit<ConnectProps, "url">,
 	offered: Offer,
 	abort: Promise<void>,
-): Promise<WebTransport | Session | undefined> {
+): Promise<WebTransport | Qmux | undefined> {
 	// Stop transports after one connects or the caller aborts.
 	const { promise: raced, resolve: done } = Promise.withResolvers<void>();
 	const cancel = Promise.race([raced, abort]);
@@ -574,7 +574,7 @@ async function dialRace(
 	// Race the available transports, using `.any` to ignore if one participant has an error.
 	// `webtransport`/`websocket` are `Promise | undefined`, so test existence explicitly: a
 	// promise is always truthy, so bare truthiness here would be a misused-promise.
-	const contenders: Promise<WebTransport | Session | undefined>[] = [];
+	const contenders: Promise<WebTransport | Qmux | undefined>[] = [];
 	if (websocket !== undefined) contenders.push(websocket);
 	if (webtransport !== undefined) contenders.push(webtransport);
 	const session = await Promise.any(contenders).catch((err: unknown) => {
@@ -596,7 +596,7 @@ async function connectTransport(
 	session: WebTransport,
 	wiring: SessionProps,
 	setup: Lite.Version[],
-): Promise<Established> {
+): Promise<Session> {
 	const closed = session.closed.then(fromClose, error);
 	const terminal = closed.then((cause) => {
 		throw cause ?? new Error("session closed during SETUP");
@@ -634,7 +634,7 @@ async function negotiate(
 	session: WebTransport,
 	wiring: SessionProps,
 	setup: Lite.Version[],
-): Promise<Established> {
+): Promise<Session> {
 	// The DOM lib has no `protocol` property yet. It is "" when none was negotiated, and
 	// undefined in a browser that predates subprotocols (Firefox before 155).
 	const protocol: string | undefined = (session as { protocol?: string }).protocol || undefined;
@@ -690,7 +690,7 @@ async function handshakeAlpn(
 	session: WebTransport,
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
-): Promise<Established> {
+): Promise<Session> {
 	// Spread whole, so every negotiated flag reaches the connection.
 	// The IETF session code loads on demand, since most sessions negotiate lite; the ALPN already
 	// committed to IETF, so fetch it alongside SETUP.
@@ -759,7 +759,7 @@ async function resolveCertificateHashes(options?: WebTransportProps): Promise<We
 }
 
 // Close every transport the race opened other than `winner`.
-function closeLosers(contenders: Promise<WebTransport | Session | undefined>[], winner: unknown): void {
+function closeLosers(contenders: Promise<WebTransport | Qmux | undefined>[], winner: unknown): void {
 	for (const contender of contenders) {
 		void contender.then(
 			(transport) => {
@@ -954,14 +954,14 @@ async function connectWebSocket(
 	delay: number,
 	cancel: Promise<void>,
 	options: QmuxOptions,
-): Promise<Session | undefined> {
+): Promise<Qmux | undefined> {
 	const timer = sleep(Nano.fromMilli(Milli(delay)));
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
 
 	for (let wait = WEBSOCKET_REDIAL; ; wait = Milli(wait * 2)) {
-		const quic = new Session(url, options);
+		const quic = new Qmux(url, options);
 
 		// Wait for the WebSocket to connect, for the cancel promise to resolve, or for the
 		// redial. `ready` rejects on a refused/failed connection, so a throw here is the

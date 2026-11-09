@@ -12,7 +12,7 @@
 //! dependency.
 //!
 //! ```no_run
-//! # fn example(device: &moq_video::render::wgpu::Device, queue: &moq_video::render::wgpu::Queue) -> Result<(), moq_video::Error> {
+//! # fn example(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<(), moq_video::Error> {
 //! use moq_video::render::{Config, Renderer};
 //!
 //! let mut renderer = Renderer::new(device, queue, Config::new())?;
@@ -69,14 +69,6 @@ mod metal;
 
 pub use device::request_device;
 pub use renderer::{Config, Renderer};
-
-/// The `wgpu` this renderer was built against, re-exported so you name the exact
-/// version rather than guessing at a compatible one.
-///
-/// [`Renderer::new`] takes this crate's `Device` and `Queue`, and
-/// [`Renderer::render`] hands back its `Texture`, so a major bump here is a
-/// breaking change for this crate.
-pub use wgpu;
 
 #[cfg(test)]
 mod tests {

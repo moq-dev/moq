@@ -15,7 +15,6 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
-use moq_tokio::moq_net;
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -450,7 +449,7 @@ async fn uring_custom_route_and_quic() {
 async fn webrtc_feed(mut config: Config) {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	config.drain_timeout = Some((Duration::ZERO).into());
-	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let quic = relay.quic_addr().expect("quic listener bound");
 	let feed = relay.webrtc().expect("tokio serves QUIC");
 	let trigger = relay.shutdown_trigger().clone();
@@ -516,6 +515,7 @@ async fn worker_tokio_webrtc_feed() {
 /// An embedder-owned accept loop joins the relay's own /metrics exposition.
 #[tokio::test]
 async fn embedded_listener_health_reaches_metrics() {
+	moq_tokio::crypto::install_default().unwrap();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());

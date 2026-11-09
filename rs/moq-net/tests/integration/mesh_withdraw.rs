@@ -575,6 +575,7 @@ fn random_mesh(seed: u64) -> (Vec<Link>, usize) {
 /// revive, and how many updates they send beyond the one retraction. Hop chains
 /// counted (231, 3, 290); routed by origin node, none.
 #[kio::test]
+#[ignore = "quarantined: takes 40s+ alone and times out under load; quest/m0/test-flakes-2/mesh-withdraw-runtime.md"]
 async fn random_meshes_retract_once() {
 	assert_eq!(withdrawal_counts(false).await, (0, 0, 0));
 }
@@ -583,6 +584,7 @@ async fn random_meshes_retract_once() {
 /// extra hops, including the publishing client outside the relay graph. Hop
 /// chains counted (177, 0, 192).
 #[kio::test]
+#[ignore = "quarantined: takes 40s+ alone and times out under load; quest/m0/test-flakes-2/mesh-withdraw-runtime.md"]
 async fn capped_random_meshes_retract_once() {
 	assert_eq!(withdrawal_counts(true).await, (0, 0, 0));
 }

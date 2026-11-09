@@ -199,6 +199,7 @@ function frameSource() {
 	return {
 		source: { frames, frameRate: 30 },
 		push: (timestamp: number) => controller.enqueue(new Frame(undefined, { timestamp }) as unknown as VideoFrame),
+		end: () => controller.close(),
 		[Symbol.dispose]() {
 			if (original) Object.defineProperty(globalThis, "VideoFrame", original);
 			else Reflect.deleteProperty(globalThis, "VideoFrame");
@@ -388,6 +389,39 @@ test("the held frame is closed when replaced, when an unread copy is dropped, an
 
 	capture.close();
 	expect(open()).toEqual([]);
+});
+
+test("a source that ends releases the held frame and still drains queued frames", async () => {
+	using input = frameSource();
+	const capture = new Capture({ source: input.source });
+	const effect = new Effect();
+	const late = new Effect();
+
+	try {
+		await settle();
+		const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
+		if (!reader) throw new Error("no fanout");
+		input.push(1_000);
+		input.end();
+		await flush();
+
+		// Only the reader's queued copy is left open: the held original is released.
+		expect(open()).toHaveLength(1);
+
+		// A reader attaching after the end gets no stale replay.
+		const after = capture.out.frames.peek()?.subscribe(late).getReader();
+		expect((await after?.read())?.done).toBe(true);
+
+		const last = await reader.read();
+		expect(last.value?.timestamp).toBe(1_000);
+		last.value?.close();
+		expect((await reader.read()).done).toBe(true);
+		expect(open()).toEqual([]);
+	} finally {
+		effect.close();
+		late.close();
+		capture.close();
+	}
 });
 
 test("closing the capture releases a copy its reader never read", async () => {

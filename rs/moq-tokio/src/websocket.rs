@@ -9,11 +9,10 @@
 //! port via [`Listener`], or pass an HTTP server's upgraded socket to [`accept`] before
 //! admitting the returned request.
 
-use qmux::ws::tokio_tungstenite;
-use qmux::ws::tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
+use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
 use url::Url;
 
 use crate::cli::Duration as CliDuration;
@@ -877,31 +876,31 @@ mod tests {
 
 	#[tokio::test]
 	async fn tls_host_name_override_dials_url_address() {
-		kio::clock::host_time();
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("127.0.0.1", false, Some("relay.example")).await;
 	}
 
 	#[tokio::test]
 	async fn fixed_addresses_keep_tls_name_and_request_host() {
-		kio::clock::host_time();
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("relay.example", true, None).await;
 	}
 
 	#[tokio::test]
 	async fn ipv6_literal() {
-		kio::clock::host_time();
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("[::1]", false, None).await;
 	}
 
 	#[tokio::test]
 	async fn ipv6_literal_fixed_addresses() {
-		kio::clock::host_time();
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("[::1]", true, None).await;
 	}
 
 	#[tokio::test]
 	async fn ipv6_tls_host_name_override() {
-		kio::clock::host_time();
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("[::1]", false, Some("::1")).await;
 	}
 
@@ -1210,7 +1209,7 @@ mod timeout_tests {
 				peer = qmux::ws::Upgraded::new(peer, ALPN).connect() => crate::spawn_qmux(peer.unwrap()),
 				result = accept.as_mut() => panic!("accepted before SETUP: {:?}", result.map(|_| ())),
 			};
-			let _stream = moq_net::kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
+			let _stream = kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
 				.await
 				.unwrap();
 			tokio::time::advance(timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT)).await;

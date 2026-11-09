@@ -9,8 +9,8 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { registerWire, wireOf } from "../wire.ts";
-import type { Established } from "./established.ts";
 import { forwardAnnounced } from "./forward.ts";
+import type { Session } from "./session.ts";
 
 const LINGER = 2000;
 
@@ -128,8 +128,8 @@ class FakeSession {
 	}
 
 	/** What `forwardAnnounced` takes; only the members it touches are implemented. */
-	get session(): Established {
-		return this as unknown as Established;
+	get session(): Session {
+		return this as unknown as Session;
 	}
 }
 

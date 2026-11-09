@@ -4,7 +4,7 @@
 
 import { expect, spyOn, test } from "bun:test";
 import { Manual, yieldNow } from "@moq/clock";
-import { accept, connect, type Established } from "./connection/index.ts";
+import { accept, connect, type Session } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
 import { SubscribeUpdate } from "./ietf/subscribe.ts";
 import * as Lite from "./lite/index.ts";
@@ -23,7 +23,7 @@ const LOW = -100;
 const HIGH = 100;
 
 // Dial a session that consumes what `origin` serves.
-async function session(protocol: string, origin: OriginProducer): Promise<[Established, Established]> {
+async function session(protocol: string, origin: OriginProducer): Promise<[Session, Session]> {
 	const pair = createMockTransportPair(protocol);
 	lateAcks(pair.client);
 	return Promise.all([

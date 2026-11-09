@@ -61,8 +61,8 @@ const room = new Room({ connection, identity });
 
 // room.remotes is a Map<identity, Remote>. Each Remote has camera/screen
 // Members; call member.canvas.set(canvas) to display video and
-// member.muted.set(false) to play audio.
-// member.player exposes the complete Watch.Player pipeline.
+// member.muted.set(false) to play audio. member.video and member.audio
+// report the playing timestamp and receive stats.
 ```
 
 `Local` publishes through `Publish.Broadcast`, which encodes while enabled: while `cameraEnabled` is on, the camera's hd and sd renditions encode even when nobody in the room watches, so a member who arrives late can fetch the last few seconds. While `microphoneEnabled` is on, the microphone keeps raw audio and encodes it once someone listens. Turn either off to stop that capture.

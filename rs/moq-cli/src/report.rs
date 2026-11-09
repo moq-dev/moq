@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::Context;
-use hang::moq_net;
 use moq_mux::catalog::{CatalogFormat, Stream};
 use moq_mux::container::ts;
 use moq_tokio::connection::Monitor;
@@ -77,7 +76,7 @@ impl<T: serde::Serialize> ReportTrack<T> {
 		let Some(track) = &mut self.track else {
 			return;
 		};
-		let refreshed = match track.poll_refresh(&moq_net::kio::Waiter::noop()) {
+		let refreshed = match track.poll_refresh(&kio::Waiter::noop()) {
 			std::task::Poll::Ready(Err(err)) => Err(err),
 			_ => Ok(()),
 		};
@@ -325,7 +324,7 @@ impl Echo {
 			}
 			let prefix = prefix?;
 			let name = format!("{}{}", self.target.name.0, hang::echo::SUFFIX);
-			hang::moq_net::Path::new(&name)
+			moq_net::Path::new(&name)
 				.and_then(|name| prefix.join(&name))
 				.inspect_err(|err| tracing::warn!(%err, path = %echo.path.as_str(), "the feedback path is too long"))
 				.ok()

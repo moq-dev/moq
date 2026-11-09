@@ -8,6 +8,8 @@ use unsafe_libopus::{
 	opus_multistream_decoder_create, opus_multistream_decoder_ctl_impl, opus_multistream_decoder_destroy, varargs,
 };
 
+use std::collections::VecDeque;
+
 use super::Backend;
 use crate::decode::Decoded;
 use crate::{Error, Layout, opus};
@@ -34,6 +36,8 @@ pub(super) struct Libopus {
 	/// packet most likely carried. `None` until one has.
 	last_frame_size: Option<usize>,
 	in_dtx: bool,
+	/// Outputs submitted but not yet received, which reuse their slots across calls.
+	ready: VecDeque<Decoded>,
 }
 
 // SAFETY: the decoder is owned exclusively and libopus keeps no thread-local state.
@@ -101,6 +105,7 @@ impl Libopus {
 			max_frame_size: (opus::DECODE_RATE as usize * MAX_FRAME_MS) / 1000,
 			last_frame_size: None,
 			in_dtx: false,
+			ready: VecDeque::new(),
 		};
 
 		// Same Q7.8 dB units as OpusHead, and it survives OPUS_RESET_STATE.
@@ -150,7 +155,7 @@ impl Backend for Libopus {
 	/// An empty packet conceals as much audio as the last packet that decoded
 	/// held, and is refused before any has. Loss during DTX remains classified
 	/// as DTX, while loss during active audio remains active.
-	fn decode(&mut self, packet: &[u8]) -> Result<Decoded, Error> {
+	fn decode(&mut self, packet: &[u8]) -> Result<(), Error> {
 		let channels = self.layout.channels() as usize;
 		// libopus conceals exactly `frame_size` samples for a lost packet, and
 		// the decoder can't know how long it was, so assume the last one's length.
@@ -195,7 +200,17 @@ impl Backend for Libopus {
 
 		let activity = opus::multistream_activity(packet, self.streams, self.in_dtx);
 		self.in_dtx = activity.is_dtx();
-		Ok(Decoded { samples: out, activity })
+		self.ready.push_back(Decoded { samples: out, activity });
+		Ok(())
+	}
+
+	fn receive(&mut self) -> Result<Option<Decoded>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	/// libopus readies each packet's samples as soon as it is submitted.
+	fn flush(&mut self) -> Result<(), Error> {
+		Ok(())
 	}
 
 	fn reset(&mut self) -> Result<(), Error> {
@@ -205,6 +220,7 @@ impl Backend for Libopus {
 			return Err(opus::error(rc, "OPUS_RESET_STATE"));
 		}
 		self.in_dtx = false;
+		self.ready.clear();
 		Ok(())
 	}
 
@@ -363,7 +379,7 @@ mod tests {
 
 			let mut pcm = Vec::new();
 			for packet in &packets {
-				pcm.extend(decoder.decode(packet).unwrap().samples);
+				pcm.extend(crate::single(decoder.decode_all(packet).unwrap()).samples);
 			}
 			// Skip the encoder's warmup.
 			let pcm = &pcm[pcm.len() / 2..];
@@ -387,13 +403,13 @@ mod tests {
 	fn surround_silence_is_dtx() {
 		let (head, packets) = surround(6);
 		let mut decoder = Decoder::new(&catalog(head.clone(), 6), &Config::default()).unwrap();
-		let mid = decoder.decode(&packets[PACKETS / 2]).unwrap();
+		let mid = crate::single(decoder.decode_all(&packets[PACKETS / 2]).unwrap());
 		assert!(mid.activity.is_active(), "a coded surround frame must stay active");
 
 		// Two coupled streams, then two mono, each a 20 ms empty frame.
 		let dtx = [0xfc, 0x00, 0xfc, 0x00, 0xf8, 0x00, 0xf8];
 		let mut decoder = Decoder::new(&catalog(head, 6), &Config::default()).unwrap();
-		let decoded = decoder.decode(&dtx).expect("empty multistream packet");
+		let decoded = crate::single(decoder.decode_all(&dtx).expect("empty multistream packet"));
 		assert!(decoded.activity.is_dtx(), "all-DTX surround packet read as active");
 		assert_eq!(decoded.samples.len() % 6, 0);
 	}

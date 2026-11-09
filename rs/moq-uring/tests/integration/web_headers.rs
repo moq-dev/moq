@@ -41,7 +41,7 @@ pub fn run(pending: usize, ready: usize, iterations: u64) -> Duration {
 			.build()
 			.expect("runtime");
 		runtime.block_on(async {
-			let request = moq_tokio::quic::web::proto::ConnectRequest::new(
+			let request = web_transport_proto::ConnectRequest::new(
 				url::Url::parse(&format!("https://{address}/headers")).unwrap(),
 			);
 			let session = support::web_connect(request, Default::default())

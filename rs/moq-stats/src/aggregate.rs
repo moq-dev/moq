@@ -12,7 +12,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use kio::clock::Instant;
-use moq_net::kio::{self, Pending, Waiter};
+use kio::{Pending, Waiter};
 use moq_net::stats::{Presence, Traffic};
 use moq_net::track::Resolving;
 use moq_net::{Instance, Path, broadcast, origin};

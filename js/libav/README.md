@@ -13,6 +13,8 @@ await Polyfill.load({ LibAV, polyfill: true });
 
 Most apps never import this directly: `@moq/hang`'s `Util.Libav.polyfill()` does.
 
+It loads a worker and WebAssembly from beside its own module, a path app bundlers may not keep. `@moq/watch` and `@moq/publish` ship both in their `assets/`, so a page under a strict CSP that hosts those and calls their `assets()` points the polyfill at its own copies.
+
 ## Building
 
 `dist/` is a Nix build output, not committed. The workspace's `bun install` builds it through the root `postinstall`, or rebuild it alone:

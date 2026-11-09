@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 
 use anyhow::Context;
 use axum::http::Method;
-use hang::moq_net;
 use moq_tokio::RedactedUrl;
 use url::Url;
 

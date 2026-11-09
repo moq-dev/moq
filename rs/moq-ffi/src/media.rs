@@ -780,14 +780,17 @@ pub enum MoqMediaTarget {
 }
 
 impl MoqMediaTarget {
-	fn resolve(
+	/// Import onto the target's track: a newly reserved one, or the requested one, whose later
+	/// calls then report a failed import.
+	fn import<R>(
 		self,
 		broadcast: &moq_net::broadcast::Producer,
-		format: &impl std::fmt::Display,
-	) -> Result<moq_net::track::Request, MoqError> {
+		format: impl std::fmt::Display,
+		import: impl FnOnce(moq_net::track::Request) -> Result<R, MoqError>,
+	) -> Result<R, MoqError> {
 		match self {
-			Self::Named { name } => reserve_track(broadcast, name, format),
-			Self::Requested { request } => request.take(),
+			Self::Named { name } => import(reserve_track(broadcast, name, &format)?),
+			Self::Requested { request } => request.answer(import),
 		}
 	}
 }
@@ -1006,14 +1009,14 @@ impl MoqMediaTrackProducer {
 		let _guard = crate::ffi::enter();
 		broadcast.with_state(|state| {
 			let init: moq_mux::import::AudioInit = init.into();
-			let request = target.resolve(&state.broadcast, &init.format)?;
-
-			let import = moq_mux::import::Track::audio(request, state.catalog.reserve(), init).map_err(|err| {
-				MoqError::Codec {
-					reason: format!("init failed: {err}"),
-				}
-			})?;
-			MoqMediaTrackProducer::from_import(import, None, &state.children)
+			target.import(&state.broadcast, init.format, |request| {
+				let import = moq_mux::import::Track::audio(request, state.catalog.reserve(), init).map_err(|err| {
+					MoqError::Codec {
+						reason: format!("init failed: {err}"),
+					}
+				})?;
+				MoqMediaTrackProducer::from_import(import, None, &state.children)
+			})
 		})
 	}
 }
@@ -1034,14 +1037,14 @@ impl MoqMediaTrackProducer {
 		let init = init.resolve()?;
 		broadcast.with_state(|state| {
 			let priority = init.priority;
-			let request = target.resolve(&state.broadcast, &init.format)?;
-
-			let import = moq_mux::import::Track::video(request, state.catalog.reserve(), init).map_err(|err| {
-				MoqError::Codec {
-					reason: format!("init failed: {err}"),
-				}
-			})?;
-			MoqMediaTrackProducer::from_import(import, Some(priority), &state.children)
+			target.import(&state.broadcast, init.format, |request| {
+				let import = moq_mux::import::Track::video(request, state.catalog.reserve(), init).map_err(|err| {
+					MoqError::Codec {
+						reason: format!("init failed: {err}"),
+					}
+				})?;
+				MoqMediaTrackProducer::from_import(import, Some(priority), &state.children)
+			})
 		})
 	}
 }
@@ -1087,22 +1090,21 @@ impl MoqMediaTrackStreamProducer {
 		let init = init.resolve()?;
 		broadcast.with_state(|state| {
 			let priority = init.priority;
-			let request = target.resolve(&state.broadcast, &init.format)?;
-
-			let import =
-				moq_mux::import::TrackStream::video(request, state.catalog.reserve(), init).map_err(|err| {
-					MoqError::Codec {
-						reason: format!("init failed: {err}"),
-					}
-				})?;
-
-			state.children.adopt(Arc::new(MoqMediaTrackStreamProducer {
-				inner: std::sync::Mutex::new(Some(MediaStreamProducer {
-					import: Box::new(import),
-					priority,
-				})),
-				children: state.children.clone(),
-			}))
+			target.import(&state.broadcast, init.format, |request| {
+				let import =
+					moq_mux::import::TrackStream::video(request, state.catalog.reserve(), init).map_err(|err| {
+						MoqError::Codec {
+							reason: format!("init failed: {err}"),
+						}
+					})?;
+				state.children.adopt(Arc::new(MoqMediaTrackStreamProducer {
+					inner: std::sync::Mutex::new(Some(MediaStreamProducer {
+						import: Box::new(import),
+						priority,
+					})),
+					children: state.children.clone(),
+				}))
+			})
 		})
 	}
 }
@@ -1617,11 +1619,15 @@ mod read_tests {
 	}
 
 	/// The warmup starts the reader that much further back than the min delay.
-	#[tokio::test]
-	#[ignore = "flaky: the 4.7 s group is sometimes skipped under load; quest/m0/test-flakes-2/ffi-warmup-wall-clock.md"]
+	///
+	/// Reads on the paused test clock, not through `next()` on the FFI runtime's host clock: a
+	/// group is stale once its successor arrived a full max delay ago, so a stall between the
+	/// writes and the read would rightly skip the groups this checks.
+	#[tokio::test(start_paused = true)]
 	async fn raw_media_catalog_warmup_reaches_the_subscription() {
 		for video in [false, true] {
 			let (_broadcast, track, reader, kind) = subscribe_warmup(video).await;
+			let mut media = reader.reads.take(|_| Ok(())).unwrap();
 			let write = |sequence: u64, micros| {
 				let mut group = track.create_group(sequence.into()).unwrap();
 				moq_mux::catalog::hang::Container::Legacy(kind)
@@ -1644,9 +1650,9 @@ mod read_tests {
 			write(3, 4_400_000);
 			track.finish().unwrap();
 			let mut micros = Vec::new();
-			while let Some(read) = reader.next().await.unwrap() {
-				if let MoqMediaRead::Frame { frame } = read {
-					micros.push(frame.timestamp.value);
+			while let Some(read) = media.read().await.unwrap() {
+				if let moq_mux::container::Read::Frame { frame, .. } = read {
+					micros.push(frame.timestamp.as_micros());
 				}
 			}
 			assert_eq!(micros, [4_400_000, 4_700_000, 5_000_000], "video={video}");
