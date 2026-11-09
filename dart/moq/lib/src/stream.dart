@@ -27,34 +27,34 @@ abstract class NativeStream<T> extends Stream<T> {
   Stream<T> _create() {
     late final StreamController<T> controller;
     Future<void>? running;
-    UniffiRustFuture<T>? pending;
+    _Reading<T> reading = _Idle<T>();
     Completer<void>? resumed;
-    var stopped = false;
+    bool stopped() => reading is _Stopped<T>;
 
     Future<void> run() async {
       try {
-        if (stopped) return;
+        if (stopped()) return;
         for (final value in initial()) {
           if (resumed != null) await resumed!.future;
-          if (stopped) {
+          if (stopped()) {
             discard(value);
             return;
           }
           controller.add(value);
         }
-        while (!stopped) {
+        while (!stopped()) {
           if (resumed != null) await resumed!.future;
-          if (stopped) return;
+          if (stopped()) return;
           final next = read();
-          pending = next;
+          reading = _Pending<T>(next);
           final T value;
           try {
             value = await next;
           } finally {
-            pending = null;
+            if (!stopped()) reading = _Idle<T>();
           }
           if (resumed != null) await resumed!.future;
-          if (stopped) {
+          if (stopped()) {
             discard(value);
             return;
           }
@@ -62,7 +62,7 @@ abstract class NativeStream<T> extends Stream<T> {
           controller.add(value);
         }
       } catch (error, stack) {
-        if (!stopped && !ended(error)) controller.addError(error, stack);
+        if (!stopped() && !ended(error)) controller.addError(error, stack);
       } finally {
         try {
           release();
@@ -82,8 +82,9 @@ abstract class NativeStream<T> extends Stream<T> {
         resumed = null;
       },
       onCancel: () {
-        stopped = true;
-        unawaited(pending?.cancel());
+        final previous = reading;
+        reading = _Stopped<T>();
+        if (previous is _Pending<T>) unawaited(previous.read.cancel());
         resumed?.complete();
         resumed = null;
         return running;
@@ -105,3 +106,16 @@ abstract class NativeStream<T> extends Stream<T> {
     cancelOnError: cancelOnError,
   );
 }
+
+/// Where a [NativeStream]'s read loop is: between reads, awaiting one, or stopped by its
+/// listener, which cancels the read it was awaiting.
+sealed class _Reading<T> {}
+
+final class _Idle<T> extends _Reading<T> {}
+
+final class _Pending<T> extends _Reading<T> {
+  _Pending(this.read);
+  final UniffiRustFuture<T> read;
+}
+
+final class _Stopped<T> extends _Reading<T> {}

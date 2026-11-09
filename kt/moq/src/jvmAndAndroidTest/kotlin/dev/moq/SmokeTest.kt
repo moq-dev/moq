@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import uniffi.moq.MoqException
 
@@ -697,6 +698,30 @@ class SmokeTest {
                     route.announce()
                     route.withdraw()
                 }
+            }
+    }
+
+    @Test
+    fun `a flow releases its handle however collection ends`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("thrown", null)
+            track.appendGroup().finish()
+            // Finished, so a handle left open would read the end instead of failing.
+            track.finish()
+            val consumer = broadcast.consume().subscribeTrack("thrown", null)
+            assertFailsWith<IllegalStateException> { consumer.groups().collect { error("collector failed") } }
+            assertFailsWith<MoqException.Cancelled> { consumer.nextGroup() }
+        }
+    }
+
+    @Test
+    fun `ending a requests collection leaves the server listening`() = runTest {
+        Server.listen(
+                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
+            )
+            .use { server ->
+                assertNull(withTimeoutOrNull(10.milliseconds) { server.requests().first() })
+                assertEquals(1, server.certFingerprints().size)
             }
     }
 

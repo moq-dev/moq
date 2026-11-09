@@ -47,7 +47,7 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
-`Moq.connect(url, ClientConfig(...))` builds the `MoqClient` from the config record, wires the publish + consume origins, and hands back a `Moq` you can `use {}`. Cancelling the surrounding coroutine scope propagates through the Flow extensions to the native consumer's `cancel()` via their `onCompletion` hook.
+`Moq.connect(url, ClientConfig(...))` builds the `MoqClient` from the config record, wires the publish + consume origins, and hands back a `Moq` you can `use {}`. However a Flow extension's collection ends, by cancellation, an exception, or the stream's end, its `onCompletion` hook calls the native consumer's `cancel()`, so collect each one once. `Server.requests()` is the exception: ending it leaves the server listening.
 
 ### What the wrapper adds
 
