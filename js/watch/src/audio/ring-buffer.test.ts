@@ -1054,7 +1054,7 @@ describe("time stretch", () => {
 		// The staged window plays out once, then the rest of the silence, then the utterance.
 		const [output] = read(buffer, frames(100), 1);
 		expect(output.length).toBe(frames(100));
-		const silence = output.indexOf(0);
+		const silence = output.findIndex((sample) => sample === 0);
 		expect(silence).toBe(staged);
 		expect(output.slice(silence).every((sample) => sample === 0 || sample === 0.5)).toBe(true);
 		expect(output.at(-1)).toBe(0.5);

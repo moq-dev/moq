@@ -47,7 +47,7 @@ const server = Bun.serve<Peer>({
 		// Accept the upgraded socket like a real server, so Session sends its transport parameters first.
 		open(ws) {
 			const peer = ws.data;
-			Session.accept({
+			const session = Session.accept({
 				url: peer.url,
 				opened: Promise.resolve({
 					protocol: peer.protocol,
@@ -66,9 +66,15 @@ const server = Bun.serve<Peer>({
 				closed: peer.closed.promise,
 				close: (info?: WebSocketStreamCloseInfo) => ws.close(info?.closeCode, info?.reason),
 			});
+			// The client only sees the socket close, so log the server-side cause, such as a handshake timeout.
+			session.closed.catch((err: unknown) => console.error("qmux fake peer:", err));
 		},
 		message(ws, message) {
-			if (typeof message === "string") throw new Error("QMux frames are binary");
+			// QMux is binary-only. Close rather than throw, so the session ends with the close.
+			if (typeof message === "string") {
+				ws.close(1003, "QMux frames are binary");
+				return;
+			}
 			if (!ws.data.incoming) throw new Error("QMux frame before the socket opened");
 			ws.data.incoming.enqueue(message);
 		},
