@@ -19,6 +19,7 @@ pub mod consumer;
 pub mod datagram;
 pub mod demand;
 pub mod error;
+pub mod instance;
 mod ffi;
 pub mod json;
 mod log;
