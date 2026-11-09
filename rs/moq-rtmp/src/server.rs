@@ -2806,7 +2806,13 @@ mod tests {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
 		kio::clock::timeout(Duration::from_secs(5), async {
-			while !matches!(announced.next().await, Some(moq_net::origin::RouteEvent::Restart(_))) {}
+			while !matches!(
+				announced.next().await,
+				Some(moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Restart,
+					..
+				})
+			) {}
 		})
 		.await
 		.expect("the reconnect restarts the broadcast");

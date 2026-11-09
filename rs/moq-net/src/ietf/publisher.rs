@@ -4131,12 +4131,19 @@ impl Publisher {
 		let mut initial = std::collections::BTreeMap::new();
 		while let Some(event) = announced.try_next() {
 			match event {
-				crate::origin::RouteEvent::Start(update)
-				| crate::origin::RouteEvent::Update(update)
-				| crate::origin::RouteEvent::Restart(update) => {
+				crate::origin::RouteEvent {
+					kind:
+						crate::origin::RouteKind::Start
+						| crate::origin::RouteKind::Update
+						| crate::origin::RouteKind::Restart,
+					announce: update,
+				} => {
 					initial.insert(update.prefix.clone(), update);
 				}
-				crate::origin::RouteEvent::End(update) => {
+				crate::origin::RouteEvent {
+					kind: crate::origin::RouteKind::End,
+					announce: update,
+				} => {
 					initial.remove(&update.prefix);
 				}
 			}
@@ -5898,11 +5905,18 @@ impl ForwardNamespaces {
 		}
 		if let Poll::Ready(next) = self.announced.poll_next(waiter) {
 			return Poll::Ready(NamespaceEvent::Update(next.map(|event| match event {
-				crate::origin::RouteEvent::Start(update) | crate::origin::RouteEvent::Update(update) => {
-					(update, true, false)
-				}
-				crate::origin::RouteEvent::Restart(update) => (update, true, true),
-				crate::origin::RouteEvent::End(update) => (update, false, false),
+				crate::origin::RouteEvent {
+					kind: crate::origin::RouteKind::Start | crate::origin::RouteKind::Update,
+					announce: update,
+				} => (update, true, false),
+				crate::origin::RouteEvent {
+					kind: crate::origin::RouteKind::Restart,
+					announce: update,
+				} => (update, true, true),
+				crate::origin::RouteEvent {
+					kind: crate::origin::RouteKind::End,
+					announce: update,
+				} => (update, false, false),
 			})));
 		}
 		if self.retry.poll(waiter).is_ready() {

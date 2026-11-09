@@ -30,13 +30,22 @@ async fn read_until_synced(announced: &mut origin::Routes) -> BTreeSet<String> {
 			.expect("synced in time")
 			.expect("the cursor stays open");
 		match event {
-			origin::RouteEvent::Start(announce) | origin::RouteEvent::Restart(announce) => {
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start | origin::RouteKind::Restart,
+				announce,
+			} => {
 				seen.insert(announce.prefix.to_string());
 			}
-			origin::RouteEvent::End(announce) => {
+			origin::RouteEvent {
+				kind: origin::RouteKind::End,
+				announce,
+			} => {
 				seen.remove(announce.prefix.as_str());
 			}
-			origin::RouteEvent::Update(_) => {}
+			origin::RouteEvent {
+				kind: origin::RouteKind::Update,
+				..
+			} => {}
 		}
 	}
 	seen
@@ -140,6 +149,8 @@ async fn a_cold_relay_syncs_then_forwards_upstream_routes_as_live() {
 	options.client_subscribe = Some(relay.clone());
 	let _upstream = connect_mock(options).await;
 	let event = announced.next().await.unwrap();
-	assert!(matches!(event, origin::RouteEvent::Start(route) if route.prefix.as_str() == "room/cam"));
+	assert!(
+		matches!(event, origin::RouteEvent { kind: origin::RouteKind::Start, announce: route } if route.prefix.as_str() == "room/cam")
+	);
 	assert!(announced.poll_synced(&kio::Waiter::noop()).is_ready());
 }

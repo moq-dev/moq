@@ -829,7 +829,13 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 			// The new connection is cheaper, so the relay reports its route taking over.
 			let mut follow = relay.consume().routes();
 			assert!(
-				matches!(follow.next().await, Some(origin::RouteEvent::Start(_))),
+				matches!(
+					follow.next().await,
+					Some(origin::RouteEvent {
+						kind: origin::RouteKind::Start,
+						..
+					})
+				),
 				"{version}"
 			);
 			let replacement = upstream(1).await;
@@ -837,7 +843,10 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 			assert!(
 				matches!(
 					event,
-					Some(origin::RouteEvent::Update(_) | origin::RouteEvent::Restart(_))
+					Some(origin::RouteEvent {
+						kind: origin::RouteKind::Update | origin::RouteKind::Restart,
+						..
+					})
 				),
 				"{version}: {event:?}"
 			);
