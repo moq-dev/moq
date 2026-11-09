@@ -451,6 +451,12 @@ pub fn excluding(origin: crate::origin::Consumer, peer: u64) -> crate::origin::C
 	origin.excluding(crate::Hop::from_wire(peer))
 }
 
+/// A fresh instance as a session mints one for a route an older wire delivered, for tests
+/// outside the crate that route one without an older session.
+pub fn minted_instance() -> crate::Instance {
+	crate::Instance::minted()
+}
+
 /// A peer's wire route: its hop ids, cost, and instance at an epoch, as a session
 /// decodes one, for benches and tests that land or update forwarded routes.
 ///

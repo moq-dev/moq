@@ -435,6 +435,7 @@ export namespace Instance {
 	export function isMinted(instance: Instance.Valid): boolean;
 	export function parse(text: string): Instance.Valid;
 	export function random(): Instance.Valid;
+	export function text(instance: Instance.Valid): string;
 }
 
 export namespace Origin {

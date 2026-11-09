@@ -23,7 +23,7 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
-import * as Instance from "../instance.ts";
+import type * as Instance from "../instance.ts";
 import {
 	type DropRun,
 	hiddenBelow,
@@ -40,6 +40,7 @@ import {
 	staleHole,
 } from "../internal.ts";
 import type { Lister } from "../listing.ts";
+import * as Mint from "../mint.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
@@ -234,7 +235,7 @@ export class Minted {
 	acquire(path: Path.Valid): Instance.Valid {
 		let entry = this.#paths.get(path);
 		if (!entry) {
-			entry = { instance: Instance.minted(), holders: 0 };
+			entry = { instance: Mint.fresh(), holders: 0 };
 			this.#paths.set(path, entry);
 		}
 		entry.holders += 1;

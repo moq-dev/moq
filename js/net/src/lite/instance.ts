@@ -1,4 +1,5 @@
 import * as Instance from "../instance.ts";
+import * as Mint from "../mint.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { hasInstance, type Version } from "./version.ts";
 
@@ -6,25 +7,28 @@ const encoder = new TextEncoder();
 // `ignoreBOM` keeps a leading U+FEFF, which is instance text like any other, as Rust does.
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
-/** Encode the instance a request pins as its UTF-8 bytes, or empty for none. Older versions
- * carry nothing, so the peer resolves whichever instance wins the path. Mirrors rs/moq-net. */
+/** Encode the instance a request pins as its UTF-8 bytes and minted flag, or empty and unminted
+ * for none. Older versions carry nothing, so the peer resolves whichever instance wins the path.
+ * Mirrors rs/moq-net. */
 export async function encodePin(w: Writer, version: Version, instance: Instance.Valid | undefined): Promise<void> {
 	if (!hasInstance(version)) return;
-	const bytes = instance === undefined ? new Uint8Array() : encoder.encode(instance);
-	await w.u53(bytes.byteLength);
-	await w.write(bytes);
+	if (instance !== undefined) return encode(w, instance);
+	await w.u53(0);
+	await w.bool(false);
 }
 
-/** Decode the instance a request pins: empty is none, and anything but UTF-8 is refused. */
+/** Decode the instance a request pins: empty is none, and anything but UTF-8, or an empty one
+ * flagged minted, is refused. */
 export async function decodePin(r: Reader, version: Version): Promise<Instance.Valid | undefined> {
 	if (!hasInstance(version)) return undefined;
-	const size = await r.u53();
-	if (size === 0) return undefined;
-	return Instance.parse(decoder.decode(await r.read(size)));
+	const bytes = await r.read(await r.u53());
+	const minted = await r.bool();
+	if (bytes.byteLength === 0 && !minted) return undefined;
+	return decode(bytes, minted);
 }
 
-/** Encode the instance and epoch an announcement serves. Every route carries an instance, so
- * lite-07 refuses to announce one without; older versions carry neither. */
+/** Encode the instance, its minted flag, and the epoch an announcement serves. Every route
+ * carries an instance, so lite-07 refuses to announce one without; older versions carry neither. */
 export async function encodeRoute(
 	w: Writer,
 	version: Version,
@@ -33,16 +37,26 @@ export async function encodeRoute(
 ): Promise<void> {
 	if (!hasInstance(version)) return;
 	if (instance === undefined) throw new Error("a lite-07 route needs an instance");
-	const bytes = encoder.encode(instance);
-	await w.u53(bytes.byteLength);
-	await w.write(bytes);
+	await encode(w, instance);
 	await w.u62(epoch ?? 0n);
 }
 
 /** Decode the instance and epoch an announcement serves; see {@link encodeRoute}. */
 export async function decodeRoute(r: Reader, version: Version): Promise<{ instance?: Instance.Valid; epoch?: bigint }> {
 	if (!hasInstance(version)) return {};
-	const size = await r.u53();
-	const instance = Instance.parse(decoder.decode(await r.read(size)));
+	const bytes = await r.read(await r.u53());
+	const instance = decode(bytes, await r.bool());
 	return { instance, epoch: await r.u62() };
+}
+
+async function encode(w: Writer, instance: Instance.Valid): Promise<void> {
+	const bytes = encoder.encode(Instance.text(instance));
+	await w.u53(bytes.byteLength);
+	await w.write(bytes);
+	await w.bool(Instance.isMinted(instance));
+}
+
+function decode(bytes: Uint8Array, minted: boolean): Instance.Valid {
+	const named = Instance.parse(decoder.decode(bytes));
+	return minted ? Mint.mark(named) : named;
 }

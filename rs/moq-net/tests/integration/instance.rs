@@ -54,7 +54,8 @@ async fn job_reannounced(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let relay = produce_origin(2);
-	let instance: Instance = "job".parse().unwrap();
+	// Text like the mark minted instances once carried, which names an instance like any other.
+	let instance: Instance = "~job".parse().unwrap();
 	let job = publisher
 		.route(
 			"job",
@@ -99,6 +100,21 @@ async fn moq_transport_mints_per_announcement() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		job_reannounced(version).await;
 	}
+}
+
+/// A session mints an instance for a route an older wire delivered, and lite-07 forwards it
+/// still minted, so every hop past it names the same stream.
+#[kio::test]
+async fn lite07_forwards_a_minted_instance() {
+	let publisher = produce_origin(1);
+	let relay = produce_origin(2);
+	let viewer = produce_origin(3);
+	let _route = publisher.route("job", Default::default()).unwrap();
+	let _older = link("moq-lite-06".parse().unwrap(), &publisher, &relay).await;
+	let _newer = link("moq-lite-07-wip".parse().unwrap(), &relay, &viewer).await;
+	let minted = started(&mut relay.consume().routes()).await;
+	assert!(minted.is_minted());
+	assert_eq!(started(&mut viewer.consume().routes()).await, minted);
 }
 
 /// One publisher reaches a relay through two neighbors, and the one the relay prefers
