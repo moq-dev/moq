@@ -250,7 +250,8 @@ test("a listing past the announces cap is reset, and the session stays", async (
 	again.close();
 });
 
-test("a flood of a peer's listing churn yields to the host's tasks", async () => {
+// Quarantined: timed out at 5 s in 2 of 30 full js/net runs under 48 CPU burners; see moq-dev/moq#8355.
+test.skip("a flood of a peer's listing churn yields to the host's tasks", async () => {
 	const { subscriber, listed } = handPlayed();
 	const tracks = subscriber.consume(Path.from("room")).tracks();
 	const peer = await listed();
