@@ -101,7 +101,7 @@ public typealias CongestionControl = MoqFFI.MoqCongestionControl
 /// The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start.
 public typealias WebSocketConfig = MoqFFI.MoqWebSocketConfig
 
-/// The connection lifecycle phase.
+/// Where a connection is in its lifecycle, carrying that phase's failure or version.
 public typealias ConnectionPhase = MoqFFI.MoqConnectionPhase
 
 /// One coherent connection lifecycle snapshot.

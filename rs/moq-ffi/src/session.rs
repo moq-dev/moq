@@ -703,19 +703,36 @@ impl MoqConnectionStats {
 	}
 }
 
-/// The current lifecycle phase, distinct from cumulative statistics presence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+/// Where a connection is in its lifecycle, with the data that phase carries.
+#[derive(Debug, uniffi::Enum)]
 pub enum MoqConnectionPhase {
 	/// No session has connected yet.
-	Connecting,
+	Connecting {
+		/// The latest failed dial, or none before the first one fails.
+		failure: Option<MoqError>,
+	},
 	/// A session is serving.
-	Connected,
+	Connected {
+		/// The live session's negotiated version, spelled like `moq-lite-03`.
+		version: String,
+	},
 	/// No session is serving while a native connection redials.
-	Disconnected,
+	Disconnected {
+		/// Why nothing serves: the last session's close reason or the latest failed dial.
+		failure: Option<MoqError>,
+	},
 	/// The old session serves while its replacement dials.
-	Migrating,
+	Migrating {
+		/// The serving session's negotiated version.
+		version: String,
+		/// The replacement's latest failed dial.
+		failure: Option<MoqError>,
+	},
 	/// The connection has stopped for good.
-	Closed,
+	Closed {
+		/// The terminal error, or none after a local close.
+		failure: Option<MoqError>,
+	},
 }
 
 /// One coherent connection lifecycle observation.
@@ -723,31 +740,33 @@ pub enum MoqConnectionPhase {
 pub struct MoqConnectionState {
 	/// An opaque revision to pass back to `state_changed` on this session.
 	pub revision: u64,
-	/// The current lifecycle phase.
-	pub phase: MoqConnectionPhase,
 	/// How many sessions have connected, including replacements.
 	pub connects: u64,
-	/// The latest failed attempt or terminal failure, cleared by a successful connect.
-	pub failure: Option<MoqError>,
-	/// The live session's negotiated protocol, or none while offline.
-	pub version: Option<String>,
+	/// The current lifecycle phase and its data.
+	pub phase: MoqConnectionPhase,
 }
 
 impl From<moq_tokio::connection::Observation> for MoqConnectionState {
 	fn from(state: moq_tokio::connection::Observation) -> Self {
 		use moq_tokio::connection::Phase;
+		let failure = |failure: Option<moq_tokio::Error>| failure.map(map_closed_error);
 		Self {
 			revision: state.revision,
-			phase: match state.phase {
-				Phase::Connecting => MoqConnectionPhase::Connecting,
-				Phase::Connected => MoqConnectionPhase::Connected,
-				Phase::Disconnected => MoqConnectionPhase::Disconnected,
-				Phase::Migrating => MoqConnectionPhase::Migrating,
-				Phase::Closed => MoqConnectionPhase::Closed,
-			},
 			connects: state.connects,
-			failure: state.failure.map(map_closed_error),
-			version: state.version.map(|v| v.to_string()),
+			phase: match state.phase {
+				Phase::Connecting { failure: err } => MoqConnectionPhase::Connecting { failure: failure(err) },
+				Phase::Connected { version, .. } => MoqConnectionPhase::Connected {
+					version: version.to_string(),
+				},
+				Phase::Disconnected { failure: err } => MoqConnectionPhase::Disconnected { failure: failure(err) },
+				Phase::Migrating {
+					version, failure: err, ..
+				} => MoqConnectionPhase::Migrating {
+					version: version.to_string(),
+					failure: failure(err),
+				},
+				Phase::Closed { failure: err } => MoqConnectionPhase::Closed { failure: failure(err) },
+			},
 		}
 	}
 }
@@ -779,16 +798,19 @@ impl Accepted {
 			closed.as_mut(),
 			&mut std::task::Context::from_waker(std::task::Waker::noop()),
 		);
-		let (phase, failure, revision) = match result {
-			std::task::Poll::Pending => (MoqConnectionPhase::Connected, None, 0),
-			std::task::Poll::Ready(result) => (MoqConnectionPhase::Closed, result.err(), 1),
+		let (revision, phase) = match result {
+			std::task::Poll::Pending => (
+				0,
+				MoqConnectionPhase::Connected {
+					version: self.session.version().to_string(),
+				},
+			),
+			std::task::Poll::Ready(result) => (1, MoqConnectionPhase::Closed { failure: result.err() }),
 		};
 		MoqConnectionState {
 			revision,
-			phase,
 			connects: 1,
-			failure,
-			version: (phase == MoqConnectionPhase::Connected).then(|| self.session.version().to_string()),
+			phase,
 		}
 	}
 
@@ -970,8 +992,8 @@ impl MoqSession {
 					if state.revision != after {
 						return Ok(state);
 					}
-					if state.phase == MoqConnectionPhase::Closed {
-						return Err(state.failure.unwrap_or(MoqError::Closed));
+					if let MoqConnectionPhase::Closed { failure } = state.phase {
+						return Err(failure.unwrap_or(MoqError::Closed));
 					}
 					let _ = session.closed::<()>().await;
 					Ok(session.state())
