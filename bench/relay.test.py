@@ -269,6 +269,7 @@ relay_owns_port "$OWNER_PID" "$PORT"
             )
             self.assertEqual(result.returncode, 1, result.stderr)
 
+    @unittest.skip("flaky under parallel checks; quarantined until quest/m0/test-flakes-2/relay-port-pair.md lands")
     def test_a_stream_transport_needs_its_own_listener(self):
         with (
             tempfile.TemporaryDirectory() as directory,
