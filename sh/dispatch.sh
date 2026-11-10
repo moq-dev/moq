@@ -162,9 +162,29 @@ module bench '^bench/' \
 module carla '^demo/carla/(sim/|justfile$)' \
     tools='uv'
 # The CARLA demo's GPU bridge, a Cargo workspace of its own. It also matches
-# the rs/ crates it path-depends on, so their API changes compile it.
-module carla_bridge '^(\.cargo/config\.toml$|demo/carla/(bridge/|justfile$)|rs/(hang|kio|moq-(json|loc|msf|mux|net|nvenc|pattern|video))/)' \
-    tools='cargo' compiles='check fix' fix
+# rs/, narrowed after the tool check to the crates it path-depends on, so their
+# API changes compile it while other rs/ changes skip it.
+module carla_bridge '^(\.cargo/config\.toml$|demo/carla/(bridge/|justfile$)|rs/)' \
+    tools='cargo jq' compiles='check fix' fix
+# Reads the bridge's manifest and the root workspace's, so it needs cargo and
+# runs only after setup. Dev-dependencies of the crates it reaches never build
+# into it, so they are left out.
+carla_bridge_scope() {
+    local crates
+    crates=$(
+        {
+            cargo metadata --no-deps --format-version 1 --manifest-path demo/carla/bridge/Cargo.toml
+            cargo metadata --no-deps --format-version 1
+        } | jq -rs '
+            (.[1].workspace_root + "/") as $root
+            | (.[1].packages | map({key: (.manifest_path | rtrimstr("/Cargo.toml")), value: [.dependencies[] | select(.kind != "dev") | .path // empty]}) | from_entries) as $deps
+            | def close: (. + [.[] | $deps[.][]?] | unique) as $next | if $next == . then . else $next | close end;
+            [.[0].packages[].dependencies[] | .path // empty] | unique | close | .[] | ltrimstr($root) | gsub("\\."; "\\.")' |
+            tr '\n' '|'
+    )
+    [[ -n "$crates" ]] || { echo "error: found no rs/ crates under the CARLA bridge" >&2; exit 1; }
+    echo "^(\.cargo/config\.toml$|demo/carla/(bridge/|justfile$)|(${crates%|})/)"
+}
 # swift needs no tools: it skips off macOS by design, and platform.yml is its
 # real gate. Its formatter is absent where nixpkgs cannot build it (see
 # flake.nix).
@@ -282,6 +302,12 @@ for module in "${modules[@]}"; do
         command -v "$tool" >/dev/null 2>&1 || absent+=("$tool")
     done
     if ((${#absent[@]} == 0)); then
+        # A query keeps every rs/ path: any rs/ change already selects rs,
+        # which reports the same need and Rust cache.
+        if [[ "$module" == carla_bridge && -z "$all" ]]; then
+            pattern=$(carla_bridge_scope)
+            grep -qE "$pattern" "$changed" || continue
+        fi
         selected+=("$module")
     elif [[ -n "${CI_STRICT:-}" ]]; then
         missing+=("${absent[@]}")
