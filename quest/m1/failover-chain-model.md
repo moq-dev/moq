@@ -32,7 +32,4 @@ resuming.
 - Replay each counterexample on the real stack (relays over the memory
   transport, mocked clock), and pin confirmed bugs as `residual_*` tests.
 
-Related: [route health](/quest/m5/route-health/README.md), which adds
-stall-driven failover; extend this model when it lands.
-
 Public API: none. Wire: none.
