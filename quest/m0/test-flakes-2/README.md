@@ -242,8 +242,9 @@ reader got `Unroutable` after the endpoint closed during
 It is quarantined with `pytest.mark.skip` until its child fixes it.
 
 Added 2026-11-09 (maintainer, `/quest-complete`, under the flaky-test rule):
-`js/common/worklet.test.ts`'s dev-server test, which hit bun's 5 s timeout in a
-loaded full `just check` on [moq-dev/moq#8325](https://github.com/moq-dev/moq/pull/8325).
+`js/common/worklet.test.ts`'s dev-server test, a candidate for bun's 5 s timeout
+in a loaded full `just check` on [moq-dev/moq#8325](https://github.com/moq-dev/moq/pull/8325).
+The failed log was not retained, so the failing test is unconfirmed.
 It is quarantined with `test.skip` until its child fixes it.
 
 Public API: none. Wire: none.

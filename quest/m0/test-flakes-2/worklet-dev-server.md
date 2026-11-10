@@ -36,9 +36,10 @@ Reproduction attempts, all on 2026-11-09, all passing:
 
 Suspected, not confirmed: the dev server's setup or `close()` waits on I/O under
 load past the 5 s budget; or state from an earlier file in the same bun process
-(the root set shares one process) delays this test's timers. Reproduce the
-failure first: run the root `bun test` set under a loaded `just check`, and keep
-the log with the failing test's name. Then fix the step that outruns the
+(the root set shares one process) delays this test's timers. Temporarily remove
+the candidate's `test.skip` locally first, since a skipped test cannot fail.
+Reproduce the failure: run the root `bun test` set under a loaded `just check`,
+and keep the log with the failing test's name. Then fix the step that outruns the
 budget: wait on an event the test can observe, not a longer deadline or a
 retry. If the failure is in the shared process rather than the test, fix it
 there.
