@@ -3785,13 +3785,6 @@ enum OnceStep {
 	},
 	/// Refused: cancelling the request, then failing.
 	Refuse(Cancelling),
-	/// The alias would not bind: cancelling the request, then failing the track with why.
-	Unbound {
-		cancelling: Cancelling,
-		request_id: RequestId,
-		track: track::Producer,
-		err: Error,
-	},
 	/// Established, until one event ends it.
 	Serve(Serving),
 	/// The publisher ended it with `end`: waiting for the data streams it opened.
@@ -3976,24 +3969,6 @@ impl SubscribeOnce {
 				OnceStep::Refuse(mut cancelling) => match cancelling.poll(waiter) {
 					Poll::Ready(_) => Flow::Ready(None),
 					Poll::Pending => Flow::Wait(OnceStep::Refuse(cancelling)),
-				},
-				OnceStep::Unbound {
-					mut cancelling,
-					request_id,
-					track,
-					err,
-				} => match cancelling.poll(waiter) {
-					Poll::Ready(_) => {
-						this.remove_subscribe(request_id);
-						let _ = track.abort(err);
-						Flow::Ready(None)
-					}
-					Poll::Pending => Flow::Wait(OnceStep::Unbound {
-						cancelling,
-						request_id,
-						track,
-						err,
-					}),
 				},
 				OnceStep::Serve(mut serving) => {
 					if let Some(shared) = &mut serving.live.shared {
@@ -4671,12 +4646,11 @@ impl SubscribeOnce {
 				);
 			} else {
 				tracing::warn!(track_alias = %alias, %err, "could not bind track alias");
-				return Flow::Next(OnceStep::Unbound {
-					cancelling: Subscriber::cancelling(req.stream),
-					request_id,
-					track,
-					err,
-				});
+				// Refuse before waiting on the peer to acknowledge the cancellation.
+				this.remove_subscribe(request_id);
+				this.entry_ended(&self.key, request_id, Err(err.clone()));
+				let _ = track.abort(err);
+				return Flow::Next(OnceStep::Refuse(Subscriber::cancelling(req.stream)));
 			}
 			this.remove_subscribe(request_id);
 			let _ = track.abort(err);
@@ -17745,6 +17719,67 @@ mod joining_fetch_tests {
 	#[kio::test]
 	async fn revocation_cancels_an_answered_fetch_before_the_subscribe_fin_is_acked() {
 		revoked_child_fetch(true).await;
+	}
+
+	/// A SUBSCRIBE_OK reusing a live alias for the same track refuses its subscription at
+	/// once, even while the peer never acknowledges the cancellation's FIN.
+	#[kio::test]
+	async fn an_unbound_alias_refuses_before_the_fin_is_acked() {
+		let version = Version::Draft22;
+		let session = ScriptedSession::per_stream(vec![subscribe_ok(version, None)]).with_unacked_fin();
+		let log = session.log.clone();
+		let (tasks, _task_set) = TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::sim(),
+			crate::driver::Transport::new(session.clone()),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			Control::new(false),
+			None,
+			peer::PeerSetup::declared(peer::Peer::default()),
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		);
+		// Another subscription to the same track already holds alias 7.
+		subscriber.state.lock().subscribes.insert(
+			RequestId(99),
+			TrackState::new(
+				track::Producer::new(
+					std::sync::Arc::new(crate::broadcast::Info::default()),
+					"video",
+					track::Info::timed(),
+				),
+				Path::from_static("broadcast"),
+				kio::Producer::new(Fill::Done),
+			),
+		);
+		subscriber.register_alias(RequestId(99), 7).unwrap();
+		let state = subscriber.state.clone();
+
+		let broadcast = crate::broadcast::Info::default().produce();
+		let mut dynamic = broadcast.requests();
+		let consumer = broadcast.consume();
+		let track = consumer.track("video").unwrap();
+		let mut subscribing = Box::pin(track.subscribe(None));
+		let request = dynamic.requested_track().await.unwrap();
+		let mut serving = Box::pin(subscriber.run_subscribe(Path::from_static("broadcast"), dynamic, None, request));
+		for _ in 0..50 {
+			let _ = futures::poll!(serving.as_mut());
+			settle().await;
+		}
+		assert!(
+			futures::poll!(serving.as_mut()).is_pending(),
+			"the cancellation waits on the peer's acknowledgement"
+		);
+		let keys: Vec<_> = state.lock().subscribes.keys().copied().collect();
+		assert_eq!(keys, vec![RequestId(99)], "the refused subscription is removed at once");
+		if let Ok(mut received) = (&mut subscribing).now_or_never().expect("the reader is answered") {
+			assert!(received.recv_group().now_or_never().expect("ended").is_err());
+		}
+		assert!(!log.stops().is_empty(), "the request is cancelled");
+		assert!(session.log.closes().is_empty(), "the session stays up");
 	}
 
 	/// From draft 18 the joining FETCH's request stays open after FETCH_OK. Its failure while

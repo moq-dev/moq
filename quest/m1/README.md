@@ -44,7 +44,6 @@ moves what remains of them once their claims merge.
 - [A padded TS export sheds when its sink falls behind](/quest/m1/ts-padded-shed.md) - a `--mux-rate` export skips stale slots with a flagged PCR jump instead of back-filling them or blaming the source
 - [A resumed QUIC client gives up on its own idle timer](/quest/m1/quic-resume-idle.md) - a client stopped past its idle timeout closes within about one timeout of resuming, without waiting on a stateless reset
 - [A reused moq-transport alias delivers a group that beats its SUBSCRIBE_OK](/quest/m1/ietf-alias-reuse.md) - a new SUBSCRIBE clears its track's alias tombstone, so moqxr's alias-0 catalog refetch no longer hangs
-- [A reused moq-transport alias refuses its track at once](/quest/m1/ietf-alias-refuse.md) - a SUBSCRIBE_OK on an alias already bound fails its readers and removes its entry without waiting on the peer's FIN acknowledgement
 - [Unused crates, scripts, and files are deleted](/quest/m1/unused-code.md) - moq-room, the moq-native tombstone, demo/throttle, sh/dart/publish.sh, demo/web's Solid deps, and unpublished packages' release notes go
 - [The recurring audits are fewer and carry plans, not results](/quest/m1/audit-merge.md) - m3's 13 audits become about five, each a Goal plus a short check-first list
 - [The CARLA bridge builds outside the root workspace](/quest/m1/carla-workspace.md) - workspace builds stop compiling the demo bridge
