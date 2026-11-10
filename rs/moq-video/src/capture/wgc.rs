@@ -332,7 +332,9 @@ mod tests {
 			assert_eq!(delivery.deadline(), Some(now));
 			let (surface, timestamp) = delivery.next(now).unwrap().unwrap();
 			let frame = crate::Frame::new(crate::Surface::I420(surface.clone()), timestamp);
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				producer.publish(&encoded).unwrap();
+			}
 			let received = loop {
 				if let moq_mux::container::Read::Frame { frame, .. } = subscriber.read().await.unwrap().unwrap() {
 					break frame;

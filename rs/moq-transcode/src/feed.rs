@@ -219,7 +219,8 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 				let keyframe = frame.keyframe || first;
 				first = false;
 
-				for decoded in decoder.decode(frame.payload, timestamp, keyframe).await? {
+				decoder.decode(frame.payload, timestamp, keyframe).await?;
+				while let Some(decoded) = decoder.receive()? {
 					let _ = sender.send(Item::Frame(Arc::new(decoded)));
 				}
 			}
@@ -227,15 +228,16 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 		// A buffered decoder still owns this group's tail. Drain it before the
 		// boundary so those frames stay in this group rather than appearing after
 		// the next group's keyframe.
-		let tail = decoder.flush().await?;
+		decoder.flush().await?;
 		// A lost group is never finished short, and every rung hears of it now
 		// rather than at a next group that may never come.
 		if complete {
-			for decoded in tail {
+			while let Some(decoded) = decoder.receive()? {
 				let _ = sender.send(Item::Frame(Arc::new(decoded)));
 			}
 			let _ = sender.send(Item::End);
 		} else {
+			while decoder.receive()?.is_some() {}
 			let _ = sender.send(Item::Lost);
 		}
 	}

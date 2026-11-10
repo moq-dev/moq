@@ -1139,16 +1139,20 @@ mod tests {
 	/// a stalled speaker never holds the picture.
 	#[tokio::test]
 	async fn stalled_audio_no_longer_holds_video() {
-		struct Passthrough;
+		struct Passthrough(Option<moq_video::Frame>);
 		impl super::super::video::Decoder for Passthrough {
-			async fn decode(&mut self, frame: moq_mux::container::Frame) -> anyhow::Result<Vec<moq_video::Frame>> {
-				Ok(vec![moq_video::Frame::new(
+			async fn decode(&mut self, frame: moq_mux::container::Frame) -> anyhow::Result<()> {
+				self.0 = Some(moq_video::Frame::new(
 					moq_video::Surface::rgba(&[128; 16 * 16 * 4], moq_video::Size::new(16, 16))?,
 					frame.timestamp,
-				)])
+				));
+				Ok(())
 			}
-			async fn flush(&mut self) -> anyhow::Result<Vec<moq_video::Frame>> {
-				Ok(Vec::new())
+			async fn flush(&mut self) -> anyhow::Result<()> {
+				Ok(())
+			}
+			fn receive(&mut self) -> anyhow::Result<Option<moq_video::Frame>> {
+				Ok(self.0.take())
 			}
 		}
 		tokio::time::pause();
@@ -1208,7 +1212,7 @@ mod tests {
 		});
 		let video_task = tokio::spawn(video_play.run(
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
-			Passthrough,
+			Passthrough(None),
 			None,
 		));
 		let mut shown = Vec::new();
@@ -1262,19 +1266,24 @@ mod tests {
 	}
 
 	async fn quick_resumes(audio_end: bool, video_end: bool, audio_latency: Duration) {
-		struct Buffered(Vec<moq_video::Frame>);
+		struct Buffered(Vec<moq_video::Frame>, std::collections::VecDeque<moq_video::Frame>);
 		impl super::super::video::Decoder for Buffered {
-			async fn decode(&mut self, frame: moq_mux::container::Frame) -> anyhow::Result<Vec<moq_video::Frame>> {
+			async fn decode(&mut self, frame: moq_mux::container::Frame) -> anyhow::Result<()> {
 				self.0.push(moq_video::Frame::new(
 					moq_video::Surface::rgba(&[128; 16 * 16 * 4], moq_video::Size::new(16, 16))?,
 					frame.timestamp,
 				));
 				self.0.sort_by_key(|frame| frame.timestamp);
 				let ready = self.0.len().saturating_sub(2);
-				Ok(self.0.drain(..ready).collect())
+				self.1.extend(self.0.drain(..ready));
+				Ok(())
 			}
-			async fn flush(&mut self) -> anyhow::Result<Vec<moq_video::Frame>> {
-				Ok(std::mem::take(&mut self.0))
+			async fn flush(&mut self) -> anyhow::Result<()> {
+				self.1.extend(self.0.drain(..));
+				Ok(())
+			}
+			fn receive(&mut self) -> anyhow::Result<Option<moq_video::Frame>> {
+				Ok(self.1.pop_front())
 			}
 		}
 		tokio::time::pause();
@@ -1338,7 +1347,7 @@ mod tests {
 		});
 		let video_task = tokio::spawn(video_play.run(
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
-			Buffered(Vec::new()),
+			Buffered(Vec::new(), Default::default()),
 			None,
 		));
 		let picture = |index: u64, keyframe: bool| moq_mux::container::Frame {
@@ -1656,16 +1665,20 @@ mod tests {
 
 	#[tokio::test]
 	async fn an_evicted_replacement_gop_gives_way_to_the_next_replacement() {
-		struct Passthrough;
+		struct Passthrough(Option<moq_video::Frame>);
 		impl super::super::video::Decoder for Passthrough {
-			async fn decode(&mut self, frame: moq_mux::container::Frame) -> anyhow::Result<Vec<moq_video::Frame>> {
-				Ok(vec![moq_video::Frame::new(
+			async fn decode(&mut self, frame: moq_mux::container::Frame) -> anyhow::Result<()> {
+				self.0 = Some(moq_video::Frame::new(
 					moq_video::Surface::rgba(&[128; 16 * 16 * 4], moq_video::Size::new(16, 16))?,
 					frame.timestamp,
-				)])
+				));
+				Ok(())
 			}
-			async fn flush(&mut self) -> anyhow::Result<Vec<moq_video::Frame>> {
-				Ok(Vec::new())
+			async fn flush(&mut self) -> anyhow::Result<()> {
+				Ok(())
+			}
+			fn receive(&mut self) -> anyhow::Result<Option<moq_video::Frame>> {
+				Ok(self.0.take())
 			}
 		}
 		tokio::time::pause();
@@ -1696,7 +1709,7 @@ mod tests {
 		};
 		let video_task = tokio::spawn(video_play.run(
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
-			Passthrough,
+			Passthrough(None),
 			None,
 		));
 		let picture = |millis: u64, keyframe: bool| moq_mux::container::Frame {
@@ -2389,7 +2402,8 @@ mod tests {
 		for index in 0..=60 {
 			let surface = moq_video::Surface::rgba(&vec![128; 64 * 64 * 4], moq_video::Size::new(64, 64)).unwrap();
 			let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_millis(index * 33).unwrap());
-			for encoded in encoder.encode(&frame).unwrap() {
+			encoder.encode(&frame).unwrap();
+			while let Some(encoded) = encoder.receive().unwrap() {
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: encoded.timestamp,

@@ -256,7 +256,7 @@ fn decode(name: &str, vector: &Vector) -> Vec<Frame> {
 	let mut decoded = Vec::new();
 	for unit in access_units(vector) {
 		let frames = decoder
-			.decode(unit.payload, unit.timestamp, unit.keyframe)
+			.decode_all(unit.payload, unit.timestamp, unit.keyframe)
 			.unwrap_or_else(|e| panic!("{name} failed to decode {}: {e}", vector.name));
 		decoded.extend(frames);
 	}

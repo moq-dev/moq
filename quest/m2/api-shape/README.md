@@ -60,3 +60,4 @@ Rejected in planning:
 ## Required
 
 - [Ban doc(hidden) in Rust](/quest/m2/api-shape/doc-hidden.md) - `just check` bans it; each use becomes private or documented, test-support modules documented behind their feature
+- [A peer's closed session reads as Closed in the bindings](/quest/m2/api-shape/session-closed.md) - a remote SESSION_CLOSED maps to `MoqError::Closed`, as a local close does

@@ -6726,7 +6726,6 @@ impl TrackServe {
 	fn serve_group(&mut self, group: group::Consumer, slice: GroupSlice) -> GroupServe {
 		let group = if self.compression { group.compressed() } else { group };
 		let sequence = group.sequence;
-		let wire = group.wire();
 		let msg = ietf::GroupHeader {
 			track_alias: self.request_id.0,
 			group_id: sequence,
@@ -6736,17 +6735,10 @@ impl TrackServe {
 			// model ranks higher-first and this wire field lower-first.
 			publisher_priority: super::priority::to_wire(self.track.info().priority),
 			// Carry per-object timestamps as extension headers (the Timestamp
-			// Object Property) only when TIMESCALE was declared.
+			// Object Property) only when TIMESCALE was declared. The relay state adds
+			// to these once it settles (see `GroupState::Describe`).
 			flags: ietf::GroupFlags {
-				has_extensions: self.compression
-					|| self.timescale.is_some()
-					|| wire.as_ref().is_some_and(|wire| wire.extensions),
-				first_object: wire
-					.as_ref()
-					.map_or(slice.skip == 0, |wire| wire.first_object && slice.skip <= wire.first_id),
-				// A stream capped by the range stops before the group may end, so its
-				// FIN cannot claim END_OF_GROUP.
-				has_end: slice.until.is_none() && wire.as_ref().is_none_or(|wire| wire.has_end),
+				has_extensions: self.compression || self.timescale.is_some(),
 				..Default::default()
 			},
 		};
@@ -7578,6 +7570,11 @@ struct GroupServe {
 enum GroupState {
 	/// Waiting for stream credit on this machine's own session handle.
 	Open,
+	/// The stream is open, and its header waits for the group's relay state, which a relayed
+	/// group settles after it becomes visible.
+	Describe {
+		writer: Writer<crate::transport::boxed::SendStream, Version>,
+	},
 	/// Streaming objects: the write buffer drains first, then the pending chunk,
 	/// then the pending frame, then the next frame.
 	Serve {
@@ -7610,7 +7607,7 @@ impl Drop for GroupServe {
 	fn drop(&mut self) {
 		// The writer's own fallback would say CANCELLED, which a lapse is not.
 		if self.lapse.as_ref().is_some_and(Lapse::lapsed)
-			&& let GroupState::Serve { writer, .. } | GroupState::Closed { writer } =
+			&& let GroupState::Describe { writer } | GroupState::Serve { writer, .. } | GroupState::Closed { writer } =
 				std::mem::replace(&mut self.state, GroupState::Done)
 		{
 			writer.reset(super::error::EXPIRED_AUTH_TOKEN);
@@ -7623,17 +7620,11 @@ impl GroupServe {
 		session: Transport,
 		msg: ietf::GroupHeader,
 		rank: Rank<GroupOf<Transport>>,
-		mut group: group::Consumer,
+		group: group::Consumer,
 		timescale: Option<Timescale>,
 		version: Version,
 		slice: GroupSlice,
 	) -> Self {
-		if group.wire().is_none() {
-			// Only the end: a start would clamp past a prefix the group never held,
-			// which `skip_to` leaves to fail as `Lagged`.
-			group.skip_to(slice.skip);
-			group = group.with_end(slice.until);
-		}
 		Self {
 			session,
 			opened: Default::default(),
@@ -7703,7 +7694,25 @@ impl GroupServe {
 		self
 	}
 
-	/// Wait for stream credit, then write the group header, leaving the machine serving.
+	/// Fill in the header flags and the read slice from the group's relay state.
+	fn describe(&mut self, wire: Option<group::Wire>) {
+		let flags = &mut self.msg.flags;
+		flags.has_extensions |= wire.as_ref().is_some_and(|wire| wire.extensions);
+		flags.first_object = wire.as_ref().map_or(self.slice.skip == 0, |wire| {
+			wire.first_object && self.slice.skip <= wire.first_id
+		});
+		// A stream capped by the range stops before the group may end, so its FIN cannot
+		// claim END_OF_GROUP.
+		flags.has_end = self.slice.until.is_none() && wire.as_ref().is_none_or(|wire| wire.has_end);
+		if wire.is_none() {
+			// Only the end: a start would clamp past a prefix the group never held, which
+			// `skip_to` leaves to fail as `Lagged`.
+			self.group.skip_to(self.slice.skip);
+			self.group.end_at(self.slice.until);
+		}
+	}
+
+	/// Wait for stream credit, leaving the machine to describe the group on its stream.
 	/// Gives up once the group can no longer be sent, so a parked group never spends the
 	/// credit it was waiting for on a reset.
 	fn poll_open(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -7734,17 +7743,8 @@ impl GroupServe {
 		};
 		self.opened.fetch_add(1, Ordering::Relaxed);
 
-		let mut writer = Writer::new(stream, self.version);
-		if let Err(err) = writer.buffer(&self.msg) {
-			self.state = GroupState::Done;
-			return Poll::Ready(Err(err));
-		}
-		self.state = GroupState::Serve {
-			writer,
-			frame: None,
-			chunk: None,
-			batch: Box::new(arrayvec::ArrayVec::new()),
-			batch_pos: 0,
+		self.state = GroupState::Describe {
+			writer: Writer::new(stream, self.version),
 		};
 		Poll::Ready(Ok(()))
 	}
@@ -7765,6 +7765,36 @@ impl GroupServe {
 					ready!(self.poll_open(waiter))?;
 					// The current rank, which already includes anything `moved` saw.
 					moved = None;
+				}
+				GroupState::Describe { writer } => {
+					if let Some(priority) = moved.take() {
+						writer.set_priority(priority);
+					}
+					// The peer closing first cancels the group.
+					if writer.poll_closed(waiter).is_ready() {
+						self.state = GroupState::Done;
+						return Poll::Ready(Err(Error::Cancel));
+					}
+					let wire = match ready!(self.group.poll_wire(waiter)) {
+						Ok(wire) => wire,
+						Err(err) => {
+							self.state = GroupState::Done;
+							return Poll::Ready(Err(err));
+						}
+					};
+					let GroupState::Describe { mut writer } = std::mem::replace(&mut self.state, GroupState::Done)
+					else {
+						unreachable!("matched above");
+					};
+					self.describe(wire);
+					writer.buffer(&self.msg)?;
+					self.state = GroupState::Serve {
+						writer,
+						frame: None,
+						chunk: None,
+						batch: Box::new(arrayvec::ArrayVec::new()),
+						batch_pos: 0,
+					};
 				}
 				GroupState::Serve {
 					writer,
@@ -8656,6 +8686,89 @@ mod group_priority_test {
 		.await;
 	}
 
+	/// A relay ingest publishes a group before it reads the header that describes it, so the
+	/// egress header waits for that state rather than describing a plain group.
+	#[kio::test]
+	async fn a_group_header_waits_for_its_relay_state() {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone());
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			// Keeps a superseded group, so the later group landing does not give up on this one.
+			track::Info::default().with_max_age(None),
+		);
+		let mut serve = TrackServe::new(
+			crate::driver::Transport::new(session.clone()),
+			track.subscribe(Some(
+				track::Subscription::default().with_delay(track::Delay::default().with_max(None)),
+			)),
+			RequestId(0),
+			Version::Draft18,
+			ServeRange::default(),
+			None,
+		);
+
+		let group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		assert!(futures::poll!(kio::wait(|waiter| serve.poll(waiter))).is_pending());
+		// A later group is served meanwhile, its stream independent of the one waiting.
+		let mut later = track.create_group(group::Info { sequence: 1 }).unwrap();
+		later.write_frame(None, b"later".as_slice()).unwrap();
+		later.finish().unwrap();
+		for _ in 0..8 {
+			assert!(futures::poll!(kio::wait(|waiter| serve.poll(waiter))).is_pending());
+			kio::clock::sim::yield_now().await;
+		}
+		let written = log.writes.lock().unwrap().clone();
+		assert!(written.windows(5).any(|window| window == b"later"));
+
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: false,
+				first_id: 3,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		let mut frame = group
+			.create_object(frame::Header {
+				info: frame::Info {
+					size: 1,
+					timestamp: None,
+				},
+				fields: Some(std::sync::Arc::new(crate::model::object::Fields {
+					id: 3,
+					properties: Default::default(),
+				})),
+				inflated: None,
+			})
+			.unwrap();
+		frame.write(b"x".as_slice()).unwrap();
+		frame.finish().unwrap().finish().unwrap();
+		let _finished = track.finish().unwrap();
+		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
+
+		let mut streams = std::collections::BTreeMap::<usize, Vec<u8>>::new();
+		for (stream, sent) in log.trail() {
+			if let crate::lite::test_transport::Sent::Write(bytes) = sent {
+				streams.entry(stream).or_default().extend(bytes);
+			}
+		}
+		let header = streams
+			.into_values()
+			.filter_map(|bytes| {
+				let mut buf = bytes::Bytes::from(bytes);
+				crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| ietf::GroupHeader::decode(r, v)).ok()
+			})
+			.find(|header| header.group_id == 0)
+			.expect("group 0's header");
+		assert!(header.flags.has_extensions);
+		assert!(!header.flags.first_object);
+	}
+
 	/// Serve one group of a track with `info` and decode the subgroup header it opens with.
 	async fn serve_group_header(info: track::Info) -> ietf::GroupHeader {
 		let log = crate::lite::test_transport::Log::default();
@@ -8842,6 +8955,48 @@ mod group_priority_test {
 		let mut edge = track.append_group().unwrap();
 		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(serving.await, Err(Error::Old)));
+	}
+
+	/// A group whose stream opened but whose relay state never settled still expires once a
+	/// successor lands, rather than holding the stream until its ingest ends.
+	#[kio::test]
+	async fn a_group_waiting_for_its_relay_state_expires() {
+		let session = SinkSession::new(crate::lite::test_transport::Log::default());
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			track::Info::default(),
+		);
+		let mut subscriber = track.subscribe(None);
+		let _stalled = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("stalled group");
+
+		let mut serve = GroupServe::new(
+			crate::driver::Transport::new(session.clone()),
+			ietf::GroupHeader {
+				track_alias: 0,
+				group_id: 0,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: Default::default(),
+			},
+			Rank::solo(kio::Producer::new(0).consume()),
+			group,
+			None,
+			Version::Draft18,
+			GroupSlice::default(),
+		);
+		let mut serving = std::pin::pin!(kio::wait(|waiter| serve.poll_serve(waiter)));
+		assert!(
+			futures::poll!(serving.as_mut()).is_pending(),
+			"the relay state is unsettled"
+		);
+
+		let mut edge = track.create_group(group::Info { sequence: 1 }).unwrap();
+		edge.write_frame(None, b"edge".as_slice()).unwrap();
 		edge.finish().unwrap();
 
 		assert!(matches!(serving.await, Err(Error::Old)));
