@@ -39,7 +39,8 @@ extracted default-feature native input whose manifest names its version,
 commit, target, features and profile; CMake then generates bindings without
 Cargo. `cpp/moq/FFI_VERSION` pins a `moq-ffi-v*` release and `FFI_SHA256.json`
 pins each archive's hash. The pin stays unset until a release publishes all four
-validated assets. A malformed pin, missing asset, wrong hash, wrong
+validated assets, and is set only after those downloads pass the same four-host
+consumer check; publication checks same-run inputs, not the downloads. A malformed pin, missing asset, wrong hash, wrong
 feature/profile or incompatible target fails; a failed fetch never falls back to
 source.
 
@@ -48,5 +49,5 @@ macOS ARM and Windows MSVC. Only after all four installed consumers pass may a
 tag publish `moq-ffi-default-<version>-<target>.tar.gz` with a `.sha256` each;
 the publisher never clobbers or changes an existing asset. Nightly packages C++
 from these same-run `cpp-native-<target>` artifacts; tag releases refuse
-same-run inputs and use the pin. Archive comparisons and the four-host consumer
+same-run inputs, using the pin when set and building from source otherwise. Archive comparisons and the four-host consumer
 proof are in [#5740](https://github.com/moq-dev/moq/pull/5740).
