@@ -369,18 +369,20 @@ test("folding an arrival gap wakes the reader parked on it", async () => {
 
 // A closed track bills none of its arrival gaps, so an account the pool's sweep keeps for its drops
 // holds no bytes for them.
-test("a closed track releases its arrival gaps from the pool", () => {
-	const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
-	const producer = pooled(pool);
-	hooks.receiveTrack(producer);
-	const reader = producer.subscribe({ delay: { max: null } });
-	producer.createGroup(0n).finish();
-	producer.createGroup(2n).finish();
-	expect(hooks.arrivalRuns(producer)).toBe(2);
-	const used = pool.used;
-	producer.close();
-	expect(pool.used).toBe(used - ARRIVAL_OVERHEAD);
-	reader.close();
+test("a closed track releases its arrival gaps from the pool", async () => {
+	await withClock(() => {
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
+		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		const reader = producer.subscribe({ delay: { max: null } });
+		producer.createGroup(0n).finish();
+		producer.createGroup(2n).finish();
+		expect(hooks.arrivalRuns(producer)).toBe(2);
+		const used = pool.used;
+		producer.close();
+		expect(pool.used).toBe(used - ARRIVAL_OVERHEAD);
+		reader.close();
+	});
 });
 
 // A run given up longer than the pool's idle window ago is forgotten by the sweep, even on a
