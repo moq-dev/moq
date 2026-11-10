@@ -3234,6 +3234,21 @@ mod tests {
 		assert!(handle.poll_withdrawn(id, &kio::Waiter::noop()).is_ready());
 	}
 
+	/// An AUTH_OK racing the withdrawal of its token reaches a stream that is closing: it
+	/// never widens what the session may do.
+	#[test]
+	fn a_withdrawn_token_takes_no_grant() {
+		let handle = Link::new(true);
+		let setup = handle.present(Bytes::new(), true).unwrap();
+		handle.grant(setup.presented.id, Grant::default());
+		let auth = handle.present(Bytes::from_static(b"jwt"), false).unwrap();
+		let id = opened(&handle);
+		drop(auth);
+		assert!(handle.poll_withdrawn(id, &kio::Waiter::noop()).is_ready());
+		handle.granted(id, Grant::all());
+		assert!(!handle.within_grant(Direction::Publish, "room"));
+	}
+
 	fn opened(link: &Link) -> u64 {
 		match link.poll_opening(&kio::Waiter::noop()) {
 			Poll::Ready(Some((id, _))) => id,
