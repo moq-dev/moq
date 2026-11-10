@@ -21,7 +21,7 @@ import {
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { type Hop, HopSchema, isAnonymous, MAX_HOPS, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
-import { hooks } from "../internal.ts";
+import { hooks, rendezvousHash } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -3582,8 +3582,95 @@ async function routedStream() {
 	await AnnounceRequest.decode(replies, version);
 	await new AnnounceOk(PEER, 0).encode(peer, version);
 	const send = (msg: AnnounceBroadcast) => encodeAnnounceBroadcast(peer, msg, version);
-	return { subscriber, announced, send, replies, version };
+	// The TRACK request a consume of `path` opens as its `index`th stream.
+	const trackRequest = async (path: Path.Valid, index: number) => {
+		const consumed = subscriber.consume(path);
+		const info = consumed
+			.track("video")
+			.info()
+			.catch(() => {});
+		const opening = await opened(index);
+		const reader = new Reader(opening.outbound, undefined, version);
+		expect(await reader.u53()).toBe(StreamId.Track);
+		const request = await Track.decode(reader, version);
+		return { request, consumed, info };
+	};
+	return { subscriber, announced, send, replies, version, trackRequest };
 }
+
+test("a lite-07 consume names the node now serving its instance", async () => {
+	const { subscriber, announced, send, trackRequest } = await routedStream();
+	const room = Path.from("room");
+	const a = Instance.parse("a");
+
+	// Two origin nodes reach one instance; the cheaper serves.
+	await send({ status: "routeStart", node: NODE_A, advert: { ...ADVERT, metric: 5n } });
+	await send({ status: "active", suffix: room, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n });
+	await announced.next();
+	await send({ status: "routeStart", node: NODE_B, advert: ADVERT });
+	await send({ status: "active", suffix: room, route: 1n, instance: a });
+	await send({ status: "floor", id: 1n });
+	await announced.next();
+	const first = await trackRequest(room, 1);
+	expect(first.request).toMatchObject({ instance: a, node: NODE_B });
+
+	// The cheaper one goes: the same instance's consume now names the other.
+	await send({ status: "routeEnd", id: 1n });
+	await announced.next();
+	const second = await trackRequest(room, 2);
+	expect(second.consumed.closed).toBe(first.consumed.closed);
+	expect(second.request).toMatchObject({ instance: a, node: NODE_A });
+
+	first.consumed.close();
+	second.consumed.close();
+	subscriber.close();
+	await Promise.all([first.info, second.info]);
+});
+
+test("a lite-07 path ranks only an instance's newest epoch", async () => {
+	const { subscriber, announced, send } = await routedStream();
+	const room = Path.from("room");
+	const a = Instance.parse("a");
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: room, route: 0n, instance: a, epoch: 0n });
+	await send({ status: "floor", id: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: room, route: { epoch: 0n } });
+
+	// Dearer, but newer: it takes over.
+	await send({ status: "routeStart", node: NODE_B, advert: { ...ADVERT, metric: 9n } });
+	await send({ status: "active", suffix: room, route: 1n, instance: a, epoch: 1n });
+	await send({ status: "floor", id: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { epoch: 1n, node: NODE_B } });
+
+	announced.close();
+	subscriber.close();
+});
+
+// Each consume ranks every route's claim at its covering prefix for its own path, so two equal
+// origins of a prefix spread its children by rendezvous hash, whichever announced first.
+test("lite-07 children of a prefix two origins claim spread by node", async () => {
+	for (const order of [
+		[NODE_A, NODE_B],
+		[NODE_B, NODE_A],
+	]) {
+		const { subscriber, announced, send, trackRequest } = await routedStream();
+		const pool = Path.from("pool");
+		for (const [route, node] of order.entries()) {
+			await send({ status: "routeStart", node, advert: ADVERT });
+			await send({ status: "active", suffix: pool, route: BigInt(route), instance: Instance.parse(`i${node}`) });
+			await send({ status: "floor", id: BigInt(route) });
+			await announced.next();
+		}
+		const job = Path.from("pool/job");
+		const want = rendezvousHash(job, NODE_A) < rendezvousHash(job, NODE_B) ? NODE_A : NODE_B;
+		const { request, consumed, info } = await trackRequest(job, 1);
+		expect(request.node).toBe(want);
+		consumed.close();
+		subscriber.close();
+		await info;
+	}
+});
 
 test("a lite-07 batch applies at its floor, and a held route turns unavailable", async () => {
 	const { subscriber, announced, send, replies, version } = await routedStream();

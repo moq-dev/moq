@@ -934,16 +934,24 @@ export class Publisher {
 			notify?.();
 		};
 
-		// Replies arrive on their own task.
-		const replies: AnnounceReply[] = [];
+		// Replies arrive on their own task, each applied as it lands, so a peer that keeps sending
+		// while our writes stall queues nothing: an echo frees a route to start again, and a request
+		// raises the identity, whose change marks the stream dirty.
 		let departed: Error | null | undefined;
+		const reply = (msg: AnnounceReply) => {
+			if (msg.kind === "request") {
+				origin?.own.request(msg.node, msg.seqno);
+				return;
+			}
+			if (!ending.delete(msg.id)) throw new ProtocolViolation(`echo of route ${msg.id}, which is not ending`);
+			poke();
+		};
 		void (async () => {
 			try {
 				for (;;) {
-					const reply = await decodeAnnounceReplyMaybe(stream.reader, this.version);
-					if (!reply) break;
-					replies.push(reply);
-					notify?.();
+					const msg = await decodeAnnounceReplyMaybe(stream.reader, this.version);
+					if (!msg) break;
+					reply(msg);
 				}
 				departed = null;
 			} catch (err) {
@@ -976,20 +984,6 @@ export class Publisher {
 			await write({ status: "synced" });
 
 			for (;;) {
-				const reply = replies.shift();
-				if (reply?.kind === "echo") {
-					if (!ending.delete(reply.id))
-						throw new ProtocolViolation(`echo of route ${reply.id}, which is not ending`);
-					// The route may start again.
-					dirty = true;
-					continue;
-				}
-				if (reply?.kind === "request") {
-					// Answered through the identity: a raised seqno or a rotation marks the stream dirty.
-					origin?.own.request(reply.node, reply.seqno);
-					continue;
-				}
-
 				if (departed instanceof Error) throw departed;
 				if (departed === null || this.#withdrawal.closing.peek()) break;
 				if (dirty) {

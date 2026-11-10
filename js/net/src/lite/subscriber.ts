@@ -27,6 +27,7 @@ import * as Instance from "../instance.ts";
 import {
 	compareRouteCandidates,
 	type DropRun,
+	Epochs,
 	hiddenBelow,
 	hooks,
 	insertDrop,
@@ -866,6 +867,9 @@ export class Subscriber {
 			// How the claims differ from `committed`, applied whole at the next floor.
 			pending: Map<Path.Valid, Claim | undefined>;
 			committed: Map<Path.Valid, Claim>;
+			// Who the route's claims are filed under in the consume cache, which keeps every
+			// route's claim so a consume ranks them for its own path.
+			owner: object;
 		};
 		const same = (a: Claim | undefined, b: Claim | undefined) =>
 			a === b || (!!a && !!b && a.instance === b.instance && a.epoch === b.epoch && a.cost === b.cost);
@@ -913,16 +917,30 @@ export class Subscriber {
 				}),
 			);
 
+		// File the route's claim at `path` in the consume cache, or take it out. Every route's claim
+		// stays there, so each consume ranks them for its own path and its epochs. `restart` marks
+		// another instance or epoch, whose consumes subscribe fresh.
+		const serve = (wire: Route, path: Path.Valid, restart: boolean) => {
+			const claim = wire.committed.get(path);
+			if (claim && visible(path)) this.#consumes.announce(path, wire.owner, candidate(wire, claim), restart);
+			else this.#consumes.withdraw(path, wire.owner);
+		};
+
 		// Report the best claim at `path`, or its end. `lost` marks the routes leaving as let go
 		// rather than withdrawn, so the path goes offline rather than ending.
 		const refresh = (path: Path.Valid, lost: boolean) => {
 			let best: WireRoute | undefined;
 			if (visible(path)) {
+				const candidates: WireRoute[] = [];
 				for (const id of byPath.get(path) ?? []) {
 					const wire = route(id);
 					const claim = wire.committed.get(path);
-					if (!claim) continue;
-					const next = candidate(wire, claim);
+					if (claim) candidates.push(candidate(wire, claim));
+				}
+				// Only an instance's highest epoch is eligible, however cheap an older one is.
+				const epochs = new Epochs(candidates);
+				for (const next of candidates) {
+					if (epochs.supersedes(next)) continue;
 					// The newest wins a tie.
 					if (!best || compareRouteCandidates(path, path, next, best) <= 0) best = next;
 				}
@@ -933,29 +951,29 @@ export class Subscriber {
 			if (!best) {
 				if (!prev) return;
 				reported.delete(path);
-				this.#consumes.withdraw(path, announced);
 				console.debug(`announced: broadcast=${path} active=false lost=${lost}`);
 				announced.append({ prefix: path, captures, kind: lost ? "offline" : "end", route: prev });
 				return;
 			}
 			if (prev && routesEqual(prev, best)) return;
 			reported.set(path, best);
-			// Another instance or epoch: whatever was consumed at the path may be stale, so the
-			// next consume subscribes fresh, while the handles already out keep theirs.
 			const restart = !!prev && (prev.instance !== best.instance || prev.epoch !== best.epoch);
-			this.#consumes.announce(path, announced, best, restart);
 			const kind = !prev ? "start" : restart ? "restart" : "update";
 			console.debug(`announced: broadcast=${path} ${kind} instance=${best.instance} node=${best.node}`);
 			announced.append({ prefix: path, captures, kind, route: best });
 		};
 		const refreshRoute = (wire: Route, lost: boolean) => {
-			for (const path of wire.committed.keys()) refresh(path, lost);
+			for (const path of wire.committed.keys()) {
+				if (lost) this.#consumes.withdraw(path, wire.owner);
+				else serve(wire, path, false);
+				refresh(path, lost);
+			}
 		};
 
 		// A draining peer ranks its routes last from the GOAWAY itself.
 		const stopDrain = this.#goaway?.changed(() => {
 			if (announced.closed.peek() !== undefined) return;
-			for (const path of [...reported.keys()]) refresh(path, false);
+			for (const wire of routes.values()) refreshRoute(wire, false);
 		});
 
 		try {
@@ -977,6 +995,7 @@ export class Subscriber {
 							claims: new Map(),
 							pending: new Map(),
 							committed: new Map(),
+							owner: {},
 						});
 						nodes.add(msg.node);
 						break;
@@ -1013,8 +1032,13 @@ export class Subscriber {
 						// The batch applies whole. One stream's floors certify only its own claims, so
 						// the revision orders nothing here.
 						const wire = route(msg.id);
-						const touched = [...wire.pending.keys()];
+						const touched: [Path.Valid, boolean][] = [];
 						for (const [path, claim] of wire.pending) {
+							// Another instance or epoch: what was consumed through the claim may be stale.
+							const was = wire.committed.get(path);
+							const restart =
+								!!was && !!claim && (was.instance !== claim.instance || was.epoch !== claim.epoch);
+							touched.push([path, restart]);
 							if (claim) {
 								wire.committed.set(path, claim);
 								let ids = byPath.get(path);
@@ -1033,7 +1057,10 @@ export class Subscriber {
 							}
 						}
 						wire.pending.clear();
-						for (const path of touched) refresh(path, false);
+						for (const [path, restart] of touched) {
+							serve(wire, path, restart);
+							refresh(path, false);
+						}
 						break;
 					}
 					case "active": {
@@ -1089,7 +1116,9 @@ export class Subscriber {
 			}
 		} finally {
 			stopDrain?.();
-			for (const path of reported.keys()) this.#consumes.withdraw(path, announced);
+			for (const wire of routes.values()) {
+				for (const path of wire.committed.keys()) this.#consumes.withdraw(path, wire.owner);
+			}
 			reported.clear();
 			claims.clear();
 			routes.clear();
@@ -1112,9 +1141,16 @@ export class Subscriber {
 	}
 
 	#createConsume(path: Path.Valid, instance: ReturnType<BroadcastCache["instance"]>): broadcast.Consumer {
+		const consumes = this.#consumes;
+		const pinned = instance.route.node;
 		const consumed = {
 			instance: instance.route.instance,
-			node: instance.route.node,
+			// The node of the route now serving the instance, which moves with failover; the one it
+			// first resolved through once another instance wins the path.
+			get node() {
+				const now = consumes.instance(path).route;
+				return now.instance !== undefined && now.instance === this.instance ? now.node : pinned;
+			},
 			id: this.#consumeNext++,
 			get valid() {
 				return instance.validity?.signal;
