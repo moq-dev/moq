@@ -732,6 +732,23 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		}
 	});
 
+	// A hole may resume below a picture still inside the codec, which would late-reject the keyframe.
+	it(`${kind} drops codec-queued pictures when a hole rewinds below them`, async () => {
+		const queued = 60_000_000;
+		const playback = await guardedPlayback(
+			kind,
+			[sample(1n, 0), sample(1n, queued), gap, sample(2n, 16_000_000)],
+			[queued],
+		);
+		try {
+			expect(playback.outputs).toEqual([0, 16_000_000]);
+			expect(playback.resets).toBe(1);
+			expect(playback.decoder.out.timestamp.peek()).toEqual(Duration.millis(16_000));
+		} finally {
+			playback.close();
+		}
+	});
+
 	for (const boundary of ["hole", "end"] as const) {
 		it(`${kind} keeps parked pictures and the anchor across a ${boundary}`, async () => {
 			const clock = manualAt(1000);

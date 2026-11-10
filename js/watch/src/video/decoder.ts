@@ -629,6 +629,10 @@ class DecoderTrack {
 
 	// A timeline restart makes the next decoded frame decide whether the codec resets.
 	#resetPending = false;
+	// A hole was read, so the next decoded frame resets the codec only if it rewinds.
+	#holed = false;
+	// The newest timestamp fed to the codec since it last opened.
+	#submitted?: Duration;
 	// The group the publisher declared the media ends with. It stays in force through holes until a
 	// later group starts a new timeline.
 	readonly ended = new Signal<bigint | undefined>(undefined);
@@ -866,9 +870,9 @@ class DecoderTrack {
 				previous = frame.timestamp;
 
 				latest = next.group;
-				this.#resetAtKeyframe(decoder, frame.keyframe);
+				this.#resetAtKeyframe(decoder, frame);
 				this.#groups.set(frame.timestamp.asMicros(), next.group);
-				decoder.decode(this.#chunk(frame));
+				this.#submit(decoder, frame);
 				if (!this.sync.playing.peek()) await this.#waitStartup(effect, frame.timestamp);
 			}
 		});
@@ -939,9 +943,9 @@ class DecoderTrack {
 
 				if (decoder.state === "closed") break;
 				latest = next.group;
-				this.#resetAtKeyframe(decoder, frame.keyframe);
+				this.#resetAtKeyframe(decoder, frame);
 				this.#groups.set(frame.timestamp.asMicros(), next.group);
-				decoder.decode(this.#chunk(frame));
+				this.#submit(decoder, frame);
 				if (!this.sync.playing.peek()) await this.#waitStartup(effect, frame.timestamp);
 			}
 		});
@@ -980,14 +984,14 @@ class DecoderTrack {
 		}
 	}
 
-	// A container gap keeps the clock and the codec: timestamps keep rising past it, so no queued
-	// picture can sit above the resuming keyframe, and Recovery guards the references. A codec reset
-	// would visibly stall each group whose tail a zero max delay gave up on. Only a declared end
-	// followed by a later group establishes another timeline; a marker from older history cannot end
-	// live media.
+	// A container gap keeps the clock, and the codec unless the media resumes at or below a picture
+	// already fed to it (see #resetAtKeyframe): resetting at every gap would visibly stall each group
+	// whose tail a zero max delay gave up on. Only a declared end followed by a later group establishes
+	// another timeline; a marker from older history cannot end live media.
 	#onRead(read: Container.Read, latest: bigint | undefined): void {
-		if (read.kind === "gap") return;
-		if (read.kind === "end") {
+		if (read.kind === "gap") {
+			if (latest !== undefined) this.#holed = true;
+		} else if (read.kind === "end") {
 			if (latest === undefined || read.group >= latest) this.ended.set(read.group);
 		} else {
 			const ended = this.ended.peek();
@@ -1011,19 +1015,27 @@ class DecoderTrack {
 		this.#resetPending = true;
 	}
 
-	// Re-prime at a keyframe after a restart, dropping pictures still queued in the codec: a group may
-	// restart at its own start, so one could sit above the new keyframe and late-reject it. A delta
-	// may continue a group that a max-delay hole interrupted and still need its references; resetting
-	// before it would make WebCodecs require a key chunk. An output callback that already holds a
-	// frame stays parked on Sync; only a new timeline invalidates its clock epoch.
-	#resetAtKeyframe(decoder: VideoDecoder, keyframe: boolean): void {
-		if (!this.#resetPending) return;
+	// Re-prime at a keyframe after a restart, or a hole that resumes at or below a picture already fed
+	// to the codec, dropping pictures still queued there: one could sit above the new keyframe and
+	// late-reject it. A delta may continue a group that a max-delay hole interrupted and still need its
+	// references; resetting before it would make WebCodecs require a key chunk. An output callback that
+	// already holds a frame stays parked on Sync; only a new timeline invalidates its clock epoch.
+	#resetAtKeyframe(decoder: VideoDecoder, frame: Container.ReceivedFrame): void {
+		const rewound = this.#holed && this.#submitted !== undefined && frame.timestamp.le(this.#submitted);
+		this.#holed = false;
+		if (!this.#resetPending && !rewound) return;
 		this.#resetPending = false;
 		// A closed decoder throws on reset.
-		if (!keyframe || decoder.state === "closed") return;
+		if (!frame.keyframe || decoder.state === "closed") return;
 		decoder.reset();
 		this.#groups.clear();
 		this.#configure(decoder);
+	}
+
+	// Feed `frame` to the codec, noting the newest timestamp it holds.
+	#submit(decoder: VideoDecoder, frame: Container.ReceivedFrame): void {
+		this.#submitted = this.#submitted?.max(frame.timestamp) ?? frame.timestamp;
+		decoder.decode(this.#chunk(frame));
 	}
 
 	// The chunk for `frame`, run through the opening rewrite when it opens the codec.
@@ -1063,6 +1075,7 @@ class DecoderTrack {
 	#configure(decoder: VideoDecoder): void {
 		if (this.#codec === undefined) throw new Error("video: configured before the codec was accepted");
 		this.#opening = true;
+		this.#submitted = undefined;
 		decoder.configure({
 			codec: this.#codec,
 			description: this.#description,
