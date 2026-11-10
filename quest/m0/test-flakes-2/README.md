@@ -271,3 +271,4 @@ Public API: none. Wire: none.
 ## Required
 
 - [Interop's finish cases hold up under load](/quest/m0/test-flakes-2/interop-finish.md) - every publisher's finish cells pass under load, and the scenario's quarantine is removed
+- [Kotlin's playout-delay smoke test holds up under load](/quest/m0/test-flakes-2/kt-playout-delay.md) - the audio playout-delay smoke test passes under load, and its `@Ignore` is removed
