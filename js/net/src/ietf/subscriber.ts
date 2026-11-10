@@ -1,4 +1,4 @@
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -71,11 +71,6 @@ import { joinFilter, Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
-
-// Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
-// candidate outranks it, while the route stays selectable as the last path. Matches Rust
-// Cost::DRAIN: cost is the whole mechanism, not a separate state.
-const DRAIN_COST: Cost = 2n ** 62n - 1n;
 
 /** A fetch stream the head cannot be stitched from, which costs only that head. */
 class JoinUnsupported extends Error {
@@ -221,7 +216,7 @@ export class Subscriber {
 	// Whether a SUBSCRIBE_NAMESPACE's REQUEST_OK counts the NAMESPACEs that follow it (MoQ Active Count).
 	#activeCount: boolean;
 
-	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
+	// Settles when the peer sends GOAWAY, ranking this session's routes last.
 	#goaway?: GetPromise<Drain>;
 	// Our grant (MoQ Auth): a subscription it stops covering is cancelled. Undefined until
 	// the peer answers, which allows everything.
@@ -275,8 +270,8 @@ export class Subscriber {
 		this.#goaway = goaway;
 		this.#grant = grant;
 		this.#auth = auth;
-		// A draining peer usually stops publishing namespaces, so reprice from the signal
-		// itself. Waiting for another message would leave the route primary until close.
+		// A draining peer usually stops publishing namespaces, so rank its routes last from the
+		// signal itself. Waiting for another message would leave the route primary until close.
 		void goaway?.then(() => this.#drainAnnounced());
 	}
 
@@ -287,14 +282,13 @@ export class Subscriber {
 		return this.#goaway?.peek() !== undefined;
 	}
 
-	// What a route costs once the peer has asked us to leave.
-	#priced(route: WireRoute): WireRoute {
-		if (!this.#goingAway()) return route;
-		if (route.cost === DRAIN_COST) return route;
-		return { ...route, cost: DRAIN_COST };
+	// A route ranks last, at its real cost, once the peer has asked us to leave.
+	#drained(route: WireRoute): WireRoute {
+		if (!this.#goingAway() || route.draining) return route;
+		return { ...route, draining: true };
 	}
 
-	// Reprice every live advertisement. Idempotent, since the signal stays set.
+	// Rank every live advertisement last. Idempotent, since the signal stays set.
 	#drainAnnounced(): void {
 		for (const [path, info] of this.#announced) {
 			this.#settleAnnounce(path, info);
@@ -402,7 +396,7 @@ export class Subscriber {
 		}
 		// moq-transport carries no instance, so each namespace the peer advertises anew is a
 		// stream of its own, even one it advertised before on this session.
-		route = this.#priced({ ...route, instance: Instance.minted(), epoch: 0n });
+		route = this.#drained({ ...route, instance: Instance.minted(), epoch: 0n });
 		const entry: Announced = { adverts: [{ id, route }], route };
 		this.#announced.set(path, entry);
 		this.#consumes.announce(path, entry, route);
@@ -436,7 +430,7 @@ export class Subscriber {
 		if (newest === undefined) return;
 		// Every advertisement of a path the peer holds is the stream its first one named.
 		const { instance, epoch } = existing.route;
-		const route = this.#priced({ ...newest.route, instance, epoch });
+		const route = this.#drained({ ...newest.route, instance, epoch });
 		if (routesEqual(existing.route, route)) return;
 		existing.route = route;
 		this.#consumes.announce(path, existing, route, false);
@@ -1097,7 +1091,7 @@ export class Subscriber {
 				timescale: ok.properties.timescale,
 				priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 				// No MAX_CACHE_DURATION sets no publisher limit, not the authored default.
-				maxAge: cache === undefined ? null : Milli(Number(cache)),
+				maxAge: cache === undefined ? null : Duration.millis(Number(cache)),
 				ietf: this.#session.version,
 			});
 			producer = staged.producer;
@@ -1632,7 +1626,7 @@ export class Subscriber {
 					timescale: ok.properties.timescale,
 					priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 					// No MAX_CACHE_DURATION sets no publisher limit, not the authored default.
-					maxAge: maxCacheDuration === undefined ? null : Milli(Number(maxCacheDuration)),
+					maxAge: maxCacheDuration === undefined ? null : Duration.millis(Number(maxCacheDuration)),
 					// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
 					ietf: version,
 				});
@@ -2127,7 +2121,7 @@ export class Subscriber {
 					stream.tryDecode(decode) ??
 					(await race([stream.decodeMaybe(decode), producer?.closed ?? hooks.trackReleased(track)]));
 				if (object === null || object instanceof Error) {
-					join.fail(object ?? new Error("the track closed under the head"));
+					join.fail(object ?? new Error("the track closed under the head"), producer);
 					stream.stop(object ?? new StreamError(StreamCode.Cancel));
 					return;
 				}
@@ -2186,11 +2180,11 @@ export class Subscriber {
 				next += 1;
 			}
 			console.debug(`join head: group=${join.sequence} objects=${next}`);
-			join.finish();
+			join.finish(producer);
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
 			if (e instanceof JoinUnsupported) console.warn(`${e.message}, joining at the next whole group`);
-			join.fail(e);
+			join.fail(e, producer);
 			if (e instanceof ProtocolViolation) this.#fail(e.code, e.message);
 			// As for a subgroup object: the track is malformed, not just its head.
 			if (e instanceof StreamError && e.code === StreamCode.MalformedTrack) track.abort(e);

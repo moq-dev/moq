@@ -24,7 +24,7 @@ fn timed() -> moq_net::track::Info {
 fn produce_origin() -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Maximum time any single test may run before being treated as a deadlock.
@@ -483,55 +483,74 @@ async fn goaway_keeps_new_subscribes_moq_transport_22() {
 	goaway_keeps_new_subscribes("moq-transport-22".parse().unwrap()).await;
 }
 
-/// A GOAWAY costs the peer's routes at [`Cost::DRAIN`] so the origin stops
-/// preferring a connection that is about to close.
+/// A GOAWAY ranks the peer's routes below every other eligible route, whatever their
+/// link preference, so the origin stops preferring a connection that is about to close.
+/// The drain is local selection state, not a price: the route keeps its real cost.
 ///
 /// The peer sends nothing after the GOAWAY, which is the case that matters: the
 /// subscriber has to react to the signal itself, not to a later announce that a
 /// draining peer has no reason to send.
 async fn goaway_drains_routes(version: Version) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
-		let pub_origin = produce_origin();
-		let broadcast = pub_origin
-			.route("test", moq_net::origin::RouteOptions::hidden())
-			.expect("create broadcast");
-		broadcast.announce().expect("announce");
+		// A publisher of its own instance at `test`, behind its own session.
+		let publish = || {
+			let origin = produce_origin();
+			let route = origin
+				.route("test", moq_net::origin::RouteOptions::hidden())
+				.expect("create broadcast");
+			route.announce().expect("announce");
+			(origin, route)
+		};
 
 		let sub_origin = produce_origin();
+		let mut announced = sub_origin.consume().routes();
 
+		// A standby on a demoted link serves until the primary lands.
+		let (standby_origin, _standby) = publish();
 		let mut opts = MockConnectOptions::new(version);
-		opts.server_publish = Some(pub_origin.consume());
+		opts.server_publish = Some(standby_origin.consume());
+		opts.client_subscribe = Some(sub_origin.clone().with_preference(moq_net::origin::Preference::new(-1)));
+		let _standby_pair = connect_mock(opts).await;
+		let standby = route_at(&mut announced, |_| true).await.instance().clone();
+
+		// The primary outranks it by preference.
+		let (primary_origin, _primary) = publish();
+		let mut opts = MockConnectOptions::new(version);
+		opts.server_publish = Some(primary_origin.consume());
 		opts.client_subscribe = Some(sub_origin.clone());
 		let MockPair { client, server, .. } = connect_mock(opts).await;
-
-		let sub = sub_origin.consume();
-		let route = crate::support::announced(&sub, "test").await;
-		assert_ne!(
-			route.cost(),
-			moq_net::origin::Cost::DRAIN,
-			"a healthy route must not start out draining"
-		);
+		route_at(&mut announced, |route| *route.instance() != standby).await;
 
 		server.drain().send(Goaway::new()).expect("send goaway");
 		client.draining().recv().await.expect("goaway");
 
 		// Nothing else is sent on the announce stream, so this only resolves if the
-		// subscriber acted on the GOAWAY rather than on another message. The drain
-		// re-prices the route in place, which arrives as another active update.
-		let mut announced = sub.routes();
-		loop {
-			let (moq_net::origin::RouteEvent::Start(update) | moq_net::origin::RouteEvent::Update(update)) =
-				announced.next().await.expect("update")
-			else {
-				continue;
-			};
-			if update.prefix.as_str() == "test" && update.route.cost() == moq_net::origin::Cost::DRAIN {
-				break;
-			}
-		}
+		// subscriber acted on the GOAWAY rather than on another message: the draining
+		// primary ranks below even the demoted standby.
+		route_at(&mut announced, |route| *route.instance() == standby).await;
 	})
 	.await
 	.expect("test timed out (likely a route that never drained)");
+}
+
+/// The next route `announced` delivers at `test` that `ready` accepts.
+async fn route_at(
+	announced: &mut moq_net::origin::Routes,
+	ready: impl Fn(&moq_net::origin::RouteInfo) -> bool,
+) -> moq_net::origin::RouteInfo {
+	loop {
+		let moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: update,
+		} = announced.next().await.expect("update")
+		else {
+			continue;
+		};
+		if update.prefix.as_str() == "test" && ready(&update.route) {
+			return update.route;
+		}
+	}
 }
 
 #[kio::test]

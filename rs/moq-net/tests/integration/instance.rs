@@ -13,7 +13,7 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) -> MockPair {
@@ -30,7 +30,10 @@ async fn started(announced: &mut origin::Routes) -> Instance {
 		.expect("announce hung")
 		.expect("announce ended")
 	{
-		origin::RouteEvent::Start(announce) => announce.route.instance().clone(),
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			announce,
+		} => announce.route.instance().clone(),
 		other => panic!("expected a start, got {other:?}"),
 	}
 }
@@ -41,7 +44,10 @@ async fn ended(announced: &mut origin::Routes) {
 		.expect("announce hung")
 		.expect("announce ended")
 	{
-		origin::RouteEvent::End(_) => {}
+		origin::RouteEvent {
+			kind: origin::RouteKind::End,
+			..
+		} => {}
 		other => panic!("expected an end, got {other:?}"),
 	}
 }
@@ -146,7 +152,10 @@ async fn next_hop_lost(version: &str) {
 				.expect("the standby serves the claim");
 		}
 		_ => match event.expect("announce hung").expect("announce ended") {
-			origin::RouteEvent::Restart(announce) => {
+			origin::RouteEvent {
+				kind: origin::RouteKind::Restart,
+				announce,
+			} => {
 				assert_ne!(
 					announce.route.instance(),
 					&first,

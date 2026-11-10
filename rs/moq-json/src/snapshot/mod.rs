@@ -178,7 +178,7 @@ mod test {
 
 	/// A compressed track.
 	fn compressed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_compress(true)
+		moq_net::track::Info::default().with_compression(moq_net::track::Compression::Deflate)
 	}
 
 	fn producer(config: Config) -> (Producer<Value>, moq_net::track::Consumer) {
@@ -296,7 +296,7 @@ mod test {
 		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 1 })));
 
 		group.abort(moq_net::Error::Old).unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(None))));
 	}
 
@@ -437,7 +437,7 @@ mod test {
 		producer.update(&json!({ "keep": true })).unwrap();
 
 		// Serializes past the group cache limit, so the frame cannot be published.
-		let oversized = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
+		let oversized = json!({ "big": "x".repeat(crate::MAX_GROUP_BYTES as usize + 1) });
 		assert!(producer.update(&oversized).is_err());
 		producer.finish().unwrap();
 
@@ -867,7 +867,7 @@ mod test {
 		assert!(matches!(
 			producer.mutate(
 				|value| {
-					*value = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
+					*value = json!({ "big": "x".repeat(crate::MAX_GROUP_BYTES as usize + 1) });
 				},
 				None
 			),
@@ -910,7 +910,7 @@ mod test {
 		producer.update(&json!({ "keep": true })).unwrap();
 		let mut subscriber = track.subscribe(None).now_or_never().unwrap().unwrap().ordered();
 
-		*producer.modify(None).unwrap() = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
+		*producer.modify(None).unwrap() = json!({ "big": "x".repeat(crate::MAX_GROUP_BYTES as usize + 1) });
 
 		// The publisher learns the cause at its next edit. The consumer drains the snapshot
 		// that finished, then learns it from the aborted track.
@@ -934,7 +934,7 @@ mod test {
 		producer.update(&json!({ "keep": true })).unwrap();
 
 		let mut guard = producer.modify(None).unwrap();
-		*guard = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
+		*guard = json!({ "big": "x".repeat(crate::MAX_GROUP_BYTES as usize + 1) });
 		assert!(matches!(
 			guard.commit(),
 			Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
@@ -1128,7 +1128,7 @@ mod test {
 			.unwrap();
 		let mut group = track.append_group().unwrap();
 		let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 
 		// Track is finished but the open group is empty: pending, not end-of-stream.

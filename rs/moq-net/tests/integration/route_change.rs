@@ -41,7 +41,7 @@ const FRAMES: u64 = 4;
 pub(super) fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Have `to` pull everything `from` publishes.
@@ -414,7 +414,10 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	// Restart versus end and start is wire-level, which only the route stream shows.
 	let mut announced = consumer.routes();
 	match announced.next().await.expect("announced") {
-		origin::RouteEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			announce,
+		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the initial start, got {other:?}"),
 	}
 	let mut follow = consumer.follow("live", None).unwrap();
@@ -453,7 +456,10 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	// while lite-07 carries ANNOUNCE_RESTART. An in-place update must fail here.
 	if version.alpn() == "moq-lite-07-wip" {
 		match announced.next().await.expect("announced") {
-			origin::RouteEvent::Restart(announce) => {
+			origin::RouteEvent {
+				kind: origin::RouteKind::Restart,
+				announce,
+			} => {
 				assert_eq!(announce.prefix.as_str(), "live");
 				assert_eq!(
 					announce.route.instance(),
@@ -465,11 +471,17 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 		}
 	} else {
 		match announced.next().await.expect("announced") {
-			origin::RouteEvent::End(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+			origin::RouteEvent {
+				kind: origin::RouteKind::End,
+				announce,
+			} => assert_eq!(announce.prefix.as_str(), "live"),
 			other => panic!("{version} {trigger:?}: expected an end, got {other:?}"),
 		}
 		match announced.next().await.expect("announced") {
-			origin::RouteEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				announce,
+			} => assert_eq!(announce.prefix.as_str(), "live"),
 			other => panic!("{version} {trigger:?}: expected a fresh start, got {other:?}"),
 		}
 	}
@@ -508,7 +520,10 @@ async fn better_route_restarts(version: &str) {
 	let consumer = topology.subscriber.consume();
 	let mut announced = consumer.routes();
 	match announced.next().await.expect("announced") {
-		origin::RouteEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			announce,
+		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the route, got {other:?}"),
 	}
 
@@ -519,10 +534,10 @@ async fn better_route_restarts(version: &str) {
 
 	topology.trigger(Trigger::BetterRoute).await;
 	match announced.next().await.expect("announced") {
-		origin::RouteEvent::Restart(announce) => {
-			assert_eq!(announce.prefix.as_str(), "live");
-			assert_eq!(announce.route.hops().len(), 1, "{version}: the direct route");
-		}
+		origin::RouteEvent {
+			kind: origin::RouteKind::Restart,
+			announce,
+		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected a restart, got {other:?}"),
 	}
 
@@ -741,7 +756,7 @@ async fn lagging_route_dies(version: Version) {
 	for frame in 0..FRAMES {
 		write(&mut group, 2, frame);
 	}
-	group.finish().unwrap();
+	let group = group.finish().unwrap();
 
 	a_r.server.abort(Error::Cancel);
 	a_r.client.abort(Error::Cancel);
@@ -1161,7 +1176,13 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 			.unwrap();
 		let track = broadcast
 			.broadcast()
-			.create_track("video", timed().with_compress(compress))
+			.create_track(
+				"video",
+				timed().with_compression(match compress {
+					true => moq_net::track::Compression::Deflate,
+					false => moq_net::track::Compression::None,
+				}),
+			)
 			.unwrap();
 		broadcast.announce().unwrap();
 		let link = priced_link(version, &publisher, &relay, cost).await;

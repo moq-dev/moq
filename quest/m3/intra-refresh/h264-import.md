@@ -48,4 +48,4 @@ follows the hang draft, which rounds up
 
 ## Required
 
-- [Plan: recovery boundaries](/quest/m3/intra-refresh/plan-boundary.md) - resolve the later-mutated warmup contract before implementing it
+- [Plan: recovery boundaries](/quest/m3/intra-refresh/recovery-boundary.md) - resolve the later-mutated warmup contract before implementing it

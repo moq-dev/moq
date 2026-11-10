@@ -4,6 +4,7 @@
  * @module
  */
 
+import type { Duration } from "@moq/clock";
 import type * as Moq from "@moq/net";
 import { Effect, type Getter, type Readonlys, readonlys, Signal } from "@moq/signals";
 import * as Watch from "@moq/watch";
@@ -24,18 +25,16 @@ export class Member {
 	/** Playback volume, 0..1. */
 	readonly volume = new Signal(0.5);
 
-	/** Playback pipeline for this member. */
-	readonly player: Watch.Player;
-	/** Watched broadcast and catalog. */
-	readonly broadcast: Watch.Broadcast;
-	/** Video decoding pipeline. */
-	readonly video: Watch.Video.Decoder;
-	/** Audio decoding pipeline. */
-	readonly audio: Watch.Audio.Decoder;
-	/** Canvas video renderer. */
-	readonly renderer: Watch.Video.Renderer;
-	/** Speaker audio output. */
-	readonly emitter: Watch.Audio.Emitter;
+	/** The painted video's media timestamp and the video received so far. */
+	readonly video: Readonlys<{
+		timestamp: Getter<Duration | undefined>;
+		stats: Getter<Watch.Video.Stats | undefined>;
+	}>;
+	/** The playing audio's media timestamp and the audio received so far. */
+	readonly audio: Readonlys<{
+		timestamp: Getter<Duration | undefined>;
+		stats: Getter<Watch.Audio.Stats | undefined>;
+	}>;
 
 	/** Published participant identity and display fields. */
 	readonly user: Readonlys<UserInput>;
@@ -49,21 +48,18 @@ export class Member {
 		this.kind = kind;
 		this.path = path;
 
-		this.player = new Watch.Player({
+		const player = new Watch.Player({
 			origin: connection.origin,
 			name: path,
 			video: { canvas: this.canvas },
 			audio: { muted: this.muted, volume: this.volume },
 			viewer: { viewers: connection.viewers },
 		});
-		this.#signals.cleanup(() => this.player.close());
-		this.broadcast = this.player.broadcast;
-		this.video = this.player.video;
-		this.audio = this.player.audio;
-		this.renderer = this.player.renderer;
-		this.emitter = this.player.emitter;
+		this.#signals.cleanup(() => player.close());
+		this.video = { timestamp: player.renderer.out.timestamp, stats: player.video.out.stats };
+		this.audio = { timestamp: player.audio.out.timestamp, stats: player.audio.out.stats };
 
-		this.#metadata = consume(this.broadcast);
+		this.#metadata = consume(player.broadcast);
 		this.user = this.#metadata.user;
 		this.preview = this.#metadata.preview;
 		this.#signals.cleanup(() => this.#metadata.close());

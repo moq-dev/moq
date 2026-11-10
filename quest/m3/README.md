@@ -47,6 +47,7 @@ federation) land.
 - [Release pull requests read the R2 Rust cache](/quest/m3/mbx-r2-release-cache.md) - after the cut brings the platform Rust cache to `release`
 - [Binary release publishers run on their tag](/quest/m3/release-tag-publishers.md) - after the cut brings the workflows to `release`
 - [Relays split horizon per session](/quest/m3/route-split-horizon.md) - a relay never advertises a route back over the session it came from
+- [Cache-aware routing](/quest/m3/cache-routing/README.md) - a relay stays on a broadcast's path only for a local reader, two downstream sessions, or its one consumer's cheapest cold route, and joins a neighbor's copy instead of pulling another
 - [crates.io trusts the workflow](/quest/m3/crates-trusted-publisher.md) - maintainer action: the crates the cut first-publishes by token get a trusted publisher for `release-rs.yml`
 - [Rust releases publish through OIDC](/quest/m3/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [One policy for oversized container metadata](/quest/m3/import-metadata-policy.md) - fMP4 and MKV refuse or stream huge metadata by one documented rule
@@ -57,7 +58,6 @@ federation) land.
 - [A runtime-free QUIC driver](/quest/m3/quic-sansio-driver.md) - a caller's own loop moves UDP datagrams and polls moq sessions over moq-quic, for rust2's bindings
 - [QoS](/quest/m3/qos/README.md) - the relay's egress `lag` histogram and `dropped` counters on the stats totals and prefix tracks
 - [The DASH manifest keeps segments across a reconfigure](/quest/m3/dash-reconfigure.md) - a same-codec reconfigure keeps the old instance's segments listed in DASH, as HLS does
-- [Broadcast fairness](/quest/m3/broadcast-fairness.md) - broadcasts share a cluster link fairly, so one tenant's priority never starves another's
 - [Plan: watch worker](/quest/m3/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m3/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
 - [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) - H.264 and H.265 from an external Vulkan image on RADV, hand-rolled on ash, proven on an RX 9070
@@ -75,12 +75,11 @@ federation) land.
 - [fMP4 and TS imports publish BCP-47 languages](/quest/m3/import-lang-iso639.md) - ISO 639-2 codes become `en`-style tags on audio and text
 - [HLS carries every audio language](/quest/m3/hls-audio-languages.md) - every `EXT-X-MEDIA` audio entry imports with its `LANGUAGE`, and exports write it back
 - [A refused follower asks a replacement handler](/quest/m3/follow-refused-retry.md) - a same-instance handler swap with identical route details re-asks a refused `Following`, while listeners still see no change
-- [Content protection](/quest/m3/drm/README.md) - Common Encryption CMAF publishes unchanged, signalled in the hang `drm` section and MSF `contentProtections`, with license URLs from Rust, the CLI, and every binding
 - [iOS capture](/quest/m3/mobile-capture-ios.md) - Rust captures the camera and screen on iOS, setting the catalog rotation
 - [Android capture](/quest/m3/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs and setting the catalog rotation
 - [Latest readers use Range::live()](/quest/m3/readers-range-live.md) - after #6278, readers start at the live edge without waiting on `largest()`
 - [PulseAudio capture periods](/quest/m3/pulseaudio-capture-period.md) - capture on cpal's PulseAudio host arrives in short periods, not the server's 2 s default fragment, proven on the null sink's monitor
-- [A JSON snapshot consumer resyncs after a bad frame](/quest/m3/json-snapshot-resync.md) - a decode failure drops the group with a typed error, so `@moq/room` and moq-boy resume at the next snapshot
+- [A JSON snapshot consumer resyncs after a bad frame](/quest/m3/json-snapshot-resync.md) - a decode failure drops the group and the consumer resumes at the next snapshot by itself, so `@moq/room` and moq-boy keep reading
 - [Go module proxy](/quest/m3/go-module-proxy.md) - `moq.dev/moq-ffi` ships from a static GOPROXY we host, so its staticlibs stop growing git history by ~61 MiB per release
 - [Go per-platform lib modules](/quest/m3/go-ffi-platform-modules.md) - a Go build downloads only the host's staticlib, and `go mod vendor` works
 - [Dart on iOS](/quest/m3/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
@@ -185,9 +184,11 @@ federation) land.
 - [MP4 export trims exactly at both ends](/quest/m3/mp4-export-window.md) - a presentation window with no lead-in and no presented tail
 - [Container export ends cleanly when its broadcast closes](/quest/m3/export-close.md) - every container export returns `None` when its instance closes, whichever signal arrives first
 - [Audio capture opens a format the mix accepts](/quest/m3/audio-capture-negotiate.md) - multichannel and odd-rate devices capture, with discrete input selection
-- [A mix-minus removes several sources](/quest/m3/bus-minus-several.md) - a guest's return feed drops every copy of their own sound
-- [Bus writes land at a bus position](/quest/m3/bus-positioned-write.md) - callers sync audio to video without copying the bus's private latency
 - [moq-mux imports a regular MP4](/quest/m3/mp4-import.md) - non-fragmented MP4, `moov` first or last
 - [An audio encoder flushes without ending its track](/quest/m3/audio-encode-flush.md) - a clip's last partial frame is heard while the source stays live
 - [Padding probes from the browser](/quest/m3/probe-padding.md) - parked: the maintainer doubts padding is the right way for a browser to probe
 - [JS rung disable](/quest/m3/probe-rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding; parked with it
+- [Layered broadcasts](/quest/m3/layers/README.md) - hang specifies a layer layout track, and `moq play` and `@moq/watch` composite layers over the main picture
+- [A room keeps a participant while one of its aliases is announced](/quest/m3/room-alias-withdraw.md) - withdrawing `camera` while `camera.hang` stays announced keeps the participant
+- [@moq/auth key derivation and key sets validate like single keys](/quest/m3/auth-key-validation.md) - `Key.public` shares no scope and never yields an invalid key, and key sets and Rust refuse mismatched keys at parse
+- [Binding server helpers observe session errors and describe close truthfully](/quest/m3/serve-session-errors.md) - Python retrieves session task errors, and the Kotlin, Go, and Dart docs say close ends every connection

@@ -414,10 +414,11 @@ impl Session {
 	/// Observe a GOAWAY from the peer, telling us to migrate elsewhere.
 	///
 	/// [`poll`](goaway::Consumer::poll) it with a no-op waiter for a synchronous check, or
-	/// wait on it for one. Once a GOAWAY arrives, this
-	/// session's routes cost [`Cost::DRAIN`](crate::origin::Cost::DRAIN): requests
-	/// keep opening on it until a replacement session's route outranks it, and
-	/// existing subscriptions keep flowing until the session closes.
+	/// wait on it for one. Once a GOAWAY arrives, this session's routes rank below
+	/// every other eligible route, whatever their preference or cost, on this node
+	/// only: requests keep opening on it until a replacement session's route
+	/// outranks it, and existing subscriptions keep flowing until the session
+	/// closes. A relay still forwards the routes at their real cost.
 	pub fn draining(&self) -> goaway::Consumer {
 		self.goaway.consumer()
 	}

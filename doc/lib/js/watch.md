@@ -107,7 +107,9 @@ player publishes its own broadcast, reporting only what it counted, so a second
 player on one connection that resolves the same feedback path, for any catalog,
 publishes nothing and warns until the first one leaves; give each player its own
 name. The decoders'
-`out.stats` and the stats panel read the same counters. The token must allow
+`out.stats` and the stats panel read the same counters. Audio's `out.stats`
+also counts `skips`, each jump that dropped buffered audio rather than playing
+it faster, which the stats panel shows and the feedback track leaves out. The token must allow
 publishing under the echo path.
 
 ## Binding from a framework
@@ -239,8 +241,9 @@ them; nothing is retained without an open handle.
 
 ## Buffered playback
 
-By default the player minimizes latency: it skips ahead whenever media piles
-up past the delay. Content produced faster than real time, such as a TTS
+By default the player minimizes latency: it time-stretches received audio
+that falls behind the delay back onto it, playing it slightly faster, and skips
+ahead only when media piles up far past it. Content produced faster than real time, such as a TTS
 response emitted in one burst with future timestamps, wants the opposite. Set
 `lookahead` to how far ahead it may run and it plays through at the encoded pace:
 
@@ -252,7 +255,9 @@ response emitted in one burst with future timestamps, wants the opposite. Set
 `delay`, since playback only skips ahead once media sits more than
 `delay + lookahead` past the playhead.
 
-Durations need a unit; a bare number is rejected. Audio holds the lookahead
+Durations need a unit; a bare number is rejected. From script, the `delay` and
+`lookahead` properties take a `Duration` from `@moq/clock`, such as
+`el.delay = Duration.millis(300)`. Audio holds the lookahead
 as encoded frames, so a large one is cheap; video waits as decoded pictures,
 which hold decoder memory, so a long video lookahead is not. The first video
 frame shows as a poster at once, and playback starts once every enabled track
@@ -272,6 +277,10 @@ import * as Watch from "@moq/watch";
 Watch.assets("/moq/");
 ```
 
-The URL must end with `/`. Copy the files again on every upgrade: the worklet
-changes with the package. `@moq/room` and `@moq/boy` play through
+The URL must end with `/` and have no query or fragment. Copy the files again
+on every upgrade: the worklet changes with the package. `@moq/room` and `@moq/boy` play through
 `@moq/watch`, so this one call covers them.
+
+A browser without `AudioDecoder` decodes through the libav polyfill, which
+loads its worker and WebAssembly from the same directory (they are among
+`assets/*`), so also allow `'wasm-unsafe-eval'` in `script-src`.

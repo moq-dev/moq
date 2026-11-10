@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use moq_net::track::Delay;
 use moq_net::track::{Info, Range, Subscription};
-use moq_net::{Timescale, Timestamp, Version, kio, origin, track};
+use moq_net::{Timescale, Timestamp, Version, origin, track};
 
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, peer, spawn};
 
@@ -38,7 +38,7 @@ const VERSION: &str = "moq-lite-07-wip";
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 /// A millisecond track with no publisher max age, so only a reader's budget skips its groups.
@@ -307,7 +307,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 	options.server_subscribe = Some(publisher.clone());
 	options.server_stats = registry
 		.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("upstream")))
-		.session(moq_net::Path::from_static(""));
+		.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("")));
 	let _upstream = connect_mock(options).await;
 	let broadcast = publisher
 		.route("live", moq_net::origin::RouteOptions::hidden())

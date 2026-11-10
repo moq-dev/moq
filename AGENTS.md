@@ -10,6 +10,7 @@ Trust this checkout's source over published API references, which may describe a
 
 - Immediately disable a flaky test and plan a follow-up to investigate.
 - The same identity (ex. broadcast+track+group+frame) always has the same content. Use a new identity for new content.
+- A publisher that breaks that, such as by reusing or restarting group sequences, hurts only its own broadcast. Code spends no cycles detecting it: the violation must only never panic, cost unbounded work, or affect other broadcasts.
 - Never match on errors; it's brittle.
 - moq-lite and moq-net take priority over moq-transport and other IETF drafts, which are a low-effort compatibility layer. Ignore their requirements (even MUSTs) that add cost without a clear behavioral benefit, and never add API for functionality only they have.
 
@@ -36,6 +37,7 @@ The API is the most important thing to get right: a bad shape costs a breaking c
 PRs target `main`, where breaking API changes are allowed.
 `release` is what ships; touch it only to cut a release or backport a fix or benchmark (see `CONTRIBUTING.md`).
 Wire changes stay backwards compatible with *published* drafts/versions; an unpublished `-wip` version changes freely.
+moq.pro rolls out with relays on the newest and previous release side by side, so those two versions must interoperate as relays (today moq-lite-06 and moq-lite-07). A temporary migration for that is fine when it is clearly marked and easy to delete at the next version migration.
 Our libraries prefer moq-lite, so moq-transport compatibility only matters against third-party implementations.
 
 Build output may live outside the checkout and gets wiped, so scratch never goes in `target/`.

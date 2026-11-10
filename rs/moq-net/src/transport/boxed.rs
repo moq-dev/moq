@@ -12,9 +12,9 @@ use std::task::{Poll, ready};
 
 use bytes::{Buf, Bytes};
 
-use super::open::{self, Open};
+use super::open::{self, Dir, Open};
 use super::poll::{self, SendOptions};
-use super::{Address, CloseKind, Dir, Limits, LimitsError, Probe, ReceiveWindow, StreamCredit, Wire};
+use super::{Address, CloseKind, Limits, LimitsError, Probe, ReceiveWindow, Wire};
 
 /// A boxed [`poll::Boxable`] session, shared by every task that uses it.
 #[derive(Clone)]
@@ -35,7 +35,7 @@ impl Session {
 			session,
 		});
 		Self {
-			opens: Arc::new(open::Lines::new(Arc::downgrade(&inner))),
+			opens: Default::default(),
 			inner,
 			closing: Default::default(),
 			work: Default::default(),
@@ -150,11 +150,15 @@ pub(super) struct Shared<S: ?Sized> {
 
 impl Shared<dyn ErasedSession> {
 	/// Reserve the credit of one more paused stream, unless it would push the paused total
-	/// over half the connection window, returning how much it reserved.
+	/// over half the connection window, returning how much it reserved. Without a connection
+	/// window a paused stream holds only its own credit, so it reserves nothing.
 	fn reserve(&self) -> Option<u64> {
 		let window = self.session.receive_window()?;
-		let charge = window.stream.min(window.connection);
-		let cap = window.connection / 2;
+		let Some(connection) = window.connection else {
+			return Some(0);
+		};
+		let charge = window.stream.min(connection.get());
+		let cap = connection.get() / 2;
 		self.paused
 			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |paused| {
 				paused.checked_add(charge).filter(|total| *total <= cap)
@@ -167,15 +171,6 @@ impl Shared<dyn ErasedSession> {
 /// The session a stream reserves paused credit from, which a stream outliving it never keeps
 /// open: once it is gone, nothing is paused.
 type Budget = Weak<Shared<dyn ErasedSession>>;
-
-/// The transport a session's lines read the peer's stream credit from, which they never keep
-/// open.
-pub(super) type Transport = Weak<Shared<dyn ErasedSession>>;
-
-/// The peer's stream credit in `dir`, or `None` once the transport is gone or cannot say.
-pub(super) fn stream_credit(transport: &Transport, dir: Dir) -> Option<StreamCredit> {
-	transport.upgrade()?.session.stream_credit(dir)
-}
 
 /// A boxed transport error, keeping both code registries and the message.
 #[derive(Debug)]
@@ -580,7 +575,6 @@ pub(super) trait ErasedSession: Send + Sync {
 	fn probe(&self) -> Option<Probe>;
 	fn receive_window(&self) -> Option<ReceiveWindow>;
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError>;
-	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit>;
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]>;
 }
 
@@ -720,10 +714,6 @@ impl<S: poll::Boxable> ErasedSession for S {
 
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
 		poll::Session::set_limits(self, limits)
-	}
-
-	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
-		poll::Session::stream_credit(self, dir)
 	}
 
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
@@ -931,10 +921,6 @@ impl poll::Session for Session {
 		self.inner.session.set_limits(limits)
 	}
 
-	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
-		self.inner.session.stream_credit(dir)
-	}
-
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
 		self.inner.session.export_keying_material(label, context)
 	}
@@ -1079,8 +1065,10 @@ mod test {
 	#[test]
 	fn paused_streams_hold_at_most_half_the_connection_window() {
 		let gate = kio::Producer::new(true);
-		let session =
-			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(100, 20)));
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume())
+				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
+		);
 		let mut streams: Vec<_> = (0..3).map(|_| accept(&session)).collect();
 		assert!(streams[0].pause());
 		assert!(streams[0].pause(), "a paused stream reserves once");
@@ -1091,6 +1079,13 @@ mod test {
 		assert!(streams[2].pause(), "a resumed stream returned its share");
 		drop(streams.remove(1));
 		assert!(accept(&session).pause(), "so did a dropped one");
+
+		// Without a connection window nothing is shared, so every stream may pause.
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(None, u64::MAX)),
+		);
+		let mut streams: Vec<_> = (0..3).map(|_| accept(&session)).collect();
+		assert!(streams.iter_mut().all(|stream| stream.pause()));
 	}
 
 	/// A stream paces at the credit its session grants it, so a hop holds about what its
@@ -1100,12 +1095,14 @@ mod test {
 		use crate::model::pace::AHEAD;
 
 		let gate = kio::Producer::new(true);
-		let session =
-			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(100, 20)));
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume())
+				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
+		);
 		assert_eq!(accept(&session).window(), 20);
 
 		let session = Session::new(
-			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(u64::MAX, u64::MAX)),
+			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(None, u64::MAX)),
 		);
 		assert_eq!(accept(&session).window(), AHEAD, "capped at half the live tail");
 
@@ -1222,8 +1219,10 @@ mod test {
 	#[test]
 	fn a_stream_paces_at_the_window_widened_after_it_arrived() {
 		let gate = kio::Producer::new(true);
-		let session =
-			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(10, 20)));
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume())
+				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(10), 20)),
+		);
 		let early = accept(&session);
 		let limits = Limits {
 			receive_window: std::num::NonZeroU64::new(100),
@@ -1240,8 +1239,10 @@ mod test {
 		let session = Session::new(SinkSession::accepted_bi(gate.consume()));
 		assert!(!accept(&session).pause());
 
-		let session =
-			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(100, 20)));
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume())
+				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
+		);
 		let mut stream = accept(&session);
 		drop(session);
 		assert!(!stream.pause());

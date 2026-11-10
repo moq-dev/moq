@@ -403,7 +403,7 @@ impl poll::Session for Session {
 	fn receive_window(&self) -> Option<net::ReceiveWindow> {
 		let state = self.inner.lock();
 		Some(net::ReceiveWindow::new(
-			state.conn.receive_window(),
+			Some(state.conn.receive_window()),
 			state.conn.stream_receive_window(),
 		))
 	}
@@ -415,16 +415,6 @@ impl poll::Session for Session {
 		let mut quic = moq_quic::Limits::default();
 		quic.receive_window = limits.receive_window;
 		Session::set_limits(self, quic).map_err(|err| net::LimitsError::Refused(err.to_string()))
-	}
-
-	fn stream_credit(&self, dir: net::Dir) -> Option<net::StreamCredit> {
-		let dir = match dir {
-			net::Dir::Uni => Dir::Uni,
-			net::Dir::Bi => Dir::Bi,
-		};
-		let mut state = self.inner.lock();
-		let streams = state.conn.streams();
-		Some(net::StreamCredit::new(streams.credit(dir), streams.blocked(dir)))
 	}
 }
 

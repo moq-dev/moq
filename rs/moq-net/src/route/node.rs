@@ -24,7 +24,7 @@ use crate::{Instance, Path};
 
 use rand::RngExt;
 
-use super::{Error, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno};
+use super::{Error, GENERATED, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno};
 
 /// One announce stream in one direction.
 pub(crate) type Key = u64;
@@ -36,11 +36,6 @@ pub(crate) struct Claim {
 	pub epoch: u64,
 	/// The origin's Announce Cost.
 	pub cost: u64,
-	/// The claim of the same identity this one took over, at or above its path, and the
-	/// instance that claim served: what was resolved through it beneath this path is
-	/// this claim's broadcast. Kept while the instance stays, and sent as
-	/// ANNOUNCE_TAKEOVER to a peer still holding that claim.
-	pub continues: Option<(Path, Instance)>,
 	/// This node's own claim, served through a route learned from an upstream peer: it
 	/// is never sent to another upstream, so this node never carries traffic between
 	/// two. Always unset on a claim off the wire.
@@ -118,10 +113,12 @@ struct Outbox {
 	pending: HashMap<Id, (u64, Pending)>,
 	/// Outputs to read in order: the other kinds, and a pending entry once taken.
 	ready: VecDeque<Output>,
-	/// Each claim's last Serve or Unserve, read after the rest, in queue order. A
-	/// takeover queues its successor's Serve before its predecessor's Unserve, and the
-	/// session needs the predecessor still served to carry it on: so a Serve replacing
-	/// a queued Serve keeps its place, while an Unserve, or a Serve after one, goes last.
+	/// Each claim's last Serve or Unserve, read after the rest, in queue order. A job
+	/// queues its Serve before the Unserve or restart of the claim it continues, and the
+	/// session needs the job's route in place before the claim's goes, so a reader
+	/// resolved through the claim carries on: so a Serve replacing a queued Serve of the
+	/// same instance and epoch keeps its place, while an Unserve, a restart, or a Serve
+	/// after an Unserve goes last.
 	serves: BTreeMap<u64, Output>,
 	/// Where each claim's last change sits in `serves`.
 	serving: HashMap<(Id, Path), u64>,
@@ -137,13 +134,19 @@ struct Outbox {
 struct Pending {
 	/// A ROUTE_END goes first, ending the route the reader holds and its claims.
 	ended: bool,
+	/// The last batch for the route the reader holds, read just before its ROUTE_END:
+	/// its floor certifies the withdrawals that ended the route.
+	closing: Option<Batch>,
 	/// The last finite reach since, which starts the route if the reader holds none.
 	finite: Option<Reach>,
 	/// The route was held after that.
 	held: bool,
 	/// The batches since, merged: each claim's last change, and the last floor.
-	batch: Option<(Changes, Option<Rev>)>,
+	batch: Option<Batch>,
 }
+
+/// Merged batches: each claim's last change, and the last floor.
+type Batch = (Changes, Option<Rev>);
 
 /// Each claim's last change, by path.
 type Changes = BTreeMap<Path, Option<Claim>>;
@@ -176,8 +179,13 @@ impl Outbox {
 				// that keeps any end before, an end of a start it never read is acked.
 				let ended = entry.ended;
 				let acked = !holds || ended;
+				let closing = match ended {
+					true => entry.closing.take(),
+					false => entry.batch.take().filter(|_| holds),
+				};
 				*entry = Pending {
 					ended: holds,
+					closing,
 					..Pending::default()
 				};
 				if !holds && let Some((seq, _)) = self.pending.remove(&id) {
@@ -222,8 +230,10 @@ impl Outbox {
 			Output::Serve { id, ref claim, .. } | Output::Unserve { id, ref claim } => {
 				let key = (id, claim.clone());
 				if let Some(&seq) = self.serving.get(&key)
-					&& matches!(output, Output::Serve { .. })
-					&& matches!(self.serves.get(&seq), Some(Output::Serve { .. }))
+					&& let Output::Serve { served, .. } = &output
+					&& let Some(Output::Serve { served: queued, .. }) = self.serves.get(&seq)
+					&& queued.claim.instance == served.claim.instance
+					&& queued.claim.epoch == served.claim.epoch
 				{
 					self.serves.insert(seq, output);
 					return None;
@@ -265,6 +275,13 @@ impl Outbox {
 	/// Queue one identity's pending entry to read, as the router would have sent it.
 	fn take(&mut self, id: Id, pending: Pending) {
 		if pending.ended {
+			if let Some(closing) = pending.closing {
+				self.ready.push_back(Output::Batch {
+					id,
+					changes: ordered(closing.0),
+					floor: closing.1,
+				});
+			}
 			self.delivered.remove(&id);
 			self.ready.push_back(Output::Route { id, reach: None });
 		}
@@ -279,19 +296,45 @@ impl Outbox {
 			});
 		}
 		if let Some((merged, floor)) = pending.batch {
-			// As the router orders a batch: what starts or changes, then what ends.
-			let (ends, starts): (Vec<_>, Vec<_>) = merged.into_iter().partition(|(_, claim)| claim.is_none());
+			let changes = ordered(merged);
 			if let Some(sent) = self.delivered.get_mut(&id) {
-				for (path, _) in &starts {
-					sent.insert(path.clone());
-				}
-				for (path, _) in &ends {
-					sent.remove(path);
+				for (path, claim) in &changes {
+					match claim {
+						Some(_) => sent.insert(path.clone()),
+						None => sent.remove(path),
+					};
 				}
 			}
-			let changes = starts.into_iter().chain(ends).collect();
 			self.ready.push_back(Output::Batch { id, changes, floor });
 		}
+	}
+}
+
+/// A batch's changes as the router orders them: what starts or changes, then what ends.
+fn ordered(changes: Changes) -> Vec<(Path, Option<Claim>)> {
+	let (ends, starts): (Vec<_>, Vec<_>) = changes.into_iter().partition(|(_, claim)| claim.is_none());
+	starts.into_iter().chain(ends).collect()
+}
+
+/// The node's state, locked. A stream's wakes wait until the lock is released: a waker
+/// may poll the stream's session inline, and the session calls back into the node.
+struct Locked<'a> {
+	// Dropped first, being declared first, so the held wakes go out unlocked.
+	state: MutexGuard<'a, State>,
+	_hold: kio::Hold,
+}
+
+impl std::ops::Deref for Locked<'_> {
+	type Target = State;
+
+	fn deref(&self) -> &State {
+		&self.state
+	}
+}
+
+impl std::ops::DerefMut for Locked<'_> {
+	fn deref_mut(&mut self) -> &mut State {
+		&mut self.state
 	}
 }
 
@@ -301,7 +344,14 @@ struct State {
 	queues: Queues,
 	/// Each shown claim of another identity, and the streams serving it.
 	homes: BTreeMap<(Id, Path), Home>,
+	/// The usable feasible routes each identity's claims were last served through,
+	/// with the name each stream's peer gives it: while they stay the same, only a
+	/// claim whose shown state changed is served differently.
+	routes: HashMap<Id, Routes>,
 }
+
+/// An identity's usable feasible routes: each stream, its metric, and the peer's name.
+type Routes = Vec<(Key, Metric, Id)>;
 
 /// Where one shown claim is served: each stream, what it was last sent, and
 /// whether it confirmed serving it.
@@ -356,19 +406,28 @@ impl Node {
 				next_key: 1,
 				queues: HashMap::new(),
 				homes: BTreeMap::new(),
+				routes: HashMap::new(),
 			})),
 		}
 	}
 
-	/// A node with a random identity.
-	pub fn random() -> Self {
+	/// A node declaring the origin's hop id, so the origin has one identity on every
+	/// wire. A declared identity is never qualified, so an id carrying that marker
+	/// loses it, or is replaced by a random one if nothing is left.
+	pub fn origin(hop: std::num::NonZeroU64) -> Self {
 		let mut rng = kio::clock::rng();
-		let id = rng.random_range(1..QUALIFIED);
+		let id = match hop.get() & !QUALIFIED {
+			0 => rng.random_range(1..=GENERATED),
+			id => id,
+		};
 		Self::new(id, rng.random())
 	}
 
-	fn lock(&self) -> MutexGuard<'_, State> {
-		self.state.lock().unwrap_or_else(|poison| poison.into_inner())
+	fn lock(&self) -> Locked<'_> {
+		Locked {
+			_hold: kio::hold(),
+			state: self.state.lock().unwrap_or_else(|poison| poison.into_inner()),
+		}
 	}
 
 	/// The identity this node declares, which a rotation replaces.
@@ -379,22 +438,13 @@ impl Node {
 			.expect("a node always declares an identity")
 	}
 
-	/// This node's own claim at `path` changed: `None` withdraws it. A claim taking over
-	/// the own claim at `predecessor` continues the instance that one serves now.
-	pub fn own(&self, path: Path, claim: Option<Claim>, predecessor: Option<&Path>) {
+	/// This node's own claim at `path` changed: `None` withdraws it.
+	pub fn own(&self, path: Path, claim: Option<Claim>) {
 		let mut state = self.lock();
 		let changed = match claim {
-			Some(mut claim) => {
+			Some(claim) => {
 				let view = state.router.declared().and_then(|id| state.router.view(id));
 				let current = view.and_then(|view| view.items.get(&path));
-				claim.continues = match predecessor {
-					Some(predecessor) => (view.and_then(|view| view.items.get(predecessor)))
-						.map(|taken| (predecessor.clone(), taken.instance.clone())),
-					// A re-price or a newer epoch of the same instance continues what it did.
-					None => current
-						.filter(|current| current.instance == claim.instance)
-						.and_then(|current| current.continues.clone()),
-				};
 				let changed = current != Some(&claim);
 				changed && state.router.announce(path, claim).is_ok()
 			}
@@ -604,41 +654,61 @@ impl State {
 				self.router.echo(key, id);
 			}
 		}
-		// The shown claims below are read whole; the events only say which changed.
+		// The shown claims are read in place; the events only say which changed.
 		self.router.events();
 		let changed = self.router.changed();
 		let declared = self.router.declared();
-		for id in changed {
+		for (id, claims) in changed {
 			if Some(id) != declared {
-				self.home(id);
+				self.home(id, claims);
 			}
 		}
 	}
 
 	/// Serve each shown claim of `id` through every stream with a usable feasible
 	/// route to it that can carry the claim, keeping it where it is, unavailable, while
-	/// there is none.
-	fn home(&mut self, id: Id) {
-		let claims: Vec<(Path, Claim, bool)> = (self.router.shown().range((id, Path::empty())..))
-			.take_while(|((shown, _), _)| *shown == id)
-			.map(|((_, claim), shown)| (claim.clone(), shown.item.clone(), shown.available))
+	/// there is none. Only `claims`, whose shown state changed, are served anew, unless
+	/// the routes changed too.
+	fn home(&mut self, id: Id, claims: BTreeSet<Path>) {
+		let routes: Routes = (self.router.routes(id).into_iter())
+			.map(|(key, metric)| (key, metric, self.router.name(key, id)))
 			.collect();
-		let mut gone: BTreeSet<Path> = (self.homes.range((id, Path::empty())..))
-			.take_while(|((home, _), _)| *home == id)
-			.map(|((_, claim), _)| claim.clone())
-			.collect();
-		for (claim, item, available) in claims {
-			gone.remove(&claim);
-			let routes = self.router.routes(id, &claim);
+		let last = self.routes.get(&id).map_or(&[][..], Vec::as_slice);
+		let claims = match last == routes.as_slice() {
+			true => claims,
+			false => {
+				match routes.is_empty() {
+					true => self.routes.remove(&id),
+					false => self.routes.insert(id, routes.clone()),
+				};
+				let shown =
+					(self.router.shown().range((id, Path::empty())..)).take_while(|((shown, _), _)| *shown == id);
+				let homes = (self.homes.range((id, Path::empty())..)).take_while(|((home, _), _)| *home == id);
+				let mut claims: BTreeSet<Path> = shown.map(|((_, claim), _)| claim.clone()).collect();
+				claims.extend(homes.map(|((_, claim), _)| claim.clone()));
+				claims
+			}
+		};
+		let (shown, gone): (Vec<Path>, Vec<Path>) =
+			(claims.into_iter()).partition(|claim| self.router.shown().contains_key(&(id, claim.clone())));
+		// Most specific first: a job continuing its claim's instance is served before
+		// the claim moves on, so a reader resolved through the claim finds the job's route.
+		for claim in shown.into_iter().rev() {
+			let shown = &self.router.shown()[&(id, claim.clone())];
+			let (item, available) = (shown.item.clone(), shown.available);
+			let carrying: Vec<(Key, Metric, Id)> = (routes.iter())
+				.filter(|(key, _, _)| self.router.carries(*key, &claim))
+				.copied()
+				.collect();
 			let home = self.homes.entry((id, claim.clone())).or_default();
 			// With no route left, the router no longer knows the name a stream's peer
 			// gave the identity, so it keeps the one it was served under.
-			let wanted: Vec<(Key, Metric, bool, Id)> = match routes.is_empty() {
+			let wanted: Vec<(Key, Metric, bool, Id)> = match carrying.is_empty() {
 				true => (home.keys.iter())
 					.map(|(key, slot)| (*key, slot.served.metric, false, slot.named))
 					.collect(),
-				false => (routes.iter())
-					.map(|&(key, metric)| (key, metric, available, self.router.name(key, id)))
+				false => (carrying.into_iter())
+					.map(|(key, metric, named)| (key, metric, available, named))
 					.collect(),
 			};
 			for slot in home.keys.values_mut() {
@@ -695,25 +765,76 @@ impl State {
 				);
 			}
 		}
+		#[cfg(test)]
+		self.check(id, &routes);
 		// Nothing left to recover: let the identity go.
 		let shows =
 			(self.router.shown().range((id, Path::empty())..).next()).is_some_and(|((shown, _), _)| *shown == id);
 		if !self.router.holds(id) && !shows {
+			self.routes.remove(&id);
 			self.router.collect(id);
+		}
+	}
+
+	/// Every claim of `id` is served as serving it anew would: only shown claims have
+	/// a home, and each is served through every route carrying it, or kept unavailable.
+	#[cfg(test)]
+	fn check(&self, id: Id, routes: &Routes) {
+		let homes = (self.homes.range((id, Path::empty())..)).take_while(|((home, _), _)| *home == id);
+		for ((_, claim), _) in homes {
+			assert!(
+				self.router.shown().contains_key(&(id, claim.clone())),
+				"{claim:?} has a home but is not shown"
+			);
+		}
+		let shown = (self.router.shown().range((id, Path::empty())..)).take_while(|((shown, _), _)| *shown == id);
+		for ((_, claim), shown) in shown {
+			let home = self.homes.get(&(id, claim.clone()));
+			let slots = home.into_iter().flat_map(|home| home.keys.iter());
+			let carrying: Vec<_> = (routes.iter())
+				.filter(|(key, _, _)| self.router.carries(*key, claim))
+				.collect();
+			if carrying.is_empty() {
+				for (_, slot) in slots {
+					assert_eq!(slot.served.claim, shown.item, "{claim:?} kept as shown");
+					assert!(!slot.served.available, "{claim:?} kept unavailable");
+				}
+				continue;
+			}
+			let slots: BTreeMap<Key, &Slot> = slots.filter(|(_, slot)| !slot.leaving).map(|(k, s)| (*k, s)).collect();
+			let want: BTreeMap<Key, (Served, Id)> = (carrying.iter())
+				.map(|&&(key, metric, named)| {
+					let served = Served {
+						claim: shown.item.clone(),
+						metric,
+						available: shown.available,
+					};
+					(key, (served, named))
+				})
+				.collect();
+			let got: BTreeMap<Key, (Served, Id)> = (slots.iter())
+				.map(|(key, slot)| (*key, (slot.served.clone(), slot.named)))
+				.collect();
+			assert_eq!(got, want, "{claim:?} served through every route carrying it");
 		}
 	}
 }
 
 /// The lite-06 hop a router identity travels as, so a relay translating its routes
-/// for a lite-06 peer recognizes them coming back.
+/// for a lite-06 peer recognizes them coming back. A declared identity is the
+/// origin's own hop id; a qualified key is folded into the 53 bits a generated hop
+/// id keeps.
 pub(crate) fn hop(id: Id) -> crate::Hop {
-	// FNV-1a over the identity, folded into the 53 bits a hop id keeps.
+	if id & QUALIFIED == 0 {
+		return crate::Hop::from(std::num::NonZeroU64::new(id).expect("a non-zero identity"));
+	}
+	// FNV-1a over the identity.
 	let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
 	for byte in id.to_le_bytes() {
 		hash ^= u64::from(byte);
 		hash = hash.wrapping_mul(0x0100_0000_01b3);
 	}
-	let id = (hash & ((1 << 53) - 1)).max(1);
+	let id = (hash & GENERATED).max(1);
 	crate::Hop::from(std::num::NonZeroU64::new(id).expect("a non-zero hop id"))
 }
 
@@ -731,7 +852,6 @@ mod tests {
 			instance: instance.clone(),
 			epoch: 0,
 			cost,
-			continues: None,
 			upstream: false,
 			learned: false,
 		}
@@ -768,7 +888,7 @@ mod tests {
 		let (origin, relay) = (Node::new(1, 1), Node::new(2, 2));
 		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 5)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 5)));
 		pump(&answer, &receive);
 		assert_eq!(
 			served(outputs(&receive)),
@@ -784,7 +904,7 @@ mod tests {
 			}]
 		);
 
-		origin.own(p("live/x"), None, None);
+		origin.own(p("live/x"), None);
 		pump(&answer, &receive);
 		assert_eq!(
 			served(outputs(&receive)),
@@ -812,7 +932,7 @@ mod tests {
 		let far_answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let near = relay.receive(Link::default(), Path::empty()).unwrap();
 		let near_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
 		pump(&far_answer, &far);
 		pump(&near_answer, &near);
 		let metric = |outputs: Vec<Output>| match &served(outputs)[..] {
@@ -851,8 +971,8 @@ mod tests {
 		};
 		let b = relay.receive(costly, p("live/b")).unwrap();
 		let b_answer = origin.answer(Link::default(), p("live/b")).unwrap();
-		origin.own(p("live/a/x"), Some(claim(&instance, 0)), None);
-		origin.own(p("live/b/y"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/a/x"), Some(claim(&instance, 0)));
+		origin.own(p("live/b/y"), Some(claim(&instance, 0)));
 		pump(&a_answer, &a);
 		pump(&b_answer, &b);
 		let claims = |outputs: Vec<Output>| -> Vec<Path> {
@@ -867,28 +987,28 @@ mod tests {
 		assert_eq!(claims(outputs(&b)), [p("live/b/y")]);
 	}
 
-	/// A stalled stream reads a takeover's successor before its predecessor goes, even
-	/// once the successor changed again meanwhile, so the session still finds the
-	/// predecessor to carry on.
+	/// A stalled stream reads a job's Serve before the Unserve of the claim it
+	/// continues, even once the job changed again meanwhile, so a reader resolved
+	/// through the claim finds the job's route before the claim's goes.
 	#[test]
-	fn a_stalled_takeover_reads_its_successor_first() {
-		let (old, new) = (Instance::random(), Instance::random());
+	fn a_stalled_stream_reads_a_job_before_its_claim_goes() {
+		let instance = Instance::random();
 		let origin = Node::new(1, 1);
 		let relay = Node::new(2, 2);
 		let fast = relay.receive(Link::default(), Path::empty()).unwrap();
 		let stalled = relay.receive(Link::default(), Path::empty()).unwrap();
 		let fast_answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let stalled_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live"), Some(claim(&old, 0)), None);
+		origin.own(p("live"), Some(claim(&instance, 0)));
 		pump(&fast_answer, &fast);
 		pump(&stalled_answer, &stalled);
 		outputs(&fast);
 		outputs(&stalled);
 
-		origin.own(p("live/x"), Some(claim(&new, 0)), Some(&p("live")));
-		origin.own(p("live"), None, None);
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
+		origin.own(p("live"), None);
 		pump(&fast_answer, &fast);
-		origin.own(p("live/x"), Some(claim(&new, 5)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 5)));
 		pump(&fast_answer, &fast);
 		let read: Vec<(Path, Option<u64>)> = (served(outputs(&stalled)).into_iter())
 			.map(|output| match output {
@@ -898,6 +1018,45 @@ mod tests {
 			})
 			.collect();
 		assert_eq!(read, [(p("live/x"), Some(5)), (p("live"), None)]);
+	}
+
+	/// A job and its claim's restart arriving together are read job first, even past a
+	/// change to the claim still queued, so a reader resolved through the claim's old
+	/// instance finds the job's route before the claim's moves on.
+	#[test]
+	fn a_job_is_read_before_its_claims_restart() {
+		let (old, new) = (Instance::random(), Instance::random());
+		let origin = Node::new(1, 1);
+		let relay = Node::new(2, 2);
+		let fast = relay.receive(Link::default(), Path::empty()).unwrap();
+		let stalled = relay.receive(Link::default(), Path::empty()).unwrap();
+		let fast_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		let stalled_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live"), Some(claim(&old, 0)));
+		pump(&fast_answer, &fast);
+		pump(&stalled_answer, &stalled);
+		outputs(&fast);
+		outputs(&stalled);
+
+		// A change to the claim the stalled stream leaves queued.
+		origin.own(p("live"), Some(claim(&old, 1)));
+		pump(&fast_answer, &fast);
+		pump(&stalled_answer, &stalled);
+		outputs(&fast);
+
+		origin.own(p("live/x"), Some(claim(&old, 0)));
+		origin.own(p("live"), Some(claim(&new, 0)));
+		pump(&fast_answer, &fast);
+		pump(&stalled_answer, &stalled);
+		for stream in [&fast, &stalled] {
+			let read: Vec<(Path, Instance)> = (served(outputs(stream)).into_iter())
+				.map(|output| match output {
+					Output::Serve { claim, served, .. } => (claim, served.claim.instance),
+					other => panic!("not a serve: {other:?}"),
+				})
+				.collect();
+			assert_eq!(read, [(p("live/x"), old.clone()), (p("live"), new.clone())]);
+		}
 	}
 
 	/// A claim of a scoped peer left with no usable route stays where it is served,
@@ -919,7 +1078,7 @@ mod tests {
 		let second = relay.receive(scoped(), Path::empty()).unwrap();
 		let first_answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let second_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
 		pump(&first_answer, &first);
 		pump(&second_answer, &second);
 		second.route(1, Some(Reach::Held));
@@ -949,11 +1108,11 @@ mod tests {
 		let stalled = relay.receive(Link::default(), Path::empty()).unwrap();
 		let fast_answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let stalled_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
 		pump(&fast_answer, &fast);
 		pump(&stalled_answer, &stalled);
 		for cost in 1..1000 {
-			origin.own(p("live/x"), Some(claim(&instance, cost)), None);
+			origin.own(p("live/x"), Some(claim(&instance, cost)));
 			pump(&fast_answer, &fast);
 			outputs(&fast);
 		}
@@ -975,9 +1134,9 @@ mod tests {
 		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		outputs(&answer);
 		for cost in 0..1000 {
-			origin.own(p("live/x"), Some(claim(&instance, cost)), None);
-			origin.own(p("live/churn"), Some(claim(&instance, cost)), None);
-			origin.own(p("live/churn"), None, None);
+			origin.own(p("live/x"), Some(claim(&instance, cost)));
+			origin.own(p("live/churn"), Some(claim(&instance, cost)));
+			origin.own(p("live/churn"), None);
 		}
 		let read = outputs(&answer);
 		let batch = |read: &[Output]| match read {
@@ -989,9 +1148,9 @@ mod tests {
 
 		// Once sent, a claim's end is kept, behind what started.
 		for cost in 0..1000 {
-			origin.own(p("live/y"), Some(claim(&instance, cost)), None);
+			origin.own(p("live/y"), Some(claim(&instance, cost)));
 		}
-		origin.own(p("live/x"), None, None);
+		origin.own(p("live/x"), None);
 		let read = outputs(&answer);
 		assert_eq!(read.len(), 1, "{read:?}");
 		assert_eq!(
@@ -1059,6 +1218,62 @@ mod tests {
 		assert_eq!(relay.retained().echoes, 0);
 	}
 
+	/// A route goes on a stream only while it has a claim the stream's interest
+	/// meets. Once the last one is withdrawn, the reader reads the floor certifying
+	/// the withdrawal before the route's end, even when both queued unread.
+	#[test]
+	fn a_route_ends_after_the_floor_certifying_its_last_claim() {
+		let instance = Instance::random();
+		let origin = Node::new(1, 1);
+		let edge = origin.answer(Link::default(), Path::empty()).unwrap();
+		let other = origin.answer(Link::default(), p("other")).unwrap();
+		assert_eq!(outputs(&edge), [], "no claim, no route");
+
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
+		assert_eq!(outputs(&edge).len(), 2, "the route, then its claim");
+		assert_eq!(outputs(&other), [], "the interest meets no claim");
+
+		origin.own(p("live/x"), None);
+		assert_eq!(
+			outputs(&edge),
+			[
+				Output::Batch {
+					id: 1,
+					changes: vec![(p("live/x"), None)],
+					floor: Some(2),
+				},
+				Output::Route { id: 1, reach: None },
+			]
+		);
+	}
+
+	/// A peer that withholds ROUTE_END echoes holds one end per identity however
+	/// often its only claim flaps: the route starts again only once the end is echoed.
+	#[test]
+	fn a_route_restarts_only_once_its_end_is_echoed() {
+		let instance = Instance::random();
+		let origin = Node::new(1, 1);
+		let edge = origin.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
+		outputs(&edge);
+		// The peer reads everything, and echoes nothing.
+		let mut ends = 0;
+		for _ in 0..100 {
+			origin.own(p("live/x"), None);
+			origin.own(p("live/x"), Some(claim(&instance, 0)));
+			ends += (outputs(&edge).into_iter())
+				.filter(|output| matches!(output, Output::Route { reach: None, .. }))
+				.count();
+		}
+		assert_eq!(ends, 1);
+		assert_eq!(origin.retained().echoes, 1);
+
+		edge.echo(1);
+		let read = outputs(&edge);
+		assert!(matches!(read[0], Output::Route { id: 1, reach: Some(_) }), "{read:?}");
+		assert_eq!(read.len(), 2, "the route, then its claim");
+	}
+
 	#[test]
 	fn a_route_lost_with_its_session_leaves_the_others_serving() {
 		let instance = Instance::random();
@@ -1068,7 +1283,7 @@ mod tests {
 		let first_answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let second = relay.receive(Link::default(), Path::empty()).unwrap();
 		let second_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
 		pump(&first_answer, &first);
 		pump(&second_answer, &second);
 		outputs(&first);

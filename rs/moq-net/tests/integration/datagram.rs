@@ -25,7 +25,7 @@ const TRACK: &str = "audio";
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn millis(ms: u64) -> Timestamp {
@@ -731,7 +731,7 @@ async fn a_stream_tracks_datagram_sent_between_its_answer_and_end_arrives() {
 		let mut producer = datagrams.accept(timed());
 		producer.append(millis(1), &b"only"[..]).unwrap();
 		producer.finish();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let mut subscriber = (&mut subscribing)
 			.await
 			.expect("subscribe panicked")

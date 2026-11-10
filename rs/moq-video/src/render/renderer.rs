@@ -138,7 +138,7 @@ impl Completion {
 					drop(keepalive);
 				}
 			})
-			.map_err(|err| Error::Render(anyhow::anyhow!("start GPU completion worker: {err}")))?;
+			.map_err(|err| Error::render(anyhow::anyhow!("start GPU completion worker: {err}")))?;
 
 		Ok(Self {
 			device: device.clone(),
@@ -1180,16 +1180,16 @@ mod tests {
 			}
 			let surface = Surface::rgba(&rgba, size).expect("a valid RGBA frame");
 			let frame = Frame::new(surface, Timestamp::from_micros(index * 33_333).unwrap());
-			for unit in encoder.encode(&frame).expect("encode a picture") {
+			for unit in encoder.encode_all(&frame).expect("encode a picture") {
 				let timestamp = unit.timestamp;
 				exported.extend(
 					exporting
-						.decode(unit.payload.clone(), timestamp, index == 0)
+						.decode_all(unit.payload.clone(), timestamp, index == 0)
 						.expect("decode to the GPU"),
 				);
 				downloaded.extend(
 					downloading
-						.decode(unit.payload, timestamp, index == 0)
+						.decode_all(unit.payload, timestamp, index == 0)
 						.expect("decode to the CPU"),
 				);
 			}
@@ -1343,12 +1343,12 @@ mod tests {
 				encoder.cut().unwrap();
 			}
 			let frame = Frame::new(picture(index), Timestamp::from_micros(index * 33_333).unwrap());
-			for unit in encoder.encode(&frame).expect("encode a picture") {
+			for unit in encoder.encode_all(&frame).expect("encode a picture") {
 				let exported = exporting
-					.decode(unit.payload.clone(), unit.timestamp, index == 0)
+					.decode_all(unit.payload.clone(), unit.timestamp, index == 0)
 					.expect("decode to the GPU");
 				let downloaded = downloading
-					.decode(unit.payload, unit.timestamp, index == 0)
+					.decode_all(unit.payload, unit.timestamp, index == 0)
 					.expect("decode to the CPU");
 				assert_eq!(exported.len(), downloaded.len(), "the two decoders disagreed");
 

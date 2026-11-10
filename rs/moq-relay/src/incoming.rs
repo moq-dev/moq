@@ -83,6 +83,8 @@ pub trait Sealed: Sized {
 	fn auth(&self) -> moq_net::auth::Handle;
 	fn requests(&mut self) -> moq_net::auth::Requests;
 	fn role(&self) -> Option<moq_net::setup::Role>;
+	/// The Hop ID the peer declared in its SETUP, if any.
+	fn peer_hop(&self) -> Option<std::num::NonZeroU64>;
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self;
 	fn with_limits(self, limits: moq_net::session::Limits) -> Self;
 	fn with_publisher(self, publish: moq_net::origin::Consumer) -> Self;
@@ -121,9 +123,9 @@ impl Sealed for moq_tokio::server::Request {
 
 	#[cfg(feature = "quic")]
 	fn pacer(&self) -> Option<auth::Pacer> {
-		let quic = moq_tokio::server::Request::quic(self)?.clone();
+		let quic = moq_tokio::server::Request::quic_limits(self)?;
 		Some(auth::Pacer::new(move |caps| {
-			if let Err(err) = quic.set_limits(caps.limits()) {
+			if let Err(err) = quic.set(caps.limits()) {
 				tracing::warn!(%err, "failed to apply bitrate caps");
 			}
 		}))
@@ -144,6 +146,10 @@ impl Sealed for moq_tokio::server::Request {
 
 	fn role(&self) -> Option<moq_net::setup::Role> {
 		moq_tokio::server::Request::role(self)
+	}
+
+	fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
+		moq_tokio::server::Request::peer_hop(self)
 	}
 
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self {
@@ -210,6 +216,10 @@ impl Sealed for Accepted {
 
 	fn role(&self) -> Option<moq_net::setup::Role> {
 		self.handshake.role()
+	}
+
+	fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
+		self.handshake.peer_hop()
 	}
 
 	fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {

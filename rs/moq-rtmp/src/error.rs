@@ -10,6 +10,10 @@ pub enum Error {
 	#[error("moq: {0}")]
 	Moq(#[from] moq_net::Error),
 
+	/// Muxing or demuxing FLV failed.
+	#[error("mux: {0}")]
+	Mux(#[from] moq_mux::Error),
+
 	/// I/O error from the RTMP listener or a connection.
 	#[error("io: {0}")]
 	Io(Arc<std::io::Error>),

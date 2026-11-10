@@ -45,7 +45,8 @@ async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, 
 	const err = new RequestError({
 		errorCode,
 		reasonPhrase: refusal.reasonPhrase,
-		retryInterval: refusal.retryInterval ?? (refusal.retryable && open ? BigInt(RETRY_INITIAL) : 0n),
+		retryInterval:
+			refusal.retryInterval ?? (refusal.retryable && open ? BigInt(Math.ceil(RETRY_INITIAL.asMillis())) : 0n),
 	});
 	await Message.write(w, RequestError.id, err, version);
 }
@@ -55,7 +56,12 @@ async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, 
  * @internal
  */
 export async function refuse(stream: Stream, version: IetfVersion, kind: RequestKind, refusal: Refusal): Promise<void> {
-	await writeRefusal(stream.writer, version, kind, refusal);
+	try {
+		await writeRefusal(stream.writer, version, kind, refusal);
+	} catch (err) {
+		stream.abort(error(err));
+		throw err;
+	}
 	stream.close();
 }
 
@@ -226,10 +232,9 @@ export class RequestStream {
 		}
 	}
 
-	/** Refuse the request and end it. */
+	/** Refuse the request and end it, resetting it if the refusal cannot be written. */
 	async refuse(kind: RequestKind, refusal: Refusal): Promise<void> {
-		await writeRefusal(this.writer, this.#session.version, kind, refusal);
-		this.close();
+		await this.serve(writeRefusal(this.writer, this.#session.version, kind, refusal));
 	}
 
 	/**

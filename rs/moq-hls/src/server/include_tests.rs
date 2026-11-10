@@ -295,7 +295,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 		.update(moq_net::Timed::from(&value).at(Timestamp::ZERO))
 		.unwrap();
 	master(&server, "RESOLUTION=640x240", true).await;
-	include.video.finish().unwrap();
+	let _video = include.video.finish().unwrap();
 	let held = server
 		.router()
 		.oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
@@ -303,7 +303,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 		.unwrap();
 	assert_eq!(held.status(), StatusCode::OK);
 	frames(&next, 3);
-	next.finish().unwrap();
+	let _next = next.finish().unwrap();
 	drop(held);
 	let deadline = kio::clock::now() + Duration::from_secs(10);
 	let ended = loop {
@@ -349,7 +349,7 @@ async fn an_include_rendition_whose_broadcast_failed_is_not_listed() {
 	frames(&parent.video, 0);
 	frames(&parent.audio, 0);
 	let other = origin
-		.route_prefix("room/other", moq_net::origin::RouteOptions::default())
+		.claim("room/other", moq_net::origin::RouteOptions::default())
 		.unwrap();
 	let child = Instance::random();
 	let mut value = catalog();
@@ -412,7 +412,7 @@ async fn an_include_rendition_is_listed_once_its_broadcast_resolves() {
 	frames(&parent.audio, 0);
 	// The include's only rendition reads a sibling whose route has not answered yet.
 	let other = origin
-		.route_prefix("room/other", moq_net::origin::RouteOptions::default())
+		.claim("room/other", moq_net::origin::RouteOptions::default())
 		.unwrap();
 	let child = Instance::random();
 	let mut value = catalog();
@@ -611,7 +611,7 @@ async fn a_refused_include_is_listed_once_announced() {
 	frames(&parent.audio, 0);
 	// An on-demand route that drops its prepared answer refuses the first resolution.
 	let claim = origin
-		.route_prefix("room/ladder", moq_net::origin::RouteOptions::default())
+		.claim("room/ladder", moq_net::origin::RouteOptions::default())
 		.unwrap();
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	let refuse = async {

@@ -2,7 +2,6 @@
 use std::process::Stdio;
 
 use anyhow::{Context, ensure};
-use moq_tokio::moq_net;
 use tokio::io::AsyncBufReadExt;
 
 async fn endpoint(

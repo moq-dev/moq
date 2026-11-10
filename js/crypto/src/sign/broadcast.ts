@@ -58,7 +58,7 @@ export class Producer {
 		}
 		// Snapshot the timescale, as the net track does, so a caller reusing its options cannot
 		// change the scale frames are signed at.
-		const timescale = { timescale: info.timescale };
+		const timescale = { timescale: info.timescale ?? null };
 		return Track.Producer.make(inner, this.#key, new Scope(this.#path, this.instance, name), sequences, timescale);
 	}
 

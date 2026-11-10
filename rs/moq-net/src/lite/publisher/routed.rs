@@ -5,13 +5,14 @@
 //! hidden claims unless the peer asked for them, and anything this handle's scope, the
 //! session's grant, the upstream horizon, or the proxy preference leaves out, in which
 //! case a floor certifies nothing, since the peer cannot tell what was left out from
-//! what is gone.
+//! what is gone. A route goes on the wire only while the stream shows the peer one
+//! of its claims, so a route whose claims it filters out costs the peer nothing.
 //!
 //! A handle's mounts beneath the prefix are read through a node stream each, at the
 //! target, and what they present is named under the mount point on the same routes.
 
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap},
+	collections::{BTreeMap, HashMap},
 	task::{Poll, ready},
 };
 
@@ -24,10 +25,15 @@ use crate::{
 	route::{self, node},
 };
 
-/// A route the peer holds, by the origin node it reaches.
+/// A route the node sends the stream, by the origin node it reaches.
 struct Sent {
-	/// Its Route ID on the stream.
-	wire: u64,
+	/// Its Route ID while the peer holds it: from the first claim the stream shows it
+	/// until the last one goes.
+	wire: Option<u64>,
+	/// The last finite advertisement, which a ROUTE_START carries.
+	advert: route::Advert,
+	/// How many of its claims the peer is shown.
+	shown: usize,
 	/// Each source's last reach for it, by index: the route stands while one has one,
 	/// and the first one's is the peer's.
 	reach: BTreeMap<usize, route::Reach>,
@@ -88,8 +94,13 @@ pub(super) struct Answer {
 	routes: HashMap<route::Id, Sent>,
 	next_route: u64,
 	/// Route IDs ended and not yet echoed, the origin node each reached, and the
-	/// source that ended it.
-	echoes: HashMap<u64, (route::Id, usize)>,
+	/// sources whose own end of it waits on that echo: none when the stream ended it
+	/// for showing nothing.
+	echoes: HashMap<u64, (route::Id, Vec<usize>)>,
+	/// The Route ID of each origin node's end in `echoes`: a route starts again only
+	/// once its last end is echoed, so a peer that withholds echoes holds at most one
+	/// end per node.
+	ending: HashMap<route::Id, u64>,
 	/// The claims the peer holds: their Announce ID and attributes.
 	live: HashMap<(route::Id, Path), (u64, node::Claim)>,
 	gate: crate::auth::Gate,
@@ -124,6 +135,7 @@ impl Answer {
 			routes: HashMap::new(),
 			next_route: 0,
 			echoes: HashMap::new(),
+			ending: HashMap::new(),
 			live: HashMap::new(),
 			epoch: 0,
 			permit: Default::default(),
@@ -169,10 +181,12 @@ impl Answer {
 			// Every route the peer holds has a floor before SYNCED; one the node has
 			// not certified yet certifies nothing.
 			for sent in self.routes.values_mut() {
-				if !sent.floored {
+				if let Some(wire) = sent.wire
+					&& !sent.floored
+				{
 					sent.floored = true;
 					let floor = Msg::Floor {
-						id: sent.wire,
+						id: wire,
 						revision: None,
 					};
 					stream.writer.buffer(&floor)?;
@@ -201,7 +215,9 @@ impl Answer {
 				// Let go of the node first, so nothing more is queued, then end every route.
 				self.sources.clear();
 				for (_, sent) in std::mem::take(&mut self.routes) {
-					stream.writer.buffer(&Msg::RouteEnd { id: sent.wire })?;
+					if let Some(wire) = sent.wire {
+						stream.writer.buffer(&Msg::RouteEnd { id: wire })?;
+					}
 				}
 				self.live.clear();
 				self.phase = Phase::Withdrawing;
@@ -222,7 +238,7 @@ impl Answer {
 			let mut progress = false;
 			match stream.reader.poll_decode_maybe::<lite::AnnounceReply>(waiter) {
 				Poll::Ready(Ok(Some(reply))) => {
-					self.reply(reply)?;
+					self.reply(stream, reply)?;
 					progress = true;
 				}
 				// The peer closed its side: it wants nothing more.
@@ -250,7 +266,7 @@ impl Answer {
 	}
 
 	/// A ROUTE_REQUEST, or the echo of a ROUTE_END.
-	fn reply(&mut self, reply: lite::AnnounceReply) -> Result<(), Error> {
+	fn reply(&mut self, stream: &mut Stream<Transport, Version>, reply: lite::AnnounceReply) -> Result<(), Error> {
 		match reply {
 			lite::AnnounceReply::RouteRequest { node, seqno } => {
 				// Through the first source carrying the route, or the prefix's own.
@@ -263,10 +279,14 @@ impl Answer {
 			}
 			lite::AnnounceReply::RouteEnd { id } => {
 				// The echo names the Route ID; the node knows the route by its origin node.
-				let (node, index) = self.echoes.remove(&id).ok_or(Error::ProtocolViolation)?;
-				if let Some(source) = self.sources.get(index) {
-					source.stream.echo(node);
+				let (node, waiting) = self.echoes.remove(&id).ok_or(Error::ProtocolViolation)?;
+				self.ending.remove(&node);
+				for index in waiting {
+					if let Some(source) = self.sources.get(index) {
+						source.stream.echo(node);
+					}
 				}
+				self.resume(stream, node)?;
 			}
 		}
 		Ok(())
@@ -294,13 +314,13 @@ impl Answer {
 		reach: Option<route::Reach>,
 	) -> Result<(), Error> {
 		let Some(sent) = self.routes.get_mut(&id) else {
-			// Held only follows a route the peer holds, and an end of one it does not is moot.
+			// Held only follows a route the node sent, and an end of one it did not is moot.
+			// The peer is sent the route with its first claim shown.
 			if let Some(reach @ route::Reach::Finite(advert)) = reach {
-				let wire = self.next_route;
-				self.next_route += 1;
-				stream.writer.buffer(&Msg::RouteStart { node: id, advert })?;
 				let sent = Sent {
-					wire,
+					wire: None,
+					advert,
+					shown: 0,
 					reach: BTreeMap::from([(source, reach)]),
 					claims: BTreeMap::new(),
 					floor: None,
@@ -318,40 +338,120 @@ impl Answer {
 			None if sent.reach.remove(&source).is_none() => return Ok(()),
 			None if sent.reach.is_empty() => {
 				let sent = self.routes.remove(&id).expect("matched above");
-				stream.writer.buffer(&Msg::RouteEnd { id: sent.wire })?;
+				let Some(wire) = sent.wire else {
+					self.echo(id, source);
+					return Ok(());
+				};
+				stream.writer.buffer(&Msg::RouteEnd { id: wire })?;
 				// The ROUTE_END retires every claim under the route.
 				for path in sent.claims.keys() {
 					if let Some((announce, _)) = self.live.remove(&(id, path.clone())) {
 						self.encoder.end(announce);
 					}
 				}
-				self.echoes.insert(sent.wire, (id, source));
+				self.ending.insert(id, wire);
+				self.echoes.insert(wire, (id, vec![source]));
 				return Ok(());
 			}
 			None => {
 				// Another source still carries the route, so the peer keeps it: the claims
-				// this one presented end, and its end is acked at once.
+				// this one presented end, and its end is acked as the peer's copy allows.
 				let paths: Vec<Path> = sent.claims.keys().cloned().collect();
 				let paths: Vec<Path> = (paths.into_iter()).filter(|path| self.source(path) == source).collect();
-				self.sources[source].stream.echo(id);
+				self.echo(id, source);
 				let sent = self.routes.get_mut(&id).expect("matched above");
 				for path in &paths {
 					sent.claims.remove(path);
 				}
-				let mut started = BTreeSet::new();
 				for path in paths {
-					self.sync(stream, id, path, &mut started)?;
+					self.sync(stream, id, path)?;
+				}
+				if self.routes[&id].shown == 0 {
+					self.floor(stream, id)?;
+					self.settle(stream, id)?;
 				}
 			}
 		}
-		let sent = &self.routes[&id];
-		match sent.reach() {
-			after if after == before => {}
-			Some(route::Reach::Finite(advert)) => stream.writer.buffer(&Msg::RouteUpdate { id: sent.wire, advert })?,
-			Some(route::Reach::Held) => stream.writer.buffer(&Msg::RouteHold { id: sent.wire })?,
+		let sent = self
+			.routes
+			.get_mut(&id)
+			.expect("a route stands while a source carries it");
+		let after = sent.reach();
+		if let Some(route::Reach::Finite(advert)) = after {
+			sent.advert = advert;
+		}
+		let Some(wire) = sent.wire else {
+			return Ok(());
+		};
+		match after {
+			_ if after == before => {}
+			Some(route::Reach::Finite(advert)) => stream.writer.buffer(&Msg::RouteUpdate { id: wire, advert })?,
+			Some(route::Reach::Held) => stream.writer.buffer(&Msg::RouteHold { id: wire })?,
 			None => unreachable!("a route stands while a source carries it"),
 		}
 		Ok(())
+	}
+
+	/// The route's Route ID, sending ROUTE_START if the peer does not hold it, or
+	/// `None` while the peer has not echoed the route's last end.
+	fn start(&mut self, stream: &mut Stream<Transport, Version>, id: route::Id) -> Result<Option<u64>, Error> {
+		let sent = self.routes.get_mut(&id).expect("only a held route starts");
+		if let Some(wire) = sent.wire {
+			return Ok(Some(wire));
+		}
+		if self.ending.contains_key(&id) {
+			return Ok(None);
+		}
+		let wire = self.next_route;
+		self.next_route += 1;
+		stream.writer.buffer(&Msg::RouteStart {
+			node: id,
+			advert: sent.advert,
+		})?;
+		if sent.reach() == Some(route::Reach::Held) {
+			stream.writer.buffer(&Msg::RouteHold { id: wire })?;
+		}
+		sent.wire = Some(wire);
+		Ok(Some(wire))
+	}
+
+	/// End the route on the wire once it shows the peer nothing; the caller sent the
+	/// floor certifying that first.
+	fn settle(&mut self, stream: &mut Stream<Transport, Version>, id: route::Id) -> Result<(), Error> {
+		let Some(sent) = self.routes.get_mut(&id) else {
+			return Ok(());
+		};
+		let Some(wire) = sent.wire.filter(|_| sent.shown == 0) else {
+			return Ok(());
+		};
+		sent.wire = None;
+		sent.floored = false;
+		stream.writer.buffer(&Msg::RouteEnd { id: wire })?;
+		self.ending.insert(id, wire);
+		self.echoes.insert(wire, (id, Vec::new()));
+		Ok(())
+	}
+
+	/// Echo `source`'s end of the route to `id` once the peer holds no copy of it: at
+	/// once, or with the echo of the route's outstanding end, since until then the
+	/// peer may still hold and forward the advertisement.
+	fn echo(&mut self, id: route::Id, source: usize) {
+		match self.ending.get(&id).and_then(|wire| self.echoes.get_mut(wire)) {
+			Some((_, waiting)) => waiting.push(source),
+			None => self.sources[source].stream.echo(id),
+		}
+	}
+
+	/// Show the peer the route's claims again once it echoed the route's last end.
+	fn resume(&mut self, stream: &mut Stream<Transport, Version>, id: route::Id) -> Result<(), Error> {
+		let Some(sent) = self.routes.get(&id) else {
+			return Ok(());
+		};
+		let paths: Vec<Path> = sent.claims.keys().cloned().collect();
+		for path in paths {
+			self.sync(stream, id, path)?;
+		}
+		self.floor(stream, id)
 	}
 
 	/// The index of the source presenting the claim at the handle-side `path`: the
@@ -387,26 +487,20 @@ impl Answer {
 				None => path,
 			};
 			match claim {
-				Some(mut claim) => {
-					if let Some(mount) = mount {
-						claim.continues = (claim.continues.take())
-							.and_then(|(taken, instance)| Some((mount.name(&taken)?, instance)));
-					}
-					sent.claims.insert(path.clone(), claim)
-				}
+				Some(claim) => sent.claims.insert(path.clone(), claim),
 				None => sent.claims.remove(&path),
 			};
 			paths.push(path);
 		}
 		sent.floor = floor;
-		let mut started = BTreeSet::new();
 		for path in paths {
-			self.sync(stream, id, path, &mut started)?;
+			self.sync(stream, id, path)?;
 		}
-		self.floor(stream, id)
+		self.floor(stream, id)?;
+		self.settle(stream, id)
 	}
 
-	/// Send the ANNOUNCE_FLOOR closing a batch for the route to `id`.
+	/// Send the ANNOUNCE_FLOOR closing a batch for the route to `id`, if the peer holds it.
 	fn floor(&mut self, stream: &mut Stream<Transport, Version>, id: route::Id) -> Result<(), Error> {
 		let certified = self.certified();
 		// Like the grant, the upstream horizon and the proxy preference leave claims out
@@ -415,12 +509,12 @@ impl Answer {
 			.flat_map(|sent| sent.claims.values())
 			.any(|claim| !sends(&self.link, claim));
 		let sent = self.routes.get_mut(&id).expect("only a held route has a batch");
+		let Some(wire) = sent.wire else {
+			return Ok(());
+		};
 		sent.floored = true;
 		let revision = sent.floor.filter(|_| certified && !hides);
-		stream.writer.buffer(&Msg::Floor {
-			id: sent.wire,
-			revision,
-		})
+		stream.writer.buffer(&Msg::Floor { id: wire, revision })
 	}
 
 	/// Whether a floor may certify the whole requested prefix: nothing this handle's
@@ -451,131 +545,63 @@ impl Answer {
 	}
 
 	/// Bring the peer's claim at `path` for the route to `id` in line with the node's.
-	///
-	/// `started` collects the claims this pass started: a claim takes over only one the
-	/// peer held before, so a snapshot replays no takeover.
-	fn sync(
-		&mut self,
-		stream: &mut Stream<Transport, Version>,
-		id: route::Id,
-		path: Path,
-		started: &mut BTreeSet<Path>,
-	) -> Result<(), Error> {
+	fn sync(&mut self, stream: &mut Stream<Transport, Version>, id: route::Id, path: Path) -> Result<(), Error> {
 		let sent = self.routes.get(&id).expect("only a held route syncs");
 		let wanted = (sent.claims.get(&path))
 			.filter(|claim| self.shows(&path) && sends(&self.link, claim))
 			.cloned();
-		let wire = sent.wire;
-		let taken = (wanted.as_ref())
-			.and_then(|claim| self.continued(id, &path, claim))
-			.filter(|(taken, _)| !started.contains(taken));
 		let key = (id, path);
 		match (self.live.get_mut(&key), wanted) {
 			(None, Some(claim)) => {
-				let suffix = self.suffix(&key.1).expect("shown claims are under the prefix");
-				let announce = match taken {
-					Some((taken, predecessor)) => {
-						tracing::debug!(route = %key.1, node = id, predecessor = %taken, "takeover");
-						self.takeover(stream, wire, predecessor, suffix, &claim)?
-					}
-					None => {
-						tracing::debug!(route = %key.1, node = id, "announce");
-						let (announce, suffix) = self.encoder.start(suffix);
-						stream.writer.buffer(&Msg::Active {
-							suffix,
-							route: wire,
-							instance: Some(claim.instance.clone()),
-							epoch: claim.epoch,
-							hops: crate::Hops::new(),
-							cost: origin::Cost::new(claim.cost),
-						})?;
-						announce.expect("lite-07 assigns announce ids")
-					}
+				let Some(wire) = self.start(stream, id)? else {
+					// Shown once the peer echoes the route's last end.
+					return Ok(());
 				};
-				started.insert(key.1.clone());
+				let suffix = self.suffix(&key.1).expect("shown claims are under the prefix");
+				tracing::debug!(route = %key.1, node = id, "announce");
+				let (announce, suffix) = self.encoder.start(suffix);
+				stream.writer.buffer(&Msg::Active {
+					suffix,
+					route: wire,
+					instance: Some(claim.instance.clone()),
+					epoch: claim.epoch,
+					hops: crate::Hops::new(),
+					cost: origin::Cost::new(claim.cost),
+				})?;
+				let announce = announce.expect("lite-07 assigns announce ids");
 				self.live.insert(key, (announce, claim));
+				self.routes.get_mut(&id).expect("started above").shown += 1;
 			}
 			(Some((announce, held)), Some(claim)) => {
 				let announce = *announce;
 				let restart = held.instance != claim.instance || held.epoch != claim.epoch;
 				let reprice = held.cost != claim.cost;
-				let replacement = match taken {
-					// In place: a new Announce ID replaces the one it continues.
-					Some((taken, predecessor)) if taken == key.1 => {
-						tracing::debug!(route = %key.1, node = id, "takeover");
-						let suffix = self.suffix(&key.1).expect("held claims are under the prefix");
-						self.takeover(stream, wire, predecessor, suffix, &claim)?
-					}
-					_ if restart => {
-						tracing::debug!(route = %key.1, "restart");
-						stream.writer.buffer(&Msg::Restart {
-							id: announce,
-							instance: Some(claim.instance.clone()),
-							epoch: claim.epoch,
-							cost: origin::Cost::new(claim.cost),
-						})?;
-						announce
-					}
-					_ => {
-						if reprice {
-							stream.writer.buffer(&Msg::Update {
-								id: announce,
-								hops: crate::Hops::new(),
-								cost: origin::Cost::new(claim.cost),
-							})?;
-						}
-						announce
-					}
-				};
-				self.live.insert(key, (replacement, claim));
+				if restart {
+					tracing::debug!(route = %key.1, "restart");
+					stream.writer.buffer(&Msg::Restart {
+						id: announce,
+						instance: Some(claim.instance.clone()),
+						epoch: claim.epoch,
+						cost: origin::Cost::new(claim.cost),
+					})?;
+				} else if reprice {
+					stream.writer.buffer(&Msg::Update {
+						id: announce,
+						hops: crate::Hops::new(),
+						cost: origin::Cost::new(claim.cost),
+					})?;
+				}
+				self.live.insert(key, (announce, claim));
 			}
 			(Some(_), None) => {
 				let (announce, _) = self.live.remove(&key).expect("matched above");
 				stream.writer.buffer(&Msg::EndedId { id: announce })?;
 				self.encoder.end(announce);
+				self.routes.get_mut(&id).expect("only a held route syncs").shown -= 1;
 			}
 			(None, None) => {}
 		}
 		Ok(())
-	}
-
-	/// Send `claim` at `suffix` under the route `wire` as an ANNOUNCE_TAKEOVER of the
-	/// peer's live `predecessor`, returning its Announce ID.
-	fn takeover(
-		&mut self,
-		stream: &mut Stream<Transport, Version>,
-		wire: u64,
-		predecessor: u64,
-		suffix: Path,
-		claim: &node::Claim,
-	) -> Result<u64, Error> {
-		let (announce, suffix) = self.encoder.takeover(predecessor, suffix);
-		stream.writer.buffer(&Msg::Takeover {
-			predecessor,
-			suffix,
-			route: wire,
-			instance: Some(claim.instance.clone()),
-			epoch: claim.epoch,
-			cost: origin::Cost::new(claim.cost),
-		})?;
-		Ok(announce)
-	}
-
-	/// The claim the peer holds that `claim` at `path` takes over, and its Announce ID.
-	///
-	/// Only the claim it continues, under the same route at the instance it continued,
-	/// and only while every claim the peer holds at that path serves the same instance:
-	/// otherwise the peer cannot tell which one it resolved through.
-	fn continued(&self, id: route::Id, path: &Path, claim: &node::Claim) -> Option<(Path, u64)> {
-		let (taken, instance) = claim.continues.as_ref()?;
-		if !path.has_prefix(taken) {
-			return None;
-		}
-		let (predecessor, held) = self.live.get(&(id, taken.clone()))?;
-		let alike = self.routes.keys().all(|other| {
-			(self.live.get(&(*other, taken.clone()))).is_none_or(|(_, other)| other.instance == *instance)
-		});
-		(held.instance == *instance && alike).then(|| (taken.clone(), *predecessor))
 	}
 
 	/// The grant changed: end what it no longer covers, start what it now does, and
@@ -585,13 +611,11 @@ impl Answer {
 		ids.sort_unstable();
 		for id in ids {
 			let paths: Vec<Path> = self.routes[&id].claims.keys().cloned().collect();
-			let mut started = BTreeSet::new();
 			for path in paths {
-				self.sync(stream, id, path, &mut started)?;
+				self.sync(stream, id, path)?;
 			}
-			if self.routes[&id].floored {
-				self.floor(stream, id)?;
-			}
+			self.floor(stream, id)?;
+			self.settle(stream, id)?;
 		}
 		Ok(())
 	}

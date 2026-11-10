@@ -128,7 +128,7 @@ test("a forwarded untimed track stays untimed", async () => {
 
 	// Serve the downstream session from the upstream one through a copy the forwarding
 	// node produces.
-	const dynamic = relay.routePrefix(Path.from("test"));
+	const dynamic = relay.claim(Path.from("test"));
 	const inputs: BroadcastConsumer[] = [];
 	const forwarding = (async () => {
 		for await (const request of dynamic.requested()) {
@@ -140,7 +140,7 @@ test("a forwarded untimed track stays untimed", async () => {
 
 	const remote = wireOf(subscriber).consume(Path.from("test"));
 	const track = remote.track("video").subscribe();
-	expect((await track.info()).timescale).toBeUndefined();
+	expect((await track.info()).timescale).toBeNull();
 	const frame = await (await track.ordered().nextGroup())?.readFrame();
 	expect(frame?.payload).toEqual(new Uint8Array([7]));
 	expect(frame?.timestamp).toBeUndefined();
@@ -158,7 +158,7 @@ for (const wire of WIRES) {
 	test(`${wire.name}: an untimed track arrives ${wire.sends ? "with its send times" : "untimed"}`, async () => {
 		const { info, frames } = await roundTrip(wire, undefined, [undefined, undefined]);
 		expect(frames.map((frame) => frame.payload[0])).toEqual([0, 1]);
-		expect(info.timescale).toBe(wire.sends ? Timescale.MILLI : undefined);
+		expect(info.timescale).toBe(wire.sends ? Timescale.MILLI : null);
 		for (const frame of frames) expect(frame.timestamp !== undefined).toBe(wire.sends);
 	});
 
@@ -174,7 +174,7 @@ for (const wire of WIRES) {
 			expect(frames.map((frame) => frame.timestamp?.asMicros())).toEqual([1_000, 1_234]);
 		} else {
 			// No trusted units on the wire, and no arrival time made up in their place.
-			expect(info.timescale).toBeUndefined();
+			expect(info.timescale).toBeNull();
 			for (const frame of frames) expect(frame.timestamp).toBeUndefined();
 		}
 	});

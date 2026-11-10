@@ -33,7 +33,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
 		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Publish a one-frame track over one mock session, end it cleanly, and return what
@@ -93,7 +93,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
 	group.finish().unwrap();
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 	drop(track);
 	if finish_broadcast {
 		broadcast.broadcast().close();

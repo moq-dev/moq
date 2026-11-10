@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano, now, origin } from "@moq/clock";
+import { Duration, type Instant, now, origin } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
@@ -6,7 +6,7 @@ import { Time } from "@moq/net";
 import { Effect } from "@moq/signals";
 
 // Estimate-only edits publish at most this often.
-const ESTIMATE_INTERVAL = Nano.fromMilli(Milli(1000));
+const ESTIMATE_INTERVAL = Duration.millis(1000);
 
 /**
  * A stable catalog producer that fans out to one or more network tracks.
@@ -52,12 +52,12 @@ export class CatalogProducer {
 		if (!changed || this.#outputs.size === 0) return;
 
 		const at = now();
-		const next = this.#lastEstimate === undefined ? undefined : Instant.add(this.#lastEstimate, ESTIMATE_INTERVAL);
-		if (!estimateOnly || next === undefined || at >= next) {
+		const next = this.#lastEstimate === undefined ? undefined : this.#lastEstimate.add(ESTIMATE_INTERVAL);
+		if (!estimateOnly || next === undefined || at.ge(next)) {
 			this.#publish(estimateOnly || this.#pending !== undefined);
 		} else if (!this.#pending) {
 			this.#pending = new Effect();
-			this.#pending.timer(() => this.#publish(true), Instant.durationSince(next, at));
+			this.#pending.timer(() => this.#publish(true), next.since(at));
 		}
 	}
 
@@ -72,7 +72,7 @@ export class CatalogProducer {
 	/**
 	 * Serve a track: seed it with the current catalog, then forward updates.
 	 *
-	 * Create the track with `compress: true`: catalog JSON is small and repetitive.
+	 * Create the track with `compression: "deflate"`: catalog JSON is small and repetitive.
 	 */
 	serve(track: Moq.Track.Producer, effect: Effect): void {
 		const output = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
@@ -134,7 +134,7 @@ function advertised(catalog: Catalog.Root, field: "jitter" | "delay"): [string, 
 // An empty root advertising the wall time of instant zero, the zero every js/publish timestamp
 // counts from, when the wall clock is set.
 function pageRoot(): Catalog.Root {
-	const at = Math.round((origin() - Catalog.MOQ_EPOCH_UNIX_MILLIS) * 1000);
+	const at = Math.round((origin().asUnixMillis() - Catalog.MOQ_EPOCH_UNIX_MILLIS) * 1000);
 	if (at < 0) return {};
 	return { media: { clock: { wall: Catalog.u53(at), timescale: 1_000_000 } } };
 }

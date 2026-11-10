@@ -27,22 +27,80 @@ func (s *Session) Closed(ctx context.Context) error {
 type ConnectionState struct {
 	// Revision is the opaque token for the next StateChanged wait.
 	Revision uint64
-	// Phase says whether the connection is dialing, serving, replacing, or closed.
-	Phase ConnectionPhase
 	// Connects counts successful sessions, including replacements.
 	Connects uint64
-	// Failure is the latest failed attempt or terminal cause, cleared by a successful connect.
+	// Phase is where the connection is, carrying that phase's data.
+	Phase ConnectionPhase
+}
+
+// ConnectionPhase is where a connection is in its lifecycle, carrying that phase's data:
+// ConnectionPhaseConnecting, ConnectionPhaseConnected, ConnectionPhaseDisconnected,
+// ConnectionPhaseMigrating, or ConnectionPhaseClosed.
+type ConnectionPhase interface {
+	isConnectionPhase()
+}
+
+// ConnectionPhaseConnecting means no session has connected yet.
+type ConnectionPhaseConnecting struct {
+	// Failure is the latest failed dial, or nil before the first one fails.
 	Failure error
-	// Version names the live protocol, or nil while offline.
-	Version *string
+}
+
+// ConnectionPhaseConnected means a session is serving.
+type ConnectionPhaseConnected struct {
+	// Version names the live session's negotiated protocol, like "moq-lite-03".
+	Version string
+}
+
+// ConnectionPhaseDisconnected means no session is serving while the connection redials.
+type ConnectionPhaseDisconnected struct {
+	// Failure is why nothing serves: the last session's close reason or the latest failed dial.
+	Failure error
+}
+
+// ConnectionPhaseMigrating means the peer sent a GOAWAY: the old session serves while its replacement dials.
+type ConnectionPhaseMigrating struct {
+	// Version names the serving session's negotiated protocol.
+	Version string
+	// Failure is the replacement's latest failed dial, or nil.
+	Failure error
+}
+
+// ConnectionPhaseClosed means the connection has stopped for good.
+type ConnectionPhaseClosed struct {
+	// Failure is the terminal error, or nil after a local close.
+	Failure error
+}
+
+func (ConnectionPhaseConnecting) isConnectionPhase()   {}
+func (ConnectionPhaseConnected) isConnectionPhase()    {}
+func (ConnectionPhaseDisconnected) isConnectionPhase() {}
+func (ConnectionPhaseMigrating) isConnectionPhase()    {}
+func (ConnectionPhaseClosed) isConnectionPhase()       {}
+
+// failure keeps an absent error a nil error.
+func failure(err **ffi.MoqError) error {
+	if err == nil || *err == nil {
+		return nil
+	}
+	return *err
 }
 
 func connectionStateFromFFI(state ffi.MoqConnectionState) ConnectionState {
-	var failure error
-	if state.Failure != nil {
-		failure = *state.Failure
+	var phase ConnectionPhase
+	switch p := state.Phase.(type) {
+	case ffi.MoqConnectionPhaseConnecting:
+		phase = ConnectionPhaseConnecting{Failure: failure(p.Failure)}
+	case ffi.MoqConnectionPhaseConnected:
+		phase = ConnectionPhaseConnected{Version: p.Version}
+	case ffi.MoqConnectionPhaseDisconnected:
+		phase = ConnectionPhaseDisconnected{Failure: failure(p.Failure)}
+	case ffi.MoqConnectionPhaseMigrating:
+		phase = ConnectionPhaseMigrating{Version: p.Version, Failure: failure(p.Failure)}
+	case ffi.MoqConnectionPhaseClosed:
+		phase = ConnectionPhaseClosed{Failure: failure(p.Failure)}
 	}
-	return ConnectionState{Revision: state.Revision, Phase: state.Phase, Connects: state.Connects, Failure: failure, Version: state.Version}
+	return ConnectionState{Revision: state.Revision, Connects: state.Connects, Phase: phase}
 }
 
 // State reads the lifecycle fields together without advancing a watcher.
@@ -324,7 +382,7 @@ func (b *BandwidthConsumer) Rate() *uint64 { return b.inner.Rate() }
 
 // RateChanged waits for the estimate to change and returns the new Rate, or fails once its producer closes.
 func (b *BandwidthConsumer) RateChanged(ctx context.Context) (*uint64, error) {
-	return bridge.Call(ctx, b.inner.Cancel, b.inner.RateChanged)
+	return bridge.Call(ctx, nil, b.inner.RateChanged)
 }
 
 // Cancel releases this consumer's demand, including a pending wait.

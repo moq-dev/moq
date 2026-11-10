@@ -21,7 +21,7 @@
 //!
 //! Trimming is therefore an op, not a group boundary. Dropping a record costs one small frame
 //! instead of a roll that restates the whole window (and, on a
-//! [`compress`](moq_net::track::Info::compress)ed track, throws away the group's DEFLATE window).
+//! [compressed](moq_net::track::Info::compression) track, throws away the group's DEFLATE window).
 //!
 //! # Group boundaries are invisible
 //!
@@ -677,7 +677,7 @@ mod test {
 			let mut checkpoint = track.append_group().unwrap();
 			checkpoint.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
 			checkpoint.finish().unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 
 			assert_eq!(
 				drain(&mut consumer),
@@ -806,7 +806,7 @@ mod test {
 	fn compressed_round_trip_across_rolls() {
 		let mut live = Live::on(
 			ProducerConfig::default(),
-			moq_net::track::Info::default().with_compress(true),
+			moq_net::track::Info::default().with_compression(moq_net::track::Compression::Deflate),
 		);
 		for n in 0..40 {
 			live.push(n);
@@ -902,7 +902,7 @@ mod test {
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track.clone(), ProducerConfig::default());
 		producer.push(&rec(1)).unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		producer.finish().unwrap();
 
 		let waiter = kio::Waiter::noop();

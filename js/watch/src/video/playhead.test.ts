@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 
@@ -8,19 +8,19 @@ function config(props: { jitter?: number; delay?: number; framerate?: number }):
 	return { codec: "avc1.640028", container: { kind: "legacy" }, ...props } as Catalog.VideoConfig;
 }
 
-const ms = (value: number) => value as Milli;
+const ms = (value: number) => Duration.millis(value);
 
 describe("renditionJitter", () => {
 	it("prefers the catalog value", () => {
-		expect(renditionJitter(config({ jitter: 2000, framerate: 30 }))).toBe(ms(2000));
+		expect(renditionJitter(config({ jitter: 2000, framerate: 30 }))).toEqual(ms(2000));
 	});
 
 	it("keeps a declared zero rather than falling back", () => {
-		expect(renditionJitter(config({ jitter: 0, framerate: 30 }))).toBe(ms(0));
+		expect(renditionJitter(config({ jitter: 0, framerate: 30 }))).toEqual(ms(0));
 	});
 
 	it("falls back to a frame interval", () => {
-		expect(renditionJitter(config({ framerate: 30 }))).toBe(ms(34));
+		expect(renditionJitter(config({ framerate: 30 }))).toEqual(ms(34));
 	});
 
 	it("is undefined when the catalog declares neither", () => {
@@ -28,9 +28,9 @@ describe("renditionJitter", () => {
 	});
 
 	it("adds the delay behind the earliest rendition", () => {
-		expect(renditionJitter(config({ delay: 200, jitter: 60 }))).toBe(ms(260));
-		expect(renditionJitter(config({ delay: 200, framerate: 30 }))).toBe(ms(234));
-		expect(renditionJitter(config({ delay: 200 }))).toBe(ms(200));
+		expect(renditionJitter(config({ delay: 200, jitter: 60 }))).toEqual(ms(260));
+		expect(renditionJitter(config({ delay: 200, framerate: 30 }))).toEqual(ms(234));
+		expect(renditionJitter(config({ delay: 200 }))).toEqual(ms(200));
 	});
 });
 
@@ -59,13 +59,13 @@ describe("caughtUp", () => {
 
 describe("switchJitter", () => {
 	it("covers both renditions until promotion", () => {
-		expect(switchJitter({ active: ms(20), pending: ms(100) })).toBe(ms(100));
-		expect(switchJitter({ active: ms(100), pending: ms(20) })).toBe(ms(100));
+		expect(switchJitter({ active: ms(20), pending: ms(100) })).toEqual(ms(100));
+		expect(switchJitter({ active: ms(100), pending: ms(20) })).toEqual(ms(100));
 	});
 
 	it("settles to the remaining rendition", () => {
-		expect(switchJitter({ active: ms(20) })).toBe(ms(20));
-		expect(switchJitter({ pending: ms(100) })).toBe(ms(100));
+		expect(switchJitter({ active: ms(20) })).toEqual(ms(20));
+		expect(switchJitter({ pending: ms(100) })).toEqual(ms(100));
 		expect(switchJitter({})).toBeUndefined();
 	});
 });

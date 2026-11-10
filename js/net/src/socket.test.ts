@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { Manual, Milli, Nano, Second } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept as acceptConnection } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
@@ -136,7 +136,7 @@ test("a peer route replaced between metadata and opening cannot inherit a socket
 		// Both route changes happen before the info promise's continuation opens the session.
 		first.close();
 		advertise(replacementKeep);
-		await clock.advance(Nano.zero);
+		await clock.advance(Duration.ZERO);
 		expect(outcome).toBeInstanceOf(Error);
 	} finally {
 		a.close();
@@ -153,9 +153,9 @@ test("a peer route replaced between metadata and opening cannot inherit a socket
 
 test("track halves start reliable and ascending, preserve old messages and accept independent info", async () => {
 	const { local, remote } = await track();
-	expect((await local.producer.info()).maxAge).toBeUndefined();
+	expect((await local.producer.info()).maxAge).toBeNull();
 	expect(remote.consumer.subscription.peek()?.order).toBe("ascending");
-	expect(remote.consumer.subscription.peek()?.delay?.max).toBe(Milli(Number.MAX_SAFE_INTEGER));
+	expect(remote.consumer.subscription.peek()?.delay?.max).toEqual(Duration.millis(Number.MAX_SAFE_INTEGER));
 	for (let i = 0; i < 3; i++) local.producer.writeFrame(bytes(i));
 	local.producer.finish();
 	const reader = remote.consumer.ordered();
@@ -180,7 +180,7 @@ test("a track session skips dropped groups and keeps the next message", async ()
 	group.writeFrame(bytes(7));
 	group.finish();
 	local.producer.finish();
-	await clock.advance(Nano.zero);
+	await clock.advance(Duration.ZERO);
 	const frame = await reading;
 	expect(frame?.group).toBe(1n);
 	expect(frame?.payload).toEqual(bytes(7).payload);
@@ -220,7 +220,7 @@ test("finished track sessions release their unlisted producers after both halves
 	expect((await remoteReader.readFrame())?.payload).toEqual(bytes(1).payload);
 	expect(await localReader.readFrame()).toBeUndefined();
 	expect(await remoteReader.readFrame()).toBeUndefined();
-	await clock.advance(Nano.zero);
+	await clock.advance(Duration.ZERO);
 	expect(hooks.trackReleased(local.producer).peek()).toBeNull();
 	expect(hooks.trackReleased(remote.producer).peek()).toBeNull();
 });
@@ -249,7 +249,7 @@ for (const protocol of ["tcp", "track"] as const) {
 				},
 			);
 		try {
-			await clock.advance(Nano.zero);
+			await clock.advance(Duration.ZERO);
 			const unverified = await next;
 			expect(unverified.session).toBe(local.session);
 			// A late query has the old name, but the original dial no longer answers.
@@ -293,7 +293,7 @@ test("an endpoint announces only the roles it takes, and its client answers only
 
 	// Bob has not accepted yet, so the dial waits for him to serve.
 	const clock = time();
-	await clock.advance(Nano.fromSecond(Second(3600)));
+	await clock.advance(Duration.secs(3600));
 	expect(announced(origin, ".server", "bob")).toBeUndefined();
 	const incoming = b.acceptTcp();
 	expect(announced(origin, ".server", "bob")).toBeDefined();
@@ -348,7 +348,7 @@ test("cancelled dials leave queues and cannot be accepted later", async () => {
 	const pending = new AbortController();
 	const dropped = a.dialTcp("bob", { signal: pending.signal });
 	const observed = dropped.catch((error: unknown) => error);
-	await clock.advance(Nano.zero);
+	await clock.advance(Duration.ZERO);
 	pending.abort();
 	expect(await observed).toBeInstanceOf(Error);
 	const newIncoming = b.acceptTcp();
@@ -364,14 +364,14 @@ test("dial and accept cancellation before announcement release their routing hol
 	const cancel = new AbortController();
 	const dialing = a.dialTcp("later", { signal: cancel.signal });
 	const failure = dialing.catch((error: unknown) => error);
-	await clock.advance(Nano.fromSecond(Second(3600)));
+	await clock.advance(Duration.secs(3600));
 	cancel.abort();
 	expect(await failure).toBeInstanceOf(Error);
 	const next = b.acceptTcp();
 	const subscriber = await raw(origin, ".server", "bob", "tcp/absent/bob/never-announced");
 	const accepted = (await next).accept();
 	const acceptanceFailure = accepted.catch((error: unknown) => error);
-	await clock.advance(Nano.fromSecond(Second(3600)));
+	await clock.advance(Duration.secs(3600));
 	subscriber.close();
 	expect(await acceptanceFailure).toBeInstanceOf(Error);
 });
@@ -380,7 +380,7 @@ test("a dial waits for the peer to announce, without an arbitrary timeout", asyn
 	const clock = time();
 	const { origin, a } = setup();
 	const dialing = a.dialTcp("later");
-	await clock.advance(Nano.fromSecond(Second(3600)));
+	await clock.advance(Duration.secs(3600));
 	const later = new Socket.Endpoint(origin, Path.from("room"), "later");
 	const incoming = await later.acceptTcp();
 	const remote = await incoming.accept();
@@ -396,11 +396,11 @@ test("accept waits for a delayed dialer announcement only while its original dia
 	const subscriber = await raw(origin, ".server", "bob", "track/late/bob/delayed-announcement");
 	const incoming = await next;
 	const acceptance = incoming.accept();
-	await clock.advance(Nano.fromSecond(Second(3600)));
+	await clock.advance(Duration.secs(3600));
 	const route = origin.route(Path.from("room/.client/late"), { hidden: true });
 	const answer = hooks.reserveUnlistedTrack(route.broadcast, "track/late/bob/delayed-announcement");
 	route.announce();
-	await clock.advance(Nano.zero);
+	await clock.advance(Duration.ZERO);
 	expect(answer.demand().wanted.peek()).toBeDefined();
 	const producer = answer.accept({ maxAge: null });
 	const remote = await acceptance;
@@ -486,7 +486,7 @@ test("a second TCP group resets the session even after the first FIN", async () 
 		const acceptance = (await next).accept();
 		// Drive the accept's return subscription before publishing the first half.
 		const clock = time();
-		await clock.advance(Nano.zero);
+		await clock.advance(Duration.ZERO);
 		const producer = answer.accept();
 		const stream = await acceptance;
 		const group = producer.createGroup(initial);
@@ -512,7 +512,7 @@ for (const dropped of [false, true]) {
 		const subscriber = await raw(origin, ".server", "bob", name);
 		const acceptance = (await next).accept();
 		const clock = time();
-		await clock.advance(Nano.zero);
+		await clock.advance(Duration.ZERO);
 		const producer = answer.accept();
 		const stream = await acceptance;
 		const reading = stream.consumer.readFrame();
@@ -539,7 +539,7 @@ test("unpaced TCP eviction is an error, never a skipped frame or clean FIN", asy
 	const payload = new Uint8Array(1024 * 1024);
 	for (let i = 0; i < 32; i++) {
 		local.producer.writeFrame({ payload });
-		await clock.advance(Nano.zero);
+		await clock.advance(Duration.ZERO);
 	}
 	local.producer.finish();
 	await expect(remote.consumer.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
@@ -607,7 +607,7 @@ for (const protocol of ["tcp", "track"] as const) {
 			}
 			staged.producer.finish();
 			staged.commit();
-			await clock.advance(Nano.zero);
+			await clock.advance(Duration.ZERO);
 			const local = await dialing;
 			const reader = local instanceof Socket.TcpStream ? local.consumer : local.consumer.ordered();
 			const received: number[] = [];
@@ -624,7 +624,7 @@ for (const protocol of ["tcp", "track"] as const) {
 					failure = error;
 				},
 			);
-			await clock.advance(Nano.zero);
+			await clock.advance(Duration.ZERO);
 			expect(failure).toBeUndefined();
 			expect(received).toEqual([1, 2, 3]);
 			expect(completed).toBe(true);
@@ -670,7 +670,7 @@ for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ie
 			);
 			try {
 				(await next).reject();
-				await clock.advance(Nano.zero);
+				await clock.advance(Duration.ZERO);
 				expect(outcome).toBeInstanceOf(Error);
 			} finally {
 				a.close();
@@ -712,7 +712,7 @@ for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ie
 			);
 			try {
 				const incoming = await next;
-				await clock.advance(Nano.fromSecond(Second(3600)));
+				await clock.advance(Duration.secs(3600));
 				expect(outcome).toBeUndefined();
 				const remote = await incoming.accept();
 				const local = await dialing;
@@ -769,7 +769,7 @@ test("a socket endpoint behind a lite-06 client fails its dials and accepts, not
 		await expect(a.acceptTcp()).rejects.toThrow(unsupported);
 		await expect(a.acceptTrack()).rejects.toThrow(unsupported);
 		// The server's endpoint keeps accepting, and never heard a dial it can't answer.
-		await clock.advance(Nano.fromSecond(Second(3600)));
+		await clock.advance(Duration.secs(3600));
 		expect(heard).toBe(false);
 
 		// The session's end releases the endpoint: an accept waits again.
@@ -784,7 +784,7 @@ test("a socket endpoint behind a lite-06 client fails its dials and accepts, not
 				accepted = error;
 			},
 		);
-		await clock.advance(Nano.zero);
+		await clock.advance(Duration.ZERO);
 		expect(accepted).toBeUndefined();
 		a.close();
 		await accepting;

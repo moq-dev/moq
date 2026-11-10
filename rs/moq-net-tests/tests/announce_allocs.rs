@@ -16,7 +16,7 @@ use std::cell::Cell;
 use moq_net::{
 	Client, Path, Pattern, Patterns, Server, Version,
 	fuzz::{decode_path, decode_subscribe, encode_path, encode_subscribe},
-	kio, origin,
+	origin,
 	time::{Driver, Instant},
 	track,
 	transport::memory,
@@ -77,7 +77,7 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 
 /// Land `peer`'s route at `path`, as a session does: one hop, at `cost`.
-fn peer_route(producer: &origin::Producer, path: &'static str, peer: u64, cost: u64) -> origin::Route {
+fn peer_route(producer: &origin::Producer, path: &'static str, peer: u64, cost: u64) -> origin::Claim {
 	moq_net::fuzz::requests_route(
 		producer,
 		Path::from_static(path),

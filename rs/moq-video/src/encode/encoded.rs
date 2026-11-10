@@ -12,7 +12,7 @@ use moq_net::Timestamp;
 ///
 /// The encoder carries the timestamp through the codec rather than leaving the
 /// caller to guess one at publish time, so a backend that buffers a frame or
-/// drains a tail from [`Encoder::finish`](super::Encoder::finish) still stamps
+/// drains a tail on [`Encoder::flush`](super::Encoder::flush) still stamps
 /// each access unit with the time of the picture it encoded.
 #[derive(Clone, Debug)]
 #[non_exhaustive]

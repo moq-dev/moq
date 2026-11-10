@@ -1,10 +1,10 @@
-import { Nano, Second } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
-import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
+import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
@@ -41,13 +41,17 @@ function handed(task: Promise<void>): Promise<void> {
 	return task.catch((err: unknown) => console.error("error processing bidi stream", err));
 }
 
+/** Where a session is: open, delivering what it owes before it closes, or closed. */
+/** `leaving` is open but draining at this side's own request; see the wire view's `leave`. */
+type Phase = { kind: "open" } | { kind: "leaving" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
+
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
  *
  * @internal
  */
-export class Connection implements Established {
-	#closing?: Promise<void>;
+export class Connection implements Session {
+	#phase: Phase = { kind: "open" };
 	// The URL of the connection.
 	readonly url: URL;
 
@@ -57,10 +61,10 @@ export class Connection implements Established {
 	// The wire transport this session runs over.
 	readonly transport: Transport;
 
-	/** moq-transport has no PROBE, so this stays empty; see {@link Established.probe}. */
+	/** moq-transport has no PROBE, so this stays empty; see {@link Session.probe}. */
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
-	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Established.auth}. */
+	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Session.auth}. */
 	get auth(): Auth.Handle {
 		return this.#auth.handle;
 	}
@@ -95,10 +99,7 @@ export class Connection implements Established {
 	// The peer's GOAWAY, read off its SETUP stream.
 	#goaway = new Once<Drain>();
 
-	// Just to avoid logging when `close()` is called.
-	#closed = false;
-
-	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
+	/** The implementation the peer advertised; see {@link Session.peerImplementation}. */
 	readonly peerImplementation: Promise<string | undefined>;
 
 	/**
@@ -189,7 +190,7 @@ export class Connection implements Established {
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 			handle,
-			draining: () => this.#goaway.peek() !== undefined || this.#closing !== undefined,
+			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -232,38 +233,50 @@ export class Connection implements Established {
 			// The drafts refuse overlapping SUBSCRIBE_NAMESPACEs (PREFIX_OVERLAP). A peer that
 			// declared MoQ Solicit is ours and holds both; any other may enforce it.
 			exclusive: solicit === undefined,
+			// Drained locally only: this compatibility layer sends no client GOAWAY.
+			leave: () => {
+				if (this.#phase.kind === "open") this.#phase = { kind: "leaving" };
+			},
 			auth: this.#auth,
 		});
 
 		void this.#run(early);
 	}
 
-	/** Snapshot the transport's counters; see {@link Established.stats}. */
+	/** Snapshot the transport's counters; see {@link Session.stats}. */
 	async stats(): Promise<Stats> {
 		return transportStats(this.#quic);
 	}
 
 	/** Withdraw announcements and wait up to one second for delivery before closing. */
 	close(): Promise<void> {
-		this.#closing ??= withTimeout(
-			this.#publisher.withdraw(),
-			Nano.fromSecond(Second(1)),
-			"session close timed out",
-		).finally(() => this.abort());
-		return this.#closing;
+		switch (this.#phase.kind) {
+			case "open":
+			case "leaving": {
+				const done = withTimeout(
+					this.#publisher.withdraw(),
+					Duration.secs(1),
+					"session close timed out",
+				).finally(() => this.abort());
+				this.#phase = { kind: "closing", done };
+				return done;
+			}
+			case "closing":
+				return this.#phase.done;
+			case "closed":
+				return Promise.resolve();
+		}
 	}
 
 	/** End the session immediately without waiting for delivery. */
 	abort(): void {
-		if (this.#closed) return;
 		this.#close();
 	}
 
 	// Close with the session code the peer should see, a clean close by default.
 	#close(info?: WebTransportCloseInfo) {
-		if (this.#closed) return;
-
-		this.#closed = true;
+		if (this.#phase.kind === "closed") return;
+		this.#phase = { kind: "closed" };
 
 		this.#publisher.close();
 		this.#auth.close();
@@ -301,7 +314,7 @@ export class Connection implements Established {
 			if (this.#client) tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered(), this.#auth));
 			await Promise.all(tasks);
 		} catch (err) {
-			if (!this.#closed) {
+			if (this.#phase.kind !== "closed") {
 				console.error("fatal error running connection", err);
 			}
 		} finally {
@@ -309,11 +322,11 @@ export class Connection implements Established {
 			// a tracked withdrawal, so a failure in it ends this driver while close() is
 			// still waiting on the sibling loops; closing here would drop their
 			// withdrawals. close() aborts once its barrier settles or the deadline hits.
-			if (!this.#closing) this.#close();
+			if (this.#phase.kind !== "closing") this.#close();
 		}
 	}
 
-	/** The paths announced matching `scope`, each present or absent; see {@link Established.announced}. */
+	/** The paths announced matching `scope`, each present or absent; see {@link Session.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
 		return announce.list(this.#subscriber.routes(scope, options));
 	}
@@ -573,7 +586,7 @@ export class Connection implements Established {
 			});
 			await race([read(), stopped]);
 		} catch (err) {
-			if (!this.#closed && !sessionClosed(err))
+			if (this.#phase.kind !== "closed" && !sessionClosed(err))
 				this.#violated(
 					err instanceof ProtocolViolation
 						? err
@@ -593,12 +606,12 @@ export class Connection implements Established {
 		return GoAway.decode(controlStream.reader, version);
 	}
 
-	/** Settles with the peer's GOAWAY; see {@link Established.draining}. */
+	/** Settles with the peer's GOAWAY; see {@link Session.draining}. */
 	get draining(): GetPromise<Drain> {
 		return this.#goaway;
 	}
 
-	/** Resolves when the session closes, decoding the peer's close code; see {@link Established.closed}. */
+	/** Resolves when the session closes, decoding the peer's close code; see {@link Session.closed}. */
 	get closed(): Promise<Error | null> {
 		return this.#quic.closed.then(fromClose, (err: unknown) => error(err));
 	}

@@ -1,9 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
-import { Elapsed, Manual, Milli, Nano, timeout, yieldNow } from "@moq/clock";
+import { Duration, Elapsed, Manual, timeout, yieldNow } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { Viewers } from "../bandwidth.ts";
+import { DEFAULT_EXPIRY } from "../cache.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import {
 	error,
@@ -21,7 +22,7 @@ import type { Consumer as GroupConsumer } from "../group.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
-import { CACHE_EXPIRY, GRACE } from "../ledger.ts";
+import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
@@ -139,7 +140,7 @@ function announceHarness(version: Version, origin = 1n) {
 	// than hang it out to the suite timeout.
 	const abortReason = async () => {
 		try {
-			return reason(error(await timeout(Nano.fromMilli(Milli(250)), aborted)));
+			return reason(error(await timeout(Duration.millis(250), aborted)));
 		} catch (error) {
 			if (error instanceof Elapsed) throw new Error("stream was never aborted");
 			throw error;
@@ -149,7 +150,7 @@ function announceHarness(version: Version, origin = 1n) {
 	// Rejects promptly if the session outlives the violation, rather than hanging the test.
 	const sessionEnded = async () => {
 		try {
-			return await timeout(Nano.fromMilli(Milli(250)), sessionClosed);
+			return await timeout(Duration.millis(250), sessionClosed);
 		} catch (error) {
 			if (error instanceof Elapsed) throw new Error("session was never closed");
 			throw error;
@@ -390,90 +391,6 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 	subscriber.close();
 });
 
-test("a lite-07 takeover surfaces as a start beneath its predecessor, or a restart of it", async () => {
-	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07);
-	const announced = subscriber.routes();
-	await settle();
-	const pool = Path.from("pool");
-	const job = Path.from("pool/job");
-
-	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "active", suffix: pool, instance: Instance.random(), hops: [PUBLISHER_A] },
-			Version.DRAFT_07,
-		),
-	);
-	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start" });
-
-	// Beneath the claim: a start with the next id (1), and the claim stays live.
-	const instance = Instance.random();
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "takeover", predecessor: 0n, suffix: job, instance, hops: [PUBLISHER_A] },
-			Version.DRAFT_07,
-		),
-	);
-	expect(await announced.next()).toMatchObject({ prefix: job, kind: "start", route: { instance } });
-
-	// At the job's own path: a restart that retires id 1 and assigns id 2.
-	const next = Instance.random();
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "takeover", predecessor: 1n, suffix: job, instance: next, hops: [PUBLISHER_A] },
-			Version.DRAFT_07,
-		),
-	);
-	expect(await announced.next()).toMatchObject({ prefix: job, kind: "restart", route: { instance: next } });
-
-	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 2n }, Version.DRAFT_07));
-	expect(await announced.next()).toMatchObject({ prefix: job, kind: "end" });
-	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_07));
-	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "end" });
-
-	announced.close();
-	subscriber.close();
-});
-
-// A takeover must name a live predecessor whose path covers its own.
-test.each([
-	["a retired predecessor", 1n, "pool/job"],
-	["a predecessor not covering it", 0n, "other"],
-] as const)("a lite-07 takeover of %s ends the stream", async (_, predecessor, suffix) => {
-	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07);
-	const announced = subscriber.routes();
-	await settle();
-
-	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "active", suffix: Path.from("pool"), instance: Instance.random(), hops: [PUBLISHER_A] },
-			Version.DRAFT_07,
-		),
-	);
-	expect(await announced.next()).toMatchObject({ kind: "start" });
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{
-				status: "takeover",
-				predecessor,
-				suffix: Path.from(suffix),
-				instance: Instance.random(),
-				hops: [PUBLISHER_A],
-			},
-			Version.DRAFT_07,
-		),
-	);
-	await expect(announced.next()).rejects.toThrow();
-
-	subscriber.close();
-});
-
 // A replaced prefix served everything consumed beneath it, so those paths subscribe fresh too,
 // whether the replacement arrives as a lite-07 restart or as an end then a start.
 test.each([
@@ -678,10 +595,10 @@ test("an RTT retraction clears the reading on lite-04+", async () => {
 // Seeded rather than sent, because lite-03 has no way to put one on the wire.
 test("lite-03 keeps an existing RTT, since its PROBE cannot carry one", async () => {
 	const got = await runProbeScript(Version.DRAFT_03, [new Probe({ bitrate: 2_000_000 })], {
-		rtt: Milli(40),
+		rtt: Duration.millis(40),
 	});
 	expect(got.estimatedRecvRate).toBe(2_000_000);
-	expect(got.rtt).toBe(Milli(40));
+	expect(got.rtt).toEqual(Duration.millis(40));
 });
 
 test("an announce skipped as a reflected loop still holds its path", async () => {
@@ -1204,7 +1121,7 @@ test.each([
 		await opened(0);
 		await streams[0].reading;
 
-		await clock.advance(Nano.fromMilli(Milli(3_600_000)));
+		await clock.advance(Duration.millis(3_600_000));
 		expect(track.closed.peek()).toBeUndefined();
 		track.close();
 
@@ -1244,7 +1161,7 @@ test("a lite subscribe waiting on a stream slot for the SUBSCRIBE outlasts the d
 		await answerTrackInfo(streams[0]);
 		await opened(1);
 
-		await clock.advance(Nano.fromMilli(Milli(3_600_000)));
+		await clock.advance(Duration.millis(3_600_000));
 		expect(track.closed.peek()).toBeUndefined();
 
 		streams[1].release();
@@ -1360,7 +1277,7 @@ test("a lite subscribe abandoned while its SUBSCRIBE write stalls closes its TRA
 		await answerTrackInfo(streams[0]);
 		await (await opened(1)).writing;
 
-		await clock.advance(Nano.fromMilli(Milli(3_600_000)));
+		await clock.advance(Duration.millis(3_600_000));
 		expect(track.closed.peek()).toBeUndefined();
 		track.close();
 		await streams[0].finished;
@@ -1385,7 +1302,7 @@ test.each(
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ priority: 3, delay: { max: Milli(10_000) } });
+		.subscribe({ priority: 3, delay: { max: Duration.millis(10_000) } });
 	try {
 		await opened(0);
 		await streams[0].reading;
@@ -1408,7 +1325,7 @@ test.each(
 		await track.info();
 		await request.reading;
 		// An explicit change orders after any update caused by TRACK_INFO, even if its encoding yields.
-		track.update({ priority: 4, delay: { max: Milli(10_000) } });
+		track.update({ priority: 4, delay: { max: Duration.millis(10_000) } });
 		const update = await SubscribeUpdate.decode(subscribe, version);
 		expect([update.priority, update.maxDelay]).toEqual([4, 10_000]);
 		track.close();
@@ -1999,7 +1916,7 @@ test.each([
 	["answered on lite-06 stays", Version.DRAFT_06, "answered"],
 	["unanswered on lite-05 finishes", Version.DRAFT_05, "withdrawn"],
 	["unanswered on lite-06 finishes", Version.DRAFT_06, "withdrawn"],
-] as const)("an unpinned SUBSCRIBE %s at a takeover or withdrawal", async (_, version, outcome) => {
+] as const)("an unpinned SUBSCRIBE %s at a replacement or withdrawal", async (_, version, outcome) => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
@@ -2565,7 +2482,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received time
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	// Old enough to keep every group, however far behind the newest start.
-	const track = broadcast.track("video").subscribe({ delay: { max: Milli(60_000) } });
+	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(60_000) } });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -2601,7 +2518,7 @@ test("a lite-07 rewind is refused", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Milli(60_000) } });
+	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(60_000) } });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -2715,7 +2632,7 @@ test("a group wins over its stale drop on lite-07", async () => {
 		return runResponses(stream, captured);
 	});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Milli(500) } });
+	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -2757,7 +2674,7 @@ test("a group wins over its stale drop on lite-07", async () => {
 		await send(old(4n));
 		if (!entry) throw new Error("no subscription");
 
-		track.update({ priority: 1, delay: { max: Milli(500) } });
+		track.update({ priority: 1, delay: { max: Duration.millis(500) } });
 		await drainReactions();
 		// Every group that arrived stays accounted for; the one that never arrived is owed again.
 		expect(entry.tail.covers(1n, 4n)).toBe(true);
@@ -2801,7 +2718,7 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 		return runResponses(stream, captured);
 	});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Milli(500) } });
+	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -2827,10 +2744,10 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 				new Reader(new ReadableStream({ start: (controller) => controller.close() }), undefined, version),
 			);
 		// Everything below the live edge ages out of the cache.
-		const evict = () => clock.advance(Nano.fromMilli(Milli(2 * CACHE_EXPIRY)));
+		const evict = () => clock.advance(DEFAULT_EXPIRY.mul(2));
 		let priority = 0;
 		const update = async () => {
-			track.update({ priority: ++priority, delay: { max: Milli(500) } });
+			track.update({ priority: ++priority, delay: { max: Duration.millis(500) } });
 			await drainReactions();
 		};
 
@@ -2877,7 +2794,7 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 		return runResponses(stream, captured);
 	});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Milli(500) } });
+	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -2907,7 +2824,7 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 		await drainReactions();
 		if (!entry) throw new Error("no subscription");
 
-		track.update({ priority: 1, delay: { max: Milli(500) } });
+		track.update({ priority: 1, delay: { max: Duration.millis(500) } });
 		await drainReactions();
 		expect(entry.tail.covers(1n, 3n)).toBe(true);
 		expect(entry.tail.covers(4n, 5n)).toBe(true);
@@ -2940,7 +2857,7 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 	});
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Milli(500) } });
+	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -3021,7 +2938,7 @@ test.each(
 		streams[0].inbound.close();
 		await drainReactions();
 
-		await clock.advance(Nano.fromMilli(GRACE));
+		await clock.advance(GRACE);
 		expect(await track.finished()).toEqual({ group: 0n, frame: 0 });
 		expect(await track.closed).toBeNull();
 		expect(closes).toEqual([]);
@@ -3355,14 +3272,14 @@ test.each(["answer", "credit"] as const)("FETCH waiting for %s ends with its cal
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await opened(1);
 		if (stage === "answer") await streams[1].reading;
-		await clock.advance(Nano.fromMilli(Milli(3_600_000)));
+		await clock.advance(Duration.millis(3_600_000));
 		expect(failure).toBeUndefined();
 		const reason = new Error("left");
 		cancel.abort(reason);
 		await fetch;
 		expect(failure).toBe(reason);
 		// Credit granted once the caller has left can't send the FETCH.
-		await clock.advance(Nano.zero);
+		await clock.advance(Duration.ZERO);
 		if (stage === "credit") streams[1].release();
 		if (stage === "credit") {
 			await drainReactions();
@@ -3465,7 +3382,7 @@ test("the PROBE stream sends the viewers' target to an Increase peer", async () 
 
 	// Reading the target back only proves its bytes were written: the writer may still be
 	// yielding its write budget, and a FIN then would reset the stream instead of closing it.
-	await clock.advance(Nano.zero);
+	await clock.advance(Duration.ZERO);
 	finish();
 	await running;
 	expect(await sent.done()).toBe(true);
@@ -3531,7 +3448,7 @@ test("a stalled PROBE writer sends only the latest target once it drains", async
 	expect((await Probe.decode(sent, version)).bitrate).toBe(4_000_000);
 
 	// Let the last write finish yielding before the FIN, as in the test above.
-	await clock.advance(Nano.zero);
+	await clock.advance(Duration.ZERO);
 	finish();
 	await running;
 	expect(await sent.done()).toBe(true);

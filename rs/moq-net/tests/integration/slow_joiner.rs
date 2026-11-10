@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::{Timescale, Timestamp, Version, kio, origin, track};
+use moq_net::{Timescale, Timestamp, Version, origin, track};
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribed};
 
@@ -21,7 +21,7 @@ const GROUPS: u64 = 5;
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 /// The groups a reader subscribed with `budget` receives once it resumes from a stall
@@ -76,7 +76,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 		group.finish().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 	}
-	source.finish().unwrap();
+	let _source = source.finish().unwrap();
 	*gate.write().ok().unwrap() = true;
 
 	// Read until the track ends, so a skipped group can't be one that merely arrived late.

@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import { DEFAULT_EXPIRY } from "../cache.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import { error } from "../error.ts";
 import { hooks } from "../internal.ts";
-import { CACHE_EXPIRY } from "../ledger.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -43,7 +43,7 @@ const INVALID_JOINING_REQUEST_ID = 0x32;
 /** A publisher serving the `room` broadcast, with its `video` track and the client's uni streams. */
 // `maxAge` is the track's publisher max age: omitted is the authored zero, and a test that fills
 // superseded history passes `null`, since the publisher fills only groups still fresh.
-function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority?: number, maxAge?: Milli | null) {
+function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority?: number, maxAge?: Duration | null) {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const origin = new OriginProducer();
 	const pub = new Publisher({
@@ -139,8 +139,8 @@ function manual(): Manual & Disposable {
 	return Object.assign(clock, { [Symbol.dispose]: () => installed.close() });
 }
 
-function ms(value: number): Nano {
-	return Nano.fromMilli(Milli(value));
+function ms(value: number): Duration {
+	return Duration.millis(value);
 }
 
 /** Let every pending promise chain run. */
@@ -276,7 +276,7 @@ test("FETCH and FETCH_OK round trip on every draft", async () => {
 			type,
 			subscriberPriority: 3,
 			groupOrder: "descending",
-			fillTimeout: Milli(250),
+			fillTimeout: 250,
 		});
 		const decoded = await Fetch.decode(await encode(msg, version), version);
 		expect(decoded).toEqual(msg);
@@ -436,7 +436,7 @@ test("a FETCH fills never-cached and evicted history, then reuses the cache", as
 			using fx = serve(version, undefined, undefined, null);
 			if (evicted) {
 				writeGroup(fx.track, 1n, ["1-0", "1-1", "1-2"]);
-				await clock.advance(ms(CACHE_EXPIRY * 2));
+				await clock.advance(DEFAULT_EXPIRY.mul(2));
 			}
 			writeGroup(fx.track, 3n, ["live"]);
 			const cache = fx.track.subscribe({ ranges: [] });
@@ -505,7 +505,7 @@ test("a FETCH preserves relayed metadata and cached groups without upstream FETC
 					while (await group?.readFrame()) {}
 					group?.close();
 				}
-				const requests = fx.origin.routePrefix(Path.from("relayed"));
+				const requests = fx.origin.claim(Path.from("relayed"));
 				const cursor = requests.requested();
 				const requested = cursor.next();
 				const type = { ...range(version, at(3, 0), at(3, 0)), trackNamespace: Path.from("relayed") };
@@ -608,7 +608,7 @@ test("a FETCH outside the grant is refused", async () => {
 // The requester leaving while the answer waits on an open group is owed nothing, budget or not.
 test("a cancelled FETCH stops waiting", async () => {
 	for (const version of VERSIONS) {
-		for (const fillTimeout of [undefined, Milli(10_000)]) {
+		for (const fillTimeout of [undefined, 10_000]) {
 			using _clock = manual();
 			using fx = serve(version);
 			publishPairs(fx.track, 2);
@@ -630,7 +630,7 @@ test("a cancelled FETCH stops waiting", async () => {
 // FILL_TIMEOUT is accepted without truncating a one-group answer, including zero.
 test("FILL_TIMEOUT is ignored while a group finishes", async () => {
 	for (const version of VERSIONS) {
-		for (const fillTimeout of [Milli(0), Milli(100)]) {
+		for (const fillTimeout of [0, 100]) {
 			using clock = manual();
 			using fx = serve(version);
 			const live = writeGroup(fx.track, 4n, ["4-0"], false);

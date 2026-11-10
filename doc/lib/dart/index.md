@@ -17,7 +17,7 @@ Import `package:moq/media.dart` with a prefix for catalogs, encoded-media import
 container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init record,
 and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns catalog properties
 and sections; it holds the broadcast weakly and fails after the broadcast closes.
-Publish JSON tracks with `MoqTrackInfo(compress: true)`; a `package:moq/json.dart` consumer reads one with no option of its own.
+Publish JSON tracks with `MoqTrackInfo(compression: MoqCompression.deflate)`; a `package:moq/json.dart` consumer reads one with no option of its own.
 A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
 `SnapshotProducer.update`, `StreamProducer.append`, and `WindowProducer.push` and `pop` require a timestamp on the broadcast clock (`CatalogProducer.now()`), the epoch every track in the broadcast shares, so their track needs a timescale.
 `package:moq/json.dart` consumers return `Value` (`value`, `timestamp`) from `next()`; a snapshot consumer
@@ -25,7 +25,7 @@ yields each state in order, and `latest()` skips to the newest.
 Media times are exact `Timestamp` records, `value` units at `scale` units per second, so a 90 kHz tick survives a
 read and republish. `Duration.toTimestamp()` converts exactly; `Timestamp.toDuration()` rounds down to a whole microsecond.
 Raw tracks with a `null` timescale are untimed on both publish and receive.
-`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+`MoqTrackInfo.compression` set to `MoqCompression.deflate` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -128,7 +128,7 @@ if (read is video.ReadFrame) {
 ```dart
 // Publish already-encoded frames. bytes comes from your encoder or application source.
 final route = moq.route('live/camera'); // visible at once, under a fresh instance
-print(route.instanceId());
+print(route.instance());
 final mine = route.broadcast();
 final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();
@@ -149,7 +149,7 @@ one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
 - **Names.** Types drop the `Moq` prefix (`Session`, `BroadcastProducer`, `RouteOptions`) as aliases, so the generated names still work. `MoqContainer`, `MoqRoute`, and the exceptions keep it, since Flutter owns those names.
-- **Routes.** `route(path)` publishes a broadcast and `routePrefix(prefix)` answers requests beneath a prefix, each returning a `MoqRoute`. Hold it: cancelling or disposing it retracts the route, while a broadcast handle alone does not keep it announced. It keeps its instance across `withdraw()` and `announce()`, so a new run is a new route.
+- **Routes.** `route(path)` publishes a broadcast, returning a `MoqRoute` whose `broadcast()` you fill, and `claim(prefix)` answers requests beneath a prefix, returning a `Claim` whose `requested()` yields each one. Hold either: cancelling or disposing it retracts it, while a broadcast handle alone does not keep a route announced. A `route(path)` keeps its instance across `withdraw()` and `announce()`, so a new run is a new route. Unless one is named, a request's own route (`request.route(options: ...)`) takes its claim's instance (on moq-lite 07; older wires mint another, restarting readers resolved through the claim), and the claim moves to a fresh one each time such a route holding its current one ends.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or less often to batch frames into fewer groups.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `media.TrackConsumer`, `audio.Consumer`, and `video.Consumer` return a `Read` in order: a `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start: media.DecodeStart.latest` in its decoder output, which joins at the newest group and skips the cached backlog.

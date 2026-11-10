@@ -11,7 +11,7 @@
 //! driver), makes `Encoder::new` return an error; under automatic selection
 //! [`backend::open`](super::open) then moves on to openh264, like the NVENC backend.
 //! The render node is the one the decoder and the GPU resize share, unless that
-//! one cannot encode H.265, and `MOQ_VAAPI_DEVICE` can name it; see
+//! one cannot encode H.265, and `Config::vaapi` can name it; see
 //! `frame::vaapi::device`.
 //!
 //! A [`Surface::DmaBuf`] is encoded without touching the CPU. An NV12 buffer at
@@ -35,12 +35,13 @@
 //! frames, VA-API decodes handed over as DMA-BUFs, and packed RGB buffers at
 //! and above the encoder's size, decode each stream with openh264, and compare
 //! pixels. The H.265 case decodes with the VA-API decoder, since there is no
-//! software one, and was validated on Intel Arrow Lake (iHD 26.1.2). All of them,
-//! ignored ones included, pass on an AMD Radeon RX 9070 (radeonsi, Mesa 26.2.5).
-//! They skip on a machine without a VA-API device.
+//! software one, and was validated on Intel Arrow Lake (iHD 26.1.2). All of
+//! them, ignored ones included, also pass on an AMD RX 9070 with radeonsi (Mesa
+//! 26.2.6). They skip on a machine without a VA-API device, except the ignored
+//! `vaapi_1080p_ladder_stays_on_the_gpu`, which requests hardware explicitly and
+//! fails without it.
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{HashSet, VecDeque};
 
 use bytes::Bytes;
 use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
@@ -62,6 +63,7 @@ pub(crate) struct Vaapi {
 	/// The CPU path's NV12 staging buffer, kept so a frame reuses the last one's
 	/// allocation.
 	nv12: Vec<u8>,
+	ready: VecDeque<Encoded>,
 	/// Frames encoded from a DMA-BUF on the GPU, for the tests to tell the two
 	/// paths apart.
 	#[cfg(test)]
@@ -91,7 +93,7 @@ impl Vaapi {
 			Codec::H265 => moq_vaapi::Codec::H265,
 		};
 		let vaapi = VaapiConfig {
-			device: vaapi::device(codec).map(Path::to_path_buf),
+			device: vaapi::device(codec, config.vaapi.as_deref()),
 			color: vaapi::color(color)?,
 			codec,
 			..VaapiConfig::new(
@@ -102,7 +104,7 @@ impl Vaapi {
 				interval,
 			)
 		};
-		let encoder = Encoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI encoder init: {e:?}")))?;
+		let encoder = Encoder::new(vaapi).map_err(|e| Error::codec(anyhow::anyhow!("VAAPI encoder init: {e:?}")))?;
 
 		tracing::info!(
 			encoder = NAME,
@@ -117,6 +119,7 @@ impl Vaapi {
 			codec: config.codec,
 			refused: HashSet::new(),
 			nv12: Vec::new(),
+			ready: VecDeque::new(),
 			#[cfg(test)]
 			gpu_frames: 0,
 		})
@@ -166,12 +169,12 @@ impl Vaapi {
 		i420_to_nv12(&i420, &mut self.nv12);
 		self.encoder
 			.encode_nv12(&self.nv12, cut)
-			.map_err(|e| Error::Codec(e.context("VAAPI encode")))
+			.map_err(|e| Error::codec(e.context("VAAPI encode")))
 	}
 }
 
 impl Backend for Vaapi {
-	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
 		let gpu = match &frame.surface {
 			Surface::DmaBuf(buffer) => self.encode_dmabuf(buffer, cut),
 			_ => None,
@@ -182,25 +185,23 @@ impl Backend for Vaapi {
 		};
 
 		// Submitted and read back within the call, so this is that frame's output.
-		Ok(if annexb.is_empty() {
-			Vec::new()
-		} else {
+		if !annexb.is_empty() {
 			// moq-vaapi places the IDRs but reports only the bytes.
 			let keyframe = keyframe_annexb(self.codec, &annexb);
-			vec![Encoded::new(Bytes::from(annexb), frame.timestamp, keyframe)]
-		})
+			self.ready
+				.push_back(Encoded::new(Bytes::from(annexb), frame.timestamp, keyframe));
+		}
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
 		// The encoder submits and reads back synchronously per frame, so nothing
 		// is ever buffered.
-		Ok(Vec::new())
-	}
-
-	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-		// The encoder submits and reads back synchronously per frame, so nothing
-		// is buffered at shutdown.
-		Ok(Vec::new())
+		Ok(())
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
@@ -208,7 +209,7 @@ impl Backend for Vaapi {
 		// applies from the next one without an IDR.
 		self.encoder
 			.set_bitrate(bitrate.min(u32::MAX as u64) as u32)
-			.map_err(|e| Error::Codec(e.context("VAAPI bitrate change")))
+			.map_err(|e| Error::codec(e.context("VAAPI bitrate change")))
 	}
 
 	fn can_cut(&self) -> bool {
@@ -318,15 +319,15 @@ mod tests {
 		let mut software = decoder("openh264", Output::Cpu);
 		let mut decoded = Vec::new();
 		for (index, frame) in frames.iter().enumerate() {
-			for encoded in backend.encode(frame, index == 0).expect("encode") {
+			for encoded in backend.encode_all(frame, index == 0).expect("encode") {
 				decoded.extend(
 					software
-						.decode(encoded.payload, encoded.timestamp, index == 0)
+						.decode_all(encoded.payload, encoded.timestamp, index == 0)
 						.expect("decode"),
 				);
 			}
 		}
-		decoded.extend(software.flush().expect("flush"));
+		decoded.extend(software.flush_all().expect("flush"));
 		assert_eq!(decoded.len(), frames.len(), "pictures went missing");
 		decoded
 	}
@@ -413,11 +414,11 @@ mod tests {
 				source.cut().unwrap();
 			}
 			let frame = Frame::new(Surface::rgba(&rgba, size).unwrap(), at(i));
-			for encoded in source.encode(&frame).unwrap() {
-				frames.extend(hardware.decode(encoded.payload, encoded.timestamp, i == 0).unwrap());
+			for encoded in source.encode_all(&frame).unwrap() {
+				frames.extend(hardware.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap());
 			}
 		}
-		frames.extend(hardware.flush().unwrap());
+		frames.extend(hardware.flush_all().unwrap());
 		assert!(
 			frames.iter().all(|frame| matches!(frame.surface, Surface::DmaBuf(_))),
 			"the decoder handed out CPU frames, so nothing here tests the GPU path"
@@ -526,16 +527,16 @@ mod tests {
 
 		let mut decoded = Vec::new();
 		for (index, frame) in frames.iter().enumerate() {
-			for encoded in backend.encode(frame, index == 0).expect("encode") {
+			for encoded in backend.encode_all(frame, index == 0).expect("encode") {
 				assert_eq!(encoded.keyframe, index == 0, "picture {index} keyframe flag");
 				decoded.extend(
 					hardware
-						.decode(encoded.payload, encoded.timestamp, encoded.keyframe)
+						.decode_all(encoded.payload, encoded.timestamp, encoded.keyframe)
 						.expect("decode"),
 				);
 			}
 		}
-		decoded.extend(hardware.flush().expect("flush"));
+		decoded.extend(hardware.flush_all().expect("flush"));
 		assert_eq!(backend.gpu_frames, 3, "the encoder fell back to the CPU");
 		assert!(backend.refused.is_empty());
 		assert_eq!(decoded.len(), frames.len(), "pictures went missing");
@@ -557,7 +558,7 @@ mod tests {
 			if index == 3 {
 				backend.set_bitrate(250_000).expect("set the bitrate");
 			}
-			assert!(!backend.encode(frame, index == 0).expect("encode").is_empty());
+			assert!(!backend.encode_all(frame, index == 0).expect("encode").is_empty());
 		}
 		assert_eq!(backend.encoder.config().bitrate, 250_000);
 	}
@@ -627,7 +628,7 @@ mod tests {
 			};
 			let rgba = [255u8, 0, 0, 255].repeat(size.pixels() as usize);
 			let frame = Frame::new(Surface::rgba(&rgba, size).unwrap(), at(0));
-			let encoded = backend.encode(&frame, true).unwrap();
+			let encoded = backend.encode_all(&frame, true).unwrap();
 			let annexb = &encoded.first().expect("a keyframe").payload;
 			assert_eq!(declared_color(annexb), Some(described), "{size} SPS color description");
 		}
@@ -645,7 +646,7 @@ mod hardware_tests {
 	/// The tests above check pixels with an independent software decoder; this
 	/// proof deliberately compiles without a software codec.
 	#[test]
-	#[ignore = "requires an Intel VA-API decode/VPP/encode device"]
+	#[ignore = "requires a VA-API decode/VPP/encode device"]
 	fn vaapi_1080p_ladder_stays_on_the_gpu() {
 		const FRAMES: usize = 12;
 		let size = Size::new(1920, 1080);
@@ -670,22 +671,22 @@ mod hardware_tests {
 		for index in 0..FRAMES {
 			let timestamp = Timestamp::from_micros(index as u64 * 33_333).unwrap();
 			let frame = Frame::new(Surface::I420(pixels.clone()), timestamp);
-			for packet in source.encode(&frame).expect("encode source") {
+			for packet in source.encode_all(&frame).expect("encode source") {
 				frames.extend(
 					decoder
-						.decode(&packet.payload, packet.timestamp, packet.keyframe)
+						.decode_all(&packet.payload, packet.timestamp, packet.keyframe)
 						.expect("decode source"),
 				);
 			}
 		}
-		for packet in source.finish().expect("finish source") {
+		for packet in source.flush_all().expect("finish source") {
 			frames.extend(
 				decoder
-					.decode(&packet.payload, packet.timestamp, packet.keyframe)
+					.decode_all(&packet.payload, packet.timestamp, packet.keyframe)
 					.expect("decode source tail"),
 			);
 		}
-		frames.extend(decoder.flush().expect("flush source decoder"));
+		frames.extend(decoder.flush_all().expect("flush source decoder"));
 		assert_eq!(frames.len(), FRAMES);
 		assert!(
 			frames.iter().all(|frame| matches!(frame.surface, Surface::DmaBuf(_))),
@@ -716,15 +717,15 @@ mod hardware_tests {
 					"{size}: resize downloaded pixels"
 				);
 				assert_eq!(scaled.size(), size);
-				for packet in encoder.encode(&scaled, index == 0).expect("encode rung") {
+				for packet in encoder.encode_all(&scaled, index == 0).expect("encode rung") {
 					decoded.extend(
 						output
-							.decode(&packet.payload, packet.timestamp, packet.keyframe)
+							.decode_all(&packet.payload, packet.timestamp, packet.keyframe)
 							.expect("decode rung"),
 					);
 				}
 			}
-			decoded.extend(output.flush().expect("flush rung decoder"));
+			decoded.extend(output.flush_all().expect("flush rung decoder"));
 			assert_eq!(encoder.gpu_frames, FRAMES as u64, "{size}: encoder used CPU transfers");
 			assert!(encoder.refused.is_empty());
 			assert_eq!(decoded.len(), FRAMES, "{size}: lost output pictures");

@@ -23,10 +23,7 @@ fn request_reply(c: &mut criterion::Criterion) {
 	const ALPN: &str = "worker-turns";
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let certs = support::certs().expect("certificates");
-	let tls = quic::Identity::open(&certs.cert, &certs.key)
-		.expect("identity")
-		.server(&[ALPN], quic::server::ClientAuth::None)
-		.expect("tls");
+	let tls = certs.server(&[ALPN]);
 	let mut group = c.benchmark_group("worker_request_reply");
 	for connections in [1, 16] {
 		for bytes in [64, 256 * 1024] {
@@ -43,9 +40,7 @@ fn request_reply(c: &mut criterion::Criterion) {
 			)
 			.expect("server");
 			let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket()).expect("client");
-			let mut dial = quic::client::Config::default();
-			dial.alpn = vec![ALPN.to_owned()];
-			dial.verify = false;
+			let dial = quic::client::Config::new(support::client_tls(&[ALPN]));
 			for _ in 0..connections {
 				let server = server.clone();
 				handle.spawn(async move {

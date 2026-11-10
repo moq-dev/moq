@@ -25,7 +25,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
 		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 async fn read_all(group: &mut group::Consumer) -> moq_net::Result<Vec<Vec<u8>>> {
@@ -829,7 +829,13 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 			// The new connection is cheaper, so the relay reports its route taking over.
 			let mut follow = relay.consume().routes();
 			assert!(
-				matches!(follow.next().await, Some(origin::RouteEvent::Start(_))),
+				matches!(
+					follow.next().await,
+					Some(origin::RouteEvent {
+						kind: origin::RouteKind::Start,
+						..
+					})
+				),
 				"{version}"
 			);
 			let replacement = upstream(1).await;
@@ -837,11 +843,10 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 			assert!(
 				matches!(
 					event,
-					Some(
-						origin::RouteEvent::Update(_)
-							| origin::RouteEvent::Restart(_)
-							| origin::RouteEvent::Takeover { .. }
-					)
+					Some(origin::RouteEvent {
+						kind: origin::RouteKind::Update | origin::RouteKind::Restart,
+						..
+					})
 				),
 				"{version}: {event:?}"
 			);

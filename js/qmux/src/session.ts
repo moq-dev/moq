@@ -1,23 +1,14 @@
-import {
-	Elapsed,
-	Instant,
-	type Interval,
-	interval,
-	Milli,
-	MissedTickBehavior,
-	Nano,
-	now,
-	Second,
-	timeout,
-} from "@moq/clock";
-import { Credit, replenishWindow } from "./credit.ts";
+import { Duration, Elapsed, Instant, type Interval, interval, MissedTickBehavior, now, timeout } from "@moq/clock";
+import { Credit, StreamLimit, Window } from "./credit.ts";
 import { resetCode, SessionError, StreamError, streamCode } from "./error.ts";
 import type { TransportParams, WireFormat } from "./frame.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_TRANSPORT_PARAMS, usesRecords } from "./frame.ts";
+import { Queue } from "./queue.ts";
 import { RecvStream } from "./recv.ts";
 import { RecvOpen } from "./recv-open.ts";
 import { BacklogSink, DEFAULT_SEND_ORDER, SendScheduler, type SendSink, WritableStreamSink } from "./scheduler.ts";
+import { SendHalf } from "./send.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
 import {
@@ -46,11 +37,11 @@ export interface Config {
 	receiveWindow?: bigint;
 	/** Receive window in bytes for every stream. */
 	streamReceiveWindow?: bigint;
-	/** Idle timeout in milliseconds, or null to disable it; zero is refused. */
-	idleTimeout?: number | null;
-	/** How long `ready` waits for the peer's transport parameters, in milliseconds, or null to wait
-	 *  indefinitely; zero is refused. The session closes when it passes. */
-	handshakeTimeout?: number | null;
+	/** Idle timeout, sent as whole milliseconds rounded up, or null to disable it; zero is refused. */
+	idleTimeout?: Duration | null;
+	/** How long `ready` waits for the peer's transport parameters, or null to wait indefinitely;
+	 *  zero is refused. The session closes when it passes. */
+	handshakeTimeout?: Duration | null;
 	/** Maximum QMux Record size in bytes (draft-01). */
 	maxRecordSize?: bigint;
 	/** Largest DATAGRAM *frame* (RFC 9221: type + length + payload) we advertise
@@ -67,8 +58,8 @@ const DEFAULT_CONFIG: Required<Config> = {
 	maxStreamsUni: 100n,
 	receiveWindow: 1_048_576n,
 	streamReceiveWindow: 262_144n,
-	idleTimeout: 30_000,
-	handshakeTimeout: 10_000,
+	idleTimeout: Duration.secs(30),
+	handshakeTimeout: Duration.secs(10),
 	maxRecordSize: Frame.DEFAULT_MAX_RECORD_SIZE,
 	// Fill a full record by default; the record layer bounds the size.
 	maxDatagramFrameSize: Frame.DEFAULT_MAX_RECORD_SIZE,
@@ -88,8 +79,11 @@ function resolveConfig(config?: Config): Required<Config> {
 	}
 	for (const [key, value] of Object.entries(resolved)) {
 		if (key === "idleTimeout" || key === "handshakeTimeout") {
-			if (value !== null && (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)) {
-				throw new TypeError(`${key} must be a positive safe integer or null`);
+			if (value !== null && (!(value instanceof Duration) || value.isZero())) {
+				throw new TypeError(`${key} must be a positive Duration or null`);
+			}
+			if (value !== null && !Number.isSafeInteger(Math.ceil(value.asMillis()))) {
+				throw new TypeError(`${key} exceeds the safe integer millisecond range`);
 			}
 		} else if (key !== "maxDatagramFrameSize" || value !== null) {
 			if (typeof value !== "bigint") throw new TypeError(`${key} must be a bigint`);
@@ -105,7 +99,7 @@ function resolveConfig(config?: Config): Required<Config> {
 
 function configToTransportParams(config: Required<Config>): TransportParams {
 	return {
-		maxIdleTimeout: BigInt(config.idleTimeout ?? 0),
+		maxIdleTimeout: BigInt(config.idleTimeout === null ? 0 : Math.ceil(config.idleTimeout.asMillis())),
 		initialMaxData: config.receiveWindow,
 		initialMaxStreamDataBidiLocal: config.streamReceiveWindow,
 		initialMaxStreamDataBidiRemote: config.streamReceiveWindow,
@@ -285,7 +279,7 @@ class IncomingStreamQueue<T> {
 	readonly readable: ReadableStream<T>;
 
 	#controller!: ReadableStreamDefaultController<T>;
-	#pending: PendingIncomingStream<T>[] = [];
+	#pending = new Queue<PendingIncomingStream<T>>();
 	#pullResolve?: () => void;
 	#cancelled = false;
 	#closed = false;
@@ -347,7 +341,7 @@ class IncomingStreamQueue<T> {
 
 	#dropPending(err: Error): void {
 		const pending = this.#pending;
-		this.#pending = [];
+		this.#pending = new Queue();
 		for (const item of pending) item.onDrop(err);
 	}
 
@@ -463,7 +457,7 @@ const DEFAULT_SEND_BUFFER_SIZE = 64 * 1024;
 /** How long a closing session waits for a backed-up socket to take its close
  *  frame, matching Rust's `CLOSE_TIMEOUT`. A peer that stopped reading can't
  *  hold the socket open past it. */
-const CLOSE_TIMEOUT = Nano.fromSecond(Second(3));
+const CLOSE_TIMEOUT = Duration.secs(3);
 
 /** Present the caller's socket as a `WebSocketStreamLike`, whichever they passed.
  *
@@ -618,20 +612,29 @@ function parseProtocol(raw: string, version: WireFormat): string {
 	return raw.startsWith(prefix) ? raw.slice(prefix.length) : "";
 }
 
-/** Per-stream flow control state. */
-interface StreamFlowState {
-	sendCredit: Credit;
-	/** Bytes that have actually reached the transport for this send half. */
-	sendOffset: bigint;
-	recvMax: bigint;
-	recvOffset: bigint;
-	recvConsumed: bigint;
-	/** Runs once when the send half ends, for a peer stream whose credit waits on it. */
-	onSendEnd?: () => void;
+/** A stream's halves, kept until each is done on the wire: the receive half once its
+ *  final size is known (FIN or RESET_STREAM received), the send half once its FIN
+ *  reached the socket or it was reset. Until then a late frame still finds the state
+ *  that accounts for it. */
+interface StreamState {
+	send?: SendHalf;
+	/** The writable's controller, so STOP_SENDING and a closing session can error it. */
+	writable?: WritableStreamDefaultController;
+	recv?: RecvStream;
+	/** Runs once both halves are done, returning a peer stream's slot once the application has it too. */
+	onClose?: () => void;
 }
 
+/** A terminal transition, with the close frame that tells the peer, if any. A clean
+ *  end fulfills `closed` with its code and reason, and `send` puts them on the wire
+ *  as an APPLICATION_CLOSE. An abort rejects `closed` with `cause`, and `send` tells
+ *  the peer why with a CONNECTION_CLOSE. */
+type End =
+	| { clean: true; code: number; reason: string; send: boolean }
+	| { clean: false; cause: Error; send?: { code: number; reason: string } };
+
 /** A `WebTransport` session carried over a WebSocket, for hosts without native WebTransport. */
-export default class Session implements WebTransport {
+export class Session implements WebTransport {
 	// The transport: a native `WebSocketStream` when the platform has one,
 	// otherwise the `WebSocketStream` ponyfill over a plain `WebSocket`. Either
 	// way, one API.
@@ -650,13 +653,12 @@ export default class Session implements WebTransport {
 	// `SessionOptions.requireProtocol` on a dial: the server must pick one of
 	// our application protocols, not answer with none.
 	#requireProtocol = false;
+	// Set once closed, and never changed after: the error later calls throw.
 	#closed?: Error;
-	#closeReason?: Error;
-	// The APPLICATION_CLOSE or CONNECTION_CLOSE that #teardown sends, if any.
-	#closeFrame?: Uint8Array;
 
-	#sendStreams = new Map<bigint, WritableStreamDefaultController>();
-	#recvStreams = new Map<bigint, RecvStream>();
+	#streams = new Map<bigint, StreamState>();
+	// Streams whose MAX_STREAM_DATA is owed, sent with the newest limit when the scheduler polls.
+	#updates = new Set<bigint>();
 
 	#nextUniStreamId = 0n;
 	#nextBiStreamId = 0n;
@@ -709,13 +711,9 @@ export default class Session implements WebTransport {
 	// Peer credit is unavailable until its transport parameters arrive.
 	#connCredit = new Credit(0n);
 
-	// Connection-level recv flow control
-	#recvDataOffset = 0n;
-	#recvDataMax = 0n;
-	#recvDataConsumed = 0n;
+	// The connection receive window (MAX_DATA), which every peer byte charges.
+	#recvData: Window;
 
-	// Per-stream flow control
-	#streamFlow = new Map<bigint, StreamFlowState>();
 	#recvOpenBi = new RecvOpen();
 	#recvOpenUni = new RecvOpen();
 
@@ -723,17 +721,17 @@ export default class Session implements WebTransport {
 	#bidiStreamCredit = new Credit(0n);
 	#uniStreamCredit = new Credit(0n);
 
-	// Stream count tracking via Credit (for receiving - our limits)
-	#recvBiCredit: Credit;
-	#recvUniCredit: Credit;
+	// The streams the peer may open (MAX_STREAMS).
+	#recvBiLimit: StreamLimit;
+	#recvUniLimit: StreamLimit;
 
 	// QMux01 idle-timeout tracking (engaged once we've received the peer's params).
 	#lastRecvAt = now();
 	#lastSendAt = now();
 	// Deadline bookkeeping for #idleActivityAt: the newest receive observed, the
 	// send last allowed to restart the deadline, and whether a send may restart it.
-	#recvSeen = Instant.zero;
-	#sendResetAt = Instant.zero;
+	#recvSeen = Instant.ZERO;
+	#sendResetAt = Instant.ZERO;
 	#sendCredit = true;
 	#nextPingSeq = 0;
 	// Highest sequence seen in a received QX_PING request (draft-02 requires them
@@ -780,9 +778,11 @@ export default class Session implements WebTransport {
 		this.#ourParams = configToTransportParams(this.#config);
 		this.#sendBufferSize = sendBufferSize(options?.sendBufferSize ?? DEFAULT_SEND_BUFFER_SIZE);
 
-		// Recv stream count limits are version-independent.
-		this.#recvBiCredit = new Credit(this.#config.maxStreamsBidi);
-		this.#recvUniCredit = new Credit(this.#config.maxStreamsUni);
+		// Receive limits are version-independent.
+		const notify = () => this.#scheduler?.notify();
+		this.#recvData = new Window(this.#ourParams.initialMaxData, notify);
+		this.#recvBiLimit = new StreamLimit(this.#config.maxStreamsBidi, notify);
+		this.#recvUniLimit = new StreamLimit(this.#config.maxStreamsUni, notify);
 
 		const ready = Promise.withResolvers<void>();
 		this.ready = ready.promise;
@@ -832,6 +832,10 @@ export default class Session implements WebTransport {
 	 * apart from the stream-id role - so it accepts peer-initiated streams and
 	 * opens server-initiated ones.
 	 *
+	 * Cap the host's message size at one record where it allows it, as `ws`'s
+	 * `maxPayload` does: the larger of `config.maxRecordSize` and 16384, draft-00's
+	 * frame limit. The session refuses a larger message, but only once it is buffered.
+	 *
 	 * @example
 	 * ```ts
 	 * const { socket, response } = Deno.upgradeWebSocket(req, { protocol });
@@ -861,11 +865,10 @@ export default class Session implements WebTransport {
 					const protocol = this.#protocolOverride ?? conn.protocol;
 					// Strict application negotiation also refuses a bare QMux version.
 					if (this.#requireProtocol && parseProtocol(protocol, detectVersion(protocol)) === "") {
-						this.#closeReason ??= new Error(
-							`server negotiated no application protocol (${JSON.stringify(protocol)})`,
-						);
-						this.#abort(1002, "no application protocol");
-						this.#transportClose();
+						this.#end({
+							clean: false,
+							cause: new Error(`server negotiated no application protocol (${JSON.stringify(protocol)})`),
+						});
 						return;
 					}
 					// Only the ponyfill's `desiredSize` measures bytes; the native API's counts
@@ -876,30 +879,28 @@ export default class Session implements WebTransport {
 					this.#startSession(protocol, sink);
 					void this.#readLoop(conn.readable.getReader());
 				} catch (error) {
-					this.#closeReason ??= error instanceof Error ? error : new Error("Invalid QMux subprotocol");
-					this.#abort(1002, "Invalid QMux subprotocol");
-					this.#transportClose();
+					this.#end({ clean: false, cause: toError(error, "Invalid QMux subprotocol") });
 				}
 			},
 			(err: unknown) => {
-				this.#closeReason ??= err instanceof Error ? err : new Error("WebSocketStream failed to open");
-				this.#abort(1006, "WebSocketStream error");
+				this.#end({ clean: false, cause: toError(err, "WebSocketStream failed to open") });
 			},
 		);
 		wss.closed.then(
 			(info) => {
 				// The socket went away without a CONNECTION_CLOSE. A peer close or a
-				// local close() would already have transitioned us (and #close is
-				// idempotent), so reaching here settled means the session dropped -
+				// local close() would already have transitioned us (and #end is
+				// idempotent), so reaching here open means the session dropped -
 				// even if the WebSocket itself closed with a "clean" status code.
-				this.#closeReason ??= new Error(`Connection closed: ${info.closeCode ?? 0} ${info.reason ?? ""}`);
-				this.#abort(info.closeCode ?? 1006, info.reason ?? "");
+				this.#end({
+					clean: false,
+					cause: new Error(`Connection closed: ${info.closeCode ?? 0} ${info.reason ?? ""}`),
+				});
 			},
 			(err: unknown) => {
 				// Keep the socket failure itself - it becomes the SessionError's cause, and
 				// it's the only description of *why* the transport died.
-				this.#closeReason ??= err instanceof Error ? err : new Error("WebSocketStream closed");
-				this.#abort(1006, "WebSocketStream error");
+				this.#end({ clean: false, cause: toError(err, "WebSocketStream closed") });
 			},
 		);
 	}
@@ -912,8 +913,8 @@ export default class Session implements WebTransport {
 				// QMux is binary-only; a text frame is a protocol error, not something
 				// to silently drop (which would desync the session).
 				if (typeof value === "string") {
-					this.#sendClose("connection_close", 1003, "text frames are not valid for QMux");
-					this.#abort(1003, "text frames are not valid for QMux");
+					const reason = "text frames are not valid for QMux";
+					this.#end({ clean: false, cause: new Error(reason), send: { code: 1003, reason } });
 					return;
 				}
 				// `openWebSocketStream` normalizes the native API's ArrayBuffer chunks,
@@ -924,8 +925,7 @@ export default class Session implements WebTransport {
 				this.#onData(value instanceof ArrayBuffer ? new Uint8Array(value) : value);
 			}
 		} catch (err) {
-			this.#closeReason ??= err instanceof Error ? err : new Error("WebSocketStream read error");
-			this.#abort(1006, "WebSocketStream read error");
+			this.#end({ clean: false, cause: toError(err, "WebSocketStream read error") });
 		}
 	}
 
@@ -959,10 +959,9 @@ export default class Session implements WebTransport {
 			// A failed write leaves the session unable to send anything, even if the
 			// socket hasn't reported closing yet.
 			onFail: (err) => {
-				this.#closeReason ??= err;
-				this.#abort(1006, "WebSocketStream write error");
-				this.#transportClose();
+				this.#end({ clean: false, cause: err });
 			},
+			pending: () => this.#nextUpdate(),
 		});
 
 		// Exchange transport parameters before granting send credit.
@@ -973,24 +972,24 @@ export default class Session implements WebTransport {
 		this.#connCredit = new Credit(0n);
 		this.#bidiStreamCredit = new Credit(0n);
 		this.#uniStreamCredit = new Credit(0n);
-		this.#recvDataMax = this.#ourParams.initialMaxData;
 		// Our own idle deadline applies until the peer's parameters arrive.
 		this.#startIdleTimerIfEnabled();
 		// The handshake deadline also covers qmux-00 and a disabled idle timeout, so
 		// a peer that never sends its parameters can't hold `ready` forever.
 		const handshake = this.#config.handshakeTimeout;
 		if (handshake !== null) {
-			timeout(Nano.fromMilli(Milli(handshake)), this.ready).catch((err) => {
+			timeout(handshake, this.ready).catch((err) => {
 				if (!(err instanceof Elapsed)) return;
-				this.#closeReason ??= new Error("handshake timeout");
-				this.#abort(0, "handshake timeout");
-				this.#transportClose();
+				this.#end({ clean: false, cause: new Error("handshake timeout") });
 			});
 		}
 	}
 
 	#onData(data: Uint8Array) {
 		this.#lastRecvAt = now();
+		// The WebSocket binding makes an empty message a no-op on every version, unlike an
+		// empty record, as Rust's transport does.
+		if (data.byteLength === 0) return;
 		try {
 			if (usesRecords(this.#version)) {
 				if (BigInt(data.byteLength) > this.#ourParams.maxRecordSize) {
@@ -1019,8 +1018,11 @@ export default class Session implements WebTransport {
 		} catch (error) {
 			// A decode failure or a frame that violates a negotiated limit is fatal.
 			console.error("Protocol violation:", error);
-			this.#sendClose("connection_close", 1002, "Protocol violation");
-			this.#abort(1002, "Protocol violation", error);
+			this.#end({
+				clean: false,
+				cause: toError(error, "Protocol violation"),
+				send: { code: 1002, reason: "Protocol violation" },
+			});
 		}
 	}
 
@@ -1042,25 +1044,22 @@ export default class Session implements WebTransport {
 		} else if (frame.type === "stop_sending") {
 			this.#handleStopSending(frame);
 		} else if (frame.type === "application_close" || frame.type === "connection_close") {
-			this.#closeReason ??= new Error(`Connection closed: ${frame.code.value} ${frame.reason}`);
 			if (frame.type === "application_close") {
 				// APPLICATION_CLOSE (0x1d): the peer closed the session deliberately -
 				// graceful, so `closed` fulfills with its code/reason.
-				this.#close(Number(frame.code.value), frame.reason);
+				this.#end({ clean: true, code: Number(frame.code.value), reason: frame.reason, send: false });
 			} else {
 				// CONNECTION_CLOSE (0x1c): the peer hit a protocol violation or
 				// transport error, so `closed` rejects. A termination with *no* close
-				// frame at all is a drop, which #abort also handles.
-				this.#abort(Number(frame.code.value), frame.reason);
+				// frame at all is a drop, which the socket's `closed` handles.
+				this.#end({ clean: false, cause: new Error(`Connection closed: ${frame.code.value} ${frame.reason}`) });
 			}
-			this.#transportClose();
 		} else if (frame.type === "transport_parameters") {
 			this.#handleTransportParameters(frame.params);
 		} else if (frame.type === "max_data") {
 			this.#connCredit.increaseMax(frame.max);
 		} else if (frame.type === "max_stream_data") {
-			const flow = this.#streamFlow.get(frame.id.value.value);
-			if (flow) flow.sendCredit.increaseMax(frame.max);
+			this.#sendState(frame.id)?.send?.credit.increaseMax(frame.max);
 		} else if (frame.type === "max_streams_bidi") {
 			this.#bidiStreamCredit.increaseMax(frame.max);
 		} else if (frame.type === "max_streams_uni") {
@@ -1148,16 +1147,16 @@ export default class Session implements WebTransport {
 		// Credit streams created before params arrived. Only qmux-02 requires the
 		// params first, so an earlier draft's peer may already have opened streams:
 		// the peer's bidi_local limits its own bidi streams, bidi_remote ours.
-		for (const [streamIdVal, flow] of this.#streamFlow) {
+		for (const [streamIdVal, stream] of this.#streams) {
+			if (!stream.send) continue;
 			const id = new Stream.Id(VarInt.from(streamIdVal));
 			let sendLimit = params.initialMaxStreamDataUni;
 			if (id.dir === Stream.Dir.Bi) {
-				sendLimit =
-					id.serverInitiated === this.#isServer
-						? params.initialMaxStreamDataBidiRemote
-						: params.initialMaxStreamDataBidiLocal;
+				sendLimit = this.#isPeerStream(id)
+					? params.initialMaxStreamDataBidiLocal
+					: params.initialMaxStreamDataBidiRemote;
 			}
-			flow.sendCredit.increaseMax(sendLimit);
+			stream.send.credit.increaseMax(sendLimit);
 		}
 
 		// The peer's limit may be shorter than ours.
@@ -1188,21 +1187,21 @@ export default class Session implements WebTransport {
 		if (timeoutMs === 0n) return;
 		// Poll at a fraction of the timeout - frequent enough to trigger pings on time
 		// but not so frequent it burns CPU on otherwise-quiet sessions.
-		const timeout = Nano.fromMilli(Milli(Number(timeoutMs)));
-		const timer = interval(Nano.fromMilli(Milli(Math.max(50, Number(timeoutMs) / 6))));
+		const timeout = Duration.millis(Number(timeoutMs));
+		const timer = interval(Duration.millis(Math.max(50, Number(timeoutMs) / 6)));
 		timer.setMissedTickBehavior(MissedTickBehavior.Delay);
 		this.#idleTimer = timer;
 		void this.#idleLoop(timer, timeout);
 	}
 
-	async #idleLoop(timer: Interval, timeout: Nano) {
+	async #idleLoop(timer: Interval, timeout: Duration) {
 		// The first tick is immediate; the first check belongs one period in.
 		let first = true;
 		for (;;) {
 			try {
 				await timer.tick();
 			} catch {
-				return; // #teardown closed the timer.
+				return; // #end closed the timer.
 			}
 			if (this.#closed) {
 				timer.close();
@@ -1228,33 +1227,30 @@ export default class Session implements WebTransport {
 	 * re-arms the credit.
 	 */
 	#idleActivityAt(): Instant {
-		if (this.#lastRecvAt > this.#recvSeen) {
+		if (this.#lastRecvAt.gt(this.#recvSeen)) {
 			this.#recvSeen = this.#lastRecvAt;
 			this.#sendCredit = true;
 		}
-		if (this.#sendCredit && this.#lastSendAt > this.#sendResetAt) {
+		if (this.#sendCredit && this.#lastSendAt.gt(this.#sendResetAt)) {
 			this.#sendResetAt = this.#lastSendAt;
 			this.#sendCredit = false;
 		}
-		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
-		return this.#recvSeen > this.#sendResetAt ? this.#recvSeen : this.#sendResetAt;
+		return this.#recvSeen.max(this.#sendResetAt);
 	}
 
-	#idleTick(timeout: Nano) {
+	#idleTick(timeout: Duration) {
 		const at = now();
-		if (Instant.durationSince(at, this.#idleActivityAt()) > timeout) {
+		if (at.since(this.#idleActivityAt()).gt(timeout)) {
 			// No frames have been sent or received within the negotiated limit. Abnormal:
 			// without a rejection this is indistinguishable from a graceful close(), which
 			// also settles with closeCode 0.
-			this.#closeReason ??= new Error("idle timeout");
-			this.#abort(0, "idle timeout");
-			this.#transportClose();
+			this.#end({ clean: false, cause: new Error("idle timeout") });
 			return;
 		}
 		// Keep-alive: nudge the peer when our outbound side has been silent for a third
 		// of the timeout. Any frame counts as activity, so this only fires when truly idle.
 		// Nothing to keep alive before the peer has spoken at all.
-		if (this.#paramsReceived && Instant.durationSince(at, this.#lastSendAt) > timeout / 3) {
+		if (this.#paramsReceived && at.since(this.#lastSendAt).gt(timeout.div(3))) {
 			const seq = this.#nextPingSeq;
 			// Monotonic (never wraps within a session's life): the draft-02
 			// strictly-increasing rule requires it, and it must not wrap earlier
@@ -1270,327 +1266,155 @@ export default class Session implements WebTransport {
 		}
 	}
 
-	async #claimSendCredit(streamId: bigint, desired: bigint, signal: AbortSignal): Promise<bigint> {
-		const flow = this.#streamFlow.get(streamId);
-		if (!flow) return desired;
-
-		while (true) {
-			// 1. Try stream credit
-			const streamClaimed = flow.sendCredit.tryClaim(desired);
-			if (streamClaimed === 0n) {
-				if (this.#closed) throw this.#closed;
-				// Wait for stream credit, then release and retry to coordinate with conn credit
-				const claimed = await flow.sendCredit.claim(desired, signal);
-				flow.sendCredit.release(claimed);
-				continue;
-			}
-
-			// 2. Try connection credit
-			const connClaimed = this.#connCredit.tryClaim(streamClaimed);
-			if (connClaimed === 0n) {
-				flow.sendCredit.release(streamClaimed);
-				if (this.#closed) throw this.#closed;
-				const claimed = await this.#connCredit.claim(1n, signal);
-				this.#connCredit.release(claimed);
-				continue;
-			}
-
-			// Return excess stream credit if connection had less
-			if (connClaimed < streamClaimed) {
-				flow.sendCredit.release(streamClaimed - connClaimed);
-			}
-
-			return connClaimed;
-		}
-	}
-
-	/** Check that a STREAM frame continues its stream, then charge it to flow
-	 *  control. Throws on a gap, overlap, or duplicate; returns false when the
-	 *  frame exceeds a receive window. */
-	#accountRecv(frame: Frame.Data): boolean {
-		const flow = this.#streamFlow.get(frame.id.value.value);
-		// The transport is ordered, so a frame must start exactly where the last one
-		// ended (draft-02 §4.1): there is nothing to reassemble, and anything else
-		// would deliver bytes out of order or twice. An absent offset comes from a
-		// sender released before offsets were encoded, whose frames are contiguous.
-		if (flow && frame.offset !== undefined && frame.offset !== flow.recvOffset) {
-			throw new Error(`STREAM offset ${frame.offset} does not continue the stream at ${flow.recvOffset}`);
-		}
-
-		const bytesN = BigInt(frame.data.byteLength);
-		if (bytesN === 0n) return true;
-
-		// Connection-level check
-		if (this.#recvDataOffset + bytesN > this.#recvDataMax) {
-			return false;
-		}
-		this.#recvDataOffset += bytesN;
-
-		// Stream-level check
-		if (flow) {
-			if (flow.recvOffset + bytesN > flow.recvMax) {
-				return false;
-			}
-			flow.recvOffset += bytesN;
-		}
-
-		return true;
-	}
-
-	/** Connection-level credit. Accounted when bytes are delivered to the
-	 *  application or deliberately discarded, never merely on receipt. This keeps
-	 *  completed-but-unread streams inside the aggregate receive-memory window.
-	 *  `recvDataConsumed` is cumulative. */
-	#accountConnConsumed(bytes: number | bigint) {
-		if (bytes === 0 || bytes === 0n) return;
-		this.#recvDataConsumed += BigInt(bytes);
-		this.#maybeSendMaxData();
-	}
-
-	/** Stream-level credit. Accounted on *delivery* to the application (driven by
-	 *  RecvStream.onConsume), so MAX_STREAM_DATA tracks the read rate and the peer
-	 *  can't buffer more than one window ahead of a slow reader. `recvConsumed`
-	 *  is cumulative. */
-	#accountStreamConsumed(streamId: bigint, bytes: number) {
-		if (bytes === 0) return;
-		const flow = this.#streamFlow.get(streamId);
-		if (flow) {
-			flow.recvConsumed += BigInt(bytes);
-			this.#maybeSendMaxStreamData(streamId, flow);
-		}
-	}
-
-	#maybeSendMaxData() {
-		const newMax = replenishWindow(this.#recvDataConsumed, this.#recvDataMax, this.#ourParams.initialMaxData);
-		if (newMax !== null) {
-			this.#recvDataMax = newMax;
-			this.#sendPriorityFrame({ type: "max_data", max: newMax });
-		}
-	}
-
-	#maybeSendMaxStreamData(streamId: bigint, flow: StreamFlowState) {
-		const id = new Stream.Id(VarInt.from(streamId));
-
-		let initialWindow: bigint;
-		if (id.dir === Stream.Dir.Bi) {
-			// Check if we initiated this stream
-			initialWindow =
-				id.serverInitiated === this.#isServer
-					? this.#ourParams.initialMaxStreamDataBidiLocal
-					: this.#ourParams.initialMaxStreamDataBidiRemote;
+	/** Encode the next window update owed to the peer, or undefined once none is.
+	 *  The scheduler polls this as it writes, so each carries the newest limit. */
+	#nextUpdate(): Uint8Array | undefined {
+		let frame: Frame.Any | undefined;
+		if (this.#recvData.takePending()) {
+			frame = { type: "max_data", max: this.#recvData.max };
+		} else if (this.#recvBiLimit.takePending()) {
+			frame = { type: "max_streams_bidi", max: this.#recvBiLimit.max };
+		} else if (this.#recvUniLimit.takePending()) {
+			frame = { type: "max_streams_uni", max: this.#recvUniLimit.max };
 		} else {
-			initialWindow = this.#ourParams.initialMaxStreamDataUni;
-		}
-
-		// `recvConsumed` only grows on delivery to the application, so a stalled
-		// reader stops replenishing and the peer's send credit drains to the window.
-		const newMax = replenishWindow(flow.recvConsumed, flow.recvMax, initialWindow);
-		if (newMax !== null) {
-			flow.recvMax = newMax;
-			this.#sendPriorityFrame({ type: "max_stream_data", id, max: newMax });
-		}
-	}
-
-	/** Replenish stream count credit for a peer-initiated stream and send MAX_STREAMS if needed. */
-	#replenishStreamCredit(dir: Stream.DirType) {
-		const credit = dir === Stream.Dir.Bi ? this.#recvBiCredit : this.#recvUniCredit;
-		const newMax = credit.consume(1n);
-		if (newMax !== null) {
-			if (dir === Stream.Dir.Bi) {
-				this.#sendPriorityFrame({ type: "max_streams_bidi", max: newMax });
-			} else {
-				this.#sendPriorityFrame({ type: "max_streams_uni", max: newMax });
+			for (const streamId of this.#updates) {
+				this.#updates.delete(streamId);
+				const recv = this.#streams.get(streamId)?.recv;
+				// Moot once the peer sent its last byte or we stopped reading.
+				if (!recv?.wantsCredit || !recv.window.takePending()) continue;
+				frame = { type: "max_stream_data", id: new Stream.Id(VarInt.from(streamId)), max: recv.window.max };
+				break;
 			}
 		}
+		if (!frame) return undefined;
+		const bytes = Frame.encode(frame, this.#version);
+		this.#validateRecordSize(bytes);
+		return bytes;
+	}
+
+	#isPeerStream(id: Stream.Id): boolean {
+		return id.serverInitiated !== this.#isServer;
 	}
 
 	#recvOpen(dir: Stream.DirType): RecvOpen {
 		return dir === Stream.Dir.Bi ? this.#recvOpenBi : this.#recvOpenUni;
 	}
 
-	/** Account the previously-unseen tail declared by RESET_STREAM.
-	 *
-	 * Drafts through -02 were emitted by implementations that used an incorrect
-	 * zero final size, so tolerate a value below the bytes already received. The
-	 * stricter FINAL_SIZE_ERROR check starts with draft-03; meanwhile the larger
-	 * of the two values still prevents a reset from undoing flow-control usage. */
-	#accountReset(frame: Frame.ResetStream): bigint | null {
-		const streamId = frame.id.value.value;
-		const flow = this.#streamFlow.get(streamId);
-		const received = flow?.recvOffset ?? 0n;
-		// TODO(qmux-03): Once draft-03 is implemented, reject finalSize < received
-		// (and conflicting terminal final sizes) with FINAL_SIZE_ERROR instead of
-		// applying this draft-00/-01/-02 compatibility fallback.
-		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
-		const finalSize = frame.finalSize > received ? frame.finalSize : received;
-		const gap = finalSize - received;
-
-		const recvMax =
-			flow?.recvMax ??
-			(frame.id.dir === Stream.Dir.Bi
-				? this.#ourParams.initialMaxStreamDataBidiRemote
-				: this.#ourParams.initialMaxStreamDataUni);
-		if (finalSize > recvMax || this.#recvDataOffset + gap > this.#recvDataMax) {
-			return null;
-		}
-
-		this.#recvDataOffset += gap;
-		if (flow) flow.recvOffset = finalSize;
-		return gap;
+	#recvLimit(dir: Stream.DirType): StreamLimit {
+		return dir === Stream.Dir.Bi ? this.#recvBiLimit : this.#recvUniLimit;
 	}
 
-	/** Delete stream flow state only when both send and recv sides are gone. */
-	#maybeDeleteStreamFlow(streamId: bigint) {
-		if (!this.#sendStreams.has(streamId) && !this.#recvStreams.has(streamId)) {
-			const flow = this.#streamFlow.get(streamId);
-			if (flow) {
-				flow.sendCredit.close();
-				this.#streamFlow.delete(streamId);
-			}
+	/** A receive half charging the connection window, with a stream window of `size`. */
+	#recvHalf(id: Stream.Id, size: bigint): RecvStream {
+		const streamId = id.value.value;
+		return new RecvStream({
+			conn: this.#recvData,
+			window: new Window(size, () => {
+				this.#updates.add(streamId);
+				this.#scheduler?.notify();
+			}),
+			stop: (reason) => {
+				this.#sendPriorityFrame({ type: "stop_sending", id, code: VarInt.from(resetCode(reason)) });
+			},
+		});
+	}
+
+	/** Forget a stream once both its halves are done on the wire. */
+	#reap(streamId: bigint) {
+		const stream = this.#streams.get(streamId);
+		if (!stream) return;
+		if (stream.send && !stream.send.terminal) return;
+		if (stream.recv && !stream.recv.sizeKnown) return;
+		this.#streams.delete(streamId);
+		this.#updates.delete(streamId);
+		stream.onClose?.();
+	}
+
+	/** Open a peer stream on its first STREAM frame, implicitly opening every lower index. */
+	#openPeerStream(id: Stream.Id): StreamState & { recv: RecvStream } {
+		// Per QUIC RFC 9000 §4.6, the limit applies to the stream index.
+		const limit = this.#recvLimit(id.dir);
+		if (!limit.open(id.index)) throw new Error("stream limit exceeded");
+		this.#recvOpen(id.dir).record(id.index);
+
+		const bidi = id.dir === Stream.Dir.Bi;
+		const recv = this.#recvHalf(
+			id,
+			bidi ? this.#ourParams.initialMaxStreamDataBidiRemote : this.#ourParams.initialMaxStreamDataUni,
+		);
+		// Its slot returns once the application has the stream and both halves are done,
+		// as in QUIC, so it bounds the streams a peer holds open.
+		let holds = 2;
+		const stream = {
+			recv,
+			// The peer's bidi_local limits what we send on its bidi streams.
+			send: bidi ? new SendHalf(this.#peerParams.initialMaxStreamDataBidiLocal) : undefined,
+			onClose: () => {
+				if (--holds === 0) limit.close();
+			},
+		};
+		this.#streams.set(id.value.value, stream);
+		return stream;
+	}
+
+	/** Hand a newly opened peer stream to the application. */
+	#announce(id: Stream.Id, stream: StreamState & { recv: RecvStream }) {
+		// Taking the stream is the slot's other hold, counted by the same closure as onClose.
+		const accept = stream.onClose as () => void;
+		// A refused stream stays registered until its FIN or RESET, so in-flight frames
+		// cannot reopen it, and discards what they carry. The application will never
+		// take it, so it releases that hold and resets a bidi stream's send half, and
+		// the slot returns once the peer's half is done too.
+		const drop = (err: Error) => {
+			stream.recv.stop(err);
+			accept();
+			if (stream.send) this.#resetSend(id, stream, err, VarInt.from(resetCode(err)));
+			else this.#reap(id.value.value);
+		};
+		const refused = () => drop(new Error("incoming stream acceptor cancelled"));
+		if (stream.send) {
+			const writable = this.#sendWritable(id, stream, stream.send, DEFAULT_SEND_ORDER);
+			const bidi = { readable: stream.recv.readable, writable };
+			if (!this.#incomingBidirectionalQueue.push(bidi, accept, drop)) refused();
+		} else if (!this.#incomingUnidirectionalQueue.push(stream.recv.readable, accept, drop)) {
+			refused();
 		}
 	}
 
 	#handleStreamFrame(frame: Frame.Data) {
-		// The read loop can still deliver frames after #close() has torn down the
-		// incoming-stream controllers and #recvStreams; drop them, matching the
+		// The read loop can still deliver frames after #end() has torn down the
+		// incoming-stream controllers and the streams; drop them, matching the
 		// #sendDatagram/#sendPriorityFrame post-close guards.
 		if (this.#closed) return;
 
-		const streamId = frame.id.value.value;
-
-		if (!frame.id.canRecv(this.#isServer)) {
+		const id = frame.id;
+		const streamId = id.value.value;
+		if (!id.canRecv(this.#isServer)) {
 			throw new Error("Invalid stream ID direction");
 		}
 
-		let recv = this.#recvStreams.get(streamId);
-		if (
-			frame.id.serverInitiated !== this.#isServer &&
-			!recv &&
-			this.#recvOpen(frame.id.dir).isClosed(frame.id.index)
-		) {
+		const recv = this.#streams.get(streamId)?.recv;
+		if (recv) {
+			recv.data(frame.offset, frame.data, frame.fin);
+			if (frame.fin) this.#reap(streamId);
 			return;
 		}
 
-		if (!recv) {
-			if (frame.id.serverInitiated === this.#isServer) {
-				// One of ours whose receive half already closed: a late frame, dropped.
-				// One we never opened is malformed (canRecv leaves only bidi here).
-				if (frame.id.index >= this.#nextBiStreamId) {
-					throw new Error("STREAM frame for a stream we never opened");
-				}
-				return;
-			}
-			if (!frame.id.canRecv(this.#isServer)) {
-				throw new Error("received write-only stream");
-			}
-
-			// Validate stream count limits (QMux only)
-			// Per QUIC RFC 9000 §4.6, the limit applies to the stream index.
-			// A peer opening stream index N implicitly opens all streams 0..N.
-
-			const credit = frame.id.dir === Stream.Dir.Bi ? this.#recvBiCredit : this.#recvUniCredit;
-			if (!credit.receiveUpTo(frame.id.index + 1n)) {
-				this.#sendClose("connection_close", 1002, "stream limit exceeded");
-				this.#abort(1002, "stream limit exceeded");
-				return;
-			}
-			this.#recvOpen(frame.id.dir).record(frame.id.index);
-
-			// Initialize flow control state for new stream
-
-			const recvMax =
-				frame.id.dir === Stream.Dir.Bi
-					? this.#ourParams.initialMaxStreamDataBidiRemote
-					: this.#ourParams.initialMaxStreamDataUni;
-
-			// For send side on bidi: peer's bidi_local is our send limit
-			const sendMax = frame.id.dir === Stream.Dir.Bi ? this.#peerParams.initialMaxStreamDataBidiLocal : 0n;
-
-			// Stream credit returns once the application has the stream and both halves have
-			// ended, as in QUIC, so it bounds the streams a peer holds open.
-			let holds = frame.id.dir === Stream.Dir.Bi ? 3 : 2;
-			const release = () => {
-				if (--holds === 0) this.#replenishStreamCredit(frame.id.dir);
-			};
-
-			this.#streamFlow.set(streamId, {
-				sendCredit: new Credit(sendMax),
-				sendOffset: 0n,
-				recvMax,
-				recvOffset: 0n,
-				recvConsumed: 0n,
-				onSendEnd: frame.id.dir === Stream.Dir.Bi ? release : undefined,
-			});
-
-			// Validate recv flow control before accepting
-			if (!this.#accountRecv(frame)) {
-				this.#sendClose("connection_close", 1002, "flow control error");
-				this.#abort(1002, "flow control error");
-				return;
-			}
-
-			const recvStream = new RecvStream(
-				(bytes) => {
-					this.#accountStreamConsumed(streamId, bytes);
-					this.#accountConnConsumed(bytes);
-				},
-				(discarded, reason) => {
-					this.#accountConnConsumed(discarded);
-					this.#sendPriorityFrame({
-						type: "stop_sending",
-						id: frame.id,
-						code: VarInt.from(resetCode(reason)),
-					});
-
-					this.#recvStreams.delete(streamId);
-					this.#maybeDeleteStreamFlow(streamId);
-				},
-				release,
-			);
-			this.#recvStreams.set(streamId, recvStream);
-			recv = recvStream;
-			const reader = recvStream.readable;
-
-			const onDrop = (err: Error) => {
-				this.#accountConnConsumed(recvStream.error(err));
-			};
-
-			if (frame.id.dir === Stream.Dir.Bi) {
-				// Incoming bidirectional stream
-				const writer = this.#sendWritable(frame.id, DEFAULT_SEND_ORDER);
-
-				if (!this.#incomingBidirectionalQueue.push({ readable: reader, writable: writer }, release, onDrop)) {
-					// Keep the refused stream registered until FIN/RESET so in-flight frames
-					// cannot repeatedly reopen it. RecvStream rejects subsequent pushes,
-					// letting the receive path account them as deliberately discarded.
-					onDrop(new Error("incoming stream acceptor cancelled"));
-				}
-			} else {
-				if (!this.#incomingUnidirectionalQueue.push(reader, release, onDrop)) {
-					onDrop(new Error("incoming stream acceptor cancelled"));
-				}
-			}
-		} else {
-			// Existing stream - validate recv flow control
-			if (!this.#accountRecv(frame)) {
-				this.#sendClose("connection_close", 1002, "flow control error");
-				this.#abort(1002, "flow control error");
-				return;
-			}
+		if (!this.#isPeerStream(id)) {
+			// One of ours whose receive half already ended: a late frame, dropped.
+			// One we never opened is malformed (canRecv leaves only bidi here).
+			if (id.index >= this.#nextBiStreamId) throw new Error("STREAM frame for a stream we never opened");
+			return;
 		}
+		// A peer stream whose receive half already ended stays closed.
+		if (this.#recvOpen(id.dir).isClosed(id.index)) return;
 
-		if (frame.data.byteLength > 0) {
-			// A refused/reset/cancelled stream discards new in-flight data. Discarded
-			// bytes free memory immediately and therefore count as consumed; buffered
-			// bytes advance both flow-control windows only when RecvStream delivers them.
-			if (!recv.push(frame.data)) this.#accountConnConsumed(frame.data.byteLength);
-		}
-
-		if (frame.fin) {
-			recv.finish();
-			this.#recvStreams.delete(streamId);
-			this.#maybeDeleteStreamFlow(streamId);
-		}
+		const stream = this.#openPeerStream(id);
+		// Charge the frame before the application sees the stream, so one that breaks
+		// flow control never reaches it.
+		stream.recv.data(frame.offset, frame.data, frame.fin);
+		this.#announce(id, stream);
+		if (frame.fin) this.#reap(streamId);
 	}
 
 	#handleResetStream(frame: Frame.ResetStream) {
@@ -1601,102 +1425,79 @@ export default class Session implements WebTransport {
 		if (frame.reliableSize !== undefined && !this.#ourParams.resetStreamAt) {
 			throw new Error("RESET_STREAM_AT received without advertising reset_stream_at");
 		}
-		if (!frame.id.canRecv(this.#isServer)) {
+		const id = frame.id;
+		if (!id.canRecv(this.#isServer)) {
 			throw new Error("Invalid stream ID direction");
 		}
+		if (this.#closed) return;
 
-		const streamId = frame.id.value.value;
-		const recv = this.#recvStreams.get(streamId);
-		const peerInitiated = frame.id.serverInitiated !== this.#isServer;
-
-		if (!recv) {
-			// A terminal peer-initiated stream stays terminal. In particular, a
-			// duplicate RESET must not consume its final size twice.
-			if (peerInitiated && this.#recvOpen(frame.id.dir).isClosed(frame.id.index)) {
-				return;
-			}
-			// A locally-created receive half that is no longer live is already closed,
-			// unless we never opened it at all.
-			if (!peerInitiated) {
-				const opened = frame.id.dir === Stream.Dir.Bi ? this.#nextBiStreamId : this.#nextUniStreamId;
-				if (frame.id.index >= opened) throw new Error("RESET_STREAM for a stream we never opened");
-				return;
-			}
-
-			const credit = frame.id.dir === Stream.Dir.Bi ? this.#recvBiCredit : this.#recvUniCredit;
-			if (!credit.receiveUpTo(frame.id.index + 1n)) {
-				this.#sendClose("connection_close", 1002, "stream limit exceeded");
-				this.#abort(1002, "stream limit exceeded");
-				return;
-			}
-		}
-
-		// RESET_STREAM_AT (draft-02 §9.2): the transport is ordered, so every byte
-		// the peer sent arrived before this frame. A reliable prefix longer than
-		// that promises bytes that will never come.
-		if (
-			frame.reliableSize !== undefined &&
-			frame.reliableSize > (this.#streamFlow.get(streamId)?.recvOffset ?? 0n)
-		) {
-			throw new Error("RESET_STREAM_AT reliable_size exceeds the bytes received");
-		}
-
-		const resetGap = this.#accountReset(frame);
-		if (resetGap === null) {
-			this.#sendClose("connection_close", 1002, "flow control error");
-			this.#abort(1002, "flow control error");
+		const streamId = id.value.value;
+		const err = new StreamError(streamCode(frame.code.value), "RESET_STREAM");
+		const recv = this.#streams.get(streamId)?.recv;
+		if (recv) {
+			recv.reset(err, frame.finalSize, frame.reliableSize);
+			this.#reap(streamId);
 			return;
 		}
 
-		if (!recv) {
-			// The final-size gap consumes connection flow control, but it can never
-			// occupy receive memory, so it is immediately eligible to replenish the
-			// connection window.
-			this.#accountConnConsumed(resetGap);
-			this.#recvOpen(frame.id.dir).record(frame.id.index);
-			this.#replenishStreamCredit(frame.id.dir);
+		if (!this.#isPeerStream(id)) {
+			// One of ours whose receive half already ended, unless we never opened it.
+			const opened = id.dir === Stream.Dir.Bi ? this.#nextBiStreamId : this.#nextUniStreamId;
+			if (id.index >= opened) throw new Error("RESET_STREAM for a stream we never opened");
 			return;
 		}
+		// A terminal peer stream stays terminal, so a duplicate RESET can't charge its final size twice.
+		if (this.#recvOpen(id.dir).isClosed(id.index)) return;
 
-		// Only bytes past the reliable prefix are discarded; the reader still gets
-		// the prefix before the reset surfaces.
-		const discarded = recv.reset(new StreamError(streamCode(frame.code.value), "RESET_STREAM"), frame.reliableSize);
-		this.#accountConnConsumed(resetGap + BigInt(discarded));
-		this.#recvStreams.delete(streamId);
-		this.#maybeDeleteStreamFlow(streamId);
+		// A reset as the stream's first frame opens and closes it at once, and the
+		// application never sees it: charge its final size and return its slot.
+		const limit = this.#recvLimit(id.dir);
+		if (!limit.open(id.index)) throw new Error("stream limit exceeded");
+		this.#recvOpen(id.dir).record(id.index);
+		const size =
+			id.dir === Stream.Dir.Bi
+				? this.#ourParams.initialMaxStreamDataBidiRemote
+				: this.#ourParams.initialMaxStreamDataUni;
+		this.#recvHalf(id, size).reset(err, frame.finalSize, frame.reliableSize);
+		// Nobody will write our half of a bidi stream, so end it for the peer's reader.
+		if (id.dir === Stream.Dir.Bi) {
+			this.#sendPriorityFrame({ type: "reset_stream", id, code: VarInt.from(0), finalSize: 0n });
+		}
+		limit.close();
+	}
+
+	/** The stream a MAX_STREAM_DATA or STOP_SENDING names. As in QUIC, either can be
+	 *  the first frame of a peer's bidi stream, and opens it like a STREAM frame. */
+	#sendState(id: Stream.Id): StreamState | undefined {
+		if (this.#closed) return undefined;
+		const stream = this.#streams.get(id.value.value);
+		if (stream) return stream;
+		if (!this.#isPeerStream(id) || id.dir !== Stream.Dir.Bi) return undefined;
+		if (this.#recvOpen(id.dir).isClosed(id.index)) return undefined;
+		const opened = this.#openPeerStream(id);
+		this.#announce(id, opened);
+		return opened;
 	}
 
 	#handleStopSending(frame: Frame.StopSending) {
-		const streamId = frame.id.value.value;
-		const stream = this.#sendStreams.get(streamId);
-		if (!stream) return;
-
+		const stream = this.#sendState(frame.id);
+		if (!stream?.send) return;
 		const stopped = new StreamError(streamCode(frame.code.value), "STOP_SENDING");
-		stream.error(stopped);
-		this.#scheduler?.dropStream(streamId, stopped);
-		// A write parked on stream credit isn't interrupted by error(); fail it here,
-		// even though a live receive half keeps the flow state around.
-		this.#streamFlow.get(streamId)?.sendCredit.close(stopped);
-
-		this.#sendPriorityFrame({
-			type: "reset_stream",
-			id: frame.id,
-			code: frame.code,
-			finalSize: this.#sendFinalSize(streamId),
-		});
-
-		this.#endSend(streamId);
+		this.#resetSend(frame.id, stream, stopped, frame.code);
 	}
 
-	/** End a stream's send half once its FIN or RESET_STREAM is sent. */
-	#endSend(streamId: bigint) {
-		if (!this.#sendStreams.delete(streamId)) return;
-		this.#streamFlow.get(streamId)?.onSendEnd?.();
-		this.#maybeDeleteStreamFlow(streamId);
-	}
-
-	#sendFinalSize(streamId: bigint): bigint {
-		return this.#streamFlow.get(streamId)?.sendOffset ?? 0n;
+	/** Reset a stream's send half, unless it already ended: fail its writable and its
+	 *  queued frame, and send RESET_STREAM with every byte that took credit. */
+	#resetSend(id: Stream.Id, stream: StreamState, reason: Error, code: VarInt) {
+		const finalSize = stream.send?.reset(reason);
+		if (finalSize === undefined) return;
+		const streamId = id.value.value;
+		try {
+			stream.writable?.error(reason);
+		} catch {}
+		this.#scheduler?.dropStream(streamId, reason);
+		this.#sendPriorityFrame({ type: "reset_stream", id, code, finalSize });
+		this.#reap(streamId);
 	}
 
 	/** The largest STREAM frame the peer accepts, in bytes.
@@ -1752,70 +1553,39 @@ export default class Session implements WebTransport {
 		await scheduler.enqueueStream(streamId, bytes);
 	}
 
-	async #sendStreamDataWithFlowControl(
+	async #sendStreamData(
 		id: Stream.Id,
-		streamId: bigint,
+		send: SendHalf,
 		data: Uint8Array,
 		signal: AbortSignal,
 		stats: SendStreamStats,
 	) {
-		const flow = this.#streamFlow.get(streamId);
-		if (!flow) throw new Error(`missing flow state for stream ${streamId}`);
+		const streamId = id.value.value;
+		stats.bytesWritten += data.byteLength;
 
 		for (let offset = 0; offset < data.byteLength; ) {
 			const remaining = BigInt(data.byteLength - offset);
 			// Size from the peer's frame budget and this frame's actual header, then
 			// apply the compatibility ceiling for released receivers.
-			const payloadMax = this.#maxStreamPayload(id, flow.sendOffset);
+			const start = send.offset;
+			const payloadMax = this.#maxStreamPayload(id, start);
 			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
-			const chunkMax = Number(payloadMax < remaining ? payloadMax : remaining);
+			const chunkMax = payloadMax < remaining ? payloadMax : remaining;
 
-			// Claim flow control credit (stream + connection)
-			const allowed = await this.#claimSendCredit(streamId, BigInt(chunkMax), signal);
-			const sendable = Number(allowed);
-
+			const sendable = Number(await send.claim(chunkMax, this.#connCredit, signal));
+			// A STOP_SENDING may have reset the half while this resumed.
+			send.throwIfReset();
 			const chunk = data.subarray(offset, offset + sendable);
-			const sendOffset = flow.sendOffset;
+			await this.#enqueueStreamFrame(
+				streamId,
+				{ type: "stream", id, offset: start, data: chunk, fin: false },
+				signal,
+			);
 
-			try {
-				await this.#enqueueStreamFrame(
-					streamId,
-					{ type: "stream", id, offset: sendOffset, data: chunk, fin: false },
-					signal,
-				);
-			} catch (e) {
-				// Return claimed credits on send failure
-				if (sendable > 0) {
-					const flow = this.#streamFlow.get(streamId);
-					if (flow) flow.sendCredit.release(BigInt(sendable));
-					this.#connCredit.release(BigInt(sendable));
-				}
-				throw e;
-			}
-
-			flow.sendOffset += BigInt(sendable);
 			offset += sendable;
 			stats.bytesSent += sendable;
 			stats.bytesAcknowledged = stats.bytesSent;
 		}
-	}
-
-	async #sendStreamData(id: Stream.Id, data: Uint8Array, signal: AbortSignal, stats: SendStreamStats) {
-		const streamId = id.value.value;
-
-		stats.bytesWritten += data.byteLength;
-		await this.#sendStreamDataWithFlowControl(id, streamId, data, signal, stats);
-	}
-
-	/** Send the FIN. Routed through the stream's own queue so it stays ordered
-	 *  after that stream's data (not via the control lane, which would jump ahead). */
-	async #sendStreamFin(id: Stream.Id) {
-		const streamId = id.value.value;
-		const offset = this.#streamFlow.get(streamId)?.sendOffset;
-		if (offset === undefined) {
-			throw new Error(`missing flow state for stream ${streamId}`);
-		}
-		await this.#enqueueStreamFrame(streamId, { type: "stream", id, offset, data: new Uint8Array(), fin: true });
 	}
 
 	/** Enqueue a DATAGRAM frame on the scheduler's bounded, lossy datagram lane -
@@ -1832,7 +1602,7 @@ export default class Session implements WebTransport {
 	#sendPriorityFrame(frame: Frame.Any) {
 		// Once closed, the scheduler rejects new control frames; a late reset/stop
 		// from a stream teardown callback must be a no-op, not a throw. (The close
-		// frame goes through #sendClose instead.)
+		// frame goes through #end instead.)
 		if (this.#closed) return;
 		const bytes = Frame.encode(frame, this.#version);
 		this.#validateRecordSize(bytes);
@@ -1892,43 +1662,14 @@ export default class Session implements WebTransport {
 		// close() may have torn down the session while the claim resumed.
 		if (this.#closed) throw this.#closed;
 
-		const sendOrder = options?.sendOrder ?? DEFAULT_SEND_ORDER;
-
-		const streamId = Stream.Id.create(this.#nextBiStreamId++, Stream.Dir.Bi, this.#isServer);
-		const streamIdVal = streamId.value.value;
-
-		// Initialize flow control for this stream
-
-		this.#streamFlow.set(streamIdVal, {
-			sendCredit: new Credit(this.#peerParams.initialMaxStreamDataBidiRemote),
-			sendOffset: 0n,
-			recvMax: this.#ourParams.initialMaxStreamDataBidiLocal,
-			recvOffset: 0n,
-			recvConsumed: 0n,
-		});
-
-		const writer = this.#sendWritable(streamId, sendOrder);
-
-		const recvStream = new RecvStream(
-			(bytes) => {
-				this.#accountStreamConsumed(streamIdVal, bytes);
-				this.#accountConnConsumed(bytes);
-			},
-			(discarded, reason) => {
-				this.#accountConnConsumed(discarded);
-				this.#sendPriorityFrame({
-					type: "stop_sending",
-					id: streamId,
-					code: VarInt.from(resetCode(reason)),
-				});
-
-				this.#recvStreams.delete(streamIdVal);
-				this.#maybeDeleteStreamFlow(streamIdVal);
-			},
-		);
-		this.#recvStreams.set(streamIdVal, recvStream);
-
-		return { readable: recvStream.readable, writable: writer };
+		const id = Stream.Id.create(this.#nextBiStreamId++, Stream.Dir.Bi, this.#isServer);
+		const stream = {
+			send: new SendHalf(this.#peerParams.initialMaxStreamDataBidiRemote),
+			recv: this.#recvHalf(id, this.#ourParams.initialMaxStreamDataBidiLocal),
+		};
+		this.#streams.set(id.value.value, stream);
+		const writable = this.#sendWritable(id, stream, stream.send, options?.sendOrder ?? DEFAULT_SEND_ORDER);
+		return { readable: stream.recv.readable, writable };
 	}
 
 	/** Open a send-only stream, waiting for the peer to grant stream credit
@@ -1938,47 +1679,28 @@ export default class Session implements WebTransport {
 		// close() may have torn down the session while the claim resumed.
 		if (this.#closed) throw this.#closed;
 
-		const sendOrder = options?.sendOrder ?? DEFAULT_SEND_ORDER;
-
-		const streamId = Stream.Id.create(this.#nextUniStreamId++, Stream.Dir.Uni, this.#isServer);
-		const streamIdVal = streamId.value.value;
-
-		// Initialize flow control for this stream
-
-		this.#streamFlow.set(streamIdVal, {
-			sendCredit: new Credit(this.#peerParams.initialMaxStreamDataUni),
-			sendOffset: 0n,
-			recvMax: 0n,
-			recvOffset: 0n,
-			recvConsumed: 0n,
-		});
-
-		return this.#sendWritable(streamId, sendOrder);
+		const id = Stream.Id.create(this.#nextUniStreamId++, Stream.Dir.Uni, this.#isServer);
+		const stream = { send: new SendHalf(this.#peerParams.initialMaxStreamDataUni) };
+		this.#streams.set(id.value.value, stream);
+		return this.#sendWritable(id, stream, stream.send, options?.sendOrder ?? DEFAULT_SEND_ORDER);
 	}
 
 	/** The writable for a stream's send half. */
-	#sendWritable(id: Stream.Id, sendOrder: number): SendStream {
+	#sendWritable(id: Stream.Id, stream: StreamState, send: SendHalf, sendOrder: number): SendStream {
 		const streamId = id.value.value;
 		const stats: SendStreamStats = { bytesWritten: 0, bytesSent: 0, bytesAcknowledged: 0 };
 		let signal!: AbortSignal;
 		const reset = (e: unknown) => {
-			this.#scheduler?.dropStream(streamId, e instanceof Error ? e : new Error("stream aborted"));
-			this.#sendPriorityFrame({
-				type: "reset_stream",
-				id,
-				code: VarInt.from(resetCode(e)),
-				finalSize: this.#sendFinalSize(streamId),
-			});
-
-			this.#endSend(streamId);
+			const reason = e instanceof Error ? e : new Error("stream aborted");
+			this.#resetSend(id, stream, reason, VarInt.from(resetCode(e)));
 		};
 		const writable = new WritableStream<Uint8Array>({
 			start: (controller) => {
 				signal = controller.signal;
-				this.#sendStreams.set(streamId, controller);
+				stream.writable = controller;
 				// An abort fires the signal at once but runs `abort` below only after the
 				// in-flight write settles, so the signal has to end that write: here if
-				// it is queued behind other frames, in #claimSendCredit if it is parked
+				// it is queued behind other frames, in SendHalf.claim if it is parked
 				// on the peer's credit.
 				controller.signal.addEventListener(
 					"abort",
@@ -1993,12 +1715,28 @@ export default class Session implements WebTransport {
 				);
 			},
 			write: async (chunk, controller) => {
-				await this.#sendStreamData(id, chunk, controller.signal, stats);
+				try {
+					await this.#sendStreamData(id, send, chunk, controller.signal, stats);
+				} catch (e) {
+					// A failed write errors the writable without running `abort`, so end the
+					// half here; an abort runs `abort` itself.
+					if (!controller.signal.aborted) reset(e);
+					throw e;
+				}
 			},
 			abort: reset,
 			close: async () => {
 				try {
-					await this.#sendStreamFin(id);
+					const offset = send.finish();
+					// Routed through the stream's own queue so it stays ordered after that
+					// stream's data (not via the control lane, which would jump ahead).
+					await this.#enqueueStreamFrame(streamId, {
+						type: "stream",
+						id,
+						offset,
+						data: new Uint8Array(),
+						fin: true,
+					});
 				} catch (e) {
 					// An abort during close drops the queued FIN, and WritableStream never
 					// runs `abort` once an in-flight close fails, so reset here instead.
@@ -2007,8 +1745,9 @@ export default class Session implements WebTransport {
 					return;
 				}
 
+				send.finished();
 				this.#scheduler?.forget(streamId);
-				this.#endSend(streamId);
+				this.#reap(streamId);
 			},
 		});
 		this.#attachSendOrder(writable, streamId, sendOrder);
@@ -2021,131 +1760,86 @@ export default class Session implements WebTransport {
 		return writable as SendStream;
 	}
 
-	/** Shared teardown for both terminal transitions: tears down streams,
-	 *  credits, and the scheduler. The caller has already marked the session
-	 *  closed and settled `ready`/`closed` - the only thing that differs between
-	 *  a clean shutdown and a dropped session is which way `closed` settled, and
-	 *  {@link #close} vs {@link #abort} own that choice. */
-	#teardown() {
+	/** The one terminal transition; a no-op once closed. A clean end fulfills `closed`,
+	 *  and per the WebTransport contract is reached only by a local {@link close} or a
+	 *  peer's APPLICATION_CLOSE (0x1d). Everything else aborts, rejecting `closed`
+	 *  with a `WebTransportError`: a socket failure, read error, idle timeout, a
+	 *  protocol violation we detected, or a peer's CONNECTION_CLOSE (0x1c). Close
+	 *  codes can't carry that distinction, since they are application-defined.
+	 *
+	 *  Settles `ready` and `closed`, then tears down streams, credits, and the
+	 *  scheduler, and closes the socket once it has the close frame. */
+	#end(end: End) {
+		if (this.#closed) return;
+
+		// Encode before the transition, so an oversized reason throws with the session still open.
+		const send = end.clean
+			? end.send && { type: "application_close" as const, code: end.code, reason: end.reason }
+			: end.send && { type: "connection_close" as const, ...end.send };
+		let frame: Uint8Array | undefined;
+		if (send) {
+			frame = Frame.encode({ type: send.type, code: VarInt.from(send.code), reason: send.reason }, this.#version);
+			this.#validateRecordSize(frame);
+		}
+
+		const error = end.clean ? new Error(`Connection closed: ${end.code} ${end.reason}`) : end.cause;
+		this.#closed = error;
+		// Rejecting `ready` is a no-op once it has resolved (after a successful open).
+		this.#readyReject(error);
+		if (end.clean) this.#closedResolve({ closeCode: end.code, reason: end.reason });
+		else this.#closedReject(new SessionError(error.message, { cause: error }));
+
 		this.#idleTimer?.close();
 		this.#idleTimer = undefined;
 
-		// Fail active streams so consumers unblock
-		this.#incomingBidirectionalQueue.close(this.#closeReason);
-		this.#incomingUnidirectionalQueue.close(this.#closeReason);
-		// Pass the *reason*, not `#closed` (always an Error): a graceful
-		// app-initiated close leaves `#closeReason` unset, so the datagram
-		// readable closes cleanly instead of erroring, matching the incoming
-		// stream controllers below.
-		closeDatagrams(this.#datagrams, this.#closeReason);
-		for (const c of this.#sendStreams.values()) {
+		// A clean end ends the incoming readables; an abort errors them with its cause.
+		const cause = end.clean ? undefined : error;
+		this.#incomingBidirectionalQueue.close(cause);
+		this.#incomingUnidirectionalQueue.close(cause);
+		closeDatagrams(this.#datagrams, cause);
+		for (const stream of this.#streams.values()) {
 			try {
-				c.error(this.#closed);
+				stream.writable?.error(error);
 			} catch {}
+			stream.send?.credit.close(error);
+			// A receive half whose final size is known keeps what it still owes the reader,
+			// as it would once forgotten.
+			if (stream.recv && !stream.recv.sizeKnown) stream.recv.refuse(error);
 		}
-		const closeErr = this.#closed ?? this.#closeReason ?? new Error("Connection closed");
-		for (const recv of this.#recvStreams.values()) {
-			try {
-				recv.error(closeErr);
-			} catch {}
-		}
-		this.#sendStreams.clear();
-		this.#recvStreams.clear();
-
-		// Close per-stream credits before clearing the map. Pass the rich close
-		// reason so writes parked in Credit.claim() reject with the same
-		// "Connection closed: <code> <reason>" error as every other teardown path.
-		for (const flow of this.#streamFlow.values()) {
-			flow.sendCredit.close(closeErr);
-		}
-		this.#streamFlow.clear();
+		this.#streams.clear();
+		this.#updates.clear();
 
 		this.#paramsSettled.resolve();
 
 		// Close global credits so blocked claim() calls reject.
-		this.#connCredit.close(closeErr);
-		this.#bidiStreamCredit.close(closeErr);
-		this.#uniStreamCredit.close(closeErr);
-		this.#recvBiCredit.close(closeErr);
-		this.#recvUniCredit.close(closeErr);
+		this.#connCredit.close(error);
+		this.#bidiStreamCredit.close(error);
+		this.#uniStreamCredit.close(error);
 
 		// Drop whatever is still queued so the close frame goes out next.
-		const flushed = this.#scheduler?.close(closeErr, this.#closeFrame) ?? Promise.resolve();
-		if (this.#closeFrame) {
+		const flushed = this.#scheduler?.close(error, frame);
+		if (frame && flushed !== undefined) {
 			// Close the socket once it has the close frame. A socket the peer stopped
 			// draining can't hold it open: past CLOSE_TIMEOUT it closes without it.
 			const close = () => this.#transportClose();
 			void timeout(CLOSE_TIMEOUT, flushed).then(close, close);
+		} else {
+			this.#transportClose();
 		}
-	}
-
-	/** Graceful terminal transition: `closed` **fulfills** with the close code
-	 *  and reason. Per the WebTransport contract this is the only clean outcome -
-	 *  reached by a local {@link close} (which first puts an APPLICATION_CLOSE on
-	 *  the wire) or by receiving a peer's APPLICATION_CLOSE (0x1d). A peer's
-	 *  CONNECTION_CLOSE (0x1c) routes to {@link #abort} instead. Idempotent. */
-	#close(code: number, reason: string) {
-		if (this.#closed) return;
-		this.#closed = this.#closeReason ?? new Error(`Connection closed: ${code} ${reason}`);
-
-		// Rejecting `ready` is a no-op once it has resolved (i.e. after a
-		// successful open).
-		this.#readyReject(this.#closed);
-		this.#closedResolve({ closeCode: code, reason });
-
-		this.#teardown();
-	}
-
-	/** Abnormal terminal transition: `closed` **rejects** with a
-	 *  `WebTransportError`. Reached on everything that is not a clean shutdown -
-	 *  socket failure, read error, idle timeout, a protocol violation we detected
-	 *  locally, or a peer's CONNECTION_CLOSE (0x1c). Close codes cannot carry this
-	 *  distinction, since they are
-	 *  application-defined (an app closing with 1006 must not look like a dropped
-	 *  socket). `cause`, when given, is preserved as the close reason so the
-	 *  original failure survives on `closed`. Idempotent. */
-	#abort(code: number, reason: string, cause?: unknown) {
-		if (this.#closed) return;
-		if (cause !== undefined) {
-			this.#closeReason ??= cause instanceof Error ? cause : new Error(String(cause));
-		}
-		this.#closed = this.#closeReason ?? new Error(`Connection closed: ${code} ${reason}`);
-
-		this.#readyReject(this.#closed);
-		this.#closedReject(new SessionError(this.#closed.message, { cause: this.#closed }));
-
-		this.#teardown();
 	}
 
 	/** Tear down the underlying transport. The meaningful close code/reason
-	 *  already travels in the CONNECTION_CLOSE frame, so the WebSocket-level
-	 *  close is bare (avoids the WebSocket close-code validity constraints). */
+	 *  already travels in the close frame, so the WebSocket-level close is bare
+	 *  (avoids the WebSocket close-code validity constraints). */
 	#transportClose() {
 		try {
 			this.#wss?.close();
 		} catch {}
 	}
 
-	/** Tell the peer why the session ends, then close the socket; call just before
-	 *  the terminal transition, whose teardown sends it. APPLICATION_CLOSE (0x1d)
-	 *  is a graceful close the peer surfaces by *fulfilling* its `closed`, pairing
-	 *  with {@link #close}. CONNECTION_CLOSE (0x1c) is a protocol violation or
-	 *  transport error we detected, which the peer surfaces by *rejecting* it,
-	 *  pairing with {@link #abort}. */
-	#sendClose(type: "application_close" | "connection_close", code: number, reason: string) {
-		if (this.#closed) return;
-		const bytes = Frame.encode({ type, code: VarInt.from(code), reason }, this.#version);
-		this.#validateRecordSize(bytes);
-		this.#closeFrame = bytes;
-	}
-
 	/** Close the session with an application code and reason; a no-op once closed. */
 	close(info?: { closeCode?: number; reason?: string }) {
-		if (this.#closed) return;
-		const code = info?.closeCode ?? 0;
-		const reason = info?.reason ?? "";
-		this.#sendClose("application_close", code, reason);
-		this.#close(code, reason);
+		this.#end({ clean: true, code: info?.closeCode ?? 0, reason: info?.reason ?? "", send: true });
 	}
 
 	/** Resize the send-buffer high-water mark (bytes) used for write
@@ -2173,4 +1867,9 @@ export default class Session implements WebTransport {
 	async getStats() {
 		return { datagrams: {} };
 	}
+}
+
+/** `err` if it is an Error, else a new one saying `fallback`. */
+function toError(err: unknown, fallback: string): Error {
+	return err instanceof Error ? err : new Error(fallback);
 }

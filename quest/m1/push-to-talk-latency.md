@@ -30,12 +30,19 @@ Decided 2026-11-06 (maintainer, on
 `just test push-to-talk` run until Watch lands, since its no-underrun check
 fails on the defaults by design?
 
-- ✅ (a) Require [Watch](/quest/m1/audio-jitter-target/watch.md) for this
+- ✅ (a) Require Watch's time stretch ([moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058)) for this
   quest. The run holds a fixed 300 ms delay until then, and the defaults are
   budgeted after Watch lands, on the jitter buffer users will get.
 - (b) Run the defaults now and stop failing on underruns while `"auto"` is
   on.
 - (c) Run both rows, roughly doubling the nine-minute nightly step.
+
+Decided 2026-11-09 (maintainer, /quest-plan of the
+[audio jitter target](/quest/m1/audio-jitter-target/README.md)'s model): zero
+underruns is not a goal of that epic either, so the run gates underruns and
+stalls on a measured ceiling for good, not until the epic reaches zero.
+[moq-dev/moq#8364](https://github.com/moq-dev/moq/pull/8364)'s wording
+"leaving zero to the epic" goes.
 
 [moq-dev/moq#8009](https://github.com/moq-dev/moq/pull/8009) landed the
 analyzer's delay timeline: the page records the resolved delay over time, so
@@ -91,10 +98,7 @@ measured term (`js/watch/src/audio/latency.ts`); device and render follow the
 watch AudioContext's `latencyHint` (`"interactive"` in
 `js/watch/src/audio/decoder.ts`), otherwise the platform.
 
-## Required
-
-- [Watch](/quest/m1/audio-jitter-target/watch.md) - `"auto"` stops underrunning by time-stretching the ring, so the run can hold the default delay
-
 ## Related
 
+- [Stretch model](/quest/m1/audio-jitter-target/stretch.md) - `"auto"` underruns less once the ring slows down near empty and resumes on a cushion, which moves this run's measured ceiling
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the `"auto"` target this latency feeds

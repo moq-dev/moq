@@ -25,7 +25,7 @@ public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
 public typealias VideoDecoderOutput = MoqVideoDecoderOutput
 /// One decoded video frame, owning the decoder's surface until released;
 /// `pixels(format:)` converts it to packed CPU pixels.
-public typealias VideoDecodedFrame = MoqVideoDecodedFrame
+public typealias VideoDecodedFrame = Video.DecodedFrame
 /// The decoded PCM layout, its delay (playout and group staleness), and whether the
 /// playout delay is estimated.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
@@ -75,6 +75,8 @@ public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
 /// Publisher-side track properties: priority, group ordering, max age,
 /// and timescale.
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
+/// How a track's frames are compressed on the wire: `.deflate`, or `nil` in `TrackInfo` for none.
+public typealias Compression = MoqFFI.MoqCompression
 
 /// A snapshot of connection statistics (RTT, bandwidth estimates, byte/packet
 /// counters). Fields are `nil` when the transport backend doesn't report them.
@@ -99,7 +101,7 @@ public typealias CongestionControl = MoqFFI.MoqCongestionControl
 /// The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start.
 public typealias WebSocketConfig = MoqFFI.MoqWebSocketConfig
 
-/// The connection lifecycle phase.
+/// Where a connection is in its lifecycle, carrying that phase's failure or version.
 public typealias ConnectionPhase = MoqFFI.MoqConnectionPhase
 
 /// One coherent connection lifecycle snapshot.

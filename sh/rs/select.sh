@@ -208,11 +208,12 @@ case "$action" in
         # The relay's io_uring listener, Linux-only. A moq-uring change selects
         # the relay too, as its dependent.
         if [[ "$(uname -s)" == Linux ]] && wants moq-relay; then features+=(moq-relay/io-uring); fi
-        # Cargo skips a bench or example whose `required-features` are off without
-        # a word, and a bench-only change selects its crate alone, so no dependent
-        # turns them on. Turn on every one the built crates' targets name. All of
-        # them are additive and build wherever the gate runs; moq-uring's targets
-        # compile to nothing off Linux.
+        # Cargo skips a target whose `required-features` are off without a word,
+        # and a crate alone in the selection (a bench-only change, or moq-boy,
+        # whose one target is its binary) has no dependent to turn them on. Turn
+        # on every one named by a target this build holds: benches, examples, and
+        # every target with tests. All of them are additive and build wherever the
+        # gate runs; moq-uring's targets compile to nothing off Linux.
         required=$(
             set -e
             cargo metadata --locked --format-version 1 --no-deps | jq -r --arg names "$building" --arg all "$packages" '
@@ -221,7 +222,7 @@ case "$action" in
                 | select(if $all == "ALL" then (.name | endswith("-fuzz") | not) else (.name as $n | $want | index($n) != null) end)
                 | .name as $name
                 | .targets[]
-                | select(.kind // [] | any(. == "bench" or . == "example"))
+                | select((.kind // [] | any(. == "bench" or . == "example")) or .test)
                 | (.["required-features"] // [])[]
                 | "\($name)/\(.)"' | sort -u | tr '\n' ' '
         )

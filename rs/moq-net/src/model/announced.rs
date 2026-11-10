@@ -2,7 +2,7 @@
 
 use std::task::Poll;
 
-use super::origin_impl::{Announce, RouteEvent, Routes};
+use super::origin_impl::{Announce, RouteEvent, RouteKind, Routes};
 use crate::{Error, Path};
 
 /// What an announcement listing reports for a path.
@@ -32,13 +32,18 @@ impl AnnounceConsumer {
 	/// What a route change means for the listing, if anything.
 	fn list(event: RouteEvent) -> Option<AnnounceEvent> {
 		match event {
-			RouteEvent::Start(announce) => Some(AnnounceEvent::Present(announce)),
-			RouteEvent::End(announce) => Some(AnnounceEvent::Absent(announce)),
-			// A takeover elsewhere starts its own prefix; at its predecessor's it replaces it.
-			RouteEvent::Takeover { announce, predecessor } if predecessor != announce.prefix => {
-				Some(AnnounceEvent::Present(announce))
-			}
-			RouteEvent::Update(_) | RouteEvent::Restart(_) | RouteEvent::Takeover { .. } => None,
+			RouteEvent {
+				kind: RouteKind::Start,
+				announce,
+			} => Some(AnnounceEvent::Present(announce)),
+			RouteEvent {
+				kind: RouteKind::End,
+				announce,
+			} => Some(AnnounceEvent::Absent(announce)),
+			RouteEvent {
+				kind: RouteKind::Update | RouteKind::Restart,
+				..
+			} => None,
 		}
 	}
 
@@ -168,18 +173,30 @@ mod tests {
 
 		let first = origin.route("live", route(&Instance::random())).unwrap();
 		assert_eq!(listed(&mut announced).await, "present live");
-		assert!(matches!(routes.next().await, Some(RouteEvent::Start(_))));
+		assert!(matches!(
+			routes.next().await,
+			Some(RouteEvent {
+				kind: RouteKind::Start,
+				..
+			})
+		));
 
 		first
 			.announce_info(
-				RouteInfo::default()
+				RouteInfo::new()
 					.with_instance(Instance::random(), 0)
 					.with_cost(Cost::new(5)),
 			)
 			.unwrap();
 		quiet(&mut announced).await;
 		// The relay-level stream still reports the replacement.
-		assert!(matches!(routes.next().await, Some(RouteEvent::Restart(_))));
+		assert!(matches!(
+			routes.next().await,
+			Some(RouteEvent {
+				kind: RouteKind::Restart,
+				..
+			})
+		));
 
 		let second = origin.route("live", route(&Instance::random())).unwrap();
 		drop(first);

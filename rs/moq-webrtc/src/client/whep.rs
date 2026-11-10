@@ -16,11 +16,13 @@ use url::Url;
 
 use crate::{Error, Result, client::Client, ingest::IngestSink, session};
 
-pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::broadcast::Producer) -> Result<()> {
-	let config = moq_mux::catalog::Config::default()
-		.with_max_age(client.config().max_age)
-		.with_bandwidth(client.config().bandwidth.clone());
-	let sink = Box::new(IngestSink::new(broadcast, config)?);
+pub(crate) async fn dial(
+	client: &Client,
+	url: Url,
+	broadcast: moq_net::broadcast::Producer,
+	catalog: moq_mux::catalog::Config,
+) -> Result<()> {
+	let sink = Box::new(IngestSink::new(broadcast, catalog)?);
 
 	let socket = session::bind_udp(&client.config().ice_candidates).await?;
 	let mut rtc = session::rtc_config()?.build(kio::clock::now().into_std());

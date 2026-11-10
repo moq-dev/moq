@@ -1,5 +1,5 @@
 /** Sweep cached groups, independent FETCH peers, and small or chunked frame payloads. */
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Fetch, FetchHeader, FetchOk } from "../src/ietf/fetch.ts";
 import { decodeFetchObject } from "../src/ietf/object.ts";
 import { Publisher } from "../src/ietf/publisher.ts";
@@ -20,7 +20,7 @@ for (const groups of [2, 128]) {
 		for (const size of [16, 1000, SEGMENT_BYTES * 2]) {
 			const origin = new Producer();
 			const route = origin.route(Path.from("fetch"));
-			const track = route.broadcast.createTrack("video", { maxAge: Milli(60_000) });
+			const track = route.broadcast.createTrack("video", { maxAge: Duration.millis(60_000) });
 			for (let sequence = 0; sequence < groups; sequence++) {
 				const group = track.appendGroup();
 				// Only the selected group needs payloads; the rest expose cache-table scans.

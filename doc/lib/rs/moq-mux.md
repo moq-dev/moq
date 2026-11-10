@@ -10,8 +10,9 @@ description: Container import and export
 
 Turns existing container formats into [hang](/concept/hang) broadcasts and
 back. This is what `moq import` / `export` and the gateways are built on.
-Native players also use its `timeline` to present a broadcast's audio and video
-on one clock: audio drives the anchor while it plays, and video follows it.
+Native players also use its `sync` to present a broadcast's tracks on one clock,
+anchored on the earliest arrival any track has seen. Tracks stay together in the
+steady state, and one that stalls plays late instead of holding the others.
 The caller supplies the jitter target, decoders, and output devices; a presenter
 can select the newest due picture without waiting and repeat it during a stall.
 
@@ -39,8 +40,8 @@ timeline that rewinds ends the import. The MPEG-TS import ends at a clock step
 onto another timeline with `ts::Restart`, which carries the input from the step
 for the caller to publish as a new broadcast. fMP4 export fixes its track
 set at the init segment, so a new rendition or a changed configuration ends the
-export. The [CLI page](/bin/cli#import) covers these and the MPEG-TS specifics:
-one program per broadcast, private PES, damaged packets, and feed checks.
+export. The [MPEG-TS guide](/bin/ts) covers the MPEG-TS specifics: one program
+per broadcast, private PES, passthrough, acquisition, and loss.
 
 Exporters take a catalog stream alongside the source. Choose its encoding and
 rendition selection before exporting; the same stream shape drives every container.

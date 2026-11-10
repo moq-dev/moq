@@ -30,7 +30,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
-import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -211,7 +210,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
-            origin.routePrefix("", RouteOptions()).use { /* prefix route smoke */ }
+            origin.claim("", RouteOptions()).use { /* claim smoke */ }
         }
     }
 
@@ -243,13 +242,13 @@ class SmokeTest {
         val server: ServerConfig = ServerConfig(tls = ServerTls(generate = listOf("localhost")))
         assertEquals(4096uL, client.quic.maxStreams)
         assertEquals(listOf("localhost"), server.tls.generate)
-        val status: ConnectionPhase = ConnectionPhase.CONNECTED
+        val status: ConnectionPhase = ConnectionPhaseConnected(version = "moq-lite-03")
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(true, snapshot.deltas)
         assertNull(properties.display)
         assertNull(properties.flip)
         assertEquals(java.time.Duration.ofMillis(500), backoff.initial)
-        assertEquals(ConnectionPhase.CONNECTED, status)
+        assertEquals("moq-lite-03", assertIs<ConnectionPhaseConnected>(status).version)
     }
 
     @Test
@@ -588,7 +587,10 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val config = WindowConfig()
             val track =
-                broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL, compress = true))
+                broadcast.publishTrack(
+                    "log",
+                    TrackInfo(timescale = 1_000_000uL, compression = Compression.DEFLATE),
+                )
             val producer = WindowProducer(track, config)
             val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null))
             for (n in 1..3) producer.push(
@@ -913,15 +915,14 @@ class SmokeTest {
     @Test
     fun `dynamic serves a request under a prefix`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.routePrefix("live", RouteOptions()).use { dynamic ->
-                assertFailsWith<MoqException.Internal> { dynamic.broadcast() }
+            origin.claim("live", RouteOptions()).use { dynamic ->
                 val pending = async {
                     origin.consume().request("live/cam")
                 }
                 val request = assertNotNull(dynamic.requested())
                 assertEquals("live/cam", request.path())
                 request.route(RouteOptions(hidden = true)).use { job ->
-                    assertNotEquals(dynamic.instance(), job.instance())
+                    assertEquals(dynamic.instance(), job.instance())
                     job.broadcast().use { fill ->
                         // Only announcing answers the requester.
                         job.announce()
@@ -1056,7 +1057,7 @@ class SmokeTest {
             assertEquals(0uL, session.state().connects)
             session.cancel(0u)
             session.closed()
-            assertEquals(ConnectionPhase.CLOSED, session.state().phase)
+            assertIs<ConnectionPhaseClosed>(session.state().phase)
         }
     }
 
@@ -1189,6 +1190,7 @@ class SmokeTest {
 
                         // The frame outlives its consumer's cancellation.
                         decoder.cancel()
+                        assertNull(frame.surface())
 
                         val planar = frame.pixels(VideoPixelFormat.I420)
                         assertEquals(

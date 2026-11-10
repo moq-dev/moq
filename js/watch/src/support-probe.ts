@@ -72,8 +72,7 @@ export class SupportProbe<Config extends { codec: string }> {
 						// Undefined when torn down; the abort check below handles it.
 						if (result !== undefined) {
 							isSupported = !!result;
-							// Recompute the key: a probe may rewrite the config it accepted.
-							cache.set(name, { key: cacheKey(config), supported: isSupported });
+							cache.set(name, { key, supported: isSupported });
 						}
 					} catch (err) {
 						if (effect.abort.aborted) return;

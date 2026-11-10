@@ -485,7 +485,7 @@ pub enum Error {
 
 	/// A write could not make room in the group even by shedding its front: what is left,
 	/// such as the frame in flight, already fills the live tail
-	/// ([`MAX_CACHE_BYTES`](crate::group::MAX_CACHE_BYTES)). The write is refused and the
+	/// (32 MiB). The write is refused and the
 	/// group is aborted.
 	#[error("group too large")]
 	GroupTooLarge,

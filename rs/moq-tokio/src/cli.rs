@@ -29,9 +29,6 @@ pub use deprecated::Deprecated;
 pub use duration::Duration;
 pub use env::{UnknownEnv, check_env};
 
-/// Re-exported because [`Merge`] and [`answer`] use Usage types in their APIs.
-pub use usage_rs;
-
 /// What a Usage parse result asks the process to do.
 #[non_exhaustive]
 pub enum Answer {

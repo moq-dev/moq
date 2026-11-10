@@ -64,6 +64,9 @@ struct Broadcast {
 	children: Children,
 	/// Set by [`Publish::catalog_finish`]: the catalog is final, so a close leaves it alone.
 	ended: bool,
+	/// Shared source timebases, owned here because each holds the catalog, so a handle that
+	/// outlives the broadcast cannot keep it alive.
+	timebases: std::collections::HashMap<Id, moq_mux::catalog::Timebase<Extra>>,
 }
 
 /// A handle publishing tracks on a broadcast, by the table that holds it.
@@ -91,8 +94,9 @@ enum Family {
 	Open {
 		/// Handles that may still publish, ended on close.
 		open: HashSet<Child>,
-		/// Finished producers, kept so a late subscriber still finds their tracks.
-		kept: Vec<Box<dyn Send>>,
+		/// Finished producers, kept so a late subscriber still finds their tracks, or `None` for
+		/// a family that drops them on finish.
+		kept: Option<Vec<Box<dyn Send>>>,
 	},
 	/// The broadcast closed: its children ended and new ones are refused.
 	Closed,
@@ -117,10 +121,19 @@ impl Default for Children {
 }
 
 impl Children {
-	fn new() -> Self {
+	pub(crate) fn new() -> Self {
 		Self(Arc::new(std::sync::Mutex::new(Family::Open {
 			open: HashSet::new(),
-			kept: Vec::new(),
+			kept: Some(Vec::new()),
+		})))
+	}
+
+	/// A family that drops each finished producer instead of keeping it until the close, for
+	/// children no late subscriber looks up, such as a socket endpoint's streams.
+	pub(crate) fn unkept() -> Self {
+		Self(Arc::new(std::sync::Mutex::new(Family::Open {
+			open: HashSet::new(),
+			kept: None,
 		})))
 	}
 
@@ -150,12 +163,29 @@ impl Children {
 		Err(Error::BroadcastNotFound)
 	}
 
-	/// Keep `child`'s finished producer until the broadcast ends, or drop it now if it already has.
+	/// Keep `child`'s finished producer until the broadcast ends, or drop it now if it already
+	/// has or the family keeps none.
 	pub(crate) fn keep(&self, child: Child, producer: impl Send + 'static) {
 		let producer: Box<dyn Send> = Box::new(producer);
-		if let Family::Open { open, kept, .. } = &mut *self.lock() {
+		let mut family = self.lock();
+		if let Family::Open { open, kept } = &mut *family {
 			open.remove(&child);
-			kept.push(producer);
+			if let Some(kept) = kept {
+				kept.push(producer);
+				return;
+			}
+		}
+		// Dropped outside the lock: the last producer's drop tears its track down.
+		drop(family);
+		drop(producer);
+	}
+
+	/// How many children are open and how many finished producers are kept.
+	#[cfg(test)]
+	pub(crate) fn counts(&self) -> (usize, usize) {
+		match &*self.lock() {
+			Family::Open { open, kept } => (open.len(), kept.as_ref().map_or(0, Vec::len)),
+			Family::Closed => (0, 0),
 		}
 	}
 
@@ -167,7 +197,7 @@ impl Children {
 	}
 
 	/// Refuse new children, handing back the open ones and letting go of the finished ones.
-	fn close(&self) -> HashSet<Child> {
+	pub(crate) fn close(&self) -> HashSet<Child> {
 		let family = std::mem::replace(&mut *self.lock(), Family::Closed);
 		match family {
 			Family::Open { open, .. } => open,
@@ -182,6 +212,14 @@ pub struct Target<'a> {
 	pub catalog: &'a mut moq_mux::catalog::Producer<Extra>,
 	/// The broadcast's children, which the producer joins.
 	pub children: &'a Children,
+}
+
+/// A raw group handle.
+struct GroupEntry {
+	inner: crate::state::Shared<moq_net::group::Producer>,
+	/// Dropped with the entry, ending a [crate::moq_publish_group_ready] wait that finishing the
+	/// group would not wake: a finished group no reader holds never turns ready on its own.
+	ended: tokio::sync::watch::Sender<()>,
 }
 
 /// A producer handle, with the broadcast that keeps it once finished.
@@ -317,7 +355,7 @@ pub struct Publish {
 	datagram_demand: NonZeroSlab<DatagramDemand>,
 
 	/// Raw group producers, created from a raw track producer.
-	groups: NonZeroSlab<moq_net::group::Producer>,
+	groups: NonZeroSlab<GroupEntry>,
 
 	/// JSON snapshot producers (lossy latest-value tracks), each advertised in its broadcast's
 	/// catalog for as long as it lives.
@@ -342,6 +380,9 @@ pub struct Publish {
 
 	/// Group requests delivered to a handler, freed on accept, abort, or free.
 	group_request: NonZeroSlab<GroupRequest>,
+
+	/// Shared source timebases, each naming the broadcast that owns it.
+	timebases: NonZeroSlab<Id>,
 }
 
 impl Publish {
@@ -375,6 +416,7 @@ impl Publish {
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
 			ended: false,
+			timebases: Default::default(),
 		})?;
 		Ok(id)
 	}
@@ -533,15 +575,45 @@ impl Publish {
 		self.insert_media(track, children, Some(priority))
 	}
 
-	pub fn container(&mut self, broadcast: Id, init: import::ContainerInit) -> Result<Id, Error> {
+	/// Create a source timebase owned by `broadcast`, for containers that share one offset.
+	pub fn timebase(&mut self, broadcast: Id) -> Result<Id, Error> {
+		let timebase = self.broadcast(broadcast)?.catalog.timebase();
+		let id = self.timebases.insert(broadcast)?;
+		self.broadcast_mut(broadcast)?.timebases.insert(id, timebase);
+		Ok(id)
+	}
+
+	/// Release a source timebase; containers already sharing it keep their offset.
+	pub fn timebase_free(&mut self, timebase: Id) -> Result<(), Error> {
+		let broadcast = self.timebases.remove(timebase).ok_or(Error::NotFound)?;
+		if let Some(broadcast) = self.broadcasts.get_mut(broadcast) {
+			broadcast.timebases.remove(&timebase);
+		}
+		Ok(())
+	}
+
+	/// Import a container, from `timebase` when shared, or with an independent offset.
+	pub fn container(&mut self, broadcast: Id, init: import::ContainerInit, timebase: Option<Id>) -> Result<Id, Error> {
+		let owner = timebase
+			.map(|timebase| self.timebases.get(timebase).copied().ok_or(Error::NotFound))
+			.transpose()?;
+		if owner.is_some_and(|owner| owner != broadcast) {
+			return Err(Error::InvalidConfig("the timebase belongs to another broadcast".into()));
+		}
 		let Broadcast {
 			producer: broadcast,
 			catalog,
 			driver,
 			children,
+			timebases,
 			..
 		} = self.broadcast(broadcast)?;
-		let container = import::Container::new(broadcast.clone(), catalog.reserve(), &init)?;
+		let reserved = match timebase {
+			// The owner check above means a missing entry is a broadcast that closed and was reused.
+			Some(timebase) => timebases.get(&timebase).ok_or(Error::NotFound)?.reserve(),
+			None => catalog.reserve(),
+		};
+		let container = import::Container::new(broadcast.clone(), reserved, &init)?;
 		let children = children.clone();
 		let container = Container {
 			inner: container,
@@ -1074,7 +1146,7 @@ impl Publish {
 	pub fn group_request_accept(&mut self, request: Id) -> Result<Id, Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
 		let group = request.fill.accept(request.sequence, None)?;
-		self.groups.insert(group)
+		self.insert_group(group)
 	}
 
 	/// Reject a group request like [`Self::group_request_free`]; `error_code` is not delivered.
@@ -1109,18 +1181,45 @@ impl Publish {
 		children.insert(&mut self.tracks, raw, Child::Track)
 	}
 
+	/// Hand a socket stream's `track` half to C as a raw track handle, a child of the
+	/// endpoint's `children` like a track is of its broadcast.
+	pub(crate) fn socket_track(&mut self, track: moq_net::track::Producer, children: &Children) -> Result<Id, Error> {
+		let raw = Kept {
+			inner: track,
+			children: children.clone(),
+		};
+		children.insert(&mut self.tracks, raw, Child::Track)
+	}
+
+	/// Hand a socket stream's `tcp` half to C as a group handle.
+	pub(crate) fn socket_group(&mut self, group: moq_net::group::Producer) -> Result<Id, Error> {
+		self.insert_group(group)
+	}
+
+	/// End a closed endpoint's open `track` halves, as a broadcast's close ends its tracks,
+	/// and let go of its finished ones.
+	pub(crate) fn socket_close(&mut self, children: &Children) {
+		for child in children.close() {
+			if let Child::Track(id) = child
+				&& let Some(track) = self.tracks.remove(id)
+			{
+				track.abort(moq_net::Error::Unroutable);
+			}
+		}
+	}
+
 	/// Append a new group to a raw track, returning a group producer.
 	pub fn track_group(&mut self, track: Id) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
 		let group = raw.inner.append_group()?;
-		self.groups.insert(group)
+		self.insert_group(group)
 	}
 
 	/// Create a raw group with an explicit sequence number.
 	pub fn track_group_at(&mut self, track: Id, sequence: u64) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
 		let group = raw.inner.create_group(moq_net::group::Info { sequence })?;
-		self.groups.insert(group)
+		self.insert_group(group)
 	}
 
 	/// Declare that a raw track will never produce groups `start..end`.
@@ -1150,11 +1249,18 @@ impl Publish {
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let id = track;
 		let Kept { inner: track, children } = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
+		// The kept handle stays a producer, whose appends the end refuses.
 		if track.finished().is_none() {
-			track.finish()?;
+			drop(track.clone().finish()?);
 		}
 		Kept { inner: track, children }.keep(Child::Track(id));
 		Ok(())
+	}
+
+	/// The newest content a raw track holds: its newest group at that group's newest frame
+	/// (0 while it is empty), or `None` before any group was written.
+	pub fn track_largest(&self, track: Id) -> Result<Option<moq_net::track::Position>, Error> {
+		Ok(self.tracks.get(track).ok_or(Error::TrackNotFound)?.inner.largest())
 	}
 
 	/// Declare a raw track's exclusive final group sequence.
@@ -1190,7 +1296,7 @@ impl Publish {
 		// Compressed: JSON is small and repetitive.
 		let mut info = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
-			.with_compress(true);
+			.with_compression(moq_net::track::Compression::Deflate);
 		info.refresh = refresh;
 		let track = broadcast.producer.create_track(name, info)?;
 		let producer = publish(&broadcast.catalog, track)?;
@@ -1399,21 +1505,56 @@ impl Publish {
 		timestamp: Option<moq_net::Timestamp>,
 		payload: &[u8],
 	) -> Result<(), Error> {
-		let group = self.groups.get_mut(group).ok_or(Error::GroupNotFound)?;
-		group.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
+		let group = self.groups.get(group).ok_or(Error::GroupNotFound)?;
+		let mut group = group.inner.lock();
+		group
+			.as_mut()
+			.ok_or(Error::GroupNotFound)?
+			.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
+	}
+
+	fn insert_group(&mut self, group: moq_net::group::Producer) -> Result<Id, Error> {
+		self.groups.insert(GroupEntry {
+			inner: crate::state::Shared::new(group),
+			ended: tokio::sync::watch::Sender::new(()),
+		})
+	}
+
+	/// A raw group's producer, to wait on it without the global lock, and a receiver whose
+	/// `changed` fails once the handle ends.
+	pub fn group(
+		&self,
+		group: Id,
+	) -> Result<
+		(
+			crate::state::Shared<moq_net::group::Producer>,
+			tokio::sync::watch::Receiver<()>,
+		),
+		Error,
+	> {
+		let entry = self.groups.get(group).ok_or(Error::GroupNotFound)?;
+		Ok((entry.inner.clone(), entry.ended.subscribe()))
 	}
 
 	/// Finish a raw group. No more frames can be written.
 	pub fn group_finish(&mut self, group: Id) -> Result<(), Error> {
-		let mut group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
+		let group = self
+			.groups
+			.remove(group)
+			.and_then(|group| group.inner.take())
+			.ok_or(Error::GroupNotFound)?;
 		group.finish()?;
 		Ok(())
 	}
 
 	/// Abort a raw group with an application error code.
 	pub fn group_abort(&mut self, group: Id, error_code: u16) -> Result<(), Error> {
-		let group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
+		let group = self
+			.groups
+			.remove(group)
+			.and_then(|group| group.inner.take())
+			.ok_or(Error::GroupNotFound)?;
 		group.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}
@@ -1637,6 +1778,7 @@ mod supervision_tests {
 			.container(
 				broadcast,
 				import::ContainerInit::new(import::ContainerFormat::Ts, bytes::Bytes::new()),
+				None,
 			)
 			.unwrap();
 		publish.broadcasts.remove(broadcast).unwrap();
@@ -1807,7 +1949,7 @@ impl Publish {
 
 	pub fn datagrams_demand(&mut self, track: Id, callback: OnStatus) -> Result<Id, Error> {
 		let entry = self.datagrams.get(track).ok_or(Error::TrackNotFound)?;
-		let producer = entry.producer.clone();
+		let mut producer = entry.producer.clone();
 		let alive = entry.alive.consume();
 		let (task, mut close) = Task::new(callback);
 		let id = self.datagram_demand.insert(DatagramDemand {
@@ -1826,7 +1968,12 @@ impl Publish {
 					 biased;
 					 _ = &mut close => return Ok(()),
 					 _ = alive.closed() => return Ok(()),
-					 priority = kio::wait(|waiter| producer.poll_priority(waiter, priority)) => priority,
+					 next = kio::wait(|waiter| loop {
+						 let next = std::task::ready!(producer.poll_priority_changed(waiter));
+						 if next != priority {
+							 return std::task::Poll::Ready(next);
+						 }
+					 }) => next,
 					};
 				}
 			})

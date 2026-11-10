@@ -7,15 +7,13 @@
 [![npm](https://img.shields.io/npm/v/@moq/ui)](https://www.npmjs.com/package/@moq/ui)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Presentation components shared by the [@moq/watch](../watch) and [@moq/publish](../publish) overlays, built on [@moq/signals](../signals).
-You only need it directly to build a custom overlay in the same style.
+The base of the `<moq-watch-support>` and `<moq-publish-support>` banners in [@moq/watch](../watch) and [@moq/publish](../publish), built on [@moq/signals](../signals).
+You only need it directly to build a support banner for your own capability checks.
 
-- `controlButton`, `settingsButton`, `fullscreenButton`, `icon`: overlay control buttons and SVG glyphs. `fullscreenButton` toggles cross-browser fullscreen, falling back to an iPhone pseudo-fullscreen.
-- `statCard`, `statLine`, `graph`: stats panel cards, key/value rows, and a rolling sparkline.
-- `formatBitrate`, `formatMillis`, `formatHz`, `formatFps`: human-readable stats values.
-- `Support`: the base of `<moq-watch-support>` and `<moq-publish-support>`, a banner and details table for a browser support report.
+`Support` is an abstract `HTMLElement` that renders a banner and details table for the `Report` its `detect()` returns. Its `show` attribute (`Show`) picks when the banner appears, by the report's `Level`.
+The overlay helpers the two packages share (control buttons, stats cards, sparkline, formatters) live here too, but are internal and may change in any release.
 
-It holds no capability detection and publishes no styles: each overlay styles these elements, including the `player--pseudo-fullscreen` class, and detects its own support.
+It holds no capability detection and publishes no styles: each overlay styles these elements and detects its own support.
 Inside this repository, `@moq/watch` and `@moq/publish` inline the shared stats card and sparkline styles from `src/stats.css` at build time; that file is not part of the npm package.
 
 ```bash
@@ -25,13 +23,15 @@ npm add @moq/ui
 ```
 
 ```ts
-import { Effect } from "@moq/signals";
-import { graph } from "@moq/ui";
+import { type Report, Support } from "@moq/ui";
 
-const effect = new Effect();
-const bitrate = graph(effect, "Bitrate", { color: "#a855f7" });
-document.body.append(bitrate.el);
-bitrate.push(2_500_000);
+class MySupport extends Support {
+	protected async detect(): Promise<Report> {
+		const webcodecs = typeof VideoDecoder !== "undefined";
+		return { summary: webcodecs ? "full" : "none", rows: [["Video", "WebCodecs", webcodecs]] };
+	}
+}
+customElements.define("my-support", MySupport);
 ```
 
 ## License

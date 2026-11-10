@@ -37,7 +37,7 @@ const A_COST: u64 = 100;
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
@@ -133,11 +133,14 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timest
 /// [`A_COST`]: a lite-07 route names its origin node rather than the relays between.
 fn via_a(announce: &origin::RouteEvent) -> bool {
 	let route = match announce {
-		origin::RouteEvent::Start(a)
-		| origin::RouteEvent::Update(a)
-		| origin::RouteEvent::Restart(a)
-		| origin::RouteEvent::Takeover { announce: a, .. } => &a.route,
-		origin::RouteEvent::End(_) => return false,
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
+			announce: a,
+		} => &a.route,
+		origin::RouteEvent {
+			kind: origin::RouteKind::End,
+			..
+		} => return false,
 	};
 	route.cost().value() >= A_COST
 }
@@ -282,7 +285,13 @@ async fn fails_over_and_back(secondary: &str) {
 		let mut announced = topology.subscriber.consume().routes();
 		let start = announced.next().await.expect("announced");
 		assert!(
-			matches!(start, origin::RouteEvent::Start(_)) && via_a(&start),
+			matches!(
+				start,
+				origin::RouteEvent {
+					kind: origin::RouteKind::Start,
+					..
+				}
+			) && via_a(&start),
 			"the preferred CDN wins over the cheaper one: {start:?}"
 		);
 
@@ -292,7 +301,13 @@ async fn fails_over_and_back(secondary: &str) {
 		topology.lose_a().await;
 		let update = announced.next().await.expect("announced");
 		assert!(
-			matches!(update, origin::RouteEvent::Update(_)) && !via_a(&update),
+			matches!(
+				update,
+				origin::RouteEvent {
+					kind: origin::RouteKind::Update,
+					..
+				}
+			) && !via_a(&update),
 			"same instance over B: {update:?}"
 		);
 		seen.extend(topology.group_anywhere(&mut rx).await);
@@ -300,7 +315,13 @@ async fn fails_over_and_back(secondary: &str) {
 		topology.restore_a().await;
 		let update = announced.next().await.expect("announced");
 		assert!(
-			matches!(update, origin::RouteEvent::Update(_)) && via_a(&update),
+			matches!(
+				update,
+				origin::RouteEvent {
+					kind: origin::RouteKind::Update,
+					..
+				}
+			) && via_a(&update),
 			"back on A: {update:?}"
 		);
 		seen.extend(topology.group_through_a(&mut rx).await);
@@ -335,7 +356,13 @@ async fn restarts_across_protocols(secondary: &str) {
 		topology.lose_a().await;
 		let update = announced.next().await.expect("announced");
 		assert!(
-			matches!(update, origin::RouteEvent::Restart(_)) && !via_a(&update),
+			matches!(
+				update,
+				origin::RouteEvent {
+					kind: origin::RouteKind::Restart,
+					..
+				}
+			) && !via_a(&update),
 			"another instance over B: {update:?}"
 		);
 		topology.group();

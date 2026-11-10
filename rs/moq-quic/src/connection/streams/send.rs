@@ -641,9 +641,7 @@ impl<'a> Stream<'a> {
 	/// Set the priority within the stream's send group, or session-wide when ungrouped
 	///
 	/// Higher values go first; equal values share bytes round robin. A queued stream moves at
-	/// once, behind the streams already queued at its new priority. With
-	/// [`transport::Config::send_fairness`](crate::transport::Config::send_fairness) off, a stream
-	/// its group is partway through keeps going first until it runs out of data.
+	/// once, behind the streams already queued at its new priority.
 	pub fn set_priority(&mut self, priority: i64) -> Result<(), Error> {
 		let max_data = self.state.max_send_data(self.id);
 		let stream = StreamsState::send_mut(&mut self.state.send, self.id, max_data)?;

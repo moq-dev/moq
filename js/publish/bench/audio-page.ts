@@ -1,4 +1,4 @@
-import { Manual, Micro, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
 import type { AudioFrame, Capture, Format } from "../src/audio/capture";
@@ -83,8 +83,8 @@ async function measure(tracks: number, seconds: number, onDemand: boolean) {
 	const broadcast = new Broadcast({
 		origin: new Moq.Origin.Producer(),
 		name: Moq.Path.from("audio.hang"),
-		maxAge: Milli(seconds * 1000),
-		onDemand,
+		maxAge: Duration.millis(seconds * 1000),
+		onDemand: onDemand ? "retain" : "off",
 	});
 	const feeds = Array.from({ length: tracks }, () => new Feed());
 	const encoders = feeds.map((feed, index) => {
@@ -110,8 +110,8 @@ async function measure(tracks: number, seconds: number, onDemand: boolean) {
 		const frames = seconds * 100;
 		const start = performance.now();
 		for (let index = 0; index < frames; index++) {
-			for (const feed of feeds) await feed.push({ timestamp: Micro(index * 20_000), channels });
-			await clock.advance(Nano.fromMilli(Milli(20)));
+			for (const feed of feeds) await feed.push({ timestamp: Duration.micros(index * 20_000), channels });
+			await clock.advance(Duration.millis(20));
 		}
 		await flush();
 		const idle = performance.now() - start;
@@ -125,7 +125,7 @@ async function measure(tracks: number, seconds: number, onDemand: boolean) {
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("missing broadcast");
 		for (const encoder of encoders)
-			subscribers.push(net.track(encoder.name).subscribe({ delay: { max: Milli(seconds * 1000) } }));
+			subscribers.push(net.track(encoder.name).subscribe({ delay: { max: Duration.millis(seconds * 1000) } }));
 		await yieldNow();
 		await flush();
 		const catchup = performance.now() - joining;

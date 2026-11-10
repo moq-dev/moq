@@ -319,7 +319,7 @@ mod tests {
 		let container = moq_mux::catalog::hang::Container::try_from(&rendition).unwrap();
 		let mut subscriber = moq_mux::container::Consumer::new(subscriber, container);
 		let reserved = catalog.reserve().with_interval(config.effective_join());
-		let mut producer = Producer::with_track(track, reserved, rendition).unwrap();
+		let mut producer = Producer::new(track, reserved, rendition).unwrap();
 		assert!(producer.demand().wanted().is_some());
 
 		// Only one captured picture arrives; more than three intervals of paced
@@ -329,7 +329,9 @@ mod tests {
 			assert_eq!(delivery.deadline(), Some(now));
 			let (surface, timestamp) = delivery.next(now).unwrap().unwrap();
 			let frame = crate::Frame::new(crate::Surface::I420(surface.clone()), timestamp);
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				producer.publish(&encoded).unwrap();
+			}
 			let received = loop {
 				if let moq_mux::container::Read::Frame { frame, .. } = subscriber.read().await.unwrap().unwrap() {
 					break frame;

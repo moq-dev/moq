@@ -59,7 +59,7 @@ transcode = ["dep:moq-transcode", "dep:moq-video"]
 # Native playback (`moq ... play`): decode into a wgpu window and a cpal
 # speaker. Off by default because it pulls both graphics and audio device stacks
 # into a binary that may only be routing containers or serving gateways.
-play = ["dep:moq-video", "moq-video/render", "dep:moq-audio", "moq-audio/playback", "dep:pollster", "dep:winit"]
+play = ["dep:moq-video", "moq-video/render", "dep:moq-audio", "moq-audio/playback", "dep:pollster", "dep:wgpu", "dep:winit"]
 # NVIDIA hardware codecs (NVENC + NVDEC) on Linux, on by default. Just turns on
 # the matching moq-video feature, so it only bites when something else pulls in
 # moq-video: `capture`, `transcode`, or `play`. For a build with no CUDA
@@ -113,6 +113,7 @@ moq-hls = { workspace = true, features = ["server"] }
 # Writes and reads the stats and feedback snapshots.
 moq-json = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true, features = ["async"] }
+moq-net = { workspace = true }
 # Cluster, LAN mesh, and inbound `/.cluster` auth. default-features off so the
 # CLI's own feature set (quic, cluster-lan) is what selects them.
 moq-relay = { workspace = true }
@@ -141,6 +142,8 @@ tower-http = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true, features = ["serde"] }
 usage-rs = { workspace = true, features = ["completions", "config"] }
+# The device, queue, and surface `play` hands moq-video's renderer.
+wgpu = { workspace = true, optional = true }
 winit = { version = "0.30.13", optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -155,6 +158,8 @@ moq-relay = { path = "../moq-relay", default-features = false, features = ["test
 moq-rtsp = { path = "../moq-rtsp", features = ["test-support"] }
 # Applies the finite bufferbloat queue to redundant-ingest acceptance tests.
 moq-shaper = { path = "../moq-shaper" }
+# Reads back the boxes of an exported MP4.
+mp4-atom = { workspace = true }
 # Writes the PAT and PMTs, CRCs included, of the two-program input `import ts --program all` splits.
 mpeg2ts = "0.6.0"
 tempfile = { workspace = true }

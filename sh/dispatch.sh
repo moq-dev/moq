@@ -6,6 +6,8 @@
 # large for one job splits across several.
 # CHECK_FAIL_FAST=1 stops every lane at the first failed module, for the land
 # gate, which ejects a failing batch either way and gains nothing from the rest.
+# CHECK_TIMES=FILE also writes each phase's wall seconds, CPU milliseconds, and
+# label there, one per line, ending with the whole run's.
 # `--query` prints the selection before CI installs its toolchain and caches.
 # `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
@@ -141,6 +143,12 @@ module biome '' \
 # Root Nix inputs own the browser version every npm Playwright pin matches.
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
     tools='bun python3 uv' lane=bun fix
+# The recorded-trace replays play through the player's container consumer and
+# ring on a simulated clock: deterministic, seconds long, and only Bun (plus uv
+# for the install step), so they gate every diff that can move a row. It shares
+# the bun lane so it reads the dependencies js installs.
+module audio_quality '^(js/(hang|watch|net|signals|clock)/|test/audio-quality/|test/lib/|test/justfile$)' \
+    tools='bun uv' lane=bun
 module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/kt/|doc/lib/samples\.sh$)' \
     tools='cargo gradle java ktfmt' compiles=check fix
 # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
@@ -366,6 +374,7 @@ step() {
             run bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
             ;;
         check:quest) run bash sh/quest.sh check ;;
+        check:audio_quality) run just test audio-quality --replays --enforce ;;
         check:drill) run just test drill-sensitivity --apply-only ;;
         check:obs_compile) run just obs compile ;;
         check:flake)
@@ -471,10 +480,29 @@ github() {
     [[ -n "${GITHUB_ACTIONS:-}" ]]
 }
 
-# Run one lane's modules in order, appending each phase's seconds to the lane's
-# times file and announcing each phase's start and end on fd 3. A failed phase
-# skips the rest of that module, but independent modules still run. A TERM
-# stops the running phase, waits for it, and records the phase it cut short.
+# Sets cpu to the CPU milliseconds, user and system, of every child this shell
+# has waited for. `times` must run in this shell, not a command substitution's
+# fork, whose children are its own. Bash prints three decimals, with the
+# locale's decimal point.
+lane_cpu() {
+    local user system each minutes seconds
+    times >"$times.cpu"
+    { read -r _ _ && read -r user system; } <"$times.cpu"
+    cpu=0
+    for each in "$user" "$system"; do
+        minutes=${each%%m*}
+        seconds=${each#*m}
+        seconds=${seconds%s}
+        cpu=$((cpu + minutes * 60000 + 10#${seconds%[.,]*} * 1000 + 10#${seconds#*[.,]}))
+    done
+}
+
+# Run one lane's modules in order, appending each phase's wall seconds and CPU
+# milliseconds to the lane's times file and announcing each phase's start and
+# end on fd 3. A failed phase skips the rest of that module, but independent
+# modules still run. A TERM stops the running phase, waits for it, and records
+# the phase it cut short. CPU counts only processes the phase waited for, so
+# not the work of a daemon such as Nix's or Gradle's.
 run_lane() {
     times=$1
     shift
@@ -493,6 +521,8 @@ run_lane() {
         for phase in "${phases[@]}"; do
             current="$phase $module"
             began=$SECONDS
+            lane_cpu
+            cpu_began=$cpu
             if github; then echo "::group::$current"; else echo "==> $current"; fi
             echo "$action: $current started" >&3
             # A job, as `run` explains; errexit stays on inside it. Untrapped,
@@ -530,7 +560,8 @@ run_lane() {
 }
 record() {
     local seconds=$((SECONDS - began))
-    echo "$seconds $current${1:+ ($1)}" >>"$times"
+    lane_cpu
+    echo "$seconds $((cpu - cpu_began)) $current${1:+ ($1)}" >>"$times"
     echo "$action: $current ${1:-passed} in ${seconds}s" >&3
 }
 cancelled() {
@@ -539,28 +570,33 @@ cancelled() {
     record cancelled
 }
 
-# Each phase's wall time, printed when the run ends, pass or fail, so the slow
-# module of a check or a queue run is named without reading log timestamps.
-# GitHub Actions also gets it in the job summary. Concurrent phases overlap, so
-# the run's own wall time comes last.
+# Each phase's wall and CPU time, printed when the run ends, pass or fail, so
+# the slow module of a check or a queue run is named without reading log
+# timestamps. GitHub Actions also gets it in the job summary, and CHECK_TIMES
+# in its file. Concurrent phases overlap, so the whole run comes last.
 report() {
-    local name row seconds label rows=()
+    local name row seconds cpu label total=0 rows=()
     for name in "${lanes[@]:0:next}"; do
         [[ ! -f "$logs/$name.times" ]] || mapfile -t -O "${#rows[@]}" rows <"$logs/$name.times"
     done
     ((${#rows[@]})) || return 0
-    rows+=("$SECONDS wall time")
-    echo "$action: seconds per module" >&2
     for row in "${rows[@]}"; do
-        read -r seconds label <<<"$row"
-        printf '%6d  %s\n' "$seconds" "$label" >&2
+        read -r seconds cpu label <<<"$row"
+        total=$((total + cpu))
+    done
+    rows+=("$SECONDS $total whole run")
+    [[ -z "${CHECK_TIMES:-}" ]] || printf '%s\n' "${rows[@]}" >"$CHECK_TIMES"
+    echo "$action: wall and CPU seconds per module" >&2
+    for row in "${rows[@]}"; do
+        read -r seconds cpu label <<<"$row"
+        printf '%6d %7d  %s\n' "$seconds" "$((cpu / 1000))" "$label" >&2
     done
     [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
     {
-        printf '| %s module | Seconds |\n| --- | ---: |\n' "$action"
+        printf '| %s module | Wall seconds | CPU seconds |\n| --- | ---: | ---: |\n' "$action"
         for row in "${rows[@]}"; do
-            read -r seconds label <<<"$row"
-            printf '| %s | %d |\n' "$label" "$seconds"
+            read -r seconds cpu label <<<"$row"
+            printf '| %s | %d | %d |\n' "$label" "$seconds" "$((cpu / 1000))"
         done
     } >>"$GITHUB_STEP_SUMMARY"
 }
@@ -635,7 +671,7 @@ done
 # Name every failed module after all independent work has completed.
 if ((${#failed[@]})); then
     for name in "${failed[@]}"; do
-        failed_phases=$(sed -n 's/^[0-9]* \(.*\) (failed)$/\1/p' "$logs/$name.times")
+        failed_phases=$(sed -n 's/^[0-9]* [0-9]* \(.*\) (failed)$/\1/p' "$logs/$name.times")
         while IFS= read -r phase; do
             if github; then echo "::error::$action: $phase failed"; else echo "$action: $phase failed" >&2; fi
         done <<<"${failed_phases:-${members[$name]# }}"

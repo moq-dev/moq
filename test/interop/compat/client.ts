@@ -13,9 +13,15 @@ import { connect } from "./transport";
 // API both have: the group and frame primitives, the snapshot decoder, and the libav WebCodecs
 // fallback, not the consumers above them, whose shapes follow the checkout.
 
-// The released packages brand units under `Moq.Time`, the checkout's under @moq/clock: both are
-// plain numbers at runtime, so cast rather than call either brand.
+// The released packages take branded numbers, the checkout's `Clock.Duration` objects, which only
+// the checkout's @moq/net re-exports as `Moq.Clock`; build and read whichever the packages use.
 type FrameMicros = Parameters<typeof Container.Legacy.encodeFrame>[1];
+const Clock = (Moq as { Clock?: { Duration: { micros(us: number): unknown; millis(ms: number): unknown } } }).Clock;
+const frameMicros = (us: number) => (Clock ? Clock.Duration.micros(us) : us) as FrameMicros;
+const duration = (ms: number): unknown => (Clock ? Clock.Duration.millis(ms) : ms);
+// A decoded frame's timestamp in whole microseconds, from either a number or a `Clock.Duration`.
+const micros = (timestamp: unknown): number =>
+	typeof timestamp === "number" ? timestamp : Math.floor((timestamp as { asMicros(): number }).asMicros());
 type TimestampMicros = Parameters<typeof Moq.Time.Timestamp.fromMicros>[0];
 
 // Group completion was renamed after @moq/net 0.4.7. Select the installed API
@@ -98,7 +104,7 @@ const AUDIO_BUDGET = 5000;
  */
 function budget(millis: number): Record<string, unknown> {
 	// Each version refuses the older names, which a throwaway local track shows without a session.
-	const spellings = [{ maxAge: millis }, { maxDelay: millis }, { delay: { max: millis } }];
+	const spellings = [{ maxAge: millis }, { maxDelay: millis }, { delay: { max: duration(millis) } }];
 	const broadcast = new Moq.Broadcast.Producer();
 	try {
 		for (const spelling of spellings.slice(0, -1)) {
@@ -191,7 +197,7 @@ async function audio(
 		for (let frame = await track.readFrame(); frame; frame = await track.readFrame()) {
 			for (const { timestamp, payload } of format.decode(frame.payload, frame.timestamp)) {
 				if (decoder.state === "closed") return;
-				decoder.decode(new EncodedAudioChunk({ type: "key", data: payload, timestamp }));
+				decoder.decode(new EncodedAudioChunk({ type: "key", data: payload, timestamp: micros(timestamp) }));
 			}
 		}
 		throw new Error("audio track ended early");
@@ -289,7 +295,7 @@ if (command === "sign") {
 	const decoded = format.decode(new Uint8Array(readFileSync(args[1])));
 	if (
 		decoded.length !== 1 ||
-		decoded[0].timestamp !== 1000001 ||
+		micros(decoded[0].timestamp) !== 1000001 ||
 		Buffer.from(decoded[0].payload).toString() !== "compat-frame"
 	) {
 		throw new Error("legacy container decoded the wrong timestamp or payload");
@@ -302,7 +308,7 @@ if (command === "sign") {
 	writeFileSync(args[0], JSON.stringify(catalog));
 	writeFileSync(
 		args[1],
-		Container.Legacy.encodeFrame(new TextEncoder().encode("compat-frame"), 1000001 as FrameMicros),
+		Container.Legacy.encodeFrame(new TextEncoder().encode("compat-frame"), frameMicros(1000001)),
 	);
 } else if (command === "publish") {
 	install();

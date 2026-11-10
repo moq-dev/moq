@@ -441,8 +441,7 @@ where
 
 	/// The jitter, bitrate, delay, and framerate measured from the frames written so far.
 	///
-	/// A catalog-owned producer publishes this automatically. See
-	/// [`Estimator`](crate::catalog::Estimator).
+	/// A catalog-owned producer publishes this automatically.
 	pub fn estimate(&self) -> crate::catalog::Estimate {
 		self.estimator.estimate()
 	}
@@ -743,7 +742,7 @@ where
 		if let Some(group) = self.group.as_mut() {
 			self.container.finish_group(group, tail_end)?;
 		}
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 			// Only a closed group reaches anything; a cut with none open names a point nothing reached.
 			if let Some(end) = reached {
@@ -953,7 +952,8 @@ where
 			return Err(cause);
 		}
 		match err {
-			None => self.inner.finish()?,
+			// The producer keeps its own clone, whose appends the end refuses.
+			None => drop(self.inner.clone().finish()?),
 			Some(err) => {
 				let next = self
 					.inner

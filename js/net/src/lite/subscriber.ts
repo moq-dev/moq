@@ -1,4 +1,4 @@
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -116,11 +116,6 @@ const datagramBudget = new Budget();
 // one is dropped and counted rather than stalling the receive queue, which would hold up other
 // tracks' datagrams behind their ends.
 const HELD_DATAGRAMS = 32;
-
-// Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
-// candidate outranks it, while the route stays selectable as the last path. Matches Rust
-// Cost::DRAIN: cost is the whole mechanism, not a separate state.
-const DRAIN_COST: Cost = 2n ** 62n - 1n;
 
 // What a subscription has set up so far, so a revocation (or abandonment) can reach it at
 // any stage.
@@ -328,7 +323,7 @@ export class Subscriber {
 	// stream on the peer having advertised Probe >= Report.
 	#peerSetup?: Signal<Setup | undefined>;
 
-	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
+	// Settles when the peer sends GOAWAY, ranking this session's routes last.
 	#goaway?: GetPromise<Drain>;
 
 	// Distinguishes failures from streams torn down by Subscriber.close().
@@ -380,10 +375,10 @@ export class Subscriber {
 		return this.#goaway?.peek() !== undefined;
 	}
 
-	// What a route costs once the peer has asked us to leave. A later announce on a
+	// A route ranks last once the peer has asked us to leave. A later announce on a
 	// draining session must not win selection, however cheap the path it advertises.
-	#cost(cost?: Cost): Cost {
-		return this.#goingAway() ? DRAIN_COST : (cost ?? Cost.zero);
+	#drained(route: WireRoute): WireRoute {
+		return this.#goingAway() ? { ...route, draining: true } : route;
 	}
 
 	// Whether our grant no longer lets us subscribe to `broadcast`.
@@ -523,8 +518,13 @@ export class Subscriber {
 			switch (this.version) {
 				case Version.DRAFT_01:
 				case Version.DRAFT_02: {
-					// Receive ANNOUNCE_INIT first
-					const init = await race([AnnounceInit.decode(stream.reader, this.version), announced.closed]);
+					// Receive ANNOUNCE_INIT first. Each suffix takes an announce slot, so a set past
+					// what is left of the budget is refused before it is decoded.
+					const budget = this.#announces.available();
+					const init = await race([
+						AnnounceInit.decode(stream.reader, this.version, budget),
+						announced.closed,
+					]);
 					if (!(init instanceof AnnounceInit)) {
 						stream.close();
 						return;
@@ -542,7 +542,12 @@ export class Subscriber {
 						if (advertised.has(path)) {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
-						const route = { instance: mint(path), epoch: 0n, hops: [UNKNOWN_HOP], cost: this.#cost() };
+						const route = this.#drained({
+							instance: mint(path),
+							epoch: 0n,
+							hops: [UNKNOWN_HOP],
+							cost: Cost.zero,
+						});
 						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
 						advertised.set(path, { live, route, captures });
@@ -558,15 +563,15 @@ export class Subscriber {
 					break;
 			}
 
-			// A draining peer usually stops announcing, so reprice from the GOAWAY itself.
-			// Waiting for another message would leave the route primary until the session
-			// closed. Idempotent: an unchanged cost emits nothing. A GOAWAY that already
-			// arrived needs no listener, since `#cost()` priced every route above.
+			// A draining peer usually stops announcing, so rank its routes last from the GOAWAY
+			// itself. Waiting for another message would leave the route primary until the
+			// session closed. Idempotent: a route already draining emits nothing. A GOAWAY that
+			// already arrived needs no listener, since `#drained()` marked every route above.
 			const drainAdvertised = () => {
 				if (announced.closed.peek() !== undefined) return;
 				for (const [path, ad] of advertised) {
 					if (!ad.live) continue;
-					const route = { ...ad.route, cost: DRAIN_COST };
+					const route = { ...ad.route, draining: true };
 					if (routesEqual(ad.route, route)) continue;
 					advertised.set(path, { ...ad, route });
 					this.#consumes.announce(path, announced, route);
@@ -576,8 +581,8 @@ export class Subscriber {
 			stopDrain = this.#goaway?.changed(() => drainAdvertised());
 
 			// Lite06+: announce ids. Each received `active` implicitly assigns the next
-			// per-stream ordinal, as does each `takeover`; `endedId`/`update`/`restart` reference
-			// it, and lite-07 bases copy from it. Tracked even for announces we skip as reflected, since the sender
+			// per-stream ordinal; `endedId`/`update`/`restart` reference it, and lite-07 bases
+			// copy from it. Tracked even for announces we skip as reflected, since the sender
 			// doesn't know we skipped.
 			const history = new AnnounceHistory();
 
@@ -664,23 +669,6 @@ export class Subscriber {
 						restart = true;
 						break;
 					}
-					case "takeover": {
-						// Continuity across the takeover is not kept here: a takeover at a new path
-						// surfaces as a start, and one at its predecessor's own path as a restart,
-						// as an older wire carries it.
-						const resolved = history.takeover(announce);
-						if (!Path.hasPrefix(resolved.previous, resolved.suffix)) {
-							throw new ProtocolViolation(`takeover of ${resolved.previous} at ${resolved.suffix}`);
-						}
-						path = Path.join(prefix, resolved.suffix);
-						active = true;
-						hops = resolved.hops;
-						cost = announce.cost;
-						instance = announce.instance;
-						epoch = announce.epoch;
-						restart = resolved.suffix === resolved.previous;
-						break;
-					}
 					case "skipped":
 						continue;
 				}
@@ -702,8 +690,7 @@ export class Subscriber {
 				// a duplicate means the same thing on both sides of it. Mirrors the branch the
 				// Rust announce loop takes before `start_announce`.
 				const duplicateIsUpdate = updateSupported(this.version) && !hasAnnounceId(this.version);
-				const starts = announce.status === "active" || (announce.status === "takeover" && !restart);
-				if (starts && !duplicateIsUpdate && advertised.has(path)) {
+				if (announce.status === "active" && !duplicateIsUpdate && advertised.has(path)) {
 					throw new ProtocolViolation(`duplicate announce for ${path}`);
 				}
 
@@ -780,7 +767,7 @@ export class Subscriber {
 					});
 					continue;
 				}
-				const route: WireRoute = { instance, epoch, hops: fullHops, cost: this.#cost(cost) };
+				const route = this.#drained({ instance, epoch, hops: fullHops, cost: cost ?? Cost.zero });
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
 					advertised.set(path, { live: false, route, captures });
@@ -1104,10 +1091,6 @@ export class Subscriber {
 			lister.abort(refused);
 			return;
 		}
-		// Synced with this hop, which holds nothing yet: a relay never waits on its upstream,
-		// so the peer's tracks follow as live adds.
-		lister.synced();
-
 		// Each listed track holds an announces slot: discovery state the peer makes us hold.
 		const listed = new Set<string>();
 		const unused = new AbortController();
@@ -1152,9 +1135,10 @@ export class Subscriber {
 					if (event.kind === "finished") lister.finish(event.name);
 					else lister.remove(event.name);
 				} else {
-					// This hop synced its readers when the listing began; only the order matters here.
 					if (synced) throw new ProtocolViolation("duplicate SYNCED");
 					synced = true;
+					// Synced when the peer is, so a track listed after it is new upstream too.
+					lister.synced();
 				}
 			}
 		} catch (err) {
@@ -1526,8 +1510,7 @@ export class Subscriber {
 			// accept it again.
 			state.cancel.signal.throwIfAborted();
 			const model = this.#toModelInfo(answered.info);
-			// A TRACK_INFO without a max age sets no publisher limit, not the authored default.
-			const producer = request.accept({ ...model, maxAge: model.maxAge ?? null });
+			const producer = request.accept(model);
 			const framing = {
 				compress: answered.info.compress,
 				timescale: answered.info.timescale ?? 0,
@@ -1708,13 +1691,13 @@ export class Subscriber {
 	// Map the wire TRACK_INFO onto the model track.Info a producer/consumer holds.
 	#toModelInfo(info: TrackInfo): track.Info {
 		return {
-			timescale: info.timescale,
+			timescale: info.timescale ?? null,
 			// Publisher Max Age rides on the wire, so the local media-time budget
 			// matches what the upstream advertises (relays re-serve with the same bound).
-			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
+			maxAge: info.maxAge === undefined ? null : Duration.millis(info.maxAge),
 			priority: info.priority,
-			refresh: info.refresh,
-			compress: info.compress,
+			refresh: info.refresh ?? null,
+			compression: info.compress ? "deflate" : "none",
 			// Lite-05/06 timestamps may be send times, so the copy's groups skip the rewind check.
 			...(hasMediaTime(this.version) ? {} : { unchecked: true }),
 		};
@@ -1763,7 +1746,14 @@ export class Subscriber {
 		// Different freshness budgets use independent streams: once a FETCH is on the
 		// wire its limit cannot be widened for a later, more tolerant caller. Equal
 		// budgets still coalesce and each caller keeps an independent mirror.
-		const key = JSON.stringify([consumed.id, broadcast, instance, track, String(sequence), options.maxDelay]);
+		const key = JSON.stringify([
+			consumed.id,
+			broadcast,
+			instance,
+			track,
+			String(sequence),
+			options.maxDelay?.asNanos(),
+		]);
 		let entry = this.#fetches.get(key);
 		let consumer: netGroup.Consumer;
 		if (entry && !entry.group.isClosed) {
@@ -1808,7 +1798,7 @@ export class Subscriber {
 		sequence: bigint,
 		priority: number,
 		group: netGroup.Producer,
-		maxDelay?: Milli,
+		maxDelay?: Duration,
 	): Promise<void> {
 		const refused = unauthorized(broadcast);
 		try {
@@ -1869,7 +1859,7 @@ export class Subscriber {
 		priority: number,
 		group: netGroup.Producer,
 		deadline: Deadline,
-		maxDelay?: Milli,
+		maxDelay?: Duration,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
 		const { instance, valid } = consumed;
 		const cancel = new AbortController();
@@ -1892,7 +1882,10 @@ export class Subscriber {
 						instance,
 						track,
 						priority,
-						maxDelay: hasFetchMaxDelay(this.version) ? maxDelay : undefined,
+						maxDelay:
+							hasFetchMaxDelay(this.version) && maxDelay !== undefined
+								? Math.ceil(maxDelay.asMillis())
+								: undefined,
 						group: sequence,
 					}).encode(stream.writer, this.version);
 					// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
@@ -2043,7 +2036,10 @@ export class Subscriber {
 		for (;;) {
 			const priority = fill.priority;
 			// Lite-07 FETCH carries the budget; older ones leave it to the publisher's max age.
-			const maxDelay = hasFetchMaxDelay(this.version) ? (fill.maxDelay ?? undefined) : undefined;
+			const budget = fill.maxDelay;
+			// Rounded up, since a budget shortened by rounding skips a group a reader still wants.
+			const maxDelay =
+				hasFetchMaxDelay(this.version) && budget !== null ? Math.ceil(budget.asMillis()) : undefined;
 			try {
 				// Wait for the grant as a subscribe or fetch does; nobody waiting ends the wait.
 				while (
@@ -2079,7 +2075,8 @@ export class Subscriber {
 				);
 			} catch (err) {
 				if (cancel.aborted || !fill.isWanted(sequence)) return undefined;
-				if (maxDelay !== undefined && (fill.maxDelay ?? Number.POSITIVE_INFINITY) > maxDelay) continue;
+				if (maxDelay !== undefined && (fill.maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY) > maxDelay)
+					continue;
 				fill.refuseGroups(sequence, sequence + 1n, error(err));
 				return undefined;
 			}
@@ -2314,7 +2311,10 @@ export class Subscriber {
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
 			order: msg.order,
-			delay: { max: Milli(msg.maxDelay), min: msg.minDelay === undefined ? null : Milli(msg.minDelay) },
+			delay: {
+				max: Duration.millis(msg.maxDelay),
+				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
+			},
 			ranges: entry.asked,
 		};
 
@@ -2734,7 +2734,7 @@ export class Subscriber {
 				if (!probe) break;
 				// Lite-03 carries no RTT; newer drafts retract it with a zero.
 				const prev = this.#probe.peek();
-				const rtt = probe.rtt !== undefined ? Milli(probe.rtt) : undefined;
+				const rtt = probe.rtt !== undefined ? Duration.millis(probe.rtt) : undefined;
 				this.#probe.set({
 					// `undefined` is the peer reporting "unknown"; a 0 would become a real ABR target.
 					estimatedRecvRate: probe.bitrate,

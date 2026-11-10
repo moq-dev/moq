@@ -419,7 +419,11 @@ impl Reader {
 				// nothing in between to wait on. A caller that treats a codec
 				// error as one lost picture and carries on then spins.
 				self.drained = true;
-				self.pending.extend(tail?.into_iter().map(Read::Frame));
+				// Queue what the flush readied before reporting its error, so a
+				// later read still hands those pictures over.
+				let received = self.receive();
+				tail?;
+				received?;
 				continue;
 			};
 
@@ -431,19 +435,25 @@ impl Reader {
 				continue;
 			}
 
-			let pictures = self
-				.decoder
+			self.decoder
 				.decode(mux_frame.payload, mux_frame.timestamp, mux_frame.keyframe)
 				.await?;
-			self.pending.extend(pictures.into_iter().map(Read::Frame));
+			self.receive()?;
 		}
+	}
+
+	/// Queue every picture the decoder has ready.
+	fn receive(&mut self) -> Result<(), Error> {
+		while let Some(picture) = self.decoder.receive()? {
+			self.pending.push_back(Read::Frame(picture));
+		}
+		Ok(())
 	}
 
 	/// Queue every picture the decoder still holds.
 	async fn drain(&mut self) -> Result<(), Error> {
-		let pictures = self.decoder.flush().await?;
-		self.pending.extend(pictures.into_iter().map(Read::Frame));
-		Ok(())
+		self.decoder.flush().await?;
+		self.receive()
 	}
 }
 
@@ -488,14 +498,19 @@ mod tests {
 		};
 		let rendition = config.probe().await.unwrap();
 		let reserved = source_catalog.reserve().with_interval(config.effective_join());
-		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
+		let track = source_broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut producer = EncodeProducer::new(track, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for index in 0..2 {
 			encoder.cut().unwrap();
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap());
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				producer.publish(&encoded).unwrap();
+			}
 		}
 
 		let origin = produce_origin();
@@ -507,8 +522,8 @@ mod tests {
 		// wide enough to read them: its REAL_TIME default keeps only the live edge, and
 		// the second `next()` would then block forever waiting for a group that was
 		// skipped.
-		let mut export =
-			moq_mux::container::fmp4::Export::new(source, catalog).with_max_delay(std::time::Duration::from_secs(30));
+		let mut export = moq_mux::container::fmp4::Export::new(source, catalog)
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 
@@ -741,6 +756,7 @@ mod tests {
 			kind: Kind::Named(probe::NATIVE_NAME.into()),
 			output: crate::Output::Cpu,
 			scale_hint: Some(crate::Size::new(160, 120)),
+			..Default::default()
 		};
 		let max_delay = std::time::Duration::from_secs(10);
 		let mut consumer = pollster::block_on(Consumer::new(
@@ -839,7 +855,7 @@ mod tests {
 		consumer.reader(Lane::Min).track.set_delay(Delay::default());
 		write(12, &[3000]);
 		write(13, &[4000, 3800, 3900, 4100]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		got.clear();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			got.push(frame.timestamp.as_micros());
@@ -985,7 +1001,6 @@ mod tests {
 	#[cfg(not(apple))]
 	#[tokio::test]
 	async fn a_cancelled_read_resumes_the_flush_in_flight() {
-		kio::clock::host_time();
 		probe::prepare_blocking_flush();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1072,7 +1087,7 @@ mod tests {
 			}
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap());
-			for encoded in encoder.encode(&frame).unwrap() {
+			for encoded in encoder.encode_all(&frame).unwrap() {
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: encoded.timestamp,
@@ -1227,7 +1242,6 @@ mod tests {
 	/// then the max-delay decoder's once it has decoded the sweep before them.
 	#[tokio::test]
 	async fn a_cold_join_hands_over_to_the_max_delay_decoder() {
-		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let published = track.clone();
 		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
@@ -1260,7 +1274,6 @@ mod tests {
 	/// max-delay decoder still starts at the group before it, and takes over.
 	#[tokio::test]
 	async fn a_cold_join_whose_live_edge_arrives_first_starts_a_group_earlier() {
-		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let mut live = group(&mut track, 1, &[4, 5]);
 
@@ -1306,7 +1319,6 @@ mod tests {
 	/// never alternating in between.
 	#[tokio::test]
 	async fn a_short_stall_skips_only_the_min_delay_decoder() {
-		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let mut consumer = dual(
 			&broadcast,
@@ -1334,11 +1346,15 @@ mod tests {
 		// leading by more than a frame, so it is shown at once.
 		let mut live = group(&mut track, 2, &[8]);
 		shown.push(read(&mut consumer).await);
+		// Mocked time, so the timeout fires only once every task has run, well inside the
+		// sweep; no decode runs while the max-delay decoder waits on the stalled group.
+		tokio::time::pause();
 		assert!(
 			kio::clock::timeout(std::time::Duration::from_millis(100), consumer.next_frame())
 				.await
 				.is_err()
 		);
+		tokio::time::resume();
 		assert_eq!(
 			consumer.selector.source(),
 			Lane::Min,
@@ -1372,7 +1388,6 @@ mod tests {
 	/// late frames are never shown, and the max-delay decoder still takes over.
 	#[tokio::test]
 	async fn a_long_stall_skips_both_decoders() {
-		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let mut consumer = dual(
 			&broadcast,
@@ -1410,7 +1425,7 @@ mod tests {
 		let (broadcast, mut track) = live_track();
 		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
 		group(&mut track, 1, &[4, 5]).finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		// A budget past the whole 5 s backlog, so the start keeps every cached group and both
 		// decoders read them all.

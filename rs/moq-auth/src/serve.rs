@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,8 +23,9 @@ use kio::clock::Instant;
 
 use crate::{Event, Grant, Key, KeyId, KeySet, Patterns, Permissions, Rate, Request, Token};
 
-/// Where the signing keys a `jwt` is verified against come from. Read per request,
-/// so a rotated file takes effect without a restart.
+/// Where the signing keys a `jwt` is verified against come from. Each file is parsed
+/// once and re-read when its modification time or size changes, so a rotated file
+/// takes effect without a restart.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Keys {
@@ -229,6 +230,84 @@ pub struct Policy {
 	pub expires: Option<Duration>,
 	/// Live session caps.
 	pub limits: Limits,
+	/// The key files as last parsed.
+	cache: KeyCache,
+}
+
+/// Parsed key files, keyed by path and format, so a token costs a `stat` rather than a
+/// read and parse.
+#[derive(Clone, Default)]
+struct KeyCache(Arc<Mutex<HashMap<(PathBuf, Format), Cached>>>);
+
+/// How a key file is read.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Format {
+	/// One key, as a set holding just it, which selects it by `kid` exactly as
+	/// verifying with the key alone would.
+	Key,
+	/// A JWK Set.
+	Set,
+}
+
+impl Format {
+	fn parse(self, json: &str) -> Result<KeySet, Denial> {
+		match self {
+			Self::Key => {
+				let key = json.parse::<Key>().map_err(|_| Denial::UnknownKey)?;
+				Ok(KeySet {
+					keys: vec![Arc::new(key)],
+				})
+			}
+			Self::Set => json
+				.parse()
+				.map_err(|err: crate::Error| Denial::InvalidToken(err.to_string())),
+		}
+	}
+}
+
+struct Cached {
+	stamp: (kio::clock::Wall, u64),
+	keys: Arc<KeySet>,
+}
+
+impl std::fmt::Debug for KeyCache {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("KeyCache")
+	}
+}
+
+impl KeyCache {
+	/// The keys in `path`, parsed again only when its modification time or size changed
+	/// since they were cached. A file that is gone forgets its keys.
+	async fn load(&self, path: &Path, format: Format) -> Result<Arc<KeySet>, Denial> {
+		let lock = || self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		let entry = (path.to_owned(), format);
+		let Ok(meta) = tokio::fs::metadata(path).await else {
+			lock().remove(&entry);
+			return Err(Denial::UnknownKey);
+		};
+		// Stamped before reading, so a write racing the read is caught at the next token.
+		let modified = meta.modified().ok().and_then(|modified| modified.try_into().ok());
+		let stamp = modified.map(|modified| (modified, meta.len()));
+		if let Some(cached) = lock().get(&entry)
+			&& Some(cached.stamp) == stamp
+		{
+			return Ok(cached.keys.clone());
+		}
+		let json = tokio::fs::read_to_string(path).await.map_err(|_| Denial::UnknownKey)?;
+		let keys = Arc::new(format.parse(&json)?);
+		// A file without a modification time this clock holds parses every time.
+		if let Some(stamp) = stamp {
+			lock().insert(
+				entry,
+				Cached {
+					stamp,
+					keys: keys.clone(),
+				},
+			);
+		}
+		Ok(keys)
+	}
 }
 
 /// Why the policy denied a session, mapped to the typed [`Refusal`](crate::Refusal) in the 403 body.
@@ -415,27 +494,16 @@ impl Policy {
 		// Every key source reads the header first, so a token that is not a JWT fails here
 		// whichever one is configured.
 		let header = jsonwebtoken::decode_header(jwt).map_err(|err| Denial::MalformedToken(err.to_string()))?;
-		let claims = match keys {
-			Keys::File(path) => Key::from_file_async(path)
-				.await
-				.map_err(|_| Denial::UnknownKey)?
-				.verify_claims(jwt),
+		let set = match keys {
+			Keys::File(path) => self.cache.load(path, Format::Key).await?,
 			Keys::Dir(dir) => {
 				let kid = header.kid.ok_or(Denial::MissingKeyId)?;
 				let kid = KeyId::decode(&kid).map_err(|_| Denial::UnknownKey)?;
-				Key::from_file_async(dir.join(format!("{kid}.jwk")))
-					.await
-					.map_err(|_| Denial::UnknownKey)?
-					.verify_claims(jwt)
+				self.cache.load(&dir.join(format!("{kid}.jwk")), Format::Key).await?
 			}
-			Keys::Set(path) => {
-				let json = tokio::fs::read_to_string(path).await.map_err(|_| Denial::UnknownKey)?;
-				json.parse::<KeySet>()
-					.map_err(|err| Denial::InvalidToken(err.to_string()))?
-					.key(jwt)
-					.and_then(|key| key.verify_claims(jwt))
-			}
+			Keys::Set(path) => self.cache.load(path, Format::Set).await?,
 		};
+		let claims = set.key(jwt).and_then(|key| key.verify_claims(jwt));
 		let claims = claims.map_err(|err| match err {
 			crate::Error::Key(crate::KeyError::MissingKid) => Denial::MissingKeyId,
 			crate::Error::Key(crate::KeyError::KeyNotFound(_)) => Denial::UnknownKey,
@@ -604,6 +672,7 @@ pub struct Server {
 	policy: Arc<std::sync::RwLock<Arc<Policy>>>,
 	sessions: Arc<Mutex<Sessions>>,
 	mesh: Option<crate::mesh::Coordinator>,
+	secret: Option<Arc<str>>,
 }
 
 impl Server {
@@ -615,6 +684,7 @@ impl Server {
 			policy: Arc::new(std::sync::RwLock::new(Arc::new(Self::validate(policy)?))),
 			sessions: Default::default(),
 			mesh: None,
+			secret: None,
 		})
 	}
 
@@ -655,8 +725,16 @@ impl Server {
 		Ok(policy)
 	}
 
-	/// Also answer the mesh owner's API under `/mesh` with `coordinator`. Like `POST /`,
-	/// it has no authentication of its own.
+	/// Refuse with 401 every request whose HTTP Basic password is not `secret`, so only
+	/// the relays can drive the session table. A relay sends it from its URL's userinfo,
+	/// as in `https://relay:<secret>@auth.example/`.
+	pub fn with_secret(mut self, secret: impl Into<Arc<str>>) -> Self {
+		self.secret = Some(secret.into());
+		self
+	}
+
+	/// Also answer the mesh owner's API under `/mesh` with `coordinator`, behind the same
+	/// [`secret`](Self::with_secret) as `POST /`.
 	pub fn with_mesh(mut self, coordinator: crate::mesh::Coordinator) -> Self {
 		self.mesh = Some(coordinator);
 		self
@@ -703,11 +781,15 @@ impl Server {
 	}
 
 	/// The router: `POST /` reading a [`Request`] and writing a [`Grant`], plus the mesh
-	/// owner's API when [`with_mesh`](Self::with_mesh) set one.
+	/// owner's API when [`with_mesh`](Self::with_mesh) set one, all behind the
+	/// [`secret`](Self::with_secret) when there is one.
 	pub fn router(&self) -> Router {
-		let router = Router::new().route("/", post(handle)).with_state(self.clone());
-		match &self.mesh {
-			Some(mesh) => router.merge(mesh.admin_router()),
+		let mut router = Router::new().route("/", post(handle)).with_state(self.clone());
+		if let Some(mesh) = &self.mesh {
+			router = router.merge(mesh.admin_router());
+		}
+		match &self.secret {
+			Some(secret) => router.layer(axum::middleware::from_fn_with_state(secret.clone(), guard)),
 			None => router,
 		}
 	}
@@ -721,6 +803,42 @@ impl Server {
 	#[cfg(unix)]
 	pub async fn serve_unix(&self, listener: tokio::net::UnixListener) -> std::io::Result<()> {
 		axum::serve(listener, self.router()).await
+	}
+}
+
+/// Pass only a request whose HTTP Basic password is `secret`; the user name is ignored.
+async fn guard(
+	State(secret): State<Arc<str>>,
+	request: axum::extract::Request,
+	next: axum::middleware::Next,
+) -> Response {
+	use base64::Engine;
+	let password = request
+		.headers()
+		.get(axum::http::header::AUTHORIZATION)
+		.and_then(|value| value.to_str().ok())
+		// RFC 7235 auth schemes are case-insensitive.
+		.and_then(|value| value.split_once(' '))
+		.filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Basic"))
+		.map(|(_, encoded)| encoded)
+		.and_then(|encoded| base64::engine::general_purpose::STANDARD.decode(encoded.trim()).ok())
+		.and_then(|decoded| {
+			let colon = decoded.iter().position(|&byte| byte == b':')?;
+			Some(decoded[colon + 1..].to_vec())
+		});
+	// Compare digests so the comparison does not end early on a length mismatch.
+	let digest = |bytes: &[u8]| rind::digest::digest(&rind::digest::SHA256, bytes);
+	match password {
+		Some(password)
+			if rind::constant_time::verify(digest(&password).as_ref(), digest(secret.as_bytes()).as_ref()).is_ok() =>
+		{
+			next.run(request).await
+		}
+		_ => {
+			// A relay reads this 401 as a refusal, so its log alone cannot tell a wrong secret from a denied token.
+			tracing::debug!(path = %request.uri().path(), presented = password.is_some(), "listen secret mismatch");
+			StatusCode::UNAUTHORIZED.into_response()
+		}
 	}
 }
 
@@ -945,6 +1063,74 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn the_secret_guards_every_route() {
+		let key = Key::generate(Algorithm::HS256, None).unwrap();
+		let config = crate::mesh::Config::new("https://mesh.example".parse().unwrap(), key);
+		let server = Server::new(Policy {
+			public: rules(&["**"], &[]),
+			..Default::default()
+		})
+		.unwrap()
+		.with_mesh(crate::mesh::Coordinator::new(config).unwrap())
+		.with_secret("hunter2:x");
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		tokio::spawn(async move { server.serve(listener).await });
+
+		let http = reqwest::Client::builder()
+			.use_preconfigured_tls(crate::crypto::tls().unwrap())
+			.build()
+			.unwrap();
+		for (userinfo, admitted) in [
+			("", false),
+			("relay:wrong@", false),
+			("hunter2:x@", false),
+			("relay:hunter2%3Ax@", true),
+			(":hunter2%3Ax@", true),
+		] {
+			let status = |path: &'static str| {
+				let url = format!("http://{userinfo}{addr}{path}");
+				let http = http.clone();
+				async move {
+					match path {
+						"/" => http.post(url).json(&request("/demo")).send().await,
+						_ => http.get(url).send().await,
+					}
+					.unwrap()
+					.status()
+				}
+			};
+			for path in ["/", "/mesh/keys"] {
+				assert_eq!(
+					status(path).await == StatusCode::UNAUTHORIZED,
+					!admitted,
+					"{userinfo}{path}"
+				);
+			}
+		}
+
+		// The relay's client sends the secret from its URL's userinfo.
+		let client = Client::new(format!("http://relay:hunter2%3Ax@{addr}/").parse().unwrap(), None).unwrap();
+		client.connect(request("/demo")).await.unwrap();
+		let client = Client::new(format!("http://{addr}/").parse().unwrap(), None).unwrap();
+		client.connect(request("/demo")).await.unwrap_err();
+
+		// The scheme matches case-insensitively.
+		use base64::Engine;
+		let credentials = base64::engine::general_purpose::STANDARD.encode("relay:hunter2:x");
+		for scheme in ["basic", "BASIC", "Basic", "Bearer"] {
+			let status = http
+				.get(format!("http://{addr}/mesh/keys"))
+				.header(reqwest::header::AUTHORIZATION, format!("{scheme} {credentials}"))
+				.send()
+				.await
+				.unwrap()
+				.status();
+			assert_eq!(status == StatusCode::UNAUTHORIZED, scheme == "Bearer", "{scheme}");
+		}
+	}
+
+	#[tokio::test]
 	async fn a_token_without_exp_gets_the_default_bound() {
 		let (dir, key) = key_dir();
 		let policy = Policy {
@@ -1036,6 +1222,40 @@ mod tests {
 		assert!(policy.decide(&request("/demo")).await.is_ok());
 	}
 
+	/// A key file is parsed once and re-read only when it changes, so rotating it still
+	/// takes effect without a restart.
+	#[tokio::test]
+	async fn a_key_file_is_cached_until_it_changes() {
+		let (dir, key) = key_dir();
+		let path = dir.path().join("kid1.jwk");
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			..Default::default()
+		};
+		let old = with_token(request("/demo"), &sign(&key, "demo", &["**"], &[], None));
+		policy.decide(&old).await.unwrap();
+
+		// Rewritten at the same size and modification time, the cached key still answers.
+		let before = std::fs::metadata(&path).unwrap();
+		let rotated = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid1").unwrap())).unwrap();
+		rotated.to_file(&path).unwrap();
+		let file = std::fs::File::options().write(true).open(&path).unwrap();
+		assert_eq!(file.metadata().unwrap().len(), before.len());
+		file.set_modified(before.modified().unwrap()).unwrap();
+		policy.decide(&old).await.unwrap();
+
+		// A new modification time reads the rotated key.
+		file.set_modified(before.modified().unwrap() + Duration::from_secs(1))
+			.unwrap();
+		assert!(matches!(policy.decide(&old).await, Err(Denial::InvalidToken(_))));
+		let new = with_token(request("/demo"), &sign(&rotated, "demo", &["**"], &[], None));
+		policy.decide(&new).await.unwrap();
+
+		// A removed file forgets its key.
+		std::fs::remove_file(&path).unwrap();
+		assert_eq!(policy.decide(&new).await.unwrap_err(), Denial::UnknownKey);
+	}
+
 	#[tokio::test]
 	async fn a_single_key_file_checks_the_kid() {
 		let dir = tempfile::tempdir().unwrap();
@@ -1078,6 +1298,14 @@ mod tests {
 		};
 		let jwt = sign(&key, "demo", &["**"], &[], None);
 		assert!(policy.decide(&with_token(request("/demo"), &jwt)).await.is_ok());
+
+		// The same file read as a single key is no key, whatever the set cached.
+		let mut single = policy.clone();
+		single.keys = Some(Keys::File(dir.path().join("keys.jwks")));
+		assert_eq!(
+			single.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err(),
+			Denial::UnknownKey
+		);
 
 		let mut wrong = key.export();
 		wrong.kid = Some(KeyId::decode("kid2").unwrap());

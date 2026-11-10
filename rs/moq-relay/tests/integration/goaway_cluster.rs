@@ -178,10 +178,16 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 		.expect("track ended");
 	assert_eq!(read(&mut reading).await, (0, Some("a".into())));
 
-	// The cursor replays A's route first. After the GOAWAY, A's re-prices to DRAIN, so
-	// the next route at any other cost is B's.
+	// The cursor replays A's route first. After the GOAWAY, A's ranks last, so the next
+	// route under any other instance is B's.
 	let mut announced = consumer.routes();
-	within("A's route", announced.next()).await.expect("announce update");
+	let instance_a = match within("A's route", announced.next()).await.expect("announce update") {
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::Start,
+			announce: update,
+		} => update.route.instance().clone(),
+		other => panic!("expected A's route, got {other:?}"),
+	};
 	session_a
 		.drain()
 		.send(moq_net::goaway::Goaway::redirect(net.url("b")))
@@ -191,11 +197,13 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 		loop {
 			let event = announced.next().await.expect("announce update");
 			// Under another instance, B's route is another source: a restart.
-			if let moq_net::origin::RouteEvent::Start(update)
-			| moq_net::origin::RouteEvent::Update(update)
-			| moq_net::origin::RouteEvent::Restart(update)
-			| moq_net::origin::RouteEvent::Takeover { announce: update, .. } = event
-				&& update.route.cost() != moq_net::origin::Cost::DRAIN
+			if let moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: update,
+			} = event && *update.route.instance() != instance_a
 			{
 				break;
 			}
@@ -224,8 +232,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 
 /// An upstream GOAWAY with a redirect migrates the cluster dial to the sibling.
 /// The draining session keeps serving through the handover window, and the path
-/// never retracts on the cluster origin (route re-pricing and the sibling's
-/// announce surface as metadata updates, not churn).
+/// never retracts on the cluster origin (the sibling's announce surfaces as a
+/// metadata update, not churn).
 async fn cluster_migrates_on_upstream_goaway_inner() {
 	// ── the shared "live" broadcast both siblings can serve ─────────
 	let net = Net::new();
@@ -277,8 +285,8 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 	);
 
 	// Watch for retraction during the swap: the migration must never
-	// unannounce the path (metadata updates are expected: the drain
-	// re-prices the old route and the sibling announces its own).
+	// unannounce the path (metadata updates are expected: the sibling
+	// announces its own route, which outranks the draining one).
 	let recorded = memory::record(cluster.origin.consume().routes());
 
 	// ── sibling A drains with a redirect to sibling B ────────────────
@@ -320,8 +328,8 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 	within("A's session closes", session_a.closed()).await;
 
 	// No retraction leaked to the origin during the whole swap, once the mesh
-	// has settled. Metadata updates (the drain re-pricing, the sibling's route)
-	// are expected and harmless; an inactive event means the path flapped.
+	// has settled. Metadata updates (the sibling's route winning) are expected
+	// and harmless; an inactive event means the path flapped.
 	kio::clock::sim::idle().await;
 	let retracted = retractions(&recorded);
 	assert!(
@@ -548,13 +556,13 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		sub_connection
 			.draining()
 			.expect("connected")
-			.poll(&moq_net::kio::Waiter::noop())
+			.poll(&kio::Waiter::noop())
 			.is_pending(),
 		"BOTTOM must not propagate the upstream GOAWAY downstream"
 	);
 
 	// ── announcement stability: the path never retracted under the swap ──
-	// Metadata updates (route re-pricing, the new leg's hops) are expected.
+	// Metadata updates (the new leg winning) are expected.
 	let retracted = retractions(&recorded);
 	assert!(
 		retracted.is_empty(),
@@ -637,7 +645,7 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	let healthy = Duration::from_millis(100);
 	config.backoff.healthy = Some(healthy.into());
 	// Past the handover, so only the handover can end the old session.
-	assert!(config.resolve().timeout > handover);
+	assert!(config.resolve().timeout.is_none_or(|timeout| timeout > handover));
 
 	let connection = within(
 		"client connects",

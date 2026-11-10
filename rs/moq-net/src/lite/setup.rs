@@ -408,8 +408,7 @@ struct PeerSetupState {
 	address: crate::transport::Address,
 	/// Whether our own SETUP offers the `ietf` extension.
 	ietf: bool,
-	seen: bool,
-	setup: Option<Setup>,
+	peer: Peer,
 	/// Where the peer's advertised implementation is published for the session handle.
 	implementation: crate::setup::PeerImplementation,
 	/// The session's auth link to tell once the peer's SETUP accepts the connection.
@@ -417,23 +416,61 @@ struct PeerSetupState {
 	/// What the peer's route key proof must sign, or `None` when the transport cannot bind
 	/// one to this session, so any proof leaves the peer unproven.
 	transcript: Option<crate::route::Transcript>,
-	/// The route key the peer proved.
-	route_key: Option<[u8; 32]>,
+}
+
+/// Where the peer's SETUP stands.
+enum Peer {
+	/// No Setup Stream yet.
+	Waiting,
+	/// The Setup Stream is claimed and its body still decoding, so no other may arrive.
+	Claimed,
+	/// The peer's SETUP, with the route key it proved, if any.
+	Received {
+		setup: Box<Setup>,
+		route_key: Option<[u8; 32]>,
+	},
 }
 
 impl PeerSetupState {
-	/// Keep the key the peer's SETUP proves, or refuse a proof whose signature fails.
-	fn prove(&mut self, setup: &Setup) -> Result<(), crate::Error> {
-		let (Some(proof), Some(transcript)) = (&setup.route_key, &self.transcript) else {
-			return Ok(());
-		};
-		// The peer holds the side of the session we do not.
-		if !transcript.verify(proof, !self.client) {
+	/// Record the peer's SETUP, refusing a second one or a route key proof whose signature
+	/// fails.
+	fn set(&mut self, setup: Setup) -> Result<(), crate::Error> {
+		if let Peer::Received { .. } = self.peer {
 			return Err(crate::Error::ProtocolViolation);
 		}
-		tracing::debug!(proof = ?proof, "peer proved its route key");
-		self.route_key = Some(proof.key);
+		let route_key = match (&setup.route_key, &self.transcript) {
+			(Some(proof), Some(transcript)) => {
+				// The peer holds the side of the session we do not.
+				if !transcript.verify(proof, !self.client) {
+					return Err(crate::Error::ProtocolViolation);
+				}
+				tracing::debug!(proof = ?proof, "peer proved its route key");
+				Some(proof.key)
+			}
+			_ => None,
+		};
+		self.implementation.set(setup.implementation.clone());
+		self.peer = Peer::Received {
+			setup: Box::new(setup),
+			route_key,
+		};
 		Ok(())
+	}
+
+	/// The peer's SETUP, once it arrived.
+	fn setup(&self) -> Option<&Setup> {
+		match &self.peer {
+			Peer::Received { setup, .. } => Some(setup),
+			Peer::Waiting | Peer::Claimed => None,
+		}
+	}
+
+	/// The route key the peer's SETUP proved, once it arrived.
+	fn route_key(&self) -> Option<[u8; 32]> {
+		match self.peer {
+			Peer::Received { route_key, .. } => route_key,
+			Peer::Waiting | Peer::Claimed => None,
+		}
 	}
 }
 
@@ -443,12 +480,10 @@ impl PeerSetup {
 			client,
 			address,
 			ietf: false,
-			seen: false,
-			setup: None,
+			peer: Peer::Waiting,
 			implementation: Default::default(),
 			accept: None,
 			transcript: None,
-			route_key: None,
 		}))
 	}
 
@@ -478,10 +513,7 @@ impl PeerSetup {
 		{
 			return Err(crate::Error::ProtocolViolation);
 		}
-		state.prove(&received.setup)?;
-		state.seen = true;
-		state.implementation.set(received.setup.implementation.clone());
-		state.setup = Some(received.setup);
+		state.set(received.setup)?;
 		let accept = state.accept.take();
 		drop(state);
 		if let Some(link) = accept {
@@ -511,43 +543,40 @@ impl PeerSetup {
 		let state = self.0.lock();
 		match state.ietf {
 			false => Some(false),
-			true => state.setup.as_ref().map(|setup| setup.ietf),
+			true => state.setup().map(|setup| setup.ietf),
 		}
 	}
 
 	/// Record the peer's SETUP, refusing a route key proof that does not hold.
 	pub fn set(&self, setup: Setup) -> Result<(), crate::Error> {
-		let mut state = self.0.lock();
-		state.prove(&setup)?;
-		state.seen = true;
-		state.implementation.set(setup.implementation.clone());
-		state.setup = Some(setup);
-		Ok(())
+		self.0.lock().set(setup)
 	}
 
 	/// The route key the peer proved, once its SETUP arrived.
 	pub fn route_key(&self) -> Option<[u8; 32]> {
-		self.0.lock().route_key
+		self.0.lock().route_key()
 	}
 
 	/// Poll for the route key the peer proved, waiting until its SETUP arrives.
 	/// `None` when it proved none.
 	pub fn poll_route_key(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<[u8; 32]>> {
-		let state = std::task::ready!(self.0.poll(waiter, |state| match state.setup.is_some() {
-			true => std::task::Poll::Ready(()),
-			false => std::task::Poll::Pending,
+		let state = std::task::ready!(self.0.poll(waiter, |state| match state.setup() {
+			Some(_) => std::task::Poll::Ready(()),
+			None => std::task::Poll::Pending,
 		}));
-		std::task::Poll::Ready(state.route_key)
+		std::task::Poll::Ready(state.route_key())
 	}
 
 	/// Claim the Setup Stream before decoding its body, refusing any second stream.
 	pub fn claim(&self) -> Result<(), crate::Error> {
 		let mut state = self.0.lock();
-		if state.seen {
-			return Err(crate::Error::ProtocolViolation);
+		match state.peer {
+			Peer::Waiting => {
+				state.peer = Peer::Claimed;
+				Ok(())
+			}
+			Peer::Claimed | Peer::Received { .. } => Err(crate::Error::ProtocolViolation),
 		}
-		state.seen = true;
-		Ok(())
 	}
 
 	/// Poll for the peer's advertised probe level, waiting until its SETUP arrives.
@@ -573,14 +602,11 @@ impl PeerSetup {
 	/// Pends forever if it never does; the caller is session state, dropped with the
 	/// driver.
 	fn poll_get<T>(&self, waiter: &kio::Waiter, f: impl FnOnce(&Setup) -> T) -> std::task::Poll<T> {
-		let slot = std::task::ready!(self.0.poll(waiter, |setup| {
-			if setup.setup.is_some() {
-				std::task::Poll::Ready(())
-			} else {
-				std::task::Poll::Pending
-			}
+		let state = std::task::ready!(self.0.poll(waiter, |state| match state.setup() {
+			Some(_) => std::task::Poll::Ready(()),
+			None => std::task::Poll::Pending,
 		}));
-		std::task::Poll::Ready(f(slot.setup.as_ref().expect("waited for Some")))
+		std::task::Poll::Ready(f(state.setup().expect("judged under this lock")))
 	}
 }
 

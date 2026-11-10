@@ -124,7 +124,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, payload)
+		.write_frame(moq_net::Timestamp::ZERO, payload)
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
@@ -158,7 +158,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		// The client wired only a subscriber, so its advertised role reaches the server
 		// over every transport, now that the SETUP is read before the caller authorizes
 		// rather than deferred to `ok()`.
-		assert_eq!(request.role(), Some(moq_tokio::moq_net::setup::Role::Subscriber));
+		assert_eq!(request.role(), Some(moq_net::setup::Role::Subscriber));
 		if let Some(expect_path) = expect_path {
 			assert_eq!(request.path(), expect_path);
 		}
@@ -665,10 +665,10 @@ async fn quic_client_close_drains_finished_track() {
 			}
 			let mut group = track.append_group().expect("failed to append group");
 			group
-				.write_frame(moq_tokio::moq_net::Timestamp::ZERO, payload)
+				.write_frame(moq_net::Timestamp::ZERO, payload)
 				.expect("failed to write frame");
 			group.finish().expect("failed to finish group");
-			track.finish().expect("failed to finish track");
+			let _track = track.finish().expect("failed to finish track");
 
 			let mut close = Box::pin(connection.close());
 			assert!(futures::FutureExt::now_or_never(close.as_mut()).is_none());
@@ -807,10 +807,10 @@ async fn quic_client_close_drains_migrated_predecessor() {
 
 			let mut group = track.append_group().expect("failed to append group");
 			group
-				.write_frame(moq_tokio::moq_net::Timestamp::ZERO, payload)
+				.write_frame(moq_net::Timestamp::ZERO, payload)
 				.expect("failed to write frame");
 			group.finish().expect("failed to finish group");
-			track.finish().expect("failed to finish track");
+			let _track = track.finish().expect("failed to finish track");
 
 			connection.close().await.expect("the close drains");
 			client.close().await;
@@ -862,10 +862,7 @@ async fn quic_client_close_drains_migrated_predecessor() {
 		.expect("the subscription never reached the client")
 		.expect("client thread panicked");
 
-	first
-		.drain()
-		.send(moq_tokio::moq_net::goaway::Goaway::new())
-		.expect("send goaway");
+	first.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
 	let request = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("the replacement never dialed")
@@ -987,10 +984,7 @@ async fn quic_client_close_keeps_predecessor_handover() {
 		.expect("the subscription never reached the client")
 		.expect("client thread panicked");
 
-	first
-		.drain()
-		.send(moq_tokio::moq_net::goaway::Goaway::new())
-		.expect("send goaway");
+	first.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
 
 	let (err, elapsed) = tokio::task::spawn_blocking(move || client.join())
 		.await
@@ -998,7 +992,7 @@ async fn quic_client_close_keeps_predecessor_handover() {
 		.expect("client thread panicked");
 	// The one second close window would have ended it with a timeout instead.
 	assert!(
-		!matches!(err, moq_tokio::Error::MoqNet(moq_tokio::moq_net::Error::Timeout)),
+		!matches!(err, moq_tokio::Error::MoqNet(moq_net::Error::Timeout)),
 		"the handover deadline cuts the close short: {err:?}"
 	);
 	// The window opened just before the status flipped, so most of it remains. Loose,

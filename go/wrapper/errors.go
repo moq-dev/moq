@@ -61,7 +61,7 @@ var (
 	ErrBind = ffi.ErrMoqErrorBind
 	// ErrReject is returned when a session is refused during the handshake.
 	ErrReject = ffi.ErrMoqErrorReject
-	// ErrAlreadyResponded is returned when a Request is accepted or rejected more than once.
+	// ErrAlreadyResponded is returned when a request is used after it was accepted or rejected.
 	ErrAlreadyResponded = ffi.ErrMoqErrorAlreadyResponded
 	// ErrCodec is returned when codec configuration or bitstream parsing fails.
 	ErrCodec = ffi.ErrMoqErrorCodec
