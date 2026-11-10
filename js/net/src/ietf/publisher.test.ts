@@ -1186,6 +1186,28 @@ test("a broadcast published mid-advertisement is still announced", async () => {
 });
 
 /**
+ * The opt-in exists for relays that set SOLICIT=1 but never open
+ * SUBSCRIBE_NAMESPACE: advertising anyway is the only way they can route.
+ */
+test("an opted-in publisher advertises to a soliciting peer", async () => {
+    using clock = manual();
+    const pair = createMockTransportPair(ALPN.DRAFT_18);
+    const { pub, origin } = publisher(pair.server, {
+        requiresSolicitation: true,
+        unsolicited: true,
+    });
+
+    publish(origin, Path.from("first"));
+    void pub.runPublishNamespaces();
+
+    const stream = await nextStream(pair.client);
+    expect(await readPublishNamespace(stream)).toBe(Path.from("first"));
+    await acceptPublishNamespace(stream);
+
+    origin.close();
+});
+
+/**
  * A peer may decline an advertisement and stay connected. Recording it as advertised
  * anyway would strand the namespace: nothing re-adds it to the diff, so it would never
  * be offered again for the life of the session.
