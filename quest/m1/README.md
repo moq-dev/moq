@@ -41,7 +41,6 @@ moves what remains of them once their claims merge.
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
 - [Lifecycles are explicit state](/quest/m1/explicit-state/README.md) - every lifecycle the 2026-11-07 audit found implicit is one enum or union, fixing the bugs in the 11 lifecycles it redesigns, with review and agent rules against new ones
 - [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
-- [A padded TS export sheds when its sink falls behind](/quest/m1/ts-padded-shed.md) - a `--mux-rate` export skips stale slots with a flagged PCR jump instead of back-filling them or blaming the source
 - [A resumed QUIC client gives up on its own idle timer](/quest/m1/quic-resume-idle.md) - a client stopped past its idle timeout closes within about one timeout of resuming, without waiting on a stateless reset
 - [A reused moq-transport alias delivers a group that beats its SUBSCRIBE_OK](/quest/m1/ietf-alias-reuse.md) - a new SUBSCRIBE clears its track's alias tombstone, so moqxr's alias-0 catalog refetch no longer hangs
 - [Unused crates, scripts, and files are deleted](/quest/m1/unused-code.md) - moq-room, the moq-native tombstone, demo/throttle, sh/dart/publish.sh, demo/web's Solid deps, and unpublished packages' release notes go

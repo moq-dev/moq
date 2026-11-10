@@ -161,6 +161,12 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	{
 		self.writing(key).lose(key, ahead);
 	}
+	pub fn shed(&mut self, before: Instant) {
+		if let Some(Handoff::Committed(committed)) = self.handoff.as_deref_mut() {
+			committed.old.shed(before);
+		}
+		self.active.shed(before);
+	}
 	pub fn discard(&mut self, ready: &Ready<K, T>) {
 		if let Some(Handoff::Committed(committed)) = self.handoff.as_deref_mut()
 			&& !committed.keys.contains(&ready.track)
@@ -241,9 +247,14 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		for (_, ready) in held {
 			let track = engine.tracks.get_mut(&ready.track).expect("the previewed track");
 			// The issued start is owned by the caller even while it waits on the old tail.
-			track
-				.queue
-				.push_front((ready.generation, ready.decode, ready.deadline, ready.item, ready.bytes));
+			track.queue.push_front((
+				ready.generation,
+				ready.decode,
+				ready.deadline,
+				ready.item,
+				ready.bytes,
+				ready.sync,
+			));
 			track.bytes += ready.bytes;
 		}
 		let first = engine
@@ -421,6 +432,7 @@ pub(crate) struct Ready<K, T> {
 	/// Whether it is the first frame of its track to go out.
 	pub first: bool,
 	bytes: usize,
+	sync: bool,
 }
 
 /// What [`Buffer::push`] did with a frame.
@@ -533,6 +545,9 @@ pub(crate) struct Engine<K, T> {
 	expect: BTreeSet<K>,
 	/// The latest deadline of a frame gone out.
 	released: Option<Instant>,
+	/// Everything due before it was shed ([`Self::shed`]), so a frame due before it is late however
+	/// early it reached us.
+	shed: Option<Instant>,
 	/// What the clock is steered on, since it last started.
 	steer: Steer<K>,
 	/// How much more slack each track had than the track sent latest, in seconds, in the last
@@ -756,8 +771,9 @@ enum Admit {
 }
 
 struct Track<T> {
-	/// Frames in arrival order, each with its generation, decode time, deadline and bytes.
-	queue: VecDeque<(u64, Decode, Instant, T, usize)>,
+	/// Frames in arrival order, each with its generation, decode time, deadline, bytes, and
+	/// whether it is a sync frame.
+	queue: VecDeque<(u64, Decode, Instant, T, usize, bool)>,
 	/// Wake the reader when its future tail enters the admission window.
 	read_timer: Option<Pin<Box<Sleep>>>,
 	/// What its queued frames hold against the byte budget.
@@ -786,6 +802,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			horizon: None,
 			expect: BTreeSet::new(),
 			released: None,
+			shed: None,
 			steer: Steer::default(),
 			leads: BTreeMap::new(),
 			timer: None,
@@ -864,7 +881,8 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			let generation = track.generation;
 			return Ok(self.queue(key, arrival, generation, None, false));
 		}
-		if self.released.is_some() && !self.delay.is_zero() {
+		let shed = deadline.zip(self.shed).is_some_and(|(deadline, shed)| deadline < shed);
+		if self.released.is_some() && !self.delay.is_zero() && !shed {
 			self.steer(&key, deadline, &arrival)?;
 		}
 		Ok(self.queue(key, arrival, clock.generation, deadline, false))
@@ -1059,7 +1077,10 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			}
 			_ if track.admit == Admit::Waiting && !arrival.sync => Push::Waiting,
 			_ if track.admit == Admit::Resumed && arrival.leading => Push::Waiting,
-			Some(deadline) if arrival.arrived <= deadline || self.delay.is_zero() => {
+			Some(deadline)
+				if (arrival.arrived <= deadline && self.shed.is_none_or(|shed| deadline >= shed))
+					|| self.delay.is_zero() =>
+			{
 				// A frame past the checks above while waiting is a sync frame.
 				if arrival.sync {
 					track.admit = match track.admit {
@@ -1071,7 +1092,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 				track.bytes += cost;
 				track
 					.queue
-					.push_back((generation, arrival.decode, deadline, arrival.item, cost));
+					.push_back((generation, arrival.decode, deadline, arrival.item, cost, arrival.sync));
 				self.horizon = self.horizon.max(Some(deadline));
 				Push::Queued
 			}
@@ -1376,7 +1397,8 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 				&& (self.delay.is_zero() || now >= *deadline)
 			{
 				let track = self.tracks.get_mut(key).expect("the front's track");
-				let (generation, decode, deadline, item, bytes) = track.queue.pop_front().expect("the front frame");
+				let (generation, decode, deadline, item, bytes, sync) =
+					track.queue.pop_front().expect("the front frame");
 				track.bytes -= bytes;
 				let first = !std::mem::replace(&mut track.started, true);
 				self.released = self.released.max(Some(deadline));
@@ -1392,6 +1414,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 					deadline,
 					first,
 					bytes,
+					sync,
 				});
 			}
 			let Some(wake) = front.map(|(deadline, _)| deadline).into_iter().chain(acquired).min() else {
@@ -1435,12 +1458,40 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		}
 	}
 
+	/// Drop every frame due before `before`, which an output that fell that far behind can no
+	/// longer send in time, and any read later that is. A track that loses a frame resumes at its
+	/// next sync frame.
+	pub fn shed(&mut self, before: Instant) {
+		self.shed = self.shed.max(Some(before));
+		for track in self.tracks.values_mut() {
+			let mut lost = 0;
+			while let Some((_, _, deadline, _, bytes, sync)) = track.queue.front()
+				&& (*deadline < before || (lost > 0 && !sync))
+			{
+				track.bytes -= bytes;
+				track.queue.pop_front();
+				lost += 1;
+			}
+			if lost == 0 {
+				continue;
+			}
+			match track.started {
+				true => self.dropped += lost,
+				false => self.trimmed += lost,
+			}
+			track.admit = match track.queue.is_empty() {
+				true => Admit::Waiting,
+				false => Admit::Resumed,
+			};
+		}
+	}
+
 	/// The frame `key` releases next, if it has one queued.
 	pub fn peek<Q: Ord + ?Sized>(&self, key: &Q) -> Option<&T>
 	where
 		K: Borrow<Q>,
 	{
-		let (_, _, _, item, _) = self.tracks.get(key)?.queue.front()?;
+		let (_, _, _, item, ..) = self.tracks.get(key)?.queue.front()?;
 		Some(item)
 	}
 
@@ -1467,6 +1518,11 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		self.expect.remove(key);
 		self.leads.remove(key);
 		self.steer.tracks.remove(key);
+	}
+
+	/// When the frame that goes out next is due, if one is queued.
+	pub fn front_deadline(&self) -> Option<Instant> {
+		self.front_available(None).map(|(deadline, _)| deadline)
 	}
 
 	/// When the next queued frame is due, or the acquisition under way ends.
