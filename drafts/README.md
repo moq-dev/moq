@@ -35,8 +35,10 @@ which emails you a confirmation link. The submission is final only once you
 click that link. For a brand-new draft (`-00`), set "Replaces" on the
 confirmation page.
 
-The script does not touch the source. Update the changelog headings by hand
-and commit that edit as the record of the publish.
+The script uploads the source as it is and refuses a heading that still ends
+in `(in progress)`. Before publishing, close the changelog heading for the
+version you submit and commit it as the record of the publish. Open the next
+version's section only after the upload.
 
 ## Contributing
 

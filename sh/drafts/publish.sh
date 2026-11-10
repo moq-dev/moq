@@ -21,6 +21,11 @@ if [[ ! -f "$name.md" ]]; then
     exit 1
 fi
 
+if grep -n ' (in progress)$' "$name.md" >&2; then
+    echo "$name.md still has an (in progress) heading; close it before publishing" >&2
+    exit 1
+fi
+
 doc="$name-$version"
 echo "Building $doc.xml"
 sed "s/$name-latest/$doc/g" "$name.md" | kramdown-rfc --v3 >"$doc.xml"
