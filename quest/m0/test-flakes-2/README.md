@@ -243,9 +243,14 @@ reader got `Unroutable` after the endpoint closed during
 [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)'s loaded `just check`.
 It is quarantined with `pytest.mark.skip` until its child fixes it.
 
+Added 2026-11-09 (maintainer, /quest-complete): interop's `finish` cases with
+a cpp or rust publisher, which failed under a loaded host and passed on rerun.
+They are quarantined until their child fixes them.
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the test waits for the first track's queue instead of asserting at once, and its `test.skip` is removed
+- [Interop's cpp and rust finish cases hold up under load](/quest/m0/test-flakes-2/interop-finish.md) - the publishers' finish cells pass under load, and their quarantine is removed
