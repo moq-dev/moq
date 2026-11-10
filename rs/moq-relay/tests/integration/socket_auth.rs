@@ -21,7 +21,6 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const ROOT: &str = "room";
 
 const LITE: &str = "moq-lite-07-wip";
-const IETF: &str = "moq-transport-18";
 
 /// A key, the reference auth server verifying tokens it signs, and a relay asking it.
 struct Fixture {
@@ -222,29 +221,24 @@ async fn announced(origin: &moq_net::origin::Producer, id: &str) {
 }
 
 /// The prefix grants admit a dial and its accept in either protocol, and the session
-/// carries data, over moq-lite-07 and across a moq-transport hop.
+/// carries data over moq-lite-07. moq-transport never carries an endpoint's hidden
+/// broadcast, so it has no socket to admit.
 #[tokio::test]
 async fn prefix_grants_admit_a_session() {
-	for (dialer, acceptor) in [(LITE, LITE), (LITE, IETF), (IETF, LITE)] {
-		let fixture = Fixture::new().await;
-		let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", dialer).await;
-		let (bob, _bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", acceptor).await;
-		let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
-		dialed.producer.write_frame(None, &b"ping"[..]).expect("write");
-		assert_eq!(read(&mut accepted.consumer).await, b"ping", "{dialer} to {acceptor}");
-		accepted.producer.write_frame(None, &b"pong"[..]).expect("write");
-		assert_eq!(read(&mut dialed.consumer).await, b"pong", "{dialer} to {acceptor}");
-		dialed.producer.finish().expect("finish");
-		accepted.producer.finish().expect("finish");
+	let fixture = Fixture::new().await;
+	let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", LITE).await;
+	let (bob, _bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", LITE).await;
+	let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
+	dialed.producer.write_frame(None, &b"ping"[..]).expect("write");
+	assert_eq!(read(&mut accepted.consumer).await, b"ping");
+	accepted.producer.write_frame(None, &b"pong"[..]).expect("write");
+	assert_eq!(read(&mut dialed.consumer).await, b"pong");
+	dialed.producer.finish().expect("finish");
+	accepted.producer.finish().expect("finish");
 
-		let (dialed, accepted) = connect_track(&alice, &bob).await;
-		send(&dialed.producer, b"ping");
-		assert_eq!(
-			recv(&mut accepted.consumer.ordered()).await,
-			b"ping",
-			"{dialer} to {acceptor}"
-		);
-	}
+	let (dialed, accepted) = connect_track(&alice, &bob).await;
+	send(&dialed.producer, b"ping");
+	assert_eq!(recv(&mut accepted.consumer.ordered()).await, b"ping");
 }
 
 /// Mallory, a client, may dial every server, so she can ask bob for a session in alice's

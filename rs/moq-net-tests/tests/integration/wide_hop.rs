@@ -16,25 +16,23 @@ fn produce(hop: u64) -> origin::Producer {
 	producer.with_proxy(true)
 }
 
-/// A draft-18 peer declaring `u64::MAX` keeps its session and its place in the path.
-/// Forwarded on, the hop becomes 0 on lite-06's QUIC varint, while the relay's own hop
-/// still follows it. Lite-07 carries no hop chain: a claim names its origin node.
+/// A `u64::MAX` hop keeps its session and its place in the path: it becomes 0 on
+/// lite-06's QUIC varint, while the relay's own hop still follows it. Lite-07 carries
+/// no hop chain: a claim names its origin node. moq-transport carries none either.
 #[kio::test]
 async fn widest_hop_crosses_each_varint_form() {
-	for (downstream, forwarded) in [("moq-lite-06", 0)] {
-		let source = produce(u64::MAX);
-		let relay = produce(2);
-		let sink = produce(3);
-		let upstream: Version = "moq-transport-18".parse().unwrap();
-		let _upstream = peer(upstream, &source, &relay).await;
-		let _downstream = peer(downstream.parse().unwrap(), &relay, &sink).await;
-		let _route = source.claim("room", moq_net::origin::RouteOptions::default()).unwrap();
-		kio::clock::sim::idle().await;
+	let version: Version = "moq-lite-06".parse().unwrap();
+	let source = produce(u64::MAX);
+	let relay = produce(2);
+	let sink = produce(3);
+	let _upstream = peer(version, &source, &relay).await;
+	let _downstream = peer(version, &relay, &sink).await;
+	let _route = source.claim("room", moq_net::origin::RouteOptions::default()).unwrap();
+	kio::clock::sim::idle().await;
 
-		let ids = |route: origin::RouteInfo| moq_net::fuzz::route_hops(&route);
-		let at_relay = crate::support::announced(&relay.consume(), "room").await;
-		assert_eq!(ids(at_relay), [u64::MAX], "{downstream}");
-		let at_sink = crate::support::announced(&sink.consume(), "room").await;
-		assert_eq!(ids(at_sink), [forwarded, 2], "{downstream}");
-	}
+	let ids = |route: origin::RouteInfo| moq_net::fuzz::route_hops(&route);
+	let at_relay = crate::support::announced(&relay.consume(), "room").await;
+	assert_eq!(ids(at_relay), [0]);
+	let at_sink = crate::support::announced(&sink.consume(), "room").await;
+	assert_eq!(ids(at_sink), [0, 2]);
 }

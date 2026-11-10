@@ -261,7 +261,15 @@ async fn spawn_ws_relay_with(
 	let mut web_config = web::Config::default();
 	web_config.ws = true;
 	web_config.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
+	// Opt in to lite-07 beside the defaults, as `spawn_relay_config` does.
+	let mut listen = moq_tokio::listen::Config::default();
+	listen.version = moq_net::Versions::all()
+		.iter()
+		.copied()
+		.chain(["moq-lite-07-wip".parse().unwrap()])
+		.collect();
 	let web = web::Web::new(auth, cluster, crate::certificates(), web_config)
+		.with_listen(&listen)
 		.bind()
 		.expect("bind web listener");
 	let port = web.addrs().http.expect("HTTP listener is configured").port();
@@ -1889,7 +1897,8 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 }
 
 /// A token can reach a prefix outside the initial credential, and withdrawing it
-/// revokes only the streams that depended on it on both native and upgraded WS.
+/// revokes only the streams that depended on it on both native and upgraded WS. Only
+/// lite-07 carries a token in band.
 #[cfg(feature = "websocket")]
 #[tokio::test]
 async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
@@ -1905,7 +1914,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		};
 		let client = || {
 			let mut config = moq_tokio::connect::Config::default();
-			config.version = vec!["moq-transport-22".parse().unwrap()];
+			config.version = vec!["moq-lite-07-wip".parse().unwrap()];
 			#[cfg(feature = "websocket")]
 			{
 				config.websocket.delay = Some((Duration::ZERO).into());
