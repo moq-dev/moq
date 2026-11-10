@@ -189,6 +189,7 @@ export namespace Connection {
 		timeout?: Clock.Duration;
 		tokens?: readonly string[] | Signals.Signal<readonly string[]>;
 		transport?: never;
+		unsolicited?: boolean;
 		url?: URL | Signals.Signal<URL | undefined>;
 		versions?: readonly string[] | Signals.Signal<readonly string[] | undefined>;
 		websocket?: Connection.WebSocketProps;
