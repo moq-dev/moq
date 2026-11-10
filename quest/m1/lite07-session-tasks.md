@@ -14,7 +14,7 @@ Planned 2026-11-10 (maintainer, /quest-complete follow-up of
 ✅ m1 (rejected: m2 routes epic, m0, dropping it), since relays run lite-07
 in production now.
 
-#8397's `session_announce` bench found 18 tasks still alive in the
+#8397's `session_delivery_broadcasts` bench found 18 tasks still alive in the
 16-viewer delivery cell after a lite-07 room dropped, against 0 on lite-06:
 about one per session. The per-cell runtimes from
 [moq-dev/moq#8352](https://github.com/moq-dev/moq/pull/8352) hid this. The

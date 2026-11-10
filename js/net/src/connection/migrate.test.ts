@@ -245,6 +245,43 @@ test("a redirect moves the pool key while the handle keeps its origin", async ()
 	}
 });
 
+// Replays RedialsALiveRelay in js/watch/verify/Failover.tla under Redirect.cfg: a redirect is
+// sticky, so once the relay it named dies, every redial goes back to that dead relay and never
+// to the configured URL, which still answers.
+test("residual: a redirected connection redials only its dead target", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const { dials } = fleet();
+	const accepting = globalThis.WebTransport;
+	const attempts: string[] = [];
+	let dead = false;
+	globalThis.WebTransport = function DyingSibling(dialed: string | URL, options?: WebTransportOptions) {
+		const href = new URL(dialed).href;
+		attempts.push(href);
+		if (dead && href === moved.href) throw new Error("connection refused");
+		return new accepting(dialed, options);
+	} as unknown as typeof WebTransport;
+	const reload = new Reload({ url, websocket: { enabled: false }, delay: { initial: Duration.millis(1) } });
+
+	try {
+		await waitUntil(() => reload.status.peek() === "connected");
+		await goaway(dials[0]?.server as WebTransport, moved.href);
+		await elapse(clock, () => dials.length === 2 && reload.status.peek() === "connected");
+		expect(dials[1]?.url).toBe(moved.href);
+
+		// The relay it was sent to dies and stays down.
+		dead = true;
+		const before = attempts.length;
+		dials[1]?.server.close();
+		await elapse(clock, () => attempts.length >= before + 4);
+		expect(reload.status.peek()).not.toBe("connected");
+		expect(attempts.slice(before).every((href) => href === moved.href)).toBe(true);
+	} finally {
+		reload.close();
+		installed.close();
+	}
+});
+
 test("a redirect onto an already pooled key leaves both entries to their handles", async () => {
 	const clock = new Manual();
 	const installed = clock.install();

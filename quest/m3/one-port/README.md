@@ -93,6 +93,11 @@ dropped and counted. Decided 2026-10-13:
 the responder binds its own port ([relay STUN](/doc/bin/relay/config.md#stun)),
 so the shared port never answers public Binding requests.
 
+## Required
+
+- [WebRTC on the shared socket](/quest/m3/one-port/rtc-feed.md) - `moq-webrtc` serves WHIP and WHEP media from the WebRTC hook and pins ICE tuples
+- [SRT on the shared socket](/quest/m3/one-port/srt-demux.md) - moq-srt drives `srt-protocol` on demuxed packets and the flow table pins its 4-tuples
+
 ## Related
 
 - [One port on the io_uring workers](/quest/m3/uring-demux.md) - the io_uring workers host the UDP demux

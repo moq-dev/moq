@@ -59,8 +59,7 @@ test("worklet modules load a lazy blob or a hosted script, leaving no child proc
 });
 
 // A page that calls assets() in dev fetches the same path a build emits, so the dev server serves it.
-// Quarantined: flaky under load, see /quest/m0/test-flakes-2/worklet-dev-server.md
-test.skip("the dev server serves hosted worklets where builds emit them", async () => {
+test("the dev server serves hosted worklets where builds emit them", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "worklet-"));
 	const server = await createServer({
 		configFile: false,
