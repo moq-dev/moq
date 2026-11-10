@@ -5,7 +5,7 @@
  * `../analyze.ts` is the command that feeds it a run directory.
  *
  * Adapted from `debug-findings/analysis/analyze.mjs` on the reporter's fork (`fperex/moq`, branch
- * `debug/rt-audio`), whose skip-ahead rule and per-minute normalisation this keeps. The event stream
+ * `debug/rt-audio`), whose per-minute normalisation this keeps. The event stream
  * it read came from probes patched into the player; this reads public signals and the output tap.
  *
  * @module
@@ -48,12 +48,6 @@ export type Input = {
  */
 export const STALL_SLACK_MS = 60;
 
-/** A step in the de-trended playhead lag larger than this is a skip-ahead. See {@link skipAheads}. */
-export const SKIP_MS = 40;
-
-/** Samples either side of a candidate skip reduced to a median before it is judged. */
-export const SKIP_WINDOW = 4;
-
 const median = (values: number[]): number | undefined => {
 	if (values.length === 0) return undefined;
 	const sorted = [...values].sort((a, b) => a - b);
@@ -83,32 +77,22 @@ export function slope(xs: number[], ys: number[]): number | null {
 }
 
 /**
- * Forward steps in the lag between the viewer clock and the playhead, and the media they skipped.
- *
- * `lags` is the de-trended `at - timestamp` per sample, undefined where there was no playhead or the
- * ring was stalled. The playhead a page reads is quantized (it moves 240 to 296 ms per 250 ms sample
- * on a clean path), so one sample's excess is noise: a skip is a step between the medians either side
- * of a sample, larger than {@link SKIP_MS}, which is more than that band and more than one estimator
- * bucket plus a render quantum.
+ * The longest run of samples spent away from rest, in ms: from the first away sample to the next
+ * one back. A run still open at the end lasts to the last sample.
  */
-export function skipAheads(lags: (Ms | undefined)[]): { count: number; ms: Ms } {
-	let count = 0;
-	let ms = 0;
-	const defined = (slice: (Ms | undefined)[]) => slice.filter((l): l is Ms => l !== undefined);
-	for (let i = SKIP_WINDOW; i < lags.length - SKIP_WINDOW; i++) {
-		if (lags[i] === undefined) continue;
-		const before = median(defined(lags.slice(i - SKIP_WINDOW, i)));
-		const after = median(defined(lags.slice(i + 1, i + 1 + SKIP_WINDOW)));
-		if (before === undefined || after === undefined) continue;
-		const jumped = before - after;
-		if (jumped > SKIP_MS) {
-			count++;
-			ms += jumped;
-			// One step is one skip, and the trailing window straddles it for several samples.
-			i += SKIP_WINDOW;
+export function longestAway(samples: { at: Ms; away: boolean }[]): Ms {
+	let longest = 0;
+	let since: Ms | undefined;
+	for (const { at, away } of samples) {
+		if (away) since ??= at;
+		else if (since !== undefined) {
+			longest = Math.max(longest, at - since);
+			since = undefined;
 		}
 	}
-	return { count, ms };
+	const end = samples.at(-1)?.at;
+	if (since !== undefined && end !== undefined) longest = Math.max(longest, end - since);
+	return longest;
 }
 
 /**
@@ -213,12 +197,11 @@ export function analyze(input: Input): Summary {
 	const accelerated = rise((s) => s.accelerated);
 
 	// ── the playhead ────────────────────────────────────────────────────────
-	// The lag drifts when the media timeline does not run at wall rate, a property of the source
-	// rather than the player. Fitted and removed first, or it reads as a skip every few seconds.
-	// A least-squares fit would read a skip itself as drift and hide part of it, so the rate is the
-	// median slope across spans of two skip windows, which a step contaminates only a few of.
+	// The media clock's rate against the viewer's, a property of the source rather than the player.
+	// A least-squares fit would read a skip as drift, so the rate is the median slope across spans of
+	// eight samples, which a step contaminates only a few of.
 	const playing = window.filter((s) => s.timestamp !== undefined && !s.stalled);
-	const reach = 2 * SKIP_WINDOW;
+	const reach = 8;
 	const mediaRate =
 		median(
 			playing.slice(reach).map((s, i) => {
@@ -226,13 +209,24 @@ export function analyze(input: Input): Summary {
 				return (s.at - (s.timestamp as Ms) - (from.at - (from.timestamp as Ms))) / (s.at - from.at);
 			}),
 		) ?? null;
-	const base = playing[0]?.at ?? 0;
-	const lags = window.map((s) =>
-		s.timestamp === undefined || s.stalled ? undefined : s.at - s.timestamp - (mediaRate ?? 0) * (s.at - base),
-	);
-	const skips = skipAheads(lags);
 	// Both on the media clock, read at one instant, so no reduction to the viewer's is needed.
-	const behind = playing.flatMap((s) => (s.clock === undefined ? [] : [s.clock - (s.timestamp as Ms)]));
+	const lagOf = (s: Sample) => (s.clock === undefined || s.timestamp === undefined ? undefined : s.clock - s.timestamp);
+	const behind = playing.flatMap((s) => {
+		const lag = lagOf(s);
+		return lag === undefined ? [] : [lag];
+	});
+	// Rest is the window's median lag, not zero: a player may settle a little either side of the clock,
+	// and how far is `av_lag_ms_p50`'s to grade. A stalled ring is off the clock however far it ran.
+	const rest = percentile(behind, 50);
+	const recover =
+		rest === null
+			? null
+			: longestAway(
+					window.map((s) => {
+						const lag = s.stalled ? undefined : lagOf(s);
+						return { at: s.at, away: s.stalled === true || (lag !== undefined && lag > rest + BUCKET_MS) };
+					}),
+				);
 	const stalledShare = window.length > 0 ? window.filter((s) => s.stalled).length / window.length : null;
 
 	// ── the target ──────────────────────────────────────────────────────────
@@ -267,10 +261,6 @@ export function analyze(input: Input): Summary {
 		player_underruns_per_min: playerUnderruns === null ? null : perMin(playerUnderruns),
 		player_skips_total: playerSkips,
 		player_skips_per_min: playerSkips === null ? null : perMin(playerSkips),
-		skip_aheads_total: skips.count,
-		skip_aheads_per_min: perMin(skips.count),
-		discarded_ms_total: round(skips.ms),
-		discarded_ms_per_min: perMin(skips.ms),
 		trimmed_ms_total: round(trimmed),
 		trimmed_ms_per_min: trimmed === null ? null : perMin(trimmed),
 		accelerated_ms_total: round(accelerated),
@@ -279,6 +269,7 @@ export function analyze(input: Input): Summary {
 		silence_share: round(silence, 3),
 		av_lag_ms_p50: round(percentile(behind, 50)),
 		av_lag_ms_p95: round(percentile(behind, 95)),
+		recover_ms_max: round(recover),
 		target_ms_p50: round(percentile(targets, 50)),
 		target_ms_p95: round(percentile(targets, 95)),
 		target_ms_max: round(percentile(targets, 100)),
