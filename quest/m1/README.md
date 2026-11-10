@@ -48,6 +48,10 @@ moves what remains of them once their claims merge.
 - [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - every ordering on 4-5 relay meshes with two origins and clients, with an announce budget and convergence
 - [Seeded lite-07 meshes hold the route rules and an announce budget](/quest/m1/route-mesh-sweep.md) - the route rules and message budget checked on real sessions over random meshes
 - [A model of a relay chain's failover delivers every group once](/quest/m1/failover-chain-model.md) - route, resume, and subscribe composed across a relay chain whose hops fail
+- [Route sweeps are checked against the TLA+ model](/quest/m1/route-trace-validation.md) - each `sweep_handoff` run is a behaviour of `RouteHandoff.tla`, with a trace format the other models reuse
+- [The route rules hold from any state, not only the runs TLC reaches](/quest/m1/route-inductive.md) - Apalache checks an inductive invariant behind the route rules on meshes of up to five relays
+- [A symbolic model proves a route key proof binds to its session and side](/quest/m1/route-key-model.md) - Tamarin proves no replay, reflection, or relaying of lite-07's Route Key Parameter, and gates the cut
+- [A hostile peer's session cannot panic, leak, or disturb another broadcast](/quest/m1/session-fuzz.md) - whole-session fuzz targets for moq-lite and moq-transport with a bystander broadcast as the oracle
 - [A reused moq-transport alias refuses its track at once](/quest/m1/ietf-alias-refuse.md) - a SUBSCRIBE_OK on an alias already bound fails its readers and removes its entry without waiting on the peer's FIN acknowledgement
 - [Unused crates, scripts, and files are deleted](/quest/m1/unused-code.md) - moq-room, the moq-native tombstone, demo/throttle, sh/dart/publish.sh, demo/web's Solid deps, and unpublished packages' release notes go
 - [The CARLA bridge builds outside the root workspace](/quest/m1/carla-workspace.md) - workspace builds stop compiling the demo bridge
