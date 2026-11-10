@@ -122,7 +122,7 @@ describe("Tail", () => {
 	function tail(grace = GRACE) {
 		const clock = new Manual();
 		installed = clock.install();
-		const at = (to: Duration) => clock.jump(Instant.ZERO.add(to).since(clock.now()));
+		const at = (to: Duration) => clock.jump(Instant.ZERO.saturatingAdd(to).since(clock.now()));
 		return { at, clock, tail: new Tail({ grace: () => grace }) };
 	}
 

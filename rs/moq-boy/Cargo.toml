@@ -10,6 +10,7 @@ categories = ["multimedia::video", "emulators", "network-programming"]
 version = "0.5.12"
 edition = "2024"
 rust-version.workspace = true
+publish = false
 
 [[bin]]
 name = "moq-boy"

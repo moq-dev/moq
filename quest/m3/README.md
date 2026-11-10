@@ -181,7 +181,7 @@ federation) land.
 - [A published capture exposes its bandwidth grant](/quest/m3/video-publish-grant.md) - a moq-video publish shows each track's granted bitrate, not only its target
 - [The test relay can enable stats](/quest/m3/relay-test-stats.md) - `moq_relay::test_relay` starts with stats on when asked
 - [macOS capture listing futures are Send](/quest/m3/capture-shareable-send.md) - ScreenCaptureKit listing and start no longer hold a non-Send block across an await
-- [A capture listing a picker can draw](/quest/m3/capture-list.md) - windows grouped by app with icons, camera kinds, low-rate pictures, and a wait for changes on macOS, Windows, and X11, for moq-dev/studio's Add page
+- [A capture listing a picker can draw](/quest/m3/capture-list.md) - windows grouped by app with icons and placed on their displays, camera kinds, low-rate pictures, and a wait for changes on macOS, Windows, and X11, for moq-dev/studio's Add page
 - [Denied macOS system audio names its settings pane](/quest/m3/audio-system-denied-hint.md) - a permission error pointing at Screen & System Audio Recording
 - [One encoder follows several connections' estimates](/quest/m3/bandwidth-multi-connection.md) - a track published to two relays tracks both estimates
 - [Bandwidth reservations ignore in-process readers](/quest/m3/reservation-local-readers.md) - a local recorder no longer counts as uplink demand
@@ -199,3 +199,8 @@ federation) land.
 - [A room keeps a participant while one of its aliases is announced](/quest/m3/room-alias-withdraw.md) - withdrawing `camera` while `camera.hang` stays announced keeps the participant
 - [@moq/auth key derivation and key sets validate like single keys](/quest/m3/auth-key-validation.md) - `Key.public` shares no scope and never yields an invalid key, and key sets and Rust refuse mismatched keys at parse
 - [Binding server helpers observe session errors and describe close truthfully](/quest/m3/serve-session-errors.md) - Python retrieves session task errors, and the Kotlin, Go, and Dart docs say close ends every connection
+- [A GOAWAY to a draining fallback session is followed](/quest/m3/reconnect-probe-redirect.md) - a redirect that reaches a draining fallback session is not lost
+- [A connection reports Migrating while its predecessor still serves](/quest/m3/reconnect-predecessor-status.md) - Disconnected means nothing serves
+- [A group read to its FIN stays finished across updates](/quest/m3/lite-finished-across-updates.md) - a lite-07 subscriber never records a group it got whole as stale
+- [A dead redirect target falls back to the configured relay](/quest/m3/net-redirect-fallback.md) - `@moq/net` stops redialing a dead redirect target
+- [Room participants survive your own connection blip](/quest/m3/room-keep-through-blip.md) - remote participants stay on screen across the local user's reconnect

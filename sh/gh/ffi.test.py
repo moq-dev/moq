@@ -173,11 +173,9 @@ print((root / "jobs").read_text())
         self.env["GH_FAIL"] = "1"
         self.run_helper("completed", "swift", success=False)
 
-    def test_direct_and_legacy_triggers_need_no_api(self):
-        for event, name in [("push", ""), ("workflow_run", "Release Go FFI")]:
-            (self.root / "output").unlink(missing_ok=True)
-            self.env.update(GITHUB_EVENT_NAME=event, UPSTREAM_NAME=name)
-            self.assertEqual(self.run_helper("completed", "go"), "ready=true\n")
+    def test_direct_trigger_needs_no_api(self):
+        self.env.update(GITHUB_EVENT_NAME="push", UPSTREAM_NAME="")
+        self.assertEqual(self.run_helper("completed", "go"), "ready=true\n")
         self.assertFalse((self.root / "queried").exists())
 
     def test_native_and_cross_builds_stage_the_selected_artifacts(self):

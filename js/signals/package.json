@@ -12,7 +12,6 @@
 	"sideEffects": false,
 	"exports": {
 		".": "./src/index.ts",
-		"./solid": "./src/solid.ts",
 		"./react": "./src/react.ts",
 		"./dom": "./src/dom.ts"
 	},
@@ -30,22 +29,17 @@
 		"fast-check": "^4.10.2",
 		"react": "^19.3.1",
 		"react-dom": "^19.3.1",
-		"solid-js": "^1.9.18",
 		"typescript": "7.0.2"
 	},
 	"peerDependencies": {
 		"@types/react": "^19.2.17",
-		"react": "^19.3.1",
-		"solid-js": "^1.9.15"
+		"react": "^19.3.1"
 	},
 	"peerDependenciesMeta": {
 		"@types/react": {
 			"optional": true
 		},
 		"react": {
-			"optional": true
-		},
-		"solid-js": {
 			"optional": true
 		}
 	},
