@@ -62,6 +62,8 @@ hang = { path = "../hang", features = ["async"] }
 kio = { workspace = true, features = ["sim"] }
 # Compile the async API used by the tests, benches, and examples.
 moq-mux = { path = ".", features = ["async"] }
+# Mints an instance for a test, as a session of an older wire does.
+moq-net = { path = "../moq-net", features = ["fuzz"] }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }

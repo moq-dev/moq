@@ -325,12 +325,15 @@ impl Client {
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				node: None,
 				// Older versions carry the credential in the URL query instead.
 				token: self.setup_token.clone().filter(|_| version.has_auth()),
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
 				// Filled by `lite::start` from the attached origin handles.
 				route_key: None,
+				// Filled by `lite::start` from the version.
+				lite06_chain: false,
 			}
 		} else {
 			lite::Setup::default()

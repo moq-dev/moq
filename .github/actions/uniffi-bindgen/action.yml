@@ -21,7 +21,7 @@ runs:
         case "$GENERATOR" in
           cpp)
             repo=https://github.com/kixelated/uniffi-bindgen-cpp
-            rev=a5a1ac411772b3f589859edf50aef7bc7538100b # v0.11.0-kixelated.7+v0.32.2
+            rev=6ea9f9bb764e2f9e753ff2bb623e899598df7960 # v0.11.0-kixelated.8+v0.32.2
             ;;
           go)
             repo=https://github.com/kixelated/uniffi-bindgen-go

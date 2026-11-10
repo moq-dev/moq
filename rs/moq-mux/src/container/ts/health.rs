@@ -1147,7 +1147,7 @@ mod test {
 			health.packet(
 				(&*feed.last_packet()).try_into().unwrap(),
 				super::Continuation::Contiguous,
-				at(i + 1, start + std::time::Duration::from_millis(ms)),
+				at(i + 1, start.saturating_add(std::time::Duration::from_millis(ms))),
 			);
 			health.flush();
 		}
@@ -1331,7 +1331,10 @@ mod test {
 			health.packet(
 				(&*feed.last_packet()).try_into().unwrap(),
 				super::Continuation::Broken,
-				at(count as u64 + 1, start + std::time::Duration::from_millis(ms)),
+				at(
+					count as u64 + 1,
+					start.saturating_add(std::time::Duration::from_millis(ms)),
+				),
 			);
 			health.flush();
 		}

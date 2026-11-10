@@ -210,7 +210,7 @@ impl EnabledMtuDiscovery {
 				state.last_probed_mtu = probe_udp_payload_size;
 				return Some(probe_udp_payload_size);
 			} else {
-				let next_mtud_activation = now + self.config.interval;
+				let next_mtud_activation = now.saturating_add(self.config.interval);
 				self.phase = Phase::Complete(next_mtud_activation);
 				return None;
 			}
@@ -245,7 +245,7 @@ impl EnabledMtuDiscovery {
 	/// Called when a black hole is detected
 	fn on_black_hole_detected(&mut self, now: Instant) {
 		// Stop searching, if applicable, and reset the timer
-		let next_mtud_activation = now + self.config.black_hole_cooldown;
+		let next_mtud_activation = now.saturating_add(self.config.black_hole_cooldown);
 		self.phase = Phase::Complete(next_mtud_activation);
 	}
 }
@@ -620,7 +620,7 @@ mod tests {
 		assert!(mtud.black_hole_detected(now));
 		assert_eq!(mtud.current_mtu, 1200);
 		if let Phase::Complete(next_mtud_activation) = mtud.state.unwrap().phase {
-			assert_eq!(next_mtud_activation, now + Duration::from_secs(60));
+			assert_eq!(next_mtud_activation, now.saturating_add(Duration::from_secs(60)));
 		} else {
 			panic!("Unexpected MTUD phase!");
 		}
@@ -642,7 +642,10 @@ mod tests {
 		assert_eq!(mtud.current_mtu, 1_471);
 
 		// Polling after the interval has passed does (taking the current mtu as lower bound)
-		assert_eq!(mtud.poll_transmit(now + Duration::from_secs(600), 43), Some(5235));
+		assert_eq!(
+			mtud.poll_transmit(now.saturating_add(Duration::from_secs(600)), 43),
+			Some(5235)
+		);
 
 		match mtud.state.unwrap().phase {
 			Phase::Searching(state) => {

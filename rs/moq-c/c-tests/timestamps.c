@@ -107,7 +107,7 @@ int main(void) {
     // A JSON write is never stamped for you.
     CHECK(moq_publish_json_stream_append((uint32_t)json, doc, strlen(doc), NULL) == MOQ_ERROR_INVALID_POINTER);
 
-    CHECK(moq_origin_request((uint32_t)origin, path, strlen(path), NULL, 0, on_broadcast, &c) > 0);
+    CHECK(moq_origin_request((uint32_t)origin, path, strlen(path), 0, on_broadcast, &c) > 0);
     WAIT_FOR(&c, c.broadcast);
     int32_t frames = moq_consume_track((uint32_t)c.broadcast, "ticks", 5, NULL, on_frame, &c);
     CHECK(frames > 0);

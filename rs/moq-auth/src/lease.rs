@@ -253,7 +253,7 @@ impl Producer {
 		let base = Duration::from_secs(1) * 2u32.saturating_pow(clock.failures.saturating_sub(1).min(16));
 		let base = base.min(clock.cadence.unwrap_or(BACKOFF_MAX)).min(BACKOFF_MAX);
 		let delay = base.mul_f64(kio::clock::rng().random_range(0.75..=1.25));
-		clock.next = Some(kio::clock::now() + delay);
+		clock.next = Some(kio::clock::now().saturating_add(delay));
 		delay
 	}
 

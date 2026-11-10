@@ -92,7 +92,7 @@ impl Publisher {
 		self.prune()?;
 		self.producer
 			.push(moq_net::Timed::from(&text.to_owned()).at(moq_net::Timestamp::now()))?;
-		self.expires.push_back(kio::clock::now() + HISTORY);
+		self.expires.push_back(kio::clock::now().saturating_add(HISTORY));
 		Ok(())
 	}
 

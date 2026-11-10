@@ -49,8 +49,7 @@ unsignalled holes on a live moq-transport SUBSCRIBE:
   `Ordered`/`max_delay`.
 - No FETCH to learn whether a hole will fill: it races the live
   subscription. No inference from later groups, and no grace periods.
-- Build this extension when an IETF client wants it; until then this quest
-  waits on that demand.
+- Build this extension when an IETF client wants it (see Waiting).
 
 Only peers that implement the extension benefit, which today means our own
 Rust and JS moq-transport stacks. Our own peers talk moq-lite to each other,
@@ -76,6 +75,12 @@ the extension is unchanged.
 
 Public API: none. Wire: a new negotiated SETUP option and its drop message.
 Our publishers answer multi-group FETCH and fills over known caches.
+
+## Waiting
+
+- IETF clients: a third-party moq-transport implementation asks for hole
+  markers or would adopt the extension. Check moq-dev/moq issues and the
+  interop runner's participants for such a request.
 
 ## Related
 

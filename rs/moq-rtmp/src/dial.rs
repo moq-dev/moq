@@ -561,13 +561,13 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			catalog,
-			media_deadline: kio::clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT,
+			media_deadline: kio::clock::Instant::now().saturating_add(crate::server::PUBLISH_IDLE_TIMEOUT),
 			route,
 		})
 	}
 
 	fn push(&mut self, tag_type: u8, timestamp: u32, body: &Bytes) -> anyhow::Result<()> {
-		self.media_deadline = kio::clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT;
+		self.media_deadline = kio::clock::Instant::now().saturating_add(crate::server::PUBLISH_IDLE_TIMEOUT);
 		flv::import(&mut self.importer, tag_type, timestamp, body)
 	}
 

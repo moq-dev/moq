@@ -253,7 +253,7 @@ mod tests {
 			assert!(poll_once(&mut sleep).is_pending());
 			clock.advance(Duration::from_millis(1));
 			sleep.await;
-			assert_eq!(crate::clock::now(), start + Duration::from_secs(1));
+			assert_eq!(crate::clock::now(), start.saturating_add(Duration::from_secs(1)));
 		});
 	}
 
@@ -275,7 +275,10 @@ mod tests {
 		});
 		armed_rx.recv().unwrap();
 		clock.advance(Duration::from_secs(5));
-		assert_eq!(runtime.block_on(task).unwrap(), Instant::ZERO + Duration::from_secs(5));
+		assert_eq!(
+			runtime.block_on(task).unwrap(),
+			Instant::ZERO.saturating_add(Duration::from_secs(5))
+		);
 	}
 
 	/// Resetting a timer re-arms it at the new deadline.
@@ -286,7 +289,9 @@ mod tests {
 		runtime.block_on(async {
 			let mut sleep = pin!(crate::clock::sleep(Duration::from_secs(1)));
 			assert!(poll_once(&mut sleep).is_pending());
-			sleep.as_mut().reset(Instant::ZERO + Duration::from_secs(2));
+			sleep
+				.as_mut()
+				.reset(Instant::ZERO.saturating_add(Duration::from_secs(2)));
 			clock.advance(Duration::from_secs(1));
 			assert!(poll_once(&mut sleep).is_pending());
 			clock.advance(Duration::from_secs(1));
@@ -317,7 +322,7 @@ mod tests {
 			let counter = std::sync::Arc::new(Wakes(Default::default()));
 			let waker = Waker::from(counter.clone());
 			let mut cx = Context::from_waker(&waker);
-			let at = Instant::ZERO + Duration::from_secs(10);
+			let at = Instant::ZERO.saturating_add(Duration::from_secs(10));
 			let mut sleep = pin!(crate::clock::sleep(Duration::from_secs(10)));
 			assert!(sleep.as_mut().poll(&mut cx).is_pending());
 
@@ -327,7 +332,7 @@ mod tests {
 			}
 			assert_eq!(wakes(&counter), 0, "a same-deadline reset woke the task");
 
-			let earlier = Instant::ZERO + Duration::from_secs(2);
+			let earlier = Instant::ZERO.saturating_add(Duration::from_secs(2));
 			sleep.as_mut().reset(earlier);
 			assert_eq!(wakes(&counter), 1, "an earlier reset left the task parked");
 			assert!(sleep.as_mut().poll(&mut cx).is_pending());
@@ -350,7 +355,10 @@ mod tests {
 		assert_eq!(crate::clock::wall(), Manual::WALL_START + Duration::from_secs(5));
 		clock.step_wall(Manual::WALL_START);
 		assert_eq!(crate::clock::wall(), Manual::WALL_START);
-		assert_eq!(crate::clock::now(), Instant::ZERO + Duration::from_secs(5));
+		assert_eq!(
+			crate::clock::now(),
+			Instant::ZERO.saturating_add(Duration::from_secs(5))
+		);
 		assert_eq!(
 			crate::clock::origin(),
 			(Instant::ZERO, Manual::WALL_START),
@@ -365,7 +373,7 @@ mod tests {
 		let _clock = Manual::new().install(installed.handle());
 		let other = runtime(false);
 		// The host clock reads far past zero from its first instant.
-		let host = Instant::ZERO + Duration::from_secs(1 << 31);
+		let host = Instant::ZERO.saturating_add(Duration::from_secs(1 << 31));
 		assert!(other.block_on(async { crate::clock::now() }) > host);
 		assert!(crate::clock::now() > host);
 		assert_eq!(installed.block_on(async { crate::clock::now() }), Instant::ZERO);
@@ -378,11 +386,11 @@ mod tests {
 		let clock = Manual::new().install(runtime.handle());
 		assert_eq!(
 			clock.advance(Duration::from_secs(1)),
-			Some(Instant::ZERO + Duration::from_secs(1))
+			Some(Instant::ZERO.saturating_add(Duration::from_secs(1)))
 		);
 		// The wall clock starts in 2025, so it runs out first.
 		assert_eq!(clock.advance(Duration::from_nanos(u64::MAX - 1_000_000_000)), None);
-		assert_eq!(clock.now(), Instant::ZERO + Duration::from_secs(1));
+		assert_eq!(clock.now(), Instant::ZERO.saturating_add(Duration::from_secs(1)));
 		assert_eq!(clock.wall(), Manual::WALL_START + Duration::from_secs(1));
 	}
 

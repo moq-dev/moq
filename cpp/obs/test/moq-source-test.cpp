@@ -1585,7 +1585,7 @@ int main()
 			// A different stream than the one the rendition pins, hidden until announced.
 			moq::RouteOptions options;
 			options.hidden = true;
-			options.instance = "obs-test-other";
+			options.instance = TestOk(moq::Instance::parse("obs-test-other"), "instance");
 			hidden = TestOk(relay.origin->route("obs/hidden", options), "unannounced sibling");
 			config.broadcast = "./hidden";
 			config.instance = "obs-test-pinned";

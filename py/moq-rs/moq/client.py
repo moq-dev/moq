@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import timedelta
+from typing import NamedTuple
 
 from moq_ffi import (
     MoqClient,
@@ -17,8 +18,18 @@ from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _implemen
 from .origin import AnnounceConsumer, Following, OriginConsumer, OriginProducer, Route
 from .session import Session
 from .subscribe import BroadcastConsumer
+from .types import Instance
 
 CongestionControl = MoqCongestionControl
+
+
+class _Connected(NamedTuple):
+    """A client's connection, set by entering it and cleared by exiting."""
+
+    inner: MoqClient
+    session: Session
+    publisher: OriginProducer
+    consumer: OriginConsumer
 
 
 def versions() -> list[str]:
@@ -114,91 +125,82 @@ class Client:
             consume=None if consume is None else consume._inner,
         )
 
-        self._publisher: OriginProducer | None = None
-        self._consumer: OriginConsumer | None = None
-        self._inner: MoqClient | None = None
-        self._session: Session | None = None
+        # Connecting while a bare MoqClient, until exit.
+        self._state: MoqClient | _Connected | None = None
 
     async def __aenter__(self):
-        self._inner = MoqClient(self._config)
+        if self._state is not None:
+            raise RuntimeError("client already entered; exit it before entering again")
+        inner = MoqClient(self._config)
+        self._state = inner
         try:
-            self._session = Session(await self._inner.connect(self._url))
+            session = Session(await inner.connect(self._url))
+            # The session always exposes both sides, wired from the origins above or
+            # auto-created, so publishing and discovery always have somewhere to go.
+            self._state = _Connected(inner, session, session.publish(), session.consume())
         except BaseException:
-            self._inner.cancel()
-            self._inner = None
+            self._state = None
+            inner.cancel()
             raise
-
-        # The session always exposes both sides, wired from the origins above or
-        # auto-created, so publishing and discovery always have somewhere to go.
-        self._publisher = self._session.publish()
-        self._consumer = self._session.consume()
-
         return self
 
     async def __aexit__(self, *exc) -> None:
-        self._publisher = None
-        self._consumer = None
+        state = self._state
+        if not isinstance(state, _Connected):
+            return
         try:
-            if self._session is not None:
-                # A body error is the failure worth reporting. Draining behind it would
-                # wait out the deadline and replace it with a delivery timeout. Cancel
-                # rather than skip: dropping the last session closes the transport, so
-                # one the caller kept a reference to would otherwise stay open.
-                if exc[0] is None:
-                    self._session.shutdown()
-                    await self._session.closed()
-                else:
-                    self._session.cancel(0)
+            # A body error is the failure worth reporting. Draining behind it would
+            # wait out the deadline and replace it with a delivery timeout. Cancel
+            # rather than skip: dropping the last session closes the transport, so
+            # one the caller kept a reference to would otherwise stay open.
+            if exc[0] is None:
+                state.session.shutdown()
+                await state.session.closed()
+            else:
+                state.session.cancel(0)
         finally:
-            self._session = None
-            if self._inner is not None:
-                self._inner.cancel()
-                self._inner = None
+            self._state = None
+            state.inner.cancel()
 
     def route(
-        self, path: str, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0
+        self, path: str, *, hidden: bool = False, cost: int = 0, instance: Instance | None = None, epoch: int = 0
     ) -> Route:
         """Create a route at ``path`` owning a broadcast to fill; hold it to keep it announced.
 
         See :meth:`OriginProducer.route`.
         """
-        return self._require_publisher().route(path, hidden=hidden, cost=cost, instance=instance, epoch=epoch)
+        return self._connected().publisher.route(path, hidden=hidden, cost=cost, instance=instance, epoch=epoch)
 
     def announced(self, prefix: str = "", *, filter: str | None = None, hidden: bool = False) -> AnnounceConsumer:
         """Async-iterate broadcasts under ``prefix`` matching an optional pattern.
 
         See :meth:`OriginConsumer.announced`.
         """
-        return self._require_consumer().announced(prefix, filter=filter, hidden=hidden)
+        return self._connected().consumer.announced(prefix, filter=filter, hidden=hidden)
 
-    def follow(self, path: str, *, instance: str | None = None) -> Following:
+    def follow(self, path: str, *, instance: Instance | None = None) -> Following:
         """Follow the broadcast at exactly ``path`` across its publisher instances.
 
         See :meth:`OriginConsumer.follow`.
         """
-        return self._require_consumer().follow(path, instance=instance)
+        return self._connected().consumer.follow(path, instance=instance)
 
-    async def request(self, path: str, *, instance: str | None = None) -> BroadcastConsumer:
+    async def request(self, path: str, *, instance: Instance | None = None) -> BroadcastConsumer:
         """Request the broadcast at ``path``, resolving one publisher instance as soon as it can be served.
 
         See :meth:`OriginConsumer.request`.
         """
-        return await self._require_consumer().request(path, instance=instance)
+        return await self._connected().consumer.request(path, instance=instance)
 
-    def _require_publisher(self) -> OriginProducer:
-        if self._publisher is None:
+    def _connected(self) -> _Connected:
+        if not isinstance(self._state, _Connected):
             raise RuntimeError("not connected; use the client as an async context manager")
-        return self._publisher
-
-    def _require_consumer(self) -> OriginConsumer:
-        if self._consumer is None:
-            raise RuntimeError("not connected; use the client as an async context manager")
-        return self._consumer
+        return self._state
 
     @property
     def session(self) -> Session | None:
         """The connecting or connected session, or `None` before connecting / after exit."""
-        return self._session
+        return self._state.session if isinstance(self._state, _Connected) else None
 
 
 def connect(

@@ -707,6 +707,92 @@ async fn mixed_version_ring_withdraw_retracts() {
 	}
 }
 
+/// Relays peered over `links`, each moq-lite-06 or moq-lite-07: broadcasts announced at
+/// relay `publisher` start at every relay, and once withdrawn end at every one.
+///
+/// A claim crossing from lite-06 into lite-07 at one relay and back out at another
+/// must still name the first, or the two keep re-originating each other's copy after
+/// its source left. Such a claim circles at one instant forever, so a regression never
+/// settles here and fails on the runner's timeout instead.
+///
+/// Whether a topology loops can hang on the route identities, which are random, and
+/// selection hashes them with the path, so eight paths each draw their own tie-breaks.
+async fn assert_mixed_withdrawal(links: &[(usize, usize, &str)], publisher: usize) {
+	let n = links.iter().map(|&(a, b, _)| a.max(b) + 1).max().unwrap();
+	let relays: Vec<_> = (1..=n as u64).map(produce_origin).collect();
+	let mut pairs = Vec::new();
+	for &(a, b, version) in links {
+		pairs.push(peer(version.parse().unwrap(), &relays[a], &relays[b]).await);
+	}
+	let mut watched: Vec<_> = relays.iter().map(|relay| watch(relay.consume().routes())).collect();
+
+	let paths: Vec<String> = (0..8).map(|i| format!("room/{i}")).collect();
+	let broadcasts: Vec<_> = (paths.iter())
+		.map(|path| {
+			let broadcast = relays[publisher].route(path, origin::RouteOptions::hidden()).unwrap();
+			broadcast.announce().unwrap();
+			broadcast
+		})
+		.collect();
+	kio::clock::sim::idle().await;
+	for (relay, watched) in watched.iter_mut().enumerate() {
+		let mut updates = drain(watched);
+		for path in &paths {
+			let kinds = updates.remove(path.as_str());
+			let (first, last) = (
+				kinds.as_ref().and_then(|k| k.first()),
+				kinds.as_ref().and_then(|k| k.last()),
+			);
+			assert_eq!(first, Some(&Kind::Start), "relay {relay} {path}: {kinds:?}");
+			assert_ne!(last, Some(&Kind::End), "relay {relay} {path}: {kinds:?}");
+		}
+	}
+
+	drop(broadcasts);
+	kio::clock::sim::idle().await;
+	for (relay, watched) in watched.iter_mut().enumerate() {
+		let mut updates = drain(watched);
+		for path in &paths {
+			let kinds = updates.remove(path.as_str());
+			let last = kinds.as_ref().and_then(|kinds| kinds.last());
+			assert_eq!(last, Some(&Kind::End), "relay {relay} {path}: {kinds:?}");
+		}
+	}
+}
+
+const LITE06: &str = "moq-lite-06";
+const LITE07: &str = "moq-lite-07-wip";
+
+/// A ring alternating lite-07 and lite-06 links: A-07-B-06-C-07-D-06-A.
+#[kio::test]
+async fn alternating_version_ring_withdraw_retracts() {
+	let ring = [(0, 1, LITE07), (1, 2, LITE06), (2, 3, LITE07), (3, 0, LITE06)];
+	assert_mixed_withdrawal(&ring, 0).await;
+}
+
+/// A rolling upgrade: one relay still on lite-06, linked to each relay of a lite-07
+/// full mesh.
+const ROLLING_UPGRADE: &[(usize, usize, &str)] = &[
+	(0, 1, LITE06),
+	(0, 2, LITE06),
+	(0, 3, LITE06),
+	(1, 2, LITE07),
+	(1, 3, LITE07),
+	(2, 3, LITE07),
+];
+
+/// [`ROLLING_UPGRADE`] with the publisher on the lite-06 relay.
+#[kio::test]
+async fn rolling_upgrade_withdraw_retracts() {
+	assert_mixed_withdrawal(ROLLING_UPGRADE, 0).await;
+}
+
+/// [`ROLLING_UPGRADE`] with the publisher on a lite-07 relay.
+#[kio::test]
+async fn rolling_upgrade_from_lite07_withdraw_retracts() {
+	assert_mixed_withdrawal(ROLLING_UPGRADE, 1).await;
+}
+
 /// A relay never carries traffic between two upstreams, across versions too: a
 /// broadcast it learned from a moq-lite-06 upstream enters the route layer as one of
 /// its own claims, yet never reaches a moq-lite-07 upstream, while one published at

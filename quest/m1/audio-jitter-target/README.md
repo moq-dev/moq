@@ -97,6 +97,7 @@ native playback against its budgets.
 - [Native A/V lag](/quest/m1/audio-jitter-target/native-av-lag.md) - `moq play --metrics` reports how far audio trails its presentation clock, so native rows grade `av_lag_ms`
 - [Native rendition delay](/quest/m1/audio-jitter-target/native-rendition-delay.md) - `moq play` holds each subscribed rendition's catalog `delay` plus its target, as the browser does
 - [Chromium Opus stalled share](/quest/m1/audio-jitter-target/opus-stalled-share.md) - the Chromium Opus browser rows' stalled-share ceiling is measured with the stretch, and passes
+- [Native backpressure](/quest/m1/audio-jitter-target/native-backpressure.md) - native playback decodes audio only when the ring has room, holding the rest of the target encoded as the browser does
 
 ## Closes
 

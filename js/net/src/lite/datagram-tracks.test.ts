@@ -1,4 +1,5 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test";
+import * as clock from "@moq/clock";
 import { yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
@@ -473,9 +474,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // A track's end waits a host task for the datagrams received with it. A session close in
 // between finishes the track rather than cutting it off: the publisher already ended it.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
-	// Quarantined: fails in the merge queue with "Session: remote error: 0" (lite-06 on #8280, lite-05 on
-	// #8276 after #8321 re-enabled it). /quest/m0/test-flakes-2/datagram-close-end.md
-	test.skip(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
+	test(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");
@@ -488,13 +487,14 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		const remote = wireOf(client).consume(path);
 		const reader = remote.datagrams("audio");
 		reader.setPriority(5);
-		// The end has to reach the client before the abort, and the mock delivers it in
-		// microtasks. A write-budget yield is a host task that the drain below can't advance,
-		// so under CPU load the publisher's answer could still be stalled when the abort lands.
+		// Only the end's routing yields a host task after the finish below: the receive loop's
+		// budget never runs out here.
 		const budget = spyOn(Budget.prototype, "poll").mockImplementation(() => undefined);
+		let routing: ReturnType<typeof spyOn> | undefined;
 		// Runs even when the test times out with a wait still pending.
 		onTestFinished(() => {
 			budget.mockRestore();
+			routing?.mockRestore();
 			reader.close();
 			remote.close();
 			client.abort();
@@ -503,9 +503,15 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		});
 		await reader.info();
 		while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+		// The client marks the end taken, then waits a host task to route what arrived with it.
+		const received = Promise.withResolvers<void>();
+		const hostTask = clock.yieldNow;
+		routing = spyOn(clock, "yieldNow").mockImplementation(() => {
+			received.resolve();
+			return hostTask();
+		});
 		datagrams.finish();
-		// The mock delivers the end in microtasks, all within this host task.
-		for (let i = 0; i < 10000; i++) await Promise.resolve();
+		await received.promise;
 		client.abort();
 		expect(await reader.recv()).toBeUndefined();
 	});

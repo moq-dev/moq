@@ -13,7 +13,7 @@ before the model lands, `test/audio-quality` grades:
   regression.
 - Dropped audio is the player's own count (`trimmed_ms`, `player_skips`).
   Speeding up is not a skip.
-- No gate is fixed at zero underruns or zero stalls.
+- No row's budget is fixed at zero underruns or zero stalls.
 - A congestion row, where the path stalls for longer than the target and
   then delivers the backlog, reports the audio dropped and how long audio
   takes to return to the clock.
@@ -43,10 +43,10 @@ The gates the audit of `main` found pushing the wrong way (2026-11-09,
   `discarded_ms`).
 - The 24 browser and native rows cap underruns with no ceiling on lag. Native
   settled 60 to 88 ms behind its clock without failing one.
-- `test/audio-quality/clients/js/ptt-analyze.ts` fails on any underrun or
-  stall. [Push-to-talk latency](/quest/m1/push-to-talk-latency.md) owns that
-  change in
-  [moq-dev/moq#8364](https://github.com/moq-dev/moq/pull/8364); leave it there.
+- `test/audio-quality/clients/js/ptt-analyze.ts` failed on any underrun or
+  stall. [moq-dev/moq#8364](https://github.com/moq-dev/moq/pull/8364) made it
+  report the counts without gating them (maintainer, /quest-unblock,
+  2026-11-09), leaving their judgment to this quest.
 - The unit tests that pin the old rule belong to the model quest, which
   rewrites them with the behavior.
 
@@ -56,10 +56,11 @@ conformance corpus measures the target.
 
 Recommendations:
 
-- Replay rows stay exact. Rewrite the note to say which direction is a
-  regression: a steady-state p50 lag that rises, or audio the player
-  trimmed. A p95 lag that rises through a stall, or an underrun count that
-  moves, is not one by itself.
+- Replay rows stay exact, so any change to one still fails until it is
+  re-measured. Rewrite the note to say which re-measured moves are
+  regressions to fix rather than budget: a steady-state p50 lag that rises,
+  or audio the player trimmed. A p95 lag that rises through a stall, or an
+  underrun count that moves, is re-measured in.
 - Add the congestion case twice: a shaper profile that queues until packets
   drop, per the repository's impairment rule, and a replay trace where media
   trickles in late after a stall, which the audit of #8360 asked for.

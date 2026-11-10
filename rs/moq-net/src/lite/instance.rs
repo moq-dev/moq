@@ -5,8 +5,9 @@ use crate::{
 
 use super::Version;
 
-/// Encode the instance a request pins as its UTF-8 bytes, or empty for none. Older
-/// versions carry nothing, so the peer resolves whichever instance wins the path.
+/// Encode the instance a request pins as its UTF-8 bytes and minted flag, or empty and
+/// unminted for none. Older versions carry nothing, so the peer resolves whichever instance
+/// wins the path.
 pub(super) fn encode_pin(
 	w: &mut Encoder<'_>,
 	version: Version,
@@ -15,17 +16,25 @@ pub(super) fn encode_pin(
 	if !version.has_instance() {
 		return Ok(());
 	}
-	w.bytes(instance.map_or(&[][..], |instance| instance.as_str().as_bytes()))
+	match instance {
+		Some(instance) => encode(w, instance),
+		None => {
+			w.bytes(&[])?;
+			w.bool(false);
+			Ok(())
+		}
+	}
 }
 
-/// Decode the instance a request pins: empty is none, and anything but UTF-8 is refused.
+/// Decode the instance a request pins: empty is none, and anything but UTF-8, or an empty
+/// one flagged minted, is refused.
 pub(super) fn decode_pin(r: &mut Decoder<'_>, version: Version) -> Result<Option<Instance>, DecodeError> {
 	if !version.has_instance() {
 		return Ok(None);
 	}
-	match r.bytes()? {
-		[] => Ok(None),
-		bytes => decode(bytes).map(Some),
+	match (r.bytes()?, r.bool()?) {
+		([], false) => Ok(None),
+		(bytes, minted) => decode(bytes, minted).map(Some),
 	}
 }
 
@@ -46,9 +55,9 @@ pub(super) fn decode_node(r: &mut Decoder<'_>, version: Version) -> Result<u64, 
 	}
 }
 
-/// Encode the instance and epoch an announcement serves. Every route carries an instance,
-/// so lite-07 refuses to announce one without. Older versions carry neither, so the
-/// receiving session mints an instance of its own.
+/// Encode the instance, its minted flag, and the epoch an announcement serves. Every route
+/// carries an instance, so lite-07 refuses to announce one without. Older versions carry
+/// neither, so the receiving session mints an instance of its own.
 pub(super) fn encode_route(
 	w: &mut Encoder<'_>,
 	version: Version,
@@ -58,8 +67,7 @@ pub(super) fn encode_route(
 	if !version.has_instance() {
 		return Ok(());
 	}
-	let instance = instance.ok_or(EncodeError::InvalidState)?;
-	w.bytes(instance.as_str().as_bytes())?;
+	encode(w, instance.ok_or(EncodeError::InvalidState)?)?;
 	w.varint(epoch)
 }
 
@@ -68,15 +76,19 @@ pub(super) fn decode_route(r: &mut Decoder<'_>, version: Version) -> Result<(Opt
 	if !version.has_instance() {
 		return Ok((None, 0));
 	}
-	let instance = decode(r.bytes()?)?;
+	let instance = decode(r.bytes()?, r.bool()?)?;
 	Ok((Some(instance), r.varint()?))
 }
 
-fn decode(bytes: &[u8]) -> Result<Instance, DecodeError> {
-	std::str::from_utf8(bytes)
-		.map_err(|_| DecodeError::InvalidValue)?
-		.parse()
-		.map_err(|_| DecodeError::InvalidValue)
+fn encode(w: &mut Encoder<'_>, instance: &Instance) -> Result<(), EncodeError> {
+	w.bytes(instance.as_str().as_bytes())?;
+	w.bool(instance.is_minted());
+	Ok(())
+}
+
+fn decode(bytes: &[u8], minted: bool) -> Result<Instance, DecodeError> {
+	let text = std::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidValue)?;
+	Instance::decoded(text, minted).map_err(|_| DecodeError::InvalidValue)
 }
 
 #[cfg(test)]
@@ -97,6 +109,31 @@ mod test {
 		let instance = Instance::random();
 		assert_eq!(pin(Version::Lite07, Some(&instance)), Some(instance));
 		assert_eq!(pin(Version::Lite07, None), None);
+	}
+
+	/// The flag, not the text, says a session minted an instance: each round-trips as
+	/// itself, and a named instance that looks like the old `~` mark stays named.
+	#[test]
+	fn lite07_carries_the_minted_flag() {
+		let minted = Instance::minted();
+		let decoded = pin(Version::Lite07, Some(&minted)).unwrap();
+		assert!(decoded.is_minted());
+		assert_eq!(decoded, minted);
+		let named: Instance = "~named".parse().unwrap();
+		assert!(!pin(Version::Lite07, Some(&named)).unwrap().is_minted());
+	}
+
+	#[test]
+	fn refuses_a_bad_minted_flag() {
+		let decode = |text: &[u8], flag: u8| {
+			let mut buf = Vec::new();
+			let w = &mut Encoder::new(&mut buf, Version::Lite07.into());
+			w.bytes(text).unwrap();
+			w.u8(flag);
+			decode_pin(&mut Decoder::new(&buf, Version::Lite07.into()), Version::Lite07)
+		};
+		assert!(decode(b"a", 2).is_err());
+		assert!(decode(b"", 1).is_err(), "no instance is never minted");
 	}
 
 	#[test]
@@ -135,6 +172,7 @@ mod test {
 		let mut buf = Vec::new();
 		let w = &mut Encoder::new(&mut buf, Version::Lite07.into());
 		w.bytes(&[]).unwrap();
+		w.bool(false);
 		w.varint(0).unwrap();
 		assert!(decode_route(&mut Decoder::new(&buf, Version::Lite07.into()), Version::Lite07).is_err());
 	}
@@ -142,7 +180,9 @@ mod test {
 	#[test]
 	fn refuses_non_utf8() {
 		let mut buf = Vec::new();
-		Encoder::new(&mut buf, Version::Lite07.into()).bytes(&[0xff]).unwrap();
+		let w = &mut Encoder::new(&mut buf, Version::Lite07.into());
+		w.bytes(&[0xff]).unwrap();
+		w.bool(false);
 		assert!(decode_pin(&mut Decoder::new(&buf, Version::Lite07.into()), Version::Lite07).is_err());
 	}
 }

@@ -114,7 +114,7 @@ fn oversized_retry_token() {
 			panic!("Retry must be routed to the client connection")
 		};
 		conn.handle_event(event);
-		let now = now + Duration::from_secs(1);
+		let now = now.saturating_add(Duration::from_secs(1));
 		let crypto_before = conn.stats().frame_tx.crypto;
 		buf.clear();
 		assert_eq!(conn.transmit(now, 1, &mut buf).is_some(), fits);
