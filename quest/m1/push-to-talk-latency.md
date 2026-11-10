@@ -143,6 +143,14 @@ watch AudioContext's `latencyHint` (`"interactive"` in
   browser underruns and stalls on `kixtop` and the nightly runner, and replace
   `ptt-analyze.ts`'s zero gate with that ceiling. Check with
   `quest unblocked quest/m1/audio-jitter-target/stretch.md` and its PR.
+- Maintainer: whether to wait that long, since the model needs grading,
+  native A/V lag, and native backpressure first: (a) keep waiting, as
+  decided; (b) land with a provisional ceiling from today's player, measured
+  on `kixtop` (17 / 8) and one nightly run on the branch, and let
+  [calibrate](/quest/m1/audio-jitter-target/calibrate.md) re-measure it after
+  the model (recommended: it enforces the latency budget now and drops a zero
+  gate that [grading](/quest/m1/audio-jitter-target/grading.md) says pushes
+  the wrong way).
 
 ## Related
 
