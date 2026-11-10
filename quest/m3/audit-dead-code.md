@@ -81,7 +81,7 @@ From the 2026-10-25 run:
 - Locals and fields still named `dynamic` after the `requests()` rename
   ([moq-dev/moq#6752](https://github.com/moq-dev/moq/pull/6752)).
 
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the public-item pass runs before the cut as [api-shape](/quest/m2/api-shape/README.md)'s own work, removing this run's shortlist (`Server::serve_both`, `Catalog::to_json_pretty`, `Format::{is_planar, is_float}`); this audit keeps private code.
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the public-item pass ran before the cut as the api-shape epic's own work and removed this run's shortlist (`Server::serve_both`, `Catalog::to_json_pretty`, `Format::{is_planar, is_float}`); this audit keeps private code.
 
 ## Required
 
