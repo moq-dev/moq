@@ -92,11 +92,6 @@ This README's own work, once its children land:
   and a section on the routing concept page once the
   [routing guide](/quest/m1/routing-guide.md) has added it.
 
-## Required
-
-- [Prove cache-aware routing](/quest/m3/cache-routing/proof.md) - warm routes and the eligibility rule hold in route-layer sweeps, and the wire placement is chosen
-- [Warm routes and per-broadcast parent selection](/quest/m3/cache-routing/select.md) - relays advertise warm routes and pull each broadcast through the cheapest eligible neighbor
-
 ## Related
 
 - [Cluster routing](/quest/m2/cluster-routing/README.md) - the node routes and feasibility distances this ranks on
