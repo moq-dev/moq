@@ -18,7 +18,7 @@ use crate::clock::{Instant, Wall};
 
 /// How far past [`Instant::ZERO`] a runtime clock reads at its origin.
 ///
-/// Like std's since-boot `Instant`, so `now() - d` names a moment before the
+/// Like std's since-boot `Instant`, so `now().checked_sub(d)` names a moment before the
 /// process started instead of underflowing during its first seconds. 2^32 s
 /// (~136 years) outlasts any lookback, and leaves ~448 years of range ahead.
 const LEAD: std::time::Duration = std::time::Duration::from_secs(1 << 32);
@@ -357,13 +357,13 @@ mod tests {
 		runtime.block_on(async {
 			let start = crate::clock::now();
 			crate::clock::sleep(Duration::from_secs(5)).await;
-			assert_eq!(crate::clock::now(), start + Duration::from_secs(5));
+			assert_eq!(crate::clock::now(), start.saturating_add(Duration::from_secs(5)));
 			tokio::time::advance(Duration::from_secs(60)).await;
-			assert_eq!(crate::clock::now(), start + Duration::from_secs(65));
-			let at = crate::clock::sleep_until(start + Duration::from_secs(70));
-			assert_eq!(at.deadline(), start + Duration::from_secs(70));
+			assert_eq!(crate::clock::now(), start.saturating_add(Duration::from_secs(65)));
+			let at = crate::clock::sleep_until(start.saturating_add(Duration::from_secs(70)));
+			assert_eq!(at.deadline(), start.saturating_add(Duration::from_secs(70)));
 			at.await;
-			assert_eq!(crate::clock::now(), start + Duration::from_secs(70));
+			assert_eq!(crate::clock::now(), start.saturating_add(Duration::from_secs(70)));
 		});
 	}
 
@@ -435,7 +435,7 @@ mod tests {
 		let host = now.into_std();
 		assert!(before <= host && host <= after, "{before:?} <= {host:?} <= {after:?}");
 		assert_eq!(crate::clock::Instant::from_std(host), now);
-		let earlier = now - Duration::from_secs(3_600);
+		let earlier = now.saturating_sub(Duration::from_secs(3_600));
 		assert_eq!(crate::clock::Instant::from_std(earlier.into_std()), earlier);
 	}
 
@@ -455,7 +455,7 @@ mod tests {
 			assert_eq!(later.into_std() - host, Duration::from_secs(60));
 			assert_eq!(
 				crate::clock::Instant::from_std(host + Duration::from_secs(5)),
-				start + Duration::from_secs(5)
+				start.saturating_add(Duration::from_secs(5))
 			);
 		});
 	}
@@ -465,7 +465,7 @@ mod tests {
 	fn std_conversion_saturates() {
 		let now = crate::clock::now();
 		let far = now.into_std() + Duration::from_secs(1 << 40);
-		assert!(crate::clock::Instant::from_std(far) > now + Duration::from_secs(1 << 33));
+		assert!(crate::clock::Instant::from_std(far) > now.saturating_add(Duration::from_secs(1 << 33)));
 	}
 
 	/// A fresh clock names moments before the process started, as std's does, so

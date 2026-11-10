@@ -18,6 +18,17 @@ Decided 2026-10-30 with the maintainer (planning interview), after the str0m wor
 - **Upstream fixes:** after vendoring, nobody merges upstream automatically. Record the vendored upstream versions in the crate docs; the release-cut audit checks the upstream changelogs for security fixes (malformed SRTP/RTCP input, for example) and ports them.
 - Docs a change makes stale (crate names, `doc/lib/rs`, `doc/setup/upgrade.md`, other quests naming a crate or module) change in the PR that makes them stale.
 
+## Required
+
+- [A typed DTLS handshake timeout error](/quest/m3/webrtc/dtls-timeout.md) - callers match a DTLS handshake timeout by variant, and session end treats it like an ICE timeout
+- [Several bandwidth lines per media section](/quest/m3/webrtc/sdp-bandwidth.md) - answers carry both `b=TIAS` and `b=AS` without splicing
+- [DTLS waits for ICE](/quest/m3/webrtc/dtls-after-ice.md) - DTLS flights start once ICE nominates a pair, so a late ICE path can't exhaust them
+- [The stack takes kio clock time](/quest/m3/webrtc/clock.md) - the vendored code takes `kio::clock::Instant`, so sim tests drive it directly
+- [WHIP/WHEP builds carry no SCTP](/quest/m3/webrtc/sctp-feature.md) - SCTP compiles only with the `p2p` feature
+- [The vendored stack keeps only what browsers negotiate](/quest/m3/webrtc/browser-only.md) - PSK suites, `ccm`, and anything else no browser uses are gone
+- [The vendored stack exposes only what moq-webrtc calls](/quest/m3/webrtc/dead-api.md) - dead upstream API is deleted once clock settles the time seams
+- [A failed client socket ends a WebRTC session with an error](/quest/m3/webrtc/socket-error.md) - a client or `p2p` session whose socket fails ends with its I/O error, not `Ok` or `Closed`
+
 ## Related
 
 - [moq-webrtc paces WHEP viewers](/quest/m3/rtc-pacing.md) - adds the NACK hook and the shared pacer on the vendored stack

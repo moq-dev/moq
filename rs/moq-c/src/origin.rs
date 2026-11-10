@@ -2,6 +2,7 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::{OnFollow, OnStatus};
+use crate::publish::Children;
 use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, State, moq_announce_event, moq_announce_kind, moq_route_info, moq_string};
 
@@ -136,12 +137,15 @@ impl State {
 		visible: bool,
 	) -> Result<Id, Error> {
 		let broadcast = self.publish.create((route.broadcast().clone(), driver.clone()))?;
-		let announced = match visible {
-			true => route.announce().map_err(Error::from),
-			false => Ok(()),
-		};
-		announced
-			.and_then(|()| self.origin.route_insert(route, driver, broadcast))
+		self.publish
+			.target(broadcast)
+			.map(|target| target.children.clone())
+			.and_then(|family| {
+				if visible {
+					route.announce()?;
+				}
+				self.origin.route_insert(route, driver, broadcast, family)
+			})
 			.inspect_err(|_| {
 				self.publish.discard(broadcast);
 			})
@@ -155,6 +159,8 @@ struct RouteEntry {
 	instance: String,
 	/// The fill handle of the route's broadcast.
 	broadcast: Id,
+	/// Carried, not looked up, so a closed broadcast is told apart from a newer one reusing its id.
+	family: Children,
 }
 
 struct ClaimEntry {
@@ -411,6 +417,7 @@ impl Origin {
 		route: moq_net::origin::Route,
 		driver: crate::ffi::Background,
 		broadcast: Id,
+		family: Children,
 	) -> Result<Id, Error> {
 		// Read only on request: reading a hidden job's instance binds it.
 		self.routes.insert(RouteEntry {
@@ -418,6 +425,7 @@ impl Origin {
 			instance: String::new(),
 			driver,
 			broadcast,
+			family,
 		})
 	}
 
@@ -515,9 +523,13 @@ impl Origin {
 		Ok(result?)
 	}
 
-	/// The route's broadcast fill handle.
+	/// The route's broadcast fill handle, until [State::publish_close] ends it.
 	pub fn route_broadcast(&self, route: Id) -> Result<Id, Error> {
-		Ok(self.route_entry(route)?.broadcast)
+		let entry = self.route_entry(route)?;
+		match entry.family.is_closed() {
+			true => Err(Error::BroadcastNotFound),
+			false => Ok(entry.broadcast),
+		}
 	}
 
 	pub fn route_instance(&mut self, route: Id, dst: &mut moq_string) -> Result<(), Error> {

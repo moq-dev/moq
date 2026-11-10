@@ -97,6 +97,10 @@ This README's own work, once the children land:
   `doc/lib` pages rather than adding a page, unless the material outgrows
   them. Children keep their own API docs and drafts current inline.
 
+## Required
+
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - browser publishers adapt to `getStats()`'s send estimate once Chrome and Safari report one
+
 ## Related
 
 - [BBR media study](/quest/m5/quic-bbr-study.md) - preserving an estimate and discovering spare capacity are separate problems

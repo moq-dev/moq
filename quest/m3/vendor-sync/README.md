@@ -45,7 +45,7 @@ This README's own work, once every child has merged:
    first, what was ruled out). Each child requires
    [the release cut](/quest/m3/release/cut.md), which removes itself from
    every `Required` and moves the questline under the re-created
-   [cut gate](/quest/m2/cut-gate/README.md) in m2, so the next run becomes
+   cut gate (`quest/m2/cut-gate/`) in m2, so the next run becomes
    ready there, once per release cycle (rule replaced 2026-11-05).
 3. Drop a child whose code was deleted or whose upstream stopped mattering,
    saying why in the PR.
@@ -67,6 +67,17 @@ which builds pinned upstream libav.js, ffmpeg, and opus releases unmodified.
 
 Public API: none expected; a ported fix that changes one says so. Wire: QUIC
 behavior follows quinn's fixes.
+
+## Required
+
+- [moq-quic has every quinn fix it needs](/quest/m3/vendor-sync/quinn.md) - moq-quic, moq-sock's `udp`, moq-tokio's driver, and moq-congestion's Cubic and BBR3 carry quinn's fixes
+- [The WebRTC ports have every upstream fix they need](/quest/m3/vendor-sync/webrtc.md) - moq-congestion's GoogCC and moq-audio's NetEq time stretch follow WebRTC's fixes
+- [moq-congestion's SCReAMv2 follows its draft and reference](/quest/m3/vendor-sync/scream.md) - draft revisions and Ericsson's reference fixes are ported or ruled out
+- [moq-rtmp's rml has every upstream fix it needs](/quest/m3/vendor-sync/rml.md) - rust-media-libs fixes to rml_rtmp and rml_amf0 are ported or ruled out
+- [moq-v4l has every libv4l-rs fix it needs](/quest/m3/vendor-sync/v4l.md) - libv4l-rs fixes are ported or ruled out
+- [moq-nvenc has every upstream fix it needs](/quest/m3/vendor-sync/nvenc.md) - nvidia-video-codec-sdk fixes and NVIDIA SDK releases are ported or ruled out
+- [moq-vaapi has every ChromeOS fix it needs](/quest/m3/vendor-sync/vaapi.md) - cros-libva and cros-codecs fixes are ported or ruled out
+- [UniFFI generator forks are current](/quest/m3/vendor-sync/uniffi.md) - the four `kixelated/uniffi-*` forks carry the upstream fixes moq's bindings need
 
 ## Related
 

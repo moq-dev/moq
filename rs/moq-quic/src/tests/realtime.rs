@@ -193,7 +193,7 @@ fn run(preset: &Preset, candidate: &Candidate, seed: u64, competing: bool) -> Ou
 	loop {
 		let now = pair.time;
 		if let Some(&(at, rate)) = steps.last()
-			&& now >= start + at
+			&& now >= start.saturating_add(at)
 		{
 			pair.to_server.bottleneck.as_mut().unwrap().set_rate(rate);
 			steps.pop();
@@ -230,13 +230,13 @@ fn run(preset: &Preset, candidate: &Candidate, seed: u64, competing: bool) -> Ou
 			chunks.finalize();
 		}
 
-		if now >= start + END {
+		if now >= start.saturating_add(END) {
 			break;
 		}
 		let wakeups = [
 			pair.client.next_wakeup(),
 			pair.server.next_wakeup(),
-			steps.last().map(|&(at, _)| start + at),
+			steps.last().map(|&(at, _)| start.saturating_add(at)),
 		];
 		pair.time = pair.time.max(wakeups.into_iter().flatten().min().unwrap());
 	}

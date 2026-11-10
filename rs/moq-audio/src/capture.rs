@@ -966,16 +966,19 @@ mod tests {
 		let start = Instant::now();
 		let mut clock = StreamClock::default();
 		for millis in [0, 10, 20] {
-			let at = start + Duration::from_millis(millis);
+			let at = start.saturating_add(Duration::from_millis(millis));
 			assert_eq!(clock.place(stream(millis), stream(millis), at), Some(at));
 		}
 
 		// Captured at 25 ms, stamped by the host at 30 ms, run at 55 ms.
-		let placed = clock.place(stream(30), stream(25), start + Duration::from_millis(55));
+		let placed = clock.place(stream(30), stream(25), start.saturating_add(Duration::from_millis(55)));
 		let creep = Duration::from_millis(10) / MAX_DRIFT;
-		assert_eq!(placed, Some(start + Duration::from_millis(25) + creep));
+		assert_eq!(
+			placed,
+			Some(start.saturating_add(Duration::from_millis(25)).saturating_add(creep))
+		);
 
-		let on_time = start + Duration::from_millis(40);
+		let on_time = start.saturating_add(Duration::from_millis(40));
 		assert_eq!(clock.place(stream(40), stream(40), on_time), Some(on_time));
 	}
 
@@ -985,10 +988,10 @@ mod tests {
 	fn an_on_time_callback_corrects_a_late_first_one() {
 		let start = Instant::now();
 		let mut clock = StreamClock::default();
-		let late = start + Duration::from_millis(30);
+		let late = start.saturating_add(Duration::from_millis(30));
 		assert_eq!(clock.place(stream(0), stream(0), late), Some(late));
 
-		let on_time = start + Duration::from_millis(40);
+		let on_time = start.saturating_add(Duration::from_millis(40));
 		assert_eq!(clock.place(stream(40), stream(40), on_time), Some(on_time));
 	}
 
@@ -1000,7 +1003,7 @@ mod tests {
 		let mut clock = StreamClock::default();
 		// 500 ppm slow: 10 ms on the stream clock is 10.005 ms of `Instant`.
 		for index in 0..10_000u64 {
-			let at = start + Duration::from_micros(10_005 * index);
+			let at = start.saturating_add(Duration::from_micros(10_005 * index));
 			assert_eq!(clock.place(stream(10 * index), stream(10 * index), at), Some(at));
 		}
 	}

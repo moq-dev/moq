@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from typing import NamedTuple
 
 from moq_ffi import MoqQuicConfig, MoqRequest, MoqServer, MoqServerConfig, MoqServerTls, MoqTransport
 
@@ -13,6 +14,13 @@ from .session import Session
 
 # The network transport carrying an incoming session.
 Transport = MoqTransport
+
+
+class _Listening(NamedTuple):
+    """A server's bound listener, set by entering it and cleared by exiting."""
+
+    inner: MoqServer
+    local_addr: str
 
 
 class Request:
@@ -157,31 +165,37 @@ class Server:
             consume=None if consume is None else consume._inner,
         )
 
-        self._inner: MoqServer | None = None
-        self._local_addr: str | None = None
+        # Binding while a bare MoqServer, until exit.
+        self._state: MoqServer | _Listening | None = None
 
     async def __aenter__(self):
-        self._inner = MoqServer(self._config)
+        if self._state is not None:
+            raise RuntimeError("server already entered; exit it before entering again")
+        inner = MoqServer(self._config)
+        self._state = inner
         try:
-            self._local_addr = await self._inner.listen()
+            self._state = _Listening(inner, await inner.listen())
         except BaseException:
-            self._inner.cancel()
-            self._inner = None
+            self._state = None
+            inner.cancel()
             raise
         return self
 
     async def __aexit__(self, *exc) -> None:
-        if self._inner is not None:
-            self._inner.cancel()
-            self._inner = None
-        self._local_addr = None
+        state = self._state
+        if isinstance(state, _Listening):
+            self._state = None
+            state.inner.cancel()
+
+    def _listening(self) -> _Listening:
+        if not isinstance(self._state, _Listening):
+            raise RuntimeError("server not listening; use 'async with'")
+        return self._state
 
     @property
     def local_addr(self) -> str:
         """The bound local address, available after entering the context manager."""
-        if self._local_addr is None:
-            raise RuntimeError("server not listening; use 'async with'")
-        return self._local_addr
+        return self._listening().local_addr
 
     def cert_fingerprints(self) -> list[str]:
         """SHA-256 fingerprints of the configured TLS certificates, hex-encoded.
@@ -189,17 +203,13 @@ class Server:
         Useful for pinning a generated self-signed certificate in a browser
         via WebTransport's `serverCertificateHashes`.
         """
-        if self._inner is None:
-            raise RuntimeError("server not listening; use 'async with'")
-        return self._inner.cert_fingerprints()
+        return self._listening().inner.cert_fingerprints()
 
     def __aiter__(self):
         return self
 
     async def __anext__(self) -> Request:
-        if self._inner is None:
-            raise RuntimeError("server not listening; use 'async with'")
-        request = await self._inner.accept()
+        request = await self._listening().inner.accept()
         if request is None:
             raise StopAsyncIteration
         return Request(request)

@@ -51,7 +51,7 @@ impl Driver {
 
 	/// Drain the registry and encode every track once, one interval after the last tick.
 	pub fn tick(&mut self) -> FrameBytes {
-		self.now += self.drain.task.interval;
+		self.now = self.now.saturating_add(self.drain.task.interval);
 		self.drain.collect();
 		self.drain.publish(self.now);
 		self.drain.bucket_frame_bytes()

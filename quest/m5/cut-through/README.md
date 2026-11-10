@@ -68,6 +68,11 @@ bench on the same sweep and record before and after in this README before
 closing the line. No new doc page: nothing user-facing changes beyond the
 stats field, which its quest documents inline.
 
+## Required
+
+- [Loss delay](/quest/m5/cut-through/loss-delay.md) - relays report, per broadcast, the ingress bytes a loss held back by at least one RTT
+- [Bench](/quest/m5/cut-through/bench.md) - a congested relay hop swept over ingress rate, queue depth, frame size, and egress headroom, measuring the post-hole drain time, with a go or no-go verdict
+
 ## Related
 
 - [QoS](/quest/m3/qos/README.md) - the loss-delay counter follows its per-broadcast ingress row conventions

@@ -2266,12 +2266,7 @@ pub unsafe extern "C" fn moq_origin_claim(
 pub extern "C" fn moq_route_broadcast(route: u32) -> i32 {
 	ffi::enter(move || {
 		let route = ffi::parse_id(route)?;
-		let state = State::lock();
-		let broadcast = state.origin.route_broadcast(route)?;
-		match state.publish.contains(broadcast) {
-			true => Ok(broadcast),
-			false => Err(Error::BroadcastNotFound),
-		}
+		State::lock().origin.route_broadcast(route)
 	})
 }
 

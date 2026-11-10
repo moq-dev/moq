@@ -1900,7 +1900,7 @@ mod tests {
 		assert_eq!(lease.ended().await, lease::Reason::Expired);
 		assert_eq!(
 			kio::clock::now(),
-			start + Duration::from_secs(10),
+			start.saturating_add(Duration::from_secs(10)),
 			"expired at the deadline despite re-polling"
 		);
 	}
