@@ -823,8 +823,9 @@ export class Publisher {
 		let route: { id: bigint; node: bigint; seqno: bigint } | undefined;
 		let nextRoute = 0n;
 		let nextAnnounce = 0n;
-		// Route IDs ended and not yet echoed, and the origin node each reached. A route starts on
-		// the stream again only once its last end is echoed.
+		// Route IDs ended and not yet echoed, and the origin node each reached. No route starts
+		// until every end is echoed, so a peer that rotates our identity and withholds its echoes
+		// holds at most one here.
 		const ending = new Map<bigint, bigint>();
 		// The claims the peer holds, by suffix.
 		const live = new Map<Path.Valid, { id: bigint; snap: Advertised }>();
@@ -875,8 +876,8 @@ export class Publisher {
 			// A rotated identity ends the old route with every claim under it.
 			if (route && route.node !== identity?.node) await end();
 			if (!identity) return;
-			// Shown once the peer echoes the route's last end.
-			for (const node of ending.values()) if (node === identity.node) return;
+			// Shown once the peer echoes the last route's end.
+			if (ending.size > 0) return;
 
 			let changed = false;
 			for (const [suffix, { id }] of [...live]) {
@@ -991,6 +992,8 @@ export class Publisher {
 					await sync();
 					continue;
 				}
+				// The origin closed: the last sync ended its claims and route, and the stream finishes.
+				if (this.#advertised.peek() === undefined) break;
 				const woke = new Promise<void>((resolve) => {
 					notify = resolve;
 				});

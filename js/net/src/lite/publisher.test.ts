@@ -3954,6 +3954,64 @@ test("a lite-07 answer carries this origin's claims under its own route", async 
 	}
 });
 
+// A request for the last seqno rotates this origin's identity, which ends its route. A peer
+// that keeps rotating it and never echoes holds one ended route here, not one per rotation.
+test("a lite-07 route starts again only once every end is echoed", async () => {
+	const origin = new OriginProducer();
+	const cam = publish(origin, Path.from("cam"));
+	const { node, running, next, answer, ok, close } = routedAnswer(origin);
+	const own = wireOf(origin.consume()).own;
+	const last = 2n ** 64n - 1n;
+	try {
+		await ok();
+		expect(await next()).toMatchObject({ status: "routeStart", node });
+		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
+		expect(await next()).toMatchObject({ status: "floor", id: 0n });
+		expect(await next()).toEqual({ status: "synced" });
+
+		await answer({ kind: "request", node, seqno: last });
+		expect(await next()).toEqual({ status: "routeEnd", id: 0n });
+		await yieldNow();
+		expect(own.node).not.toBe(node);
+		await answer({ kind: "request", node: own.node, seqno: last });
+		await yieldNow();
+
+		// Nothing under the newer identities until the end is echoed, then only the latest.
+		await answer({ kind: "echo", id: 0n });
+		expect(await next()).toMatchObject({ status: "routeStart", node: own.node });
+		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 1n });
+		expect(await next()).toMatchObject({ status: "floor", id: 1n });
+	} finally {
+		cam.close();
+		close();
+		origin.close();
+		await running.catch(() => {});
+	}
+});
+
+// The publishing origin closing ends its claims and route, and finishes the stream.
+test("a lite-07 answer finishes once the publishing origin closes", async () => {
+	const origin = new OriginProducer();
+	const cam = publish(origin, Path.from("cam"));
+	const { running, next, ok, close } = routedAnswer(origin);
+	try {
+		await ok();
+		expect(await next()).toMatchObject({ status: "routeStart" });
+		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
+		expect(await next()).toMatchObject({ status: "floor", id: 0n });
+		expect(await next()).toEqual({ status: "synced" });
+
+		origin.close();
+		expect(await next()).toEqual({ status: "endedId", id: 0n });
+		expect(await next()).toMatchObject({ status: "floor", id: 0n });
+		expect(await next()).toEqual({ status: "routeEnd", id: 0n });
+		await running;
+	} finally {
+		cam.close();
+		close();
+	}
+});
+
 test("a lite-07 request naming another origin node is unroutable", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
