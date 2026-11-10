@@ -116,7 +116,7 @@ fn republish_cut(
 		let mut due = Duration::ZERO;
 		for (i, object) in objects.into_iter().enumerate() {
 			due = due.max(at(i, &object));
-			kio::clock::sleep_until(start + due).await;
+			kio::clock::sleep_until(start.saturating_add(due)).await;
 			if group.as_ref().map(|(sequence, _)| *sequence) != Some(object.group) {
 				if let Some((sequence, group)) = group.take() {
 					end(sequence, group, &cut);

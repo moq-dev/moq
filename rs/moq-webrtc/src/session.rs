@@ -390,7 +390,7 @@ impl Session {
 		let Some(rate) = &mut self.rate else {
 			return;
 		};
-		rate.next_remb = Instant::now() + REMB_INTERVAL;
+		rate.next_remb = Instant::now().saturating_add(REMB_INTERVAL);
 		// A REMB ceiling holds until the next one replaces it, so a lifted cap keeps sending
 		// the largest REMB can carry rather than going quiet and leaving the old ceiling.
 		let bitrate = match rate.meter.cap() {
@@ -740,7 +740,10 @@ mod tests {
 		let video = Mid::from("1");
 		let t0 = Instant::now();
 		assert_eq!(clock.normalize(audio, t0, 0), 0);
-		assert_eq!(clock.normalize(video, t0 + Duration::from_millis(50), 0), 50_000);
+		assert_eq!(
+			clock.normalize(video, t0.saturating_add(Duration::from_millis(50)), 0),
+			50_000
+		);
 
 		// NTP time zero (1900), which a sender without a wall clock may report, and past 2554.
 		let ntp_zero = UNIX_EPOCH - Duration::from_secs(2_208_988_800);
@@ -753,11 +756,11 @@ mod tests {
 
 		// Both tracks stay on arrival time.
 		assert_eq!(
-			clock.normalize(audio, t0 + Duration::from_secs(1), 1_000_000),
+			clock.normalize(audio, t0.saturating_add(Duration::from_secs(1)), 1_000_000),
 			1_000_000
 		);
 		assert_eq!(
-			clock.normalize(video, t0 + Duration::from_millis(1_050), 1_000_000),
+			clock.normalize(video, t0.saturating_add(Duration::from_millis(1_050)), 1_000_000),
 			1_050_000
 		);
 		assert!(SenderAnchor::new(sender_info(1, UNIX_EPOCH, 0)).is_ok());
@@ -824,7 +827,7 @@ mod tests {
 		// Raw RTP base is a large random value; the first frame must map to 0.
 		assert_eq!(clock.normalize(mid, t0, 5_000_000_000), 0);
 		// A later frame advances by the RTP delta, not by arrival jitter.
-		let arrival = t0 + Duration::from_millis(17); // jittered arrival, ignored after anchor
+		let arrival = t0.saturating_add(Duration::from_millis(17)); // jittered arrival, ignored after anchor
 		assert_eq!(clock.normalize(mid, arrival, 5_000_020_000), 20_000);
 	}
 
@@ -838,11 +841,15 @@ mod tests {
 		assert_eq!(clock.normalize(audio, t0, 1_000_000_000), 0);
 		// Video's first frame arrives 5 ms later with an unrelated RTP base; it
 		// must land at +5 ms on the shared timeline, not at video's raw base.
-		let video_arrival = t0 + Duration::from_millis(5);
+		let video_arrival = t0.saturating_add(Duration::from_millis(5));
 		assert_eq!(clock.normalize(video, video_arrival, 8_000_000_000), 5_000);
 		// And then track its own RTP delta.
 		assert_eq!(
-			clock.normalize(video, video_arrival + Duration::from_millis(33), 8_000_033_000),
+			clock.normalize(
+				video,
+				video_arrival.saturating_add(Duration::from_millis(33)),
+				8_000_033_000
+			),
 			38_000
 		);
 	}
@@ -858,10 +865,14 @@ mod tests {
 		// Video's first frame actually arrived 5 ms *before* the epoch. Its lead
 		// pulls the start below zero (clamped to 0), and a frame 33 ms into video
 		// lands 28 ms onto the shared timeline (33 ms - the 5 ms head start).
-		let video_arrival = t0 - Duration::from_millis(5);
+		let video_arrival = t0.saturating_sub(Duration::from_millis(5));
 		assert_eq!(clock.normalize(video, video_arrival, 8_000_000), 0);
 		assert_eq!(
-			clock.normalize(video, video_arrival + Duration::from_millis(33), 8_033_000),
+			clock.normalize(
+				video,
+				video_arrival.saturating_add(Duration::from_millis(33)),
+				8_033_000
+			),
 			28_000
 		);
 	}
@@ -877,15 +888,19 @@ mod tests {
 
 		assert_eq!(clock.normalize(audio, t0, audio_base), 0);
 		assert_eq!(
-			clock.normalize(video, t0 + Duration::from_millis(50), video_base),
+			clock.normalize(video, t0.saturating_add(Duration::from_millis(50)), video_base),
 			50_000
 		);
 		assert_eq!(
-			clock.normalize(audio, t0 + Duration::from_secs(1), audio_base + 1_000_000),
+			clock.normalize(audio, t0.saturating_add(Duration::from_secs(1)), audio_base + 1_000_000),
 			1_000_000
 		);
 		assert_eq!(
-			clock.normalize(video, t0 + Duration::from_millis(1_050), video_base + 1_000_000,),
+			clock.normalize(
+				video,
+				t0.saturating_add(Duration::from_millis(1_050)),
+				video_base + 1_000_000,
+			),
 			1_050_000
 		);
 
@@ -895,8 +910,16 @@ mod tests {
 		clock.observe(audio, sender_info(1, report_time, audio_base + 1_000_000));
 		clock.observe(video, sender_info(2, report_time, video_base + 1_000_000));
 
-		let audio_time = clock.normalize(audio, t0 + Duration::from_millis(1_020), audio_base + 1_020_000);
-		let video_time = clock.normalize(video, t0 + Duration::from_millis(1_070), video_base + 1_020_000);
+		let audio_time = clock.normalize(
+			audio,
+			t0.saturating_add(Duration::from_millis(1_020)),
+			audio_base + 1_020_000,
+		);
+		let video_time = clock.normalize(
+			video,
+			t0.saturating_add(Duration::from_millis(1_070)),
+			video_base + 1_020_000,
+		);
 		assert_eq!(audio_time, video_time);
 		assert_eq!(audio_time, 1_070_000);
 	}

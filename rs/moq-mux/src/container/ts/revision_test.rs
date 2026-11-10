@@ -1385,7 +1385,7 @@ async fn a_pmt_moved_while_its_tables_go_out_moves_behind_them() {
 	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await.with_mux_rate(rate(4));
 	for millis in (0..6_000).step_by(50) {
-		kio::clock::sleep_until(start + Duration::from_millis(millis)).await;
+		kio::clock::sleep_until(start.saturating_add(Duration::from_millis(millis))).await;
 		match millis {
 			// Three packets of PMT from here, in slots of four.
 			2_500 => {
@@ -1496,7 +1496,7 @@ async fn a_revision_out_before_the_one_it_follows_takes_its_version() {
 	);
 	let (_, mut added) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
 	settle(&mut export, &mut frames).await;
-	kio::clock::sleep_until(start + Duration::from_millis(3_000)).await;
+	kio::clock::sleep_until(start.saturating_add(Duration::from_millis(3_000))).await;
 	cue.write(Frame {
 		timestamp: moq_net::Timestamp::from_millis(3_000).unwrap(),
 		duration: None,
@@ -1578,7 +1578,7 @@ async fn a_stream_taking_a_pid_over_leaves_the_buffer_before_it() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	settle(&mut export, &mut frames).await;
-	kio::clock::sleep_until(start + Duration::from_millis(6_000)).await;
+	kio::clock::sleep_until(start.saturating_add(Duration::from_millis(6_000))).await;
 	let mut section = vec![0x80, 0x7f, 0xfd];
 	section.resize(4_096, 0xab);
 	private
@@ -1721,7 +1721,7 @@ async fn live<S: crate::catalog::Stream>(
 	S::Ext: super::catalog::Catalog,
 {
 	for millis in (from..to).step_by(20) {
-		kio::clock::sleep_until(start + Duration::from_millis(millis)).await;
+		kio::clock::sleep_until(start.saturating_add(Duration::from_millis(millis))).await;
 		for (track, mark) in tracks.iter_mut() {
 			write_marked(track, millis, *mark);
 		}
@@ -1763,7 +1763,7 @@ async fn the_clock_moves_behind_the_last_packet_of_the_pmt_naming_its_pid() {
 	// Frames 50 ms apart, for room beside the tables; the second track's from 500 ms, for room
 	// beside the first tables.
 	for millis in (0..6_000).step_by(50) {
-		kio::clock::sleep_until(start + Duration::from_millis(millis)).await;
+		kio::clock::sleep_until(start.saturating_add(Duration::from_millis(millis))).await;
 		match millis {
 			..3_000 => write_marked(&mut clock, millis, 0x21),
 			// The revision moving the clock lays three packets of PMT, in slots of four.

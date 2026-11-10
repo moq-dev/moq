@@ -20,7 +20,7 @@ impl std::fmt::Display for Id {
 }
 
 /// Process-wide counter wrapping from i32::MAX back to 1.
-static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+pub(crate) static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Map that assigns IDs from a process-wide counter, skipping live entries.
 ///

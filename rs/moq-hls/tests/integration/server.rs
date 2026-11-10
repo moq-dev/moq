@@ -18,7 +18,7 @@ async fn respond_serves_a_route_rewritten_into_scope() {
 	let mut route = Route::parse(&format!("/tenant{media}")).expect("media route");
 	route.broadcast = route.broadcast.strip_prefix("tenant/").expect("scoped").to_string();
 
-	let deadline = kio::clock::now() + TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(TIMEOUT);
 	let body = loop {
 		let response = server.respond(&route, Some("jwt=abc")).await;
 		if response.status() == StatusCode::OK {

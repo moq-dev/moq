@@ -29,7 +29,9 @@ import java.net.InetAddress
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -41,6 +43,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import uniffi.moq.MoqException
 
@@ -701,6 +704,32 @@ class SmokeTest {
     }
 
     @Test
+    fun `a flow releases its handle however collection ends`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("thrown", null)
+            track.appendGroup().finish()
+            // Finished, so a handle left open would read the end instead of failing.
+            track.finish()
+            val consumer = broadcast.consume().subscribeTrack("thrown", null)
+            assertFailsWith<IllegalStateException> {
+                consumer.groups().collect { error("collector failed") }
+            }
+            assertFailsWith<MoqException.Cancelled> { consumer.nextGroup() }
+        }
+    }
+
+    @Test
+    fun `ending a requests collection leaves the server listening`() = runTest {
+        Server.listen(
+                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
+            )
+            .use { server ->
+                assertNull(withTimeoutOrNull(10.milliseconds) { server.requests().first() })
+                assertEquals(1, server.certFingerprints().size)
+            }
+    }
+
+    @Test
     fun `sessions advertise the wrapper ahead of moq-ffi`() = runTest {
         Server.listen(
                 ServerConfig(
@@ -859,24 +888,24 @@ class SmokeTest {
             val following = consumer.follow("instance", null)
             origin.route("instance", RouteOptions()).use { first ->
                 val present = assertIs<AnnounceEventPresent>(announced.nextRoute())
-                assertTrue(present.announce.route.instance.isNotEmpty())
+                assertFalse(present.announce.route.instance.isMinted())
                 assertEquals(first.instance(), present.announce.route.instance)
                 assertNotNull(following.available()).close()
 
-                origin.route("instance", RouteOptions(instance = "camera", epoch = 1uL)).use {
-                    second ->
+                val camera = Instance.parse("camera")
+                origin.route("instance", RouteOptions(instance = camera, epoch = 1uL)).use { second
+                    ->
                     assertNotNull(following.available()).close()
 
                     // The takeover was not listed, so the next event is the path going absent.
                     first.withdraw()
                     second.withdraw()
                     val absent = assertIs<AnnounceEventAbsent>(announced.nextRoute())
-                    assertEquals("camera", absent.announce.route.instance)
+                    assertEquals(camera, absent.announce.route.instance)
+                    assertEquals("camera", absent.announce.route.instance.toString())
                 }
 
-                assertFailsWith<MoqException.InvalidInstance> {
-                    origin.route("refused", RouteOptions(instance = ""))
-                }
+                assertFailsWith<MoqException.InvalidInstance> { Instance.parse("") }
             }
             following.cancel()
         }
@@ -1034,6 +1063,59 @@ class SmokeTest {
                     assertFailsWith<MoqException.Unsupported> { moq.tokens().answered() }
                     assertEquals(everything, moq.grants().grant())
                     session.cancel(0u)
+                }
+            }
+    }
+
+    /**
+     * Over moq-lite-06, whose wire carries no instance, the session mints one: passing it back pins
+     * `request` and `follow`, while its text parsed is another, named instance that nothing serves.
+     */
+    @Test
+    fun `an announced instance pins request and follow`() = runTest {
+        val version = listOf("moq-lite-06")
+        Server.listen(
+                ServerConfig(
+                    bind = "127.0.0.1:0",
+                    versions = version,
+                    tls = ServerTls(generate = listOf("localhost")),
+                )
+            )
+            .use { server ->
+                server.route("live", RouteOptions()).use {
+                    // Not requests().first(): ending that collection cancels the server.
+                    val accepted = async { server.server.accept()!!.accept() }
+                    OriginProducer(OriginConfig()).use { viewer ->
+                        Moq.connect(
+                                "https://${server.localAddr}",
+                                ClientConfig(
+                                    bind = "127.0.0.1:0",
+                                    versions = version,
+                                    tls = ClientTls(insecure = true),
+                                    consume = viewer,
+                                    once = true,
+                                ),
+                            )
+                            .use { moq ->
+                                val session = accepted.await()
+                                val present =
+                                    assertIs<AnnounceEventPresent>(moq.announced().nextRoute())
+                                val minted = present.announce.route.instance
+                                assertTrue(minted.isMinted())
+
+                                moq.request("live", minted)
+                                val following = moq.follow("live", minted)
+                                assertNotNull(following.available()).close()
+                                following.cancel()
+
+                                val named = Instance.parse(minted.text())
+                                assertFalse(named.isMinted())
+                                assertEquals(minted.text(), named.toString())
+                                assertNotEquals(minted, named)
+                                assertFailsWith<MoqException> { moq.request("live", named) }
+                                session.cancel(0u)
+                            }
+                    }
                 }
             }
     }

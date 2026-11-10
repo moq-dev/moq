@@ -1256,7 +1256,7 @@ mod tests {
 		);
 		assert!(shown.len() > 50, "video stalled: {} pictures", shown.len());
 		for (timestamp, at) in shown {
-			let due = start + delay + Duration::from(timestamp);
+			let due = start.saturating_add(delay).saturating_add(Duration::from(timestamp));
 			assert!(
 				at.saturating_duration_since(due) <= Duration::from_millis(1)
 					&& due.saturating_duration_since(at) <= Duration::from_millis(1),
@@ -1430,7 +1430,7 @@ mod tests {
 		let (picture, sample) = if audio_end && video_end {
 			(shown[3].1, new[0].from)
 		} else if audio_end {
-			let timestamp = new[0].from.duration_since(playback_start + delay);
+			let timestamp = new[0].from.duration_since(playback_start.saturating_add(delay));
 			let shown = shown
 				.iter()
 				.find(|(shown, _)| {
@@ -1438,12 +1438,12 @@ mod tests {
 					start <= timestamp && timestamp < start + PACKET_DURATION
 				})
 				.expect("continuous video reaches resumed audio");
-			(shown.1 + (timestamp - Duration::from(shown.0)), new[0].from)
+			(shown.1.saturating_add(timestamp - Duration::from(shown.0)), new[0].from)
 		} else {
 			let timestamp = Duration::from(shown[3].0);
 			let index = (shown[3].0.as_millis() / 20) as usize;
 			let offset = timestamp - PACKET_DURATION * index as u32;
-			(shown[3].1, new[index - 3].from + offset)
+			(shown[3].1, new[index - 3].from.saturating_add(offset))
 		};
 		assert!(
 			picture.saturating_duration_since(sample) <= Duration::from_millis(1)
@@ -1857,7 +1857,7 @@ mod tests {
 		while index < 50 {
 			old.write(packet(index, OLD)).unwrap();
 			index += 1;
-			kio::clock::sleep_until(start + PACKET_DURATION * index as u32).await;
+			kio::clock::sleep_until(start.saturating_add(PACKET_DURATION * index as u32)).await;
 		}
 
 		// The replacement joins the catalog, then the old track finishes.
@@ -1867,7 +1867,7 @@ mod tests {
 		drop(old.finish().unwrap());
 
 		while index < 100 {
-			kio::clock::sleep_until(start + PACKET_DURATION * index as u32).await;
+			kio::clock::sleep_until(start.saturating_add(PACKET_DURATION * index as u32)).await;
 			new.write(packet(index, NEW)).unwrap();
 			index += 1;
 		}
@@ -1951,7 +1951,7 @@ mod tests {
 				_ => a.write(packet(index, BACK)).unwrap(),
 			}
 			index += 1;
-			kio::clock::sleep_until(start + PACKET_DURATION * index as u32).await;
+			kio::clock::sleep_until(start.saturating_add(PACKET_DURATION * index as u32)).await;
 		}
 
 		settle(player, &recorder).await;
@@ -2360,7 +2360,8 @@ mod tests {
 		let start = Instant::now();
 		for index in 0..COUNT {
 			let ready = ((index + 1) * PACKET).div_ceil(BLOCK) * BLOCK;
-			kio::clock::sleep_until(start + Duration::from_secs_f64(ready as f64 / SAMPLE_RATE as f64)).await;
+			kio::clock::sleep_until(start.saturating_add(Duration::from_secs_f64(ready as f64 / SAMPLE_RATE as f64)))
+				.await;
 			audio.write(packet(index, 0.25)).unwrap();
 		}
 		settle(player, &recorder).await;
@@ -2441,14 +2442,20 @@ mod tests {
 		);
 		loop {
 			tokio::task::yield_now().await;
-			if media.video.lock().unwrap().len() == 30 || media.presentation.due(last) == Some(now + delay) {
+			if media.video.lock().unwrap().len() == 30
+				|| media.presentation.due(last) == Some(now.saturating_add(delay))
+			{
 				break;
 			}
 		}
 		let due = media.presentation.due(last);
 		task.abort();
 		let _ = task.await;
-		assert_eq!(due, Some(now + delay), "the decoder did not observe the live edge");
+		assert_eq!(
+			due,
+			Some(now.saturating_add(delay)),
+			"the decoder did not observe the live edge"
+		);
 		assert!(recorder.present(&media).is_none(), "nothing is due before its delay");
 	}
 }

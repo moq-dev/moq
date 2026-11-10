@@ -105,7 +105,7 @@ impl Ordered {
 			if gap && !draining {
 				// The oldest arrival still pending is when this gap was first seen.
 				let (_, since) = self.arrivals.front().expect("a pending sequence arrived");
-				let deadline = *since + self.max_delay;
+				let deadline = since.saturating_add(self.max_delay);
 				if kio::clock::now() < deadline {
 					let timer = self
 						.timer

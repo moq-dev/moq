@@ -189,6 +189,11 @@ impl Children {
 		}
 	}
 
+	/// Whether the broadcast closed, ending its children.
+	pub(crate) fn is_closed(&self) -> bool {
+		matches!(*self.lock(), Family::Closed)
+	}
+
 	/// Stop tracking `child`, which ended on its own.
 	pub(crate) fn forget(&self, child: Child) {
 		if let Family::Open { open, .. } = &mut *self.lock() {
@@ -419,11 +424,6 @@ impl Publish {
 			timebases: Default::default(),
 		})?;
 		Ok(id)
-	}
-
-	/// Whether `id` names a broadcast fill handle that has not been closed.
-	pub fn contains(&self, id: Id) -> bool {
-		self.broadcasts.get(id).is_some()
 	}
 
 	/// Drop a fill handle that never reached the caller.

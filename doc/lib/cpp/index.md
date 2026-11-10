@@ -93,7 +93,7 @@ void ok(moq::expected<void> result) {
 // Subscribe.
 auto client = ok(moq::Client::init({}));   // a moq::ClientConfig; {} takes every default
 auto session = ok(client->connect("https://relay.example.com").get());
-auto announced = ok(session->consume()->follow("my-stream.hang", std::nullopt));
+auto announced = ok(session->consume()->follow("my-stream.hang", nullptr));
 auto broadcast = ok(announced->available().get());   // the first call is never null
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends

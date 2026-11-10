@@ -895,8 +895,8 @@ impl Track {
 		let ahead = ahead.min(arrived.duration_since(kio::clock::Instant::ZERO));
 		let ahead = ahead.min(read.duration_since(kio::clock::Instant::ZERO));
 		let arrival = Arrival {
-			arrived: arrived - ahead,
-			read: read - ahead,
+			arrived: arrived.saturating_sub(ahead),
+			read: read.saturating_sub(ahead),
 			decode: key.into(),
 			restart,
 			sync,
@@ -2892,7 +2892,8 @@ where
 			self.cancel_pending();
 			let next = self.replacement(self.program.source.switched(broadcast), catalog);
 			self.pending = Some(Box::new(next));
-			self.follow_until.get_or_insert_with(|| kio::clock::now() + follow);
+			self.follow_until
+				.get_or_insert_with(|| kio::clock::now().saturating_add(follow));
 			return Ok(());
 		}
 		if let Some(mut pending) = self.pending.take() {
@@ -5343,7 +5344,11 @@ mod tests {
 			// The last available audio frame, including its scheduling lead, anchors both orders.
 			let (decode, key, _) = tracks[1].released.unwrap();
 			assert_eq!(decode.as_micros(), 800_000);
-			assert_eq!(jitter.at(0, key), Some(start + Duration::from_millis(500)), "{order:?}");
+			assert_eq!(
+				jitter.at(0, key),
+				Some(start.saturating_add(Duration::from_millis(500))),
+				"{order:?}"
+			);
 			tokio::time::advance(Duration::from_millis(500)).await;
 			let video = std::iter::from_fn(|| match jitter.poll_next(&waiter) {
 				std::task::Poll::Ready(ready) => Some(ready),

@@ -715,7 +715,7 @@ fn addr_url(addr: SocketAddr) -> Option<Url> {
 /// refusing to start over one of those would be wrong; an error only decides the
 /// outcome if *nothing* announces.
 async fn announced(monitor: &mdns_sd::Receiver<mdns_sd::DaemonEvent>) -> Result<()> {
-	let deadline = kio::clock::now() + ANNOUNCE_TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(ANNOUNCE_TIMEOUT);
 	// Kept so a total failure reports why rather than just "timed out".
 	let mut failure = None;
 

@@ -1899,7 +1899,7 @@ mod tests {
 			media.write(vp8_frame(micros, true)).unwrap();
 		}
 
-		let deadline = kio::clock::now() + Duration::from_secs(5);
+		let deadline = kio::clock::now().saturating_add(Duration::from_secs(5));
 		let new = loop {
 			let current = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 			if !Arc::ptr_eq(&current, &old) {
@@ -2695,7 +2695,7 @@ mod tests {
 		let media = media.finish().unwrap();
 		catalog.finish().unwrap();
 
-		let deadline = kio::clock::now() + Duration::from_secs(5);
+		let deadline = kio::clock::now().saturating_add(Duration::from_secs(5));
 		let manifest = loop {
 			let manifest = broadcaster.manifest(None).unwrap().expect("manifest renders");
 			if manifest.contains(" type=\"static\"") {

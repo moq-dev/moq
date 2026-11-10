@@ -116,7 +116,6 @@ const publish = document.createElement("moq-publish") as MoqPublish;
 publish.url = required("relay");
 publish.name = "ptt.hang";
 publish.invisible = true;
-publish.audio.codec.set({ mime: "opus", frameDuration: Duration.millis(60), bitrate: 128_000 });
 publish.source = "camera";
 document.body.append(publish);
 
@@ -128,7 +127,6 @@ const listener = new URL(required("relay"));
 listener.searchParams.set("role", "listener");
 watch.url = listener.toString();
 watch.name = publish.name;
-watch.setAttribute("delay", "300ms");
 watch.setAttribute("visible", "always");
 watch.volume = 1;
 watch.muted = false;

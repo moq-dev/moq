@@ -163,7 +163,7 @@ impl BandwidthProbe {
 				self.attempt = None;
 				self.misses = self.misses.saturating_add(1);
 				let backoff = BACKOFF.saturating_mul(2u32.saturating_pow(self.misses - 1));
-				self.resume = Some(now + backoff.min(MAX_BACKOFF));
+				self.resume = Some(now.saturating_add(backoff.min(MAX_BACKOFF)));
 			}
 		}
 		probing && self.resume.is_none_or(|resume| now >= resume)
@@ -339,7 +339,7 @@ impl Bucket {
 		}
 		// Rounded up, so the wait earns the whole shortfall rather than re-arming at `now`
 		let nanos = (u128::from(needed - self.tokens) * 1_000_000_000).div_ceil(u128::from(rate));
-		Some(now + Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)))
+		Some(now.saturating_add(Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))))
 	}
 }
 
@@ -400,10 +400,10 @@ mod tests {
 	fn stall(probe: &mut BandwidthProbe, now: Instant) -> Instant {
 		attempt(probe, 0, now, PATH);
 		assert!(
-			probe.judge(true, Some(PATH), round(1), now + RTT),
+			probe.judge(true, Some(PATH), round(1), now.saturating_add(RTT)),
 			"stopped before a round of duplicates came back"
 		);
-		let missed = now + 2 * RTT;
+		let missed = now.saturating_add(2 * RTT);
 		assert!(
 			!probe.judge(true, Some(PATH), round(2), missed),
 			"kept filling a stalled attempt"
@@ -418,8 +418,13 @@ mod tests {
 		let mut probe = probe(now);
 		for backoff in [BACKOFF, MAX_BACKOFF, MAX_BACKOFF] {
 			now = stall(&mut probe, now);
-			assert!(!probe.judge(true, Some(PATH), round(2), now + backoff - MS));
-			now += backoff;
+			assert!(!probe.judge(
+				true,
+				Some(PATH),
+				round(2),
+				now.saturating_add(backoff).saturating_sub(MS)
+			));
+			now = now.saturating_add(backoff);
 		}
 	}
 
@@ -430,14 +435,14 @@ mod tests {
 		let now = Instant::now();
 		let mut probe = probe(now);
 		attempt(&mut probe, 0, now, PATH);
-		let late = now + 10 * RTT;
+		let late = now.saturating_add(10 * RTT);
 		assert!(probe.judge(true, Some(PATH), round(0), late));
 		assert!(probe.judge(true, Some(PATH), round(1), late));
 		assert!(
-			probe.judge(true, Some(PATH + 1), round(1), late + RTT),
+			probe.judge(true, Some(PATH + 1), round(1), late.saturating_add(RTT)),
 			"a raise in the second round"
 		);
-		assert!(probe.judge(true, Some(PATH + 1), round(2), late + RTT));
+		assert!(probe.judge(true, Some(PATH + 1), round(2), late.saturating_add(RTT)));
 	}
 
 	/// An attempt that raises the estimate goes on until the controller's probe ends, which misses
@@ -447,11 +452,16 @@ mod tests {
 		let now = Instant::now();
 		let mut probe = probe(now);
 		attempt(&mut probe, 0, now, PATH);
-		let later = now + 4 * RTT;
+		let later = now.saturating_add(4 * RTT);
 		assert!(probe.judge(true, Some(PATH + 1), round(4), later));
 		assert!(!probe.judge(false, Some(PATH + 1), round(4), later));
-		assert!(!probe.judge(true, Some(PATH + 1), round(5), later + BACKOFF - MS));
-		assert!(probe.judge(true, Some(PATH + 1), round(5), later + BACKOFF));
+		assert!(!probe.judge(
+			true,
+			Some(PATH + 1),
+			round(5),
+			later.saturating_add(BACKOFF).saturating_sub(MS)
+		));
+		assert!(probe.judge(true, Some(PATH + 1), round(5), later.saturating_add(BACKOFF)));
 	}
 
 	/// An attempt that begins below the plateau stalls two rounds after it climbs back, rather
@@ -462,13 +472,13 @@ mod tests {
 		let now = Instant::now();
 		let mut probe = probe(now);
 		attempt(&mut probe, 0, now, PATH / 2);
-		assert!(probe.judge(true, Some(PATH), round(1), now + RTT));
+		assert!(probe.judge(true, Some(PATH), round(1), now.saturating_add(RTT)));
 		assert!(
-			probe.judge(true, Some(PATH * 3 / 4), round(2), now + 2 * RTT),
+			probe.judge(true, Some(PATH * 3 / 4), round(2), now.saturating_add(2 * RTT)),
 			"stalled before a round of duplicates came back"
 		);
 		assert!(
-			!probe.judge(true, Some(PATH), round(3), now + 3 * RTT),
+			!probe.judge(true, Some(PATH), round(3), now.saturating_add(3 * RTT)),
 			"kept filling once the estimate stopped rising"
 		);
 	}
@@ -479,17 +489,17 @@ mod tests {
 		let mut now = Instant::now();
 		let mut probe = probe(now);
 		now = stall(&mut probe, now);
-		now = stall(&mut probe, now + BACKOFF);
+		now = stall(&mut probe, now.saturating_add(BACKOFF));
 
 		// The estimate reached the target, then aged below it
 		assert!(!probe.judge(true, Some(TARGET), round(2), now));
 		now = stall(&mut probe, now);
 		assert!(
-			probe.judge(true, Some(PATH), round(2), now + BACKOFF),
+			probe.judge(true, Some(PATH), round(2), now.saturating_add(BACKOFF)),
 			"the misses before still count"
 		);
 
-		now = stall(&mut probe, now + BACKOFF);
+		now = stall(&mut probe, now.saturating_add(BACKOFF));
 		probe.set_target(TARGET);
 		assert!(
 			!probe.judge(true, Some(PATH), round(2), now),

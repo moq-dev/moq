@@ -96,8 +96,15 @@ answer with `moq_broadcast_request_serve()`, `moq_broadcast_request_route()`, or
 `moq_claim_set_cost()`, and `moq_claim_free()` control the claim. Unless one is named, a claim moves to a fresh
 instance (`moq_claim_instance()`) each time a job holding its current one ends, and a job from
 `moq_broadcast_request_route()` takes the claim's, so on moq-lite 07 a reader resolved through the
-claim does not restart; older wires mint another instance for the job's route, restarting it. The string `moq_route_instance()` or `moq_claim_instance()` writes is
-borrowed until the next such call on that handle, or until it is freed.
+claim does not restart; older wires mint another instance for the job's route, restarting it.
+
+An instance is a handle: `moq_route_instance()` and `moq_claim_instance()` return one you free
+with `moq_instance_free()`, and an announcement's `route.instance` lives as long as the
+announcement. `moq_instance_parse()` names one from text; `moq_instance_text()`,
+`moq_instance_minted()`, and `moq_instance_equal()` read it. A session mints an instance for a
+route whose wire (moq-lite 06 or older, or moq-transport) carries none, and only a session can,
+so pass the handle a route or announcement reported, not its text, to pin
+`moq_origin_request()` or `moq_origin_follow()` to that stream.
 
 Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. For pre-encoded video, publish from the lowest rendition up and set `moq_video_init.lower` to the next lower media handle. Reserve each track with `moq_allocator_reserve_media`, then bind its reservation with `moq_rate_control_create` and call `moq_rate_control_update` on every frame. Apply changed targets to your encoder and `moq_publish_media_set_enabled`, resuming video on a keyframe; close the control and reservation separately when done.
 

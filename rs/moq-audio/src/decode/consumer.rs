@@ -2282,7 +2282,7 @@ mod tests {
 				}
 			}
 			sequence += 1;
-			CLOCK.set(Some(origin + duration(arrival)));
+			CLOCK.set(Some(origin.saturating_add(duration(arrival))));
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(media as u64 * 1000).unwrap(),
