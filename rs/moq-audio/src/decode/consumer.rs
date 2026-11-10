@@ -176,6 +176,8 @@ pub struct Consumer {
 	boundary: Option<Duration>,
 	/// The duration of the latest decoded packet, which the next one is taken to match.
 	frame: Duration,
+	/// The group of the latest end read, until a later group or a loss arrives.
+	declared: Option<u64>,
 }
 
 /// Whether a pending packet may decode.
@@ -298,6 +300,7 @@ impl Consumer {
 			seen: 0,
 			boundary: None,
 			frame: Duration::ZERO,
+			declared: None,
 		})
 	}
 
@@ -373,10 +376,7 @@ impl Consumer {
 					let first = !std::mem::replace(&mut self.started, true);
 					// A later group after a declared end comes from a fresh encoder; the end's
 					// own group carries the stopped encoder's final packets, trimmed below.
-					// Those packets end the speech before the silence, so only this frame
-					// tells the estimator the silence it measures across was declared.
 					if self.end.is_some() && group != self.end_group {
-						self.target.end();
 						self.restart()?;
 					}
 					// Nothing precedes group 0, and a group delivers from its frame 0 or not at
@@ -388,10 +388,6 @@ impl Consumer {
 				Some(Encoded::Gap { timestamp, duration }) => {
 					self.boundary = Some(timestamp.into());
 					self.started = true;
-					// The restart forgets the end, but the silence across it stays declared.
-					if self.end.is_some() {
-						self.target.end();
-					}
 					self.restart()?;
 					self.warmup_pending = !self.warmup.is_zero();
 					self.ready.push_back(Read::Gap { timestamp, duration });
@@ -617,6 +613,21 @@ impl Consumer {
 
 			match read {
 				Some(Ok(Some(read))) => {
+					// The estimator times arrivals, so it learns of a declared silence as the
+					// packets around it arrive rather than as they decode. The end's own group
+					// carries the stopped encoder's final packets, which end the speech before
+					// the silence, so only a later group, or a loss, says the silence it
+					// measures across was declared. A loss forgets the end, but the silence
+					// across it stays declared.
+					match &read {
+						Encoded::End { group, .. } => self.declared = Some(*group),
+						Encoded::Frame { group, .. } if self.declared.is_some_and(|end| end != *group) => {
+							self.declared = None;
+							self.target.end();
+						}
+						Encoded::Gap { .. } if self.declared.take().is_some() => self.target.end(),
+						_ => {}
+					}
 					// Every packet the container hands over is an arrival, including one the
 					// decoder will refuse, so it is observed before anything can fail.
 					if let Encoded::Frame { frame, .. } = &read {
@@ -2146,7 +2157,9 @@ mod tests {
 
 		// The first packet ends sounding in half a second, so the next one, ending
 		// 20 ms later, is within the 100 ms floor of the playhead 80 ms before that.
-		let sounds = kio::clock::Instant::now().checked_add(Duration::from_millis(500)).unwrap();
+		let sounds = kio::clock::Instant::now()
+			.checked_add(Duration::from_millis(500))
+			.unwrap();
 		backpressure.observe(Timestamp::try_from(PACKET).unwrap(), sounds);
 		assert_eq!(read(&mut consumer, Duration::from_millis(419)).await, None);
 		assert_eq!(read(&mut consumer, Duration::from_millis(1)).await, Some(PACKET));
