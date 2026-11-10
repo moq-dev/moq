@@ -592,7 +592,7 @@ export class Reload {
 									? { ...this.websocket, url: undefined }
 									: this.websocket,
 								versions: this.versions,
-									unsolicited: this.unsolicited,
+								unsolicited: this.unsolicited,
 								webtransport: this.webtransport,
 								timeout: this.timeout,
 								publish: this.publish,
