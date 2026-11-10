@@ -1093,7 +1093,7 @@ mod tests {
 		// Until the tap hears it rather than for a fixed count: writes are dropped
 		// until the device first reads, and a device can take seconds to start
 		// (PulseAudio's idle null sink renders two seconds ahead).
-		let deadline = kio::clock::Instant::now() + std::time::Duration::from_secs(10);
+		let deadline = kio::clock::Instant::now().saturating_add(std::time::Duration::from_secs(10));
 		while energy <= 1.0 && kio::clock::Instant::now() < deadline {
 			let _ = sink.write(&tone).expect("write");
 			kio::clock::sleep(std::time::Duration::from_millis(100)).await;

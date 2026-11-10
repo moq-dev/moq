@@ -23,9 +23,9 @@ import {
 import { type Fill, fillChanged, type Requests, wantedRuns } from "../fill.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
-import * as Instance from "../instance.ts";
 import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
+import * as Mint from "../mint.ts";
 import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
@@ -396,7 +396,7 @@ export class Subscriber {
 		}
 		// moq-transport carries no instance, so each namespace the peer advertises anew is a
 		// stream of its own, even one it advertised before on this session.
-		route = this.#drained({ ...route, instance: Instance.minted(), epoch: 0n });
+		route = this.#drained({ ...route, instance: Mint.fresh(), epoch: 0n });
 		const entry: Announced = { adverts: [{ id, route }], route };
 		this.#announced.set(path, entry);
 		this.#consumes.announce(path, entry, route);

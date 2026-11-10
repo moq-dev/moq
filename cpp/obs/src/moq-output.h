@@ -98,12 +98,8 @@ private:
 		std::optional<moq::Continuation> pending;
 		std::string url;
 		std::chrono::steady_clock::time_point started;
-		// Whether this attempt ever reached the server, which picks between telling
-		// OBS the connection failed and telling it the stream dropped.
+		// The last state revision seen, which the next state_changed waits past.
 		uint64_t revision = 0;
-		bool connected = false;
-		// False while the session is between reconnects.
-		bool live = false;
 		// The wait for the relay's answer to the token PresentToken() set last.
 		std::optional<moq::Continuation> presenting;
 	};
@@ -180,12 +176,21 @@ private:
 	// signal_mutex; the fields the dock polls are copied out under `mutex`.
 	std::shared_ptr<Attempt> attempt;
 
+	// How far the current attempt got. Reaching the server picks between telling OBS
+	// the connection failed and telling it the stream dropped.
+	enum class Link {
+		// Not reached the server yet, or no attempt.
+		kPending,
+		kLive,
+		// Reached the server, and now between reconnects.
+		kLost,
+	};
+
 	// Guards the group below, which the dock reads from the UI thread.
 	std::mutex mutex;
 	std::shared_ptr<moq::Session> session;
 	std::shared_ptr<moq::BandwidthConsumer> recv_bandwidth;
-	bool connected = false;
-	bool live = false;
+	Link link = Link::kPending;
 	std::string url;
 	std::string instance;
 	int last_failure_code = 0;

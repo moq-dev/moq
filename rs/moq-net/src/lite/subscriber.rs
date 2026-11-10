@@ -633,12 +633,13 @@ impl Subscriber {
 				instance,
 				epoch,
 				cost,
+				..
 			} => {
 				// Resolved like an update: the id stays live.
 				let suffix = run.decoder.get(id)?;
 				let path = prefix.join(&suffix)?;
 				run.announced.restart(&path, instance.map(|instance| (instance, epoch)));
-				// Lite-07 carries no hop chain; its claims name their route instead.
+				// Only lite-07 restarts, and its claims name their route instead.
 				self.restart_announce(
 					path,
 					crate::Hops::new(),
@@ -823,6 +824,14 @@ impl Subscriber {
 		Ok(announced.offer(self, path, route))
 	}
 
+	/// Whether `hops` passed through this node, under its lite-06 hop or the hop its
+	/// route identity travels as: a moq-lite-07 relay translating this node's claims
+	/// for a lite-06 peer names the latter. Either way the claim came back, and filed
+	/// again it would keep itself alive once its source left.
+	pub(super) fn names_self(&self, hops: &crate::Hops) -> bool {
+		hops.contains(&self.self_origin) || self.origin.route_hop().is_some_and(|hop| hops.contains(&hop))
+	}
+
 	/// The full chain of a new or replacing advertisement, or `None` when it is
 	/// reflected or exceeds the origin's hop limit.
 	fn chain(&self, path: &Path, mut hops: crate::Hops, responder_origin: Option<crate::Hop>) -> Option<crate::Hops> {
@@ -832,15 +841,10 @@ impl Subscriber {
 			Some(responder) => {
 				(responder != crate::Hop::UNKNOWN && hops.contains(&responder))
 					|| hops.push(responder).is_err()
-					|| hops.contains(&self.self_origin)
+					|| self.names_self(&hops)
 			}
-			None => hops.contains(&self.self_origin),
+			None => self.names_self(&hops),
 		};
-		// A claim of this node's that a moq-lite-07 relay translated for a lite-06 peer
-		// starts with its route identity's hop, which is this origin's own until the
-		// identity rotates. Filed again as an own claim, it would keep itself alive once
-		// its source left.
-		let reflected = reflected || self.origin.route_hop().is_some_and(|hop| hops.contains(&hop));
 		if reflected {
 			tracing::debug!(route = %self.log_path(path), "dropping reflected announce");
 			return None;
@@ -3354,10 +3358,10 @@ mod tests {
 		let mut fetches = FeedFetches::new(&clock);
 		fetches.push(req, &track.consume());
 		arrive(&track, &tail, 2, start);
-		let late = start + crate::tail::GRACE / 2;
+		let late = start.saturating_add(crate::tail::GRACE / 2);
 		fetches.poll(&sub, late, &kio::Waiter::noop());
 		assert_eq!(fetches.held.len(), 1, "group 2 alone does not give up on group 1");
-		assert_eq!(fetches.fold.deadline(), Some(start + crate::tail::GRACE));
+		assert_eq!(fetches.fold.deadline(), Some(start.saturating_add(crate::tail::GRACE)));
 
 		arrive(&track, &tail, 1, late);
 		fetches.poll(&sub, late, &kio::Waiter::noop());
@@ -3382,7 +3386,7 @@ mod tests {
 
 		let mut fetches = FeedFetches::new(&clock);
 		fetches.push(req, &track.consume());
-		fetches.poll(&sub, start + crate::tail::GRACE, &kio::Waiter::noop());
+		fetches.poll(&sub, start.saturating_add(crate::tail::GRACE), &kio::Waiter::noop());
 		assert!(fetches.held.is_empty());
 		assert!(matches!(fetching.now_or_never(), Some(Err(Error::NotFound))));
 	}
@@ -3513,9 +3517,9 @@ mod tests {
 		fetches.poll(&sub, start, &waiter);
 		assert!(fetches.held.is_empty());
 		arrive(&track, &tail, 200, start);
-		fetches.poll(&sub, start + crate::tail::GRACE, &waiter);
+		fetches.poll(&sub, start.saturating_add(crate::tail::GRACE), &waiter);
 		wakes.0.store(0, atomic::Ordering::Relaxed);
-		fetches.poll(&sub, start + crate::tail::GRACE, &waiter);
+		fetches.poll(&sub, start.saturating_add(crate::tail::GRACE), &waiter);
 		assert_eq!(
 			wakes.0.load(atomic::Ordering::Relaxed),
 			0,
@@ -3549,7 +3553,7 @@ mod tests {
 		fetches.poll(&sub, start, &waiter);
 		assert_eq!(fetches.polled - polled, 1, "an arrival touches its group alone");
 		assert_eq!(fetches.held.len(), 31);
-		assert_eq!(fetches.fold.deadline(), Some(start + crate::tail::GRACE));
+		assert_eq!(fetches.fold.deadline(), Some(start.saturating_add(crate::tail::GRACE)));
 	}
 
 	#[kio::test]
@@ -3566,17 +3570,21 @@ mod tests {
 		arrive(&track, &tail, 0, start);
 		arrive(&track, &tail, 2, start);
 		kio::clock::sleep(crate::tail::GRACE / 2).await;
-		arrive(&track, &tail, 4, start + crate::tail::GRACE / 2);
+		arrive(&track, &tail, 4, start.saturating_add(crate::tail::GRACE / 2));
 		let waiter = kio::Waiter::noop();
 		fetches.poll(&sub, start, &waiter);
 		let polled = fetches.polled;
-		fetches.poll(&sub, start + crate::tail::GRACE, &waiter);
+		fetches.poll(&sub, start.saturating_add(crate::tail::GRACE), &waiter);
 		assert_eq!(fetches.polled - polled, 1);
 		assert!(!fetches.held.contains_key(&1));
 		assert_eq!(fetches.held.len(), 3);
 		assert_eq!(
 			fetches.fold.deadline(),
-			Some(start + crate::tail::GRACE + crate::tail::GRACE / 2)
+			Some(
+				start
+					.saturating_add(crate::tail::GRACE)
+					.saturating_add(crate::tail::GRACE / 2)
+			)
 		);
 	}
 
@@ -4497,61 +4505,65 @@ mod tests {
 		}
 	}
 
+	/// Serve one Group Stream for `sequence` on subscription 7, accepted into `track`.
+	async fn serve_group(version: Version, sequence: u64, track: &track::Producer) -> Result<(), Error> {
+		use crate::transport::poll::Session as _;
+
+		let mut script = Vec::new();
+		lite::Group {
+			subscribe: 7,
+			sequence,
+			frame_start: 0,
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
+		.unwrap();
+		let session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		subscriber.subscribes.lock().insert(
+			7,
+			TrackEntry::accepted(
+				track.clone(),
+				lite::Framing {
+					timescale: Some(Timescale::MILLI),
+					ietf: None,
+					compressed: false,
+				},
+				Default::default(),
+			),
+		);
+
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+		let mut group = GroupRecv::new(
+			subscriber,
+			Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+		);
+		kio::wait(|waiter| group.poll_serve(waiter)).await
+	}
+
 	/// A group at or past the end the publisher declared contradicts that end, which no later
 	/// stream can repair, so the whole track fails rather than ending clean without it. lite-05
 	/// specified an inclusive end, so there it costs only that group's stream.
 	#[kio::test]
 	async fn a_group_past_the_declared_end_aborts_the_track() {
-		use crate::transport::poll::Session as _;
-
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let mut script = Vec::new();
-			lite::Group {
-				subscribe: 7,
-				sequence: 3,
-				frame_start: 0,
-			}
-			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
-			.unwrap();
-			let session = crate::lite::test_transport::ScriptedSession::eof(script);
-			let subscriber = Subscriber::new(SubscriberConfig {
-				runtime: crate::time::sim(),
-				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
-				recv_bandwidth: None,
-				version,
-				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-				peer_hop: None,
-				cost: None,
-				going_away: Default::default(),
-				auth: crate::auth::Link::new(false),
-			});
-
 			let mut track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"video",
 				crate::track::Info::timed(),
 			);
 			track.finish_at(Position::group(3), None).unwrap();
-			subscriber.subscribes.lock().insert(
-				7,
-				TrackEntry::accepted(
-					track.clone(),
-					lite::Framing {
-						timescale: Some(Timescale::MILLI),
-						ietf: None,
-						compressed: false,
-					},
-					Default::default(),
-				),
-			);
-
-			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-			let mut group = GroupRecv::new(
-				subscriber,
-				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
-			);
-			let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
+			let res = serve_group(version, 3, &track).await;
 			match version {
 				Version::Lite05 => {
 					assert!(matches!(res, Err(Error::Closed)), "{version:?}: {res:?}");
@@ -4569,6 +4581,20 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	/// Group `u64::MAX` is reserved, so a stream naming it is refused, and the track lives on.
+	#[kio::test]
+	async fn a_group_at_the_reserved_sequence_is_refused() {
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
+		let res = serve_group(Version::Lite07, u64::MAX, &track).await;
+		assert!(matches!(res, Err(Error::BoundsExceeded(_))), "{res:?}");
+		assert!(track.closed().now_or_never().is_none());
+		assert_eq!(track.latest_sequence(), None);
 	}
 
 	/// A track in `timescale` that a draft-18 moq-transport publisher published.
@@ -5410,8 +5436,7 @@ mod tests {
 	async fn a_drop_naming_an_unsent_update_is_a_protocol_violation() {
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
 		let drop = lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-			start: 1,
-			end: 2,
+			groups: 1..3,
 			error: u64::from(crate::coding::StreamCodes::encode_stream_code(
 				&Version::Lite07,
 				&crate::StreamError::Old,
@@ -5442,10 +5467,9 @@ mod tests {
 		);
 		let waiter = kio::Waiter::noop();
 		let code = |err: &crate::StreamError| u64::from(crate::coding::StreamCodes::encode_stream_code(&version, err));
-		let drop = |start, end, err: &crate::StreamError, update| {
+		let drop = |first, last: u64, err: &crate::StreamError, update| {
 			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-				start,
-				end,
+				groups: first..last + 1,
 				error: code(err),
 				update,
 			})
@@ -5515,10 +5539,9 @@ mod tests {
 			&version,
 			&crate::StreamError::Old,
 		));
-		let old = |sequence| {
+		let old = |sequence: u64| {
 			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-				start: sequence,
-				end: sequence,
+				groups: sequence..sequence + 1,
 				error: code,
 				update: 0,
 			})
@@ -5572,10 +5595,9 @@ mod tests {
 			&version,
 			&crate::StreamError::Old,
 		));
-		let old = |sequence, update| {
+		let old = |sequence: u64, update| {
 			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-				start: sequence,
-				end: sequence,
+				groups: sequence..sequence + 1,
 				error: code,
 				update,
 			})
@@ -5654,10 +5676,9 @@ mod tests {
 			&version,
 			&crate::StreamError::Old,
 		));
-		let old = |start, end| {
+		let old = |first, last: u64| {
 			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-				start,
-				end,
+				groups: first..last + 1,
 				error: code,
 				update: 0,
 			})
@@ -5669,13 +5690,13 @@ mod tests {
 		serving
 			.apply_response(
 				&serve,
-				lite::SubscribeResponse::Skip(lite::SubscribeSkip { start: 1, end: 2 }),
+				lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups: 1..3 }),
 			)
 			.unwrap();
 		serving
 			.apply_response(
 				&serve,
-				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(4..=4, &crate::StreamError::App(5), 0, version)),
+				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(4..5, &crate::StreamError::App(5), 0, version)),
 			)
 			.unwrap();
 		// Empty ranges.
@@ -5683,7 +5704,7 @@ mod tests {
 		serving
 			.apply_response(
 				&serve,
-				lite::SubscribeResponse::Skip(lite::SubscribeSkip { start: 6, end: 5 }),
+				lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups: 6..6 }),
 			)
 			.unwrap();
 
@@ -5712,10 +5733,14 @@ mod tests {
 	async fn a_skip_replaces_a_final_drop_but_not_a_cached_group() {
 		let version = Version::Lite07;
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
-		let drop = |start, end, error: &crate::StreamError| {
-			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(start..=end, error, 0, version))
+		let drop = |first, last: u64, error: &crate::StreamError| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(first..last + 1, error, 0, version))
 		};
-		let skip = |start, end| lite::SubscribeResponse::Skip(lite::SubscribeSkip { start, end });
+		let skip = |first, last: u64| {
+			lite::SubscribeResponse::Skip(lite::SubscribeSkip {
+				groups: first..last + 1,
+			})
+		};
 		let mut group = serving
 			.serving
 			.create_group(crate::group::Info { sequence: 5 })
@@ -5776,8 +5801,7 @@ mod tests {
 					starts: vec![Some(0)],
 				}),
 				lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-					start: 2,
-					end: 2,
+					groups: 2..3,
 					error: code.into(),
 					update: 0,
 				}),
@@ -11880,8 +11904,7 @@ impl ServeLoop {
 				if dropped.update > active.update {
 					return Err(Error::ProtocolViolation);
 				}
-				let groups = dropped.start..dropped.end.saturating_add(1);
-				// An empty range (Group Start = Group End + 1) names nothing.
+				let groups = dropped.groups.clone();
 				if groups.is_empty() {
 					return Ok(());
 				}
@@ -11932,8 +11955,7 @@ impl ServeLoop {
 			// replaces any drop of the same groups, stale or final, so no update reopens them;
 			// a reader a drop already ended stays ended.
 			lite::SubscribeResponse::Skip(skipped) => {
-				let groups = skipped.start..skipped.end.saturating_add(1);
-				// An empty range (Group Start = Group End + 1) names nothing.
+				let groups = skipped.groups.clone();
 				if groups.is_empty() {
 					return Ok(());
 				}
@@ -11949,8 +11971,7 @@ impl ServeLoop {
 				if let Some(first) = cached.iter().next() {
 					tracing::warn!(
 						track = %serve.name,
-						start = skipped.start,
-						end = skipped.end,
+						groups = ?skipped.groups,
 						cached = first.start,
 						"protocol error: SUBSCRIBE_SKIP names a group that arrived; keeping the group"
 					);

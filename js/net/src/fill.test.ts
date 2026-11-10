@@ -306,6 +306,45 @@ test("fill: a refusal fails the readers waiting now, and a later reader asks aga
 	broadcast.close();
 });
 
+test("fill: a group arriving after a refusal reaches the reader the refusal named", async () => {
+	const { broadcast, track } = resumed(5n);
+	const requests = track.requests();
+	const waiting = wireOf(broadcast).fetchGroup("video", 2n);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	fill.refuseGroups(2n, 3n, new StreamError(StreamCode.Cancel, { message: "storage busy" }));
+	// Before the waiting fetch looks again.
+	const group = track.createGroup(2n);
+	group.writeFrame({ payload: enc.encode("late") });
+	group.finish();
+	fill.close();
+	expect(await frames(await waiting)).toEqual(["late"]);
+
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: the track's skip of a run a reader's fill refused is what the reader reports", async () => {
+	const { broadcast, track } = resumed(4n);
+	const requests = track.requests();
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }],
+		delay: { max: null },
+	});
+	const first = reader.recvGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	fill.refuseGroups(0n, 2n, new StreamError(StreamCode.Cancel, { message: "storage busy" }));
+	// The publisher declares the refused run never produced; its verdict wins, as in Rust.
+	track.skipGroups(0n, 2n);
+	expect(hooks.tryDrop(reader)).toMatchObject({ kind: "drop", start: 0n, end: 2n, skip: true });
+
+	fill.close();
+	requests.close();
+	broadcast.close();
+	await first.catch(() => undefined);
+});
+
 test("fill: a fill names the most urgent priority and loosest budget among its readers", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
@@ -775,6 +814,51 @@ test("fill: a stale run that does not settle the reader is still asked for", asy
 	reader.close();
 	requests.close();
 	broadcast.close();
+});
+
+test("fill: a stale run that does not settle the reader leaves its own refusal reported", async () => {
+	const { broadcast, track } = resumed(2n);
+	const requests = track.requests();
+	hooks.dropTrackGroups(track, 0n, 2n, staleHole(60_000));
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
+		delay: { max: Duration.millis(500) },
+	});
+	const first = reader.recvGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	const refusal = new StreamError(StreamCode.Cancel, { message: "storage busy" });
+	fill.refuseGroups(0n, 2n, refusal);
+	expect(hooks.tryDrop(reader)).toMatchObject({ kind: "drop", start: 0n, end: 2n, error: refusal });
+
+	fill.close();
+	requests.close();
+	broadcast.close();
+	await first.catch(() => undefined);
+});
+
+test("fill: a stale run that does not settle the reader keeps its pending refusals", async () => {
+	const { broadcast, track } = resumed(6n);
+	const requests = track.requests();
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 6n } }],
+		delay: { max: Duration.millis(500) },
+	});
+	const first = reader.recvGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	const refusal = new StreamError(StreamCode.Cancel, { message: "storage busy" });
+	fill.refuseGroups(0n, 1n, refusal);
+	fill.refuseGroups(3n, 4n, refusal);
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 0n, end: 1n, error: refusal });
+	// Folded in as a change, over the refusal still to report.
+	hooks.dropTrackGroups(track, 2n, 5n, staleHole(60_000));
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 3n, end: 4n, error: refusal });
+
+	fill.close();
+	requests.close();
+	broadcast.close();
+	await first.catch(() => undefined);
 });
 
 // The upstream judged 0..2 and 4..6 under 500ms, and gave up both of them as stale.

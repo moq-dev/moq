@@ -334,22 +334,22 @@ test("SubscribeFinish carries its error on draft-07", async () => {
 });
 
 test("SubscribeDrop is restored on draft-07", async () => {
-	const drop: SubscribeResponse = { drop: new SubscribeDrop({ start: 1n, end: 3n, error: 7 }) };
+	const drop: SubscribeResponse = { drop: new SubscribeDrop({ start: 1n, end: 4n, error: 7 }) };
 	const wire = await encode(Version.DRAFT_07, drop);
-	// The drop names the SUBSCRIBE's update, 0.
+	// Groups 1 to 3 as a start and count; the drop names the SUBSCRIBE's update, 0.
 	expect(wire).toEqual(new Uint8Array([2, 4, 1, 3, 7, 0]));
 	const got = await responseRoundtrip(Version.DRAFT_07, drop);
 	if (!("drop" in got)) throw new Error("expected drop");
-	expect([got.drop.start, got.drop.end, got.drop.error]).toEqual([1n, 3n, 7]);
+	expect([got.drop.start, got.drop.end, got.drop.error]).toEqual([1n, 4n, 7]);
 });
 
 test("a drop names its update on draft-07 alone", async () => {
-	const drop = new SubscribeDrop({ start: 4n, end: 4n, error: 0x34, update: 2n });
-	expect(await encode(Version.DRAFT_07, { drop })).toEqual(new Uint8Array([2, 4, 4, 4, 0x34, 2]));
+	const drop = new SubscribeDrop({ start: 4n, end: 5n, error: 0x34, update: 2n });
+	expect(await encode(Version.DRAFT_07, { drop })).toEqual(new Uint8Array([2, 4, 4, 1, 0x34, 2]));
 	const got = await responseRoundtrip(Version.DRAFT_07, { drop });
 	if (!("drop" in got)) throw new Error("expected drop");
 	expect(got.drop.update).toBe(2n);
-	const old = new SubscribeDrop({ start: 4n, end: 4n, error: 0, update: 2n });
+	const old = new SubscribeDrop({ start: 4n, end: 5n, error: 0, update: 2n });
 	expect(await encode(Version.DRAFT_06, { drop: old })).toEqual(new Uint8Array([2, 3, 4, 4, 0]));
 	const back = await responseRoundtrip(Version.DRAFT_06, { drop: old });
 	if (!("drop" in back)) throw new Error("expected drop");
@@ -357,18 +357,41 @@ test("a drop names its update on draft-07 alone", async () => {
 });
 
 test("SubscribeSkip is type 3 on draft-07 alone", async () => {
-	const skip: SubscribeResponse = { skip: new SubscribeSkip({ start: 1n, end: 3n }) };
+	const skip: SubscribeResponse = { skip: new SubscribeSkip({ start: 1n, end: 4n }) };
 	expect(await encode(Version.DRAFT_07, skip)).toEqual(new Uint8Array([3, 2, 1, 3]));
 	const got = await responseRoundtrip(Version.DRAFT_07, skip);
 	if (!("skip" in got)) throw new Error("expected skip");
-	expect([got.skip.start, got.skip.end]).toEqual([1n, 3n]);
+	expect([got.skip.start, got.skip.end]).toEqual([1n, 4n]);
 	await expect(encode(Version.DRAFT_06, skip)).rejects.toThrow();
-	const malformed = new Reader(undefined, new Uint8Array([2, 3, 1]), Version.DRAFT_07);
-	await expect(SubscribeSkip.decode(malformed)).rejects.toThrow("invalid skipped range");
+});
+
+// Lite-07 carries Group Start and Group Count, which reach but never pass the reserved group 2^64-1.
+// Mirrors the Rust `skip_ranges_on_lite07_count_up_to_the_reserved_group`.
+test("lite-07 skip ranges count up to the reserved group", async () => {
+	const top = (1n << 64n) - 1n;
+	for (const [start, end] of [
+		[0n, 0n],
+		[3n, 4n],
+		[0n, top],
+		[top, top],
+	]) {
+		const got = await responseRoundtrip(Version.DRAFT_07, { skip: new SubscribeSkip({ start, end }) });
+		if (!("skip" in got)) throw new Error("expected skip");
+		expect([got.skip.start, got.skip.end]).toEqual([start, end]);
+	}
+	// Group Start 2^64-1, Group Count 1.
+	const wire = await encodeMessage(Version.DRAFT_07, new SubscribeSkip({ start: top, end: top }));
+	wire[wire.length - 1] = 1;
+	await expect(SubscribeSkip.decode(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow(
+		"invalid group range",
+	);
+	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+		await expect(encode(version, { drop: new SubscribeDrop({ start: 3n, end: 1n, error: 0 }) })).rejects.toThrow();
+	}
 });
 
 test("SubscribeDrop is type 0x2 on draft-05 and 0x1 on draft-04", async () => {
-	const drop: SubscribeResponse = { drop: new SubscribeDrop({ start: 1n, end: 3n, error: 0 }) };
+	const drop: SubscribeResponse = { drop: new SubscribeDrop({ start: 1n, end: 4n, error: 0 }) };
 
 	const wire05 = await encode(Version.DRAFT_05, drop);
 	expect(wire05[0]).toBe(2);
@@ -379,7 +402,7 @@ test("SubscribeDrop is type 0x2 on draft-05 and 0x1 on draft-04", async () => {
 	const got = await responseRoundtrip(Version.DRAFT_05, drop);
 	expect("drop" in got).toBe(true);
 	if (!("drop" in got)) throw new Error("expected drop");
-	expect([got.drop.start, got.drop.end]).toEqual([1n, 3n]);
+	expect([got.drop.start, got.drop.end]).toEqual([1n, 4n]);
 });
 
 test("SUBSCRIBE_OK is rejected on draft-05", async () => {
@@ -502,14 +525,18 @@ test("wanted groups refuse malformed input before writing bytes", async () => {
 	}
 });
 
-for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
-	test(`SUBSCRIBE_DROP refuses reversed ranges while retaining empty ranges on ${version}`, async () => {
+// Before lite-07 a range is an inclusive Group Start and Group End, refused reversed. Mirrors the
+// Rust `drop_ranges_before_lite07_are_inclusive`.
+for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
+	test(`SUBSCRIBE_DROP ranges are inclusive on ${version}`, async () => {
+		// Group Start 3, Group End 1.
 		const malformed = new Reader(undefined, new Uint8Array([3, 3, 1, 0]), version);
-		await expect(SubscribeDrop.decode(malformed, version)).rejects.toThrow("invalid dropped range");
-		await expect(encode(version, { drop: new SubscribeDrop({ start: 3n, end: 1n, error: 0 }) })).rejects.toThrow();
+		await expect(SubscribeDrop.decode(malformed, version)).rejects.toThrow("invalid group range");
+		const max = (1n << 62n) - 1n;
 		for (const [start, end] of [
-			[2n, 1n],
-			[BigInt(Number.MAX_SAFE_INTEGER), BigInt(Number.MAX_SAFE_INTEGER)],
+			[2n, 2n],
+			[1n, 4n],
+			[max, max + 1n],
 		]) {
 			const got = await responseRoundtrip(version, { drop: new SubscribeDrop({ start, end, error: 0 }) });
 			if (!("drop" in got)) throw new Error("missing drop");

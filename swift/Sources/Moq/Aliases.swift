@@ -51,7 +51,10 @@ public typealias VideoCodec = MoqFFI.MoqVideoCodec
 public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
 /// A datagram payload with its own sequence and optional timestamp.
 public typealias Datagram = MoqFFI.MoqDatagram
-/// The read-only facts on a received route: the `instance` of the stream it serves,
+/// Names one continuous stream at a path: `Instance.parse(text:)` names one, only a session mints
+/// one, and `==` also compares `isMinted()`, so pin a reported stream with the instance, not its text.
+public typealias Instance = MoqFFI.MoqInstance
+/// The read-only facts on a received route: the `Instance` of the stream it serves,
 /// relay hop ids (oldest first), and its static production and link cost, lower wins.
 public typealias RouteInfo = MoqFFI.MoqRouteInfo
 /// A route over a prefix: the origin-relative `prefix`, what each filter

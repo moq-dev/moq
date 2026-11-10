@@ -44,6 +44,11 @@ pub(crate) struct Claim {
 	/// older version: sent only to a peer this node proxies for, so a node that does
 	/// not proxy is never transit. Always unset on a claim off the wire.
 	pub learned: bool,
+	/// The hop chain of a claim learned over moq-lite-06 or moq-transport, which
+	/// lite-07 carries as the Lite-06 Chain; empty for a native claim. A relay
+	/// translating the claim back to lite-06 extends it, so a node the claim reaches
+	/// again recognizes its own hop and drops it. Deleted with lite-06 compatibility.
+	pub chain: crate::Hops,
 }
 
 /// A shown claim as the origin serves it through the selected route.
@@ -418,10 +423,7 @@ impl Node {
 	/// loses it, or is replaced by a random one if nothing is left.
 	pub fn origin(hop: std::num::NonZeroU64) -> Self {
 		let mut rng = kio::clock::rng();
-		let id = match hop.get() & !QUALIFIED {
-			0 => rng.random_range(1..=GENERATED),
-			id => id,
-		};
+		let id = declared_for(hop).unwrap_or_else(|| rng.random_range(1..=GENERATED));
 		Self::new(id, rng.random())
 	}
 
@@ -828,6 +830,15 @@ impl State {
 	}
 }
 
+/// The identity a node created for the origin hop `hop` declares, or `None` when nothing
+/// is left once the qualified marker is cleared, and it draws a random one instead.
+pub(crate) fn declared_for(hop: std::num::NonZeroU64) -> Option<Id> {
+	match hop.get() & !QUALIFIED {
+		0 => None,
+		id => Some(id),
+	}
+}
+
 /// The lite-06 hop a router identity travels as, so a relay translating its routes
 /// for a lite-06 peer recognizes them coming back. A declared identity is the
 /// origin's own hop id; a qualified key is folded into the 53 bits a generated hop
@@ -862,6 +873,7 @@ mod tests {
 			cost,
 			upstream: false,
 			learned: false,
+			chain: crate::Hops::new(),
 		}
 	}
 

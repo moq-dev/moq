@@ -362,7 +362,7 @@ async fn uring_workers_report_link_facts() {
 	}
 
 	// A client can see its session established before the relay lists it.
-	let deadline = kio::clock::now() + TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(TIMEOUT);
 	let views = loop {
 		let views = sessions.list(&Default::default());
 		if views.len() == 4 {
@@ -447,9 +447,9 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 	let pending = admissions.next().await.expect("pending admission");
 	// The relay fixes its deadline inside `start`, so these bracket it: what is
 	// left of each bounds what the relay tells the arrival from below and above.
-	let earliest = kio::clock::now() + DRAIN;
+	let earliest = kio::clock::now().saturating_add(DRAIN);
 	trigger.start();
-	let deadline = kio::clock::now() + DRAIN;
+	let deadline = kio::clock::now().saturating_add(DRAIN);
 	let draining = established.draining().expect("connected");
 	let goaway = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| draining.poll(waiter)))
 		.await
@@ -473,7 +473,7 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 		// distinguishable from a fresh one. Measured from the deadline, not from
 		// the first session leaving, so a slow close cannot push the admission
 		// past the deadline (where the relay rejects it).
-		kio::clock::sleep_until(deadline - DRAIN / 2).await;
+		kio::clock::sleep_until(deadline.saturating_sub(DRAIN / 2)).await;
 	}
 	let (_arrival_lease, arrival_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 	let granted = kio::clock::now();

@@ -22,8 +22,8 @@ and incarnation that shares it. Two instances are two independent streams,
 never stitched together. An instance names a run, not who publishes it: it is
 no credential, and auth decides who may publish the path.
 
-- **A new stream takes a new instance.** Every broadcast mints a random one
-  when it is created and keeps it while it is withdrawn and announced again or
+- **A new stream takes a new instance.** A broadcast that names no instance
+  generates a random one when it is created and keeps it while it is withdrawn and announced again or
   reconnects, since its numbering continues. A restarted process, or anything
   that starts its group numbers over, is a new broadcast with a new instance.
   Replaying a recording is a new stream too: [`moq import archive`](/bin/cli#archive)
@@ -56,7 +56,7 @@ one is, so it fences out an older run. Nothing assumes it is a clock.
 
 | Situation | Instance | What readers see |
 | --- | --- | --- |
-| One broadcast, reconnecting | The one it minted | The same stream; subscriptions resume |
+| One broadcast, reconnecting | The one it generated | The same stream; subscriptions resume |
 | One stream carried by several relays or CDNs | Shared by every route | Failover resumes from the first missing frame |
 | A restarted or replaced publisher | A fresh one | A restart, then the new stream from its start |
 | A publisher that continues its sequences across restarts | Stable, with a higher epoch each run | The same stream; readers continue without a seam |
@@ -92,11 +92,11 @@ order, and so does every relay deciding what to advertise.
 Instances and epochs travel only over moq-lite 07 (`moq-lite-07-wip`,
 opt-in). Older moq-lite versions and moq-transport carry neither, so the
 receiving session mints an instance for each announcement it receives, with
-epoch 0. A minted instance starts with `~`, so a publisher naming a stable
-instance should not start it with `~`: nothing refuses one, since a relay
-forwarding a route keeps the instance it received, but every node then treats
-it as minted. A minted instance names the announcement, not the publisher's
-stream, so:
+epoch 0. Whether an instance was minted is a flag beside it
+(`Instance::is_minted` in Rust, `Instance.isMinted` in JavaScript) that only a
+session sets: parsing text always names an instance, whatever the text, and
+moq-lite 07 carries the flag, so a relay forwarding a route keeps it. A minted
+instance names the announcement, not the publisher's stream, so:
 
 - An announcement ending and starting again, such as a job re-announced on one
   session, is a new stream, never spliced to the earlier one.
@@ -105,6 +105,9 @@ stream, so:
   an older hop.
 - A catalog reference naming an instance cannot be checked against a minted
   one, so there it is best effort.
+- To pin a request to a minted instance, pass back the instance the route
+  reported. Its text parses to a different, named instance, which never
+  resolves to that route.
 - A pool reached through an older-lite relay hop can pick different winners
   per relay, since each relay mints its own instances. Use moq-lite 07
   between relays.

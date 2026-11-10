@@ -284,14 +284,14 @@ moq-transport on every relay hop; this API does not add pre-07 capability detect
 
 - **`OriginProducer(*, cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
-  - `.route(path, *, hidden=False, cost=0, instance=None, epoch=0) → Route`. An exact route owning a new broadcast, visible at once unless `hidden`, under a fresh instance unless `instance` names one.
+  - `.route(path, *, hidden=False, cost=0, instance=None, epoch=0) → Route`. An exact route owning a new broadcast, visible at once unless `hidden`, under a fresh instance unless `instance` names an `Instance`.
   - `.claim(prefix, *, hidden=False, cost=0, instance=None, epoch=0) → Claim`. Claim `prefix` and every path beneath it, yielding the requests there.
 - **`Route`**. An exact route on an origin, owning one broadcast. Hold it: dropping or cancelling it retracts it, and so does closing its broadcast.
   - `.broadcast → BroadcastProducer`. The broadcast the route owns.
-  - `.instance`. The stream it serves now, kept across `withdraw()` and `announce()`. Unless one is named, a job's route takes its claim's when it first announces or when `.instance` first reads it. Read first, the job announces under it, and `announce()` fails with `Unroutable` once the claim has moved past it.
+  - `.instance → Instance | None`. The stream it serves now, kept across `withdraw()` and `announce()`, or `None` once cancelled without one. Unless one is named, a job's route takes its claim's when it first announces or when `.instance` first reads it. Read first, the job announces under it, and `announce()` fails with `Unroutable` once the claim has moved past it.
   - `.announce()`, `.withdraw()`, `.set_cost(cost)`. Show, hide, or re-price it in place; `announce` and `set_cost` raise `Closed` once the broadcast closed.
 - **`Claim`**. A prefix route on an origin. Hold it: dropping or cancelling it retracts it and rejects the requests still waiting.
-  - `.instance`. The stream it serves now, kept across `withdraw()` and `announce()`. Unless one is named, it moves to a fresh one each time a job holding it ends.
+  - `.instance → Instance`. The stream it serves now, kept across `withdraw()` and `announce()`. Unless one is named, it moves to a fresh one each time a job holding it ends.
   - `.announce()`, `.withdraw()`, `.set_cost(cost)`. Show, hide, or re-price it in place.
   - `await .requested() → BroadcastRequest | None`, or async iteration. Call `.serve(consumer)` to answer with held content under the claim's continuous sequence space, `.route(hidden=..., ...)` for the path's own route, which continues the claim's instance until the job ends and then moves the claim to a fresh one (unless either names an instance: a named claim lends none, and a named job keeps its own), or `.reject(code)` to fail the requester.
 - **`OriginConsumer`**. Discover broadcasts.
@@ -310,13 +310,14 @@ moq-transport on every relay hop; this API does not add pre-07 capability detect
 - **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.enabled`, `.framerate`, `.description`. A false `.enabled` means no frames are coming, so don't select the rendition.
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.
 - **`TrackInfo`**. Publisher track properties: priority, cache window, and timescale.
+- **`Instance`**. Names one continuous stream at a path. `Instance.parse(text)` names one (an empty `text` raises `Error.InvalidInstance`); `.text()` and `str()` give its text, and `.is_minted()` tells whether a session minted it for a route whose wire (moq-lite 06 or older, or moq-transport) carries none. Instances compare and hash by text and that flag, so pass back an announced instance as is, not `Instance.parse` of its text, to pin its stream.
 - **`media.Dimensions`**. `.width: int`, `.height: int`.
 - **`media.Container`**. The catalog container enum, carried on each `Video`/`Audio` record.
 
 ### Logging and errors
 
 - **`log_level(level="info")`**. Initialize logging for the underlying Rust layer (`"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"`). Call once per process.
-- **`Error`**. The exception raised by all operations. Catch a specific case via its variants, e.g. `except moq.Error.AlreadyResponded:`, `except moq.Error.Cancelled:`, or `except moq.Error.Busy:` when a setter races an in-flight connect/listen/accept.
+- **`Error`**. The exception raised by all operations. Catch a specific case via its variants, e.g. `except moq.Error.AlreadyResponded:`, `except moq.Error.Cancelled:`, or `except moq.Error.Busy:` when a call races an in-flight read on the same handle.
 - **`is_shutdown(err)`**. True for `Cancelled` and `Closed`, which arise from graceful shutdown rather than an actual failure. Use it to break out of an `async for` without treating the expected end-of-stream error as a problem.
 - **`is_auth(err)`**. True for `Unauthorized` (HTTP 401), `Forbidden` (HTTP 403), and `Expired` (a request token expired), and for a protocol Unauthorized or Expired session close or track revocation. Retrying without new credentials won't help, so surface these rather than reconnect.
 - **`protocol_error(err)`**. The structured protocol failure (session or stream scope, verbatim wire code, known kind) when the peer sent one.

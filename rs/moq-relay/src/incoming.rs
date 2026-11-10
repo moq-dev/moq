@@ -83,7 +83,7 @@ pub trait Sealed: Sized {
 	fn auth(&self) -> moq_net::auth::Handle;
 	fn requests(&mut self) -> moq_net::auth::Requests;
 	fn role(&self) -> Option<moq_net::setup::Role>;
-	/// The Hop ID the peer declared in its SETUP, if any.
+	/// The identity the peer declared in its SETUP, if any: its Hop ID, or from moq-lite-07 its Node ID.
 	fn peer_hop(&self) -> Option<std::num::NonZeroU64>;
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self;
 	fn with_limits(self, limits: moq_net::session::Limits) -> Self;

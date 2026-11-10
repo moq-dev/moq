@@ -256,7 +256,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		// A max delay far past the test's patience: only the accounting may end it.
 		const { subscriber, reader, respond, fin } = await subscribed(version, Duration.millis(60_000));
 		await respond({ start: new SubscribeStart([0n]) });
-		await respond({ drop: new SubscribeDrop({ start: 0n, end: 0n, error: 0 }) });
+		await respond({ drop: new SubscribeDrop({ start: 0n, end: 1n, error: 0 }) });
 		const group = groupStream(subscriber, 1n);
 		group.write("1.0");
 		group.finish();
@@ -278,7 +278,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const group = await reader.recvGroup();
 		expect(await group?.readString()).toBe("0.0");
 
-		await respond({ drop: new SubscribeDrop({ start: 0n, end: 0n, error: 70 }) });
+		await respond({ drop: new SubscribeDrop({ start: 0n, end: 1n, error: 70 }) });
 		const err = await group?.readString().then(
 			() => undefined,
 			(err: unknown) => err,
@@ -427,7 +427,7 @@ test("lite-07 settles a skipped group with SUBSCRIBE_DROP", async () => {
 		await group.handled;
 	}
 	await respond({ finish: new SubscribeFinish(3n) });
-	await respond({ drop: new SubscribeDrop({ start: 1n, end: 1n, error: 0 }) });
+	await respond({ drop: new SubscribeDrop({ start: 1n, end: 2n, error: 0 }) });
 	await fin();
 
 	expect((await reader.recvGroup())?.sequence).toBe(0n);
@@ -441,7 +441,7 @@ test("lite-07 settles a dropped range without grace", async () => {
 	const { reader, respond, fin } = await subscribed(Version.DRAFT_07, Duration.millis(60_000));
 	await respond({ start: new SubscribeStart([0n]) });
 	await respond({ finish: new SubscribeFinish(3n) });
-	await respond({ drop: new SubscribeDrop({ start: 0n, end: 2n, error: 0 }) });
+	await respond({ drop: new SubscribeDrop({ start: 0n, end: 3n, error: 0 }) });
 	await fin();
 
 	expect(await settlesWithin(reader.recvGroup(), clock, Duration.millis(1000))).toBe(true);
@@ -480,7 +480,7 @@ test("lite-07 FIN waits for the skipped and reset final range to settle", async 
 	const last = groupStream(subscriber, 2n);
 	last.write("tail");
 	await respond({ finish: new SubscribeFinish(3n) });
-	await respond({ drop: new SubscribeDrop({ start: 1n, end: 1n, error: 0 }) });
+	await respond({ drop: new SubscribeDrop({ start: 1n, end: 2n, error: 0 }) });
 	await fin();
 	let finished = false;
 	const ack = subscriberFin().then(() => {

@@ -599,7 +599,7 @@ impl Watched {
 	fn lapsed(&mut self, now: crate::time::Instant) -> Refused {
 		let wait = self.lapse;
 		self.lapse = (wait * 2).min(RETRY_MAX);
-		Refused::Until(now + wait)
+		Refused::Until(now.saturating_add(wait))
 	}
 }
 
@@ -1378,6 +1378,9 @@ impl SubscribeRequest {
 
 	/// Mark the subscription for joining FETCHes from the boundary it serves from: the
 	/// prefix ending right after `largest`.
+	///
+	/// The end is exclusive, and End Object 0 reads the whole group, which is that prefix
+	/// when `largest` is the last Object ID a group can hold.
 	fn save_join(
 		&self,
 		filter: Filter,
@@ -1392,7 +1395,7 @@ impl SubscribeRequest {
 			(Filter::NextObject, Some(largest)) => Joined::Group {
 				end: Location {
 					group: largest.group,
-					object: largest.object + 1,
+					object: largest.object.checked_add(1).unwrap_or(0),
 				},
 				cache: cache.clone(),
 				namespace: self.msg.track_namespace.clone(),
@@ -3878,7 +3881,7 @@ impl Publisher {
 			if matches!(&written, Poll::Ready(Ok(())))
 				&& matches!(request.pending, Some(NamespacePending::Writing { .. }))
 			{
-				let deadline = now + ADVERTISE_TIMEOUT;
+				let deadline = now.saturating_add(ADVERTISE_TIMEOUT);
 				request.pending = Some(NamespacePending::Answer(deadline));
 				inflight.push_back((deadline, suffix.clone()));
 			}
@@ -4025,11 +4028,15 @@ impl Publisher {
 	///
 	/// 0 is the peer asking not to be offered this again, which is what keeps a permanent
 	/// refusal (unauthorized, uninterested) from becoming a request every few seconds for
-	/// the life of the session.
+	/// the life of the session. An interval past the clock's range reads the same way.
 	fn refusal(&self, retry_interval: u64) -> Refused {
 		match retry_interval {
 			0 => Refused::Never,
-			ms => Refused::Until(self.runtime.now() + Duration::from_millis(ms)),
+			ms => self
+				.runtime
+				.now()
+				.checked_add(Duration::from_millis(ms))
+				.map_or(Refused::Never, Refused::Until),
 		}
 	}
 
@@ -5810,7 +5817,7 @@ impl ForwardNamespaces {
 					true => {
 						self.retry_at = self
 							.retry_at
-							.or_else(|| Some(publisher.runtime.now() + jitter(self.retry_delay)))
+							.or_else(|| Some(publisher.runtime.now().saturating_add(jitter(self.retry_delay))))
 					}
 					false => {
 						self.retry_at = None;
@@ -10973,7 +10980,7 @@ mod serve_tests {
 		let mut running: Running = Box::pin(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
 		let request = taken_token(&mut running, &mut requests).await;
 		let issued = request.accept(crate::auth::Grant {
-			expires: expires.map(|after| h.publisher.runtime.now() + after),
+			expires: expires.map(|after| h.publisher.runtime.now().saturating_add(after)),
 			..crate::auth::Grant::all()
 		});
 		assert!(futures::poll!(running.as_mut()).is_pending());
@@ -13021,6 +13028,32 @@ mod serve_tests {
 					.collect();
 				assert_eq!(ids, [5], "{version} streamed={streamed}");
 			}
+		}
+	}
+
+	/// An upstream's Largest Object can be the last Object ID a group holds, which no
+	/// exclusive end within the group follows: the join asks for that whole group, which
+	/// this cache holds only the head of.
+	#[kio::test]
+	async fn a_joining_fetch_through_the_last_object_id_reads_its_whole_group() {
+		const LATEST: u64 = 5;
+
+		for version in JOINING_DRAFTS {
+			let mut h = serve(version);
+			publish_groups(&mut h, LATEST);
+			h.track.report_object(LATEST, u64::MAX);
+			settle().await;
+
+			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let mut serve = std::pin::pin!(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+			);
+			registered(&h, serve.as_mut()).await;
+			assert_eq!(joining_refusal(&h, version).await, DOES_NOT_EXIST, "{version}");
 		}
 	}
 
@@ -18610,6 +18643,18 @@ mod tests {
 	/// uninterested) into a request every few seconds for the life of the session.
 	#[kio::test]
 	async fn a_refusal_that_forbids_retrying_is_not_retried() {
+		refused_once(0).await;
+	}
+
+	/// The largest retry interval a peer can encode is past the clock's range: it waits
+	/// forever rather than panicking the publisher.
+	#[kio::test]
+	async fn a_refusal_past_the_clock_s_range_is_not_retried() {
+		refused_once(crate::coding::varint::MAX_QUIC).await;
+	}
+
+	/// Refuse the only advertisement with `retry_interval`, and assert it is never re-offered.
+	async fn refused_once(retry_interval: u64) {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
@@ -18618,7 +18663,7 @@ mod tests {
 
 		// Every stream is answered with the same refusal, so a retry would show up as a
 		// second occurrence on the wire.
-		let refusal = publish_namespace_error(VERSION, 0).await;
+		let refusal = publish_namespace_error(VERSION, retry_interval).await;
 		let session =
 			crate::lite::test_transport::ScriptedSession::per_stream(vec![refusal.clone(), refusal.clone(), refusal]);
 		let log = session.log.clone();

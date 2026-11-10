@@ -989,7 +989,7 @@ pub struct moq_section {
 /// Pass one to [moq_origin_route], [moq_origin_claim], or [moq_broadcast_request_route].
 /// The hop chain is the origin's to build, so a local publisher cannot claim relay hops it
 /// never took. Zeroed (or NULL) is the default: visible at once, cost 0, under a fresh
-/// instance. `instance` is borrowed for the duration of the call.
+/// instance. The `instance` handle is borrowed for the duration of the call.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct moq_route_options {
@@ -997,17 +997,16 @@ pub struct moq_route_options {
 	/// sets its production cost here: zero for content it is already producing,
 	/// larger for content it would have to start producing on demand.
 	pub cost: u64,
-	/// A stable instance for the stream, NOT NULL terminated, or NULL (or empty) to mint a
-	/// fresh one when the route is created.
+	/// A stable instance for the stream, as an instance handle ([moq_instance_parse], or one a
+	/// route or announcement reported, to forward that stream as is), or 0 to mint a fresh one
+	/// when the route is created.
 	///
 	/// A route keeps its instance for its lifetime, across [moq_route_withdraw] and
 	/// [moq_route_announce], so a new route is a new stream viewers restart onto. Set one only
 	/// for a publisher that continues its group sequences across restarts and raises `epoch`
 	/// on each: readers stitch every route of one instance together, so restarting the
 	/// sequences under an old instance splices unrelated groups into their tracks.
-	pub instance: *const c_char,
-	/// The length in bytes of `instance`.
-	pub instance_len: usize,
+	pub instance: u32,
 	/// Which run of a stable `instance` this is: only its highest epoch is eligible, cheaper
 	/// or not. Ignored without one.
 	pub epoch: u64,
@@ -1024,19 +1023,18 @@ pub struct moq_route_options {
 pub struct moq_route_info {
 	/// Preference among routes covering the same prefix: lower wins.
 	pub cost: u64,
-	/// The stream the route serves: routes with one instance are one continuous stream.
-	pub instance: moq_string,
+	/// The stream the route serves, as an instance handle the announcement owns: valid until
+	/// [moq_origin_announced_free], and never passed to [moq_instance_free]. Routes with one
+	/// instance are one continuous stream.
+	pub instance: u32,
 	/// Whether a usable path reaches the route's origin; requests may fail while it is not.
 	pub available: bool,
 }
 
 /// Parse [moq_route_options], treating NULL as the default.
 ///
-/// The instance parses as at every API that takes one: NULL or empty names none.
-///
 /// # Safety
-/// `options` may be NULL, or must point at a readable [moq_route_options] whose `instance`
-/// pointer is valid for `instance_len` bytes.
+/// `options` may be NULL, or must point at a readable [moq_route_options].
 unsafe fn parse_route_options(options: *const moq_route_options) -> Result<moq_net::origin::RouteOptions, Error> {
 	let hidden = unsafe { options.as_ref() }.is_some_and(|options| options.hidden);
 	unsafe { route_options(options, hidden) }
@@ -1068,7 +1066,7 @@ unsafe fn route_options(
 		return Ok(out);
 	};
 	out = out.with_cost(options.cost);
-	if let Some(instance) = unsafe { parse_instance(options.instance, options.instance_len)? } {
+	if let Some(instance) = lookup_instance(options.instance)? {
 		out = out.with_instance(instance, options.epoch);
 	}
 	Ok(out)
@@ -2277,34 +2275,25 @@ pub unsafe extern "C" fn moq_origin_claim(
 pub extern "C" fn moq_route_broadcast(route: u32) -> i32 {
 	ffi::enter(move || {
 		let route = ffi::parse_id(route)?;
-		let state = State::lock();
-		let broadcast = state.origin.route_broadcast(route)?;
-		match state.publish.contains(broadcast) {
-			true => Ok(broadcast),
-			false => Err(Error::BroadcastNotFound),
-		}
+		State::lock().origin.route_broadcast(route)
 	})
 }
 
-/// The stream a route serves now.
+/// The stream a route serves now, as a new instance handle the caller frees with
+/// [moq_instance_free].
 ///
 /// Named options keep one instance. A route from [moq_broadcast_request_route] takes its
 /// claim's current one when it first announces or when this first reads it. Read first,
 /// the job announces under it, and [moq_route_announce] fails with an unroutable error once the
 /// claim has moved past it, so a signer built from it stays valid.
-/// Withdrawing and announcing again keep it. The destination borrows the route's storage
-/// until the next [moq_route_instance] on the route or [moq_route_free].
+/// Withdrawing and announcing again keep it.
 ///
-/// Returns zero on success, or a negative code on failure.
-///
-/// # Safety
-/// - `dst` must point at a writable [moq_string].
+/// Returns a non-zero instance handle on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_route_instance(route: u32, dst: *mut moq_string) -> i32 {
+pub extern "C" fn moq_route_instance(route: u32) -> i32 {
 	ffi::enter(move || {
 		let route = ffi::parse_id(route)?;
-		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		State::lock().origin.route_instance(route, dst)
+		State::lock().origin.route_instance(route)
 	})
 }
 
@@ -2367,22 +2356,18 @@ pub extern "C" fn moq_route_free(route: u32) -> i32 {
 	})
 }
 
-/// The stream a claim serves now.
+/// The stream a claim serves now, as a new instance handle the caller frees with
+/// [moq_instance_free].
 ///
 /// Named options keep one instance. Unnamed, the claim moves to a fresh one each time a job
-/// holding its current one ends. The destination borrows the claim's storage until the next
-/// [moq_claim_instance] on the claim or [moq_claim_free].
+/// holding its current one ends.
 ///
-/// Returns zero on success, or a negative code on failure.
-///
-/// # Safety
-/// - `dst` must point at a writable [moq_string].
+/// Returns a non-zero instance handle on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_claim_instance(claim: u32, dst: *mut moq_string) -> i32 {
+pub extern "C" fn moq_claim_instance(claim: u32) -> i32 {
 	ffi::enter(move || {
 		let claim = ffi::parse_id(claim)?;
-		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		State::lock().origin.claim_instance(claim, dst)
+		State::lock().origin.claim_instance(claim)
 	})
 }
 
@@ -2659,9 +2644,10 @@ pub enum moq_follow_event {
 /// instead, use [moq_origin_request]. A broadcast created on this origin resolves once it is
 /// announced, like a remote one.
 ///
-/// `instance` is the only stream to follow, or NULL (or empty) to follow every instance serving
-/// the path. A pinned follow never delivers another instance taking over: that ends it, and its
-/// own instance is delivered again when it returns.
+/// `instance` is an instance handle naming the only stream to follow, or 0 to follow every
+/// instance serving the path; pass the one an announcement reported to follow that stream. A
+/// pinned follow never delivers another instance taking over: that ends it, and its own
+/// instance is delivered again when it returns.
 ///
 /// `on_follow` receives a [moq_follow_event] and a code. `MOQ_FOLLOW_EVENT_ONLINE` carries a
 /// broadcast handle once announced, and again a new one each time another publisher instance
@@ -2678,22 +2664,20 @@ pub enum moq_follow_event {
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
-/// - `instance` may be NULL, or must point at `instance_len` readable bytes.
 /// - The caller must keep `user_data` valid until the `MOQ_FOLLOW_EVENT_END` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_follow(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
-	instance: *const c_char,
-	instance_len: usize,
+	instance: u32,
 	on_follow: ffi::moq_follow_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
-		let instance = unsafe { parse_instance(instance, instance_len)? };
+		let instance = lookup_instance(instance)?;
 		let on_follow = unsafe { ffi::OnFollow::new(user_data, on_follow)? };
 		State::lock().origin.follow(origin, path, instance, on_follow)
 	})
@@ -2722,8 +2706,9 @@ pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 /// hidden route not announced yet. No separate announcement stream is needed.
 /// Serve on-demand paths with [moq_origin_claim].
 ///
-/// `instance` is the only stream to accept, or NULL (or empty) for any. A request pinned to an
-/// instance that does not serve the path is unroutable.
+/// `instance` is an instance handle naming the only stream to accept, or 0 for any; pass the one
+/// an announcement reported to pin that stream. A request pinned to an instance that does not
+/// serve the path is unroutable.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
 /// with a terminal code: `0` (finished, including after [moq_origin_request_cancel]) or a negative
@@ -2735,22 +2720,20 @@ pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
-/// - `instance` may be NULL, or must point at `instance_len` readable bytes.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_broadcast` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_request(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
-	instance: *const c_char,
-	instance_len: usize,
+	instance: u32,
 	on_broadcast: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
-		let instance = unsafe { parse_instance(instance, instance_len)? };
+		let instance = lookup_instance(instance)?;
 		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast)? };
 		State::lock().origin.request(origin, path, instance, on_broadcast)
 	})
@@ -2770,18 +2753,92 @@ pub extern "C" fn moq_origin_request_cancel(task: u32) -> i32 {
 	})
 }
 
-/// Parse an optional publisher instance, where NULL or empty means unpinned.
+/// The instance a handle names, or none for 0.
+fn lookup_instance(instance: u32) -> Result<Option<moq_net::Instance>, Error> {
+	if instance == 0 {
+		return Ok(None);
+	}
+	let instance = ffi::parse_id(instance)?;
+	Ok(Some(State::lock().origin.instance(instance)?.clone()))
+}
+
+/// Parse a named instance from `text`, refusing an empty one.
+///
+/// Only a session mints an instance, for a route whose wire (moq-lite 06 or older, or
+/// moq-transport) carries none, so text always names one: pass the handle a route or an
+/// announcement reported to pin or forward a minted stream.
+///
+/// Returns a non-zero instance handle the caller frees with [moq_instance_free], or a negative
+/// code on failure.
 ///
 /// # Safety
-/// - `instance` may be NULL, or must point at `instance_len` readable bytes.
-unsafe fn parse_instance(instance: *const c_char, instance_len: usize) -> Result<Option<moq_net::Instance>, Error> {
-	unsafe { ffi::parse_str_optional(instance, instance_len)? }
-		.map(|instance| {
-			instance
-				.parse()
-				.map_err(|_| Error::InvalidConfig("an instance is never empty".into()))
-		})
-		.transpose()
+/// - `text` must point at `text_len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_instance_parse(text: *const c_char, text_len: usize) -> i32 {
+	ffi::enter(move || {
+		let instance = unsafe { ffi::parse_str(text, text_len)? }
+			.parse()
+			.map_err(|_| Error::InvalidConfig("an instance is never empty".into()))?;
+		State::lock().origin.instance_insert(instance)
+	})
+}
+
+/// The instance's text, which alone does not tell a minted instance from a named one.
+///
+/// The destination borrows the handle's storage until [moq_instance_free] (or, for an
+/// announcement's, [moq_origin_announced_free]).
+///
+/// Returns zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must point at a writable [moq_string].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_instance_text(instance: u32, dst: *mut moq_string) -> i32 {
+	ffi::enter(move || {
+		let instance = ffi::parse_id(instance)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let state = State::lock();
+		let text = state.origin.instance(instance)?.as_str();
+		*dst = moq_string {
+			data: text.as_ptr().cast::<c_char>(),
+			len: text.len(),
+		};
+		Ok(())
+	})
+}
+
+/// Whether a session minted the instance for a route whose wire carries none: 1 if minted, 0 if
+/// named, or a negative code on failure. A minted instance names the announcement, not the
+/// publisher's stream, so signing refuses it and a catalog's instance check skips it.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_instance_minted(instance: u32) -> i32 {
+	ffi::enter(move || {
+		let instance = ffi::parse_id(instance)?;
+		Ok(i32::from(State::lock().origin.instance(instance)?.is_minted()))
+	})
+}
+
+/// Whether two instance handles name the same stream: 1 when their text and whether a session
+/// minted them both match, 0 otherwise, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_instance_equal(a: u32, b: u32) -> i32 {
+	ffi::enter(move || {
+		let (a, b) = (ffi::parse_id(a)?, ffi::parse_id(b)?);
+		let state = State::lock();
+		Ok(i32::from(state.origin.instance(a)? == state.origin.instance(b)?))
+	})
+}
+
+/// Free an instance handle the caller owns: one from [moq_instance_parse], [moq_route_instance],
+/// or [moq_claim_instance]. An announcement's instance goes with [moq_origin_announced_free].
+///
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_instance_free(instance: u32) -> i32 {
+	ffi::enter(move || {
+		let instance = ffi::parse_id(instance)?;
+		State::lock().origin.instance_free(instance)
+	})
 }
 
 /// Close an origin and clean up its resources.
