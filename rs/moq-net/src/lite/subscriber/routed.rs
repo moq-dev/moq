@@ -99,8 +99,8 @@ pub(super) struct Routed {
 	drained: bool,
 	/// The link's min RTT, which the peer's routes add.
 	rtt: route::LinkRtt,
-	/// When to read the link's RTT next.
-	read_rtt: crate::time::Deadline,
+	/// When to read the link's RTT next, or `None` once the transport reported none.
+	read_rtt: Option<crate::time::Deadline>,
 }
 
 impl Routed {
@@ -134,7 +134,10 @@ impl Routed {
 			.receive(scoped(&link, &regions, key), prefix.clone())
 			.map_err(refused)?;
 		let mut rtt = route::LinkRtt::default();
-		stream.min_rtt(rtt.read(subscriber.session.metrics().rtt()));
+		let first = rtt.read(subscriber.session.metrics().rtt());
+		stream.min_rtt(first);
+		// A transport that reports no RTT never starts to, so it costs no timer.
+		let read_rtt = first.map(|_| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
 		Ok(Self {
 			node,
 			stream,
@@ -158,7 +161,7 @@ impl Routed {
 			ready: Default::default(),
 			drained: false,
 			rtt,
-			read_rtt: crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL),
+			read_rtt,
 		})
 	}
 
@@ -508,13 +511,16 @@ impl Routed {
 	) -> Result<(), Error> {
 		// Only a route the peer sent adds the link's min RTT, so a peer sending none
 		// costs no timer.
-		while !self.routes.is_empty() && self.read_rtt.poll(waiter).is_ready() {
+		while !self.routes.is_empty()
+			&& let Some(read_rtt) = &mut self.read_rtt
+			&& read_rtt.poll(waiter).is_ready()
+		{
 			let last = self.rtt.reported();
 			let now = self.rtt.read(subscriber.session.metrics().rtt());
 			if now != last {
 				self.stream.min_rtt(now);
 			}
-			self.read_rtt = crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL);
+			self.read_rtt = now.map(|_| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
 		}
 		while let Poll::Ready(output) = self.stream.poll_output(waiter) {
 			self.output(subscriber, output);
