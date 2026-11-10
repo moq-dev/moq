@@ -51,7 +51,6 @@ moves what remains of them once their claims merge.
 - [A reused moq-transport alias refuses its track at once](/quest/m1/ietf-alias-refuse.md) - a SUBSCRIBE_OK on an alias already bound fails its readers and removes its entry without waiting on the peer's FIN acknowledgement
 - [Unused crates, scripts, and files are deleted](/quest/m1/unused-code.md) - moq-room, the moq-native tombstone, demo/throttle, sh/dart/publish.sh, demo/web's Solid deps, and unpublished packages' release notes go
 - [The CARLA bridge builds outside the root workspace](/quest/m1/carla-workspace.md) - workspace builds stop compiling the demo bridge
-- [Draft publishing keeps the upload and drops changelog rewriting](/quest/m1/drafts-publish-trim.md) - `sh/drafts/publish.sh` and its test shrink to the datatracker upload
 - [A client's first dial fails fast](/quest/m1/reconnect-fail-fast.md) - a client that never got a session stops instead of retrying, later failures back off, and a version mismatch is logged on both sides
 - [Find out whether Cloudflare's relay really sends SOLICIT](/quest/m1/cf-solicit.md) - capture its SETUP, then close moq-dev/moq#8418 as their bug or fix our parsing
 
