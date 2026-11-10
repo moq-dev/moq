@@ -247,11 +247,14 @@ impl Server {
 				cost: None,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				node: None,
 				token: None,
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
 				// Filled by `lite::start` from the attached origin handles.
 				route_key: None,
+				// Filled by `lite::start` from the version.
+				lite06_chain: false,
 			}
 		} else {
 			lite::Setup::default()
@@ -312,7 +315,8 @@ impl Server {
 			Some(client_setup) => (
 				client_setup.setup.path.clone(),
 				client_setup.setup.role,
-				client_setup.setup.hop,
+				// Lite-07 declares a Node ID where older versions declare a Hop ID.
+				client_setup.setup.hop.or(client_setup.setup.node.map(crate::Hop::from)),
 				client_setup.setup.token.clone(),
 				client_setup.setup.implementation.clone(),
 				PausedHandshake::LiteSetup {
@@ -1096,11 +1100,12 @@ impl Handshake {
 		self.role
 	}
 
-	/// The Hop ID declared by the peer, when the negotiated protocol carries one.
+	/// The identity the peer declared for itself, when the negotiated protocol carries one.
 	///
 	/// A moq-lite-05+ endpoint declares this when it attaches a publish or subscribe
-	/// origin; a moq-transport endpoint declares it via the MoQ Cluster extension. Older
-	/// versions and endpoints without one return `None`.
+	/// origin: its Hop ID, or from moq-lite-07 its Node ID. A moq-transport endpoint
+	/// declares its Hop ID via the MoQ Cluster extension. Older versions and endpoints
+	/// without one return `None`. [`origin::Producer::is_own`] tells whether it is ours.
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
@@ -1715,10 +1720,12 @@ mod tests {
 			role,
 			cost: None,
 			hop,
+			node: None,
 			token: None,
 			ietf: false,
 			implementation: None,
 			route_key: None,
+			lite06_chain: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 		.unwrap();

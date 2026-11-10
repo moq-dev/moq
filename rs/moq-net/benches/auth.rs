@@ -305,11 +305,13 @@ fn waiting(c: &mut Criterion) {
 								let mut seen = std::collections::HashSet::new();
 								while seen.len() < paths {
 									match announced.next().await.unwrap() {
-										moq_net::origin::RouteEvent::Start(update)
-										| moq_net::origin::RouteEvent::Update(update)
-										| moq_net::origin::RouteEvent::Restart(update)
-											if update.prefix.as_str().starts_with(&prefix) =>
-										{
+										moq_net::origin::RouteEvent {
+											kind:
+												moq_net::origin::RouteKind::Start
+												| moq_net::origin::RouteKind::Update
+												| moq_net::origin::RouteKind::Restart,
+											announce: update,
+										} if update.prefix.as_str().starts_with(&prefix) => {
 											seen.insert(update.prefix);
 										}
 										_ => {}
@@ -383,8 +385,10 @@ fn shared_requests(c: &mut Criterion) {
 							}
 							let mut seen = std::collections::HashSet::new();
 							while seen.len() < tokens * requests {
-								if let moq_net::origin::RouteEvent::Start(update)
-								| moq_net::origin::RouteEvent::Restart(update) = announced.next().await.unwrap()
+								if let moq_net::origin::RouteEvent {
+									kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Restart,
+									announce: update,
+								} = announced.next().await.unwrap()
 									&& update.prefix.as_str().starts_with(&prefix)
 								{
 									seen.insert(update.prefix);

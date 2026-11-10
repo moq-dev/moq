@@ -220,9 +220,16 @@ pub(crate) type ParameterSets = BTreeMap<(u8, u32), Bytes>;
 /// Adopt the parameter sets of one type that an access unit or init defined: each layer it
 /// defined any for replaces that layer's retained sets, dropping ids the new configuration no
 /// longer uses, while every other layer keeps its own. An empty `sets` changes nothing.
-pub(crate) fn adopt_parameter_sets(retained: &mut ParameterSets, sets: ParameterSets) {
-	retained.retain(|(layer, _), _| !sets.keys().any(|(defined, _)| defined == layer));
-	retained.extend(sets);
+pub(crate) fn adopt_parameter_sets(retained: &mut ParameterSets, mut sets: ParameterSets) {
+	let defined = layers(&sets);
+	retained.retain(|&(layer, _), _| defined & 1 << layer == 0);
+	// Appending to an emptied map moves `sets` in rather than inserting each set.
+	retained.append(&mut sets);
+}
+
+/// The layers `sets` holds any for, as a bitmask: `nuh_layer_id` has six bits.
+fn layers(sets: &ParameterSets) -> u64 {
+	sets.keys().fold(0, |mask, &(layer, _)| mask | 1 << layer)
 }
 
 /// The NAL syntax an [`InBand`] transform reads.
@@ -441,9 +448,7 @@ pub(crate) fn reconcile_keyframe_params(
 ) -> Result<()> {
 	let mut missing = false;
 	for (retained, seen) in retained.iter_mut().zip(seen.iter_mut()) {
-		missing |= retained
-			.keys()
-			.any(|(layer, _)| !seen.keys().any(|(defined, _)| defined == layer));
+		missing |= layers(retained) & !layers(seen) != 0;
 		adopt_parameter_sets(retained, std::mem::take(*seen));
 		seen.clone_from(retained);
 	}

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { RefusedRedirect } from "../error.ts";
 import { dialed, handover, pinnedTransport, type Redirect, target } from "./goaway.ts";
 
@@ -88,9 +88,9 @@ test("a certificate pin holds only the WebTransport session that used it", () =>
 });
 
 test("the handover is the cap, lowered only by a positive peer deadline", () => {
-	const cap = Milli(10_000);
+	const cap = Duration.millis(10_000);
 	expect(handover(cap)).toBe(cap);
-	expect(handover(cap, Milli(0))).toBe(cap);
-	expect(handover(cap, Milli(3_000))).toBe(Milli(3_000));
-	expect(handover(cap, Milli(3_600_000))).toBe(cap);
+	expect(handover(cap, Duration.millis(0))).toBe(cap);
+	expect(handover(cap, Duration.millis(3_000))).toEqual(Duration.millis(3_000));
+	expect(handover(cap, Duration.millis(3_600_000))).toBe(cap);
 });

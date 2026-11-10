@@ -81,9 +81,9 @@ describe("sign", () => {
 
 	/** The `exp` `args` write, with the wall seconds bracketing the subprocess that wrote it. */
 	function bracketed(...args: string[]) {
-		const before = Math.floor(wall() / 1000);
+		const before = Math.floor(wall().asUnixMillis() / 1000);
 		const value = exp(...args) ?? 0;
-		const after = Math.floor(wall() / 1000);
+		const after = Math.floor(wall().asUnixMillis() / 1000);
 		return { before, value, after };
 	}
 

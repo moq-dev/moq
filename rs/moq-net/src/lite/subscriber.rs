@@ -45,8 +45,8 @@ pub(super) struct SubscriberConfig {
 	/// Local policy for what pulling from this peer costs, overriding whatever it
 	/// declared in its SETUP. `None` charges the peer's declared price.
 	pub cost: Option<u64>,
-	/// Set once the peer sends a GOAWAY; this session's routes then cost
-	/// [`crate::origin::Cost::DRAIN`], so a replacement session outranks it.
+	/// Set once the peer sends a GOAWAY; this session's routes then rank last
+	/// (draining), so a replacement session outranks it.
 	pub going_away: crate::goaway::GoingAway,
 	/// Our tokens' grants: a subscription the union stops covering is cancelled.
 	pub auth: crate::auth::Link,
@@ -633,12 +633,13 @@ impl Subscriber {
 				instance,
 				epoch,
 				cost,
+				..
 			} => {
 				// Resolved like an update: the id stays live.
 				let suffix = run.decoder.get(id)?;
 				let path = prefix.join(&suffix)?;
 				run.announced.restart(&path, instance.map(|instance| (instance, epoch)));
-				// Lite-07 carries no hop chain; its claims name their route instead.
+				// Only lite-07 restarts, and its claims name their route instead.
 				self.restart_announce(
 					path,
 					crate::Hops::new(),
@@ -735,10 +736,7 @@ impl Subscriber {
 		.with_cost(cost.charged(link_cost))
 		.with_via(self.via(responder));
 
-		if self.going_away.is_set() {
-			route.cost = crate::origin::Cost::DRAIN;
-		}
-
+		route.draining = self.going_away.is_set();
 		route
 	}
 
@@ -826,6 +824,14 @@ impl Subscriber {
 		Ok(announced.offer(self, path, route))
 	}
 
+	/// Whether `hops` passed through this node, under its lite-06 hop or the hop its
+	/// route identity travels as: a moq-lite-07 relay translating this node's claims
+	/// for a lite-06 peer names the latter. Either way the claim came back, and filed
+	/// again it would keep itself alive once its source left.
+	pub(super) fn names_self(&self, hops: &crate::Hops) -> bool {
+		hops.contains(&self.self_origin) || self.origin.route_hop().is_some_and(|hop| hops.contains(&hop))
+	}
+
 	/// The full chain of a new or replacing advertisement, or `None` when it is
 	/// reflected or exceeds the origin's hop limit.
 	fn chain(&self, path: &Path, mut hops: crate::Hops, responder_origin: Option<crate::Hop>) -> Option<crate::Hops> {
@@ -835,14 +841,10 @@ impl Subscriber {
 			Some(responder) => {
 				(responder != crate::Hop::UNKNOWN && hops.contains(&responder))
 					|| hops.push(responder).is_err()
-					|| hops.contains(&self.self_origin)
+					|| self.names_self(&hops)
 			}
-			None => hops.contains(&self.self_origin),
+			None => self.names_self(&hops),
 		};
-		// A claim of this node's that a moq-lite-07 relay translated for a lite-06 peer
-		// starts with its route identity's hop instead of this origin's. Filed again as
-		// an own claim, it would keep itself alive once its source left.
-		let reflected = reflected || self.origin.route_hop().is_some_and(|hop| hops.contains(&hop));
 		if reflected {
 			tracing::debug!(route = %self.log_path(path), "dropping reflected announce");
 			return None;
@@ -982,7 +984,7 @@ impl SubscriptionCleanup {
 				continue;
 			};
 			if entry.tail.read().is_ended() {
-				let _ = producer.finish();
+				let _ = producer.finish_shared();
 			}
 			let _ = producer.abort(err.clone());
 		}
@@ -5419,9 +5421,9 @@ mod tests {
 				update: 0,
 			})
 		};
-		let frame = |group: &mut crate::group::Producer| {
+		let frame = |mut group: crate::group::Producer| {
 			group.write_frame(crate::Timestamp::from_millis(1).unwrap(), &b"x"[..])?;
-			group.finish()
+			group.finish().map(drop)
 		};
 		let arrive = |serving: &mut ServeLoop, sequence| {
 			let group = serving.serving.create_group(crate::group::Info { sequence }).unwrap();
@@ -5430,15 +5432,15 @@ mod tests {
 
 		// OLD, then the group, which finishes.
 		serving.apply_response(&serve, old(1)).unwrap();
-		let (mut one, reading) = arrive(&mut serving, 1);
-		frame(&mut one).unwrap();
+		let (one, reading) = arrive(&mut serving, 1);
+		frame(one).unwrap();
 		drop(reading);
 		// The group first, still arriving when its OLD lands.
-		let (mut two, _two) = arrive(&mut serving, 2);
+		let (two, _two) = arrive(&mut serving, 2);
 		serving.apply_response(&serve, old(2)).unwrap();
 		// OLD, then the group, still arriving at the update.
 		serving.apply_response(&serve, old(3)).unwrap();
-		let (mut three, _three) = arrive(&mut serving, 3);
+		let (three, _three) = arrive(&mut serving, 3);
 		// OLD, and no group.
 		serving.apply_response(&serve, old(4)).unwrap();
 
@@ -5452,8 +5454,8 @@ mod tests {
 		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
 		assert!(covers(1..4), "every group that arrived stays accounted for");
 		assert!(!covers(4..5), "the group that never arrived is owed again");
-		frame(&mut two).expect("the drop leaves a group still arriving");
-		frame(&mut three).expect("the update leaves a group still arriving");
+		frame(two).expect("the drop leaves a group still arriving");
+		frame(three).expect("the update leaves a group still arriving");
 	}
 
 	/// A group whose stream finished wins over a lite-07 stale drop that lands after the cache
@@ -6637,11 +6639,11 @@ mod tests {
 			Err(_) => panic!("the entry holds the parked streams"),
 		};
 		assert_eq!(opened, [kept], "the withdrawn group is gone");
-		let Ok(Open::Group(Opened { mut group, .. })) = entry.unpark(kept) else {
+		let Ok(Open::Group(Opened { group, .. })) = entry.unpark(kept) else {
 			panic!("the kept group");
 		};
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		// Only the kept group reaches the subscriber: the withdrawn one ended, so nothing
 		// waits on it.
 		let mut sequences = Vec::new();
@@ -7434,10 +7436,10 @@ mod tests {
 			assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
 			// Held for the whole round: a dropped tail settles at once.
 			let tail = kio::Producer::new(Tail::default());
-			let mut group = serving.serving.append_group().unwrap();
+			let mut group = Some(serving.serving.append_group().unwrap());
 			if let Some(finished) = ended {
 				if finished {
-					group.finish().unwrap();
+					group.take().unwrap().finish().unwrap();
 				}
 				if version.has_track_stream() {
 					serving.serving.finish_at(Position::group(1), None).unwrap();
@@ -9791,9 +9793,7 @@ impl Announced {
 				}
 				Some(Held::Withheld(mut route)) => {
 					tracing::info!(route = %subscriber.log_path(&path), "announce authorized again");
-					if subscriber.going_away.is_set() {
-						route.cost = crate::origin::Cost::DRAIN;
-					}
+					route.draining |= subscriber.going_away.is_set();
 					self.offer(subscriber, path, route);
 				}
 				_ => unreachable!("only attached and withheld routes change"),
@@ -9801,7 +9801,7 @@ impl Announced {
 		}
 	}
 
-	/// Re-price every attached route to a draining cost (the peer sent a GOAWAY).
+	/// Rank every attached route last (the peer sent a GOAWAY).
 	fn drain(&mut self) {
 		for held in self.routes.values_mut() {
 			if let Held::Attached(entry) = held {
@@ -9859,15 +9859,13 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry
 /// advertisement plus its request queue), which mints a source per requested path
 /// beneath it.
 struct AnnouncedRoute<K = Path> {
-	/// The route as last announced (post-charge), so a drain can re-price it
+	/// The route as last announced (post-charge), so a drain can rank it last
 	/// without recomputing the chain.
 	route: crate::origin::RouteInfo,
 	/// Dropping it retracts the route and rejects its queued requests.
 	dynamic: crate::origin::Claim,
 	/// Closes as the route goes, which closes every source it minted.
 	live: kio::Producer<()>,
-	/// Whether the GOAWAY drain already re-priced this route.
-	drained: bool,
 	/// Queues this route on its prefix's ready set when its request queue wakes.
 	wake: Arc<crate::util::QueueWake<K>>,
 	waker: std::task::Waker,
@@ -9885,7 +9883,6 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
 			route,
 			dynamic,
 			live: Default::default(),
-			drained: false,
 			waker: std::task::Waker::from(wake.clone()),
 			wake,
 			park: kio::Park::default(),
@@ -9895,21 +9892,18 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
 	/// Update the route metadata without changing its content identity.
 	fn update(&mut self, route: crate::origin::RouteInfo) {
 		self.route = route.clone();
-		self.drained = false;
 		let _ = self.dynamic.update(route);
 	}
 
-	/// Re-price the route to [`crate::origin::Cost::DRAIN`] (the peer sent a
-	/// GOAWAY): every other candidate outranks it while it stays selectable as
-	/// the last path. Idempotent, since the signal stays set.
+	/// Rank the route last (the peer sent a GOAWAY): every other candidate outranks
+	/// it while it stays selectable as the last path, at its real cost. Idempotent,
+	/// since the signal stays set.
 	fn drain(&mut self) {
-		if self.drained {
+		if self.route.draining {
 			return;
 		}
-		self.drained = true;
-		let mut route = self.route.clone();
-		route.cost = crate::origin::Cost::DRAIN;
-		let _ = self.dynamic.update(route);
+		self.route.draining = true;
+		let _ = self.dynamic.update(self.route.clone());
 	}
 }
 
@@ -12027,7 +12021,7 @@ impl ServeLoop {
 							return Poll::Pending;
 						}
 						if !serve.subscriber.version.has_track_stream() {
-							let _ = self.serving.finish();
+							let _ = self.serving.finish_shared();
 						}
 						return Poll::Ready(ServeEnd::GiveBack(crate::lite::error::from_transport(err)));
 					}

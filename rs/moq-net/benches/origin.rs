@@ -532,7 +532,7 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 /// honor each cursor's scope rather than reuse one global winner.
 fn bench_reprice_duplicate(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/reprice_duplicate");
-	for incumbent_cost in [INCUMBENT_COST, origin::Cost::MAX.value() - 1] {
+	for incumbent_cost in [INCUMBENT_COST, MAX_COST - 1] {
 		for (duplicates, subscribers) in CONTENDED {
 			let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s_cost{incumbent_cost}"));
 			group.bench_function(id, |b| {
@@ -586,7 +586,11 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 						for cursor in &mut cursors {
 							// The winner switches between unnamed routes, which is another instance.
 							let event = cursor.next().now_or_never().flatten().expect("winner changed");
-							let moq_net::origin::RouteEvent::Restart(update) = event else {
+							let moq_net::origin::RouteEvent {
+								kind: moq_net::origin::RouteKind::Restart,
+								announce: update,
+							} = event
+							else {
 								panic!("expected a restart: got {event:?}");
 							};
 							assert_eq!(
@@ -608,6 +612,10 @@ const PATH: &str = ".stats/p0/node/edge0";
 
 /// What every incumbent route costs, leaving room for a cheaper challenger.
 const INCUMBENT_COST: u64 = 2;
+
+/// The wire ceiling a route cost saturates at: an incumbent just below it leaves room
+/// for a costlier challenger.
+const MAX_COST: u64 = (1 << 62) - 1;
 
 /// A route as `peer` would have announced it: one hop, at `cost`.
 fn peer_route(peer: u64, cost: u64) -> origin::RouteInfo {
@@ -698,7 +706,16 @@ fn bench_lend(c: &mut Criterion) {
 					let (request, output) = ask(&format!("room/incoming{n}"));
 					for cursor in &mut cursors {
 						let event = cursor.next().now_or_never().flatten();
-						assert!(matches!(event, Some(origin::RouteEvent::Start(_))), "{event:?}");
+						assert!(
+							matches!(
+								event,
+								Some(origin::RouteEvent {
+									kind: origin::RouteKind::Start,
+									..
+								})
+							),
+							"{event:?}"
+						);
 					}
 					drop(request);
 					drop(output);
@@ -773,7 +790,11 @@ fn bench_subscribe(c: &mut Criterion) {
 			b.iter(|| {
 				let mut cursor = fleet.consumer.routes();
 				let mut replayed = 0;
-				while let Some(origin::RouteEvent::Start(_)) = cursor.next().now_or_never().flatten() {
+				while let Some(origin::RouteEvent {
+					kind: origin::RouteKind::Start,
+					..
+				}) = cursor.next().now_or_never().flatten()
+				{
 					replayed += 1;
 				}
 				assert_eq!(replayed, publishers);

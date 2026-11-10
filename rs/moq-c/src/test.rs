@@ -202,8 +202,6 @@ fn announce_info(announced: u32) -> moq_announce_event {
 		captures_len: 0,
 		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT,
 		route: moq_route_info {
-			hops: std::ptr::null(),
-			hops_len: 0,
 			cost: 0,
 			instance: moq_string {
 				data: std::ptr::null(),
@@ -348,7 +346,19 @@ extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connectio
 		code: 0,
 		kind: 0,
 	};
-	let failed = state.failure < 0;
+	use moq_connection_phase::*;
+	// Flatten the phase data: a phase without a failure reports zero, one without a version empty.
+	let data = &state.data;
+	let (failure, version) = unsafe {
+		match state.phase {
+			MOQ_CONNECTION_PHASE_CONNECTING => (data.connecting.failure, None),
+			MOQ_CONNECTION_PHASE_CONNECTED => (0, Some(data.connected.version)),
+			MOQ_CONNECTION_PHASE_DISCONNECTED => (data.disconnected.failure, None),
+			MOQ_CONNECTION_PHASE_MIGRATING => (data.migrating.failure, Some(data.migrating.version)),
+			MOQ_CONNECTION_PHASE_CLOSED => (data.closed.failure, None),
+		}
+	};
+	let failed = failure < 0;
 	let error = failed.then(|| {
 		unsafe { std::ffi::CStr::from_ptr(moq_error()) }
 			.to_string_lossy()
@@ -358,10 +368,12 @@ extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connectio
 	let _ = sink.tx.send(Seen {
 		phase: state.phase,
 		connects: state.connects,
-		failure: state.failure,
+		failure,
 		error,
 		protocol,
-		version: borrowed_string(state.protocol.data, state.protocol.len).unwrap_or_default(),
+		version: version
+			.and_then(|version| borrowed_string(version.data, version.len))
+			.unwrap_or_default(),
 	});
 }
 
@@ -775,10 +787,10 @@ fn publish_media_labels_config_without_naming_track() {
 fn session_snapshot_error_preserves_destination() {
 	let mut dst: moq_connection_snapshot = unsafe { std::mem::zeroed() };
 	dst.stats.rtt_us = 123;
-	dst.protocol.len = 456;
+	dst.version.len = 456;
 	assert!(unsafe { moq_session_snapshot(0, &mut dst) } < 0);
 	assert_eq!(dst.stats.rtt_us, 123);
-	assert_eq!(dst.protocol.len, 456);
+	assert_eq!(dst.version.len, 456);
 }
 
 #[test]
@@ -4206,10 +4218,9 @@ fn a_hidden_route_is_unroutable_until_announced() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A locally announced route carries its cost and instance, and no hops: the hop chain is
-/// the origin's to build.
+/// A locally announced route carries its cost and instance.
 #[test]
-fn route_options_carry_cost_and_instance_without_hops() {
+fn route_options_carry_cost_and_instance() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
@@ -4220,7 +4231,6 @@ fn route_options_carry_cost_and_instance_without_hops() {
 
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
-	assert_eq!(info.route.hops_len, 0, "a local route claims no hops");
 	assert_eq!(info.route.cost, 7);
 	assert_eq!(route_instance(&info.route).as_ref(), Some(&instance));
 	assert_eq!(moq_origin_announced_free(announced), 0);
@@ -5065,7 +5075,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
 		group.finish().unwrap();
-		producer.finish().unwrap();
+		drop(producer.clone().finish().unwrap());
 	}
 	let subscribe = || {
 		let subscription = moq_net::track::Subscription::default()
@@ -6966,9 +6976,15 @@ fn video_raw_decode() {
 		}
 		let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(320, 240)).unwrap();
 		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(i * 33_333).unwrap());
-		frames.extend(encoder.encode(&frame).unwrap());
+		encoder.encode(&frame).unwrap();
+		while let Some(encoded) = encoder.receive().unwrap() {
+			frames.push(encoded);
+		}
 	}
-	frames.extend(encoder.finish().unwrap());
+	encoder.flush().unwrap();
+	while let Some(encoded) = encoder.receive().unwrap() {
+		frames.push(encoded);
+	}
 	assert!(!frames.is_empty(), "encoder produced no frames");
 
 	let origin = id(moq_origin_create());
@@ -7439,7 +7455,10 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	let connect = expected.connect.resolve();
 
 	assert!(config.has_connect_timeout);
-	assert_eq!(config.connect_timeout_us, connect.timeout.as_micros() as u64);
+	assert_eq!(
+		config.connect_timeout_us,
+		connect.timeout.unwrap_or_default().as_micros() as u64
+	);
 	assert!(config.has_failover_delay);
 	assert_eq!(config.failover_delay_us, connect.race.as_micros() as u64);
 	assert!(config.has_resolution_delay);
@@ -7453,10 +7472,13 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
 	assert!(config.has_backoff_max);
-	assert_eq!(config.backoff_max_us, expected.connect.backoff.max().as_micros() as u64);
+	assert_eq!(
+		config.backoff_max_us,
+		expected.connect.backoff.max().unwrap_or_default().as_micros() as u64
+	);
 	assert!(config.has_backoff_timeout);
 	assert_eq!(
-		expected.connect.backoff.timeout(),
+		expected.connect.backoff.timeout().unwrap_or_default(),
 		std::time::Duration::from_micros(config.backoff_timeout_us)
 	);
 
@@ -7469,7 +7491,10 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_quic_max_streams);
 	assert_eq!(config.quic_max_streams, quic.max_streams);
 	assert!(config.has_quic_idle_timeout);
-	assert_eq!(config.quic_idle_timeout_us, quic.idle_timeout.as_micros() as u64);
+	assert_eq!(
+		config.quic_idle_timeout_us,
+		quic.idle_timeout.unwrap_or_default().as_micros() as u64
+	);
 	assert_eq!(
 		config.has_quic_keep_alive.then_some(config.quic_keep_alive_us),
 		quic.keep_alive.map(|d| d.as_micros() as u64)
@@ -8156,20 +8181,16 @@ fn dial_pinned(url: &str, fingerprint: &str, publish: u32, consume: u32, user_da
 	})
 }
 
-/// Received routes expose each traversed origin in order, rather than an empty local path.
+/// A received route accumulates each session's cost across a relay and carries an instance.
 ///
 /// The relay accepts both sessions, as a relay server does: a server asks its peer about
 /// everything, while a client session asks only about what a local reader watches, which
 /// a session forwarding the relay's origin downstream is not.
 #[test]
-fn announce_route_hops_cross_a_relay_session() {
+fn announce_route_crosses_a_relay_session() {
 	let source = id(moq_origin_create());
 	let relay = id(moq_origin_create());
 	let sink = id(moq_origin_create());
-	let hops = {
-		let state = State::lock();
-		[source, relay].map(|origin| state.origin.get(Id::try_from(origin).unwrap()).unwrap().hop().get())
-	};
 	let server_cb = Callback::new();
 	let (server, addr, fingerprint) = listen(&server_cb);
 	let url = format!("https://{addr}/");
@@ -8198,11 +8219,6 @@ fn announce_route_hops_cross_a_relay_session() {
 	assert_eq!(
 		borrowed_string(info.prefix, info.prefix_len).as_deref(),
 		Some("relayed")
-	);
-	assert_eq!(info.route.hops_len, hops.len());
-	assert_eq!(
-		unsafe { std::slice::from_raw_parts(info.route.hops, info.route.hops_len) },
-		hops
 	);
 	assert_eq!(info.route.cost, 9, "each session adds its default cost of one");
 	assert!(route_instance(&info.route).is_some(), "every route carries an instance");
@@ -8275,7 +8291,7 @@ fn server_accepts_a_session() {
 		assert_eq!(connected.phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED);
 		assert_eq!(connected.connects, 1);
 		assert_eq!(connected.failure, 0);
-		assert!(!connected.version.is_empty(), "a live session names its protocol");
+		assert!(!connected.version.is_empty(), "a live session names its version");
 	}
 
 	let mut stats: moq_connection_stats = unsafe { std::mem::zeroed() };

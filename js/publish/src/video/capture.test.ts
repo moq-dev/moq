@@ -1,5 +1,5 @@
 import { expect, mock, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Instant, Manual } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Order } from "../order";
@@ -17,7 +17,7 @@ const { Renderer } = await import("../preview");
 function manualAt(ms: number) {
 	const clock = new Manual();
 	const installed = clock.install();
-	const set = (to: number) => clock.jump(Nano(Nano.fromMilli(Milli(to)) - clock.now()));
+	const set = (to: number) => clock.jump(Duration.millis(to).sub(clock.now().since(Instant.ZERO)));
 	set(ms);
 	return { set, close: () => installed.close(), [Symbol.dispose]: () => installed.close() };
 }
@@ -319,7 +319,7 @@ test("a replay never starts below an earlier replay", async () => {
 	using input = frameSource();
 	const clock = new Manual();
 	const installed = clock.install();
-	const advance = (ms: number) => clock.jump(Nano.fromMilli(Milli(ms)));
+	const advance = (ms: number) => clock.jump(Duration.millis(ms));
 	const capture = new Capture({ source: input.source });
 	const watch = new Effect();
 	const first = new Effect();

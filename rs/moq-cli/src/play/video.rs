@@ -77,17 +77,25 @@ pub(super) struct Refresh<D> {
 
 /// The production sink and the deterministic buffered decoder used by tests.
 pub(super) trait Decoder {
-	async fn decode(&mut self, frame: Frame) -> anyhow::Result<Vec<moq_video::Frame>>;
-	async fn flush(&mut self) -> anyhow::Result<Vec<moq_video::Frame>>;
+	/// Submit one frame, whose pictures `receive` returns.
+	async fn decode(&mut self, frame: Frame) -> anyhow::Result<()>;
+	/// Mark the end of input, so `receive` returns every picture the codec holds.
+	async fn flush(&mut self) -> anyhow::Result<()>;
+	/// Pop the next ready picture, in display order.
+	fn receive(&mut self) -> anyhow::Result<Option<moq_video::Frame>>;
 }
 
 impl Decoder for moq_video::decode::Sink {
-	async fn decode(&mut self, frame: Frame) -> anyhow::Result<Vec<moq_video::Frame>> {
+	async fn decode(&mut self, frame: Frame) -> anyhow::Result<()> {
 		Ok(self.decode(frame.payload, frame.timestamp, frame.keyframe).await?)
 	}
 
-	async fn flush(&mut self) -> anyhow::Result<Vec<moq_video::Frame>> {
+	async fn flush(&mut self) -> anyhow::Result<()> {
 		Ok(self.flush().await?)
+	}
+
+	fn receive(&mut self) -> anyhow::Result<Option<moq_video::Frame>> {
+		Ok(self.receive()?)
 	}
 }
 
@@ -442,7 +450,7 @@ impl<O: Output> Video<O> {
 						}
 					}
 				};
-				let frames = match step {
+				match step {
 					Step::Wait(Some(at)) => {
 						tokio::select! {
 							_ = kio::clock::sleep_until(at) => {},
@@ -472,7 +480,7 @@ impl<O: Output> Video<O> {
 						wake.notify_one();
 						// Never race a codec call: cancelling Sink::decode poisons it. The
 						// joined receiver continues observing arrivals during this await.
-						decoder.decode(frame).await?
+						decoder.decode(frame).await?;
 					}
 					Step::Resume => {
 						// Read under the same lock as the pop: a gap replaces the buffers and
@@ -524,22 +532,20 @@ impl<O: Output> Video<O> {
 					Step::Flush => {
 						let flushed = generation.take();
 						held.clear();
-						let frames = decoder.flush().await?;
+						decoder.flush().await?;
 						// A gap during the await already discarded these pictures' generation.
 						if flushed != Some(buffers.lock().unwrap().front().unwrap().generation) {
+							while decoder.receive()?.is_some() {}
 							continue;
 						}
-						frames
 					}
-				};
-				// A codec returns display order, so a picture held before the newest
-				// one it returned was dropped rather than delayed.
-				if let Some(last) = frames.iter().map(|frame| frame.timestamp).max() {
-					held.retain(|held| *held > last);
 				}
 				let now = Instant::now();
 				let mut selector = selector.lock().unwrap();
-				for frame in frames {
+				while let Some(frame) = decoder.receive()? {
+					// A codec returns display order, so a picture held before one it
+					// returned was dropped rather than delayed.
+					held.retain(|held| *held > frame.timestamp);
 					selector.push(Lane::Min, Decoded::Frame(frame), now);
 				}
 			};
@@ -557,14 +563,15 @@ impl<O: Output> Video<O> {
 			else {
 				return std::future::pending::<anyhow::Result<()>>().await;
 			};
-			let push = |frames: Vec<moq_video::Frame>| {
+			let push = |codec: &mut D| -> anyhow::Result<()> {
 				let now = Instant::now();
 				let mut selector = selector.lock().unwrap();
-				for frame in frames {
+				while let Some(frame) = codec.receive()? {
 					selector.push(Lane::Max, Decoded::Frame(frame), now);
 				}
 				drop(selector);
 				self.changed.notify_one();
+				Ok(())
 			};
 			// After a join or a loss, pictures presenting before the first recovery
 			// point reference media this decoder never had.
@@ -590,18 +597,21 @@ impl<O: Output> Video<O> {
 				let (group, mut frame) = match read {
 					Some(Read::Frame { group, frame }) => (group, frame),
 					Some(Read::Gap { .. }) => {
-						push(codec.flush().await?);
+						codec.flush().await?;
+						push(&mut codec)?;
 						recover = true;
 						continue;
 					}
 					// A fresh encoder has no preceding GOP to reference, so no recovery.
 					Some(Read::End { group, .. }) => {
-						push(codec.flush().await?);
+						codec.flush().await?;
+						push(&mut codec)?;
 						fence = Some(group);
 						continue;
 					}
 					None => {
-						push(codec.flush().await?);
+						codec.flush().await?;
+						push(&mut codec)?;
 						selector.lock().unwrap().finish(Lane::Max);
 						self.changed.notify_one();
 						return std::future::pending::<anyhow::Result<()>>().await;
@@ -681,7 +691,8 @@ impl<O: Output> Video<O> {
 				};
 				frame.timestamp = mapped;
 				// Never race a codec call: cancelling Sink::decode poisons it.
-				push(codec.decode(frame).await?);
+				codec.decode(frame).await?;
+				push(&mut codec)?;
 			}
 		};
 		let decode = async {
@@ -715,6 +726,7 @@ mod tests {
 		/// How long each decode takes.
 		cost: Duration,
 		held: Vec<moq_video::Frame>,
+		ready: VecDeque<moq_video::Frame>,
 		decoded: Arc<Mutex<Vec<(moq_net::Timestamp, Instant)>>>,
 		flushed: Arc<Mutex<usize>>,
 	}
@@ -732,6 +744,7 @@ mod tests {
 				size: MIN,
 				cost: Duration::ZERO,
 				held: Vec::new(),
+				ready: VecDeque::new(),
 				decoded: Default::default(),
 				flushed: Default::default(),
 			}
@@ -752,7 +765,7 @@ mod tests {
 	}
 
 	impl Decoder for Buffered {
-		async fn decode(&mut self, frame: Frame) -> anyhow::Result<Vec<moq_video::Frame>> {
+		async fn decode(&mut self, frame: Frame) -> anyhow::Result<()> {
 			if !self.cost.is_zero() {
 				kio::clock::sleep(self.cost).await;
 			}
@@ -763,12 +776,18 @@ mod tests {
 			self.held.push(moq_video::Frame::new(surface, frame.timestamp));
 			self.held.sort_by_key(|frame| frame.timestamp);
 			let bumped = self.held.len().saturating_sub(self.depth);
-			Ok(self.held.drain(..bumped).collect())
+			self.ready.extend(self.held.drain(..bumped));
+			Ok(())
 		}
 
-		async fn flush(&mut self) -> anyhow::Result<Vec<moq_video::Frame>> {
+		async fn flush(&mut self) -> anyhow::Result<()> {
 			*self.flushed.lock().unwrap() += 1;
-			Ok(std::mem::take(&mut self.held))
+			self.ready.extend(self.held.drain(..));
+			Ok(())
+		}
+
+		fn receive(&mut self) -> anyhow::Result<Option<moq_video::Frame>> {
+			Ok(self.ready.pop_front())
 		}
 	}
 
@@ -1160,7 +1179,7 @@ mod tests {
 			"continuous media reached the codec before the later delivery hole"
 		);
 		write(13, vec![400, 380, 390, 410]);
-		published.finish().unwrap();
+		let _published = published.finish().unwrap();
 		for _ in 0..1300 {
 			tokio::task::yield_now().await;
 			media.output.present(&media);
@@ -1579,14 +1598,14 @@ mod tests {
 		/// Finish every group before `sequence` still open.
 		fn seal(&mut self, sequence: u64) {
 			let open = self.groups.split_off(&sequence);
-			for (_, mut group) in std::mem::replace(&mut self.groups, open) {
+			for (_, group) in std::mem::replace(&mut self.groups, open) {
 				group.finish().unwrap();
 			}
 		}
 
 		fn finish(&mut self) {
 			self.seal(u64::MAX);
-			self.track.finish().unwrap();
+			drop(self.track.clone().finish().unwrap());
 		}
 	}
 

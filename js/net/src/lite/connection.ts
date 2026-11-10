@@ -1,4 +1,4 @@
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
@@ -40,6 +40,7 @@ import {
 	hasDatagramTracks,
 	hasGoaway,
 	hasHidden,
+	hasNodeId,
 	hasPadding,
 	hasProbeRtt,
 	hasRouteKey,
@@ -301,7 +302,7 @@ export class Connection implements Session {
 			case "leaving": {
 				const done = withTimeout(
 					this.#publisher.drain(),
-					Nano.fromMilli(Milli(1000)),
+					Duration.millis(1000),
 					"session close timed out",
 				).finally(() => this.abort());
 				this.#phase = { kind: "closing", done };
@@ -422,9 +423,10 @@ export class Connection implements Session {
 	// path and leave routing to the URL. The probe level reflects what this transport
 	// can actually measure; we never pad, so we never advertise Increase.
 	// Role stays Both: the publish origin starts empty and fills later, and consume is
-	// called after this point, so there is nothing to narrow yet. The origin declares
-	// our session identity so the peer can filter
-	// reflected announcements (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it).
+	// called after this point, so there is nothing to narrow yet. Before lite-07 the hop
+	// declares our session identity so the peer can filter reflected announcements
+	// (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it). From lite-07 the parameter
+	// is a Node ID, which this per-connection hop is not: we originate no routes, so we omit it.
 	async #sendSetup(): Promise<void> {
 		const writer = await Writer.open(this.#quic, { version: this.#version });
 		try {
@@ -433,7 +435,7 @@ export class Connection implements Session {
 			const routeKey = hasRouteKey(this.#version) ? await proveRouteKey(this.#quic, this.#client) : undefined;
 			await new Setup({
 				probe,
-				hop: this.hop,
+				hop: hasNodeId(this.#version) ? undefined : this.hop,
 				token: this.#token,
 				implementation: this.#implementation,
 				routeKey,

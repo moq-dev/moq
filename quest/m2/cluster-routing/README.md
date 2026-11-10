@@ -57,7 +57,7 @@ Decided with the maintainer, 2026-10-13:
   2026-10-14; own identities included 2026-10-26, since they are no longer
   proven.) The issuer-qualified subject key was dropped 2026-11-02
   (maintainer); since 2026-11-04 a scoped peer's identities are keyed by the
-  route key it proves ([Route session integration](/quest/m2/cluster-routing/routes/session.md)).
+  route key it proves ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)).
 - Matching explicit epochs authorize resume. Epochless changes retain
   Restart and fresh resolution; neither node identity nor a healthy
   alternate grants permission to splice content.
@@ -134,7 +134,6 @@ setup after the capabilities land.
 
 - [Outbound federation](/quest/m2/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
-- [A relay refuses a lite-07 session with itself](/quest/m2/cluster-routing/lite07-self-dial.md) - the self-dial refusal lite-06 has, on lite-07, whose SETUP carries no Hop ID
 
 ## Related
 

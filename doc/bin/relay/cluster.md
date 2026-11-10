@@ -23,10 +23,11 @@ The first relay a request reaches picks the origin node, by a hash of the path
 and the node's identity that every relay computes alike, and names it on the
 request so later hops follow their own route to that node. A relay running both
 versions translates: a moq-lite-06 peer's routes enter the route layer as the
-relay's own claims, and lite-07 routes reach a moq-lite-06 peer as a hop list
-that starts at their origin node. A relay drops a moq-lite-06 route whose hop
-list names its own routing identity, since that is one of its claims coming
-back.
+relay's own claims, keeping their hop list, which lite-07 carries alongside
+them. A lite-07 route reaches a moq-lite-06 peer as that hop list followed by
+its origin node. A relay drops a route whose hop list names it, by its hop or
+its routing identity, since that is one of its claims coming back, so a
+rolling upgrade's mix of versions ends a withdrawn broadcast everywhere.
 
 A track from a moq-transport publisher keeps its Object IDs, object properties,
 and END\_OF\_GROUP status objects across a moq-lite-07 link, since relays
@@ -204,9 +205,13 @@ connect = [
 ```
 
 Prices aren't static. A publisher can re-price a live announcement, which is
-how a standby transcoder pool seeds a high cost and drops it once it's working,
-and a relay receiving a GOAWAY re-prices every route learned from that peer to
-the maximum so new subscriptions go elsewhere while existing ones finish. A
+how a standby transcoder pool seeds a high cost and drops it once it's working.
+A GOAWAY is not a price: a relay receiving one ranks every route learned from
+that peer below every other eligible route, whatever the costs say. New
+subscriptions go elsewhere when another route serves them, and an existing one
+moves to another route of the same stream if there is one, or else finishes on
+the draining peer. The drain is that relay's
+own state, so it still advertises the routes onward at their real cost. A
 relay keeps its session to a peer draining to restart until that peer closes
 it, and redials only then, so it reaches the replacement rather than the
 draining process.
@@ -274,16 +279,18 @@ decides which relays receive the cluster token.
 
 ## Identity
 
-Each relay has a Hop ID: the value it adds to a route's hop list for loop
-detection and shortest-path routing. It is random on every start, so a
+Each relay has an identity that it uses for loop detection and routing, and
+declares in SETUP on moq-lite-05 and later: a Hop ID added to each route's hop
+list, or on the opt-in `moq-lite-07-wip` a Node ID naming the route's origin. It is random on every start, so a
 restarted relay is a new node to the rest of the mesh, and there is no setting
 to pin it.
 
 A relay never dials its own `cluster.node`, so every relay can share one
 `cluster.connect` list or API response. Peer URLs that differ only in query,
 userinfo, fragment, or slashes name one peer and get one link. A relay
-refuses a session that declares its own Hop ID, which means a peer URL
-reaches the relay itself under another name, such as an IP for its hostname.
+refuses a session that declares its own identity (its Hop ID, or on
+`moq-lite-07-wip` its Node ID), which means a peer URL reaches the relay itself
+under another name, such as an IP for its hostname.
 
 ## Failure detection
 

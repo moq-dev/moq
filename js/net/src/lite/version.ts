@@ -672,6 +672,22 @@ export function hasSynced(version: Version): boolean {
 	}
 }
 
+/** Whether SETUP's 0x5 parameter carries a Node ID rather than a Hop ID, from lite-07. */
+export function hasNodeId(version: Version): boolean {
+	// Explicitly list older versions so future versions default to carrying it.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether SETUP may carry a route key proof, added in lite-07. */
 export function hasRouteKey(version: Version): boolean {
 	// Explicitly list older versions so future versions default to carrying it.

@@ -5,7 +5,7 @@
  *
  * @module
  */
-import { type Instant, Milli } from "@moq/clock";
+import type { Duration, Instant } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Charge, Pool } from "./cache.ts";
@@ -36,26 +36,26 @@ import * as Varint from "./varint.ts";
 import type { Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
-/** What a null {@link Delay.max} goes out as: the largest value every peer can read, as Rust sends for `None`. */
-export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
+/** What a null {@link Delay.max} goes out as, in milliseconds: the largest value every peer can read, as Rust sends for `None`. */
+export const NO_MAX_DELAY = Varint.MAX_U53;
 
 /** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
 export function datagramTrackInfo(info: datagram.Info): Info {
 	return { compression: "none", timescale: info.timescale, maxAge: null, priority: info.priority, refresh: null };
 }
 
-/** A subscription's {@link Delay.max} as the wire carries it: null for no limit, omitted for zero. */
-export function maxDelayOf(subscription: Pick<Subscription, "delay">): Milli {
+/** A subscription's {@link Delay.max} in milliseconds as the wire carries it: null for no limit, omitted for zero. */
+export function maxDelayOf(subscription: Pick<Subscription, "delay">): number {
 	const max = subscription.delay?.max;
 	if (max === null) return NO_MAX_DELAY;
-	return max ?? Milli.zero;
+	return max?.asMillis() ?? 0;
 }
 
-/** A subscription's {@link Delay.min} as the wire carries it: undefined when not stated, omitted for zero. */
-export function minDelayOf(subscription: Pick<Subscription, "delay">): Milli | undefined {
+/** A subscription's {@link Delay.min} in milliseconds as the wire carries it: undefined when not stated, omitted for zero. */
+export function minDelayOf(subscription: Pick<Subscription, "delay">): number | undefined {
 	const min = subscription.delay?.min;
 	if (min === null) return undefined;
-	return min ?? Milli.zero;
+	return min?.asMillis() ?? 0;
 }
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
@@ -378,7 +378,7 @@ export interface Land {
 	/** Whether the feed was asked to start at `start`: otherwise only from its first arrival. */
 	floor: boolean;
 	/** How long a gap a later arrival opened is waited for. */
-	grace: Milli;
+	grace: Duration;
 	/** When given, only a group it lacks counts. */
 	delivered?: Delivered;
 }
@@ -626,7 +626,7 @@ export const hooks: {
 	 * How long a session's tail waits for a late group: the subscribers' max delay, bounded by
 	 * the track's max age; assigned by `track.ts`.
 	 */
-	tailGrace: (producer: Producer) => Milli;
+	tailGrace: (producer: Producer) => Duration;
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => bigint | undefined;
 	/**
@@ -750,7 +750,7 @@ export const hooks: {
 	/** Wake once a subscriber's group cursor may read differently, including when the track declares its end; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
-	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
+	fetchBudget: (subscriber: Subscriber, maxDelay: Duration | undefined) => void;
 	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
 	subscribing: (producer: Producer) => Getter<boolean>;
 	/** The aggregate across every reader, one-shot fetches included: what the wire asks for. */
@@ -1308,9 +1308,16 @@ export class Epochs {
 	}
 }
 
-/** Prefer identified publishers, then lower static cost. */
+/**
+ * Prefer a route that is not draining (a peer that sent GOAWAY ranks below every other), then
+ * identified publishers, then lower static cost.
+ */
 export function compareRoutes(a: WireRoute, b: WireRoute): number {
-	return Number(isAnonymous(a)) - Number(isAnonymous(b)) || (a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0);
+	return (
+		Number(a.draining ?? false) - Number(b.draining ?? false) ||
+		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
+		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
+	);
 }
 
 /**

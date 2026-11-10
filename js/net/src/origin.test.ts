@@ -1775,6 +1775,45 @@ test("a stale takeover's refusal leaves a request whose source came back", async
 	origin.close();
 });
 
+// A GOAWAY ranks a session's routes last, whatever their cost: a preference state this node
+// keeps, which readers (and the peers a relay forwards to) never see.
+test("a draining route ranks below every other and still serves alone", async () => {
+	const origin = new Producer();
+	const path = Path.from("drained");
+
+	const draining = new BroadcastProducer();
+	const disposeDraining = serve(
+		origin,
+		path,
+		provider(draining),
+		WireRoute.normalize({ instance: INSTANCE, cost: 1n, draining: true }),
+	);
+	const routes = origin.consume().routes();
+	const alone = await routes.next();
+	expect(alone?.kind).toBe("start");
+	expect(alone?.route.cost).toBe(1n);
+	expect(alone?.route.draining).toBeUndefined();
+
+	// A costlier route wins, since the draining one ranks last.
+	const standby = new BroadcastProducer();
+	const disposeStandby = serve(origin, path, provider(standby), WireRoute.normalize({ cost: 5n }));
+	const replaced = await routes.next();
+	expect(replaced?.kind).toBe("restart");
+	expect(replaced?.route.cost).toBe(5n);
+
+	// Without it, the draining route serves again as the last resort.
+	disposeStandby();
+	const restored = await routes.next();
+	expect(restored?.kind).toBe("restart");
+	expect(restored?.route.instance).toBe(INSTANCE);
+
+	routes.close();
+	disposeDraining();
+	draining.close();
+	standby.close();
+	origin.close();
+});
+
 test("a request ends when its winning source goes, even with a standby", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

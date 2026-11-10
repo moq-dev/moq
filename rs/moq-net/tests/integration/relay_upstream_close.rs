@@ -155,7 +155,7 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 			}
 			group.finish().unwrap();
 		}
-		track.finish().unwrap();
+		let _finished = track.clone().finish().unwrap();
 	}
 
 	match end {

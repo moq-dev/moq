@@ -270,7 +270,7 @@ struct Cache {
 	_broadcast: broadcast::Producer,
 	tracks: Vec<track::Producer>,
 	/// Each track's finished groups, oldest first, with their payload bytes.
-	groups: Vec<Vec<(group::Producer, usize)>>,
+	groups: Vec<Vec<(group::Finished, usize)>>,
 }
 
 impl Cache {

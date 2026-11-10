@@ -2522,7 +2522,9 @@ export class Consumer implements Reader {
 			if (relative === undefined) continue;
 			next.set(relative, {
 				identity: entry.identity,
-				route: entry.route,
+				// Draining is this node's selection state: readers, and the peers a relay
+				// forwards to, see the route as it is.
+				route: entry.route.draining === undefined ? entry.route : { ...entry.route, draining: undefined },
 				captures: scopeCaptures(scope.pattern, path),
 			});
 		}

@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Duplicate, type Grant, Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Session } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
@@ -153,10 +153,10 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 
 			streams[0]?.abort(new StreamError(StreamCode.Internal, { message: "lost" }));
 			await waitFor(token.grant, (g) => g === undefined);
-			await clock.advance(Nano.fromMilli(Milli(999)));
+			await clock.advance(Duration.millis(999));
 			for (let i = 0; i < 10; i++) await yieldNow();
 			expect(streams.length).toBe(1);
-			await clock.advance(Nano.fromMilli(Milli(1)));
+			await clock.advance(Duration.millis(1));
 			await waitFor(token.grant, (g) => g?.publish.equals(patterns("a")) === true);
 			expect(streams.length).toBe(2);
 			expect(ended).toBe(false);
@@ -204,7 +204,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 
 			first.writer.reset(new StreamError(StreamCode.Internal, { message: "lost" }));
 			await waitFor(token.grant, (g) => g === undefined);
-			await clock.advance(Nano.fromMilli(Milli(1000)));
+			await clock.advance(Duration.millis(1000));
 			await waitFor(token.grant, (g) => g?.publish.equals(patterns("a")) === true);
 			expect(streams.length).toBe(2);
 			expect(abandoned).toBeInstanceOf(Error);
@@ -380,7 +380,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		const third = await nextRoute(announced);
 		expect(third?.kind).toBe("start");
 
-		expect(await settlesWithin(transport.closed, clock, Milli(10))).toBe(false);
+		expect(await settlesWithin(transport.closed, clock, Duration.millis(10))).toBe(false);
 
 		announced.close();
 		client.abort();
@@ -465,7 +465,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			const track = wireOf(client).consume(Path.from("room/x")).track("video").subscribe();
 			await yieldNow();
 			expect(track.closed.peek()).toBeUndefined();
-			clock.jump(Nano.fromMilli(Milli(7)));
+			clock.jump(Duration.millis(7));
 			const firstGrant = unanswered.accept(grant([], ["room"]));
 			const first = await adding;
 			expect(await track.recvGroup()).toBeDefined();
@@ -655,7 +655,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			expect(
 				await withTimeout(
 					Promise.resolve(issued.closed),
-					Nano.fromMilli(Milli(1000)),
+					Duration.millis(1000),
 					"the grant stream never closed",
 				),
 			).toBeNull();
@@ -727,17 +727,17 @@ test("lite-07 presents a transiently refused token again after a backoff", async
 	};
 
 	/** The token presented again, exactly once `backoff` passes. */
-	const after = async (backoff: Milli) => {
+	const after = async (backoff: Duration) => {
 		let presented = false;
 		const next = requests.next().then((request) => {
 			presented = true;
 			return request;
 		});
-		await clock.advance(Nano.fromMilli(Milli(backoff - 1)));
+		await clock.advance(backoff.sub(Duration.millis(1)));
 		for (let i = 0; i < 10; i++) await yieldNow();
 		expect(presented).toBe(false);
 		expect(added).toBe(false);
-		await clock.advance(Nano.fromMilli(Milli(1)));
+		await clock.advance(Duration.millis(1));
 		return await next;
 	};
 
@@ -758,9 +758,9 @@ test("lite-07 presents a transiently refused token again after a backoff", async
 			.then((value) => {
 				ready = value;
 			});
-		await refuse(await after(Milli(1000)));
+		await refuse(await after(Duration.millis(1000)));
 		expect(ready).toBeUndefined();
-		const accepted = await after(Milli(2000));
+		const accepted = await after(Duration.millis(2000));
 		if (!accepted) throw new Error("the token was not presented again");
 		issued.push(accepted.accept(grant(["a"], [])));
 		const token = await adding;
@@ -805,12 +805,12 @@ test("lite-07 presents a shared token again when its retry stream is reset", asy
 		read = spyOn(LiteAuthWire.prototype, "read").mockRejectedValue(
 			new StreamError(StreamCode.Cancel, { message: "reset" }),
 		);
-		await clock.advance(Nano.fromMilli(Milli(1000)));
+		await clock.advance(Duration.millis(1000));
 		await settles(() => logged("auth token ended") > 0);
 		for (let i = 0; i < 10; i++) await yieldNow();
 		expect(rejected).toBeUndefined();
 
-		await clock.advance(Nano.fromMilli(Milli(2000)));
+		await clock.advance(Duration.millis(2000));
 		await settles(() => logged("auth token ended") > 1);
 		expect(rejected).toBeUndefined();
 	} finally {
@@ -874,7 +874,7 @@ test("lite-07 refuses a token added to a session's own handle after a GOAWAY", a
 	await settles(() => !wireOf(client).auth.active);
 
 	try {
-		const late = withTimeout(client.auth.add("late"), Nano.fromMilli(Milli(1000)), "add after GOAWAY hung");
+		const late = withTimeout(client.auth.add("late"), Duration.millis(1000), "add after GOAWAY hung");
 		await expect(late).rejects.toBeInstanceOf(StreamError);
 	} finally {
 		client.abort();
@@ -985,7 +985,7 @@ test("lite-07 ignores a draining session's late refusal while its successor retr
 		expect(ended).toBe(false);
 
 		const retried = successorRequests.next();
-		await clock.advance(Nano.fromMilli(Milli(1000)));
+		await clock.advance(Duration.millis(1000));
 		const again = await retried;
 		if (!again) throw new Error("the successor did not present the token again");
 		issued.push(again.accept(grant(["third"], [])));
@@ -1453,8 +1453,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("AUTH violations %s", (pro
 			await waitFor(pair.server.auth.grant, (g) => g !== undefined);
 			await streams[0]?.writer.u53(0);
 			expect(
-				(await withTimeout(pair.transport.closed, Nano.fromMilli(Milli(100)), "second AUTH did not close"))
-					.closeCode,
+				(await withTimeout(pair.transport.closed, Duration.millis(100), "second AUTH did not close")).closeCode,
 			).toBe(SessionCode.ProtocolViolation);
 		} finally {
 			spy.mockRestore();
@@ -1480,7 +1479,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("AUTH violations %s", (pro
 		const added = pair.client.auth.add("bad").catch(() => undefined);
 		try {
 			expect(
-				(await withTimeout(pair.transport.closed, Nano.fromMilli(Milli(100)), "malformed AUTH did not close"))
+				(await withTimeout(pair.transport.closed, Duration.millis(100), "malformed AUTH did not close"))
 					.closeCode,
 			).toBe(SessionCode.ProtocolViolation);
 		} finally {
@@ -1537,13 +1536,8 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("AUTH violations %s", (pro
 					else await IetfMessage.encode(stream.writer, body, id);
 				}
 				expect(
-					(
-						await withTimeout(
-							pair.transport.closed,
-							Nano.fromMilli(Milli(100)),
-							"malformed AUTH did not close",
-						)
-					).closeCode,
+					(await withTimeout(pair.transport.closed, Duration.millis(100), "malformed AUTH did not close"))
+						.closeCode,
 				).toBe(SessionCode.ProtocolViolation);
 			} finally {
 				spy.mockRestore();
@@ -1576,7 +1570,7 @@ describe.each([Ietf.ALPN.DRAFT_22])("AUTH request IDs %s", (protocol) => {
 					(
 						await withTimeout(
 							pair.transport.closed,
-							Nano.fromMilli(Milli(100)),
+							Duration.millis(100),
 							"invalid AUTH ID left session open",
 						)
 					).closeCode,

@@ -1,7 +1,7 @@
 import { type Installed, install } from "./ambient.ts";
 import type { Backend } from "./backend.ts";
 import { drain, host } from "./host.ts";
-import { Instant, Nano, Wall } from "./types.ts";
+import { type Duration, type Instant, instantOf, type Wall, wallMillis, wallOf } from "./types.ts";
 
 type Timer = { at: number; order: number; index: number; ready: () => void };
 
@@ -11,11 +11,12 @@ type Timer = { at: number; order: number; index: number; ready: () => void };
  */
 export class Manual {
 	/** The reproducible starting wall time, 2025-01-01T00:00:00Z. */
-	static readonly WALL_START = Wall(1_735_689_600_000);
-	#now = Instant.zero;
+	static readonly WALL_START: Wall = wallOf(1_735_689_600_000);
+	// Nanoseconds since the origin.
+	#now = 0;
 	// Wall time is derived from an anchor so tiny advances don't vanish into an epoch-sized float.
-	#wallAnchor = Manual.WALL_START;
-	#wallAnchorAt = Instant.zero;
+	#wallAnchor = wallMillis(Manual.WALL_START);
+	#wallAnchorAt = 0;
 	#timers: Timer[] = [];
 	#order = 0;
 	#revision = 0;
@@ -26,8 +27,8 @@ export class Manual {
 	#armed?: () => void;
 	#backend: Backend = {
 		now: () => this.#now,
-		wall: () => this.wall(),
-		origin: () => this.#wallAnchor - Nano.toMilli(Nano(this.#wallAnchorAt)),
+		wall: () => this.#wall(),
+		origin: () => this.#wallAnchor - this.#wallAnchorAt / 1_000_000,
 		arm: (at, ready) => {
 			const timer = { at, order: this.#order++, index: this.#timers.length, ready };
 			this.#timers.push(timer);
@@ -57,20 +58,24 @@ export class Manual {
 
 	/** Read this clock's instant without installing it. */
 	now(): Instant {
-		return this.#now;
+		return instantOf(this.#now);
 	}
 
 	/** Read this clock's wall time without installing it. */
 	wall(): Wall {
-		return Wall.add(this.#wallAnchor, Instant.durationSince(this.#now, this.#wallAnchorAt));
+		return wallOf(this.#wall());
+	}
+
+	#wall(): number {
+		return this.#wallAnchor + (this.#now - this.#wallAnchorAt) / 1_000_000;
 	}
 
 	/** Jump forward without draining tasks, firing due timers late as a stalled event loop would. */
-	jump(duration: Nano): void {
+	jump(duration: Duration): void {
 		if (this.#driving) throw new Error("time driver already pending");
 		this.#driving = true;
 		try {
-			this.#now = Instant.add(this.#now, duration);
+			this.#now += duration.asNanos();
 			this.#fire();
 		} finally {
 			this.#driving = false;
@@ -78,11 +83,11 @@ export class Manual {
 	}
 
 	/** Advance through each due deadline, draining tasks and pending yields before continuing to the target. */
-	async advance(duration: Nano): Promise<void> {
+	async advance(duration: Duration): Promise<void> {
 		if (this.#driving) throw new Error("time driver already pending");
 		this.#driving = true;
 		try {
-			await this.#advance(Instant.add(this.#now, duration));
+			await this.#advance(this.#now + duration.asNanos());
 		} finally {
 			this.#driving = false;
 		}
@@ -97,7 +102,7 @@ export class Manual {
 		this.#driving = true;
 		try {
 			await this.#advance();
-			return this.#now;
+			return instantOf(this.#now);
 		} finally {
 			this.#driving = false;
 		}
@@ -131,12 +136,12 @@ export class Manual {
 
 	/** Set wall time forward or backward without passing monotonic time. */
 	stepWall(wall: Wall): void {
-		this.#wallAnchor = Wall(wall);
+		this.#wallAnchor = wallMillis(wall);
 		this.#wallAnchorAt = this.#now;
 	}
 
 	// Without a target, advances to the earliest deadline unless `stop` holds first.
-	async #advance(target?: Instant, stop?: () => boolean): Promise<void> {
+	async #advance(target?: number, stop?: () => boolean): Promise<void> {
 		const fired = this.#fired;
 		// Reached timers armed while draining join the heap once a target is chosen.
 		this.#advancing = target !== undefined;
@@ -158,12 +163,12 @@ export class Manual {
 						this.#armed = undefined;
 						continue;
 					}
-					target = Instant(Math.max(this.#now, at));
+					target = Math.max(this.#now, at);
 					this.#advancing = true;
 				}
 				const first = this.#timers[0];
 				if (first !== undefined && first.at <= target) {
-					this.#now = Instant(Math.max(this.#now, first.at));
+					this.#now = Math.max(this.#now, first.at);
 					this.#ready(first);
 				} else if (this.#now < target) {
 					this.#now = target;

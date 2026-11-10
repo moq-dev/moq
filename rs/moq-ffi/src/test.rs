@@ -428,13 +428,11 @@ async fn route_options_reach_the_announced_route() {
 		.unwrap();
 
 	// Reading an advertisement preserves its static production price and the route's
-	// instance; a local route took no hops.
+	// instance.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let info = next_announced(&announced).await.route;
 	assert_eq!(info.cost, 9);
 	assert_eq!(info.instance, route.instance_id());
-	assert!(info.hops.is_empty());
-	assert!(!info.anonymous);
 
 	// Re-pricing changes the route in place: the listing never reports it, but a fresh
 	// listing reads the new price under the same instance.
@@ -6084,7 +6082,7 @@ async fn datagrams_cross_a_default_connection() {
 			scale: 90_000
 		})
 	);
-	assert_eq!(session.state().version.as_deref(), Some("moq-lite-06"));
+	assert!(matches!(session.state().phase, MoqConnectionPhase::Connected { version } if version == "moq-lite-06"));
 }
 
 /// An on-demand datagram-only track reaches a reader on the default lite-06 path while a
@@ -6119,7 +6117,7 @@ async fn requested_datagrams_cross(versions: Vec<String>, negotiated: &str) {
 		.unwrap()
 		.unwrap();
 	assert_eq!(datagram.payload, b"only");
-	assert_eq!(session.state().version.as_deref(), Some(negotiated));
+	assert!(matches!(session.state().phase, MoqConnectionPhase::Connected { version } if version == negotiated));
 }
 
 /// A replacement session from the same publisher re-announces every route while the old one
@@ -6573,7 +6571,7 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	let defaults = moq_client_defaults();
 
 	let connect = moq_tokio::connect::Config::default().resolve();
-	assert_eq!(defaults.timeout, Some(connect.timeout));
+	assert_eq!(defaults.timeout, connect.timeout);
 	assert_eq!(defaults.race, Some(connect.race));
 	assert_eq!(defaults.resolution_delay, Some(connect.resolution_delay));
 
@@ -6586,8 +6584,8 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(defaults.websocket.enabled, Some(true));
 	let backoff = moq_tokio::connection::Backoff::default();
 	assert_eq!(defaults.backoff.initial, Some(backoff.initial()));
-	assert_eq!(defaults.backoff.max, Some(backoff.max()));
-	assert_eq!(defaults.backoff.timeout, Some(backoff.timeout()));
+	assert_eq!(defaults.backoff.max, Some(backoff.max().unwrap_or_default()));
+	assert_eq!(defaults.backoff.timeout, Some(backoff.timeout().unwrap_or_default()));
 
 	// The backend picks these, so there is no single value to report.
 	assert_eq!(defaults.tls.system_roots, None);
@@ -7093,12 +7091,13 @@ async fn request_per_session_publish_override() {
 	server.cancel();
 }
 
+/// Wait for a state whose phase passes `reached`.
 async fn wait_phase(
 	session: &MoqSession,
-	phase: MoqConnectionPhase,
+	reached: fn(&MoqConnectionPhase) -> bool,
 ) -> Result<crate::session::MoqConnectionState, MoqError> {
 	let mut state = session.state();
-	while state.phase != phase {
+	while !reached(&state.phase) {
 		state = session.state_changed(state.revision).await?;
 	}
 	Ok(state)
@@ -7123,18 +7122,21 @@ async fn session_state_names_a_failing_first_dial() {
 	.unwrap();
 	let session = client.connect(format!("https://{addr}")).await.unwrap();
 	let mut state = session.state();
-	assert_eq!(state.phase, MoqConnectionPhase::Connecting);
+	assert!(matches!(state.phase, MoqConnectionPhase::Connecting { .. }));
 	assert_eq!(state.connects, 0);
-	assert!(state.version.is_none());
 	drop(client);
 	for _ in 0..2 {
 		state = kio::clock::timeout(TIMEOUT, session.state_changed(state.revision))
 			.await
 			.unwrap()
 			.unwrap();
-		assert_eq!(state.phase, MoqConnectionPhase::Connecting);
+		assert!(matches!(
+			state.phase,
+			MoqConnectionPhase::Connecting {
+				failure: Some(MoqError::Connect { .. })
+			}
+		));
 		assert_eq!(state.connects, 0);
-		assert!(matches!(state.failure, Some(MoqError::Connect { .. })));
 	}
 	drop(silent);
 	let server = MoqServer::new(MoqServerConfig {
@@ -7146,15 +7148,16 @@ async fn session_state_names_a_failing_first_dial() {
 	server.listen().await.unwrap();
 	let request = server.accept().await.unwrap().unwrap();
 	let accepted = request.accept(None, None).await.unwrap();
-	let connected = kio::clock::timeout(TIMEOUT, wait_phase(&session, MoqConnectionPhase::Connected))
-		.await
-		.unwrap()
-		.unwrap();
+	let connected = kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&session, |phase| matches!(phase, MoqConnectionPhase::Connected { .. })),
+	)
+	.await
+	.unwrap()
+	.unwrap();
 	assert_eq!(connected.connects, 1);
-	assert!(connected.failure.is_none());
-	assert!(connected.version.is_some());
 	let initial_accepted = accepted.state();
-	assert_eq!(initial_accepted.phase, MoqConnectionPhase::Connected);
+	assert!(matches!(initial_accepted.phase, MoqConnectionPhase::Connected { .. }));
 	assert_eq!(initial_accepted.connects, 1);
 	let ending = accepted.state_changed(initial_accepted.revision);
 	tokio::pin!(ending);
@@ -7165,14 +7168,15 @@ async fn session_state_names_a_failing_first_dial() {
 	);
 	accepted.cancel(0);
 	let terminal = kio::clock::timeout(TIMEOUT, ending).await.unwrap().unwrap();
-	assert_eq!(terminal.phase, MoqConnectionPhase::Closed);
-	assert!(terminal.version.is_none());
-	assert!(terminal.failure.is_some());
+	assert!(matches!(
+		terminal.phase,
+		MoqConnectionPhase::Closed { failure: Some(_) }
+	));
 	assert_eq!(accepted.state().revision, terminal.revision);
 	assert!(accepted.state_changed(terminal.revision).await.is_err());
 	session.cancel(0);
 	session.closed().await.unwrap();
-	assert_eq!(session.state().phase, MoqConnectionPhase::Closed);
+	assert!(matches!(session.state().phase, MoqConnectionPhase::Closed { .. }));
 	accepted.cancel(0);
 	server.cancel();
 }
@@ -7242,14 +7246,17 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("connect failed");
 
 	// Observe the first successful connect through the same state as its initial dial.
-	let status = kio::clock::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
-		.await
-		.expect("status timed out")
-		.expect("status errored");
-	assert_eq!(status.phase, MoqConnectionPhase::Connected);
+	let status = kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&cs, |phase| matches!(phase, MoqConnectionPhase::Connected { .. })),
+	)
+	.await
+	.expect("status timed out")
+	.expect("status errored");
 	assert_eq!(status.connects, 1);
-	assert!(status.failure.is_none(), "nothing has failed yet");
-	let version = status.version.expect("a live connection reports its version");
+	let MoqConnectionPhase::Connected { version } = status.phase else {
+		panic!("waited for a connect, got {:?}", status.phase);
+	};
 	crate::session::parse_versions(&[version]).expect("the version is spelled like the config's");
 
 	// Kill the transport under the client, simulating a relay restart.
@@ -7260,25 +7267,29 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("accept task gone");
 	first.cancel(0);
 
-	let status = kio::clock::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Disconnected))
-		.await
-		.expect("disconnect status timed out")
-		.expect("disconnect status errored");
-	assert_eq!(status.phase, MoqConnectionPhase::Disconnected);
+	let status = kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&cs, |phase| matches!(phase, MoqConnectionPhase::Disconnected { .. })),
+	)
+	.await
+	.expect("disconnect status timed out")
+	.expect("disconnect status errored");
 	// Recorded before the status moved, so the watcher woken by the drop finds why.
-	assert!(status.failure.is_some(), "the drop must report its reason");
-	assert!(status.version.is_none());
+	assert!(
+		matches!(status.phase, MoqConnectionPhase::Disconnected { failure: Some(_) }),
+		"the drop must report its reason"
+	);
 	assert!(cs.stats().version.is_none(), "nothing is live to report a version");
 
 	// Open the gate; the redial completes.
 	regate_tx.send(()).expect("accept task gone");
-	let status = kio::clock::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
-		.await
-		.expect("reconnect status timed out")
-		.expect("reconnect status errored");
-	assert_eq!(status.phase, MoqConnectionPhase::Connected);
-	assert!(status.failure.is_none(), "the reconnect must clear the failure");
-	assert!(status.version.is_some());
+	let status = kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&cs, |phase| matches!(phase, MoqConnectionPhase::Connected { .. })),
+	)
+	.await
+	.expect("reconnect status timed out")
+	.expect("reconnect status errored");
 	assert!(cs.stats().version.is_some(), "the reconnect reports its version");
 
 	assert_eq!(status.connects, 2, "phase and count come from one observation");
@@ -7483,11 +7494,13 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 		.expect("server accept timed out")
 		.expect("server accept task panicked");
 
-	let status = kio::clock::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
-		.await
-		.expect("status timed out")
-		.expect("status errored");
-	assert_eq!(status.phase, MoqConnectionPhase::Connected);
+	let status = kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&cs, |phase| matches!(phase, MoqConnectionPhase::Connected { .. })),
+	)
+	.await
+	.expect("status timed out")
+	.expect("status errored");
 
 	// Give up on a status that isn't coming, once the call has parked on it: a call that
 	// never reached its await would pass either way.
@@ -7509,7 +7522,7 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 		.await
 		.expect("the cancelled waiter swallowed the disconnect")
 		.expect("status errored");
-	assert_eq!(status.phase, MoqConnectionPhase::Disconnected);
+	assert!(matches!(status.phase, MoqConnectionPhase::Disconnected { .. }));
 
 	cs.cancel(0);
 	server.cancel();
@@ -7519,7 +7532,6 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
-	kio::clock::host_time();
 	use crate::bandwidth::MoqAllocator;
 	use crate::video::*;
 
@@ -7570,18 +7582,8 @@ async fn video_encoder_follows_a_shrinking_grant() {
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
 
-	let deadline = kio::clock::Instant::now() + TIMEOUT;
-	loop {
-		if video.applied_bitrate() == 1_000_000 {
-			break;
-		}
-		assert!(
-			kio::clock::Instant::now() < deadline,
-			"encoder did not follow the shrinking grant, last applied {}",
-			video.applied_bitrate()
-		);
-		kio::clock::sleep(Duration::from_millis(10)).await;
-	}
+	// A drop applies at once, so this waits on the follow thread alone, never a timer.
+	video.wait_applied(1_000_000);
 
 	video.finish().unwrap();
 	broadcast.close().unwrap();
@@ -7781,7 +7783,7 @@ async fn cancelling_a_session_aborts_its_first_dial() {
 	session.cancel(0);
 	kio::clock::timeout(TIMEOUT, session.closed()).await.unwrap().unwrap();
 	let state = session.state_changed(revision).await.unwrap();
-	assert_eq!(state.phase, MoqConnectionPhase::Closed);
+	assert!(matches!(state.phase, MoqConnectionPhase::Closed { .. }));
 	assert_eq!(state.connects, 0);
 	assert!(matches!(
 		session.state_changed(state.revision).await,

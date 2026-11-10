@@ -104,7 +104,7 @@ impl Live {
 	}
 
 	fn close(&mut self) -> Result<()> {
-		if let Some(mut open) = self.open.take() {
+		if let Some(open) = self.open.take() {
 			open.group.finish()?;
 		}
 		Ok(())

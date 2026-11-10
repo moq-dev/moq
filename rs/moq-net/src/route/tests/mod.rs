@@ -284,8 +284,14 @@ impl Sim {
 		self.flush();
 	}
 
+	/// `node` advertises `id` as if serving it, claiming the root.
 	pub fn forge(&mut self, node: Node, id: Id, seqno: Seqno) {
-		self.nodes[node].forge(id, seqno);
+		let item = Item {
+			seed: 0,
+			epoch: None,
+			since: 0,
+		};
+		self.nodes[node].forge(id, seqno, Path::empty(), item);
 		self.flush();
 	}
 

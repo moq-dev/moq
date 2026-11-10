@@ -11,7 +11,7 @@
  * @module
  */
 
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type { Root as CatalogRoot } from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
@@ -181,7 +181,7 @@ function serveSnapshot<T>(
 		// when written, so the track is timed.
 		const track = net.createTrack(name, {
 			timescale: Moq.Time.Timescale.MILLI,
-			maxAge: Milli(86_400_000),
+			maxAge: Duration.millis(86_400_000),
 			priority: PRIORITY,
 		});
 		effect.cleanup(() => {
