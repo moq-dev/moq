@@ -16717,7 +16717,7 @@ mod serve_tests {
 		let requests = auth.handle().requests();
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		// The peer lets us publish everything, and we let it read only "other".
-		auth.granted(0, crate::auth::Grant::all());
+		auth.grant(0, crate::auth::Grant::all());
 		auth.handle().authorize(&crate::auth::Grant {
 			publish: crate::Patterns::new(),
 			subscribe: crate::Pattern::subtree("other").unwrap().into(),
@@ -17839,7 +17839,7 @@ mod serve_tests {
 		let auth = crate::auth::Link::new(true);
 		let mut requests = auth.handle().requests();
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
-		auth.granted(0, crate::auth::Grant::all());
+		auth.grant(0, crate::auth::Grant::all());
 		let h = serve_with_auth(VERSION, auth, Vec::new());
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
 			.await
@@ -18133,7 +18133,7 @@ mod serve_tests {
 		let auth = crate::auth::Link::new(true);
 		let mut requests = auth.handle().requests();
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
-		auth.granted(
+		auth.grant(
 			0,
 			crate::auth::Grant {
 				publish: crate::Pattern::subtree("other").unwrap().into(),
