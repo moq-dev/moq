@@ -339,6 +339,8 @@ class QueryTests(unittest.TestCase):
             ("rs/deep/src/lib.rs", True),
             ("rs/dev/src/lib.rs", False),
             ("rs/other/src/lib.rs", False),
+            ("clippy.toml", True),
+            ("rust-toolchain.toml", True),
         ):
             with self.subTest(path=path):
                 self.change(path)

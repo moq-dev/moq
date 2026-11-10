@@ -164,7 +164,7 @@ module carla '^demo/carla/(sim/|justfile$)' \
 # The CARLA demo's GPU bridge, a Cargo workspace of its own. It also matches
 # rs/, narrowed after the tool check to the crates it path-depends on, so their
 # API changes compile it while other rs/ changes skip it.
-module carla_bridge '^(\.cargo/config\.toml$|demo/carla/(bridge/|justfile$)|rs/)' \
+module carla_bridge '^(\.cargo/config\.toml$|clippy\.toml$|rust-toolchain\.toml$|demo/carla/(bridge/|justfile$)|rs/)' \
     tools='cargo jq' compiles='check fix' fix
 # Reads the bridge's manifest and the root workspace's, so it needs cargo and
 # runs only after setup. Dev-dependencies of the crates it reaches never build
@@ -186,7 +186,7 @@ carla_bridge_scope() {
         echo "error: found no rs/ crates under the CARLA bridge" >&2
         exit 1
     }
-    echo "^(\.cargo/config\.toml$|demo/carla/(bridge/|justfile$)|(${crates%|})/)"
+    echo "^(\.cargo/config\.toml$|clippy\.toml$|rust-toolchain\.toml$|demo/carla/(bridge/|justfile$)|(${crates%|})/)"
 }
 # swift needs no tools: it skips off macOS by design, and platform.yml is its
 # real gate. Its formatter is absent where nixpkgs cannot build it (see
