@@ -2433,6 +2433,15 @@ type Superseded = { successor?: Successor };
 // the oldest held.
 type Successor = { sequence: bigint; arrived: Instant; fate: () => Error | undefined };
 
+// A run a reader already reported, and how: dropped for good (or stale until its group was handed
+// out, so no update reopens it), dropped as stale, which an update reopens, or skipped, which
+// replaces a drop. `received` when an upstream's stale run decided it, which is the upstream's to
+// judge again then. Mirrors the Rust `Report`.
+interface Reported extends Run {
+	kind: "dropped" | "stale" | "skip";
+	received?: boolean;
+}
+
 /**
  * A track its producer finished: its end is declared unless it closed first, and it can still
  * take an older group below that end, be read, or be aborted or closed, but not append. {@link Producer.finish} returns it,
@@ -2528,16 +2537,7 @@ export class Subscriber {
 		coverage?: Coverage;
 		judged?: readonly Run[];
 	};
-	#reported: Run[] = [];
-	// The reported runs judged stale, for a wire whose update re-offers them; see
-	// `hooks.reofferStale`.
-	#reportedStale: Run[] = [];
-	// The part of #reportedStale an upstream's received stale run decided, which is the upstream's
-	// to judge again once an update reopens it.
-	#reportedReceived: Run[] = [];
-	// The reported runs skipped: a skip replaces a drop, so a run reported dropped is reported
-	// again once it is skipped, and only a skip already reported stops it.
-	#reportedSkip: Run[] = [];
+	#reported = new Runs<Reported>((a, b) => a.kind === b.kind && a.received === b.received);
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -2792,10 +2792,8 @@ export class Subscriber {
 		this.#skipped.delete(sequence);
 		// The group won over any stale report on it, so no update reopens it. A resumed reader
 		// retires its own.
-		if (this.#reportedStale.length > 0) {
-			this.#reportedStale = removeRun(this.#reportedStale, sequence, sequence + 1n);
-			this.#reportedReceived = removeRun(this.#reportedReceived, sequence, sequence + 1n);
-		}
+		if (this.#reported.at(sequence)?.kind === "stale")
+			this.#reported.set(sequence, sequence + 1n, { start: sequence, end: sequence + 1n, kind: "dropped" });
 		// Another copy of it buffered here is never handed out.
 		this.#judge(sequence, sequence + 1n);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
@@ -2923,13 +2921,13 @@ export class Subscriber {
 	#reofferStale(): Run[] {
 		if (this.#resume) return this.#resume.reofferStale();
 		const taken: Run[] = [];
-		const received = this.#reportedReceived;
-		for (const run of this.#reportedStale) {
-			this.#reported = removeRun(this.#reported, run.start, run.end);
+		const received: Run[] = [];
+		const stale = this.#reported.all.filter((run) => run.kind === "stale");
+		for (const run of stale) {
 			insertRun(taken, run.start, run.end);
+			if (run.received) insertRun(received, run.start, run.end);
 		}
-		this.#reportedStale = [];
-		this.#reportedReceived = [];
+		this.#reported.clear(stale);
 		for (const run of this.#pending) {
 			if (run.stale === undefined) continue;
 			insertRun(taken, run.start, run.end);
@@ -3423,7 +3421,7 @@ export class Subscriber {
 		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.unreport = (subscriber, start, end) => {
-			subscriber.#reported = removeRun(subscriber.#reported, start, end);
+			subscriber.#reported.set(start, end);
 		};
 		hooks.reofferStale = (subscriber) => subscriber.#reofferStale();
 		hooks.reofferGroups = (subscriber, start, end) => subscriber.#reofferGroups(start, end);
@@ -3966,23 +3964,19 @@ export class Subscriber {
 	// replaces what it goes out over.
 	#report(from: bigint, to: bigint, hole: Hole & { received?: boolean }): (Recv & { kind: "drop" }) | undefined {
 		const { start, end } = this.#cursor.peek();
-		const final = !hole.skip && hole.stale === undefined;
+		const kind = hole.skip ? "skip" : hole.stale !== undefined ? "stale" : "dropped";
+		const blocks = (reported: Reported) =>
+			kind === "skip" ? reported.kind === "skip" : kind === "dropped" ? reported.kind !== "stale" : true;
 		for (const run of this.#window.runs(max(from, start), min(to, end ?? to))) {
-			let blocked = hole.skip ? this.#reportedSkip : this.#reported;
-			if (final) for (const stale of this.#reportedStale) blocked = removeRun(blocked, stale.start, stale.end);
+			const blocked = this.#reported.overlapping(run.start, run.end).filter(blocks);
 			const [gap] = runGaps(blocked, run.start, run.end);
 			if (!gap) continue;
-			insertRun(this.#reported, gap.start, gap.end);
-			if (hole.skip) insertRun(this.#reportedSkip, gap.start, gap.end);
-			if (hole.stale !== undefined) {
-				insertRun(this.#reportedStale, gap.start, gap.end);
-				if (hole.received) insertRun(this.#reportedReceived, gap.start, gap.end);
-				else this.#reportedReceived = removeRun(this.#reportedReceived, gap.start, gap.end);
-			} else {
-				// A skip or final drop is final, so no update reopens a stale report it replaced.
-				this.#reportedStale = removeRun(this.#reportedStale, gap.start, gap.end);
-				this.#reportedReceived = removeRun(this.#reportedReceived, gap.start, gap.end);
-			}
+			// Replacing what it goes out over: a final report is never reopened by an update.
+			this.#reported.set(gap.start, gap.end, {
+				...gap,
+				kind,
+				...(kind === "stale" && hole.received ? { received: true } : {}),
+			});
 			return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 		}
 		return undefined;

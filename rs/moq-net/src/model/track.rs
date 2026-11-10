@@ -7729,21 +7729,43 @@ struct DropCursor {
 	/// until the next: a queue-only poll judges none, and must not unsettle them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	drift: Option<(Duration, Coverage)>,
-	/// Every sequence this cursor already reported.
+	/// Every sequence this cursor already reported, with how.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	reported: RangeSet<u64>,
-	/// The reported runs judged stale, for a wire whose update re-offers them; see
-	/// [`Subscriber::reoffer_stale`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	reported_stale: RangeSet<u64>,
-	/// The part of [`Self::reported_stale`] an upstream's received stale run decided, which
-	/// is the upstream's to judge again once an update reopens it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	reported_received: RangeSet<u64>,
-	/// The reported runs skipped. A skip replaces a drop, so a run reported dropped is
-	/// reported again once it is skipped, and only a skip already reported stops it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	reported_skip: RangeSet<u64>,
+	reported: RangeMap<u64, Report>,
+}
+
+/// How a [`DropCursor`] reported a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Report {
+	/// Dropped for good, or stale until its group was handed out: no update reopens it.
+	Dropped,
+	/// Dropped as stale, which an update reopens; see [`Subscriber::reoffer_stale`].
+	/// `received` when an upstream's stale run decided it, which is the upstream's to judge
+	/// again then.
+	Stale { received: bool },
+	/// Skipped, which replaces a drop.
+	Skip,
+}
+
+impl Report {
+	/// How `hole` reports, as it came from upstream when `received`.
+	fn of(hole: &Hole, received: bool) -> Self {
+		match hole {
+			Hole::Skip => Self::Skip,
+			hole if hole.stale_budget().is_some() => Self::Stale { received },
+			_ => Self::Dropped,
+		}
+	}
+
+	/// Whether this report stops `hole` going out over it: a skip goes out over a drop, and
+	/// a final drop over a stale one, since each replaces what it goes out over.
+	fn blocks(self, hole: &Hole) -> bool {
+		match hole {
+			Hole::Skip => self == Self::Skip,
+			Hole::Drop { stale: None, .. } => !matches!(self, Self::Stale { .. }),
+			Hole::Drop { .. } => true,
+		}
+	}
 }
 
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -7756,10 +7778,7 @@ impl DropCursor {
 			scanned: None,
 			seen: 0,
 			drift: None,
-			reported: RangeSet::new(),
-			reported_stale: RangeSet::new(),
-			reported_received: RangeSet::new(),
-			reported_skip: RangeSet::new(),
+			reported: RangeMap::new(),
 		}
 	}
 
@@ -7768,7 +7787,7 @@ impl DropCursor {
 	/// the part an upstream's received stale run decided.
 	fn take_stale(&mut self) -> (Vec<ops::Range<u64>>, RangeSet<u64>) {
 		let mut stale = RangeSet::new();
-		let mut received = std::mem::take(&mut self.reported_received);
+		let mut received = RangeSet::new();
 		let queued: Vec<_> = self
 			.pending
 			.iter()
@@ -7782,9 +7801,20 @@ impl DropCursor {
 			}
 			stale.insert(run);
 		}
-		for run in std::mem::take(&mut self.reported_stale).iter() {
+		let reported: Vec<_> = self
+			.reported
+			.iter()
+			.filter_map(|(run, report)| match report {
+				Report::Stale { received } => Some((run.clone(), *received)),
+				_ => None,
+			})
+			.collect();
+		for (run, from_upstream) in reported {
 			self.reported.remove(run.clone());
-			stale.insert(run.clone());
+			if from_upstream {
+				received.insert(run.clone());
+			}
+			stale.insert(run);
 		}
 		// A received stale run is folded in again by the next scan, if the track still holds it.
 		self.scanned = None;
@@ -7794,9 +7824,10 @@ impl DropCursor {
 	/// Retire a stale report on `sequence` once its group is handed out: the group won over
 	/// the drop, so no update reopens it.
 	fn retire(&mut self, sequence: u64) {
-		if let Some(end) = sequence.checked_add(1) {
-			self.reported_stale.remove(sequence..end);
-			self.reported_received.remove(sequence..end);
+		if let Some(end) = sequence.checked_add(1)
+			&& matches!(self.reported.get(&sequence), Some(Report::Stale { .. }))
+		{
+			self.reported.insert(sequence..end, Report::Dropped);
 		}
 	}
 
@@ -7924,41 +7955,20 @@ impl DropCursor {
 			if clipped.end < range.end {
 				self.pending.insert(clipped.end..range.end, pending.clone());
 			}
-			// A skip goes out over a drop already reported, and a final drop over a stale one,
-			// since each replaces what it goes out over.
-			let mut blocked = match pending.hole {
-				Hole::Skip => self.reported_skip.overlapping(&clipped).cloned().collect(),
-				Hole::Drop { .. } => self.reported.overlapping(&clipped).cloned().collect::<RangeSet<u64>>(),
-			};
-			if matches!(pending.hole, Hole::Drop { stale: None, .. }) {
-				for stale in self.reported_stale.overlapping(&clipped) {
-					blocked.remove(stale.clone());
-				}
-			}
+			let blocked: RangeSet<u64> = self
+				.reported
+				.overlapping(&clipped)
+				.filter(|(_, report)| report.blocks(&pending.hole))
+				.map(|(run, _)| run.clone())
+				.collect();
 			if let Some(gap) = blocked.gaps(&clipped).next() {
 				if gap.end < range.end {
 					self.pending.insert(gap.end..range.end, pending.clone());
 				}
-				let hole = pending.hole;
-				self.reported.insert(gap.clone());
-				match &hole {
-					hole if hole.stale_budget().is_some() => {
-						self.reported_stale.insert(gap.clone());
-						match pending.received {
-							true => self.reported_received.insert(gap.clone()),
-							false => self.reported_received.remove(gap.clone()),
-						}
-					}
-					// Final, so no update reopens a stale report it replaced.
-					hole => {
-						if matches!(hole, Hole::Skip) {
-							self.reported_skip.insert(gap.clone());
-						}
-						self.reported_stale.remove(gap.clone());
-						self.reported_received.remove(gap.clone());
-					}
-				}
-				return Some((gap, hole));
+				// Replacing what it goes out over: a final report is never reopened by an update.
+				self.reported
+					.insert(gap.clone(), Report::of(&pending.hole, pending.received));
+				return Some((gap, pending.hole));
 			}
 		}
 		None
