@@ -210,7 +210,8 @@ export function analyze(input: Input): Summary {
 			}),
 		) ?? null;
 	// Both on the media clock, read at one instant, so no reduction to the viewer's is needed.
-	const lagOf = (s: Sample) => (s.clock === undefined || s.timestamp === undefined ? undefined : s.clock - s.timestamp);
+	const lagOf = (s: Sample) =>
+		s.clock === undefined || s.timestamp === undefined ? undefined : s.clock - s.timestamp;
 	const behind = playing.flatMap((s) => {
 		const lag = lagOf(s);
 		return lag === undefined ? [] : [lag];
