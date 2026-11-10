@@ -26,6 +26,9 @@ resuming.
   order; no group is skipped while an alternate path holds it; the track
   ends only after the origin ends it; no relay keeps a copy after the client
   leaves.
+- Cover a group that stalls or fails mid-read and continues on another
+  copy at the same frame (`Recover` in `model/resume.rs`), which
+  `verify-resume` leaves out because it models whole groups.
 - Replay each counterexample on the real stack (relays over the memory
   transport, mocked clock), and pin confirmed bugs as `residual_*` tests.
 
