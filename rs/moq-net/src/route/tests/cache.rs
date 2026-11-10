@@ -940,8 +940,8 @@ fn lan_relays_share_uplink_copies() {
 	for full in [true, false] {
 		let mut mesh = Mesh::new(K + 1);
 		mesh.origin(o, 7);
-		for i in 0..K {
-			mesh.join(o, relays[i], 3);
+		for &relay in &relays {
+			mesh.join(o, relay, 3);
 		}
 		for i in 0..K {
 			for j in i + 1..K {
