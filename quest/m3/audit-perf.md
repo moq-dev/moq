@@ -159,18 +159,18 @@ wall-clock bisect blames the wrong commit. Count instructions instead:
 Each needs a bench, swept over both axes where it fans out, or its own
 follow-up quest. The m1 run added none of these:
 
-1. [HLS request fan-out](/quest/m5/performance-survey/hls-serving.md) owns
+1. HLS request fan-out:
    repeated segment fetch/remux and playlist rendering, swept over viewers,
    renditions and window segments.
 2. LOC and CMAF wire containers in moq-mux: `containers` and `export` only use
    `Container::Legacy`; sweep container x frame size x frames.
-3. [Browser media copies](/quest/m5/performance-survey/browser-media-copies.md)
-   owns CMAF sample copies and LOC encode allocation. Generic `js/msf` and
+3. Browser media copies:
+   CMAF sample copies and LOC encode allocation. Generic `js/msf` and
    `js/flate` benchmark coverage remains here.
 4. moq-quic loss recovery and real congestion controllers: every bench pins
    `Unlimited`; sweep controller x flight x loss x streams.
-5. [Announcement snapshots](/quest/m5/performance-survey/announced-snapshots.md)
-   owns HTTP snapshot/rendering costs across routes and pollers.
+5. Announcement snapshots:
+   HTTP snapshot/rendering costs across routes and pollers.
 6. JWT verification is covered: `moq-auth`'s `verify` bench runs nightly in
    `rust-extra` (see [bench/README.md](/bench/README.md#auth-verification)).
    Signature verification dominated every asymmetric algorithm; nothing
@@ -183,9 +183,9 @@ follow-up quest. The m1 run added none of these:
    do not count that transfer as another mandatory copy. Sweep publishers
    x renditions, channels and frame duration in a browser.
 
-The [2026-10-22 source survey](/quest/m5/performance-survey/README.md) owns
-the extracted items above and additional algorithmic hypotheses, with paired
-benchmarks required before optimization. This audit still owns nightly
+The 2026-10-22 source survey's quests were deleted on 2026-11-09 for want of
+a consumer; a measured regression or a consumer brings an item back, with
+paired benchmarks required before optimization. This audit still owns nightly
 regression attribution and the remaining coverage. Its fragmented-MKV child
 specializes item 7's MKV work.
 

@@ -12,7 +12,7 @@ Attempt GPU delivery immediately on macOS decode; other platforms keep the CPU p
 
 Initial video decoding covers H.264, HEVC, and AV1 where moq-video has an available backend. Unsupported codecs produce an actionable error; do not retain an FFmpeg fallback. VP8/VP9 return through their own follow-up quest. Audio playback covers Opus, AAC-LC, and PCM.
 
-Publishing remains opt-in, with one **Use MoQ encoders** choice for video and audio. Keep the existing OBS encoder mode. Internal OBS encoder adapters call moq-video/moq-audio, preserving OBS's A/V handling and the existing encoded MoQ output. The combined choice is enabled only when both adapters are present. Start with H.264, supported HEVC, and Opus; defer AV1/AAC encoding and PCM publishing UI. Keep bitrate separate from **Low latency**, **Balanced** (default), and **Quality** presets. Presets describe supported buffering/compression controls, not an end-to-end delay promise. The line PR must call out the video default changes #4099 made: NVENC P4 to P1, and openh264 medium to low complexity. Known gap: VAAPI reports Low latency whatever was asked, and V4L2 and MediaCodec report unconfirmed; no quest owns measuring and mapping presets for them. Media Foundation is owned by [Windows GPU input](/quest/m5/obs-windows.md).
+Publishing remains opt-in, with one **Use MoQ encoders** choice for video and audio. Keep the existing OBS encoder mode. Internal OBS encoder adapters call moq-video/moq-audio, preserving OBS's A/V handling and the existing encoded MoQ output. The combined choice is enabled only when both adapters are present. Start with H.264, supported HEVC, and Opus; defer AV1/AAC encoding and PCM publishing UI. Keep bitrate separate from **Low latency**, **Balanced** (default), and **Quality** presets. Presets describe supported buffering/compression controls, not an end-to-end delay promise. The line PR must call out the video default changes #4099 made: NVENC P4 to P1, and openh264 medium to low complexity. Known gap: VAAPI reports Low latency whatever was asked, and V4L2 and MediaCodec report unconfirmed; no quest owns measuring and mapping presets for them. Media Foundation has no owner either.
 
 The quests separate portable decoding, audio, and publishing so each can land and be validated independently. moq-ffi's decoded frames own their surface and convert to CPU pixels only on request (#4094); a surface decode exposes the platform surface as a borrowed view, which each platform GPU quest extends to its own surface type.
 
@@ -27,11 +27,6 @@ Decided in the 2026-09-30 audit: the Windows and Linux GPU decode paths and the 
 
 ## Related
 
-- [Linux GPU decode](/quest/m5/obs-decode-linux.md) - present hardware-decoded frames without CPU readback; needs physical-hardware proof
-- [Windows GPU decode](/quest/m5/obs-decode-windows.md) - present D3D11 decoded textures without CPU readback; needs physical-hardware proof
-- [macOS GPU input](/quest/m5/obs-macos.md) - feed compositor frames to VideoToolbox without a CPU round trip; needs physical-hardware proof
-- [Windows GPU input](/quest/m5/obs-windows.md) - feed D3D11 compositor frames to the encoder without CPU staging; needs physical-hardware proof
 - [Video hardware validation](/quest/m5/video-hardware.md) - physical hardware evidence is required for each claimed GPU path
 - [AudioToolbox decode](/quest/m3/audio-decode-audiotoolbox.md) - HE-AAC and multichannel AAC reach the OBS source on macOS through moq-ffi
 - [AudioToolbox encode](/quest/m3/audio-encode-audiotoolbox.md) - native AAC encode reaches the OBS encoder adapter on macOS through moq-ffi
-- [Linux GPU input](/quest/m5/obs-linux-gpu.md) - allocation-export feasibility and its dependent implementation are deferred

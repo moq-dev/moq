@@ -29,7 +29,3 @@ with [Media Foundation encode](/quest/m3/audio-encode-mediafoundation.md),
 which the maintainer moved for moq-dev/studio's destinations and which
 requires this for its round-trip regression. A quest an m3 quest requires
 joins m3.
-
-## Related
-
-- [Windows decoded frames](/quest/m5/obs-decode-windows.md) - the OBS Windows line this feeds

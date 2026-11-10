@@ -44,5 +44,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Audio outlives video](/quest/m4/audio-bufferbloat-av.md) - the other extension of the same harness
-- [Opus backends](/quest/m5/audio-opus-backend.md) - a quality score is the evidence an implementation comparison needs
-- [Opus bandwidth grant](/quest/m5/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - bitrate changes this score should track

@@ -133,9 +133,9 @@ largest text-symbol increases to `moq_net` (+335,565 bytes), `moq_mux`
 attribution, not a compressed-byte decomposition. Cross-crate inlining,
 compiler-generated code, and metadata account for other bytes.
 [moq-dev/moq#7400](https://github.com/moq-dev/moq/pull/7400), merged after
-these measurements, addresses the catalog serialization duplication lead. The [bindings size profile
-quest](/quest/m5/ffi-size-profile.md) requires codec/crypto and FFI throughput
-measurements before adopting opt-level s; no compiler profile was changed.
+these measurements, addresses the catalog serialization duplication lead. Adopting opt-level s for the bindings would need codec/crypto and FFI
+throughput measurements first; no quest plans it, and no compiler profile was
+changed.
 
 The Swift source tarball grows in `Generated.swift`, from 684,643 to 704,105
 bytes. Its new request/publication, token, media-read and decoder-start
@@ -153,6 +153,5 @@ moq's WASM build was removed on 2026-10-31, so there is no WASM row to repeat.
 
 ## Related
 
-- [FFI size profile](/quest/m5/ffi-size-profile.md)
 - [Native synchronous codecs](/quest/m5/native-compression-sync.md)
 - [Native browser codecs](/quest/m5/native-compression-adopt.md)

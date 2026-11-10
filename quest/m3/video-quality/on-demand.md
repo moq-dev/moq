@@ -46,7 +46,3 @@ Public API: none expected. Wire: none.
 ## Required
 
 - [Harness](/quest/m3/video-quality/harness.md) - the scorer and pop metric
-
-## Related
-
-- [Ladder fetch](/quest/m5/ladder/fetch.md) - later makes fetch encode at the controller's target; keep the same fetch encoder ownership

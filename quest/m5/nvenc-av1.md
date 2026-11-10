@@ -27,5 +27,4 @@ Public API: additive. Wire: existing AV1 codec signaling.
 
 ## Related
 
-- [Main10](/quest/m5/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - the other half of #2147
 - [GPU CI](/quest/m3/gpu-ci.md) - the current runner lacks AV1 NVENC

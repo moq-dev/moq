@@ -48,5 +48,4 @@ waits on belongs.
 
 ## Related
 
-- [MediaCodec AAC encode](/quest/m5/audio-encode-mediacodec.md) - the same encode seam on Android
 - [Media Foundation AAC encode](/quest/m3/audio-encode-mediafoundation.md) - the same encode seam on Windows

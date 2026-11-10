@@ -12,8 +12,7 @@ Today nothing measures encoded quality: the only check is a manual PSNR/SSIM
 recipe in `rs/moq-video/examples/encode-presets.rs`. moq-boy's encoding looks
 bad, and nobody knows how each backend or GPU compares on the same input.
 
-Non-goals: per-viewer adaptation and live bitrate control, which belong to the
-[ladder](/quest/m5/ladder/README.md); browser playback quality, which belongs to
+Non-goals: per-viewer adaptation and live bitrate control, which nothing plans; browser playback quality, which belongs to
 `just test media`.
 
 ## Plan

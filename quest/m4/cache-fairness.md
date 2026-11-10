@@ -55,4 +55,3 @@ Wire: none.
 ## Related
 
 - [Broadcast fairness](/quest/m5/broadcast-fairness.md) - the same tenant fair share on cluster links
-- [Receive pool](/quest/m5/receive-pool.md) - one per-worker budget covering receive credit and the cache
