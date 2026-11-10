@@ -268,13 +268,13 @@ async def serving(scenario, monkeypatch: pytest.MonkeyPatch) -> None:
     play = asyncio.create_task(scenario(endpoint, drivers, commands, Drive()))
     try:
         await asyncio.wait({task, play}, return_when=asyncio.FIRST_COMPLETED)
-        if not play.done():
+        # The pump never returns on its own, so one that ended failed, whichever finished first.
+        if task.done():
             task.result()
             raise AssertionError("the driver endpoint stopped before the scenario finished")
         play.result()
     finally:
         play.cancel()
-        # A pump that already ended has its own failure to report.
         if not task.done():
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
