@@ -241,6 +241,12 @@ reader got `Unroutable` after the endpoint closed during
 [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)'s loaded `just check`.
 It is quarantined with `pytest.mark.skip` until its child fixes it.
 
+Added 2026-11-09 (maintainer's standing rule that flakes join this epic): the
+Go wrapper's `TestRecvGroupCancelKeepsConsumer`, whose `RecvGroup` after a
+cancelled one missed an appended group during
+[moq-dev/moq#8363](https://github.com/moq-dev/moq/pull/8363)'s loaded
+`just check`. It is quarantined with `t.Skip` until its child fixes it.
+
 Public API: none. Wire: none.
 
 ## Required
@@ -249,3 +255,4 @@ Public API: none. Wire: none.
 - [js/net's bandwidth sampling test holds up under load](/quest/m0/test-flakes-2/bandwidth-sampling.md) - the sampling test counts ticks without racing the mocked clock, and its `test.skip` is removed
 - [js/net's datagram session-close-after-end test holds up under load](/quest/m0/test-flakes-2/datagram-close-end.md) - the abort is ordered after the end by an event the client observes, and its `test.skip` is removed
 - [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the test waits for the first track's queue instead of asserting at once, and its `test.skip` is removed
+- [The Go wrapper's cancelled-RecvGroup test holds up under load](/quest/m0/test-flakes-2/go-recv-cancel.md) - a `RecvGroup` after a cancelled one is woken by the next group, and its `t.Skip` is removed
