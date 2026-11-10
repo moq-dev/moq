@@ -70,9 +70,9 @@ reach zero underruns, and some underruns during congestion are expected.
 - Bound: ✅ configurable, as
   [the `stretch` setting](/quest/m1/audio-jitter-target/stretch-setting.md)
   records.
-- Tests: no gate may reward moving away from the rule, so
-  [the grading quest](/quest/m1/audio-jitter-target/grading.md) lands before
-  [the model](/quest/m1/audio-jitter-target/stretch.md).
+- Tests: no gate may reward moving away from the rule, so the audio harness
+  grades steady-state lag, the player's own trims, and recovery from a stall
+  before [the model](/quest/m1/audio-jitter-target/stretch.md) lands.
 - Milestone: ✅ every new child in m1, here (rejected: the model and grading
   in m0; the setting in m2).
 
@@ -89,7 +89,6 @@ native playback against its budgets.
 
 ## Required
 
-- [Grading](/quest/m1/audio-jitter-target/grading.md) - the audio harness grades steady-state lag, dropped audio, and recovery from a stall, with no gate fixed at zero underruns or zero lag
 - [Stretch model](/quest/m1/audio-jitter-target/stretch.md) - every player slows down when its buffer runs low and speeds up once it refills, by one rule and one set of vectors, buffered mode included
 - [The `stretch` setting](/quest/m1/audio-jitter-target/stretch-setting.md) - a player sets how far audio may trail before it skips, and zero turns the stretch off
 - [Calibrate](/quest/m1/audio-jitter-target/calibrate.md) - every browser and native ceiling re-measured from seven Nightlies with the model
