@@ -20,13 +20,6 @@ cache-rev:
     fi
     echo "$rev"
 
-# Keep the newest cached commit's closures on nix.moq.dev past the bucket's expiry.
-cache-refresh:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    rev=$(just gh cache-rev)
-    just infra nix refresh nix-ci-moq-dev "$rev"
-
 # Build the runner image with a temporary policy on a disposable hosted runner.
 runner-vm-ci:
     #!/usr/bin/env bash

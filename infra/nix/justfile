@@ -47,7 +47,7 @@ roots bucket rev name +paths:
     set -euo pipefail
     : "${AWS_ACCESS_KEY_ID:?not set}"
     : "${AWS_SECRET_ACCESS_KEY:?not set}"
-    PATH="$(nix build --no-link --print-out-paths --inputs-from {{ quote(justfile_directory() / "../..") }} nixpkgs#rclone^out)/bin:$PATH"
+    PATH="$(nix build --no-link --print-out-paths --inputs-from {{ quote(source_directory() / "../..") }} nixpkgs#rclone^out)/bin:$PATH"
     readlink -f {{ paths }} | rclone rcat "r2:{{ bucket }}/roots/{{ rev }}/{{ name }}"
 
 # Restart the upload age of every object in a commit's recorded closures older than a week.

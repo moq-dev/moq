@@ -34,7 +34,4 @@ recurrence rule (successor added by the PR that finishes a run, behind the
 [release cut](/quest/m3/release/cut.md)), stated once per file in a line or
 two. Update m3's README links and anything else that links a merged file.
 
-[CI lane trims](/quest/m0/ci/trim.md) edits `audit-ci.md` rows; whichever
-lands second adapts.
-
 Public API: none. Wire: none.

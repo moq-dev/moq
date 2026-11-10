@@ -43,7 +43,7 @@ jobs:
     # The matrix runs in real time (ffmpeg -re pacing + per-subscriber timeouts);
     # this is just a safety net against a hung relay/client. The nix channel
     # gets longer for a cold build when the pinned commit's closure misses
-    # nix.moq.dev (e.g. objects expired while Cache refresh was failing); compiling it
+    # nix.moq.dev (e.g. objects expired while Cache was failing); compiling it
     # has taken 43 minutes.
     timeout-minutes: ${{ matrix.channel == 'nix' && 75 || 45 }}
 
@@ -207,8 +207,8 @@ jobs:
         # resolve a commit whose upload is still running (or was cancelled), and
         # the relay and CLI could even resolve different commits.
         # --print-build-logs is off, so a "building ...moq-relay" line here means
-        # a cache miss on a commit that was uploaded: the daily Cache refresh
-        # keeps that commit's closure inside the bucket's 30-day expiry
+        # a cache miss on a commit that was uploaded: each Cache run refreshes
+        # that commit's closure inside the bucket's 30-day expiry
         # (infra/nix/lifecycle.json), so check its runs before calling it a cache bug.
         # The repository root, where `just gh` resolves.
         working-directory: .

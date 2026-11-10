@@ -160,8 +160,6 @@
             cargo-bloat
             # The workspace-hack that gives every build one feature set per dependency.
             cargo-hakari
-            # Weekly mutation testing of the security-critical modules (`just rs mutants`).
-            cargo-mutants
             cargo-nextest
             cargo-codspeed
             # Source-based test coverage (`just rs coverage`).
