@@ -1199,14 +1199,14 @@ test("an opted-in publisher advertises to a soliciting peer", async () => {
 		unsolicited: true,
 	});
 
-    publish(origin, Path.from("first"));
-    void pub.runPublishNamespaces();
+	publish(origin, Path.from("first"));
+	void pub.runPublishNamespaces();
 
-    const stream = await nextStream(pair.client);
-    expect(await readPublishNamespace(stream)).toBe(Path.from("first"));
-    await acceptPublishNamespace(stream);
+	const stream = await nextStream(pair.client);
+	expect(await readPublishNamespace(stream)).toBe(Path.from("first"));
+	await acceptPublishNamespace(stream);
 
-    origin.close();
+	origin.close();
 });
 
 /**
