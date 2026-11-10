@@ -72,3 +72,7 @@ search misses or which are not items:
   `just rs macos-test` enables, and its WASI arm (`udp/wasi.rs`), which no
   target builds. Update [cmsg length on send](/quest/m3/cmsg-len-send.md),
   which names the feature.
+
+## Required
+
+- [A peer's closed session reads as Closed in the bindings](/quest/m2/api-shape/session-closed.md) - a remote SESSION_CLOSED maps to `MoqError::Closed`, as a local close does
