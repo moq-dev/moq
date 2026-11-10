@@ -342,13 +342,13 @@ mod tests_rind {
 
 	#[test]
 	fn test_default_provider_validates() {
-		let provider = rind::default_provider().unwrap();
+		let provider = rind::default_provider();
 		assert!(provider.validate().is_ok());
 	}
 
 	#[test]
 	fn test_default_provider_has_cipher_suites() {
-		let provider = rind::default_provider().unwrap();
+		let provider = rind::default_provider();
 		let count = provider.supported_cipher_suites().count();
 		// ECDHE: AES-128, AES-256, ChaCha20
 		// PSK: CCM-8
@@ -357,20 +357,20 @@ mod tests_rind {
 
 	#[test]
 	fn test_default_provider_has_kx_groups() {
-		let provider = rind::default_provider().unwrap();
+		let provider = rind::default_provider();
 		let count = provider.supported_kx_groups().count();
 		assert_eq!(count, 3); // X25519, P-256, and P-384
 	}
 
 	#[test]
 	fn test_default_provider_has_ecdh() {
-		let provider = rind::default_provider().unwrap();
+		let provider = rind::default_provider();
 		assert!(provider.has_ecdh());
 	}
 
 	#[test]
 	fn test_supported_cipher_suites_for_signature_algorithm() {
-		let provider = rind::default_provider().unwrap();
+		let provider = rind::default_provider();
 		let ecdsa_suites: Vec<_> = provider
 			.supported_cipher_suites_for_signature_algorithm(SignatureAlgorithm::ECDSA)
 			.map(|cs| cs.suite())

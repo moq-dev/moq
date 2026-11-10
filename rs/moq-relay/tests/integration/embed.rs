@@ -24,7 +24,7 @@ fn timed() -> moq_net::track::Info {
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -37,7 +37,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
 	std::fs::write(
 		&key_path,
-		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 	)
 	.expect("write key");
 	(cert_path, key_path)
@@ -161,7 +161,7 @@ async fn stop(trigger: moq_relay::shutdown::Trigger, running: tokio::task::JoinH
 /// Load, mount a custom route, clone the origin, run the owner, prove QUIC
 /// plus HTTP, then stop it through the trigger and prove its sockets closed.
 async fn embed_and_stop(mut config: Config) {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 
 	// No drain window: the sessions are already gone by the time the owner
 	// stops, and the test should not wait out the default.
@@ -447,7 +447,7 @@ async fn uring_custom_route_and_quic() {
 /// The WebRTC media path on the QUIC port reaches the embedder's feed, whichever
 /// worker read it, and the feed's reply leaves from the QUIC port.
 async fn webrtc_feed(mut config: Config) {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	config.drain_timeout = Some((Duration::ZERO).into());
 	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let quic = relay.quic_addr().expect("quic listener bound");
@@ -515,7 +515,7 @@ async fn worker_tokio_webrtc_feed() {
 /// An embedder-owned accept loop joins the relay's own /metrics exposition.
 #[tokio::test]
 async fn embedded_listener_health_reaches_metrics() {
-	moq_tokio::crypto::install_default().unwrap();
+	moq_tokio::crypto::install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());

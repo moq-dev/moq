@@ -1670,7 +1670,7 @@ pub(crate) mod tests {
 		let second = shifted(24, true);
 		let input = [&lead[..], &second].concat();
 
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18"] {
 			let fixture = moq_relay::test_relay().await.unwrap();
 			let ready = fixture.relay.ready();

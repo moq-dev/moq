@@ -36,7 +36,7 @@ pub use crate::vendor::dimpl::DtlsCertificate;
 pub fn generate_self_signed_certificate() -> Result<DtlsCertificate, CertificateError> {
 	// Create a key pair for the certificate
 	let key_pair =
-		rind_rcgen::KeyPair::generate(&PKCS_ECDSA_P256_SHA256).map_err(|_| CertificateError::GenerationFailed)?;
+		rind_rcgen::KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).map_err(|_| CertificateError::GenerationFailed)?;
 
 	// Set up certificate parameters
 	let mut params = CertificateParams::new(Vec::<String>::new()).map_err(|_| CertificateError::GenerationFailed)?;
@@ -73,7 +73,7 @@ pub fn generate_self_signed_certificate() -> Result<DtlsCertificate, Certificate
 	let cert_der = cert.der().to_vec();
 
 	// Get the private key in PKCS#8 DER format
-	let key_der = key_pair.to_pkcs8().secret_pkcs8_der().to_vec();
+	let key_der = key_pair.serialize_der();
 
 	Ok(DtlsCertificate {
 		certificate: cert_der,

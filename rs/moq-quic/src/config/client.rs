@@ -4,7 +4,7 @@ use std::{fmt, sync::Arc};
 
 use rustls::client::WebPkiServerVerifier;
 
-use crate::crypto::rustls::{QuicClientConfig, provider};
+use crate::crypto::rustls::QuicClientConfig;
 use crate::{
 	MAX_CID_SIZE, RandomConnectionIdGenerator, TokenMemoryCache, TokenStore, Version,
 	cid_generator::ConnectionIdGenerator, crypto, shared::ConnectionId, transport,
@@ -58,12 +58,10 @@ impl Config {
 
 	/// Dial trusting the specified trust anchors
 	///
-	/// A CPU that rind cannot run on, and a root store the verifier refuses, both arrive in
-	/// [`rustls::Error::Other`]: downcast it to
-	/// [`UnsupportedCpu`](moq_crypto::cpu::UnsupportedCpu) or
+	/// A root store the verifier refuses arrives in [`rustls::Error::Other`]: downcast it to
 	/// [`VerifierBuilderError`](rustls::client::VerifierBuilderError).
 	pub fn with_root_certificates(roots: Arc<rustls::RootCertStore>) -> Result<Self, rustls::Error> {
-		let provider = provider()?;
+		let provider = moq_crypto::provider::provider();
 		let verifier = WebPkiServerVerifier::builder_with_provider(roots, provider.clone())
 			.build()
 			.map_err(|err| rustls::Error::Other(rustls::OtherError(Arc::new(err))))?;

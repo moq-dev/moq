@@ -7,7 +7,6 @@ pub struct DefaultSha1HmacProvider;
 impl crate::vendor::str0m_proto::Sha1HmacProvider for DefaultSha1HmacProvider {
 	fn sha1_hmac(&self, key: &[u8], payloads: &[&[u8]]) -> [u8; 20] {
 		crate::vendor::str0m_rind::default_provider()
-			.unwrap()
 			.sha1_hmac_provider
 			.sha1_hmac(key, payloads)
 	}

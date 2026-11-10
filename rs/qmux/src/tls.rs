@@ -73,7 +73,6 @@ impl Client {
 		addr: impl ToSocketAddrs,
 		server_name: &str,
 	) -> Result<(Session, Driver<Stream<tokio_rustls::client::TlsStream<TcpStream>>>), Error> {
-		moq_crypto::cpu::check()?;
 		let stream = TcpStream::connect(&addr).await?;
 		// Adopt the socket before TLS takes ownership; the kernel's view of the TCP
 		// connection is the same either side of the encryption.

@@ -278,7 +278,7 @@ impl Client {
 			) {
 				(Some(tls), _) => Some(tokio_tungstenite::Connector::Rustls(tls.clone())),
 				(None, true) => {
-					let provider = moq_crypto::provider::provider()?;
+					let provider = moq_crypto::provider::provider();
 					let native = rustls_native_certs::load_native_certs();
 					if native.certs.is_empty() {
 						return Err(std::io::Error::new(

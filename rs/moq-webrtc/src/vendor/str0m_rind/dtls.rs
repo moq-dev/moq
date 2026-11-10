@@ -24,7 +24,7 @@ impl DtlsProvider for RindDtls {
 		now: Instant,
 		mtu: Option<usize>,
 	) -> Result<Box<dyn DtlsInstance>, CryptoError> {
-		let provider = dimpl::crypto::rind::default_provider().map_err(|e| CryptoError::Other(e.to_string()))?;
+		let provider = dimpl::crypto::rind::default_provider();
 
 		// dimpl panics on an empty certificate or a key it cannot load, and
 		// `RtcConfig::set_dtls_cert` takes both from the caller.

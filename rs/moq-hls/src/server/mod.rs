@@ -180,12 +180,7 @@ impl Server {
 	/// Build a server reading broadcasts from `origin`, which it watches whole while it
 	/// lives. Every request is served; gate access by layering middleware onto
 	/// [`router`](Self::router).
-	///
-	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU its
-	/// cryptography cannot run on.
 	pub fn new(origin: moq_net::origin::Consumer, config: Config) -> crate::Result<Self> {
-		// Checked once here, so each broadcaster it serves starts without failing.
-		moq_crypto::cpu::check()?;
 		Ok(Self {
 			inner: Arc::new(Inner {
 				_watch: origin.clone().with_hidden(true).announced(),

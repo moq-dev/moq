@@ -189,7 +189,7 @@ mod tests {
 
 	impl Fixture {
 		async fn new() -> Self {
-			moq_tokio::crypto::install_default().unwrap();
+			moq_tokio::crypto::install_default();
 			let fixture = moq_relay::test_relay().await.expect("test relay");
 			let ready = fixture.relay.ready();
 			let shutdown = fixture.relay.shutdown_trigger().clone();

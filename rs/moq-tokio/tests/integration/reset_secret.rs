@@ -24,7 +24,7 @@ struct Fixture {
 impl Fixture {
 	fn new() -> Self {
 		let dir = tempfile::tempdir().expect("tempdir");
-		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
+		let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 			.map(|mut params| {
 				params.serial_number = Some(1u64.into());
@@ -43,7 +43,7 @@ impl Fixture {
 			cert_path: write("server.pem", cert.pem().as_bytes()),
 			key_path: write(
 				"server.key",
-				pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())).as_bytes(),
+				pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())).as_bytes(),
 			),
 			reset_secret: write("reset.key", format!("{RESET_SECRET}\n").as_bytes()),
 			_dir: dir,
@@ -89,7 +89,7 @@ impl Fixture {
 /// Connect, crash the server and restart it on the same port, then report how the
 /// client's connection ended once it next sent something.
 fn restart(reset_secret: bool) -> Result<driver::connection::Error, kio::clock::Elapsed> {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let fixture = Fixture::new();
 	let client = tokio::runtime::Builder::new_current_thread()
 		.enable_all()

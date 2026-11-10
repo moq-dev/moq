@@ -50,14 +50,12 @@ impl fmt::Debug for Credential {
 }
 
 impl Credential {
-	/// Check the CPU and bounds, then extract the HKDF PRK.
+	/// Check the bounds, then extract the HKDF PRK.
 	///
 	/// # Errors
 	///
-	/// [`Error::UnsupportedCpu`](crate::e2ee::Error::UnsupportedCpu) if this CPU lacks a feature the crypto needs.
 	/// [`Error::Identity`](crate::e2ee::Error::Identity) if `context` exceeds 65535 bytes or `kid` exceeds `2^53-1`.
 	pub fn new(config: Config) -> Result<Self> {
-		crate::cpu::check()?;
 		check_bytes(config.context.len())?;
 		check_u53(config.kid)?;
 		let secret = Secret(config.secret);

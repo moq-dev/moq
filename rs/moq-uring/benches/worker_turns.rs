@@ -21,7 +21,7 @@ fn request_reply(c: &mut criterion::Criterion) {
 	use moq_uring::{Config, Worker, quic, udp};
 
 	const ALPN: &str = "worker-turns";
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let certs = support::certs().expect("certificates");
 	let tls = certs.server(&[ALPN]);
 	let mut group = c.benchmark_group("worker_request_reply");

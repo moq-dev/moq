@@ -25,7 +25,7 @@ async fn serve() -> Server {
 	use std::io::Write;
 
 	let dir = tempfile::tempdir().expect("tempdir");
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
 	let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -47,7 +47,7 @@ async fn serve() -> Server {
 	config.listen.tls.cert = vec![write("server.pem", cert.pem())];
 	config.listen.tls.key = vec![write(
 		"server.key",
-		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 	)];
 	let mut listener = config
 		.init()
@@ -76,7 +76,7 @@ async fn serve() -> Server {
 /// Dial the server over raw QUIC with `alpn`, send an empty SETUP and a GROUP for an
 /// unknown subscription, and return the code the server stopped the GROUP with.
 async fn refused_code(server: &Server, alpn: &str) -> Option<driver::VarInt> {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 
 	let mut roots = rustls::RootCertStore::empty();
 	roots.add(server.cert.clone()).expect("root");

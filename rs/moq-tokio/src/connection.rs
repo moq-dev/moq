@@ -1810,7 +1810,7 @@ mod tests {
 	/// A client that trusts the self-signed [`live`] listener.
 	#[cfg(feature = "tcp")]
 	fn client() -> Client {
-		crate::crypto::install_default().unwrap();
+		crate::crypto::install_default();
 
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);

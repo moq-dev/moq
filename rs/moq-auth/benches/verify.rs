@@ -341,7 +341,7 @@ impl Bench {
 		let mut request = Request::new("bench", Transport::Quic, "/demo");
 		request.query = Some(format!("jwt={token}"));
 		// reqwest reads rustls's process default, which a binary's main installs.
-		moq_crypto::provider::install_default().unwrap();
+		moq_crypto::provider::install_default();
 		let client = reqwest::Client::new();
 		let post = move || {
 			let response = client.post(&url).json(&request).send();

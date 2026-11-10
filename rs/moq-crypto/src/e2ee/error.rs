@@ -24,10 +24,6 @@ pub enum Error {
 	#[error("authentication")]
 	Authentication,
 
-	/// This CPU lacks an instruction set extension the crypto requires; the message names it.
-	#[error(transparent)]
-	UnsupportedCpu(#[from] crate::cpu::UnsupportedCpu),
-
 	/// The underlying MoQ track failed.
 	#[error(transparent)]
 	Net(#[from] moq_net::Error),

@@ -11,7 +11,7 @@ pub struct Certs {
 
 pub fn certs() -> anyhow::Result<Certs> {
 	let signed = (|| -> std::result::Result<_, rcgen::Error> {
-		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 		let mut params = rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])?;
 		params.serial_number = Some(1u64.into());
 		let cert = params.self_signed(&signing_key)?;
@@ -23,10 +23,7 @@ pub fn certs() -> anyhow::Result<Certs> {
 	std::fs::write(&cert, signed.cert.pem())?;
 	std::fs::write(
 		&key,
-		pem::encode(&pem::Pem::new(
-			"PRIVATE KEY",
-			signed.signing_key.to_pkcs8().secret_pkcs8_der(),
-		)),
+		pem::encode(&pem::Pem::new("PRIVATE KEY", signed.signing_key.serialized_der())),
 	)?;
 	Ok(Certs { dir, cert, key })
 }

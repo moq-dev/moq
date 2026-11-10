@@ -13,22 +13,20 @@ use super::CryptoProvider;
 #[cfg(test)]
 pub(crate) use digest::HMAC;
 
-/// Returns a dimpl [`CryptoProvider`] backed by rind, or the CPU feature rind
-/// requires that this CPU lacks.
+/// Returns a dimpl [`CryptoProvider`] backed by rind.
 ///
 /// It negotiates DTLS 1.2 ECDHE-ECDSA with AES-128-GCM, AES-256-GCM, and
 /// ChaCha20-Poly1305 over X25519, P-256, and P-384, plus PSK with
 /// AES-128-CCM-8, and signs with ECDSA P-256 or P-384 keys in PKCS#8 or SEC1
 /// DER. It prefers ChaCha20-Poly1305 where rind runs AES without CPU
 /// instructions.
-pub fn default_provider() -> Result<CryptoProvider, rind::cpu::MissingFeature> {
-	rind::cpu::check()?;
+pub fn default_provider() -> CryptoProvider {
 	let cipher_suites = if rind::cpu::has_aes_hardware() {
 		suite::DTLS12
 	} else {
 		suite::DTLS12_CHACHA20_FIRST
 	};
-	Ok(CryptoProvider {
+	CryptoProvider {
 		kx_groups: kx::ALL,
 		signature_verification: &sign::VERIFIER,
 		key_provider: &sign::KEYS,
@@ -36,5 +34,5 @@ pub fn default_provider() -> Result<CryptoProvider, rind::cpu::MissingFeature> {
 		hash_provider: &digest::HASH,
 		hmac_provider: &digest::HMAC,
 		cipher_suites,
-	})
+	}
 }

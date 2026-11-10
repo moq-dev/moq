@@ -435,7 +435,7 @@ impl ConfigBuilder {
 	/// The crypto provider is selected in the following priority order:
 	/// 1. Explicit provider set via `with_crypto_provider()`
 	/// 2. Default provider installed via `CryptoProvider::install_default()`
-	/// 3. rind's provider, refusing a CPU rind cannot run on
+	/// 3. rind's provider
 	pub fn build(self) -> Result<Config, Error> {
 		if self.handshake_timeout.is_zero() || self.handshake_timeout > MAX_TIMING_DURATION {
 			return Err(ConfigError::InvalidHandshakeTimeout.into());
@@ -446,7 +446,7 @@ impl ConfigBuilder {
 
 		let crypto_provider = match self.crypto_provider.or_else(|| CryptoProvider::get_default().cloned()) {
 			Some(provider) => provider,
-			None => crate::vendor::dimpl::crypto::rind::default_provider().map_err(ConfigError::UnsupportedCpu)?,
+			None => crate::vendor::dimpl::crypto::rind::default_provider(),
 		};
 
 		// Always validate the crypto provider
@@ -847,7 +847,7 @@ mod tests {
 	fn filter_with_explicit_provider() {
 		{
 			let config = Config::builder()
-				.with_crypto_provider(crate::vendor::dimpl::crypto::rind::default_provider().unwrap())
+				.with_crypto_provider(crate::vendor::dimpl::crypto::rind::default_provider())
 				.dtls12_cipher_suites(&[Dtls12CipherSuite::ECDHE_ECDSA_AES256_GCM_SHA384])
 				.kx_groups(&[NamedGroup::X25519, NamedGroup::Secp256r1])
 				.build()

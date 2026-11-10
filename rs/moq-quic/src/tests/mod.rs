@@ -330,7 +330,7 @@ fn connect_before_the_finished_leaves(pair: &mut Pair, config: client::Config) -
 fn close_before_a_client_certificate_leaves_ends() {
 	let _guard = subscribe();
 	// Keep the server flight in the packet layout this close-packet sweep measures.
-	let mut provider = default_provider().unwrap();
+	let mut provider = default_provider();
 	provider.kx_groups = vec![rind_rustls::kx_group::X25519];
 	let provider = Arc::new(provider);
 	let mut roots = RootCertStore::empty();
@@ -343,7 +343,7 @@ fn close_before_a_client_certificate_leaves_ends() {
 		names.extend((0..len / 50).map(|i| format!("{i:03}{}.test", "a".repeat(42))));
 		names.push(format!("{}.test", "b".repeat(len % 50 + 1)));
 		let identity = (|| -> std::result::Result<_, rcgen::Error> {
-			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 			let mut params = rcgen::CertificateParams::new(names)?;
 			params.serial_number = Some(1u64.into());
 			let cert = params.self_signed(&signing_key)?;
@@ -363,7 +363,7 @@ fn close_before_a_client_certificate_leaves_ends() {
 			)
 			.with_single_cert(
 				vec![CERTIFIED_KEY.cert.der().clone()],
-				PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.to_pkcs8().secret_pkcs8_der().to_vec()).into(),
+				PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.serialize_der()).into(),
 			)
 			.unwrap();
 		let client = rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -372,7 +372,7 @@ fn close_before_a_client_certificate_leaves_ends() {
 			.with_root_certificates(roots.clone())
 			.with_client_auth_cert(
 				vec![identity.cert.der().clone()],
-				PrivatePkcs8KeyDer::from(identity.signing_key.to_pkcs8().secret_pkcs8_der().to_vec()).into(),
+				PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der()).into(),
 			)
 			.unwrap();
 		let mut client = client::Config::new(Arc::new(client));
@@ -1033,7 +1033,7 @@ fn reject_self_signed_server_cert() {
 	issuer.push(rcgen::DnType::OrganizationName, "Crazy Quinn's House of Certificates");
 	cert.distinguished_name = issuer;
 	let cert = cert
-		.self_signed(&rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap())
+		.self_signed(&rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap())
 		.unwrap();
 	let client_ch = pair.begin_connect(client_config_with_certs(vec![cert.into()]));
 
@@ -1053,10 +1053,10 @@ fn reject_missing_client_cert() {
 	// because it's convenient.
 	store.add(CERTIFIED_KEY.cert.der().clone()).unwrap();
 
-	let key = PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.to_pkcs8().secret_pkcs8_der().to_vec());
+	let key = PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.serialize_der());
 	let cert = CERTIFIED_KEY.cert.der().clone();
 
-	let provider = Arc::new(default_provider().unwrap());
+	let provider = Arc::new(default_provider());
 	let config = rustls::ServerConfig::builder_with_provider(provider.clone())
 		.with_protocol_versions(&[&rustls::version::TLS13])
 		.unwrap()
@@ -4227,7 +4227,7 @@ fn server_can_send_3_inital_packets() {
 /// Generate a big fat certificate that can't fit inside the initial anti-amplification limit
 fn big_cert_and_key() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
 	let cert = (|| -> std::result::Result<_, rcgen::Error> {
-		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 		let mut params = rcgen::CertificateParams::new(
 			Some("localhost".into())
 				.into_iter()
@@ -4242,7 +4242,7 @@ fn big_cert_and_key() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
 
 	(
 		cert.cert.into(),
-		PrivateKeyDer::Pkcs8(cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
+		PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into()),
 	)
 }
 
@@ -4361,14 +4361,14 @@ fn long_header_packets_fit_a_large_mtu() {
 
 	// Two thousand names make a certificate past 16,383 bytes
 	let (cert, key) = (|| -> std::result::Result<_, rcgen::Error> {
-		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 		let names = iter::once("localhost".into()).chain((0..2000).map(|x| format!("foo_{x}")));
 		let mut params = rcgen::CertificateParams::new(names.collect::<Vec<_>>())?;
 		params.serial_number = Some(1u64.into());
 		let cert = params.self_signed(&signing_key)?;
 		Ok((
 			CertificateDer::from(cert),
-			PrivateKeyDer::Pkcs8(signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
+			PrivateKeyDer::Pkcs8(signing_key.serialize_der().into()),
 		))
 	})()
 	.unwrap();

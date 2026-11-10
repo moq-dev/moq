@@ -979,11 +979,11 @@ mod tests {
 	#[test]
 	fn header_encoding() {
 		use crate::Side;
-		use crate::crypto::rustls::{initial_keys, initial_suite, provider};
+		use crate::crypto::rustls::{initial_keys, initial_suite};
 		use rustls::quic::Version;
 
 		let dcid = ConnectionId::new(&hex!("06b858ec6f80452b"));
-		let suite = initial_suite(&provider().unwrap()).unwrap();
+		let suite = initial_suite(&moq_crypto::provider::provider()).unwrap();
 		let client = initial_keys(Version::V1, dcid, Side::Client, &suite);
 		let mut buf = Vec::new();
 		let header = Header::Initial(InitialHeader {

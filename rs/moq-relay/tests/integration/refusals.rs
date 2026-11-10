@@ -11,7 +11,7 @@ use moq_relay::{Config, Relay};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -24,7 +24,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
 	std::fs::write(
 		&key_path,
-		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 	)
 	.expect("write key");
 	(cert_path, key_path)
@@ -62,7 +62,7 @@ struct Running {
 }
 
 async fn start(config: Config) -> Running {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let stats = relay.stats().registry().clone();
 	let origin = relay.cluster().origin.consume();
@@ -206,7 +206,7 @@ async fn lan_refusals_are_counted() {
 /// An auth server whose connection fails is `unavailable`, apart from a refusal.
 #[tokio::test]
 async fn unavailable_auth_server_is_counted() {
-	moq_tokio::crypto::install_default().unwrap();
+	moq_tokio::crypto::install_default();
 	// Listen to reserve the port on every OS, then hang up before answering HTTP.
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
 		.await
@@ -464,7 +464,7 @@ async fn web_peer(addr: SocketAddr, alpn: &str) -> moq_tokio::quic::web::Session
 async fn uri_setup_paths(io_uring: bool) {
 	use moq_tokio::quic::web::Error;
 
-	moq_tokio::crypto::install_default().unwrap();
+	moq_tokio::crypto::install_default();
 	let versions: Vec<moq_net::Version> = [
 		"moq-lite-05",
 		"moq-lite-06",

@@ -140,11 +140,7 @@ impl Drop for Guard {
 impl Broadcaster {
 	/// Start tracking the own renditions of `source`'s catalog broadcast, once the returned
 	/// [`Driver`] runs.
-	///
-	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU its
-	/// cryptography cannot run on.
 	pub fn new(source: moq_mux::Source, config: Config) -> crate::Result<(Self, Driver)> {
-		moq_crypto::cpu::check()?;
 		Ok(Self::start(source, config, None))
 	}
 

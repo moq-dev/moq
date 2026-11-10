@@ -123,7 +123,6 @@ pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::client:
 
 /// Serve as `config` says.
 pub(crate) fn server_config(config: &server::Config) -> Result<moq_quic::server::Config, Error> {
-	moq_crypto::cpu::check()?;
 	let mut server = moq_quic::server::Config::new(config.tls.clone());
 	server.transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]

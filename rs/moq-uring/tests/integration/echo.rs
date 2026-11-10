@@ -64,7 +64,7 @@ fn echo_tokio_peer() {
 	let client = std::thread::spawn(move || {
 		// rustls has no implicit default provider; without one the client builder would panic on
 		// this thread while the server waits forever.
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		let _ = rind_rustls::default_provider().install_default();
 		let runtime = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()

@@ -254,7 +254,7 @@ mod tests {
 	impl NetworkFixture {
 		/// Publish [`Fixture`]'s `demo` through a relay that also holds `.hidden`.
 		async fn new() -> Self {
-			moq_tokio::crypto::install_default().unwrap();
+			moq_tokio::crypto::install_default();
 			let fixture = moq_relay::test_relay().await.expect("test relay");
 			// A dot-prefixed broadcast on the relay itself, like its `.stats`, which
 			// announce listings hide unless asked for by name.

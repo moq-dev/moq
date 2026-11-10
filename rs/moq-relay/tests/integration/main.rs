@@ -46,7 +46,7 @@ mod wire_stats;
 
 /// A certificate handle for a web stack, which only reads it to publish fingerprints.
 fn certificates() -> moq_tokio::tls::Certificates {
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 	let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).expect("cert params");
 	params.serial_number = Some(1u64.into());
 	let cert = params.self_signed(&key).expect("self-signed cert");

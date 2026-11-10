@@ -958,7 +958,7 @@ mod tests {
 	/// Unsupported listen settings fail before loading TLS or binding a socket.
 	#[test]
 	fn bind_refuses_preferred_addresses() {
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		type Set = fn(&mut moq_tokio::listen::Config);
 		let cases: [(&str, Set); 2] = [
 			("listen.preferred_v4", |listen| {
@@ -986,7 +986,7 @@ mod tests {
 	/// The workers refuse what the tokio listener refuses, before binding a socket.
 	#[test]
 	fn bind_refuses_an_invalid_listen() {
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		let mut server = moq_tokio::server::Config::default();
 		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		server.listen.tls.generate = vec!["localhost".into()];
@@ -1096,7 +1096,7 @@ mod tests {
 	/// the workers waiting to serve instead of hanging on their join.
 	#[tokio::test]
 	async fn a_group_stopped_before_serving_joins() {
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
 			&& std::env::var_os("CI_STRICT").is_none()
 		{
@@ -1123,7 +1123,7 @@ mod tests {
 	/// An auth decision still pending at the drain deadline is abandoned by then.
 	#[tokio::test]
 	async fn pending_admission_is_abandoned_at_the_deadline() {
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
 			&& std::env::var_os("CI_STRICT").is_none()
 		{
@@ -1132,7 +1132,7 @@ mod tests {
 		}
 
 		let dir = tempfile::tempdir().unwrap();
-		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 			.map(|mut params| {
 				params.serial_number = Some(1u64.into());
@@ -1145,7 +1145,7 @@ mod tests {
 		std::fs::write(&cert_path, cert.pem()).unwrap();
 		std::fs::write(
 			&key_path,
-			pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+			pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 		)
 		.unwrap();
 
@@ -1190,7 +1190,7 @@ mod tests {
 	/// that never comes is abandoned at the handshake deadline.
 	#[tokio::test]
 	async fn pending_admission_is_abandoned_at_the_handshake_deadline() {
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
 			&& std::env::var_os("CI_STRICT").is_none()
 		{
@@ -1199,7 +1199,7 @@ mod tests {
 		}
 
 		let dir = tempfile::tempdir().unwrap();
-		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 			.map(|mut params| {
 				params.serial_number = Some(1u64.into());
@@ -1212,7 +1212,7 @@ mod tests {
 		std::fs::write(&cert_path, cert.pem()).unwrap();
 		std::fs::write(
 			&key_path,
-			pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+			pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 		)
 		.unwrap();
 

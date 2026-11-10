@@ -6,7 +6,7 @@ static ALLOC: moq_tokio::jemalloc::Allocator = moq_tokio::jemalloc::Allocator;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-	moq_tokio::crypto::install_default()?;
+	moq_tokio::crypto::install_default();
 
 	// The whole startup sequence lives in `Relay::load` rather than here, so an
 	// embedder gets it by calling one function instead of copying this file.

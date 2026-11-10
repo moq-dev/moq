@@ -254,7 +254,7 @@ struct Server {
 impl Server {
 	async fn new() -> Self {
 		// The S3 client is reqwest on rustls, which has no provider of its own.
-		moq_crypto::provider::install_default().unwrap();
+		moq_crypto::provider::install_default();
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::create_dir(dir.path().join("archive")).unwrap();
 		let service = S3ServiceBuilder::new(s3s_fs::FileSystem::new(dir.path()).unwrap()).build();

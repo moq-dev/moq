@@ -4521,7 +4521,7 @@ mod tests {
 	#[test]
 	fn large_initial_token_leaves_room_for_close() {
 		let cert = (|| -> std::result::Result<_, rcgen::Error> {
-			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 			params.serial_number = Some(1u64.into());
 			let cert = params.self_signed(&signing_key)?;
