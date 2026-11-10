@@ -899,11 +899,11 @@ impl Drop for Call<'_> {
 /// side has cancelled but not yet released stops holding whatever it wrapped: a subscription,
 /// a codec session.
 pub(crate) struct Task<T: Send + 'static> {
-	/// `None` once cancelled, which is what makes running against a released state
+	/// `None` once released, which is what makes running against a released state
 	/// unrepresentable rather than merely documented.
 	state: Arc<tokio::sync::Mutex<Option<T>>>,
-	cancel: tokio::sync::watch::Sender<bool>,
-	cleanup: std::sync::Mutex<Option<Background>>,
+	/// `None` while live; once cancelled, the cleanup releasing the state.
+	cancel: tokio::sync::watch::Sender<Option<Background>>,
 	driver: Background,
 }
 
@@ -914,8 +914,7 @@ impl<T: Send + 'static> Task<T> {
 	pub fn new(inner: T) -> Self {
 		Self {
 			state: Arc::new(tokio::sync::Mutex::new(Some(inner))),
-			cancel: tokio::sync::watch::Sender::new(false),
-			cleanup: Default::default(),
+			cancel: tokio::sync::watch::Sender::new(None),
 			driver: Background::default(),
 		}
 	}
@@ -926,43 +925,12 @@ impl<T: Send + 'static> Task<T> {
 		self
 	}
 
-	/// Try to lock the state synchronously. Returns `None` if a task is running or it was cancelled.
-	// Only the server and its requests read state synchronously.
-	pub fn lock(&self) -> Option<Guard<T>> {
-		let guard = self.state.clone().try_lock_owned().ok()?;
-
-		// The state is still `Some` between a cancel and the take it schedules, so ask the flag
-		// rather than the state. Reading it under the lock is what makes that answer stable:
-		// `cancel` publishes the flag before it queues for this same lock, so a cancel we don't
-		// see here cannot have taken the state either.
-		if *self.cancel.borrow() {
-			return None;
-		}
-
-		tokio::sync::OwnedMutexGuard::try_map(guard, Option::as_mut).ok()
-	}
-
-	/// Whether [Self::cancel] has run, which [Self::lock] folds into the same `None` as a busy
-	/// state. The state may still be a moment away from being dropped.
-	pub fn is_cancelled(&self) -> bool {
-		*self.cancel.borrow()
-	}
-
-	/// Lock for a synchronous configuration write.
-	///
-	/// [Self::lock] folds a running task and a cancelled handle into one `None`.
-	/// Configuration must apply or fail, so this splits them: [`MoqError::Busy`]
-	/// while a [`Self::run`] owns the state, [`MoqError::Cancelled`] after
-	/// [`Self::cancel`].
-	pub fn configure(&self) -> Result<Guard<T>, MoqError> {
+	/// The supervising driver's failure, or a completed cleanup's panic.
+	fn check(&self) -> Result<(), MoqError> {
 		self.driver.check()?;
-		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
-			cleanup.check()?;
-		}
-		match self.lock() {
-			Some(guard) => Ok(guard),
-			None if self.is_cancelled() => Err(MoqError::Cancelled),
-			None => Err(MoqError::Busy),
+		match &*self.cancel.borrow() {
+			Some(cleanup) => cleanup.check(),
+			None => Ok(()),
 		}
 	}
 
@@ -980,26 +948,20 @@ impl<T: Send + 'static> Task<T> {
 		F: FnOnce(Guard<T>) -> Fut,
 		Fut: Future<Output = Result<R, MoqError>>,
 	{
-		self.driver.check()?;
-		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
-			cleanup.check()?;
-		}
+		self.check()?;
 		let result = run(self
 			.driver
 			.watch(Self::drive(self.cancel.subscribe(), self.state.clone(), f)))
 		.await;
 		// A foreign future may stop polling while holding the state, so cancellation cannot
 		// wait for cleanup. Its next call still reports a completed cleanup panic.
-		self.driver.check()?;
-		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
-			cleanup.check()?;
-		}
+		self.check()?;
 		result
 	}
 
 	/// Wait for the lock, then run `f`, with [Self::cancel] able to interrupt either.
 	async fn drive<R, F, Fut>(
-		mut cancel: tokio::sync::watch::Receiver<bool>,
+		mut cancel: tokio::sync::watch::Receiver<Option<Background>>,
 		state: Arc<tokio::sync::Mutex<Option<T>>>,
 		f: F,
 	) -> Result<R, MoqError>
@@ -1009,7 +971,7 @@ impl<T: Send + 'static> Task<T> {
 	{
 		let state = tokio::select! {
 			biased;
-			Ok(_) = cancel.wait_for(|&c| c) => return Err(MoqError::Cancelled),
+			Ok(_) = cancel.wait_for(Option::is_some) => return Err(MoqError::Cancelled),
 			state = state.lock_owned() => state,
 		};
 
@@ -1018,7 +980,7 @@ impl<T: Send + 'static> Task<T> {
 
 		tokio::select! {
 			biased;
-			Ok(_) = cancel.wait_for(|&c| c) => Err(MoqError::Cancelled),
+			Ok(_) = cancel.wait_for(Option::is_some) => Err(MoqError::Cancelled),
 			result = f(state) => result,
 		}
 	}
@@ -1029,22 +991,22 @@ impl<T: Send + 'static> Task<T> {
 	///
 	/// Terminal: there is no way back from here, and the state is gone rather than idle.
 	/// The drop is not synchronous with this call, because an in-flight [Self::run] holds the
-	/// state until it observes the flag and unwinds, or its caller drops it. It also lands on the
-	/// runtime workers, whose entered reactor unregisters the state it drops.
+	/// state until it observes the cancel and unwinds, or its caller drops it. It also lands on
+	/// the runtime workers, whose entered reactor unregisters the state it drops.
 	pub fn cancel(&self) {
-		// send_replace, not send: `send` refuses to store the value while no
-		// receiver exists, so a cancel BEFORE the first `run` would silently
-		// no-op and the run would proceed.
-		let mut cleanup = self.cleanup.lock().unwrap();
-		if self.cancel.send_replace(true) {
-			// Already cancelled, so the first call is the one dropping the state.
-			return;
-		}
-
-		let state = self.state.clone();
-		*cleanup = Some(spawn(async move {
-			state.lock().await.take();
-		}));
+		// send_if_modified, not send: `send` refuses to store the value while no receiver
+		// exists, so a cancel before the first `run` would silently no-op.
+		self.cancel.send_if_modified(|cancel| {
+			if cancel.is_some() {
+				// Already cancelled, so the first call is the one dropping the state.
+				return false;
+			}
+			let state = self.state.clone();
+			*cancel = Some(spawn(async move {
+				state.lock().await.take();
+			}));
+			true
+		});
 	}
 }
 
@@ -1160,7 +1122,7 @@ mod tests {
 		}
 		let failed = super::Task::new(Panics);
 		failed.cancel();
-		let cleanup = failed.cleanup.lock().unwrap().clone().unwrap();
+		let cleanup = failed.cancel.borrow().clone().unwrap();
 		assert!(matches!(cleanup.finished().await, Err(super::MoqError::Task { .. })));
 		let result = failed.run(|_| async { Ok(()) }).await;
 		assert!(matches!(result, Err(super::MoqError::Task { .. })), "{result:?}");
@@ -1433,53 +1395,12 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn lock_is_empty_from_the_moment_cancel_returns() {
-		let (task, dropped) = tracked();
-		assert!(task.lock().is_some());
-
-		// No await in between: the answer can't depend on whether the scheduled take has run,
-		// or a caller could still reach the state it is about to drop.
-		task.cancel();
-		assert!(task.lock().is_none());
-
-		soon(dropped).await.expect("state should be dropped");
-		assert!(task.lock().is_none());
-	}
-
-	#[tokio::test]
 	async fn cancel_twice_is_a_no_op() {
 		let (task, dropped) = tracked();
 
 		task.cancel();
 		task.cancel();
 		soon(dropped).await.expect("state should be dropped");
-	}
-
-	#[tokio::test]
-	async fn configure_is_busy_while_a_run_holds_the_lock() {
-		let task = Task::new(());
-		let (started, running) = tokio::sync::oneshot::channel();
-		let run = task.run(move |state| async move {
-			let _state = state;
-			started.send(()).expect("test should still be waiting");
-			std::future::pending::<Result<(), MoqError>>().await
-		});
-		tokio::pin!(run);
-
-		soon(async {
-			tokio::select! {
-				_ = &mut run => panic!("a pending run should not resolve"),
-				started = running => started.expect("the run should start"),
-			}
-		})
-		.await;
-
-		assert!(matches!(task.configure(), Err(MoqError::Busy)));
-		task.cancel();
-		assert!(matches!(task.configure(), Err(MoqError::Cancelled)));
-
-		let err = soon(&mut run).await.expect_err("the in-flight run should be cancelled");
-		assert!(matches!(err, MoqError::Cancelled));
 	}
 
 	/// A cursor over items `0..` behind a [`Polled`], read the way a moq-net consumer is.
@@ -1691,14 +1612,5 @@ mod tests {
 		waker.wake();
 		soon(first).await.unwrap().unwrap();
 		soon(second).await.unwrap().unwrap();
-	}
-
-	#[test]
-	fn configure_is_cancelled_from_the_moment_cancel_returns() {
-		let task = Task::new(());
-		assert!(task.configure().is_ok());
-
-		task.cancel();
-		assert!(matches!(task.configure(), Err(MoqError::Cancelled)));
 	}
 }
