@@ -127,16 +127,20 @@ fn encode_advert(w: &mut Encoder<'_>, advert: &Advert) -> Result<(), EncodeError
 	}
 	w.varint(advert.seqno)?;
 	w.varint(advert.metric)?;
+	// A sum past the field's range, which only a peer's absurd value reaches, is unknown.
+	let min_rtt = advert
+		.min_rtt
+		.and_then(|min_rtt| u64::try_from(min_rtt.as_millis()).ok());
 	let mut flags = 0;
 	if advert.down_only {
 		flags |= DOWN_ONLY;
 	}
-	if advert.min_rtt.is_some() {
+	if min_rtt.is_some() {
 		flags |= MIN_RTT;
 	}
 	w.u8(flags);
-	if let Some(min_rtt) = advert.min_rtt {
-		w.varint(u64::try_from(min_rtt.as_millis()).map_err(|_| EncodeError::InvalidState)?)?;
+	if let Some(min_rtt) = min_rtt {
+		w.varint(min_rtt)?;
 	}
 	Ok(())
 }
@@ -1636,6 +1640,22 @@ mod tests {
 		] {
 			assert_eq!(broadcast_round_trip(&msg, Version::Lite07), msg);
 		}
+	}
+
+	/// A peer's largest Min RTT plus a link goes past the field: it is forwarded as
+	/// unknown, never an error that would end the stream.
+	#[test]
+	fn a_min_rtt_past_the_field_is_unknown() {
+		let msg = |min_rtt| AnnounceBroadcast::RouteUpdate {
+			id: 1,
+			advert: Advert {
+				min_rtt,
+				..advert(2, 3, false)
+			},
+		};
+		let past = std::time::Duration::from_millis(u64::MAX).checked_add(std::time::Duration::from_millis(1));
+		assert!(past.is_some());
+		assert_eq!(broadcast_round_trip(&msg(past), Version::Lite07), msg(None));
 	}
 
 	/// A floor is a marker: the Route ID and the revision plus one, 0 when it certifies

@@ -500,6 +500,7 @@ A link min RTT is the lowest smoothed RTT [RFC9002] the connection measured over
 A lifetime minimum never rises after a path change, so it is not a link min RTT.
 A node SHOULD keep the link min RTT it adds until the lowest reading differs from it by more than the larger of 5 ms and a quarter of it, so jitter and short queues send no ROUTE_UPDATE and a lasting change sends one per route.
 A node MAY withhold Min RTT, and a node whose connection reports no RTT has no link min RTT; either sends its routes without one, and a route without one stays without one past every later node.
+A sum too large to encode is sent without one too.
 An endpoint learns its round trip to an origin node by adding its own link min RTT to the Min RTT of the route it selected; without its own, the Min RTT alone covers every hop past its first.
 Like the Metric, a Min RTT is unverified: a peer can misstate only what crosses it.
 
