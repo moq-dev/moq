@@ -4081,11 +4081,7 @@ struct TrackIo {
 	/// Queues just this track when a resource it watches changes.
 	ready: Arc<crate::util::QueueWake<Arc<str>>>,
 	park: kio::Park,
-	/// The logical track, until the first copy says what it is.
-	request: Option<track::Request>,
-	/// The logical track once accepted. Nothing writes it: its readers read the
-	/// serving route's copy through `routes`.
-	accepted: Option<track::Producer>,
+	logical: Logical,
 	/// Whether anyone reads the logical track.
 	weak: track::TrackWeak,
 	/// Which copy serves the track, and how it ends; see [`super::resume`].
@@ -4102,14 +4098,42 @@ struct TrackIo {
 	wanted: bool,
 }
 
+/// The logical track the front answers its readers with.
+enum Logical {
+	/// Until the first copy says what it is.
+	Requested(track::Request),
+	/// Accepted with that copy's info. Nothing writes it: its readers read the serving
+	/// route's copy through `routes`.
+	Accepted(track::Producer),
+	/// Finished, aborted, or refused.
+	Ended,
+}
+
+impl Logical {
+	/// Accept a request still waiting, with the first copy's `info`.
+	fn accept(&mut self, info: track::Info) {
+		if let Self::Requested(_) = self
+			&& let Self::Requested(request) = std::mem::replace(self, Self::Ended)
+		{
+			*self = Self::Accepted(request.accept(info));
+		}
+	}
+
+	/// The accepted track, whose readers' demand the copy follows.
+	fn accepted(&mut self) -> Option<&mut track::Producer> {
+		match self {
+			Self::Accepted(accepted) => Some(accepted),
+			_ => None,
+		}
+	}
+}
+
 impl TrackIo {
 	/// Serve the track from `asked`'s copy, accepting it with that copy's info first.
 	fn splice(&mut self, asked: Asked) {
 		self.ready.wake_by_ref();
-		if let Some(info) = asked.info.clone()
-			&& let Some(request) = self.request.take()
-		{
-			self.accepted = Some(request.accept(info));
+		if let Some(info) = asked.info.clone() {
+			self.logical.accept(info);
 		}
 		self.routes.splice(asked.copy.clone(), asked.staged);
 		self.copy = Some((asked.source, asked.copy, asked.query));
@@ -4125,9 +4149,9 @@ impl TrackIo {
 		self.staged = None;
 		self.copy = None;
 		self.held = None;
-		match self.request.take() {
+		match std::mem::replace(&mut self.logical, Logical::Ended) {
 			// Ended before any route served it: nothing to read, nor to fetch.
-			Some(request) => {
+			Logical::Requested(request) => {
 				self.routes.end(result.clone());
 				let err = result.err().unwrap_or(Error::NotFound);
 				match retry {
@@ -4135,16 +4159,15 @@ impl TrackIo {
 					None => request.reject(err),
 				}
 			}
-			None => {
-				if let Some(accepted) = self.accepted.take() {
-					let _ = match &result {
-						Ok(()) => accepted.finish().map(drop),
-						// A failed track refuses newcomers too, so they ask afresh.
-						Err(err) => accepted.abort(err.clone()),
-					};
-				}
+			Logical::Accepted(accepted) => {
+				let _ = match &result {
+					Ok(()) => accepted.finish().map(drop),
+					// A failed track refuses newcomers too, so they ask afresh.
+					Err(err) => accepted.abort(err.clone()),
+				};
 				self.routes.end(result);
 			}
+			Logical::Ended => self.routes.end(result),
 		}
 	}
 }
@@ -4172,12 +4195,11 @@ struct InFlight {
 	routes: super::resume::Producer,
 	/// Why the front ended, used if its pending copy cannot answer.
 	end: Error,
-	/// Still owed when the front ended before the copy's info arrived.
-	request: Option<track::Request>,
-	// Kept for its readers: the logical track, the query holding its copy, and the copy's
+	// Kept for its readers: the logical track, still owed an answer when the front ended
+	// before the copy's info arrived, the query holding its copy, and the copy's
 	// subscription, which follows their demand as it did while the front served it.
-	accepted: Option<track::Producer>,
-	query: Option<track::Resolving>,
+	logical: Logical,
+	query: track::Resolving,
 	held: Option<kio::Pending<track::Subscribing>>,
 }
 
@@ -4215,11 +4237,12 @@ impl InFlight {
 	/// as a cancel rather than as a producer dropped unfinished.
 	fn release(self) {
 		self.routes.release();
-		if let Some(request) = self.request {
-			request.reject(Error::Cancel);
-		}
-		if let Some(accepted) = self.accepted {
-			let _ = accepted.abort(Error::Cancel);
+		match self.logical {
+			Logical::Requested(request) => request.reject(Error::Cancel),
+			Logical::Accepted(accepted) => {
+				let _ = accepted.abort(Error::Cancel);
+			}
+			Logical::Ended => {}
 		}
 	}
 }
@@ -4279,40 +4302,35 @@ impl kio::Task for FrontServeRun {
 		// only while the logical track's state does, for an origin nobody owns.
 		if self.origin.poll_orphaned(waiter).is_ready() {
 			for io in in_flight.iter_mut() {
-				if let Some(request) = io.request.take() {
+				if let Logical::Requested(_) = io.logical
+					&& let Logical::Requested(request) = std::mem::replace(&mut io.logical, Logical::Ended)
+				{
 					request.reject(io.end.clone());
 				}
 			}
 			return Poll::Ready(());
 		}
 		for mut io in std::mem::take(in_flight) {
-			if let Some(request) = &mut io.request {
+			if let Logical::Requested(request) = &mut io.logical {
 				while let Poll::Ready(Some(_)) = request.poll_subscription_changed(waiter) {}
-			}
-			if io.request.is_some() {
-				match io
-					.query
-					.as_ref()
-					.expect("a pending request holds its query")
-					.poll_ok(waiter)
-				{
-					Poll::Ready(Ok(info)) => {
-						io.accepted = Some(io.request.take().expect("pending above").accept(info));
-					}
+				match io.query.poll_ok(waiter) {
+					Poll::Ready(Ok(info)) => io.logical.accept(info),
 					Poll::Ready(Err(err)) => {
 						// No metadata ever arrived: a lost route cannot answer the request.
 						let err = match err.retryable() {
 							true => io.end.clone(),
 							false => err,
 						};
-						io.request.take().expect("pending above").reject(err.clone());
+						if let Logical::Requested(request) = std::mem::replace(&mut io.logical, Logical::Ended) {
+							request.reject(err.clone());
+						}
 						io.routes.end(Err(err));
 						continue;
 					}
 					Poll::Pending => {}
 				}
 			}
-			follow_demand(&mut io.held, None, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
+			follow_demand(&mut io.held, None, io.logical.accepted(), &io.weak, &io.routes, waiter);
 			match io.weak.poll_unwanted(waiter) {
 				Poll::Pending => in_flight.push(io),
 				Poll::Ready(_) => io.release(),
@@ -4636,7 +4654,7 @@ impl FrontServe {
 						follow_demand(
 							&mut asked.sub,
 							Some(&asked.copy),
-							io.accepted.as_mut(),
+							io.logical.accepted(),
 							&io.weak,
 							&io.routes,
 							waiter,
@@ -4650,14 +4668,14 @@ impl FrontServe {
 							.copy
 							.as_ref()
 							.is_none_or(|(_, copy, _)| copy.poll_complete(waiter).is_ready())
-							|| io.accepted.as_ref().is_some_and(|accepted| accepted.info() != info)
+							|| matches!(&io.logical, Logical::Accepted(accepted) if accepted.info() != info)
 							|| asked.copy.poll_grouped(waiter).is_ready()
 							|| asked.copy.poll_complete(waiter).is_ready())
 					{
 						return Some(FrontStep::Info(name.clone(), asked.source, Ok(info.clone())));
 					}
 				}
-				follow_demand(&mut io.held, None, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
+				follow_demand(&mut io.held, None, io.logical.accepted(), &io.weak, &io.routes, waiter);
 				// Settled once the copy closes: a group still open below a declared end is
 				// owed until then, and a session closing first means it never came.
 				if let Some((source, copy, _)) = &io.copy
@@ -5015,26 +5033,28 @@ impl kio::Task for FrontServe {
 								{
 									io.splice(asked);
 								}
-								// Nothing in flight: unread, or nothing serving it.
-								if !wanted || io.copy.is_none() {
-									// A track that already ended keeps its copy, which subscribes
-									// nothing any more, so a fetch still reads what it cached.
-									let ended = io.routes.ended();
-									io.end(Err(err.clone()), None);
-									// An unread track the front has not parked yet still holds
-									// its copy, which would keep its source subscribed.
-									if !wanted && !ended {
-										io.routes.release();
+								let (_, _, query) = match io.copy.take() {
+									Some(copy) if wanted => copy,
+									// Nothing in flight: unread, or nothing serving it.
+									copy => {
+										io.copy = copy;
+										// A track that already ended keeps its copy, which subscribes
+										// nothing any more, so a fetch still reads what it cached.
+										let ended = io.routes.ended();
+										io.end(Err(err.clone()), None);
+										// An unread track the front has not parked yet still holds
+										// its copy, which would keep its source subscribed.
+										if !wanted && !ended {
+											io.routes.release();
+										}
+										continue;
 									}
-									continue;
-								}
+								};
 								io.routes.conclude();
 								let TrackIo {
 									weak,
 									routes,
-									request,
-									accepted,
-									copy,
+									logical,
 									held,
 									..
 								} = io;
@@ -5042,9 +5062,8 @@ impl kio::Task for FrontServe {
 									weak,
 									routes,
 									end: err.clone(),
-									request,
-									accepted,
-									query: copy.map(|(_, _, query)| query),
+									logical,
+									query,
 									held,
 								});
 							}
@@ -5089,8 +5108,7 @@ impl kio::Task for FrontServe {
 							ready: track_ready,
 							park: Default::default(),
 							weak: request.weak(),
-							request: Some(request.routes(routes.consume())),
-							accepted: None,
+							logical: Logical::Requested(request.routes(routes.consume())),
 							routes,
 							query: None,
 							staged: None,
@@ -8799,8 +8817,8 @@ mod tests {
 			let mut io = TrackIo {
 				ready: crate::util::QueueWake::new("catalog.json".into(), kio::Queue::new()),
 				park: Default::default(),
-				request: None,
-				accepted: Some(accepted),
+				logical: Logical::Accepted(accepted),
+
 				weak,
 				routes,
 				query: None,

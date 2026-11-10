@@ -45,3 +45,4 @@ unimplemented, because xdg-desktop-portal owns source selection:
 
 - [Windows capture parity](/quest/m3/capture-windows.md) - the same gaps,
   through Windows.Graphics.Capture and WASAPI
+- [A capture listing a picker can draw](/quest/m3/capture-list.md) - lists apps on X11 with the identity an app capture would name, and tells a caller that the picker stands in for a list on Wayland
