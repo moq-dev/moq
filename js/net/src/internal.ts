@@ -15,7 +15,7 @@ import { StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as FrameConsumer } from "./frame.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type WireRoute } from "./hop.ts";
-import type * as Instance from "./instance.ts";
+import * as Instance from "./instance.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
@@ -1309,12 +1309,13 @@ export class Epochs {
 }
 
 /**
- * Prefer a route that is not draining (a peer that sent GOAWAY ranks below every other), then
- * identified publishers, then lower static cost.
+ * Prefer a route that is neither draining (a peer that sent GOAWAY) nor unavailable (held),
+ * which rank below every other, then identified publishers, then lower static cost.
  */
 export function compareRoutes(a: WireRoute, b: WireRoute): number {
+	const last = (route: WireRoute) => Number((route.draining ?? false) || route.available === false);
 	return (
-		Number(a.draining ?? false) - Number(b.draining ?? false) ||
+		last(a) - last(b) ||
 		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
 		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
 	);
@@ -1331,8 +1332,8 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
 	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
 	if (order !== 0 || path === prefix) return order;
-	const ha = spreadHash(path, a.instance ?? "");
-	const hb = spreadHash(path, b.instance ?? "");
+	const ha = spreadHash(path, a.instance ? Instance.text(a.instance) : "");
+	const hb = spreadHash(path, b.instance ? Instance.text(b.instance) : "");
 	if (ha !== hb) return ha < hb ? -1 : 1;
 	const ca = chainHash(path, a.hops);
 	const cb = chainHash(path, b.hops);

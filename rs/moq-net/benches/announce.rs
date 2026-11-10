@@ -39,7 +39,7 @@ fn scanned(events: Vec<origin::RouteEvent>) -> Vec<announce::Announce> {
 				announce: update,
 			} => (update, true),
 			origin::RouteEvent {
-				kind: origin::RouteKind::End,
+				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				announce: update,
 			} => (update, false),
 		};

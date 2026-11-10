@@ -404,7 +404,7 @@ async fn vulkan_cuda_three_view_workload() {
 			late = 0;
 			started = kio::clock::now();
 		}
-		let deadline = kio::clock::now() + tick;
+		let deadline = kio::clock::now().saturating_add(tick);
 		let timestamp = moq_net::Timestamp::from_micros(tick_index * 33_333).unwrap();
 
 		for (producer, slot, hd, small, signal) in &mut views {

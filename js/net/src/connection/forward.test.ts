@@ -383,7 +383,7 @@ test("an exclusive session closes every request beneath a broader one before it 
 	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(false);
 	start(session.stream("a/**"), "a/b/x");
 	await settle();
-	expect(events).toEqual(["start a/b/x", "end a/b/x", "start a/b/x"]);
+	expect(events).toEqual(["start a/b/x", "offline a/b/x", "start a/b/x"]);
 	expect(origin.discovery.peek()).toBe(true);
 
 	// The narrower watch rides the broader request from here on.

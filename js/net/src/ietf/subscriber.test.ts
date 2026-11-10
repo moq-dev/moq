@@ -281,10 +281,10 @@ test("a subscription that dies releases what it advertised", async () => {
 	expect(await doomed.next()).toMatchObject({ prefix: Path.from("orphan"), kind: "start" });
 	expect(await survivor.next()).toMatchObject({ prefix: Path.from("orphan"), kind: "start" });
 
-	// The stream that advertised it goes away without a NAMESPACE_DONE.
+	// The stream that advertised it goes away without a NAMESPACE_DONE: lost, not withdrawn.
 	streamA.writer.close();
 
-	expect(await survivor.next()).toMatchObject({ prefix: Path.from("orphan"), kind: "end" });
+	expect(await survivor.next()).toMatchObject({ prefix: Path.from("orphan"), kind: "offline" });
 });
 
 /**
@@ -358,7 +358,7 @@ test("an inline NAMESPACE that starts looping back is retracted", async () => {
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "start" });
 
 	await inlineNamespace(subscription, Path.from("theirs"), { hops: [SELF, PEER], cost: 0n });
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "offline" });
 });
 
 /**
@@ -513,7 +513,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 		VERSION,
 	);
 
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "offline" });
 	expect(await peer.reader.u53()).toBe(RequestOk.id);
 	await RequestOk.decode(peer.reader, VERSION);
 
@@ -1697,7 +1697,7 @@ test("a request overlapping one on its way out waits for the peer to end it", as
 	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "start" });
 	narrow.close();
 	const broad = subscriber.routes(Path.Pattern.subtree(Path.from("a")));
-	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "end" });
+	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "offline" });
 
 	// Draft 22 cancels with a reset, and the broader request waits on the peer's half.
 	expect(stream.reader.done()).rejects.toMatchObject({ code: StreamCode.Cancel });

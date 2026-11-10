@@ -822,7 +822,7 @@ impl<S: Shape> Merged<S> {
 					changed |= self.apply_announce(&update, instance, true)
 				}
 				Poll::Ready(Some(moq_net::origin::RouteEvent {
-					kind: moq_net::origin::RouteKind::End,
+					kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 					announce: update,
 				})) => {
 					let instance = update.route.instance().clone();
@@ -1164,7 +1164,7 @@ mod tests {
 				announce: route,
 			} => Some((route, true)),
 			moq_net::origin::RouteEvent {
-				kind: moq_net::origin::RouteKind::End,
+				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: route,
 			} => Some((route, false)),
 		}

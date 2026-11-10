@@ -104,6 +104,13 @@ export interface RouteInfo {
 	readonly instance?: Instance.Valid;
 	/** What pulling content via this route costs; lower wins. */
 	readonly cost: Cost;
+	/**
+	 * Whether a usable path reaches the route's origin. An unavailable route is held: the
+	 * network lost every path to it but may recover one, so the announcement stays. It ranks
+	 * with a draining route, below every available one, and requests through it may fail until
+	 * it recovers: request again once it turns available.
+	 */
+	readonly available: boolean;
 }
 
 /**
@@ -116,6 +123,7 @@ export function routeInfo(route: WireRoute): RouteInfo {
 	return {
 		instance: route.instance,
 		cost: route.cost,
+		available: route.available ?? true,
 	};
 }
 
@@ -155,6 +163,8 @@ export interface WireRoute {
 	 * preference state, never a saturated cost. Local: never forwarded, and readers never see it.
 	 */
 	readonly draining?: boolean;
+	/** See {@link RouteInfo.available}; unset means available. */
+	readonly available?: boolean;
 }
 
 /** Constructors and helpers for {@link WireRoute}. @internal */
@@ -175,6 +185,7 @@ export const WireRoute = {
 			cost: cost > max ? max : cost,
 			auth: route.auth,
 			draining: route.draining,
+			available: route.available,
 		};
 	},
 };
@@ -192,7 +203,8 @@ export function isAnonymous(route: WireRoute): boolean {
 }
 
 /**
- * Whether two routes name the same instance, epoch, hop chain, cost, auth, and drain state.
+ * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state, and
+ * availability.
  *
  * @internal
  */
@@ -205,6 +217,7 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 		a.cost === b.cost &&
 		a.auth === b.auth &&
 		(a.draining ?? false) === (b.draining ?? false) &&
+		(a.available ?? true) === (b.available ?? true) &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])
 	);

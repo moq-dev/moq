@@ -60,8 +60,8 @@ function watchCovered(
 			for (;;) {
 				const entry = await announced.next();
 				if (!entry) break;
-				if (entry.kind === "absent") active.delete(entry.prefix);
-				else active.add(entry.prefix);
+				if (entry.kind === "absent" || entry.kind === "offline") active.delete(entry.prefix);
+				else if (entry.kind === "present") active.add(entry.prefix);
 				covered.set([...active].some((prefix) => Path.hasPrefix(prefix, path)));
 			}
 		} catch {

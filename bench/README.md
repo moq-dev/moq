@@ -444,7 +444,7 @@ run by default:
 - `group`, on request: every subscriber drains one finished 512-frame group in
   object batches through the relay's private reader, as moq-net's
   `group_relay_objects/plain/512/*` bench does, so that bench's cost is counted
-  without its wall-clock noise. Revisions before the hidden `ObjectBatch` helper
+  without its wall-clock noise. Revisions before the `fuzz::ObjectBatch` helper
   report unsupported; historical frame-batch counts remain in the bisect report.
 
 Each `bench/fanout/<scenario>` crate builds against each base's and the current

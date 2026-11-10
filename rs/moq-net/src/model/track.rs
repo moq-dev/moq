@@ -2587,12 +2587,16 @@ impl TrackState {
 		Deferred(std::mem::take(&mut self.deferred))
 	}
 
-	/// The sequence the next append takes: one past this track's own writes.
+	/// The sequence the next append takes: one past this track's own writes, short of the
+	/// reserved `u64::MAX`.
 	fn next_sequence(&self) -> Result<u64> {
-		Ok(match self.max_sequence {
-			Some(max) => max.checked_add(1).ok_or(coding::BoundsExceeded)?,
-			None => 0,
-		})
+		match self.max_sequence {
+			Some(max) => max
+				.checked_add(1)
+				.filter(|next| *next != u64::MAX)
+				.ok_or(coding::BoundsExceeded.into()),
+			None => Ok(0),
+		}
 	}
 
 	/// Reject a sequence that is still cached; a dead (aborted or evicted)
@@ -3188,7 +3192,7 @@ impl TrackState {
 
 	/// One past the highest sequence produced: where the live edge stands against the end.
 	fn edge(&self) -> u64 {
-		self.max_sequence.map_or(0, |max| max.saturating_add(1))
+		self.max_sequence.map_or(0, |max| max + 1)
 	}
 
 	/// Whether a group below `fin` the wire subscription still owes has yet to arrive.
@@ -4032,7 +4036,8 @@ impl Producer {
 	/// It says nothing about the sequences around it: groups may be created out of order, and
 	/// an aborted or evicted sequence created again. A gap it leaves is skipped only once the
 	/// producer says it will not fill it, with [`Self::skip_groups`] or [`Self::append_group`].
-	/// A sequence already skipped is refused with [`Error::Skipped`].
+	/// A sequence already skipped is refused with [`Error::Skipped`], and the reserved
+	/// sequence `u64::MAX` with [`Error::BoundsExceeded`].
 	///
 	/// Readers and group demand reach it at once, but the track counts it as content (its
 	/// live edge, or the successor that ages the group before it) only once its first frame
@@ -4054,6 +4059,10 @@ impl Producer {
 	}
 
 	fn create_group_inner(&self, info: group::Info, received: Option<u64>) -> Result<Received> {
+		// Reserved, so every group fits an exclusive range.
+		if info.sequence == u64::MAX {
+			return Err(coding::BoundsExceeded.into());
+		}
 		let mut state = self.modify()?;
 		if matches!(state.outcome, Outcome::Sealed(_)) || state.final_sequence().is_some_and(|fin| info.sequence >= fin)
 		{
@@ -4163,8 +4172,7 @@ impl Producer {
 	///
 	/// Other clones of this producer stay open handles, and refuse a group at or past the end
 	/// with [`Error::Closed`]. Fails with [`Error::Closed`] if the track already declared an
-	/// end, or with the abort error. A track whose highest group is `u64::MAX` has no end to
-	/// declare: it is aborted with [`Error::BoundsExceeded`], which the call also returns.
+	/// end, or with the abort error.
 	pub fn finish(self) -> Result<Finished> {
 		self.finish_shared()?;
 		Ok(Finished { producer: self })
@@ -4174,20 +4182,7 @@ impl Producer {
 	/// groups still in flight.
 	pub(crate) fn finish_shared(&self) -> Result<()> {
 		let mut state = self.modify()?;
-		let final_sequence = match state.max_sequence {
-			None => 0,
-			Some(max) => match max.checked_add(1) {
-				Some(end) => end,
-				None => {
-					// Left open, readers would wait for an end that never comes and then see
-					// `Dropped`; abort so they get the cause.
-					drop(state);
-					let err = Error::from(coding::BoundsExceeded);
-					let _ = self.clone().abort(err.clone());
-					return Err(err);
-				}
-			},
-		};
+		let final_sequence = state.max_sequence.map_or(0, |max| max + 1);
 		state.set_end(Position::group(final_sequence), None)
 	}
 
@@ -6454,7 +6449,7 @@ impl kio::Task for Resolving {
 }
 
 /// Join the fill covering `sequence`, or queue a one-group fill; `None` when no handler
-/// exists to take one, or for the last sequence, which a fill's exclusive end can't name.
+/// exists to take one, or for the reserved sequence `u64::MAX`, which no group holds.
 fn queue(fills: &kio::Shared<FillState>, sequence: u64, request: &FetchOptions) -> Option<Box<fill::Join>> {
 	let options = &request.options;
 	let end = sequence.checked_add(1)?;
@@ -6669,8 +6664,7 @@ impl Fetching {
 
 		// Handler side.
 		let Some(result) = result else {
-			// A fill's end is exclusive, so no handler can be asked for the last sequence:
-			// only a local write, already looked for above, can hold it.
+			// No group is ever created at the reserved sequence, so no handler is asked for it.
 			if sequence == u64::MAX {
 				return Poll::Ready(Err(Error::NotFound));
 			}
@@ -7566,10 +7560,9 @@ struct Cursor {
 	min_sequence: u64,
 	/// This subscriber's own ranges, resolved. Boxed: every reader embeds a cursor.
 	filter: Box<Filter>,
-	/// One past the highest sequence returned by `next_group`, or `None` once it returned
-	/// `u64::MAX` and no group can follow.
+	/// One past the highest sequence returned by `next_group`.
 	/// Used only by that method to skip late arrivals; does not affect `recv_group`.
-	next_sequence: Option<u64>,
+	next_sequence: u64,
 	/// Exclusive upper sequence bound for `next_group` and `recv_group`. `None` means no
 	/// cap. Set by `set_range`;
 	/// can be raised, lowered, or unset at any time. Groups at or past the cap stay in
@@ -7994,7 +7987,7 @@ impl Cursor {
 			min_sequence: 0,
 			filter: Box::new(filter),
 			index: 0,
-			next_sequence: Some(0),
+			next_sequence: 0,
 			end_sequence: None,
 			// Uncapped, the servable groups are the window's.
 			servable: published.servable.clone(),
@@ -8029,7 +8022,7 @@ impl Cursor {
 			&& let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, waiter)
 		{
 			// From where the reader reads next: an ordered one asks nothing below what it took.
-			let from = self.next_sequence.unwrap_or(u64::MAX).max(self.floor());
+			let from = self.next_sequence.max(self.floor());
 			self.probe(from, &drift, taken, waiter);
 			judged = Some(drift);
 		}
@@ -9103,25 +9096,23 @@ impl Cursor {
 	}
 
 	/// Pass groups another copy already handed out, without delivering or metering them.
-	fn skip_ordered(&mut self, floor: Option<u64>) {
-		let next = self.next_sequence.zip(floor).map(|(next, floor)| next.max(floor));
-		if next == self.next_sequence {
+	fn skip_ordered(&mut self, floor: u64) {
+		if floor <= self.next_sequence {
 			return;
 		}
 		idle::Idle::disarm(&mut self.idle);
-		self.next_sequence = next;
+		self.next_sequence = floor;
 		// A group delivered on another copy is not a stale skip on this one.
 		if !self.seek_pending.is_empty() {
-			self.seek_pending = next.map_or_else(BTreeMap::new, |next| self.seek_pending.split_off(&next));
+			self.seek_pending = self.seek_pending.split_off(&floor);
 		}
-		self.forget_heads_below(next);
+		self.forget_heads_below(floor);
 	}
 
 	/// Let go of the heads asked below `next`, which an ordered read never goes back for:
 	/// one still out would keep the read waiting on a fill it no longer polls.
-	fn forget_heads_below(&mut self, next: Option<u64>) {
+	fn forget_heads_below(&mut self, next: u64) {
 		if let Some(heads) = &mut self.heads {
-			let next = next.unwrap_or(u64::MAX);
 			heads.fetching = heads.fetching.split_off(&next);
 			heads.filled = heads.filled.split_off(&next);
 		}
@@ -9130,9 +9121,7 @@ impl Cursor {
 	/// The lowest servable group past the last one returned, walking off everything the
 	/// drift budget has convicted on the way.
 	fn poll_peek_next(&mut self, taken: &Delivered, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
-		let Some(next) = self.next_sequence else {
-			return Poll::Ready(Ok(None));
-		};
+		let next = self.next_sequence;
 		self.sync();
 		if let Some(err) = &self.filter.refused {
 			return Poll::Ready(Err(err.clone()));
@@ -9260,14 +9249,14 @@ impl Cursor {
 	}
 
 	fn advance_sequence(&mut self, group: group::Consumer) -> group::Consumer {
-		self.next_sequence = group.sequence.checked_add(1);
+		self.next_sequence = group.sequence + 1;
 		// The reader holds the group itself now, as on the arrival path.
 		if let Some(misses) = &mut self.misses {
 			misses.take_filled(group.sequence);
 		}
 		self.forget_heads_below(self.next_sequence);
 		// The delivery commits everything the seek stepped over to reach this group.
-		self.commit_seek_stale(self.next_sequence.unwrap_or(u64::MAX));
+		self.commit_seek_stale(self.next_sequence);
 		group.cache_refresh();
 		self.deliver(group)
 	}
@@ -9655,21 +9644,17 @@ impl Subscriber {
 	}
 
 	/// Pass groups another route copy handed out, preserving the arrival cursor and bounds.
-	pub(super) fn skip_ordered(&mut self, floor: Option<u64>) {
+	pub(super) fn skip_ordered(&mut self, floor: u64) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.skip_ordered(floor),
 			Inner::Resume(resume, _) => {
 				// What it handed out moves, which nothing it parked on notifies.
-				let end = floor.unwrap_or(u64::MAX);
-				if !self.delivered.covers(0..end) || (floor.is_none() && !self.delivered.contains(u64::MAX)) {
+				if !self.delivered.covers(0..floor) {
 					resume.disarm();
 				}
 				// Its retention decisions also need the containing reader's past prefix.
 				// This records what is no longer owed, without handing a group out.
-				self.delivered.forget_below(floor.unwrap_or(u64::MAX));
-				if floor.is_none() {
-					self.delivered.insert(u64::MAX);
-				}
+				self.delivered.forget_below(floor);
 			}
 		}
 	}
@@ -11747,11 +11732,11 @@ mod test {
 		assert_eq!(consumer.resume_position(), Some(Position { group: 3, frame: 1 }));
 	}
 
-	/// A fill's end is exclusive, so the last sequence can't be asked of a handler: its fetch
-	/// fails at once rather than parking until every handler goes.
+	/// No group holds the reserved sequence, so its fetch fails at once rather than parking
+	/// until every handler goes.
 	#[test]
 	#[cfg(feature = "async")]
-	fn the_last_sequence_misses_with_a_handler() {
+	fn the_reserved_sequence_misses_with_a_handler() {
 		let producer = track_producer("test", None);
 		let dynamic = producer.requests();
 		let consumer = producer.consume();
@@ -12108,17 +12093,17 @@ mod test {
 		let now = crate::model::clock::now();
 		assert_eq!(
 			pool.poll(now, &kio::Waiter::noop()),
-			Some(now + Duration::from_millis(500))
+			Some(now.saturating_add(Duration::from_millis(500)))
 		);
 		let producer = track_producer_pooled("test", pool.clone());
 		let mut group = producer.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"first".as_slice()).unwrap();
 		let _open = producer.append_group().unwrap();
 		// Activity written while cleanup was idle gets the new supplied time.
-		let later = now + Duration::from_secs(60);
+		let later = now.saturating_add(Duration::from_secs(60));
 		pool.poll(later, &kio::Waiter::noop());
 		assert!(producer.state.read().lookup.contains_key(&0));
-		pool.poll(later + Duration::from_secs(2), &kio::Waiter::noop());
+		pool.poll(later.saturating_add(Duration::from_secs(2)), &kio::Waiter::noop());
 		assert!(!producer.state.read().lookup.contains_key(&0));
 	}
 
@@ -12135,7 +12120,7 @@ mod test {
 		for group in &groups[..EVICT_SCAN * 2] {
 			group.handle().cache_refresh();
 		}
-		pool.poll(now + expiry * 2, &kio::Waiter::noop());
+		pool.poll(now.saturating_add(expiry * 2), &kio::Waiter::noop());
 		let state = producer.state.read();
 		for sequence in 0..EVICT_SCAN * 2 {
 			assert!(state.lookup.contains_key(&(sequence as u64)), "fresh front survives");
@@ -15846,31 +15831,6 @@ mod test {
 		assert!(finished.closed().now_or_never().expect("settled").is_ok());
 	}
 
-	/// No end follows group `u64::MAX`, so finishing aborts the track with that cause: the
-	/// consumed handle leaves the caller nothing to abort it with.
-	#[test]
-	#[cfg(feature = "async")]
-	fn finish_past_the_last_sequence_aborts_with_the_cause() {
-		let producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(replay());
-		let mut group = producer.create_group(group::Info { sequence: u64::MAX }).unwrap();
-		group.write_frame(Timestamp::ZERO, &b"x"[..]).unwrap();
-		let mut reader = group.consume();
-		assert!(matches!(producer.finish(), Err(Error::BoundsExceeded(_))));
-		// The subscriber may hand out the open group before the error.
-		let ended = loop {
-			match subscriber.recv_group().now_or_never().expect("settled") {
-				Ok(Some(_)) => continue,
-				ended => break ended.map(|group| group.map(|group| group.sequence)),
-			}
-		};
-		assert!(matches!(ended, Err(Error::BoundsExceeded(_))), "{ended:?}");
-		// The open group is cut with the same cause.
-		let cut = reader.read_frame().now_or_never().expect("settled");
-		assert!(matches!(cut, Err(Error::BoundsExceeded(_))), "{cut:?}");
-		assert!(matches!(group.finish(), Err(Error::BoundsExceeded(_))));
-	}
-
 	#[test]
 	fn finish_at_rejects_a_boundary_at_or_below_the_live_edge() {
 		let mut producer = track_producer("test", Info::timed());
@@ -17300,18 +17260,19 @@ mod test {
 	fn skipping_another_copys_groups_preserves_arrival_bounds_and_the_last_sequence() {
 		let producer = track_producer("test", Info::timed());
 		let mut subscriber = producer.subscribe(replay());
-		for sequence in [u64::MAX - 1, u64::MAX] {
+		for sequence in [u64::MAX - 2, u64::MAX - 1] {
 			producer
 				.create_group(group::Info { sequence })
 				.unwrap()
 				.finish()
 				.unwrap();
 		}
+		let _finished = producer.finish().unwrap();
+		assert_eq!(peek(&mut subscriber, true), Poll::Ready(Some(u64::MAX - 2)));
+		subscriber.skip_ordered(u64::MAX - 1);
 		assert_eq!(peek(&mut subscriber, true), Poll::Ready(Some(u64::MAX - 1)));
-		subscriber.skip_ordered(Some(u64::MAX));
-		assert_eq!(peek(&mut subscriber, true), Poll::Ready(Some(u64::MAX)));
-		subscriber.skip_ordered(None);
-		subscriber.skip_ordered(Some(0));
+		subscriber.skip_ordered(u64::MAX);
+		subscriber.skip_ordered(0);
 		assert_eq!(peek(&mut subscriber, true), Poll::Ready(None));
 		assert_eq!(subscriber.delivered.runs(), 0, "skips are not deliveries");
 		assert_eq!(subscriber.take_stale().groups, 0, "duplicates are not stale skips");
@@ -17321,7 +17282,7 @@ mod test {
 		assert_eq!(cursor.min_sequence, 0);
 		assert_eq!(cursor.end_sequence, None);
 		assert_eq!(cursor.index, 0);
-		assert_eq!(peek(&mut subscriber, false), Poll::Ready(Some(u64::MAX - 1)));
+		assert_eq!(peek(&mut subscriber, false), Poll::Ready(Some(u64::MAX - 2)));
 	}
 
 	#[test]
@@ -17335,7 +17296,7 @@ mod test {
 			panic!("group 3 is servable");
 		};
 		assert_eq!(reserved.sequence(), 3);
-		subscriber.skip_ordered(Some(2));
+		subscriber.skip_ordered(2);
 		assert_eq!(subscriber.take(reserved).unwrap().sequence, 3);
 		assert_eq!(subscriber.take_stale().groups, 1, "only group 2 was skipped for age");
 		assert_eq!(subscriber.take_stale().groups, 0, "counted once");
@@ -18006,34 +17967,31 @@ mod test {
 		);
 	}
 
-	/// An inclusive bound at the last group withholds nothing.
+	/// Group `u64::MAX` is reserved, so every group fits an exclusive range: neither a create
+	/// nor an append reaches it, and an inclusive bound there withholds nothing.
 	#[test]
 	#[cfg(feature = "async")]
-	fn end_at_maximum_group_is_unbounded() {
+	fn the_reserved_sequence_is_refused() {
 		let producer = track_producer("test", Info::timed());
 		let mut consumer = producer.subscribe(replay()).ordered();
 		consumer.set_range(..=u64::MAX);
 
+		assert!(matches!(
+			producer.create_group(group::Info { sequence: u64::MAX }),
+			Err(Error::BoundsExceeded(_))
+		));
 		producer
-			.create_group(group::Info { sequence: 0 })
+			.create_group(group::Info { sequence: u64::MAX - 1 })
 			.unwrap()
 			.finish()
 			.unwrap();
-		producer
-			.create_group(group::Info { sequence: u64::MAX })
-			.unwrap()
-			.finish()
-			.unwrap();
-
+		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded(_))));
 		assert_eq!(
 			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
-			0
+			u64::MAX - 1
 		);
-		assert_eq!(
-			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
-			u64::MAX
-		);
-		// Nothing can follow the maximum sequence.
+		// The track's end lands on the reserved sequence.
+		let _finished = producer.finish().unwrap();
 		assert!(consumer.next_group().now_or_never().unwrap().unwrap().is_none());
 	}
 
@@ -18070,17 +18028,6 @@ mod test {
 			None,
 			"the rejected frame did not publish a group"
 		);
-	}
-
-	#[test]
-	fn append_group_returns_bounds_exceeded_on_sequence_overflow() {
-		let producer = track_producer("test", Info::timed());
-		{
-			let mut state = producer.state.write().ok().unwrap();
-			state.max_sequence = Some(u64::MAX);
-		}
-
-		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded(_))));
 	}
 
 	#[kio::test]

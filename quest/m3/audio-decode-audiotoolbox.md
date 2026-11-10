@@ -34,8 +34,3 @@ alongside the `objc2-core-audio-types` the crate already carries.
   on a device like the rest of the mobile line.
 - Docs: the `decode` row in `doc/lib/rs/moq-audio.md` ("AAC-LC (mono or
   stereo)") names what macOS and iOS also decode.
-
-## Related
-
-- [Media Foundation decode](/quest/m5/audio-decode-mediafoundation.md) - the same shape on Windows
-- [MediaCodec decode](/quest/m5/audio-decode-mediacodec.md) - the same shape on Android

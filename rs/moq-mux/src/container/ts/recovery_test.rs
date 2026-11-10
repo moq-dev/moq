@@ -918,7 +918,7 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 		let mut open: Vec<Option<moq_net::group::Producer>> = producers.iter().map(|_| None).collect();
 		let mut kept = vec![0; producers.len()];
 		for (at, event) in events {
-			kio::clock::sleep_until(start + at).await;
+			kio::clock::sleep_until(start.saturating_add(at)).await;
 			let Some((t, g, step)) = event else {
 				let snapshot = snapshot.clone();
 				catalog
@@ -960,7 +960,7 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 		std::future::pending::<()>().await;
 	});
 
-	kio::clock::sleep_until(start + arm.join).await;
+	kio::clock::sleep_until(start.saturating_add(arm.join)).await;
 	let source = crate::source::announced(&consumer).await;
 	let mut export = open_ts(source, crate::catalog::CatalogFormat::Hang, DELAY)
 		.await

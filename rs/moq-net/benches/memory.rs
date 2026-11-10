@@ -220,7 +220,7 @@ impl Link {
 
 	// Advance the cache/model clock between rounds to expire read history.
 	fn tick(&mut self) {
-		self.cache_now += cache::DEFAULT_EXPIRY;
+		self.cache_now = self.cache_now.saturating_add(cache::DEFAULT_EXPIRY);
 		for pool in &self.pools {
 			pool.poll(self.cache_now, &kio::Waiter::noop());
 		}

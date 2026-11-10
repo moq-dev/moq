@@ -491,7 +491,7 @@ async def test_broadcast_route_over_wire():
                     route = announcement.route
                     assert isinstance(route.cost, int)
                     # Every delivered route names the stream it serves.
-                    assert route.instance
+                    assert route.instance.text()
                     break
         finally:
             serve_task.cancel()
@@ -500,6 +500,44 @@ async def test_broadcast_route_over_wire():
             except asyncio.CancelledError:
                 pass
             broadcast.close()
+
+
+async def test_a_minted_instance_pins_request_and_follow():
+    """Over a wire that carries no instance, the announced one is minted and pins as is."""
+    versions = ["moq-lite-06"]
+    async with moq.Server("127.0.0.1:0", versions=versions, tls_generate=["localhost"]) as server:
+        published = server.route("live")
+        serve_task = asyncio.create_task(server.serve())
+        try:
+            async with moq.Client(
+                f"https://{server.local_addr}",
+                versions=versions,
+                tls=moq.ClientTls(insecure=True),
+                bind="127.0.0.1:0",
+            ) as client:
+                announced = client.announced()
+                present = await asyncio.wait_for(anext(announced), timeout=10)
+                assert isinstance(present, moq.AnnounceEventPresent)
+                minted = present.announce.route.instance
+                assert minted.is_minted()
+
+                await asyncio.wait_for(client.request("live", instance=minted), timeout=10)
+                async with client.follow("live", instance=minted) as following:
+                    assert await asyncio.wait_for(following.available(), timeout=10) is not None
+
+                # The same text, named, is another instance, which nothing serves.
+                named = moq.Instance.parse(minted.text())
+                assert named != minted and not named.is_minted()
+                with pytest.raises(moq.Error.Protocol):
+                    await asyncio.wait_for(client.request("live", instance=named), timeout=10)
+                announced.cancel()
+        finally:
+            serve_task.cancel()
+            try:
+                await serve_task
+            except asyncio.CancelledError:
+                pass
+            published.broadcast.close()
 
 
 async def test_client_context_keeps_the_body_error():

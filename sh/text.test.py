@@ -83,6 +83,27 @@ class TextTests(unittest.TestCase):
                 self.assertIn(f"{name}:1:", result.stdout)
                 self.git("rm", "-f", name)
 
+    def test_doc_hidden_fails_only_in_rust(self):
+        self.write("notes.md", "#[doc(hidden)]\n")
+        self.git("add", ".")
+        self.assertEqual(self.check().returncode, 0)
+        for text in ("#[doc(hidden)]", "#[cfg_attr(test, doc( hidden ))]", '#[doc(alias = "Old", hidden)]'):
+            with self.subTest(text=text):
+                self.write("src/vendor/lib.rs", f"pub mod a;\n{text}\n")
+                self.git("add", ".")
+                result = self.check()
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("src/vendor/lib.rs:2:", result.stdout)
+                self.assertIn("doc(hidden)] is forbidden", result.stderr)
+
+    def test_every_violation_is_reported(self):
+        self.write("a.rs", f"// {EM_DASH}\n#[doc(hidden)]\n")
+        self.git("add", ".")
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("em dashes are forbidden", result.stderr)
+        self.assertIn("doc(hidden)] is forbidden", result.stderr)
+
     def test_git_errors_fail(self):
         self.git("config", "grep.patternType", "invalid")
         result = self.check()

@@ -57,7 +57,22 @@ Rejected in planning:
 - Folding these items into the larger quests: those wait on decisions or
   prototypes, and these do not.
 
+Added 2026-11-09 (maintainer, /quest-plan from the deletion audit): the
+pre-cut sweep also deletes these, which a "used only by its definition"
+search misses or which are not items:
+
+- `@moq/watch`'s `Arrival`/`Arrivals` export and `decoder.arrivals()`:
+  only `test/audio-quality` uses them, and it can import from source. Not on
+  `release`, so removing them breaks nobody.
+- `@moq/qmux`'s `install()`: no caller, and it cannot help Safari, which
+  ships a broken WebTransport rather than none.
+- `moq-nvenc`'s `src/sys/windows_sys` (680 KB generated): moq-video depends
+  on moq-nvenc only under `cfg(target_os = "linux")`.
+- `moq-sock`'s `fast-apple-datapath` feature (`udp/apple_fast.rs`), which only
+  `just rs macos-test` enables, and its WASI arm (`udp/wasi.rs`), which no
+  target builds. Update [cmsg length on send](/quest/m3/cmsg-len-send.md),
+  which names the feature.
+
 ## Required
 
-- [Ban doc(hidden) in Rust](/quest/m2/api-shape/doc-hidden.md) - `just check` bans it; each use becomes private or documented, test-support modules documented behind their feature
 - [A peer's closed session reads as Closed in the bindings](/quest/m2/api-shape/session-closed.md) - a remote SESSION_CLOSED maps to `MoqError::Closed`, as a local close does

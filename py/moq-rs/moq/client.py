@@ -18,6 +18,7 @@ from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _implemen
 from .origin import AnnounceConsumer, Following, OriginConsumer, OriginProducer, Route
 from .session import Session
 from .subscribe import BroadcastConsumer
+from .types import Instance
 
 CongestionControl = MoqCongestionControl
 
@@ -162,7 +163,7 @@ class Client:
             state.inner.cancel()
 
     def route(
-        self, path: str, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0
+        self, path: str, *, hidden: bool = False, cost: int = 0, instance: Instance | None = None, epoch: int = 0
     ) -> Route:
         """Create a route at ``path`` owning a broadcast to fill; hold it to keep it announced.
 
@@ -177,14 +178,14 @@ class Client:
         """
         return self._connected().consumer.announced(prefix, filter=filter, hidden=hidden)
 
-    def follow(self, path: str, *, instance: str | None = None) -> Following:
+    def follow(self, path: str, *, instance: Instance | None = None) -> Following:
         """Follow the broadcast at exactly ``path`` across its publisher instances.
 
         See :meth:`OriginConsumer.follow`.
         """
         return self._connected().consumer.follow(path, instance=instance)
 
-    async def request(self, path: str, *, instance: str | None = None) -> BroadcastConsumer:
+    async def request(self, path: str, *, instance: Instance | None = None) -> BroadcastConsumer:
         """Request the broadcast at ``path``, resolving one publisher instance as soon as it can be served.
 
         See :meth:`OriginConsumer.request`.

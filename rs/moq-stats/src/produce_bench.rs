@@ -1,5 +1,5 @@
-//! One producer tick, without the publish interval. The benchmark drives this
-//! over a registry it filled itself. Not a public API.
+//! Test support for the producer bench, enabled by the `bench` feature: one producer tick,
+//! without the publish interval, over a registry the bench filled itself.
 
 use std::time::Duration;
 
@@ -51,7 +51,7 @@ impl Driver {
 
 	/// Drain the registry and encode every track once, one interval after the last tick.
 	pub fn tick(&mut self) -> FrameBytes {
-		self.now += self.drain.task.interval;
+		self.now = self.now.saturating_add(self.drain.task.interval);
 		self.drain.collect();
 		self.drain.publish(self.now);
 		self.drain.bucket_frame_bytes()

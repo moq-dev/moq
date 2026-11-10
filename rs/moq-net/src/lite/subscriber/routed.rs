@@ -6,7 +6,7 @@
 //! the origin, minting a source per request that names the claim's origin node.
 
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap},
+	collections::{BTreeMap, HashMap},
 	task::Poll,
 };
 
@@ -22,8 +22,8 @@ use super::{AnnouncedRoute, Subscriber};
 struct WireRoute {
 	node: route::Id,
 	reach: route::Reach,
-	/// The Announce IDs of its live claims.
-	claims: BTreeSet<u64>,
+	/// The Announce ID of each of its live claims, by path.
+	claims: BTreeMap<Path, u64>,
 	/// How its claims differ from `committed`, by path, so what the stream keeps
 	/// between floors is bounded by its claims rather than the messages it read.
 	pending: BTreeMap<Path, Option<node::Claim>>,
@@ -175,7 +175,7 @@ impl Routed {
 					WireRoute {
 						node,
 						reach,
-						claims: BTreeSet::new(),
+						claims: BTreeMap::new(),
 						pending: BTreeMap::new(),
 						committed: None,
 					},
@@ -186,7 +186,7 @@ impl Routed {
 			Msg::RouteHold { id } => self.reach(id, route::Reach::Held)?,
 			Msg::RouteEnd { id } => {
 				let route = self.routes.remove(&id).ok_or(Error::ProtocolViolation)?;
-				for claim in route.claims {
+				for claim in route.claims.into_values() {
 					decoder.end(claim)?;
 					self.claims.remove(&claim);
 					self.held.pop();
@@ -271,17 +271,12 @@ impl Routed {
 
 	/// A claim the peer started under `route`, assigned Announce ID `id`.
 	fn start(&mut self, id: u64, route: u64, path: Path, claim: node::Claim) -> Result<(), Error> {
-		let claims = &self.claims;
 		let wire = self.routes.get_mut(&route).ok_or(Error::ProtocolViolation)?;
-		if wire
-			.claims
-			.iter()
-			.any(|other| claims.get(other).is_some_and(|other| other.path == path))
-		{
+		if wire.claims.contains_key(&path) {
 			return Err(Error::ProtocolViolation);
 		}
 		self.held.push(self.slots.acquire()?);
-		wire.claims.insert(id);
+		wire.claims.insert(path.clone(), id);
 		wire.change(path.clone(), Some(claim.clone()));
 		self.claims.insert(id, WireClaim { route, path, claim });
 		Ok(())
@@ -292,7 +287,7 @@ impl Routed {
 		let claim = self.claims.remove(&id).ok_or(Error::ProtocolViolation)?;
 		self.held.pop();
 		let route = self.routes.get_mut(&claim.route).ok_or(Error::ProtocolViolation)?;
-		route.claims.remove(&id);
+		route.claims.remove(&claim.path);
 		route.change(claim.path, None);
 		Ok(())
 	}
@@ -302,6 +297,18 @@ impl Routed {
 		let route = self.routes.get_mut(&route).ok_or(Error::ProtocolViolation)?;
 		route.change(change.0, change.1);
 		Ok(())
+	}
+
+	/// Move what the stream holds onto a budget of its own with the session's cap, while a
+	/// request replacing it takes the same claims over on the session's. The session's
+	/// count is then the replacement's alone, and a peer flooding this stream fails it
+	/// on its own budget: at most twice the cap, during one handover.
+	pub(super) fn hand_over(&mut self) {
+		let slots = self.slots.split();
+		for slot in self.held.iter_mut().chain(&mut self.echoing) {
+			*slot = slots.hold();
+		}
+		self.slots = slots;
 	}
 
 	/// The peer sent a GOAWAY: its routes rank below every other. Idempotent.
@@ -358,9 +365,8 @@ impl Routed {
 		drop(std::mem::replace(&mut self.stream, stream));
 		self.previous = previous;
 		self.outputs(subscriber);
-		for (_, served) in std::mem::take(&mut self.previous) {
-			served.route.dynamic.withdrawn();
-		}
+		// What the new stream no longer serves is let go here, not ended by its origin.
+		self.previous.clear();
 		Ok(())
 	}
 
@@ -400,8 +406,11 @@ impl Routed {
 				claim,
 				served,
 			} => self.serve(subscriber, id, named, claim, served),
-			node::Output::Unserve { id, claim } => {
-				if let Some(served) = self.served.remove(&(id, claim)) {
+			node::Output::Unserve { id, claim, ended } => {
+				// Dropped, a claim the node let go of goes offline rather than ending.
+				if let Some(served) = self.served.remove(&(id, claim))
+					&& ended
+				{
 					served.route.dynamic.withdrawn();
 				}
 			}
@@ -440,15 +449,16 @@ impl Routed {
 			}
 			return;
 		}
-		// A route held without a path to it serves only as a last resort, like a draining
-		// peer's, at its real cost.
+		// A route held without a path to it is unavailable: it serves only as a last
+		// resort, like a draining peer's, at its real cost.
 		let route = crate::origin::RouteInfo::new()
 			.with_instance(served.claim.instance.clone(), served.claim.epoch)
 			.with_hops(hops)
 			.with_cost(served.claim.cost.saturating_add(served.metric))
 			.with_via(subscriber.via(None))
 			.with_node(Some(id))
-			.with_draining(self.drained || !served.available);
+			.with_draining(self.drained)
+			.with_available(served.available);
 		if let Some(entry) = self.previous.remove(&key) {
 			self.served.insert(key.clone(), entry);
 		}
@@ -786,6 +796,93 @@ mod tests {
 		*budget.write().ok().expect("the budget is open") = usize::MAX;
 		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
 		assert_eq!(subscriber.announces.available(), 2);
+	}
+
+	/// The route and claims a peer sends one stream, its Route ID 0.
+	fn feed(
+		routed: &mut super::Routed,
+		decoder: &mut AnnounceDecoder,
+		paths: &[&'static str],
+	) -> Result<(), crate::Error> {
+		let prefix = Path::empty();
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: ADVERT,
+		};
+		routed.receive(&prefix, route, decoder)?;
+		for path in paths {
+			routed.receive(&prefix, start(path), decoder)?;
+		}
+		Ok(())
+	}
+
+	/// A request handed over keeps what it holds on a budget of its own, so the claims
+	/// arriving on both it and its replacement during the handover count once against the
+	/// session's cap: a session that fits its claims stays open.
+	#[kio::test]
+	async fn a_handover_counts_the_replacement_alone() {
+		let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		// One route and three claims.
+		subscriber.announces = crate::session::Slots::new(4);
+		let prefix = Path::empty();
+		let mut old = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut old_decoder = AnnounceDecoder::default();
+		feed(&mut old, &mut old_decoder, &["x", "y"]).unwrap();
+
+		old.hand_over();
+		assert_eq!(
+			subscriber.announces.available(),
+			4,
+			"the session's count is the replacement's"
+		);
+		let mut new = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut new_decoder = AnnounceDecoder::default();
+		feed(&mut new, &mut new_decoder, &["x", "y"]).unwrap();
+
+		// A claim the peer starts during the handover reaches both requests.
+		old.receive(&prefix, start("z"), &mut old_decoder)
+			.expect("the old request fits it on its own budget");
+		new.receive(&prefix, start("z"), &mut new_decoder)
+			.expect("the session fits it");
+		assert_eq!(subscriber.announces.available(), 0);
+
+		drop(old);
+		assert_eq!(
+			subscriber.announces.available(),
+			0,
+			"the old request held none of the session's"
+		);
+		drop(new);
+		assert_eq!(subscriber.announces.available(), 4);
+	}
+
+	/// A peer flooding a request handed over fails it on its own budget, the session's cap,
+	/// so the session holds at most twice the cap during one handover.
+	#[kio::test]
+	async fn a_handover_caps_the_old_request() {
+		let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		subscriber.announces = crate::session::Slots::new(3);
+		let prefix = Path::empty();
+		let mut old = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut old_decoder = AnnounceDecoder::default();
+		feed(&mut old, &mut old_decoder, &["x"]).unwrap();
+
+		old.hand_over();
+		let mut new = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut new_decoder = AnnounceDecoder::default();
+		feed(&mut new, &mut new_decoder, &["x", "y"]).unwrap();
+		assert_eq!(subscriber.announces.available(), 0);
+
+		old.receive(&prefix, start("y"), &mut old_decoder)
+			.expect("the old request's budget has room for one more");
+		assert!(
+			old.receive(&prefix, start("z"), &mut old_decoder).is_err(),
+			"the old request is capped on its own budget"
+		);
+		assert!(
+			new.receive(&prefix, start("z"), &mut new_decoder).is_err(),
+			"the replacement is capped on the session's"
+		);
 	}
 
 	/// A downstream peer raising its ROUTE_REQUEST seqno while this stream's peer

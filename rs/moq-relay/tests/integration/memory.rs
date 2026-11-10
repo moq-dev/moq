@@ -324,7 +324,7 @@ pub fn record(mut announced: moq_net::origin::Routes) -> std::sync::Arc<std::syn
 		while let Some(event) = announced.next().await {
 			let (update, active) = match event {
 				moq_net::origin::RouteEvent {
-					kind: moq_net::origin::RouteKind::End,
+					kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 					announce: route,
 				} => (route, false),
 				moq_net::origin::RouteEvent {

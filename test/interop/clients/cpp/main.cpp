@@ -351,7 +351,7 @@ int subscribe(
     const auto read_deadline = finish
         ? Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(timeout))
         : deadline;
-    auto announced = ok(session->consume()->follow(path, std::nullopt), "follow");
+    auto announced = ok(session->consume()->follow(path, nullptr), "follow");
     auto consumer = until(announced->available(), read_deadline, "available");
     if (!consumer) fail("first available() reported offline");
 
@@ -408,7 +408,7 @@ int subscribe(
             const auto *end = std::get_if<moq::AnnounceEvent::kAbsent>(&event->get_variant());
             if (end && end->announce.prefix == path) break;
         }
-        auto watch = ok(session->consume()->follow(path + ".health", std::nullopt), "health watch");
+        auto watch = ok(session->consume()->follow(path + ".health", nullptr), "health watch");
         auto health = until(watch->available(), read_deadline, "health available");
         if (!health) fail("first health available() reported offline");
         auto track = until(health->subscribe_track("live", std::nullopt), read_deadline, "health subscribe");

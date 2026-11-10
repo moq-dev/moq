@@ -2,19 +2,19 @@
 
 ## Goal
 
-The lite-07 cut does not wait on Firefox: the release gate passes a Firefox
-tab that connects unproven, as it does Safari. Once a Firefox release follows
-the draft's exporter, a lite-07 session from it connects to `moq-relay` with
-its route-key proof verified, as a current Chromium tab's does, and the
-nightly route key lane keeps both that way.
+Once a Firefox release follows the draft's exporter, a lite-07 session from
+it connects to `moq-relay` with its route-key proof verified, as a current
+Chromium tab's does, and the nightly route key lane keeps both that way.
 
 The lane (`test/interop/clients/js/route-key.ts`, in `test/interop` nightly
 and the release gate) dials the relay from each browser on lite-07 and reads
 the relay's log for the tab's verified proof. Each build either must prove or
-is not yet covered: it must then send no proof, and it skips, or fails under
-`CI_STRICT`, which release PRs set. Chromium 158 and later must prove, which
-the [Playwright bump](/quest/m2/cluster-routing/routes/playwright-pin.md)
-reaches. Every Firefox build is not yet covered.
+must send no proof. One that must send none either holds the lite-07 cut,
+skipping or failing under `CI_STRICT` (which release PRs set), or connects
+unproven by design and passes. Chromium 158 and later must prove, which the
+[Playwright bump](/quest/m2/cluster-routing/routes/playwright-pin.md)
+reaches. Every Firefox build connects unproven, so the lite-07 cut does not
+wait on Firefox.
 
 Firefox's exporter departs from draft-ietf-webtrans-http3 section 4.8: neqo
 writes the session ID into the exporter context as a varint
@@ -45,20 +45,16 @@ CONNECT's User-Agent, which is server-side UA sniffing). This replaces
 state, the neqo fix is one line, and the lane still fails loud if the relay
 refuses a Firefox tab.
 
-Now: make the lane pass a Firefox tab that sends no proof under `CI_STRICT`,
-as it treats a build that is not yet covered elsewhere, rather than failing
-the release gate (`uncovered` in `test/interop/clients/js/route-key.ts`).
-A Firefox tab that the relay refuses, or that sends a proof, still fails.
-
 Reported upstream on 2026-11-07 as
 [mozilla/neqo#4319](https://github.com/mozilla/neqo/issues/4319), with the
 one-line fix (approved by the maintainer in /quest-unblock).
 
 Once a Firefox release carries neqo's fix, gate `route_key.ts` on Firefox
 majors before it, set the lane's table (`uncovered` in `route-key.ts`) to
-require a proof from it on, and bump Playwright to a release bundling it,
-the way the [Playwright bump](/quest/m2/cluster-routing/routes/playwright-pin.md)
-does for Chromium. Verify the fixed build against the relay the way the
+require a proof from it on and to pass older majors unproven, and bump
+Playwright to a release bundling it, the way the
+[Playwright bump](/quest/m2/cluster-routing/routes/playwright-pin.md) does for
+Chromium. Verify the fixed build against the relay the way the
 2026-11-06 check did: its export must match the relay's for the same session.
 
 ## Waiting

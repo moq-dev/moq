@@ -1,4 +1,5 @@
-//! Fuzz target bodies for the wire codecs, plus the seeds they start from.
+//! Test support, enabled by the `fuzz` feature: fuzz target bodies for the wire codecs and their
+//! seeds, plus the hooks the benches and `moq-net-tests` reach private state through.
 //!
 //! Each `pub fn` here is one target: it takes raw fuzzer bytes, drives a decoder, and
 //! checks that whatever came out survives a re-encode. The bodies live in the crate
@@ -7,8 +8,7 @@
 //! here also lets the tests below replay them on stable, which is what turns a crash
 //! the fuzzer found into a regression `just check` runs.
 //!
-//! Compiled only under `cfg(test)` or the `fuzz` feature, so none of this is part of
-//! the published API. See `fuzz/README.md` for the workflow.
+//! It tracks the crate's internals, so it can change in any release. See `fuzz/README.md` for the workflow.
 
 mod ingest;
 mod request;
@@ -215,9 +215,12 @@ impl<const N: usize> ObjectBatch<N> {
 pub struct CanonicalStorage(crate::model::group::StorageBench);
 
 impl CanonicalStorage {
+	/// A group of `frames` 64-byte frames, each held by `views` extra owners.
 	pub fn new(frames: usize, views: usize) -> Self {
 		Self(crate::model::group::StorageBench::new(frames, views))
 	}
+
+	/// The group's stored bytes.
 	pub fn size(&self) -> u64 {
 		self.0.size()
 	}
@@ -532,6 +535,12 @@ pub fn excluding(origin: crate::origin::Consumer, peer: u64) -> crate::origin::C
 	origin.excluding(crate::Hop::from_wire(peer))
 }
 
+/// A fresh instance as a session mints one for a route an older wire delivered, for tests
+/// outside the crate that route one without an older session.
+pub fn minted_instance() -> crate::Instance {
+	crate::Instance::minted()
+}
+
 /// A peer's wire route: its hop ids, cost, and instance at an epoch, as a session
 /// decodes one, for benches and tests that land or update forwarded routes.
 ///
@@ -783,7 +792,7 @@ impl Interests {
 /// Add `n` publisher-side payload bytes on `(path, tier)`, creating the entry
 /// when the path is tracked. The stats producer bench marks a share of held
 /// paths changed this way, without a media frame. A later [`crate::stats::Registry::report`]
-/// drops the entry unless some guard still holds it. Not a public API.
+/// drops the entry unless some guard still holds it.
 pub fn bump_publisher_bytes(
 	registry: &crate::stats::Registry,
 	path: impl Into<crate::Path>,
@@ -1574,9 +1583,11 @@ pub fn pattern(data: &[u8]) -> bool {
 /// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
 /// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message
 /// (the sweep sets ROUTE_START's type byte but fills its size byte with the body
-/// pattern, so none decodes whole), the ROUTE_END echo, and ROUTE_REQUEST.
+/// pattern, so none decodes whole), the ROUTE_END echo, ROUTE_REQUEST, and a DATAGRAMS
+/// request, whose seven fields outgrow the sweep's longest body.
 const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
+	(30, &[7, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
 	(5, &[6, 4, 1, 0, 1, 0]),
 	(5, &[7, 4, 0, 1, 2, 0]),

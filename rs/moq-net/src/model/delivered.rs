@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 ///
 /// A reader stops expecting a group once it is past its budget, and counts everything
 /// below it as handed out (see [`Self::forget_below`]). The run starting at 0 is that
-/// floor, so only the gaps above it cost memory.
+/// floor, so only the gaps above it cost memory. It never holds the reserved group
+/// sequence `u64::MAX`, so one past any run fits.
 #[derive(Default)]
 pub(super) struct Delivered {
 	/// First to last sequence, inclusive, never adjacent to each other.
@@ -22,9 +23,9 @@ impl Delivered {
 			.is_some_and(|(_, last)| sequence <= *last)
 	}
 
-	/// The first sequence above the handed-out prefix, or none once every sequence is past.
-	pub fn floor(&self) -> Option<u64> {
-		self.runs.get(&0).map_or(Some(0), |last| last.checked_add(1))
+	/// The first sequence above the handed-out prefix.
+	pub fn floor(&self) -> u64 {
+		self.runs.get(&0).map_or(0, |last| last + 1)
 	}
 
 	/// Whether every sequence in `groups` was handed out, or is below the floor.
@@ -47,10 +48,7 @@ impl Delivered {
 			.and_then(|below| self.runs.range(..=below).next_back())
 			.filter(|(_, last)| **last + 1 == sequence)
 			.map_or(sequence, |(first, _)| *first);
-		let last = sequence
-			.checked_add(1)
-			.and_then(|above| self.runs.remove(&above))
-			.unwrap_or(sequence);
+		let last = self.runs.remove(&(sequence + 1)).unwrap_or(sequence);
 		self.runs.insert(first, last);
 		true
 	}
@@ -63,17 +61,13 @@ impl Delivered {
 		let mut first = groups.start;
 		// A run ending at or just below the first sequence joins it.
 		if let Some((&start, &end)) = self.runs.range(..=first).next_back()
-			&& end.checked_add(1).is_none_or(|after| after >= first)
+			&& end + 1 >= first
 		{
 			first = start;
 			last = last.max(end);
 		}
 		// So does every run starting inside it or just past it.
-		let joined: Vec<u64> = self
-			.runs
-			.range(first..=last.saturating_add(1))
-			.map(|(&start, _)| start)
-			.collect();
+		let joined: Vec<u64> = self.runs.range(first..=last + 1).map(|(&start, _)| start).collect();
 		for start in joined {
 			if let Some(end) = self.runs.remove(&start) {
 				last = last.max(end);
@@ -98,10 +92,7 @@ impl Delivered {
 			if *first > next {
 				gaps.push(next..(*first).min(groups.end));
 			}
-			match last.checked_add(1) {
-				Some(after) => next = next.max(after),
-				None => return gaps,
-			}
+			next = next.max(last + 1);
 		}
 		if next < groups.end {
 			gaps.push(next..groups.end);
@@ -124,10 +115,8 @@ impl Delivered {
 			return;
 		};
 		// Every run starting at or below the floor joins it, including one starting right at it.
-		let above = match floor.checked_add(1) {
-			Some(above) => self.runs.split_off(&above),
-			None => BTreeMap::new(),
-		};
+		// No run starts at the reserved `u64::MAX`, so a floor there splits nothing off.
+		let above = self.runs.split_off(&floor.saturating_add(1));
 		let last = self.runs.last_key_value().map_or(below, |(_, last)| below.max(*last));
 		self.runs = above;
 		self.runs.insert(0, last);
@@ -191,7 +180,7 @@ mod test {
 		assert_eq!(runs(&delivered), [(4, 8)]);
 		assert!(delivered.contains(4) && delivered.contains(8));
 		assert!(!delivered.contains(3) && !delivered.contains(9));
-		assert_eq!(delivered.floor(), Some(0), "a run above a gap is not the prefix");
+		assert_eq!(delivered.floor(), 0, "a run above a gap is not the prefix");
 		assert!(delivered.covers(4..9) && delivered.covers(9..9));
 		assert!(!delivered.covers(3..5) && !delivered.covers(8..10));
 	}
@@ -218,12 +207,12 @@ mod test {
 	fn the_extremes_are_sequences_too() {
 		let mut delivered = Delivered::default();
 		assert!(delivered.insert(0));
-		assert!(delivered.insert(u64::MAX));
-		assert!(!delivered.insert(u64::MAX));
-		assert_eq!(runs(&delivered), [(0, 0), (u64::MAX, u64::MAX)]);
+		assert!(delivered.insert(u64::MAX - 1));
+		assert!(!delivered.insert(u64::MAX - 1));
+		assert_eq!(runs(&delivered), [(0, 0), (u64::MAX - 1, u64::MAX - 1)]);
 		delivered.forget_below(u64::MAX);
-		assert_eq!(runs(&delivered), [(0, u64::MAX)]);
-		assert_eq!(delivered.floor(), None);
+		assert_eq!(runs(&delivered), [(0, u64::MAX - 1)]);
+		assert_eq!(delivered.floor(), u64::MAX);
 	}
 
 	#[test]
@@ -246,7 +235,7 @@ mod test {
 		assert_eq!(runs(&delivered), [(0, 6), (9, 9), (12, 12)]);
 		assert_eq!(delivered.above_gap(), Some(9));
 		assert!(delivered.contains(4), "below the floor counts as handed out");
-		assert_eq!(delivered.floor(), Some(7));
+		assert_eq!(delivered.floor(), 7);
 
 		// A floor inside a gap keeps the run above it.
 		delivered.forget_below(11);

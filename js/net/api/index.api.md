@@ -15,7 +15,7 @@ export namespace Announce {
 		get synced(): Signals.Getter<boolean>;
 	}
 	export type Event = {
-		kind: "present" | "absent";
+		kind: "present" | "unavailable" | "available" | "absent" | "offline";
 	} & Announce.Announce;
 	export interface Options {
 		covering?: boolean;
@@ -433,12 +433,18 @@ export namespace Group {
 }
 
 export namespace Instance {
-	export type Valid = string & {
+	export interface Minted {
+		get text(): string;
+		toString(): string;
+	}
+	export type Named = string & {
 		readonly _brand: "instance";
 	};
-	export function isMinted(instance: Instance.Valid): boolean;
-	export function parse(text: string): Instance.Valid;
-	export function random(): Instance.Valid;
+	export type Valid = Instance.Named | Instance.Minted;
+	export function isMinted(instance: Instance.Valid): instance is Instance.Minted;
+	export function parse(text: string): Instance.Named;
+	export function random(): Instance.Named;
+	export function text(instance: Instance.Valid): string;
 }
 
 export namespace Origin {
@@ -517,6 +523,7 @@ export namespace Origin {
 		withdraw(): void;
 	}
 	export interface RouteInfo {
+		readonly available: boolean;
 		readonly cost: Origin.Cost;
 		readonly instance?: Instance.Valid;
 	}
