@@ -598,6 +598,25 @@ export function hasDropCode(version: Version): boolean {
 }
 
 /**
+ * Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and `Group Count`. Added in lite-07;
+ * earlier versions carry an inclusive `Group Start` and `Group End`.
+ */
+export function hasGroupCount(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
  * Whether holes split into SUBSCRIBE_SKIP, for sequences declared never produced, and
  * SUBSCRIBE_DROP, which names the `Update` in effect when it was given up; SUBSCRIBE and
  * SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07; earlier versions name every

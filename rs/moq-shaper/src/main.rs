@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
 	// The first tick is a full period in, so a line reports traffic, not the start.
 	let mut interval = args
 		.report_interval
-		.map(|period| kio::clock::interval_at(kio::clock::now() + period, period));
+		.map(|period| kio::clock::interval_at(kio::clock::now().saturating_add(period), period));
 	let shutdown = shutdown();
 	tokio::pin!(shutdown);
 	loop {

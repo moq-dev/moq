@@ -2190,32 +2190,32 @@ export class Subscriber {
 				// publisher re-offers it or drops it again under the new number, so it is still owed,
 				// and a reader that wants it fills it meanwhile.
 				if (stale && update < (entry.update ?? 0n)) continue;
-				entry.tail.account(start, end + 1n);
+				entry.tail.account(start, end);
 				// Judged under the budget this subscriber sent with that update.
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
 				// A group whose stream finished under this update was served over a stale drop, so it
 				// won, even once the cache evicted it.
-				const named = stale ? entry.tail.unfinished(start, end + 1n) : [{ start, end: end + 1n }];
+				const named = stale ? entry.tail.unfinished(start, end) : [{ start, end }];
 				const recorded = named.flatMap((run) => hooks.dropTrackGroups(entry.track, run.start, run.end, hole));
 				// A final drop is never reopened, even where it replaces a stale one. A sequence
 				// already skipped stays skipped, and one whose group arrived keeps it, so no update
 				// reopens either.
 				entry.stale = stale
 					? recorded.reduce((runs, run) => insertDrop(runs, run.start, run.end, hole), entry.stale ?? [])
-					: removeRun(entry.stale ?? [], start, end + 1n);
+					: removeRun(entry.stale ?? [], start, end);
 			} else if ("skip" in resp) {
 				// Never produced, so nothing is waited for and no reader ends. A skip is final and
 				// replaces any drop of the same groups, stale or final, so no update reopens them; a
 				// reader a drop already ended stays ended.
 				const { start, end } = resp.skip;
-				entry.tail.account(start, end + 1n);
-				entry.stale = removeRun(entry.stale ?? [], start, end + 1n);
+				entry.tail.account(start, end);
+				entry.stale = removeRun(entry.stale ?? [], start, end);
 				// A group that arrived was produced after all, so the skip contradicts it: it keeps
 				// the group, and the session goes on, since the draft requires no more.
-				const [cached] = hooks.skipTrackGroups(entry.track, start, end + 1n);
+				const [cached] = hooks.skipTrackGroups(entry.track, start, end);
 				if (cached) {
 					console.warn(
-						`protocol error: SUBSCRIBE_SKIP [${start}, ${end}] names group ${cached.start}, which arrived; keeping it`,
+						`protocol error: SUBSCRIBE_SKIP [${start}, ${end}) names group ${cached.start}, which arrived; keeping it`,
 					);
 				}
 			}

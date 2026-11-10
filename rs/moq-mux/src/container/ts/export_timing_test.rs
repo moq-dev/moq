@@ -189,7 +189,8 @@ impl Live {
 
 	/// The receivers' instant at which the source's clock reads media time `micros`.
 	fn sent(&self, micros: u64) -> Instant {
-		self.start + Duration::from_secs_f64(micros as f64 / 1e6 / self.scale)
+		self.start
+			.saturating_add(Duration::from_secs_f64(micros as f64 / 1e6 / self.scale))
 	}
 
 	/// When the source sends the video frame of media time `video` and the audio frame of
@@ -200,7 +201,7 @@ impl Live {
 			true => (Duration::ZERO, lag),
 			false => (lag, Duration::ZERO),
 		};
-		(self.sent(video) + v, self.sent(audio) + a)
+		(self.sent(video).saturating_add(v), self.sent(audio).saturating_add(a))
 	}
 
 	/// Declare that video decodes up to `jitter` before it is presented, as a deep B-pyramid's
@@ -233,7 +234,7 @@ impl Live {
 	/// same timeline from the next group, as its replacement or the other half of a 1+1 pair
 	/// would.
 	fn fall_silent(&mut self, gap: Duration, legs: &mut [&mut Leg]) {
-		let resume = kio::clock::now() + gap;
+		let resume = kio::clock::now().saturating_add(gap);
 		self.advance(resume, legs);
 		let media = (resume.duration_since(self.start).as_secs_f64() * self.scale * 1e6) as u64;
 		self.tick = media.div_ceil(VIDEO_US * GOP) * GOP;
@@ -380,7 +381,7 @@ impl Live {
 					assert!(!leg.poll(), "export ended while the broadcast is live");
 					if !leg.every.is_zero() {
 						while leg.next_poll <= now {
-							leg.next_poll += leg.every;
+							leg.next_poll = leg.next_poll.saturating_add(leg.every);
 						}
 					}
 				}

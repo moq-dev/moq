@@ -1189,7 +1189,11 @@ impl<E: CatalogExt> Guard<'_, E> {
 			return Ok(());
 		}
 		let now = kio::clock::now();
-		if throttle && estimates.last.is_some_and(|last| now < last + ESTIMATE_WINDOW) {
+		if throttle
+			&& estimates
+				.last
+				.is_some_and(|last| now < last.saturating_add(ESTIMATE_WINDOW))
+		{
 			return Ok(());
 		}
 		self.updated = true;
@@ -2346,7 +2350,7 @@ mod test {
 		kio::clock::sleep(Duration::from_secs(5)).await;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let wall = kio::clock::Wall::MOQ_EPOCH + Duration::from_millis(60_000);
-		let start = kio::clock::now() - Duration::from_secs(5);
+		let start = kio::clock::now().saturating_sub(Duration::from_secs(5));
 		let config = Config::default().with_clock(crate::Clock::at(start, wall).expect("a representable wall"));
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
 

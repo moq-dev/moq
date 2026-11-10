@@ -360,7 +360,7 @@ mod rate_filter_tests {
 	use kio::clock::Instant;
 
 	fn at(start: Instant, ms: u64) -> Instant {
-		start + Duration::from_millis(ms)
+		start.saturating_add(Duration::from_millis(ms))
 	}
 
 	#[test]

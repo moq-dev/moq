@@ -1139,7 +1139,7 @@ mod tests {
 			// Calibrate the next receive cycles to allow two work items each.
 			state.recv_limiter.start_cycle(|| now);
 			state.recv_limiter.record_work(2);
-			state.recv_limiter.finish_cycle(|| now + RECV_TIME_BOUND);
+			state.recv_limiter.finish_cycle(|| now.saturating_add(RECV_TIME_BOUND));
 
 			let socket = ErrorSocket {
 				error,

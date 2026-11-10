@@ -51,7 +51,7 @@ impl Log {
 		if first {
 			tracing::warn!(pid, count = 1, %error, "dropped a damaged TS unit");
 		}
-		self.next.get_or_insert(now + stats::Log::INTERVAL);
+		self.next.get_or_insert(now.saturating_add(stats::Log::INTERVAL));
 	}
 
 	pub fn flush(&mut self, now: Instant) {
@@ -63,7 +63,7 @@ impl Log {
 			// A quiet interval ends the burst, so its next damage warns immediately.
 			now.duration_since(burst.last) < stats::Log::INTERVAL
 		});
-		self.next = (!self.bursts.is_empty()).then_some(now + stats::Log::INTERVAL);
+		self.next = (!self.bursts.is_empty()).then_some(now.saturating_add(stats::Log::INTERVAL));
 	}
 }
 

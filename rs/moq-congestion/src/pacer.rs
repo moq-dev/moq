@@ -144,7 +144,7 @@ impl Pacer {
 
         // divisions come before multiplications to prevent overflow
         // this is the time at which the pacing window becomes empty
-        Some(now + (unscaled_delay / 5) * 4)
+        Some(now.saturating_add((unscaled_delay / 5) * 4))
     }
 
     /// Return how long we need to wait before sending `bytes_to_send` when the congestion
@@ -198,7 +198,9 @@ impl Pacer {
         // a nanosecond, and truncating that to zero would re-arm the timer at `now` forever.
         let deficit = target.saturating_sub(self.tokens) + self.debt;
         let nanos = (u128::from(deficit) * 1_000_000_000).div_ceil(u128::from(rate));
-        Some(now + Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)))
+        Some(now.saturating_add(Duration::from_nanos(
+            u64::try_from(nanos).unwrap_or(u64::MAX),
+        )))
     }
 }
 
@@ -322,7 +324,7 @@ mod tests {
         /// pacer needs for ten seconds at [`TEST_PACING_RATE`].
         const MAX_POLLS: u64 = 1_000_000;
 
-        let deadline = start + duration;
+        let deadline = start.saturating_add(duration);
         let mut at = start;
         let mut sent = 0;
         let mut polls = 0;
@@ -424,14 +426,20 @@ mod tests {
             pacer.on_transmit(mtu);
 
             let packet_time = Duration::from_nanos((u64::from(mtu) * 1_000_000_000).div_ceil(rate));
-            let resume = start + packet_time * 2;
+            let resume = start.saturating_add(packet_time * 2);
             assert_eq!(
                 pacer.delay(rtt, u64::from(mtu), mtu, start, metrics),
                 Some(resume)
             );
             // Earning one packet repays the overdraw; the next packet still needs credit.
             assert_eq!(
-                pacer.delay(rtt, u64::from(mtu), mtu, start + packet_time, metrics),
+                pacer.delay(
+                    rtt,
+                    u64::from(mtu),
+                    mtu,
+                    start.saturating_add(packet_time),
+                    metrics
+                ),
                 Some(resume),
             );
             assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, resume, metrics), None);
@@ -465,8 +473,9 @@ mod tests {
                     window: rate / 25,
                     pacing_rate: explicit_rate.then_some(rate),
                 };
-                let resume = start
-                    + Duration::from_nanos((2 * u64::from(mtu) * 1_000_000_000).div_ceil(rate));
+                let resume = start.saturating_add(Duration::from_nanos(
+                    (2 * u64::from(mtu) * 1_000_000_000).div_ceil(rate),
+                ));
                 assert_eq!(
                     pacer.delay(rtt, u64::from(mtu), mtu, start, metrics),
                     Some(resume)
@@ -526,7 +535,7 @@ mod tests {
     #[test]
     fn does_not_panic_on_bad_instant() {
         let old_instant = Instant::now();
-        let new_instant = old_instant + Duration::from_micros(15);
+        let new_instant = old_instant.saturating_add(Duration::from_micros(15));
         let rtt = Duration::from_micros(400);
 
         assert!(
@@ -666,7 +675,7 @@ mod tests {
                 rtt,
                 mtu as u64,
                 mtu,
-                old_instant + pace_duration / 2,
+                old_instant.saturating_add(pace_duration / 2),
                 unpaced_metrics(window),
             ),
             None
@@ -689,7 +698,7 @@ mod tests {
                 rtt,
                 mtu as u64,
                 mtu,
-                old_instant + pace_duration * 3 / 2,
+                old_instant.saturating_add(pace_duration * 3 / 2),
                 unpaced_metrics(window),
             ),
             None

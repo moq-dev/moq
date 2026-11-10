@@ -1130,12 +1130,14 @@ impl OriginConsumerState {
 					match pending.held {
 						None => {
 							pending.held = Some(Held::Anchoring(now));
-							Some(now + Duration::from_nanos(1))
+							Some(now.saturating_add(Duration::from_nanos(1)))
 						}
-						Some(Held::Anchoring(seen)) if now <= seen => Some(seen + Duration::from_nanos(1)),
+						Some(Held::Anchoring(seen)) if now <= seen => {
+							Some(seen.saturating_add(Duration::from_nanos(1)))
+						}
 						Some(Held::Anchoring(_)) => {
-							pending.held = Some(Held::Until(now + hold));
-							Some(now + hold)
+							pending.held = Some(Held::Until(now.saturating_add(hold)));
+							Some(now.saturating_add(hold))
 						}
 						Some(Held::Until(until)) => Some(until).filter(|until| *until > now),
 					}
@@ -1144,7 +1146,7 @@ impl OriginConsumerState {
 					Some(Quarantine {
 						held: Held::Anchoring(seen),
 						..
-					}) => Some(*seen + Duration::from_nanos(1)),
+					}) => Some(seen.saturating_add(Duration::from_nanos(1))),
 					Some(Quarantine {
 						held: Held::Until(until),
 						..
@@ -8146,8 +8148,9 @@ impl Routes {
 			if let Some(quarantine) = self.retracted.get_mut(prefix)
 				&& quarantine.held == Held::Anchoring(*seen)
 			{
-				quarantine.held = Held::Until(now + RETRACT_QUARANTINE);
-				self.expiring.push_back((now + RETRACT_QUARANTINE, prefix.clone()));
+				quarantine.held = Held::Until(now.saturating_add(RETRACT_QUARANTINE));
+				self.expiring
+					.push_back((now.saturating_add(RETRACT_QUARANTINE), prefix.clone()));
 			}
 			self.anchoring.pop_front();
 		}
@@ -8164,7 +8167,10 @@ impl Routes {
 			}
 			self.expiring.pop_front();
 		}
-		let anchoring = self.anchoring.front().map(|(seen, _)| *seen + Duration::from_nanos(1));
+		let anchoring = self
+			.anchoring
+			.front()
+			.map(|(seen, _)| seen.saturating_add(Duration::from_nanos(1)));
 		earliest(anchoring, self.expiring.front().map(|(until, _)| *until))
 	}
 
@@ -12059,7 +12065,10 @@ mod tests {
 		for k in [64usize, 256, 1024] {
 			let (producer, mut driver) = Producer::new(Config::from(origin(1)));
 			driver
-				.poll(Instant::ZERO + Duration::from_secs(1), &kio::Waiter::noop())
+				.poll(
+					Instant::ZERO.saturating_add(Duration::from_secs(1)),
+					&kio::Waiter::noop(),
+				)
 				.unwrap();
 			let peer = producer.clone().with_link(Link::Peer);
 			// One instance, so the winner moving between routes is an update, not a restart.
