@@ -32,8 +32,15 @@ Prior art, read 2026-11-09:
 
 Guidance:
 
-- The QUIC stack is in-tree (`moq-quic`), so a generation in the connection
-  ID is ours to add. Cover both backends, `moq-tokio` and `moq-uring`.
+- Say how a new handshake reaches the new process. Nothing does today: a
+  client's Initial carries a CID it invented, `moq_sock::shard` steers only
+  by server-issued CIDs and binds its group once, QUIC-LB forwarding never
+  forwards long headers, and the io_uring backend refuses `listen.lb.id`
+  because shard steering and QUIC-LB compete for the CID bytes. Choose
+  between inheriting the sockets by fd passing, an eBPF steer as in udpgrm,
+  or reusing the shard index or QUIC-LB server ID as the generation; do not
+  add a third CID layout. Say whether `reset.secret` stays. Cover both
+  backends, `moq-tokio` and `moq-uring`.
 - Decide what happens to cluster peer sessions: handed to the new process,
   or re-dialed. Today a peer session does not leave on GOAWAY and holds a
   drain to its bound.

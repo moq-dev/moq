@@ -6,9 +6,9 @@ After the next cut, each release cycle runs in three phases by kind of
 change: additive work, then API breaks, then wire changes. `main` can be cut
 to `release` on demand at any point in the first two phases. The wire phase
 is short, because `main` cannot be cut while a wire version is half changed.
-A cut made while the cycle is still additive publishes patch versions; the
-first cut that carries an API break or a wire change advances the shared
-minor. The questline, `CONTRIBUTING.md`'s Releases and Versions, the version
+A cut made while the cycle is still additive publishes patch versions;
+every cut that carries an API break or a wire change advances the shared
+minor, so a wire cut after an API cut advances it again. The questline, `CONTRIBUTING.md`'s Releases and Versions, the version
 check, and the cut's recurrence all say so.
 
 ## Plan
@@ -50,13 +50,16 @@ Guidance:
 - Decide what holds a phase's order. A break that lands on `main` during the
   additive phase turns the next cut into a breaking one. Ordering the
   milestones through `Required` keeps `quest unblocked` from offering the
-  work early, and `just api-diff --deny` can refuse the PR.
+  work early, but nothing on a PR into `main` refuses a break today:
+  `just api-diff` runs only on PRs into `release`, and the cut only reports.
+  Choose the enforcement, such as an api-diff job with `--deny` on PRs into
+  `main` during the additive phase, or a label or `version.json` check.
 - A cut in the additive phase has no break to audit: it needs the
-  [cut gate](/quest/m2/cut-gate/README.md)'s checks but not the migration
+  [release cut](/quest/m3/release/cut.md)'s readiness checks but not the migration
   audit or the API, feature and Cargo feature reviews. Say which checks each
   kind of cut runs.
 - `just version` and `version.json` enforce one shared minor advanced at
-  every cut. An additive cut skips the bump and lets release-plz propose
+  every breaking cut, API or wire. An additive cut skips the bump and lets release-plz propose
   patches. Decide how the JS packages and the bindings take a patch at an
   additive cut.
 - After any publish, `just test wire-compat --remeasure` still lands the
@@ -68,4 +71,3 @@ fewer shared minors, more patches.
 ## Related
 
 - [Release cut](/quest/m3/release/cut.md) - performs the shift this quest redefines
-- [Cut readiness](/quest/m2/cut-gate/README.md) - the checks every kind of cut still runs
