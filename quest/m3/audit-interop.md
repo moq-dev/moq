@@ -13,8 +13,8 @@ feature outside the moq-net API).
 ## Plan
 
 Recurs each major release: the PR that finishes a run keeps its results in
-its own body and re-adds this file at the end of m3's `Required`, behind the
-[release cut](/quest/m3/release/cut.md), with Check first rewritten. Fixes land
+its own body and re-adds this file at the end of m3's `Required`, with its own `Required`
+naming the [release cut](/quest/m3/release/cut.md) and Check first rewritten. Fixes land
 in that PR; only maintainer decisions (public API, scope) and changes too
 large to review alongside become follow-ups.
 
@@ -35,11 +35,13 @@ Decided with the maintainer on 2026-10-21:
   restoring the commented-out image rebuild schedule, needs the maintainer.
 
 Both reports run published packages, so verify a fix from `main`: for our
-clients through a third-party relay, `CLI_BIN=target/debug/moq just relays
+clients through a third-party relay, `CLI_BIN=<absolute path to moq> just relays
 --only <key> --publishers rust --subscribers rust` from `test/smoke`; for a
 third-party client through our relay, its published runner image
 (`RELAY_URL`, `TLS_DISABLE_VERIFY=1`, `TESTCASE`) on the host network against
-a `moq-relay` built from `main`. Read each cell's log before classifying, and
+a `moq-relay` built from `main`; for the runner's own cases, its `moq-dev-rs`
+or `moq-dev-js` client built against the checkout, which needs small ports to
+`main`'s API. Read each cell's log before classifying, and
 group cells only when their logs share a cause. A merged runner bump reaches
 the nightly only after someone dispatches an image rebuild; check its GHCR
 tag.

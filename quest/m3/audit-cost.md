@@ -11,8 +11,8 @@ fixed, or planned. Runner and cache infrastructure belongs to
 ## Plan
 
 Recurs each major release: the PR that finishes a run keeps its results in
-its own body and re-adds this file at the end of m3's `Required`, behind the
-[release cut](/quest/m3/release/cut.md), with Check first rewritten. Fixes land
+its own body and re-adds this file at the end of m3's `Required`, with its own `Required`
+naming the [release cut](/quest/m3/release/cut.md) and Check first rewritten. Fixes land
 in that PR; only maintainer decisions (public API, scope) and changes too
 large to review alongside become follow-ups.
 
@@ -89,7 +89,7 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
 ### Check first: artifact size
 
 - Compare the first complete Shipping sizes report after the cut with the
-  previous run's. Never compare an archive to an ELF, different targets, or
+  previous run's, the [2026-10-31 measurements](https://github.com/moq-dev/moq/blob/cd560bde5e585dcfc59a705b8013a9a733c06a73/quest/m3/audit-size.md). Never compare an archive to an ELF, different targets, or
   symbol-preserving to stripped builds. JS rows are synthetic first-load
   bundles from `sh/size/bundles.ts`; attribute only an entry's static import
   closure and normalize hashed filenames.
@@ -113,8 +113,10 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
   `npm:` aliases, and lockfiles missing from `.github/dependabot.yml`.
   `dart/moq` and `nix/uniffi-dart-Cargo.lock` are uncovered on purpose.
 - The QUIC fork has no advisory feed: list quinn-proto and quinn-udp
-  advisories on RustSec and GHSA, port any fix, and record the newest
-  reviewed upstream commit in `rs/moq-quic/README.md` (decided 2026-10-28).
+  advisories on RustSec and GHSA, port any fix, and note it in
+  `rs/moq-quic/README.md` (decided 2026-10-28). Only a
+  [vendor sync](/quest/m3/vendor-sync/quinn.md), which reviews the full
+  upstream range, advances the recorded upstream commit.
 - Waiting on upstream: [ashpd](/quest/m4/ashpd-maintained.md) and
   [askama](/quest/m4/askama-maintained.md); the root Bun overrides for glob,
   minimatch, chokidar, postcss-selector-parser, and Vite, each removable once

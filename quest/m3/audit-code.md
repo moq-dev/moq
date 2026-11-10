@@ -11,8 +11,8 @@ why, and nothing calls an API deprecated at the workspace MSRV.
 ## Plan
 
 Recurs each major release: the PR that finishes a run keeps its results in
-its own body and re-adds this file at the end of m3's `Required`, behind the
-[release cut](/quest/m3/release/cut.md), with Check first rewritten. Fixes land
+its own body and re-adds this file at the end of m3's `Required`, with its own `Required`
+naming the [release cut](/quest/m3/release/cut.md) and Check first rewritten. Fixes land
 in that PR; only maintainer decisions (public API, scope) and changes too
 large to review alongside become follow-ups.
 

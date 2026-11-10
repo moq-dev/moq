@@ -11,8 +11,8 @@ for.
 ## Plan
 
 Recurs each major release: the PR that finishes a run keeps its results in
-its own body and re-adds this file at the end of m3's `Required`, behind the
-[release cut](/quest/m3/release/cut.md), with Check first rewritten. Fixes land
+its own body and re-adds this file at the end of m3's `Required`, with its own `Required`
+naming the [release cut](/quest/m3/release/cut.md) and Check first rewritten. Fixes land
 in that PR; only maintainer decisions (public API, scope) and changes too
 large to review alongside become follow-ups.
 
@@ -58,7 +58,9 @@ such as `relay_auth_refresh`, is not attributable this way.
 ### Check first
 
 - At least five nights of history by commit, read through the paired
-  comparison rather than raw `gh-pages` series. Dart still needs a recheck
+  comparison rather than raw `gh-pages` series. Nightly pairs only the Rust
+  bench targets: pick JS and Rust benchmark-test candidates from their history
+  and compare each against the release separately. Dart still needs a recheck
   against the bindings history.
 - `track_stamp_groups/append`'s per-group cost (a start-index insert and a
   second track lock per group), then the resume reader, which dominates a
