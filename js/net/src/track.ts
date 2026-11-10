@@ -46,7 +46,7 @@ import {
 	staleHole,
 	type TrackRequestOptions,
 } from "./internal.ts";
-import { grace, Ledger } from "./ledger.ts";
+import { RUN_OVERHEAD as ARRIVAL_OVERHEAD, grace, Ledger } from "./ledger.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
@@ -713,6 +713,9 @@ class TrackState {
 	// Bumped when a wire subscription declares or resolves where its live feed starts, so a
 	// publisher holding its first group for that answer wakes.
 	startChanged = new Signal(0);
+	// Bumped when paying eviction debt folds an arrival gap before its grace passes, so a reader
+	// parked on a missing group there, with no timer to wake it, judges it again.
+	folded = new Signal(0);
 	latest?: bigint;
 	// One past the highest group received, including evicted content.
 	received = new Signal(0n);
@@ -1095,6 +1098,9 @@ export class Producer {
 	// subscription's grace after a later arrival opened it, as the session's tail does, so this
 	// holds only the gaps still worth waiting for.
 	#arrivals = new Ledger();
+	// What `#arrivals` bills to the account, `ARRIVAL_OVERHEAD` per gap. Paying eviction debt folds
+	// its oldest gaps early, so an unbounded grace holds no more gaps than the pool would.
+	#arrivalsBilled = 0;
 	// What this track's own publisher produced since its last append, which skips every
 	// sequence below it that never arrived and was not given up: the producer moved on. The
 	// arrivals cannot say so, since a gap folds into them once nobody waits for it. Only
@@ -1138,6 +1144,7 @@ export class Producer {
 			shed: (entry, debt, cap) => hooks.shedGroup(entry.group, debt, cap, entry.mirrors.values()),
 			settle: () => this.#settle(),
 			shedDrops: (debt, cap) => this.#shedDrops(debt, cap),
+			shedArrivals: (debt, cap) => this.#shedArrivals(debt, cap),
 			expireDrops: (now) => this.#expireDrops(now),
 			holdsDrops: () => (this.#state.drops.all[0]?.start ?? UNBOUNDED) < this.#keptDrops(),
 		});
@@ -1184,6 +1191,36 @@ export class Producer {
 			this.#setDrops(run.start, end);
 			this.#forgot([{ start: run.start, end }]);
 			paid += billed - this.#dropsBilled;
+		}
+		return paid;
+	}
+
+	// Bill the arrivals' gaps to the account as they now stand. The run they split is the track's
+	// own, so an in-order feed bills nothing. A closed track bills none: nothing arrives to add a
+	// gap, and its account may outlive it in the pool's sweep, which would keep them billed.
+	#billArrivals(): void {
+		const closed = this.#state.closed.peek() !== undefined;
+		const billed = closed ? 0 : Math.max(0, this.#arrivals.size - 1) * ARRIVAL_OVERHEAD;
+		if (billed > this.#arrivalsBilled) this.#account.bill(billed - this.#arrivalsBilled);
+		else this.#account.unbill(this.#arrivalsBilled - billed);
+		this.#arrivalsBilled = billed;
+	}
+
+	// Fold the arrivals' oldest gaps toward `debt`, at most about `cap` bytes, returning the bytes
+	// freed: nothing waits on them any longer, as when their grace passes, so a reader parked on one
+	// judges it missing. Mirrors the Rust `TrackState::shed_arrivals`.
+	#shedArrivals(debt: number, cap: number): number {
+		let paid = 0;
+		let folded = false;
+		while (paid < debt && paid < cap && this.#arrivals.foldOldest()) {
+			const billed = this.#arrivalsBilled;
+			this.#billArrivals();
+			paid += billed - this.#arrivalsBilled;
+			folded = true;
+		}
+		if (folded) {
+			for (const state of [this.#state, ...this.#sinks]) state.folded.update((revision) => revision + 1);
+			this.#owe();
 		}
 		return paid;
 	}
@@ -1255,6 +1292,7 @@ export class Producer {
 				throw new Error("track already caches groups");
 			producer.#account = producer.#openAccount(pool);
 		};
+		hooks.arrivalRuns = (producer) => producer.#arrivals.size;
 		hooks.subscribing = (producer) => producer.#subscribing;
 		hooks.requested = (producer) => producer.#state.update;
 		resubscribe = (producer) => producer.#updateSubscription();
@@ -1414,7 +1452,7 @@ export class Producer {
 		const limit = land.grace;
 		const drops = this.#state.drops;
 		for (const gap of this.#arrivals.gaps(start, end)) {
-			const folds = gap.since?.add(limit);
+			const folds = gap.since?.saturatingAdd(limit);
 			if (folds !== undefined && at.ge(folds)) continue;
 			for (const open of runGaps(drops.overlapping(gap.start, gap.end), gap.start, gap.end)) {
 				yield { ...open, folds };
@@ -2159,6 +2197,7 @@ export class Producer {
 		this.#arrivals.account(start, end, at);
 		// Only a gap folds, so an in-order feed never reads the subscription.
 		if (this.#arrivals.hasGaps()) this.#arrivals.expire(at, this.#grace());
+		this.#billArrivals();
 		this.#owe();
 	}
 
@@ -2319,13 +2358,17 @@ export class Producer {
 	#close(abort: Error | undefined) {
 		if (this.#state.closed.peek() !== undefined) return;
 		// A gap past the grace was lost before the abort rather than cut off by it.
-		if (abort && this.#state.end.peek()?.tail) this.#arrivals.expire(now(), this.#grace());
+		if (abort && this.#state.end.peek()?.tail) {
+			this.#arrivals.expire(now(), this.#grace());
+			this.#billArrivals();
+		}
 		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = [...this.#cache].filter((entry) => entry.group.closed.peek() === undefined);
 		const kept = this.#keptDrops();
 		closeTrackState(this.#state, abort);
+		this.#billArrivals();
 		if (this.#keptDrops() > kept) this.#rearmDrops(kept);
 		if (this.#state.outcome.peek() === undefined)
 			this.#state.outcome.set(abort ?? this.#state.end.peek()?.error ?? null);
@@ -2398,6 +2441,15 @@ type Superseded = { successor?: Successor };
 // a handed-out successor's own record would retain the next one, chaining every later group to
 // the oldest held.
 type Successor = { sequence: bigint; arrived: Instant; fate: () => Error | undefined };
+
+// A run a reader already reported, and how: dropped for good (or stale until its group was handed
+// out, so no update reopens it), dropped as stale, which an update reopens, or skipped, which
+// replaces a drop. `received` when an upstream's stale run decided it, which is the upstream's to
+// judge again then. Mirrors the Rust `Report`.
+interface Reported extends Run {
+	kind: "dropped" | "stale" | "skip";
+	received?: boolean;
+}
 
 /**
  * A track its producer finished: its end is declared unless it closed first, and it can still
@@ -2494,16 +2546,7 @@ export class Subscriber {
 		coverage?: Coverage;
 		judged?: readonly Run[];
 	};
-	#reported: Run[] = [];
-	// The reported runs judged stale, for a wire whose update re-offers them; see
-	// `hooks.reofferStale`.
-	#reportedStale: Run[] = [];
-	// The part of #reportedStale an upstream's received stale run decided, which is the upstream's
-	// to judge again once an update reopens it.
-	#reportedReceived: Run[] = [];
-	// The reported runs skipped: a skip replaces a drop, so a run reported dropped is reported
-	// again once it is skipped, and only a skip already reported stops it.
-	#reportedSkip: Run[] = [];
+	#reported = new Runs<Reported>((a, b) => a.kind === b.kind && a.received === b.received);
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -2708,7 +2751,7 @@ export class Subscriber {
 		wall.timer?.abort();
 		const timer = new AbortController();
 		// A staleness wakeup is never a reason to hold a Node/Bun process open.
-		void sleepUntil(Instant.ZERO.add(Duration.nanos(at)), { signal: timer.signal, ref: false }).then(
+		void sleepUntil(Instant.ZERO.saturatingAdd(Duration.nanos(at)), { signal: timer.signal, ref: false }).then(
 			() => {
 				if (timer.signal.aborted) return;
 				wall.timer = undefined;
@@ -2758,10 +2801,8 @@ export class Subscriber {
 		this.#skipped.delete(sequence);
 		// The group won over any stale report on it, so no update reopens it. A resumed reader
 		// retires its own.
-		if (this.#reportedStale.length > 0) {
-			this.#reportedStale = removeRun(this.#reportedStale, sequence, sequence + 1n);
-			this.#reportedReceived = removeRun(this.#reportedReceived, sequence, sequence + 1n);
-		}
+		if (this.#reported.at(sequence)?.kind === "stale")
+			this.#reported.set(sequence, sequence + 1n, { start: sequence, end: sequence + 1n, kind: "dropped" });
 		// Another copy of it buffered here is never handed out.
 		this.#judge(sequence, sequence + 1n);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
@@ -2889,13 +2930,13 @@ export class Subscriber {
 	#reofferStale(): Run[] {
 		if (this.#resume) return this.#resume.reofferStale();
 		const taken: Run[] = [];
-		const received = this.#reportedReceived;
-		for (const run of this.#reportedStale) {
-			this.#reported = removeRun(this.#reported, run.start, run.end);
+		const received: Run[] = [];
+		const stale = this.#reported.all.filter((run) => run.kind === "stale");
+		for (const run of stale) {
 			insertRun(taken, run.start, run.end);
+			if (run.received) insertRun(received, run.start, run.end);
 		}
-		this.#reportedStale = [];
-		this.#reportedReceived = [];
+		this.#reported.clear(stale);
 		for (const run of this.#pending) {
 			if (run.stale === undefined) continue;
 			insertRun(taken, run.start, run.end);
@@ -3389,7 +3430,7 @@ export class Subscriber {
 		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.unreport = (subscriber, start, end) => {
-			subscriber.#reported = removeRun(subscriber.#reported, start, end);
+			subscriber.#reported.set(start, end);
 		};
 		hooks.reofferStale = (subscriber) => subscriber.#reofferStale();
 		hooks.reofferGroups = (subscriber, start, end) => subscriber.#reofferGroups(start, end);
@@ -3932,23 +3973,19 @@ export class Subscriber {
 	// replaces what it goes out over.
 	#report(from: bigint, to: bigint, hole: Hole & { received?: boolean }): (Recv & { kind: "drop" }) | undefined {
 		const { start, end } = this.#cursor.peek();
-		const final = !hole.skip && hole.stale === undefined;
+		const kind = hole.skip ? "skip" : hole.stale !== undefined ? "stale" : "dropped";
+		const blocks = (reported: Reported) =>
+			kind === "skip" ? reported.kind === "skip" : kind === "dropped" ? reported.kind !== "stale" : true;
 		for (const run of this.#window.runs(max(from, start), min(to, end ?? to))) {
-			let blocked = hole.skip ? this.#reportedSkip : this.#reported;
-			if (final) for (const stale of this.#reportedStale) blocked = removeRun(blocked, stale.start, stale.end);
+			const blocked = this.#reported.overlapping(run.start, run.end).filter(blocks);
 			const [gap] = runGaps(blocked, run.start, run.end);
 			if (!gap) continue;
-			insertRun(this.#reported, gap.start, gap.end);
-			if (hole.skip) insertRun(this.#reportedSkip, gap.start, gap.end);
-			if (hole.stale !== undefined) {
-				insertRun(this.#reportedStale, gap.start, gap.end);
-				if (hole.received) insertRun(this.#reportedReceived, gap.start, gap.end);
-				else this.#reportedReceived = removeRun(this.#reportedReceived, gap.start, gap.end);
-			} else {
-				// A skip or final drop is final, so no update reopens a stale report it replaced.
-				this.#reportedStale = removeRun(this.#reportedStale, gap.start, gap.end);
-				this.#reportedReceived = removeRun(this.#reportedReceived, gap.start, gap.end);
-			}
+			// Replacing what it goes out over: a final report is never reopened by an update.
+			this.#reported.set(gap.start, gap.end, {
+				...gap,
+				kind,
+				...(kind === "stale" && hole.received ? { received: true } : {}),
+			});
 			return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 		}
 		return undefined;
@@ -4081,6 +4118,7 @@ export class Subscriber {
 			// A handler opening takes a miss nobody could ask before.
 			...(producer ? [fillsOf(producer).opened.changed(fn)] : []),
 			this.#state.startChanged.changed(fn),
+			this.#state.folded.changed(fn),
 			// A group starting may settle a time end, or move the cap it holds reads back with.
 			...(this.#window.settled ? [] : [this.#state.timelineChanged.changed(fn)]),
 			// Accepting the track may refuse a time anchor, with no group arriving to say so.

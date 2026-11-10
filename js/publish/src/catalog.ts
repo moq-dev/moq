@@ -52,7 +52,7 @@ export class CatalogProducer {
 		if (!changed || this.#outputs.size === 0) return;
 
 		const at = now();
-		const next = this.#lastEstimate === undefined ? undefined : this.#lastEstimate.add(ESTIMATE_INTERVAL);
+		const next = this.#lastEstimate === undefined ? undefined : this.#lastEstimate.saturatingAdd(ESTIMATE_INTERVAL);
 		if (!estimateOnly || next === undefined || at.ge(next)) {
 			this.#publish(estimateOnly || this.#pending !== undefined);
 		} else if (!this.#pending) {

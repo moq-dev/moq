@@ -53,14 +53,13 @@ test("wrapper gates preserve trusted tag inputs and inspect only their publisher
 		["swift-lib", "swift", "build"],
 	]) {
 		const wrapper = await read(`release-${file}`);
-		expect(wrapper.on.workflow_run?.workflows).toContain("Release FFI");
+		expect(wrapper.on.workflow_run?.workflows).toEqual(["Release FFI"]);
 		expect(wrapper.permissions).toEqual({ contents: "read" });
 		const gate = wrapper.jobs["ffi-release"];
 		expect(gate.permissions).toEqual({ contents: "read", actions: "read" });
 		expect(gate.if).toContain("github.repository_owner == 'moq-dev'");
 		expect(gate.if).toContain("github.event.workflow_run.event == 'push'");
 		expect(gate.if).toContain("startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v')");
-		expect(gate.if).toContain("github.event.workflow_run.name == 'Release FFI'");
 		expect(gate.steps?.[0]?.with?.ref).toBe("${{ github.sha }}");
 		expect(gate.steps?.at(-1)?.run).toBe(`just gh ffi completed ${language}`);
 		expect(gate.steps?.at(-1)?.env?.UPSTREAM_RUN_STARTED_AT).toBe(
