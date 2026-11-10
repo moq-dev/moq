@@ -54,6 +54,8 @@ moves what remains of them once their claims merge.
 - [The recurring audits are fewer and carry plans, not results](/quest/m1/audit-merge.md) - m3's 13 audits become about five, each a Goal plus a short check-first list
 - [The CARLA bridge builds outside the root workspace](/quest/m1/carla-workspace.md) - workspace builds stop compiling the demo bridge
 - [Draft publishing keeps the upload and drops changelog rewriting](/quest/m1/drafts-publish-trim.md) - `sh/drafts/publish.sh` and its test shrink to the datatracker upload
+- [A client's first dial fails fast](/quest/m1/reconnect-fail-fast.md) - a client that never got a session stops instead of retrying, later failures back off, and a version mismatch is logged on both sides
+- [Find out whether Cloudflare's relay really sends SOLICIT](/quest/m1/cf-solicit.md) - capture its SETUP, then close moq-dev/moq#8418 as their bug or fix our parsing
 
 ## Related
 
