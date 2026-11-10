@@ -221,7 +221,11 @@ fn announce_info(announced: u32) -> moq_announce_event {
 		captures: std::ptr::null(),
 		captures_len: 0,
 		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT,
-		route: moq_route_info { cost: 0, instance: 0 },
+		route: moq_route_info {
+			cost: 0,
+			instance: 0,
+			available: false,
+		},
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	info

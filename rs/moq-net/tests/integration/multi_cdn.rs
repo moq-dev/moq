@@ -138,7 +138,7 @@ fn via_a(announce: &origin::RouteEvent) -> bool {
 			announce: a,
 		} => &a.route,
 		origin::RouteEvent {
-			kind: origin::RouteKind::End,
+			kind: origin::RouteKind::End | origin::RouteKind::Offline,
 			..
 		} => return false,
 	};

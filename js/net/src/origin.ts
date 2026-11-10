@@ -288,11 +288,18 @@ interface RouteEntry {
 	readonly route: Signal<WireRoute>;
 	readonly originated: boolean;
 	readonly server?: ServeState;
+	/**
+	 * Set as a received route leaves because its session lost it, rather than its announcer
+	 * ending it: readers then see it go offline, not end.
+	 */
+	lost: boolean;
 }
 
 /** One advertisement at a prefix. `exact` marks an announced local broadcast, which is only its own path. */
 interface Candidate extends Advertised {
 	readonly exact: boolean;
+	/** Whether the route left because its session lost it; see {@link RouteEntry.lost}. */
+	readonly lost?: () => boolean;
 }
 
 /**
@@ -495,6 +502,8 @@ interface Handoff {
 
 interface Presented extends Advertised {
 	readonly captures: Path.Pattern[] | undefined;
+	/** See {@link Candidate.lost}. */
+	readonly lost?: () => boolean;
 }
 
 /** A table mutation invalidates the shared route snapshot before its async notification. */
@@ -577,6 +586,7 @@ class OriginState {
 					route: entry.route.peek(),
 					claim: entry.claim,
 					exact: false,
+					lost: () => entry.lost,
 				});
 			}
 			if (list.length > 0) out.set(path, list);
@@ -1546,6 +1556,7 @@ export class Producer implements Table {
 			announced,
 			change: (update) => change(WireRoute.normalize({ ...info, ...update })),
 			close: release,
+			end: release,
 			info: () => (announced() ? this.#state.advertisedLocal.peek()?.get(path) : undefined),
 			update: (next) => {
 				const named = WireRoute.normalize(next);
@@ -1632,6 +1643,7 @@ export class Producer implements Table {
 			route: new Signal(route),
 			originated,
 			server,
+			lost: false,
 		};
 		server.onReject = (path, err) => this.#state.refuse(path, entry, err);
 
@@ -1680,6 +1692,11 @@ export class Producer implements Table {
 			this.#state.servers.delete(server);
 			remove(() => server.close());
 		});
+		// A received route its handle closes was lost with its session, unless its announcer ended it.
+		const close = (lost: boolean) => {
+			if (!ended) entry.lost = lost;
+			release();
+		};
 		// A route made after its origin (or this handle) closed is born retracted.
 		if (this.#borrowed?.closed || !this.#state.routes.peek()) {
 			ended = true;
@@ -1733,7 +1750,8 @@ export class Producer implements Table {
 				},
 				announced: () => inserted && this.#state.routes.peek() !== undefined,
 				change: (changed) => update(WireRoute.normalize({ ...entry.route.peek(), ...changed })),
-				close: release,
+				close: () => close(!originated),
+				end: () => close(false),
 				info: () => (inserted && this.#state.routes.peek() ? entry.route.peek() : undefined),
 				update: (next) => {
 					// A route naming no instance keeps the one it serves.
@@ -2523,6 +2541,7 @@ export class Consumer implements Reader {
 				// forwards to, see the route as it is.
 				route: entry.route.draining === undefined ? entry.route : { ...entry.route, draining: undefined },
 				captures: scopeCaptures(scope.pattern, path),
+				lost: entry.lost,
 			});
 		}
 		return next;
@@ -2553,7 +2572,7 @@ export class Consumer implements Reader {
 						producer.append({
 							prefix: path,
 							captures: snap.captures,
-							kind: "end",
+							kind: snap.lost?.() ? "offline" : "end",
 							route: snap.route,
 						});
 				}
@@ -2721,6 +2740,8 @@ interface RouteControl {
 	announced(): boolean;
 	change(update: Partial<Pick<WireRoute, "cost" | "auth">>): void;
 	close(): void;
+	/** Close as its announcer ending it; {@link close} on a received route means its session lost it. */
+	end(): void;
 	info(): WireRoute | undefined;
 	update(info: Partial<WireRoute>): void;
 }
@@ -2732,6 +2753,7 @@ function registerControl(handle: Route | Claim, control: RouteControl): void {
 			return control.info();
 		},
 		update: (info) => control.update(info),
+		end: () => control.end(),
 	});
 }
 

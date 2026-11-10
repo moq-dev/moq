@@ -220,7 +220,7 @@ function present(routes: Announce.Routes): Getter<ReadonlySet<Path.Valid>> {
 		for await (const event of routes) {
 			paths.update((previous) => {
 				const next = new Set(previous);
-				if (event.kind === "end") next.delete(event.prefix);
+				if (event.kind === "end" || event.kind === "offline") next.delete(event.prefix);
 				else next.add(event.prefix);
 				return next;
 			});
@@ -1135,7 +1135,7 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 		const seen = new Set<string>();
 		void (async () => {
 			for await (const event of watching) {
-				if (event.kind === "end") seen.delete(event.prefix);
+				if (event.kind === "end" || event.kind === "offline") seen.delete(event.prefix);
 				else seen.add(event.prefix);
 			}
 		})();
@@ -1185,7 +1185,7 @@ test("a pump owes the retractions of the upstream it replaces", async () => {
 	const second = new Announce.Producer();
 	second.synced();
 	upstream.set(second);
-	expect(await parked).toMatchObject({ prefix: Path.from("a"), kind: "end" });
+	expect(await parked).toMatchObject({ prefix: Path.from("a"), kind: "offline" });
 	await tick();
 	expect(consumer.synced.peek()).toBe(false);
 	void consumer.next();

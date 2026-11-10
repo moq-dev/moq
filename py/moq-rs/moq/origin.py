@@ -33,18 +33,31 @@ each broadcast's exact path, so subscribers can enumerate broadcasts from routes
 """
 
 AnnounceEvent = MoqAnnounceEvent
-"""What :class:`AnnounceConsumer` yields: :data:`AnnounceEventPresent` or
-:data:`AnnounceEventAbsent`, each carrying an :data:`Announce` as ``announce``.
+"""What :class:`AnnounceConsumer` yields: :data:`AnnounceEventPresent`,
+:data:`AnnounceEventUnavailable`, :data:`AnnounceEventAvailable`,
+:data:`AnnounceEventAbsent`, or :data:`AnnounceEventOffline`, each carrying an
+:data:`Announce` as ``announce``.
 
 Another publisher instance taking a path over keeps it present; hold
 :meth:`OriginConsumer.follow` to see the broadcast change.
 """
 
 AnnounceEventPresent = MoqAnnounceEvent.PRESENT
-"""A route now covers the path, which was absent."""
+"""A route now covers the path, which was absent; it may arrive unavailable."""
+
+AnnounceEventUnavailable = MoqAnnounceEvent.UNAVAILABLE
+"""The present path lost every usable path to its origin but may recover one:
+it stays present while requests for it may fail."""
+
+AnnounceEventAvailable = MoqAnnounceEvent.AVAILABLE
+"""The present path recovered a usable path: request it again."""
 
 AnnounceEventAbsent = MoqAnnounceEvent.ABSENT
-"""No route covers the path any more; carries its last route."""
+"""The origin withdrew the path; carries its last route."""
+
+AnnounceEventOffline = MoqAnnounceEvent.OFFLINE
+"""This side let go of the path, which its origin may still serve: the session it
+arrived on closed, or the network lost every path to it. Carries its last route."""
 
 
 class AnnounceConsumer(_Stream[MoqAnnounceEvent]):

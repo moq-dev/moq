@@ -356,7 +356,7 @@ async fn synced_listing(url: url::Url) -> BTreeSet<String> {
 			use moq_net::origin::{RouteEvent, RouteKind};
 			match next {
 				Some(RouteEvent {
-					kind: RouteKind::End,
+					kind: RouteKind::End | RouteKind::Offline,
 					announce: route,
 				}) => listed.remove(route.prefix.as_str()),
 				Some(RouteEvent {

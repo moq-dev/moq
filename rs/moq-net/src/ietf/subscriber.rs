@@ -1694,7 +1694,7 @@ impl Subscriber {
 						// The advertisement itself stays live on the wire.
 						tracing::debug!(%path, "dropping reflected namespace");
 						if let Some(id) = held.id.take() {
-							let _ = self.stop_announce(path, id, false);
+							let _ = self.stop_announce(path, id, false, false);
 						}
 						continue;
 					};
@@ -1725,7 +1725,7 @@ impl Subscriber {
 					let path = prefix.join(&msg.suffix)?;
 					tracing::debug!(%path, "namespace_done");
 					if let Some(id) = live.remove(&path).and_then(|held| held.id) {
-						let _ = self.stop_announce(path, id, false);
+						let _ = self.stop_announce(path, id, false, true);
 					}
 				}
 				_ => {
@@ -1833,7 +1833,7 @@ impl NamespaceSubscription {
 					// detaches.
 					for (path, advert) in std::mem::take(&mut request.live) {
 						if let Some(id) = advert.id {
-							let _ = self.this.stop_announce(path, id, false);
+							let _ = self.this.stop_announce(path, id, false, false);
 						}
 					}
 
@@ -2072,10 +2072,17 @@ impl Subscriber {
 	}
 
 	/// Retract an advertisement's route ahead of a withdrawal that waits on the peer, so a peer
-	/// that stops reading cannot keep it routed. `attached` makes it once only.
-	fn release_announce(&mut self, path: &Path, attached: &mut Option<u64>, token: bool) -> Result<(), Error> {
+	/// that stops reading cannot keep it routed. `attached` makes it once only. `ended` when
+	/// the peer withdrew it, rather than the stream failing.
+	fn release_announce(
+		&mut self,
+		path: &Path,
+		attached: &mut Option<u64>,
+		token: bool,
+		ended: bool,
+	) -> Result<(), Error> {
 		if let Some(id) = attached.take() {
-			self.stop_announce(path.clone(), id, token)?;
+			self.stop_announce(path.clone(), id, token, ended)?;
 		}
 		Ok(())
 	}
@@ -2286,7 +2293,10 @@ impl ServePublishNamespace {
 					// cannot keep it routed. A stream that detached mid-flight (a reflected update) has
 					// nothing left to release.
 					let token = live.grant.is_some();
-					self.this.release_announce(&live.path, &mut live.attached, token)?;
+					// Only the peer's own withdrawal ends the route; a failed stream loses it.
+					let ended = matches!(lived, Ok(Ok(Withdraw::Done)));
+					self.this
+						.release_announce(&live.path, &mut live.attached, token, ended)?;
 
 					let withdraw = match lived {
 						Ok(withdraw) => withdraw?,
@@ -2769,7 +2779,7 @@ impl PublishNamespaceUpdates {
 					None => {
 						if let Some(id) = attached.take() {
 							tracing::debug!(%path, "publish_namespace now loops back; detaching");
-							let _ = this.stop_announce(path.clone(), id, token_grant.is_some());
+							let _ = this.stop_announce(path.clone(), id, token_grant.is_some(), false);
 						}
 						Ok(())
 					}
@@ -2989,7 +2999,7 @@ impl Subscriber {
 
 	/// Release advertisement `id` of `path`, closing its sources when it was the last.
 	/// `token` says its own request token authorized it.
-	fn stop_announce(&mut self, path: Path, id: u64, token: bool) -> Result<(), Error> {
+	fn stop_announce(&mut self, path: Path, id: u64, token: bool, ended: bool) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
 		match state.broadcasts.entry(path.clone()) {
@@ -3003,8 +3013,12 @@ impl Subscriber {
 				if state.adverts.is_empty() {
 					tracing::debug!(route = %crate::path::Rooted(self.origin.root(), &path), "unannounced");
 					// Dropping the entry retracts the route (its announcement drops) and
-					// closes its sources (its token closes).
-					entry.remove();
+					// closes its sources (its token closes). Readers see it end only when
+					// the peer withdrew it; otherwise it goes offline.
+					let state = entry.remove();
+					if ended && let Some(dynamic) = state.dynamic {
+						dynamic.ended();
+					}
 					return Ok(());
 				}
 				// The newest went while an older one stands: that one is what remains.
@@ -10650,8 +10664,8 @@ mod tests {
 			)]
 		);
 
-		subscriber.stop_announce(a.clone(), first, false).unwrap();
-		subscriber.stop_announce(a, repeat, false).unwrap();
+		subscriber.stop_announce(a.clone(), first, false, true).unwrap();
+		subscriber.stop_announce(a, repeat, false, true).unwrap();
 		subscriber.start_announce(b, last, Admit::Session(None)).unwrap();
 	}
 
@@ -10837,7 +10851,7 @@ mod tests {
 		use futures::FutureExt;
 		match consumer.path_routes(path).ok()?.next().now_or_never()?? {
 			crate::origin::RouteEvent {
-				kind: crate::origin::RouteKind::End,
+				kind: crate::origin::RouteKind::End | crate::origin::RouteKind::Offline,
 				..
 			} => None,
 			crate::origin::RouteEvent {
@@ -11102,7 +11116,7 @@ mod tests {
 			.unwrap();
 		settle().await;
 
-		subscriber.stop_announce(path, id, false).unwrap();
+		subscriber.stop_announce(path, id, false, true).unwrap();
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
 			"an explicit NAMESPACE_DONE must retract the route",
@@ -11251,7 +11265,7 @@ mod tests {
 		settle().await;
 
 		// One advertisement's stream dies: the other still holds the source.
-		subscriber.stop_announce(path.clone(), ids[0], false).unwrap();
+		subscriber.stop_announce(path.clone(), ids[0], false, true).unwrap();
 		settle().await;
 		assert!(
 			routed_now(&consumer, "room/host").is_some(),
@@ -11259,7 +11273,7 @@ mod tests {
 		);
 
 		// The last owner retracts: the broadcast closes with it.
-		subscriber.stop_announce(path, ids[1], false).unwrap();
+		subscriber.stop_announce(path, ids[1], false, true).unwrap();
 		settle().await;
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
@@ -11362,7 +11376,7 @@ mod tests {
 
 		// One advertisement, so one unannounce detaches it. If the update had bumped the
 		// refcount, this would leave the route stranded.
-		subscriber.stop_announce(path, id, false).unwrap();
+		subscriber.stop_announce(path, id, false, true).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -11414,7 +11428,7 @@ mod tests {
 		);
 
 		// One advertisement, so one unannounce detaches it.
-		subscriber.stop_announce(path, id, false).unwrap();
+		subscriber.stop_announce(path, id, false, true).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -11447,9 +11461,9 @@ mod tests {
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
-		subscriber.stop_announce(path.clone(), first, false).unwrap();
+		subscriber.stop_announce(path.clone(), first, false, true).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
-		subscriber.stop_announce(path, second, false).unwrap();
+		subscriber.stop_announce(path, second, false, true).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -11480,9 +11494,9 @@ mod tests {
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
-		subscriber.stop_announce(path.clone(), first, false).unwrap();
+		subscriber.stop_announce(path.clone(), first, false, true).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
-		subscriber.stop_announce(path, second, false).unwrap();
+		subscriber.stop_announce(path, second, false, true).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -11521,7 +11535,7 @@ mod tests {
 		);
 
 		// That supersedes the advertisement it repeats, so the old route is retired.
-		subscriber.stop_announce(path, id, false).unwrap();
+		subscriber.stop_announce(path, id, false, true).unwrap();
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
 			"the superseded route must not stay attached"
@@ -12131,7 +12145,7 @@ mod tests {
 
 		// What the stream's exit path does with whatever it still holds.
 		for (path, id) in live {
-			subscriber.stop_announce(path, id, false).unwrap();
+			subscriber.stop_announce(path, id, false, true).unwrap();
 		}
 
 		assert!(routed_now(&consumer, "room/a").is_none(), "room/a leaked a refcount");

@@ -1963,9 +1963,14 @@ mod tests {
 	/// The next route and whether it is active.
 	#[cfg(all(feature = "uds", unix))]
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-		match announced.next().await? {
-			moq_net::announce::Event::Present(route) => Some((route, true)),
-			moq_net::announce::Event::Absent(route) => Some((route, false)),
+		loop {
+			return match announced.next().await? {
+				moq_net::announce::Event::Present(route) => Some((route, true)),
+				moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => {
+					Some((route, false))
+				}
+				moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
+			};
 		}
 	}
 

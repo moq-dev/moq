@@ -16,7 +16,7 @@ Decided 2026-10-27 (maintainer), from
 [moq-dev/moq#6947](https://github.com/moq-dev/moq/pull/6947): in `js/net`'s
 `origin.ts` a detached request stays on its own route instead of following
 the cheapest one; fix it with the route-selection rework here.
-- Feed the availability API from [Announcement availability](/quest/m2/cluster-routing/routes/availability.md).
+- Feed the availability API (`RouteInfo.available` and the `offline` route kind) from the route layer.
 - Rust/JS interop covers the route messages, the floor marker, and the echo.
 - Encode lite-07's Route ID (ANNOUNCE_START) and Node ID (every TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS request, 0 when the publisher selects the node) as Rust does, and pin `js/net/src/lite/announce.test.ts`'s goldens to `lite::compress`'s `GOLDEN` and `JS_LITERAL`.
 - Leave the temporary Lite-06 Chain Setup Parameter unsent: JS translates nothing, so it keeps no chain, and a Rust peer sends the chain only to a peer that offers it.
@@ -40,10 +40,6 @@ the cheapest one; fix it with the route-selection rework here.
   [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) resolves it.
   The local drain/datagram recipes and `just test media --media-cases replacement` remain
   available to validate the port.
-
-## Required
-
-- [Announcement availability](/quest/m2/cluster-routing/routes/availability.md) - the API this feeds
 
 ## Related
 

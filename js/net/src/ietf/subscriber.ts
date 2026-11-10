@@ -446,7 +446,7 @@ export class Subscriber {
 	/**
 	 * Drop advertisement `id` for a path, retracting it only once the last one goes.
 	 */
-	#detachAnnounce(path: Path.Valid, id: number) {
+	#detachAnnounce(path: Path.Valid, id: number, ended: boolean) {
 		const existing = this.#announced.get(path);
 		const index = existing?.adverts.findIndex((advert) => advert.id === id) ?? -1;
 		if (existing === undefined || index === -1) return;
@@ -468,7 +468,13 @@ export class Subscriber {
 			// A consumer that closed stays registered until its request is off the wire.
 			if (!sees(filter, path) || consumer.closed.peek() !== undefined) continue;
 			const scope = filter.scope;
-			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "end", route: existing.route });
+			// Only the peer's withdrawal ends the route; losing its stream or path lets it go.
+			consumer.append({
+				prefix: path,
+				captures: scopeCaptures(scope, path),
+				kind: ended ? "end" : "offline",
+				route: existing.route,
+			});
 		}
 	}
 
@@ -505,13 +511,14 @@ export class Subscriber {
 		let released = false;
 
 		// The stream owns every advertisement it carried, so give them back however it ends:
-		// as the request starts leaving, a decode error, or the peer resetting it. Without
+		// as the request starts leaving, a decode error, or the peer resetting it. Closing the
+		// stream withdraws nothing, which NAMESPACE_DONE is for, so they go offline. Without
 		// this each namespace keeps its count and the source never detaches, which would pin
 		// the path for the session even after the other source withdrew.
 		const release = () => {
 			released = true;
 			for (const [path, held] of live) {
-				if (held.id !== undefined) this.#detachAnnounce(path, held.id);
+				if (held.id !== undefined) this.#detachAnnounce(path, held.id, false);
 			}
 			live.clear();
 		};
@@ -633,7 +640,7 @@ export class Subscriber {
 							// over: the path is gone even though the message says active.
 							if (this.#reflected(params.cluster)) {
 								console.debug(`dropping reflected namespace: broadcast=${path}`);
-								if (held?.id !== undefined) this.#detachAnnounce(path, held.id);
+								if (held?.id !== undefined) this.#detachAnnounce(path, held.id, false);
 								live.set(path, {});
 								continue;
 							}
@@ -652,7 +659,7 @@ export class Subscriber {
 
 							const held = live.get(path);
 							live.delete(path);
-							if (held?.id !== undefined) this.#detachAnnounce(path, held.id);
+							if (held?.id !== undefined) this.#detachAnnounce(path, held.id, true);
 						} else {
 							throw new Error(
 								`unexpected message on subscribe_namespace stream: 0x${msgType.toString(16)}`,
@@ -1735,6 +1742,9 @@ export class Subscriber {
 		// stream ends.
 		this.#announceSlots.acquire();
 		let attached: number | undefined;
+		// Set once the peer ends the request, by FIN or reset, which withdraws the
+		// advertisement; a violation or a refused update here loses it instead.
+		let withdrawn = false;
 
 		try {
 			// Send OK first. This must complete before notifying consumers,
@@ -1755,6 +1765,7 @@ export class Subscriber {
 				if (framed === undefined) {
 					// FIN cancels only on some drafts; on the rest the request lasts until reset.
 					await request.ended;
+					withdrawn = true;
 					break;
 				}
 
@@ -1802,7 +1813,7 @@ export class Subscriber {
 				if (this.#reflected(held)) {
 					if (attached !== undefined) {
 						console.debug(`publish_namespace now loops back, detaching: broadcast=${path}`);
-						this.#detachAnnounce(path, attached);
+						this.#detachAnnounce(path, attached, false);
 						attached = undefined;
 					}
 				} else if (attached === undefined) {
@@ -1823,7 +1834,7 @@ export class Subscriber {
 			// Give back exactly what was taken: a request that never got its OK out never
 			// referenced the path, and retracting there would drop someone else's count.
 			if (attached !== undefined) {
-				this.#detachAnnounce(path, attached);
+				this.#detachAnnounce(path, attached, withdrawn);
 			}
 		}
 	}
