@@ -116,7 +116,7 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 # moq-cli builds the Rust interop clients as examples from outside its
 # crate; sh/rs/select.test.py fails when a target's directory is missing.
 # moq-relay's tests read its NixOS module.
-module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
+module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
     tools='cargo jq' compiles='check fix' fix
 # The C package links moq-c's native-libs lists, and the C++ package's FFI
 # pin. Both packages format with sh/clang-format.sh and OBS's style file.
@@ -158,9 +158,12 @@ module flake '(^\.cargo/|^rs/.*\.(toml|txt|ptx|in)$|^Cargo\.(toml|lock)$|^rust-t
 module bench '^bench/' \
     tools='cargo' compiles=check
 # The CARLA demo's simulator worker and launchers. Its player is a JS
-# package and its GPU bridge a Rust crate, so those modules cover them.
+# package, so that module covers it.
 module carla '^demo/carla/(sim/|justfile$)' \
     tools='uv'
+# The CARLA demo's GPU bridge, a Cargo workspace of its own.
+module carla_bridge '^demo/carla/(bridge/|justfile$)' \
+    tools='cargo' compiles='check fix' fix
 # swift needs no tools: it skips off macOS by design, and platform.yml is its
 # real gate. Its formatter is absent where nixpkgs cannot build it (see
 # flake.nix).
@@ -369,6 +372,7 @@ step() {
         # The check keeps docs and the isolated default-media lint; the test
         # phase enforces the other clippy checks in its existing build.
         check:rs) run just rs lint-changed "$rs_list" ;;
+        check:carla_bridge) run just carla bridge-check ;;
         check:bench)
             run python3 bench/compare.test.py
             run bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
@@ -434,6 +438,7 @@ step() {
         test:py) run just py test ;;
         test:gh) run just gh test ;;
         fix:rs) run just rs fix-changed "$rs_list" ;;
+        fix:carla_bridge) run just carla bridge-fix ;;
         fix:js) run just js fix-changed "$js_list" ;;
         fix:biome) run just biome-fix ;;
         fix:markdown)
