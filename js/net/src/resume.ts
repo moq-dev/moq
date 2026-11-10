@@ -1214,7 +1214,7 @@ class Reader implements ResumeSource {
 		const timer = new AbortController();
 		this.#wall = { at, timer };
 		// A wakeup is never a reason to hold a Node/Bun process open.
-		void sleepUntil(Instant.ZERO.add(Duration.nanos(at)), { signal: timer.signal, ref: false }).then(
+		void sleepUntil(Instant.ZERO.saturatingAdd(Duration.nanos(at)), { signal: timer.signal, ref: false }).then(
 			() => {
 				if (timer.signal.aborted) return;
 				this.#wall = undefined;

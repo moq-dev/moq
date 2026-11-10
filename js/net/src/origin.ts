@@ -122,8 +122,9 @@ class Scope {
 	}
 
 	/** The exact paths within this scope, relative to its root. */
-	projectPaths<T>(values: ReadonlyMap<Path.Valid, T> | undefined): ReadonlyMap<Path.Valid, T> | undefined {
-		if (!values || this === Scope.all) return values;
+	projectPaths<T>(values: ReadonlyMap<Path.Valid, T>): ReadonlyMap<Path.Valid, T> {
+		if (this === Scope.all) return values;
+
 		const out = new Map<Path.Valid, T>();
 		for (const [path, value] of values) {
 			if (!this.matches(path)) continue;
@@ -541,8 +542,8 @@ function retire({ producer, front }: Created): void {
 /** Reactive backing state shared by origin producers and consumers. */
 class OriginState {
 	// Both tables decouple the application producing into the origin from the
-	// connections serving or feeding it. Undefined once the origin closes, so late
-	// writes fail loudly.
+	// connections serving or feeding it. Emptied once the origin closes, after which
+	// `closed` refuses late writes.
 	//
 	// Created is what this endpoint publishes, keyed by exact path, announced or not.
 	// Local is the announced subset, with its route in advertisedLocal: a broadcast
@@ -551,10 +552,10 @@ class OriginState {
 	// newest first. Local and routes stay separate so a session can never announce a
 	// received entry back to a peer, which is what makes an origin shared by both
 	// directions echo-free.
-	created: Map<Path.Valid, Created> | undefined = new Map();
-	local = new VersionedSignal<Map<Path.Valid, broadcast.Consumer> | undefined>(new Map());
-	advertisedLocal = new VersionedSignal<Map<Path.Valid, WireRoute> | undefined>(new Map());
-	routes = new VersionedSignal<Map<Path.Valid, RouteEntry[]> | undefined>(new Map());
+	created = new Map<Path.Valid, Created>();
+	local = new VersionedSignal(new Map<Path.Valid, broadcast.Consumer>());
+	advertisedLocal = new VersionedSignal(new Map<Path.Valid, WireRoute>());
+	routes = new VersionedSignal(new Map<Path.Valid, RouteEntry[]>());
 
 	#snapshotVersion = "";
 	#snapshot: ReadonlyMap<Path.Valid, readonly Candidate[]> = new Map();
@@ -577,7 +578,7 @@ class OriginState {
 	 */
 	candidates(skip?: (entry: RouteEntry) => boolean): Map<Path.Valid, Candidate[]> {
 		const out = new Map<Path.Valid, Candidate[]>();
-		for (const [path, entries] of this.routes.peek() ?? []) {
+		for (const [path, entries] of this.routes.peek()) {
 			const list: Candidate[] = [];
 			for (const entry of entries) {
 				if (skip?.(entry)) continue;
@@ -592,10 +593,10 @@ class OriginState {
 			if (list.length > 0) out.set(path, list);
 		}
 		const advertised = this.advertisedLocal.peek();
-		for (const [path, front] of this.local.peek() ?? []) {
+		for (const [path, front] of this.local.peek()) {
 			const local = {
 				identity: front,
-				route: advertised?.get(path) ?? WireRoute.default,
+				route: advertised.get(path) ?? WireRoute.default,
 				exact: true,
 			};
 			const list = out.get(path);
@@ -612,6 +613,7 @@ class OriginState {
 	// Originated advertisements sessions should forward: exact-path announces plus
 	// originated dynamics. Identity is the local front or the route entry, so a
 	// republish diffs as retract-then-announce and a re-price as another active.
+	// Undefined once the origin closes, which ends the sessions publishing it.
 	originated = new Signal<Advertisements | undefined>(new Map());
 
 	// Every open prefix route's server, advertised or not, so the origin's close ends each
@@ -629,7 +631,7 @@ class OriginState {
 	// Paths consumers asked for without waiting for an announcement; attached sessions
 	// answer them with blind subscriptions. Never announced: an answered request is assumed
 	// present, not known live, so it must not read as an availability claim.
-	requests = new Signal<Map<Path.Valid, RequestSlot> | undefined>(new Map());
+	requests = new Signal(new Map<Path.Valid, RequestSlot>());
 
 	// Path-local wakeups for followers, which survive the end of a resolved instance.
 	// A counter rather than the instance: the instance is a plain object, so two routes with
@@ -701,7 +703,7 @@ class OriginState {
 				visited.add(next);
 				// Children first: settling a request may prune its node.
 				stack.push(...next.children.values());
-				const slot = requests?.get(next.path);
+				const slot = requests.get(next.path);
 				if (slot) for (const absent of [...slot.absent]) absent();
 				// A pinned slot waits detached.
 				for (const other of [...(this.detached.get(next.path) ?? [])]) {
@@ -796,7 +798,7 @@ class OriginState {
 	 */
 	refresh(path: Path.Valid): void {
 		this.watchers.get(path)?.version.update((n) => n + 1);
-		const slot = this.requests.peek()?.get(path);
+		const slot = this.requests.peek().get(path);
 		const detached = [...(this.detached.get(path) ?? [])];
 		if (slot) this.reroute(path, slot);
 		for (const other of detached) this.reroute(path, other);
@@ -805,14 +807,14 @@ class OriginState {
 
 	/** Release unanswered requests no wire waiter or local route still needs. */
 	forget(path: Path.Valid): void {
-		const slot = this.requests.peek()?.get(path);
+		const slot = this.requests.peek().get(path);
 		// An empty slot remains joinable until its deferred teardown removes it.
 		const best = slot ? this.bestEntry(path) : undefined;
 		const wanted = best && !this.localWins(path, best) ? best.server : undefined;
 		const failovers = this.detached.get(path);
 		let held: Set<RouteEntry> | undefined;
 		for (const prefix of coveringPrefixes(path)) {
-			for (const entry of this.routes.peek()?.get(prefix) ?? []) {
+			for (const entry of this.routes.peek().get(prefix) ?? []) {
 				const server = entry.server;
 				const pending = server?.pending.get(path);
 				if (!server || !pending || server.demanding.has(path) || server === wanted) continue;
@@ -877,8 +879,8 @@ class OriginState {
 			return;
 		}
 		// A local broadcast announced under the instance serves the same bytes with no round trip.
-		const local = this.local.peek()?.get(path);
-		if (instance !== undefined && local && this.advertisedLocal.peek()?.get(path)?.instance === instance) {
+		const local = this.local.peek().get(path);
+		if (instance !== undefined && local && this.advertisedLocal.peek().get(path)?.instance === instance) {
 			slot.failover = undefined;
 			this.retain(path, slot, undefined);
 			slot.route.set({ front: local, instance, source: local });
@@ -914,10 +916,10 @@ class OriginState {
 	pick(path: Path.Valid, slot: RequestSlot, instance: Instance.Valid): void {
 		const skip = (candidate: RouteEntry) => !candidate.server || candidate.route.peek().instance !== instance;
 		const entry = this.bestEntry(path, skip);
-		const local = this.local.peek()?.get(path);
+		const local = this.local.peek().get(path);
 		if (
 			local &&
-			this.advertisedLocal.peek()?.get(path)?.instance === instance &&
+			this.advertisedLocal.peek().get(path)?.instance === instance &&
 			this.localWins(path, entry, skip)
 		) {
 			slot.failover = undefined;
@@ -968,10 +970,10 @@ class OriginState {
 	 */
 	serves(path: Path.Valid, source: object, instance: Instance.Valid | undefined, exact: boolean): boolean {
 		const matches = (candidate: object) => candidate === source || (!exact && instance !== undefined);
-		const local = this.local.peek()?.get(path);
-		const advertised = this.advertisedLocal.peek()?.get(path);
+		const local = this.local.peek().get(path);
+		const advertised = this.advertisedLocal.peek().get(path);
 		if (local && advertised && advertised.instance === instance && matches(local)) return true;
-		for (const [prefix, entries] of this.routes.peek() ?? []) {
+		for (const [prefix, entries] of this.routes.peek()) {
 			if (!Path.hasPrefix(prefix, path)) continue;
 			for (const entry of entries) {
 				if (!entry.server || !entry.scope.matches(path) || entry.route.peek().instance !== instance) continue;
@@ -984,9 +986,9 @@ class OriginState {
 	/** The publisher instance a request for `path` resolves through, when one serves it. */
 	instance(path: Path.Valid): Served | undefined {
 		const entry = this.bestEntry(path);
-		const local = this.local.peek()?.get(path);
+		const local = this.local.peek().get(path);
 		if (local && this.localWins(path, entry)) {
-			return { identity: local, route: { instance: this.advertisedLocal.peek()?.get(path)?.instance } };
+			return { identity: local, route: { instance: this.advertisedLocal.peek().get(path)?.instance } };
 		}
 		if (!entry?.server) return undefined;
 		return { identity: entry.identity, route: entry.route.peek() };
@@ -998,7 +1000,7 @@ class OriginState {
 	 */
 	retire(path: Path.Valid, slot: RequestSlot): void {
 		this.requests.mutate((map) => {
-			if (map?.get(path) === slot) map.delete(path);
+			if (map.get(path) === slot) map.delete(path);
 		});
 		let detached = this.detached.get(path);
 		if (!detached) {
@@ -1016,7 +1018,7 @@ class OriginState {
 	/** Preserve this route's resolved answers before its server resets for another instance. */
 	restart(entry: RouteEntry): void {
 		for (const path of entry.server?.served.keys() ?? []) {
-			const joined = this.requests.peek()?.get(path);
+			const joined = this.requests.peek().get(path);
 			const slots = [...(this.detached.get(path) ?? [])];
 			if (joined) slots.push(joined);
 			for (const slot of slots) {
@@ -1058,7 +1060,7 @@ class OriginState {
 				this.drop(path, other, err);
 			}
 		}
-		const slot = this.requests.peek()?.get(path);
+		const slot = this.requests.peek().get(path);
 		if (!slot) return;
 		// Only the route the request is waiting on speaks for it; one superseded by another
 		// route or a local broadcast has a moot answer.
@@ -1069,10 +1071,10 @@ class OriginState {
 
 	/** End `slot` with `err`, wherever it is held: it leaves the table and every handle closes. */
 	drop(path: Path.Valid, slot: RequestSlot, err: Error): void {
-		const joined = this.requests.peek()?.get(path) === slot;
+		const joined = this.requests.peek().get(path) === slot;
 		if (joined) {
 			this.requests.mutate((map) => {
-				map?.delete(path);
+				map.delete(path);
 			});
 		}
 		this.detach(path, slot);
@@ -1103,20 +1105,20 @@ class OriginState {
 	refreshPrefix(prefix: Path.Valid): void {
 		for (const [path, watch] of this.watchers) if (Path.hasPrefix(prefix, path)) watch.version.update((n) => n + 1);
 		const detached = [...this.detached].map(([path, slots]) => [path, [...slots]] as const);
-		for (const [path, slot] of [...(this.requests.peek() ?? [])]) {
+		for (const [path, slot] of [...this.requests.peek()]) {
 			if (Path.hasPrefix(prefix, path)) this.reroute(path, slot);
 		}
 		for (const [path, slots] of detached) {
 			if (!Path.hasPrefix(prefix, path)) continue;
 			for (const slot of slots) this.reroute(path, slot);
 		}
-		for (const path of this.requests.peek()?.keys() ?? []) if (Path.hasPrefix(prefix, path)) this.forget(path);
+		for (const path of this.requests.peek().keys()) if (Path.hasPrefix(prefix, path)) this.forget(path);
 		for (const [path] of detached) if (Path.hasPrefix(prefix, path)) this.forget(path);
 	}
 
 	/** Rebuild the publisher-facing originated table after an advertisement write. */
 	rebuildOriginated(): void {
-		if (!this.local.peek() && !this.advertisedLocal.peek() && !this.routes.peek()) {
+		if (this.closed.peek() !== undefined) {
 			this.originated.set(undefined);
 			return;
 		}
@@ -1139,8 +1141,7 @@ class OriginState {
 	/** The preferred entry on the most specific route covering `path`, ignoring skipped entries, if any. */
 	bestEntry(path: Path.Valid, skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
 		const routes = this.routes.peek();
-		if (!routes) return undefined;
-		const local = this.local.peek()?.has(path) ? this.advertisedLocal.peek()?.get(path) : undefined;
+		const local = this.local.peek().has(path) ? this.advertisedLocal.peek().get(path) : undefined;
 		for (const prefix of coveringPrefixes(path)) {
 			const entries = routes.get(prefix);
 			if (!entries) continue;
@@ -1166,14 +1167,14 @@ class OriginState {
 	 * announced locally at `path`.
 	 */
 	localWins(path: Path.Valid, entry: RouteEntry | undefined, skip?: (entry: RouteEntry) => boolean): boolean {
-		const local = this.advertisedLocal.peek()?.get(path);
-		if (!local || !this.local.peek()?.has(path)) return false;
-		if (!entry || !this.routes.peek()?.get(path)?.includes(entry)) return true;
+		const local = this.advertisedLocal.peek().get(path);
+		if (!local || !this.local.peek().has(path)) return false;
+		if (!entry || !this.routes.peek().get(path)?.includes(entry)) return true;
 		const remote = entry.route.peek();
 		// Within one instance only the higher epoch is eligible, however cheap the other is, so
 		// any route at the path the request could take supersedes the local broadcast, not only
 		// the best one.
-		const rivals = (this.routes.peek()?.get(path) ?? [])
+		const rivals = (this.routes.peek().get(path) ?? [])
 			.filter((candidate) => candidate.scope.matches(path) && !(skip?.(candidate) ?? false))
 			.map((candidate) => candidate.route.peek());
 		if (superseded(local, rivals)) return false;
@@ -1192,11 +1193,11 @@ class OriginState {
 	 */
 	route(path: Path.Valid, slot: Pick<RequestSlot, "answer">): Resolution | undefined {
 		const entry = this.bestEntry(path);
-		const local = this.local.peek()?.get(path);
+		const local = this.local.peek().get(path);
 		if (local && this.localWins(path, entry)) {
 			// Nothing reads a remote front the local broadcast replaced, so close its session subscription.
 			this.releaseMaterialized(path);
-			return { front: local, instance: this.advertisedLocal.peek()?.get(path)?.instance, source: local };
+			return { front: local, instance: this.advertisedLocal.peek().get(path)?.instance, source: local };
 		}
 
 		let cached = this.materialized.get(path);
@@ -1346,7 +1347,7 @@ let exactRoute: (producer: Producer, path: Path.Valid, options: RouteOptions, re
 export class Producer implements Table {
 	#state = new OriginState();
 	#scope = Scope.all;
-	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
+	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot>>;
 
 	// Set on a derived handle, which borrows the origin: what it registered, so its close
 	// releases only that. The owner has none, since its close ends the whole origin.
@@ -1455,8 +1456,8 @@ export class Producer implements Table {
 		path = this.#scope.path(path);
 		if (this.#borrowed?.closed) throw new Error("origin handle is closed");
 		publishPath(path);
+		if (this.#state.closed.peek() !== undefined) throw new Error("origin is closed");
 		const created = this.#state.created;
-		if (!created) throw new Error("origin is closed");
 		// Normalized first, so a bad cost throws before anything is created.
 		let info = WireRoute.normalize({
 			instance: options.instance?.id ?? Instance.random(),
@@ -1474,7 +1475,7 @@ export class Producer implements Table {
 		const producer = new broadcast.Producer();
 		hooks.stampPath(producer, path);
 		const front = producer.consume();
-		const announced = () => this.#state.local.peek()?.get(path) === front;
+		const announced = () => this.#state.local.peek().get(path) === front;
 		// The claim moves on before the retraction reroutes anything, so no request resolving the
 		// claim in this step is answered under the ended stream.
 		const retract = () => {
@@ -1538,7 +1539,7 @@ export class Producer implements Table {
 		};
 		const change = (next: WireRoute) => {
 			if (producer.closed.peek() !== undefined) throw new Error("broadcast is closed");
-			if (!this.#state.created) throw new Error("origin is closed");
+			if (this.#state.closed.peek() !== undefined) throw new Error("origin is closed");
 			info = next;
 			if (announced()) this.#advertiseExact(path, front, info);
 		};
@@ -1557,7 +1558,7 @@ export class Producer implements Table {
 			change: (update) => change(WireRoute.normalize({ ...info, ...update })),
 			close: release,
 			end: release,
-			info: () => (announced() ? this.#state.advertisedLocal.peek()?.get(path) : undefined),
+			info: () => (announced() ? this.#state.advertisedLocal.peek().get(path) : undefined),
 			update: (next) => {
 				const named = WireRoute.normalize(next);
 				info = named.instance === undefined ? { ...named, instance: info.instance, epoch: info.epoch } : named;
@@ -1569,26 +1570,26 @@ export class Producer implements Table {
 	}
 
 	#advertiseExact(path: Path.Valid, front: broadcast.Consumer, route: WireRoute): void {
-		if (!this.#state.local.peek()) throw new Error("origin is closed");
-		if (this.#state.created?.get(path)?.front !== front) throw new Error("broadcast is closed");
+		if (this.#state.closed.peek() !== undefined) throw new Error("origin is closed");
+		if (this.#state.created.get(path)?.front !== front) throw new Error("broadcast is closed");
 		// Both maps move together, so every reader sees the broadcast and its route at once.
 		this.#state.local.mutate((broadcasts) => {
-			broadcasts?.set(path, front);
+			broadcasts.set(path, front);
 		});
 		this.#state.advertisedLocal.mutate((advertised) => {
-			advertised?.set(path, route);
+			advertised.set(path, route);
 		});
 		this.#state.rebuildOriginated();
 		this.#state.refresh(path);
 	}
 
 	#retractExact(path: Path.Valid, front: broadcast.Consumer): void {
-		if (this.#state.local.peek()?.get(path) !== front) return;
+		if (this.#state.local.peek().get(path) !== front) return;
 		this.#state.local.mutate((broadcasts) => {
-			broadcasts?.delete(path);
+			broadcasts.delete(path);
 		});
 		this.#state.advertisedLocal.mutate((advertised) => {
-			advertised?.delete(path);
+			advertised.delete(path);
 		});
 		this.#state.rebuildOriginated();
 		this.#state.refresh(path);
@@ -1653,7 +1654,7 @@ export class Producer implements Table {
 		// still marked inserted learns of it here, matching an exact route's "origin is closed".
 		const open = () => {
 			if (ended) throw new Error("claim is closed");
-			if (this.#state.routes.peek()) return;
+			if (this.#state.closed.peek() === undefined) return;
 			inserted = false;
 			throw new Error("origin is closed");
 		};
@@ -1661,9 +1662,9 @@ export class Producer implements Table {
 			open();
 			if (inserted) return;
 			this.#state.routes.mutate((routes) => {
-				const entries = routes?.get(prefix);
+				const entries = routes.get(prefix);
 				if (entries) entries.unshift(entry);
-				else routes?.set(prefix, [entry]);
+				else routes.set(prefix, [entry]);
 			});
 			inserted = true;
 			this.#state.rebuildOriginated();
@@ -1675,12 +1676,12 @@ export class Producer implements Table {
 			if (inserted) {
 				inserted = false;
 				this.#state.routes.mutate((routes) => {
-					const entries = routes?.get(prefix);
+					const entries = routes.get(prefix);
 					if (!entries) return;
 					const index = entries.indexOf(entry);
 					if (index < 0) return;
 					entries.splice(index, 1);
-					if (entries.length === 0) routes?.delete(prefix);
+					if (entries.length === 0) routes.delete(prefix);
 				});
 			}
 			server();
@@ -1698,7 +1699,7 @@ export class Producer implements Table {
 			release();
 		};
 		// A route made after its origin (or this handle) closed is born retracted.
-		if (this.#borrowed?.closed || !this.#state.routes.peek()) {
+		if (this.#borrowed?.closed || this.#state.closed.peek() !== undefined) {
 			ended = true;
 			server.close();
 		} else {
@@ -1733,7 +1734,8 @@ export class Producer implements Table {
 					return { instance: instance as Instance.Valid, epoch: epoch ?? 0n };
 				},
 				advance: (instance) => {
-					if (ended || !this.#state.routes.peek() || entry.route.peek().instance !== instance) return;
+					if (ended || this.#state.closed.peek() !== undefined || entry.route.peek().instance !== instance)
+						return;
 					update({ ...entry.route.peek(), instance: Instance.random(), epoch: 0n }, true);
 				},
 			};
@@ -1748,11 +1750,11 @@ export class Producer implements Table {
 					if (ended || !inserted) return;
 					remove(() => server.reset());
 				},
-				announced: () => inserted && this.#state.routes.peek() !== undefined,
+				announced: () => inserted && this.#state.closed.peek() === undefined,
 				change: (changed) => update(WireRoute.normalize({ ...entry.route.peek(), ...changed })),
 				close: () => close(!originated),
 				end: () => close(false),
-				info: () => (inserted && this.#state.routes.peek() ? entry.route.peek() : undefined),
+				info: () => (inserted && this.#state.closed.peek() === undefined ? entry.route.peek() : undefined),
 				update: (next) => {
 					// A route naming no instance keeps the one it serves.
 					const named = WireRoute.normalize(next);
@@ -1833,7 +1835,7 @@ export class Producer implements Table {
 	 * @internal
 	 */
 	#answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined {
-		const slot = this.#state.requests.peek()?.get(path);
+		const slot = this.#state.requests.peek().get(path);
 		if (!slot || slot.answer !== undefined || this.#borrowed?.closed) {
 			front.close();
 			return undefined;
@@ -1911,15 +1913,15 @@ export class Producer implements Table {
 		// Cleared before the broadcasts close, so each route's synchronous retraction finds
 		// nothing left to rebuild rather than rebuilding the table once per route.
 		const created = this.#state.created;
-		this.#state.created = undefined;
-		this.#state.local.update(() => undefined);
-		this.#state.advertisedLocal.update(() => undefined);
-		for (const entry of created?.values() ?? []) retire(entry);
+		this.#state.created = new Map();
+		this.#state.local.update(() => new Map());
+		this.#state.advertisedLocal.update(() => new Map());
+		for (const entry of created.values()) retire(entry);
 		this.#state.routes.update((routes) => {
-			for (const entries of routes?.values() ?? []) {
+			for (const entries of routes.values()) {
 				for (const entry of entries) entry.server?.close(abort);
 			}
-			return undefined;
+			return new Map();
 		});
 		// A hidden or withdrawn prefix route is out of the table but its handler still waits.
 		for (const server of this.#state.servers) server.close(abort);
@@ -1931,12 +1933,12 @@ export class Producer implements Table {
 		}
 		this.#state.materialized.clear();
 		this.#state.requests.update((requests) => {
-			for (const slot of requests?.values() ?? []) {
+			for (const slot of requests.values()) {
 				slot.answer?.close();
 				slot.answer = undefined;
 				slot.route.set(undefined);
 			}
-			return undefined;
+			return new Map();
 		});
 		for (const [path, slots] of [...this.#state.detached]) {
 			for (const slot of slots) {
@@ -2157,7 +2159,7 @@ export class Consumer implements Reader {
 	 * @internal
 	 */
 	#routes(path: Path.Valid): boolean {
-		if (this.#state.local.peek()?.has(path)) return true;
+		if (this.#state.local.peek().has(path)) return true;
 		return this.#state.bestEntry(path) !== undefined;
 	}
 
@@ -2297,7 +2299,7 @@ export class Consumer implements Reader {
 		const relative = path;
 		path = this.#scope.path(path);
 		const requests = this.#state.requests.peek();
-		if (!requests) {
+		if (this.#state.closed.peek() !== undefined) {
 			// Closed origin: a request that can never resolve ends at once.
 			const closed = new Once<Error | null>();
 			closed.set(this.#state.closed.peek() ?? null);
@@ -2344,7 +2346,7 @@ export class Consumer implements Reader {
 			};
 			slot = created;
 			this.#state.requests.mutate((map) => {
-				map?.set(path, created);
+				map.set(path, created);
 			});
 		}
 		const closed = new Once<Error | null>();
@@ -2459,13 +2461,13 @@ export class Consumer implements Reader {
 				if (taken.handles.size > 0) return;
 				// A refused slot already tore itself down, and the path may hold a newer one. A
 				// detached slot owns the front it took.
-				if (this.#state.requests.peek()?.get(path) !== taken) {
+				if (this.#state.requests.peek().get(path) !== taken) {
 					this.#state.detach(path, taken);
 					this.#state.forget(path);
 					return;
 				}
 				this.#state.requests.mutate((map) => {
-					map?.delete(path);
+					map.delete(path);
 				});
 				taken.answer?.close();
 				taken.answer = undefined;
@@ -2560,10 +2562,7 @@ export class Consumer implements Reader {
 
 		try {
 			for (;;) {
-				const local = this.#state.local.peek();
-				const advertisedLocal = this.#state.advertisedLocal.peek();
-				const routes = this.#state.routes.peek();
-				if (local === undefined && advertisedLocal === undefined && routes === undefined) break;
+				if (this.#state.closed.peek() !== undefined) break;
 
 				const next = this.#listed(patterns, hidden, covering);
 
@@ -2621,9 +2620,9 @@ export class Consumer implements Reader {
 	 * Resolves through what rebuildOriginated advertised: a peer never sees received routes.
 	 */
 	#local(path: Path.Valid, instance?: Instance.Valid): broadcast.Consumer | undefined {
-		const local = this.#state.local.peek()?.get(path);
+		const local = this.#state.local.peek().get(path);
 		if (!local) return undefined;
-		if (instance !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.instance !== instance)
+		if (instance !== undefined && this.#state.advertisedLocal.peek().get(path)?.instance !== instance)
 			return undefined;
 		// Pinned, it competes only with its own instance's routes, whichever instance wins.
 		const skip = unservable(instance);
@@ -3011,8 +3010,8 @@ export class Request {
 	readonly path: Path.Valid;
 
 	#server: ServeState;
-	#done = false;
-	#withdrawn = false;
+	// Answered by the application, or withdrawn by the origin before it was.
+	#state: "pending" | "answered" | "withdrawn" = "pending";
 	#publisher?: Producer;
 
 	private constructor(path: Path.Valid, server: ServeState) {
@@ -3040,8 +3039,7 @@ export class Request {
 		};
 		requestHandoff = (request) => request.#server.handoff;
 		finishRequest = (request, err) => {
-			request.#done = true;
-			request.#withdrawn = true;
+			request.#state = "withdrawn";
 			void err;
 		};
 	}
@@ -3065,10 +3063,10 @@ export class Request {
 	 * released or its claim retracted. Otherwise it throws as {@link Producer.route} does.
 	 */
 	route(options: RouteOptions = {}): Route {
-		if (this.#done) throw new Error("request is closed");
+		if (this.#state !== "pending") throw new Error("request is closed");
 		if (!this.#publisher) throw unroutable();
 		const route = exactRoute(this.#publisher, this.path, options, this);
-		this.#done = true;
+		this.#state = "answered";
 		return route;
 	}
 
@@ -3081,21 +3079,22 @@ export class Request {
 	 * that can restart independently.
 	 */
 	serve(source: broadcast.Producer | broadcast.Consumer): void {
-		if (this.#done) {
+		if (this.#state !== "pending") {
 			// A withdrawn request takes no answer. Only the handed-off consumer is ours;
 			// the application still owns its producer and any other consumers.
-			if (this.#withdrawn && source instanceof broadcast.Consumer) source.close();
+			if (this.#state === "withdrawn" && source instanceof broadcast.Consumer) source.close();
 			return;
 		}
-		this.#done = true;
+		this.#state = "answered";
 		const front = source instanceof broadcast.Producer ? source.consume() : source;
 		this.#server.accept(this, front);
 	}
 
 	/** Reject the request, resolving every awaiting requester with `err`. */
 	reject(err: Error): void {
-		if (this.#done) return;
-		this.#done = true;
+		if (this.#state !== "pending") return;
+		this.#state = "answered";
+
 		this.#server.reject(this, err);
 	}
 }

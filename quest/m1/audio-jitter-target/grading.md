@@ -75,10 +75,6 @@ Recommendations:
 
 Public API: none. Wire: none.
 
-## Required
-
-- [Native A/V lag](/quest/m1/audio-jitter-target/native-av-lag.md) - `moq play --metrics` reports the presentation clock, so native rows can grade `av_lag_ms`
-
 ## Related
 
 - [Audio outlives video under bufferbloat](/quest/m4/audio-bufferbloat-av.md) - adds audio and video rows through a rate-limited link to the same harness

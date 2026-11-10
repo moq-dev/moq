@@ -75,7 +75,7 @@ test("drive delivers a queued round trip before its deadline and stops at the de
 		await sleep(ms(10));
 		return { value, at: now() };
 	})();
-	expect(await clock.drive(work)).toEqual({ value: Uint8Array.of(7), at: Instant.ZERO.add(ms(10)) });
+	expect(await clock.drive(work)).toEqual({ value: Uint8Array.of(7), at: Instant.ZERO.saturatingAdd(ms(10)) });
 	expect(late).toBe(false);
 });
 
@@ -84,7 +84,7 @@ test("drive times out a read with nothing in flight at its deadline", async () =
 	const { local } = await pair();
 	const read = timeout(ms(1000), local.readable.getReader().read());
 	expect(await clock.drive(read.catch((e: unknown) => e))).toBeInstanceOf(Elapsed);
-	expect(clock.now()).toEqual(Instant.ZERO.add(ms(1000)));
+	expect(clock.now()).toEqual(Instant.ZERO.saturatingAdd(ms(1000)));
 });
 
 test("drive reaches a deadline while deliveries keep arriving", async () => {
@@ -106,7 +106,7 @@ test("drive reaches a deadline while deliveries keep arriving", async () => {
 	send();
 	try {
 		await clock.drive(sleep(ms(1000)));
-		expect(clock.now()).toEqual(Instant.ZERO.add(ms(1000)));
+		expect(clock.now()).toEqual(Instant.ZERO.saturatingAdd(ms(1000)));
 		expect(delivered).toBeGreaterThan(0);
 	} finally {
 		sending = false;

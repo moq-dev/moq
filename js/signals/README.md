@@ -163,15 +163,6 @@ Effects also provide lifecycle helpers that auto-cleanup:
 
 ## Framework Integrations
 
-### Solid.js
-
-```ts
-import { createAccessor } from "@moq/signals/solid";
-
-const count = new Signal(0);
-const value = createAccessor(count); // returns a Solid Accessor
-```
-
 ### React
 
 ```ts

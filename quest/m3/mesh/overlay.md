@@ -18,6 +18,28 @@ deterministic and local, not coordinator-assigned, so self-hosted meshes get
 it; the coordinator is only the member list (announcements under `mesh/**`)
 and the fallback path.
 
+Decided 2026-11-09 (maintainer, /quest-plan from Kixel's audit of its fleet
+plan): ✅ the ring stays the link choice, with no measured cost and no exit
+designation (rejected: links chosen by measured proximity; a coordinator
+computing the graph), on the working assumption that a peer is either on the
+same network or out of reach. Two cases the ring as written does not cover
+join this quest:
+
+- Partial reach. On radios A reaches B and B reaches C while A cannot reach
+  C, so each node computes its ring over a different set of peers. Test it:
+  in namespaces with filtered links (a line and a grid), every pair with a
+  path connects without crossing the relay, a flapping link reroutes without
+  a loop, and the links and hops are reported. A node with no uplink has no
+  fallback, so report whether the overlay stays connected whenever the reach
+  graph is, and record what such a node can know about being cut off.
+- Nodes that do not forward. An embedding application may turn a node's
+  `proxy` preference off so it carries only its own traffic (a camera or a
+  constrained robot; Kixel plans a `--leaf` flag for it). Such a node cannot
+  be a finger that forwards for the rest. Recommendation, to confirm in the
+  PR: it is not a ring member, links to a small number of members, and is
+  never chosen as a finger. Expose that preference per node in the relay
+  library if the embedding application cannot set it today.
+
 - Ring: order the reachable peers (found through mDNS or
   [address hints](/quest/m3/mesh/addr.md)) by a hash of their endpoint ID, and
   link to the first peer at or after distance 2^k for each k. Accept incoming
@@ -34,7 +56,8 @@ and the fallback path.
 - Membership churn recomputes the ring; hold a change briefly so a flapping
   node does not churn every link, and record the hold chosen.
 
-Tests in network namespaces on one segment: each node's direct link count
+Tests in network namespaces, on one segment beside the partial-reach layouts
+above: each node's direct link count
 follows the ring (and never exceeds the cap when set); every pair connects
 without crossing the relay; killing a node heals the overlay; splitting the
 segment sends cross-half traffic through the relay and healing restores the
