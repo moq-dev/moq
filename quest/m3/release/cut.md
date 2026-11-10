@@ -118,4 +118,5 @@ with the suites above.
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m3/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed
 - [Cargo feature review](/quest/m3/release/feature-flags.md) - every Cargo feature was judged against the feature rules, and approved changes landed
+- [Cycle phases](/quest/m3/release/cycle-phases.md) - the shift this cut performs sorts by additive, API and wire, and its recurrence is rewritten to match
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
