@@ -47,7 +47,6 @@ moves what remains of them once their claims merge.
 - [Unused crates, scripts, and files are deleted](/quest/m1/unused-code.md) - moq-room, the moq-native tombstone, demo/throttle, sh/dart/publish.sh, demo/web's Solid deps, and unpublished packages' release notes go
 - [The recurring audits are fewer and carry plans, not results](/quest/m1/audit-merge.md) - m3's 13 audits become about five, each a Goal plus a short check-first list
 - [The CARLA bridge builds outside the root workspace](/quest/m1/carla-workspace.md) - workspace builds stop compiling the demo bridge
-- [.github/ffi.md holds rules, not evidence](/quest/m1/ffi-doc-trim.md) - the FFI release doc drops one-off measurements for links to their PRs
 - [Draft publishing keeps the upload and drops changelog rewriting](/quest/m1/drafts-publish-trim.md) - `sh/drafts/publish.sh` and its test shrink to the datatracker upload
 
 ## Related
