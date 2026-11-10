@@ -4,6 +4,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Instance, Origin, Path, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import * as Mint from "../../net/src/mint.ts";
 import { Broadcast } from "./broadcast";
 import { Source } from "./video/source";
 
@@ -296,7 +297,7 @@ it("never reads an include of another instance, but reads a minted one", async (
 	const proven = publish(origin, "room/proven.hang", served);
 	const track = proven.createTrack(Catalog.TRACK);
 	// A route over a wire that carries no instance has one its session minted.
-	publish(origin, "room/plain.hang", Instance.minted());
+	publish(origin, "room/plain.hang", Mint.fresh());
 	const named = Instance.random();
 	const include = (instance: Instance.Valid) =>
 		Catalog.RootSchema.parse({

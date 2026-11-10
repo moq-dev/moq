@@ -29,14 +29,17 @@ fn benchmark(c: &mut criterion::Criterion) {
 		let _others: Vec<_> = (0..armed)
 			.map(|i| {
 				let mut timer = handle.timer();
-				timer.set(Some(now + Duration::from_secs(60) * i / armed));
+				timer.set(Some(now.saturating_add(Duration::from_secs(60) * i / armed)));
 				timer
 			})
 			.collect();
 
 		// Two instants a re-arm alternates between, so every set moves it.
 		let mut timer = handle.timer();
-		let at = [now + Duration::from_secs(30), now + Duration::from_secs(31)];
+		let at = [
+			now.saturating_add(Duration::from_secs(30)),
+			now.saturating_add(Duration::from_secs(31)),
+		];
 		let mut flip = 0;
 		group.bench_function(BenchmarkId::new("rearm", armed), |b| {
 			b.iter(|| {

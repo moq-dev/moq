@@ -447,7 +447,7 @@ impl Pair {
 		let server = Peer::new(server, SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 4433));
 
 		let mut pair = Self {
-			now: Instant::ZERO + Duration::from_secs(3600),
+			now: Instant::ZERO.saturating_add(Duration::from_secs(3600)),
 			server,
 			clients: Vec::new(),
 			server_cids,
@@ -553,7 +553,7 @@ impl Pair {
 				let received = self.server.received;
 				let next = next.unwrap_or_else(|| panic!("stalled with no timer: {received:?}"));
 				assert!(
-					next <= self.now + STALL,
+					next <= self.now.saturating_add(STALL),
 					"stalled with no timer due within {STALL:?}: {received:?}"
 				);
 				self.now = self.now.max(next);
@@ -568,7 +568,7 @@ impl Pair {
 				continue;
 			}
 			match self.next_timeout() {
-				Some(next) if next <= self.now + SETTLE => self.now = self.now.max(next),
+				Some(next) if next <= self.now.saturating_add(SETTLE) => self.now = self.now.max(next),
 				_ => return,
 			}
 		}
@@ -706,7 +706,7 @@ pub(crate) fn deliver(pair: &mut Pair, datagram: BytesMut) {
 /// A forged exchange never waits on a timer, so without this, state that expires with time, such
 /// as packets remembered as lost, would pile up across iterations.
 pub(crate) fn tick(pair: &mut Pair) {
-	pair.now += TICK;
+	pair.now = pair.now.saturating_add(TICK);
 	let conn = pair.server.conn();
 	if conn.poll_timeout().is_some_and(|at| at <= pair.now) {
 		conn.handle_timeout(pair.now);

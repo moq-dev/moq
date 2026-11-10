@@ -13,7 +13,7 @@ m1 holds this cycle's additive work: improvements and fixes that need no
 semver-breaking release, so each ships with the next cut or as a `release`
 patch when backported. m2 is the next breaking release: every change that
 would need one if it landed right after the cut, plus the
-[cut gate](/quest/m2/cut-gate/README.md). The cut waits on m2 alone. m3 and m4
+cut gate the [release cut](/quest/m3/release/cut.md) re-creates there. The cut waits on m2 alone. m3 and m4
 are later work split by priority: m3 holds what a named consumer waits on,
 release execution, and bug fixes in shipped code; m4 holds tests, tooling,
 benchmarks, optimizations, and features nobody waits on yet. m5 holds work

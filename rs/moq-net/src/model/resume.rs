@@ -1478,7 +1478,7 @@ impl Reader {
 		self.backfill_gaps(delivered);
 		let groups = self.groups;
 		let budget = self.mirrored.budget();
-		let floor = if ordered { delivered.floor() } else { Some(0) };
+		let floor = if ordered { delivered.floor() } else { 0 };
 		let mut lowest: Option<Candidate> = None;
 		for index in 0..self.copies.len() {
 			let copy = &mut self.copies[index];
@@ -1524,7 +1524,7 @@ impl Reader {
 								unreachable!()
 							};
 							if ordered {
-								sub.skip_ordered(sequence.checked_add(1));
+								sub.skip_ordered(sequence + 1);
 							} else {
 								let _ = sub.take(reserved);
 							}
@@ -4954,7 +4954,7 @@ mod test {
 				write(&a, 2);
 				assert_eq!(drain(&mut sub, false), [0, 2]);
 
-				pool.poll(opened + budget / 2, &noop);
+				pool.poll(opened.saturating_add(budget / 2), &noop);
 				let b = copy();
 				write(&b, if first_group { 3 } else { 2 });
 				routes.serve(b.consume());
@@ -4974,8 +4974,11 @@ mod test {
 				assert!(poll().is_pending());
 				assert!(!wake.0.load(std::sync::atomic::Ordering::Relaxed));
 
-				let deadline = opened + budget;
-				assert_eq!(pool.poll(deadline - Duration::from_micros(1), &noop), Some(deadline));
+				let deadline = opened.saturating_add(budget);
+				assert_eq!(
+					pool.poll(deadline.saturating_sub(Duration::from_micros(1)), &noop),
+					Some(deadline)
+				);
 				assert!(
 					!wake.0.load(std::sync::atomic::Ordering::Relaxed),
 					"not before the grace"

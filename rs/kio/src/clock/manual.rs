@@ -40,7 +40,7 @@ impl Manual {
 
 	/// Let `duration` pass, moving both the instant and the wall time.
 	pub fn advance(&mut self, duration: Duration) {
-		self.now += duration;
+		self.now = self.now.saturating_add(duration);
 		self.wall = self.wall + duration;
 	}
 
@@ -64,19 +64,19 @@ mod tests {
 	fn a_wall_step_passes_no_time() {
 		let mut clock = Manual::new();
 		clock.advance(Duration::from_secs(5));
-		assert_eq!(clock.now(), Instant::ZERO + Duration::from_secs(5));
+		assert_eq!(clock.now(), Instant::ZERO.saturating_add(Duration::from_secs(5)));
 		assert_eq!(clock.wall(), Manual::WALL_START + Duration::from_secs(5));
 
 		clock.step_wall(Manual::WALL_START + Duration::from_secs(2));
 		assert_eq!(
 			clock.now(),
-			Instant::ZERO + Duration::from_secs(5),
+			Instant::ZERO.saturating_add(Duration::from_secs(5)),
 			"a step back passes no time"
 		);
 		clock.step_wall(Manual::WALL_START + Duration::from_secs(3600));
 		assert_eq!(
 			clock.now(),
-			Instant::ZERO + Duration::from_secs(5),
+			Instant::ZERO.saturating_add(Duration::from_secs(5)),
 			"nor does a step forward"
 		);
 

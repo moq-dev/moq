@@ -3,8 +3,8 @@
 ## Goal
 
 moq-relay's `acme` feature returns: it issues and renews certificates through
-instant-acme on `rind-instant-acme`, with no rustls-acme, and its graph holds
-no aws-lc-rs.
+instant-acme on a rind `CryptoProvider` adapter, with no rustls-acme, and its
+graph holds no aws-lc-rs.
 
 ## Plan
 
@@ -23,19 +23,20 @@ its cache because nobody used ACME yet (maintainer, 2026-11-03), so the cache
 needs no compatibility with the rustls-acme layout. Test against a local ACME
 server such as Pebble.
 
-The adapter is planned when this starts (maintainer, 2026-11-09, in rind's
-quest audit): ✅ this quest begins by planning `rind-instant-acme` in rind's
-quest tree (rejected: re-plan the adapter in rind now, ahead of its consumer;
-leave the stale wait). rind deleted the adapter in
-[moq-dev/rind#510](https://github.com/moq-dev/rind/pull/510) because nothing
-used it yet, and carries none until this does. The wait-only quest that
-pointed at rind's deleted one is gone.
+Decided 2026-11-09 (maintainer, /quest-unblock): rind deleted
+`rind-instant-acme` on 2026-11-08
+([moq-dev/rind#510](https://github.com/moq-dev/rind/pull/510)) because no
+consumer used it, so this quest waits on instant-acme 0.9 directly instead of
+on that crate. Restore the adapter in rind from #510's parent commit, published
+this time (rejected: dropping relay ACME, and leaving the wait on the deleted
+crate).
 
 Public API: moq-relay regains the `acme` feature and an ACME config section.
 Wire: none.
 
 ## Waiting
 
-- instant-acme: publishes 0.9, which carries the pluggable `CryptoProvider`.
-  Checked 2026-11-09: its latest is 0.8.5. Check with `cargo search
-  instant-acme`.
+- djc/instant-acme: a 0.9 release ships the pluggable `CryptoProvider`
+  ([djc/instant-acme#268](https://github.com/djc/instant-acme/pull/268),
+  merged 2026-03-30). Check `cargo info instant-acme`; it was 0.8.5 on
+  2026-11-09.

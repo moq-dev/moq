@@ -192,7 +192,7 @@ impl V4l2 {
 
 	/// Hand one access unit to the driver, waiting for a free buffer.
 	fn submit(&mut self, access_unit: &Bytes, timestamp: Timestamp) -> Result<(), Error> {
-		let deadline = Instant::now() + BUFFER_TIMEOUT;
+		let deadline = Instant::now().saturating_add(BUFFER_TIMEOUT);
 		let index = loop {
 			self.reclaim_coded()?;
 			if let Some(index) = self.coded.take_free() {
@@ -397,7 +397,7 @@ impl V4l2 {
 	/// Change".
 	fn drain_tail(&mut self) -> Result<(), Error> {
 		let start = self.ready.len();
-		let deadline = Instant::now() + DRAIN_TIMEOUT;
+		let deadline = Instant::now().saturating_add(DRAIN_TIMEOUT);
 		loop {
 			if self.drain()? {
 				return Ok(());
@@ -425,7 +425,7 @@ impl V4l2 {
 	fn drain_sequence(&mut self) -> Result<bool, Error> {
 		let mut ended = false;
 		let mut changed = false;
-		let mut deadline = Instant::now() + DRAIN_TIMEOUT;
+		let mut deadline = Instant::now().saturating_add(DRAIN_TIMEOUT);
 		loop {
 			let before = self.ready.len();
 			let reclaimed = self.reclaim_coded()?;
@@ -443,7 +443,7 @@ impl V4l2 {
 			}
 
 			if reclaimed > 0 || self.ready.len() > before {
-				deadline = Instant::now() + DRAIN_TIMEOUT;
+				deadline = Instant::now().saturating_add(DRAIN_TIMEOUT);
 			} else if Instant::now() >= deadline {
 				return Err(Error::codec(anyhow::anyhow!(
 					"V4L2 decoder did not finish its drain within {DRAIN_TIMEOUT:?}, holding {} access unit(s)",
@@ -560,7 +560,7 @@ impl Backend for V4l2 {
 		// geometry.
 		if let Phase::Sizing { since } = &mut self.phase {
 			let since = *since.get_or_insert_with(Instant::now);
-			let deadline = Instant::now() + SOURCE_CHANGE_TIMEOUT;
+			let deadline = Instant::now().saturating_add(SOURCE_CHANGE_TIMEOUT);
 			while !self.device.take_source_change() {
 				if Instant::now() >= deadline {
 					let waited = since.elapsed();
