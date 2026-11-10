@@ -53,7 +53,7 @@ var (
 	ErrCancelled = ffi.ErrMoqErrorCancelled
 	// ErrClosed is returned when the session or stream has closed; IsShutdown treats it as a graceful stop.
 	ErrClosed = ffi.ErrMoqErrorClosed
-	// ErrBusy is returned when CertFingerprints races an in-flight server operation.
+	// ErrBusy is returned when a call races an in-flight read on the same handle.
 	ErrBusy = ffi.ErrMoqErrorBusy
 	// ErrConnect is returned when establishing a client session fails.
 	ErrConnect = ffi.ErrMoqErrorConnect

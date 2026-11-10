@@ -366,9 +366,9 @@ mod test {
     ) -> Vec<Usage> {
         (0..count)
             .map(|i| {
-                let sent = base + spacing * i as u32;
+                let sent = base.saturating_add(spacing * i as u32);
                 let received = sent - base + delay(i);
-                detector.on_packet(sent, received, sent + delay(i));
+                detector.on_packet(sent, received, sent.saturating_add(delay(i)));
                 detector.usage()
             })
             .collect()
@@ -445,14 +445,14 @@ mod test {
         let delay = Duration::from_millis(20);
         let mut usage = Vec::new();
         for i in 0..1000u32 {
-            let sent = base + spacing * i;
+            let sent = base.saturating_add(spacing * i);
             // The peer's clock jumps 10s ahead halfway, which its ACKs' arrivals do not
             let jump = if i < 500 {
                 Duration::ZERO
             } else {
                 Duration::from_secs(10)
             };
-            detector.on_packet(sent, sent - base + delay + jump, sent + delay);
+            detector.on_packet(sent, sent - base + delay + jump, sent.saturating_add(delay));
             usage.push(detector.usage());
         }
         assert!(!usage.contains(&Usage::Overusing));
@@ -470,7 +470,7 @@ mod test {
         // Every other packet is 30ms slower than its neighbors
         let packets: Vec<Acked> = (0..1000u32)
             .map(|i| {
-                let sent = base + spacing * i;
+                let sent = base.saturating_add(spacing * i);
                 let delay = Duration::from_millis(if i % 2 == 0 { 20 } else { 50 });
                 Acked {
                     sent,
@@ -490,7 +490,11 @@ mod test {
                 .filter(|p| p.received.is_some_and(|r| r >= from && r < to))
                 .copied()
                 .collect();
-            detector.on_ack(&acked, base + to + Duration::from_millis(20));
+            detector.on_ack(
+                &acked,
+                base.saturating_add(to)
+                    .saturating_add(Duration::from_millis(20)),
+            );
             usage.push(detector.usage());
             signaled |= detector.take_signal();
         }
@@ -515,7 +519,7 @@ mod test {
         detector.on_packet(
             base,
             Duration::from_millis(500),
-            base + Duration::from_secs(1),
+            base.saturating_add(Duration::from_secs(1)),
         );
         assert_eq!(detector.deltas, before.deltas);
         assert_eq!(detector.usage(), Usage::Normal);

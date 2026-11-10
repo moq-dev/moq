@@ -321,8 +321,8 @@ fn run(scenario: &Scenario) -> Outcome {
 	// The seed delays the media up to a frame interval past the handshake, any warmup, and the
 	// competing upload's start. Its own generator leaves the run's other draws as they were.
 	let offset = Pcg32::seed_from_u64(scenario.seed).random_range(Duration::ZERO..Duration::from_secs(1) / FPS as u32);
-	let start = pair.time + offset;
-	let end = start + scenario.duration;
+	let start = pair.time.saturating_add(offset);
+	let end = start.saturating_add(scenario.duration);
 	let mut outcome = Outcome::default();
 	let mut groups: Vec<Group> = Vec::new();
 	let mut readings: HashMap<StreamId, Reading> = HashMap::new();
@@ -336,14 +336,14 @@ fn run(scenario: &Scenario) -> Outcome {
 
 	loop {
 		let now = pair.time;
-		if next_rate < scenario.rates.len() && now >= start + scenario.rates[next_rate].0 {
+		if next_rate < scenario.rates.len() && now >= start.saturating_add(scenario.rates[next_rate].0) {
 			let rate = scenario.rates[next_rate].1;
 			pair.to_server.bottleneck.as_mut().unwrap().set_rate(rate);
 			next_rate += 1;
 		}
 
 		// Write every frame that is due
-		let frame_at = |n: u64| start + Duration::from_nanos(n * 1_000_000_000 / FPS);
+		let frame_at = |n: u64| start.saturating_add(Duration::from_nanos(n * 1_000_000_000 / FPS));
 		while frame_at(next_frame) <= now && frame_at(next_frame) < end {
 			let at = frame_at(next_frame) - start;
 			let paused = scenario.idle.is_some_and(|(from, until)| at >= from && at < until);
@@ -408,7 +408,7 @@ fn run(scenario: &Scenario) -> Outcome {
 				estimate,
 				redundant: conn.stats().path.sent_bandwidth_probe_bytes,
 			});
-			next_sample += Duration::from_millis(100);
+			next_sample = next_sample.saturating_add(Duration::from_millis(100));
 		}
 		if now >= end {
 			break;
@@ -419,7 +419,7 @@ fn run(scenario: &Scenario) -> Outcome {
 			pair.server.next_wakeup(),
 			Some(frame_at(next_frame)),
 			Some(next_sample),
-			scenario.rates.get(next_rate).map(|&(at, _)| start + at),
+			scenario.rates.get(next_rate).map(|&(at, _)| start.saturating_add(at)),
 		];
 		let next = wakeups.into_iter().flatten().min().unwrap();
 		pair.time = pair.time.max(next);
@@ -503,7 +503,7 @@ fn flush(pair: &mut Pair, ch: ConnectionHandle, groups: &mut [Group]) {
 fn expire(pair: &mut Pair, ch: ConnectionHandle, groups: &mut [Group], now: Instant, outcome: &mut Outcome) {
 	for group in groups.iter_mut() {
 		let Some(ended) = group.ended else { continue };
-		if group.reset.is_some() || now < ended + EXPIRY {
+		if group.reset.is_some() || now < ended.saturating_add(EXPIRY) {
 			continue;
 		}
 		let mut stream = pair.client_send(ch, group.id);
@@ -879,12 +879,12 @@ fn single_packet_writes() {
 		.open(Dir::Uni, Default::default())
 		.unwrap();
 
-	let end = pair.time + Duration::from_secs(1);
+	let end = pair.time.saturating_add(Duration::from_secs(1));
 	let mut next_write = pair.time;
 	while pair.time < end {
 		if pair.time >= next_write {
 			pair.client_send(client_ch, id).write(&mut &[0; 100][..]).unwrap();
-			next_write += Duration::from_millis(200);
+			next_write = next_write.saturating_add(Duration::from_millis(200));
 		}
 		pair.drive_client();
 		pair.drive_server();
@@ -953,7 +953,7 @@ fn probe_inflight_limits_only_an_attempt() {
 	// Past the pacer's bursts, short of the first ACK
 	for _ in 0..10 {
 		pair.drive_client();
-		pair.time += Duration::from_millis(1);
+		pair.time = pair.time.saturating_add(Duration::from_millis(1));
 	}
 	let conn = pair.client_conn_mut(client_ch);
 	assert!(conn.bytes_in_flight() > inflight);

@@ -178,6 +178,7 @@ Datagram Tracks have a namespace apart from other Tracks, so a datagram Track an
 A Group is an ordered stream of Frames within a Track.
 
 Each group consists of an append-only list of Frames.
+A publisher never creates a Group with sequence 2^64-1, so every range of Groups ends within 64 bits; a receiver treats a Group Stream naming it as a malformed Track.
 A Group is normally served by a dedicated QUIC stream which is closed on completion, reset by the publisher, or cancelled by the subscriber.
 This ensures that all Frames within a Group arrive reliably and in order.
 
@@ -1849,14 +1850,14 @@ SUBSCRIBE_DROP Message {
   Type (i) = 0x2
   Message Length (i)
   Group Start (i)
-  Group End (i)
+  Group Count (i)
   Error Code (i)
   Update (i)
 }
 ~~~
 
-**Group Start** and **Group End** are the inclusive range of group sequences the publisher gave up.
-`Group Start = Group End + 1` is an empty range; a larger Group Start is a PROTOCOL_VIOLATION.
+**Group Start** and **Group Count** name the group sequences the publisher gave up: `Group Count` of them from `Group Start`.
+A `Group Count` of 0 is an empty range, and a `Group Start + Group Count` above 2^64-1 is a PROTOCOL_VIOLATION.
 
 **Error Code** is a [stream error code](#error-codes) saying why the groups were given up, as a reset retaining the Group Stream header would: for example OLD for one past the subscriber's budget, EVICTED for one the publisher no longer holds, or NOT_FOUND for one a relay never received.
 A subscriber MUST end the readers of a dropped group it holds with that error, including a group whose stream is still arriving, rather than end it cleanly.
@@ -1887,7 +1888,8 @@ This includes streams reset before their headers were delivered.
 A reliably delivered reset retaining the Group Stream header accounts for that group instead.
 The publisher SHOULD name a sequence as soon as it gives it up, without waiting for SUBSCRIBE_FINISH.
 
-Before moq-lite-07, SUBSCRIBE_DROP carries no `Update`, its Error Code is application-specific, and it also names the sequences moq-lite-07 names in SUBSCRIBE_SKIP; every such drop is final.
+Before moq-lite-07, SUBSCRIBE_DROP carries an inclusive `Group End` in place of `Group Count`, where `Group Start = Group End + 1` is an empty range and a larger Group Start is a PROTOCOL_VIOLATION.
+It carries no `Update`, its Error Code is application-specific, and it also names the sequences moq-lite-07 names in SUBSCRIBE_SKIP; every such drop is final.
 
 ## SUBSCRIBE_SKIP {#subscribe-skip}
 
@@ -1898,12 +1900,11 @@ SUBSCRIBE_SKIP Message {
   Type (i) = 0x3
   Message Length (i)
   Group Start (i)
-  Group End (i)
+  Group Count (i)
 }
 ~~~
 
-**Group Start** and **Group End** are the inclusive range of sequences that will never hold a group.
-`Group Start = Group End + 1` is an empty range; a larger Group Start is a PROTOCOL_VIOLATION.
+**Group Start** and **Group Count** name the sequences that will never hold a group, as in [SUBSCRIBE_DROP](#subscribe-drop).
 
 A skip names only sequences the original publisher declared it will never produce, and it is final: no Group will ever exist at those sequences, whatever the terms.
 A publisher MUST NOT later create a Group at a sequence it skipped, and a subscriber MUST NOT deliver a Group Stream for one.
@@ -2239,6 +2240,7 @@ The `Message Length` describes the payload size on the wire.
 - An untimed Track declares a `Timescale` of 0 in TRACK_INFO, and its FRAME messages omit the timestamp.
 - A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
 - Bounded every timestamp below 2^61. A larger one is a malformed Track.
+- Reserved Group sequence 2^64-1: a publisher never creates it, and a Group Stream naming it is a malformed Track.
 
 ### Subscriptions {#changelog-07-subscribe}
 
@@ -2256,7 +2258,8 @@ The `Message Length` describes the payload size on the wire.
 - Added `Error Code` to SUBSCRIBE_FINISH: a track can end with an error while keeping the groups below its end.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_FINISH. Every sequence is accounted for by a Group Stream or a drop; a publisher SHOULD send a drop as soon as it gives a sequence up.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
-- Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every version that carries it.
+- Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every earlier version that carries it.
+- SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and `Group Count` in place of an inclusive `Group End`. A range past 2^64-1 is a PROTOCOL_VIOLATION.
 - Added SUBSCRIBE_SKIP (type 0x3) for sequences the publisher declared it will never produce, which ends no reader and is final: a Group is never created at a skipped sequence. A skip overrides an earlier drop of the same sequences, whatever its Error Code, without re-delivering to readers the drop already ended, and never overrides a Group that arrived. A gap in the sequence numbers is not a skip, since Groups may be created out of order; a sequence never had and never declared skipped is named in SUBSCRIBE_DROP. SUBSCRIBE_DROP no longer names declared skips.
 - Added `Update` to SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP: the number of the terms in effect. A stale (OLD) drop holds only under the update it names, judged against the budget the subscriber sent with it; every later SUBSCRIBE_UPDATE reopens it, and the publisher re-offers the group or drops it again under the new `Update`. Any other drop is final. A Group Stream wins over its earlier drop, and over a stale drop that arrives after it; no update reopens a sequence its Group Stream accounted for. A re-offered Group Stream that overtakes the reset of the stream it replaces waits, unread, until that stream ends, and is read only if it was reset.
 - SUBSCRIBE_FINISH declares the final boundary while lower groups can still be in flight, and no longer closes the Subscribe Stream: the publisher keeps reading SUBSCRIBE_UPDATE, so an update can reach an ended Track's history.

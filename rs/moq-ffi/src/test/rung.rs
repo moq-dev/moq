@@ -132,7 +132,7 @@ async fn shaped_uplink_disables_and_resumes() {
 	let mut previous_second = None;
 	loop {
 		tokio::select! {
-			_ = kio::clock::sleep_until(start + END) => break,
+			_ = kio::clock::sleep_until(start.saturating_add(END)) => break,
 			_ = ticker.tick() => {
 				let elapsed = start.elapsed();
 				let timestamp = elapsed.as_micros() as u64;

@@ -1420,7 +1420,7 @@ export class Publisher {
 			return true;
 		};
 
-		// The message naming `[start, end]` given up as `hole` says: lite-07 skips what was never
+		// The message naming `[start, end)` given up as `hole` says: lite-07 skips what was never
 		// produced, and earlier versions drop it as not found.
 		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse =>
 			hole.skip && hasSkip(this.version)
@@ -1466,7 +1466,7 @@ export class Publisher {
 			}
 			for (const gap of gaps) {
 				insertRun(served, gap.start, gap.end);
-				const msg = holeMessage(gap.start, gap.end - 1n, hole);
+				const msg = holeMessage(gap.start, gap.end, hole);
 				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
 			}
 			return true;
@@ -1580,7 +1580,7 @@ export class Publisher {
 						}
 						// A re-offer an update owed again is given up now, so the end sweep never names it.
 						if (served) insertRun(served, start, end);
-						const msg = SubscribeDrop.given(start, end - 1n, error, this.version, updateNumber);
+						const msg = SubscribeDrop.given(start, end, error, this.version, updateNumber);
 						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
 							return false;
 					}

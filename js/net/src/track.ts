@@ -2065,7 +2065,8 @@ export class Producer {
 	 * It says nothing about the sequences around it: groups may be created out of order, and an
 	 * aborted or evicted sequence created again. A gap it leaves is skipped only once the
 	 * producer says it will not fill it, with {@link skipGroups} or {@link appendGroup}. A
-	 * sequence already skipped throws {@link Skipped}.
+	 * sequence already skipped throws {@link Skipped}, and the reserved sequence 2^64-1 a
+	 * `RangeError`.
 	 *
 	 * Throws on a sequence that is still cached: a live duplicate would fan out to every
 	 * subscriber twice. An aborted incarnation is evicted so a fresh group can serve the
