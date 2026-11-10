@@ -2662,7 +2662,7 @@ mod tests {
 	///
 	/// The scripted peer answers nothing, so an advertisement parks after writing. That is
 	/// enough: the question is only whether the bytes went out unasked.
-	async fn announce_occurrences(peer_declared: Option<peer::Peer>) -> usize {
+	async fn announce_occurrences(peer_declared: Option<peer::Peer>, unsolicited: bool) -> usize {
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _cam = origin.announce("solo-cam", crate::origin::RouteInfo::new()).unwrap();
 
@@ -2672,7 +2672,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway, _) = start(Config {
-			unsolicited: false,
+			unsolicited,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2713,7 +2713,7 @@ mod tests {
 	#[kio::test]
 	async fn no_announce_before_the_peer_setup() {
 		assert_eq!(
-			announce_occurrences(None).await,
+			announce_occurrences(None, false).await,
 			0,
 			"advertised before knowing what the peer wants"
 		);
@@ -2729,7 +2729,7 @@ mod tests {
 		};
 
 		assert_eq!(
-			announce_occurrences(Some(declared)).await,
+			announce_occurrences(Some(declared), false).await,
 			0,
 			"PUBLISH_NAMESPACE despite the peer asking to be told on request"
 		);
@@ -2739,9 +2739,25 @@ mod tests {
 	/// sends SUBSCRIBE_NAMESPACE depends on this, and the session is what wires the
 	/// unsolicited loop up at all.
 	#[kio::test]
+	/// The opt-in exists for relays that set SOLICIT=1 but never open
+	/// SUBSCRIBE_NAMESPACE: advertising anyway is the only way they can route.
+	async fn a_solicit_peer_is_told_when_unsolicited_is_opted_in() {
+		let declared = peer::Peer {
+			solicit: Some(true),
+			..Default::default()
+		};
+
+		assert_eq!(
+			announce_occurrences(Some(declared), true).await,
+			1,
+			"opting in must advertise despite the peer's SOLICIT=1"
+		);
+	}
+
+	#[kio::test]
 	async fn a_peer_declaring_nothing_is_told_unasked() {
 		assert_eq!(
-			announce_occurrences(Some(peer::Peer::default())).await,
+			announce_occurrences(Some(peer::Peer::default()), false).await,
 			1,
 			"no unsolicited PUBLISH_NAMESPACE"
 		);
