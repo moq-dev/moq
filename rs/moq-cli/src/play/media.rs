@@ -1183,7 +1183,7 @@ mod tests {
 		for index in 0..5 {
 			producer.write(packet(index, 0.25)).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		task.await.unwrap();
 		let first = recorder
 			.played()

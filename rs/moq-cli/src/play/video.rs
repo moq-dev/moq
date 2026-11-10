@@ -980,7 +980,7 @@ mod tests {
 			"a rising catalog delay moves the schedule"
 		);
 
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		task.await.unwrap().unwrap();
 		assert_eq!(clock.delay(), jitter, "released with its track");
 	}
@@ -1045,7 +1045,7 @@ mod tests {
 			}),
 			"the subscription's budgets grow with the shared delay"
 		);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		task.await.unwrap().unwrap();
 	}
 
