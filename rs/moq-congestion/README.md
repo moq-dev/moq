@@ -8,8 +8,6 @@ The controllers take explicit `kio::clock::Instant` values and never drive a run
 
 Construct controllers with `Factory::build` on an `Arc<bbr3::Config>`, `Arc<cubic::Config>`, `Arc<gcc::Config>`, `Arc<scream::Config>`, or `Arc<Unlimited>`. `Unlimited` and `Metrics` live at the crate root, and `gcc::Gcc` and `scream::Scream` in their modules.
 
-For callers of the unpublished API, replace `Bbr3Config` with `bbr3::Config`, `CubicConfig` with `cubic::Config`, `ControllerFactory` with `Factory`, and `ControllerMetrics` with `Metrics`. Remove `Controller::into_any` from custom implementations; inspect the controller's behavior or metrics instead of downcasting. `clone_box` still copies controller state for path migration. The test-only `Bbr3::probing_rtt` and `min_rtt` accessors are removed; model internals are tested in this crate.
-
 The code was extracted from [moq-quic](../moq-quic), under the same MIT or Apache-2.0 license. Cubic originated in quinn; BBR3 was ported from moq-dev/noq and carries the fixes listed in [moq-quic's fork history](../moq-quic/README.md). SCReAMv2's delay-based path was ported from draft-ietf-ccwg-rfc8298bis-screamv2 and checked against Ericsson's [reference implementation](https://github.com/EricssonResearch/scream).
 
 GCC is libwebrtc's Google Congestion Control, a delay-based controller that reads the peer's receive timestamps (draft-ietf-quic-receive-ts). `src/gcc` vendors a Rust port of WebRTC's `goog_cc` under WebRTC's BSD license, kept in [`src/gcc/LICENSE`](src/gcc/LICENSE) with its `PATENTS` grant; its module docs record the WebRTC revision it tracks and what it trims.
