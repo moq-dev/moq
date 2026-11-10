@@ -181,7 +181,7 @@ federation) land.
 - [A published capture exposes its bandwidth grant](/quest/m3/video-publish-grant.md) - a moq-video publish shows each track's granted bitrate, not only its target
 - [The test relay can enable stats](/quest/m3/relay-test-stats.md) - `moq_relay::test_relay` starts with stats on when asked
 - [macOS capture listing futures are Send](/quest/m3/capture-shareable-send.md) - ScreenCaptureKit listing and start no longer hold a non-Send block across an await
-- [A capture listing a picker can draw](/quest/m3/capture-list.md) - windows grouped by app with icons, camera kinds, low-rate pictures, and a wait for changes on macOS, Windows, and X11, for moq-dev/studio's Add page
+- [A capture listing a picker can draw](/quest/m3/capture-list.md) - windows grouped by app with icons and placed on their displays, camera kinds, low-rate pictures, and a wait for changes on macOS, Windows, and X11, for moq-dev/studio's Add page
 - [Denied macOS system audio names its settings pane](/quest/m3/audio-system-denied-hint.md) - a permission error pointing at Screen & System Audio Recording
 - [One encoder follows several connections' estimates](/quest/m3/bandwidth-multi-connection.md) - a track published to two relays tracks both estimates
 - [Bandwidth reservations ignore in-process readers](/quest/m3/reservation-local-readers.md) - a local recorder no longer counts as uplink demand
