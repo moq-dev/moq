@@ -455,6 +455,8 @@ struct TrackState {
 	sink: Sink,
 	/// The current init segment's importer, minted by [`Self::ensure_map`].
 	generation: Option<Generation>,
+	/// The last generation's tracks once [`Import::finish`] ended them, kept servable while held.
+	finished: Option<moq_mux::container::fmp4::Finished>,
 	next_sequence: Option<u64>,
 	media_range: RangeCursor,
 	/// Consecutive failed ingest attempts, reset by any successful one. See
@@ -484,6 +486,7 @@ impl TrackState {
 			select,
 			sink,
 			generation: None,
+			finished: None,
 			next_sequence: None,
 			media_range: RangeCursor::default(),
 			failures: 0,
@@ -674,8 +677,8 @@ impl TrackState {
 
 		// The old generation must finish before retiring its catalog entries, so a subscriber
 		// draining its final group sees a clean end instead of a dropped producer.
-		if let Some(previous) = self.generation.as_mut() {
-			previous.importer.finish()?;
+		if let Some(previous) = self.generation.take() {
+			drop(previous.importer.finish()?);
 		}
 		self.generation = Some(Generation {
 			map: resource,
@@ -921,8 +924,8 @@ impl Import {
 	/// broadcast to a [`moq_mux::Linger`] to keep them up for late subscribers.
 	pub fn finish(&mut self) -> Result<()> {
 		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
-			if let Some(generation) = &mut track.generation {
-				generation.importer.finish()?;
+			if let Some(generation) = track.generation.take() {
+				track.finished = Some(generation.importer.finish()?);
 			}
 		}
 		self.sink.catalog.finish()?;
@@ -936,15 +939,13 @@ impl Import {
 	/// [`Import`] instead lets its tracks end as [`moq_net::Error::Dropped`]. Consumes
 	/// the import: every rendition is dead afterwards.
 	pub fn abort(mut self, err: moq_net::Error) {
-		for track in &mut self.video {
+		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
 			if let Some(generation) = track.generation.take() {
 				generation.importer.abort(err.clone());
 			}
-		}
-		if let Some(track) = &mut self.audio
-			&& let Some(generation) = track.generation.take()
-		{
-			generation.importer.abort(err.clone());
+			if let Some(finished) = track.finished.take() {
+				finished.abort(err.clone());
+			}
 		}
 		self.sink.catalog.clone().abort(err);
 	}

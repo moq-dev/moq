@@ -992,7 +992,7 @@ mod tests {
 		tokio::task::yield_now().await;
 		producer.discontinuity().unwrap();
 		producer.write(packet(0, 0.5)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		task.await.unwrap();
 		// The resume keeps the sink, which fills the declared silence with comfort noise.
 		assert_eq!(recorder.latencies(), vec![AUDIO_BUFFER_MIN]);
@@ -1080,7 +1080,7 @@ mod tests {
 			producer.write(packet(index, 0.5)).unwrap();
 			kio::clock::sleep(PACKET_DURATION).await;
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		task.await.unwrap();
 
 		assert_eq!(recorder.latencies(), vec![delay], "the mute replaced the sink");
@@ -1242,8 +1242,8 @@ mod tests {
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
-		audio.finish().unwrap();
-		video.finish().unwrap();
+		let _finished = audio.finish().unwrap();
+		let _finished = video.finish().unwrap();
 		video_task.await.unwrap().unwrap();
 		audio_task.abort();
 		assert!(
@@ -1379,20 +1379,17 @@ mod tests {
 				video.write(picture(index + 3, video_end && index == 0)).unwrap();
 			}
 		}
-		if audio_end {
-			audio.finish().unwrap();
-		}
-		if video_end {
-			video.finish().unwrap();
-		}
+		let (mut audio, mut video) = (Some(audio), Some(video));
+		let mut _audio_finished = audio.take_if(|_| audio_end).map(|audio| audio.finish().unwrap());
+		let mut _video_finished = video.take_if(|_| video_end).map(|video| video.finish().unwrap());
 		let mut shown = Vec::new();
 		for step in 0..800 {
 			if step >= 20 && step % 20 == 0 {
 				let index = 3 + step / 20;
-				if !audio_end {
+				if let Some(audio) = &mut audio {
 					audio.write(packet(index, 0.5)).unwrap();
 				}
-				if !video_end {
+				if let Some(video) = &mut video {
 					video.write(picture(index, false)).unwrap();
 				}
 			}
@@ -1402,12 +1399,8 @@ mod tests {
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
-		if !audio_end {
-			audio.finish().unwrap();
-		}
-		if !video_end {
-			video.finish().unwrap();
-		}
+		_audio_finished = _audio_finished.or_else(|| audio.map(|audio| audio.finish().unwrap()));
+		_video_finished = _video_finished.or_else(|| video.map(|video| video.finish().unwrap()));
 		audio_task.await.unwrap();
 		video_task.await.unwrap().unwrap();
 		if video_end {
@@ -1519,7 +1512,7 @@ mod tests {
 		for index in 0..4 {
 			producer.write(pcm(200_000 + index * 23_220, 1024, 0.75)).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		task.await.unwrap();
 		let played = recorder.played();
 		let sinks = |range: std::ops::Range<f32>| {
@@ -1585,7 +1578,7 @@ mod tests {
 		for index in 3..6 {
 			producer.write(packet(index, 0.5)).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		task.await.unwrap();
 		let played = recorder.played();
 		let resumed: Vec<_> = played.iter().filter(|part| part.sample == 0.5).collect();
@@ -1652,7 +1645,7 @@ mod tests {
 			producer.write(packet(5 + index, 0.5)).unwrap();
 			kio::clock::sleep(PACKET_DURATION).await;
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		task.await.unwrap();
 		drop(video);
 		let (resumed, _) = played(&recorder, 0.5);
@@ -1731,7 +1724,7 @@ mod tests {
 		for index in 0..3 {
 			video.write(picture(5_000 + index * 20, index == 0)).unwrap();
 		}
-		video.finish().unwrap();
+		let _finished = video.finish().unwrap();
 		let mut shown = Vec::new();
 		for _ in 0..2_000 {
 			tokio::task::yield_now().await;
@@ -1824,7 +1817,7 @@ mod tests {
 			low.write(packet(index, 0.5)).unwrap();
 			kio::clock::sleep(PACKET_DURATION).await;
 		}
-		low.finish().unwrap();
+		let _finished = low.finish().unwrap();
 		catalog.finish().unwrap();
 		// The high rendition remains open: only the disabled catalog can stop it.
 		settle(player, &recorder).await;
@@ -1871,16 +1864,14 @@ mod tests {
 		let mut new = rendition(broadcast.broadcast(), &catalog, "new");
 		new.write(packet(index, NEW)).unwrap();
 		index += 1;
-		old.finish().unwrap();
-		drop(old);
+		drop(old.finish().unwrap());
 
 		while index < 100 {
 			kio::clock::sleep_until(start + PACKET_DURATION * index as u32).await;
 			new.write(packet(index, NEW)).unwrap();
 			index += 1;
 		}
-		new.finish().unwrap();
-		drop(new);
+		drop(new.finish().unwrap());
 		catalog.finish().unwrap();
 
 		settle(player, &recorder).await;
@@ -2158,7 +2149,7 @@ mod tests {
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		write(&mut old, 10, OLD).await;
-		old.finish().unwrap();
+		let old = old.finish().unwrap();
 		old_catalog.finish().unwrap();
 		drop((old_broadcast, old_catalog, old));
 
@@ -2200,7 +2191,7 @@ mod tests {
 				catalog.audio.renditions.get_mut("audio").unwrap().bitrate = Some(u64::from(SAMPLE_RATE) * 32);
 			})
 			.unwrap();
-		audio.finish().unwrap();
+		let _finished = audio.finish().unwrap();
 
 		// The catalog stays open, so the player keeps following it.
 		settle(player, &recorder).await;
@@ -2253,7 +2244,7 @@ mod tests {
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		write(&mut old, 10, OLD).await;
-		old.finish().unwrap();
+		let old = old.finish().unwrap();
 		exact_catalog.finish().unwrap();
 		drop((exact_catalog, old));
 		// The broadcast ends while its route stands, so the player goes idle.
@@ -2346,8 +2337,7 @@ mod tests {
 		let mut audio = rendition(broadcast.broadcast(), &catalog, "audio");
 		audio.write(packet(0, 0.25)).unwrap();
 		kio::clock::sleep(PACKET_DURATION).await;
-		audio.finish().unwrap();
-		drop(audio);
+		drop(audio.finish().unwrap());
 		catalog.finish().unwrap();
 		settle(player, &recorder).await;
 		let played: Duration = recorder.played().iter().map(|p| p.to - p.from).sum();
@@ -2413,7 +2403,7 @@ mod tests {
 					.unwrap();
 			}
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let catalog = hang::catalog::VideoConfig::new(hang::catalog::H264 {
 			inline: true,
 			profile: 0x42,

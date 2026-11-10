@@ -103,11 +103,33 @@ impl Instance {
 	}
 
 	/// Flush the buffered media and finish every track, the catalog included.
-	fn finish(&mut self) -> Result<()> {
-		self.import.finish().map_err(moq_mux::Error::from)?;
-		self.catalog.finish()?;
-		Ok(())
+	fn finish(self) -> Result<Finished> {
+		let Self {
+			import,
+			mut catalog,
+			route,
+		} = self;
+		let import = import.finish().map_err(moq_mux::Error::from)?;
+		catalog.finish()?;
+		Ok(Finished {
+			import,
+			_catalog: catalog,
+			route,
+		})
 	}
+}
+
+/// One program's broadcast once its tracks finished, served while held.
+struct Finished {
+	import: ts::Finished<ts::Ext>,
+	_catalog: moq_mux::catalog::Producer<ts::Ext>,
+	route: moq_net::origin::Route,
+}
+
+/// What a finished [`Publisher`] holds to keep serving its broadcasts.
+enum Ended {
+	One { _finished: Finished },
+	All { _finished: ts::programs::Finished },
 }
 
 impl Publisher {
@@ -177,14 +199,14 @@ impl Publisher {
 				let mut data = data;
 				while let Err(err) = instance.import.decode(&data) {
 					let restart = err.downcast::<ts::Restart>().map_err(moq_mux::Error::from)?;
-					// The instance before the step finishes; the rest of the input republishes
-					// the path under a new instance.
-					instance.finish()?;
-					self.span.in_scope(|| self.log.finish(&instance.import.stats()));
+					// The rest of the input republishes the path under a new instance, and the
+					// instance before the step finishes.
 					let (next, id) = Instance::publish(origin, path, config.clone(), *program)?;
+					let previous = std::mem::replace(instance, next).finish()?;
+					self.span.in_scope(|| self.log.finish(&previous.import.stats()));
 					tracing::warn!(%path, step = %restart.step, instance = %id, "the source's clock stepped; republishing");
 					// The finished broadcast ends with its route.
-					*instance = next;
+					drop(previous);
 					self.log = ts::stats::Log::default();
 					data = restart.remainder;
 				}
@@ -208,17 +230,24 @@ impl Publisher {
 
 	/// Flush any buffered media and finish every track, the catalogs included, keeping each
 	/// finished broadcast up for `linger`.
-	pub fn finish(mut self, linger: Duration) -> Result<moq_mux::Linger<Self>> {
-		let finished = match &mut self.importer {
+	pub fn finish(self, linger: Duration) -> Result<moq_mux::Linger<impl Sized + Send>> {
+		let Self { importer, log, span, .. } = self;
+		let (ended, broadcasts, stats) = match importer {
 			Importer::One(one) => {
-				one.instance.finish()?;
-				vec![one.instance.route.broadcast().clone()]
+				let finished = one.instance.finish()?;
+				let broadcasts = vec![finished.route.broadcast().clone()];
+				let stats = finished.import.stats();
+				(Ended::One { _finished: finished }, broadcasts, stats)
 			}
-			Importer::All(programs) => programs.finish().map_err(moq_mux::Error::from)?,
+			Importer::All(programs) => {
+				let finished = programs.finish().map_err(moq_mux::Error::from)?;
+				let (broadcasts, stats) = (finished.broadcasts(), finished.stats());
+				(Ended::All { _finished: finished }, broadcasts, stats)
+			}
 		};
 		// The drain at end of input can publish a frame nothing vouched for.
-		self.span.in_scope(|| self.log.finish(&self.stats()));
-		Ok(moq_mux::Linger::new(finished, self, linger))
+		span.in_scope(|| log.finish(&stats));
+		Ok(moq_mux::Linger::new(broadcasts, ended, linger))
 	}
 
 	/// Abort the published tracks with `err` so subscribers see the real cause
@@ -915,7 +944,7 @@ mod tests {
 		.unwrap();
 		let mut roundtrip_import = ts::Import::new(roundtrip, roundtrip_catalog.reserve());
 		roundtrip_import.decode(&output).unwrap();
-		roundtrip_import.finish().unwrap();
+		let _finished = roundtrip_import.finish().unwrap();
 
 		let snapshot = roundtrip_catalog.snapshot();
 		let (name, _) = snapshot

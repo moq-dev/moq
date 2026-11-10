@@ -790,7 +790,7 @@ mod tests {
 		for frame in frames {
 			producer.write(frame).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		moq_mux::container::Consumer::new(subscriber, format)
 	}
 
@@ -823,7 +823,7 @@ mod tests {
 		for frame in frames {
 			producer.write(frame).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		(min, max)
 	}
 
@@ -985,7 +985,7 @@ mod tests {
 		assert_eq!(decoded.lock().unwrap().len(), 1, "old picture held inside decoder");
 		producer.seek(2).unwrap();
 		producer.write(frame(500, true)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let restarted = Instant::now();
 		tokio::task::yield_now().await;
 		assert_eq!(
@@ -1104,7 +1104,7 @@ mod tests {
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
 		assert_eq!(shown, [0, 33, 66], "the end discarded the pictures before it");
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		task.await.unwrap().unwrap();
 	}
 
@@ -1131,7 +1131,7 @@ mod tests {
 		}
 		// The publisher declares an end, then the track closes.
 		producer.discontinuity().unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let track = moq_mux::container::Consumer::new(subscriber, format());
 		// The window never presents, so the decoded pictures stay queued.
 		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0), None));
@@ -1173,7 +1173,8 @@ mod tests {
 			.await
 			.unwrap();
 		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let mut producer = moq_mux::container::Producer::new(source, format());
+		let mut producer = Some(moq_mux::container::Producer::new(source, format()));
+		let mut _finished = None;
 		let track = moq_mux::container::Consumer::new(subscriber, format());
 		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0), None));
 		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
@@ -1188,18 +1189,18 @@ mod tests {
 				break;
 			}
 			if at < 60 && at % 20 == 0 {
-				producer.write(frame(at, at == 0)).unwrap();
+				producer.as_mut().unwrap().write(frame(at, at == 0)).unwrap();
 			} else if at == 60 {
 				audio.declare();
 				audio.end(moq_net::Timestamp::from_millis(2_000).unwrap()).unwrap();
 			}
 			if (60..60 + SEGMENTS * 40).contains(&at) && at % 20 == 0 {
 				if at % 40 == 20 {
-					producer.discontinuity().unwrap();
+					producer.as_mut().unwrap().discontinuity().unwrap();
 				}
-				producer.write(frame(at, at % 40 == 20)).unwrap();
+				producer.as_mut().unwrap().write(frame(at, at % 40 == 20)).unwrap();
 			} else if at == 60 + SEGMENTS * 40 {
-				producer.finish().unwrap();
+				_finished = producer.take().map(|producer| producer.finish().unwrap());
 			}
 			tokio::task::yield_now().await;
 			if media
@@ -1268,7 +1269,7 @@ mod tests {
 		let transition = audio.declare();
 		audio.plan(transition, start, Some(delay));
 		producer.write(frame(3_040, true)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		audio.apply(
 			transition,
 			audio.resume(transition, start, Some(delay)).ready().await.unwrap(),
@@ -1350,7 +1351,7 @@ mod tests {
 			"the decoder missed the new picture for {:?}",
 			sent.elapsed()
 		);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		resume.abort();
 		for _ in 0..500 {
 			tokio::task::yield_now().await;
@@ -1388,7 +1389,7 @@ mod tests {
 		for ms in [100, 133, 166] {
 			producer.write(frame(ms, ms == 100)).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let decoder = Buffered::new(2);
 		let flushed = decoder.flushed.clone();
 		let task = tokio::spawn(playback(&media, delay).run(
@@ -1624,17 +1625,18 @@ mod tests {
 		let track = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let mut producer = moq_mux::container::Producer::new(
+		let mut producer = Some(moq_mux::container::Producer::new(
 			track.clone(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
-		);
+		));
+		let mut _finished = None;
 		for ms in [0, 33, 66] {
-			producer.write(frame(ms, ms == 0)).unwrap();
+			producer.as_mut().unwrap().write(frame(ms, ms == 0)).unwrap();
 		}
-		producer.discontinuity().unwrap();
+		producer.as_mut().unwrap().discontinuity().unwrap();
 		// The replacement is published live, one picture every 33 ms.
 		let picture = |index: u64| frame(1_000 + index * 33, index == 0);
-		producer.write(picture(0)).unwrap();
+		producer.as_mut().unwrap().write(picture(0)).unwrap();
 		let min = join(&track, delay, 0).await;
 		let max = join(&track, delay + warmup, 1).await;
 		let refresh = Refresh {
@@ -1649,10 +1651,10 @@ mod tests {
 		while !task.is_finished() {
 			let elapsed = Instant::now() - start;
 			if next < 60 && Duration::from_millis(next * 33) <= elapsed {
-				producer.write(picture(next)).unwrap();
+				producer.as_mut().unwrap().write(picture(next)).unwrap();
 				next += 1;
 				if next == 60 {
-					producer.finish().unwrap();
+					_finished = producer.take().map(|producer| producer.finish().unwrap());
 				}
 			}
 			tokio::task::yield_now().await;
@@ -1706,17 +1708,19 @@ mod tests {
 			}
 			(producer, moq_mux::container::Consumer::new(subscriber, format()))
 		};
-		let (mut min, min_track) = publish("min").await;
-		let (mut max, max_track) = publish("max").await;
+		let (min, min_track) = publish("min").await;
+		let (max, max_track) = publish("max").await;
 		// The replacement encoder's timestamps run ahead of the old one's.
-		let restart = |producer: &mut moq_mux::container::Producer<moq_mux::catalog::hang::Container>| {
+		let restart = |mut producer: moq_mux::container::Producer<moq_mux::catalog::hang::Container>| {
 			producer.discontinuity().unwrap();
 			for ms in [1_000, 1_033, 1_066] {
 				producer.write(frame(ms, ms == 1_000)).unwrap();
 			}
-			producer.finish().unwrap();
+			producer.finish().unwrap()
 		};
-		restart(&mut max);
+		let _max = restart(max);
+		let mut min = Some(min);
+		let mut _min = None;
 		let refresh = Refresh {
 			track: max_track,
 			decoder: refresh_decoder(Duration::ZERO),
@@ -1729,7 +1733,7 @@ mod tests {
 		let mut restarted = false;
 		while !task.is_finished() {
 			if !restarted && Instant::now() >= start + late {
-				restart(&mut min);
+				_min = min.take().map(restart);
 				restarted = true;
 			}
 			tokio::task::yield_now().await;

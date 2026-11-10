@@ -118,8 +118,9 @@ impl Publisher {
 	}
 
 	/// Finish the track, preserving the final retained window for current readers.
-	pub fn finish(mut self) -> Result<(), Error> {
-		Ok(self.producer.finish()?)
+	pub fn finish(self) -> Result<(), Error> {
+		drop(self.producer.finish()?);
+		Ok(())
 	}
 }
 

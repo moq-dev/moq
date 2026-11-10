@@ -94,8 +94,10 @@ pub struct Publisher {
 	pub route: moq_net::origin::Route,
 	/// The catalog.
 	pub catalog: moq_mux::catalog::Producer,
-	/// The media track.
-	pub media: moq_mux::container::Producer<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>,
+	/// The media track, until [`Self::finish`].
+	pub media: Option<moq_mux::container::Producer<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>>,
+	/// The media track once [`Self::finish`] ended it.
+	pub finished: Option<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>>,
 }
 
 impl Publisher {
@@ -114,7 +116,12 @@ impl Publisher {
 			)
 			.expect("rendition");
 		drop(reserved);
-		Self { route, catalog, media }
+		Self {
+			route,
+			catalog,
+			media: Some(media),
+			finished: None,
+		}
 	}
 
 	/// Write one-second frames for each second in `start..end`, a keyframe on every even second.
@@ -122,13 +129,14 @@ impl Publisher {
 	/// leaves the GOP at 12s open.
 	pub fn write(&mut self, start: u64, end: u64, payload: u8) {
 		for second in start..end {
-			self.media.write(frame(second, payload)).expect("write");
+			self.media.as_mut().expect("open").write(frame(second, payload)).expect("write");
 		}
 	}
 
 	/// Finish the media and then the catalog, as a publisher ending cleanly does.
 	pub fn finish(&mut self) {
-		self.media.finish().expect("finish media");
+		let media = self.media.take().expect("open");
+		self.finished = Some(media.finish().expect("finish media"));
 		self.catalog.finish().expect("finish catalog");
 	}
 }

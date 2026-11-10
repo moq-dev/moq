@@ -1027,9 +1027,14 @@ impl<C: Container, R: Clone + Send + 'static> Finished<C, R>
 where
 	crate::Error: From<C::Error>,
 {
-	/// The track's name, unique within its broadcast.
+	/// The catalog key owned by this track; see [`Producer::name`].
 	pub fn name(&self) -> &str {
-		self.producer.inner.name()
+		self.producer.name()
+	}
+
+	/// A watch-only handle to this track's subscriber demand.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.producer.inner.demand()
 	}
 
 	/// The properties the track was created with.

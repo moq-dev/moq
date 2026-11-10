@@ -1507,16 +1507,24 @@ impl Publisher {
 
 	/// Flush any buffered media and finish every track, the catalog included, keeping the
 	/// finished broadcast up for `linger`.
-	fn finish(mut self, linger: Duration) -> anyhow::Result<moq_mux::Linger<Self>> {
-		self.importer.finish()?;
-		self.catalog.finish()?;
-		Ok(moq_mux::Linger::new([self.route.broadcast().clone()], self, linger))
+	fn finish(self, linger: Duration) -> anyhow::Result<moq_mux::Linger<impl Sized>> {
+		let Self {
+			importer,
+			mut catalog,
+			metadata,
+			route,
+		} = self;
+		let importer = importer.finish()?;
+		catalog.finish()?;
+		let broadcast = route.broadcast().clone();
+		Ok(moq_mux::Linger::new([broadcast], (importer, catalog, metadata, route), linger))
 	}
 
 	/// Flush any buffered media, finish the catalog, close out the broadcast's open groups, and end
 	/// the broadcast so the origin unannounces it immediately.
 	fn close(mut self) -> anyhow::Result<()> {
-		self.importer.finish()?;
+		// Held until the broadcast closes, so the route retracts before the tracks drop.
+		let _importer = self.importer.finish()?;
 		self.catalog.finish()?;
 		self.route.broadcast().close();
 		Ok(())
@@ -2219,7 +2227,7 @@ mod tests {
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2364,7 +2372,7 @@ mod tests {
 		vp9.extend_from_slice(b"vp09");
 		vp9.extend_from_slice(VP9_KEYFRAME_320X240);
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vp9)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2642,7 +2650,7 @@ mod tests {
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &seq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &frames)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();

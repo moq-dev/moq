@@ -530,9 +530,9 @@ impl MoqJsonWindowProducer {
 	/// Finish the track, closing any open group.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		let _ = self.alive.close();
-		producer.finish()?;
+		drop(producer.finish()?);
 		Ok(())
 	}
 }

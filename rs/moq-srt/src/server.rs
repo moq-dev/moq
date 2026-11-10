@@ -1023,7 +1023,7 @@ mod tests {
 
 		/// End the broadcast cleanly.
 		fn finish(mut self) {
-			self.audio.finish().unwrap();
+			let _finished = self.audio.finish().unwrap();
 			self.catalog.finish().unwrap();
 		}
 	}

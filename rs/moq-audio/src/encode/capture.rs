@@ -285,33 +285,44 @@ impl Driver {
 		let end = self.drive().await;
 		let mut producer = self.producer.take().unwrap();
 		let now = self.clock.now();
+		// Held until the state closes, so the track outlives its terminal status.
+		let mut finished = None;
 		let result = match end {
 			Ok(End::Failed(failure)) => {
 				// Retention already reports the failure. It stays the cause even when the track
 				// can no longer end cleanly, such as one aborted while it still retained audio.
-				let ended = producer
-					.set_active(false, now)
-					.and_then(|()| producer.fail(moq_net::Error::Transport(failure.to_string())));
-				if ended.is_err() {
-					producer.abort(moq_net::Error::Transport(failure.to_string()));
+				let cause = moq_net::Error::Transport(failure.to_string());
+				match producer.set_active(false, now) {
+					Ok(()) => finished = producer.fail(cause).ok(),
+					Err(_) => producer.abort(cause),
 				}
 				Err(failure)
 			}
 			// The track closed, or encoding or publishing failed.
-			end => match end.and_then(|_| producer.set_active(false, now).and_then(|()| producer.finish())) {
-				Ok(()) => {
-					self.update(Status::Ended);
-					Ok(())
+			end => {
+				let ended = match end.and_then(|_| producer.set_active(false, now)) {
+					// A finish that fails ends the track with an error itself.
+					Ok(()) => producer.finish().map(|track| finished = Some(track)),
+					Err(err) => {
+						producer.abort(moq_net::Error::Transport(err.to_string()));
+						Err(err)
+					}
+				};
+				match ended {
+					Ok(()) => {
+						self.update(Status::Ended);
+						Ok(())
+					}
+					Err(err) => {
+						self.update(Status::Failed(err.clone()));
+						Err(err)
+					}
 				}
-				Err(err) => {
-					self.update(Status::Failed(err.clone()));
-					producer.abort(moq_net::Error::Transport(err.to_string()));
-					Err(err)
-				}
-			},
+			}
 		};
 		self.publish_level(Level::default());
 		let _ = self.state.close();
+		drop(finished);
 		result
 	}
 

@@ -2692,7 +2692,7 @@ mod tests {
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.represented()).await;
 
 		// A clean finish lists the open segment and ends the playlist.
-		media.finish().unwrap();
+		let media = media.finish().unwrap();
 		catalog.finish().unwrap();
 
 		let deadline = kio::clock::now() + Duration::from_secs(5);
@@ -2841,7 +2841,7 @@ mod tests {
 		// The recorder drops the broadcaster before finalizing its uploads.
 		drop(broadcaster);
 
-		media.finish().unwrap();
+		let media = media.finish().unwrap();
 		catalog.finish().unwrap();
 
 		let mut listed = Vec::new();
@@ -2917,8 +2917,8 @@ mod tests {
 		} else {
 			broadcast.clone()
 		};
-		let mut media = write_routed_media(&mut target.broadcast().clone(), KEYFRAME, 0);
-		media.finish().unwrap();
+		let media = write_routed_media(&mut target.broadcast().clone(), KEYFRAME, 0);
+		let media = media.finish().unwrap();
 		settle().await;
 
 		let source = crate::resolved(&origin, "live").await;
@@ -2995,7 +2995,7 @@ mod tests {
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 			);
 			media.write(payload_frame(0, true, NEW)).unwrap();
-			media.finish().unwrap();
+			let _finished = media.finish().unwrap();
 			settle().await;
 
 			let fresh = crate::resolved(&ended.origin, path).await;

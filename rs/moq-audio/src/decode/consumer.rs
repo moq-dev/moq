@@ -913,7 +913,7 @@ mod tests {
 				producer.cut(None).unwrap();
 			}
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut consumer = Consumer::new(
 			&broadcast.consume(),
 			&catalog,
@@ -1130,7 +1130,7 @@ mod tests {
 		for packet in 1..=20 {
 			write(packet);
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let mut stamps = Vec::new();
 		while let Some(read) = consumer.read().await.unwrap() {
@@ -1190,7 +1190,7 @@ mod tests {
 			}
 			producer.cut(None).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		catalog.warmup = Some(Duration::from_millis(80));
@@ -1243,7 +1243,7 @@ mod tests {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut consumer = Consumer::new(
 			&broadcast.consume(),
 			&catalog,
@@ -1299,7 +1299,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let mut consumer = Consumer::new(
 			&broadcast.consume(),
@@ -1365,7 +1365,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut consumer = Consumer::new(
 			&broadcast.consume(),
 			&catalog,
@@ -1433,7 +1433,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut stamps = Vec::new();
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
 			stamps.push(frame.timestamp.as_micros());
@@ -1572,7 +1572,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut reads = Vec::new();
 		while let Some(event) = consumer.read().await.unwrap() {
 			reads.push(match event {
@@ -1629,7 +1629,7 @@ mod tests {
 				producer.discontinuity().unwrap();
 			}
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut before = Vec::new();
 		let mut ended = None;
 		let mut after = Vec::new();
@@ -1766,7 +1766,7 @@ mod tests {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let first = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		let first_frames = first.data.len() / size_of::<f32>();
@@ -1850,7 +1850,7 @@ mod tests {
 				.unwrap();
 			producer.cut(None).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let expected = first_dtx.expect("silence should enter Opus DTX");
 		let mut actual = None;
@@ -1928,7 +1928,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let mut read = Vec::new();
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
@@ -2079,7 +2079,7 @@ mod tests {
 		// Same group: a new group at 1s would sit below the marker's live edge.
 		write(&mut producer, 3 * 48_000, Bytes::new(), false);
 		write(&mut producer, 48_000, dtx.payload, false);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let frame = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		// The output begins with the first packet's samples, so it is stamped and
@@ -2567,7 +2567,7 @@ mod tests {
 			2,
 			crate::single(encoder.encode_all(&pcm).unwrap()).payload,
 		);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let first = next_frame(&mut consumer).await.unwrap().expect("first decoded frame");
 		let _second = next_frame(&mut consumer).await.unwrap().expect("second decoded frame");

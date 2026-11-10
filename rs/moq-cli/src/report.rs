@@ -90,8 +90,9 @@ impl<T: serde::Serialize> ReportTrack<T> {
 
 	/// End the track cleanly, keeping the last snapshot.
 	fn finish(&mut self) {
-		if let Some(track) = &mut self.track
-			&& let Err(err) = track.finish()
+		// A clone, so the track stays to abort, refusing writes now that it finished.
+		if let Some(track) = &self.track
+			&& let Err(err) = track.clone().finish()
 		{
 			tracing::warn!(%err, "failed to finish a report");
 		}

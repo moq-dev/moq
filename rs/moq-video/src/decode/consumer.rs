@@ -587,7 +587,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -671,7 +671,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -744,7 +744,7 @@ mod tests {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -890,7 +890,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -989,7 +989,7 @@ mod tests {
 		read(&mut consumer).await;
 
 		producer.write(picture(200_000, b"new access unit")).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		read(&mut consumer).await;
 		read(&mut consumer).await;
 		assert_eq!(reads, ["frame 100000", "end 133333", "frame 200000", "none"]);
