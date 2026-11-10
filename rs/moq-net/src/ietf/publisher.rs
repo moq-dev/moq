@@ -6152,9 +6152,10 @@ impl PublishNamespaces {
 
 	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if self.run.is_none() {
-			if ready!(self.publisher.poll_requires_solicitation(waiter)) {
-				return Poll::Ready(Ok(()));
-			}
+			// Some relays (Cloudflare) answer SETUP with `solicit=true` but never
+			// open SUBSCRIBE_NAMESPACE toward the publisher; skipping this loop
+			// makes every broadcast invisible. Consume the signal, then advertise.
+			let _ = ready!(self.publisher.poll_requires_solicitation(waiter));
 
 			// The cluster extension changes what an advertisement carries, so nothing can be
 			// sent until the peer's SETUP says whether it speaks it.
