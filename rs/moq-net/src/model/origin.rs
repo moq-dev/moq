@@ -6956,7 +6956,8 @@ impl Requesting {
 				loop {
 					match discovery.poll_next(waiter) {
 						Poll::Ready(Some(RouteEvent {
-							kind: RouteKind::End | RouteKind::Offline, ..
+							kind: RouteKind::End | RouteKind::Offline,
+							..
 						})) => self.routed = false,
 						Poll::Ready(Some(RouteEvent {
 							kind: RouteKind::Start | RouteKind::Restart | RouteKind::Update,

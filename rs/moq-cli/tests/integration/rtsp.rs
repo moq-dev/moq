@@ -69,7 +69,10 @@ async fn next_broadcast(
 				..
 			} => break,
 			moq_net::origin::RouteEvent {
-				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline | moq_net::origin::RouteKind::Update,
+				kind:
+					moq_net::origin::RouteKind::End
+					| moq_net::origin::RouteKind::Offline
+					| moq_net::origin::RouteKind::Update,
 				..
 			} => {}
 		}

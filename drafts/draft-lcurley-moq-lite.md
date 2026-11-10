@@ -450,6 +450,7 @@ The publisher sends a ROUTE_START before any claim under it, and SYNCED only onc
 A floor names a Revision and certifies that the stream's claims for the route, across the whole requested prefix, are the origin's claims at that Revision as the request presents them (see [Announce](#announce)).
 It certifies only what its own request shows: a stream whose ANNOUNCE_REQUEST did not set `Hidden` certifies nothing about hidden claims.
 A publisher that does not know the route's claims across the whole requested prefix at one Revision, such as a relay that knows them only beneath part of it, still closes each batch, with a floor that certifies nothing.
+A subscriber that may receive claims only beneath one prefix, because its [scope](#auth-stream) or the publisher's confines the stream there, SHOULD request that prefix rather than one above it, so the publisher can certify the request. When that prefix changes, it SHOULD open a request for the new one and end the old one once the new one is SYNCED.
 
 The subscriber applies a batch whole, once its floor arrives.
 A receiver that hears one origin's claims on several streams merges them claim by claim, each at the prefix its stream presents it: of the streams whose floor certifies the claim, the one with the highest Revision decides whether it exists, and a claim no floor certifies exists while some stream carries it.
@@ -2194,6 +2195,7 @@ The `Message Length` describes the payload size on the wire.
 - Added ROUTE_REQUEST (0xA), sent by the subscriber on the Announce Stream to ask for a route with a newer seqno when every route it has is infeasible.
 - Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.
 - A route presents only its most specific claim covering the requested prefix, moved to the next covering claim when it is withdrawn rather than ended.
+- A subscriber whose scope confines a stream to one prefix SHOULD request that prefix, and replace the request when the prefix changes.
 - A route goes on a stream only while it has a claim the request presents, and ends after the batch withdrawing its last claim. It starts on that stream again only once the subscriber echoed the ROUTE_END.
 - Added `Node ID` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the origin node the first hop selected, followed by every later hop.
 - Replaced Warm and Cold Route Cost with the origin's Announce Cost, unchanged in transit. ANNOUNCE_UPDATE carries only the Announce Cost.
