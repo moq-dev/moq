@@ -23,10 +23,11 @@ The first relay a request reaches picks the origin node, by a hash of the path
 and the node's identity that every relay computes alike, and names it on the
 request so later hops follow their own route to that node. A relay running both
 versions translates: a moq-lite-06 peer's routes enter the route layer as the
-relay's own claims, and lite-07 routes reach a moq-lite-06 peer as a hop list
-that starts at their origin node. A relay drops a moq-lite-06 route whose hop
-list names its own routing identity, since that is one of its claims coming
-back.
+relay's own claims, keeping their hop list, which lite-07 carries alongside
+them. A lite-07 route reaches a moq-lite-06 peer as that hop list followed by
+its origin node. A relay drops a route whose hop list names it, by its hop or
+its routing identity, since that is one of its claims coming back, so a
+rolling upgrade's mix of versions ends a withdrawn broadcast everywhere.
 
 A track from a moq-transport publisher keeps its Object IDs, object properties,
 and END\_OF\_GROUP status objects across a moq-lite-07 link, since relays

@@ -633,12 +633,13 @@ impl Subscriber {
 				instance,
 				epoch,
 				cost,
+				..
 			} => {
 				// Resolved like an update: the id stays live.
 				let suffix = run.decoder.get(id)?;
 				let path = prefix.join(&suffix)?;
 				run.announced.restart(&path, instance.map(|instance| (instance, epoch)));
-				// Lite-07 carries no hop chain; its claims name their route instead.
+				// Only lite-07 restarts, and its claims name their route instead.
 				self.restart_announce(
 					path,
 					crate::Hops::new(),
@@ -823,6 +824,14 @@ impl Subscriber {
 		Ok(announced.offer(self, path, route))
 	}
 
+	/// Whether `hops` passed through this node, under its lite-06 hop or the hop its
+	/// route identity travels as: a moq-lite-07 relay translating this node's claims
+	/// for a lite-06 peer names the latter. Either way the claim came back, and filed
+	/// again it would keep itself alive once its source left.
+	pub(super) fn names_self(&self, hops: &crate::Hops) -> bool {
+		hops.contains(&self.self_origin) || self.origin.route_hop().is_some_and(|hop| hops.contains(&hop))
+	}
+
 	/// The full chain of a new or replacing advertisement, or `None` when it is
 	/// reflected or exceeds the origin's hop limit.
 	fn chain(&self, path: &Path, mut hops: crate::Hops, responder_origin: Option<crate::Hop>) -> Option<crate::Hops> {
@@ -832,15 +841,10 @@ impl Subscriber {
 			Some(responder) => {
 				(responder != crate::Hop::UNKNOWN && hops.contains(&responder))
 					|| hops.push(responder).is_err()
-					|| hops.contains(&self.self_origin)
+					|| self.names_self(&hops)
 			}
-			None => hops.contains(&self.self_origin),
+			None => self.names_self(&hops),
 		};
-		// A claim of this node's that a moq-lite-07 relay translated for a lite-06 peer
-		// starts with its route identity's hop, which is this origin's own until the
-		// identity rotates. Filed again as an own claim, it would keep itself alive once
-		// its source left.
-		let reflected = reflected || self.origin.route_hop().is_some_and(|hop| hops.contains(&hop));
 		if reflected {
 			tracing::debug!(route = %self.log_path(path), "dropping reflected announce");
 			return None;

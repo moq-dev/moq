@@ -536,6 +536,7 @@ impl RouteNode {
 			cost: 0,
 			upstream: false,
 			learned: false,
+			chain: crate::Hops::new(),
 		}
 	}
 
@@ -637,6 +638,7 @@ impl RouteRelay {
 			cost,
 			upstream: false,
 			learned: false,
+			chain: crate::Hops::new(),
 		}
 	}
 

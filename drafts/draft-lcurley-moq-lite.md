@@ -974,6 +974,8 @@ The following Setup Parameters are defined:
 |------|----------------|-------------|
 | 0x8  | Route Key      | Proof (..)  |
 |------|----------------|-------------|
+| 0x9  | Lite-06 Chain  | (empty)     |
+|------|----------------|-------------|
 
 ### Probe Parameter {#probe-parameter}
 The Probe Parameter advertises the sender's capability level when acting as a publisher on a [Probe Stream](#probe).
@@ -1073,6 +1075,11 @@ Either endpoint MAY send it. A receiver MUST close the session with a PROTOCOL_V
 A receiver that relies on the key MUST verify the signature first, closing the session with a PROTOCOL_VIOLATION if it does not verify; without an exporter on the session, it cannot rely on the key.
 A relay MUST NOT forward it.
 
+
+### Lite-06 Chain Parameter {#lite06-chain-parameter}
+The Lite-06 Chain Parameter says the sender reads the Lite-06 Chain on ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART (see [ANNOUNCE_START](#announce-start)).
+It is a temporary extension for relays that also peer over moq-lite-06, and the next version removes it.
+The Parameter Value MUST be empty; a receiver MUST close the session with a PROTOCOL_VIOLATION otherwise.
 
 ## ANNOUNCE_REQUEST {#announce-request}
 A subscriber sends an ANNOUNCE_REQUEST message to indicate it wants to receive the claims, and the routes they travel under, for any broadcasts with a path that starts with the requested prefix.
@@ -1268,6 +1275,7 @@ ANNOUNCE_START Message {
   Instance (b),
   Epoch (i),
   Announce Cost (i),
+  [Lite-06 Chain (..)],
 }
 ~~~
 
@@ -1299,6 +1307,12 @@ Only an ANNOUNCE_RESTART changes the Instance or the Epoch; ANNOUNCE_UPDATE neve
 **Announce Cost**:
 The origin's price for this prefix, in the units of the [Cost Parameter](#cost-parameter): 0 for content it already produces, larger for a standby that starts work on demand.
 A relay forwards it unchanged; the cost of a path through the claim is the Announce Cost plus the route's metric.
+
+**Lite-06 Chain**:
+The moq-lite-06 Hop ID list a claim arrived with where its origin node learned it over moq-lite-06, encoded as that list: a count, then each Hop ID.
+A publisher sends it, as the message's last field, only to a peer that sent the [Lite-06 Chain Parameter](#lite06-chain-parameter), and only when the claim has one; a received empty chain is a PROTOCOL_VIOLATION.
+A relay forwards it unchanged, and translating the claim for a moq-lite-06 peer sends it followed by a Hop ID standing for the claim's origin node.
+A node MUST NOT serve a claim whose chain names itself, by its own Hop ID or one standing for its Node ID, or whose translated chain would exceed its hop limit.
 
 
 ## ANNOUNCE_END {#announce-end}
@@ -1335,6 +1349,7 @@ ANNOUNCE_UPDATE Message {
   Message Length (i)
   Announce ID (i),
   Announce Cost (i),
+  [Lite-06 Chain (..)],
 }
 ~~~
 
@@ -1344,8 +1359,8 @@ Set to 0x2 to indicate an ANNOUNCE_UPDATE message.
 **Announce ID**:
 As defined for [ANNOUNCE_END](#announce-end).
 
-**Announce Cost**:
-As defined for [ANNOUNCE_START](#announce-start), replacing the claim's.
+**Announce Cost** and **Lite-06 Chain**:
+As defined for [ANNOUNCE_START](#announce-start), replacing the claim's; an absent chain replaces it with none.
 
 
 ## ANNOUNCE_RESTART {#announce-restart}
@@ -1362,6 +1377,7 @@ ANNOUNCE_RESTART Message {
   Instance (b),
   Epoch (i),
   Announce Cost (i),
+  [Lite-06 Chain (..)],
 }
 ~~~
 
@@ -1371,7 +1387,7 @@ Set to 0x3 to indicate an ANNOUNCE_RESTART message.
 **Announce ID**:
 As defined for [ANNOUNCE_END](#announce-end).
 
-**Instance**, **Epoch**, and **Announce Cost**:
+**Instance**, **Epoch**, **Announce Cost**, and **Lite-06 Chain**:
 As defined for [ANNOUNCE_START](#announce-start), replacing the claim's.
 
 ## ANNOUNCE_FLOOR {#announce-floor}
@@ -2210,6 +2226,7 @@ The `Message Length` describes the payload size on the wire.
 - The Cost parameter must be at least 1.
 - Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the local priority of the route's session, the Announce Cost plus the route's metric, and a Rendezvous Hash of the requested path and the origin's Node ID.
 - Removed the standby-ordering deployment requirements on Route Cost seeds and bounds.
+- Added the temporary Lite-06 Chain Setup Parameter (0x9) and a trailing Lite-06 Chain on ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART: the moq-lite-06 Hop ID list of a claim learned over moq-lite-06, which a node drops when it names that node.
 
 ### Tracks {#changelog-07-tracks}
 

@@ -972,6 +972,7 @@ impl AnnounceServe {
 				hidden,
 				self.shared.auth.clone(),
 			)
+			.with_peer_setup(self.shared.peer_setup.clone())
 		});
 
 		// The identity whose routes we filter out. Lite-04/05 carry it per
@@ -1406,6 +1407,7 @@ impl AnnounceRun {
 					instance,
 					epoch,
 					cost,
+					hops: crate::Hops::new(),
 				})?;
 				self.sent(stream)?;
 			}
