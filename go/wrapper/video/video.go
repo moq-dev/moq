@@ -207,20 +207,10 @@ func (ReadFrame) read() {}
 func (ReadGap) read()   {}
 func (ReadEnd) read()   {}
 
-// releaseRead destroys the decoded frame a read nobody received holds.
-func releaseRead(raw *ffi.MoqVideoRead) {
-	if raw == nil {
-		return
-	}
-	if read, ok := (*raw).(ffi.MoqVideoReadFrame); ok {
-		read.Frame.Destroy()
-	}
-}
-
 // Next returns the next decoded frame, gap, or encoder end, or (nil, nil) when the
 // track ends. Close each frame when done with it.
 func (d *Consumer) Next(ctx context.Context) (Read, error) {
-	raw, err := bridge.CallRelease(ctx, nil, d.inner.Next, releaseRead)
+	raw, err := bridge.Call(ctx, nil, d.inner.Next)
 	if err != nil || raw == nil {
 		return nil, err
 	}

@@ -157,7 +157,7 @@ export const METRICS = {
 		clock: "media",
 		aggregations: ["p50", "p95"],
 		description:
-			"How far the audio playhead trails the shared clock video plays from (`sync.now()`), sampled while playing: latency audio adds beyond the resolved target. Negative is audio ahead. Unset natively.",
+			"How far the audio playhead trails the shared clock video plays from (`sync.now()`), sampled while playing: latency audio adds beyond the resolved target. Negative is audio ahead.",
 	},
 	target_ms: {
 		unit: "ms",
@@ -410,7 +410,7 @@ export type Sample = {
 	 * is only a sink with nothing written yet, or none at all.
 	 */
 	stalled?: boolean;
-	/** `sync.now()`: where the shared clock puts video, on the `media` clock. Unset natively. */
+	/** `sync.now()`: where the shared clock puts video, on the `media` clock. Natively, `sync::Consumer::position`. */
 	clock?: Ms;
 	/** `sync.out.delay`: the resolved playout target. Natively, the target the speaker is held on. */
 	delay?: Ms;
