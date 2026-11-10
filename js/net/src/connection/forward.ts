@@ -329,7 +329,7 @@ async function serveRequests(conn: Session, origin: OriginProducer): Promise<voi
 
 	for (;;) {
 		const map = table.requests.peek();
-		if (!map || dead) break;
+		if (origin.closed.peek() !== undefined || dead) break;
 
 		for (const [path, slot] of map) {
 			if (!table.blind(slot)) continue;
