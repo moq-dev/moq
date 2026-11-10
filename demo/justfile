@@ -14,6 +14,3 @@ default:
 wait url="http://localhost:4443/certificate.sha256":
     ../sh/demo/wait.sh "$@"
 
-# Throttle UDP traffic for testing (macOS only, requires sudo).
-throttle:
-    throttle/enable
