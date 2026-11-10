@@ -111,8 +111,7 @@ test("lite-04 refuses datagram tracks at setup", async () => {
 	}
 });
 
-// Quarantined: flaky under load, see /quest/m0/test-flakes-2/datagram-queues.md
-test.skip("lite-07 bounds and prioritizes independent createWritable datagram queues", async () => {
+test("lite-07 bounds and prioritizes independent createWritable datagram queues", async () => {
 	const source = new Origin();
 	const publication = source.route(path, { hidden: true });
 	const datagrams = publication.broadcast.createDatagrams("audio");
@@ -133,6 +132,10 @@ test.skip("lite-07 bounds and prioritizes independent createWritable datagram qu
 	try {
 		await reader.info();
 		while (datagrams.priority.peek() !== 19) await datagrams.priority.changed();
+		// The publisher opens a track's queue after writing its DATAGRAMS_INFO, so the reader can
+		// see the info first: a datagram through each queue is what proves both are open.
+		datagrams.append(undefined, new Uint8Array([0]));
+		expect((await reader.recv())?.sequence).toBe(0n);
 		await second.info();
 		other.append(undefined, new Uint8Array([1]));
 		await second.recv();
@@ -150,7 +153,7 @@ test.skip("lite-07 bounds and prioritizes independent createWritable datagram qu
 		// Type, Subscribe ID, and Sequence each occupy one byte on this untimed track.
 		datagrams.append(undefined, new Uint8Array(898));
 		datagrams.append(undefined, new Uint8Array(897));
-		expect((await reader.recv())?.sequence).toBe(1n);
+		expect((await reader.recv())?.sequence).toBe(2n);
 	} finally {
 		second.close();
 		reader.close();

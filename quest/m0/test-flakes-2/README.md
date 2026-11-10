@@ -241,6 +241,13 @@ reader got `Unroutable` after the endpoint closed during
 [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)'s loaded `just check`.
 It is quarantined with `pytest.mark.skip` until its child fixes it.
 
+`js/net`'s lite-07 createWritable datagram queue test failed only on code
+predating [moq-dev/moq#8195](https://github.com/moq-dev/moq/pull/8195): a write
+that yielded after handing DATAGRAMS_INFO over left the first track's queue
+unopened while the reader went on. The test now reads a datagram through that
+queue before counting queues, fixed by
+[moq-dev/moq#8396](https://github.com/moq-dev/moq/pull/8396).
+
 Public API: none. Wire: none.
 
 ## Required
@@ -248,4 +255,3 @@ Public API: none. Wire: none.
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [js/net's bandwidth sampling test holds up under load](/quest/m0/test-flakes-2/bandwidth-sampling.md) - the sampling test counts ticks without racing the mocked clock, and its `test.skip` is removed
 - [js/net's datagram session-close-after-end test holds up under load](/quest/m0/test-flakes-2/datagram-close-end.md) - the abort is ordered after the end by an event the client observes, and its `test.skip` is removed
-- [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the test waits for the first track's queue instead of asserting at once, and its `test.skip` is removed
