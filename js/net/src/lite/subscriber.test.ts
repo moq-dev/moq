@@ -3583,8 +3583,8 @@ async function routedStream() {
 	await new AnnounceOk(PEER, 0).encode(peer, version);
 	const send = (msg: AnnounceBroadcast) => encodeAnnounceBroadcast(peer, msg, version);
 	// The TRACK request a consume of `path` opens as its `index`th stream.
-	const trackRequest = async (path: Path.Valid, index: number) => {
-		const consumed = subscriber.consume(path);
+	const trackRequest = async (path: Path.Valid, index: number, pin?: Instance.Valid) => {
+		const consumed = subscriber.consume(path, pin);
 		const info = consumed
 			.track("video")
 			.info()
@@ -3719,6 +3719,28 @@ test("a lite-07 tie at a claim's path goes to the newest claim, a re-price keepi
 	announced.close();
 	subscriber.close();
 	await Promise.all([kept.info, restarted.info]);
+});
+
+// A consume pinned to an instance takes that instance's route, whichever the hash ranks first.
+test("a lite-07 consume pinned to an instance names its route's node", async () => {
+	const { subscriber, announced, send, trackRequest } = await routedStream();
+	const pool = Path.from("pool");
+	const a = Instance.parse("a");
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: pool, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n });
+	await announced.next();
+	await send({ status: "routeStart", node: NODE_B, advert: ADVERT });
+	await send({ status: "active", suffix: pool, route: 1n, instance: Instance.parse("b") });
+	await send({ status: "floor", id: 1n });
+	await announced.next();
+	// NODE_B wins `pool/job` unpinned; see the spread test above.
+	const { request, consumed, info } = await trackRequest(Path.from("pool/job"), 1, a);
+	expect(request).toMatchObject({ instance: a, node: NODE_A });
+	consumed.close();
+	announced.close();
+	subscriber.close();
+	await info;
 });
 
 test("a lite-07 batch applies at its floor, and a held route turns unavailable", async () => {

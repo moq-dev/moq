@@ -1367,20 +1367,29 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
  * get from a cluster peer, which is every route here.
  */
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
-	const hops = (route: WireRoute) => (route.node !== undefined ? 1 : route.hops.length);
-	const order = compareRoutes(a, b) || hops(a) - hops(b);
+	const order = compareRoutes(a, b) || routeHops(a) - routeHops(b);
 	if (order !== 0 || path === prefix) return order;
-	if (a.node !== undefined || b.node !== undefined) {
-		// Rust keys a lite-07 claim by its node and every other by its instance and chain, which
-		// never meet on one session: compare by node where both have one.
-		const ra = a.node !== undefined ? rendezvousHash(path, a.node) : 0n;
-		const rb = b.node !== undefined ? rendezvousHash(path, b.node) : 0n;
-		return ra < rb ? -1 : ra > rb ? 1 : 0;
-	}
-	const ha = spreadHash(path, a.instance ? Instance.text(a.instance) : "");
-	const hb = spreadHash(path, b.instance ? Instance.text(b.instance) : "");
-	if (ha !== hb) return ha < hb ? -1 : 1;
-	const ca = chainHash(path, a.hops);
-	const cb = chainHash(path, b.hops);
-	return ca < cb ? -1 : ca > cb ? 1 : 0;
+	const [a1, a2] = routeKey(path, a);
+	const [b1, b2] = routeKey(path, b);
+	if (a1 !== b1) return a1 < b1 ? -1 : 1;
+	return a2 < b2 ? -1 : a2 > b2 ? 1 : 0;
+}
+
+/**
+ * The hops a route ranks by: a lite-07 route counts as the one hop to its origin node, since the
+ * rest of its chain is the lite-06 one it carries only for loop detection. As `route_order` in
+ * rs/moq-net.
+ */
+export function routeHops(route: WireRoute): number {
+	return route.node !== undefined ? 1 : route.hops.length;
+}
+
+/**
+ * The hash pair `route_order` in rs/moq-net ranks a route by beneath its prefix, each route keyed
+ * on its own: a lite-07 claim by the rendezvous hash of its origin node, any other by the spread
+ * hash of its instance and then the hash of its chain.
+ */
+function routeKey(path: Path.Valid, route: WireRoute): [bigint, bigint] {
+	if (route.node !== undefined) return [rendezvousHash(path, route.node), 0n];
+	return [spreadHash(path, route.instance ? Instance.text(route.instance) : ""), chainHash(path, route.hops)];
 }

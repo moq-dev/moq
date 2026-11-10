@@ -148,7 +148,11 @@ export type Advertisements = ReadonlyMap<Path.Valid, readonly Advertised[]>;
 
 /** The protocol-facing operations behind an established session. */
 export interface Established {
-	consume(path: Path.Valid): broadcast.Consumer;
+	/**
+	 * Consume `path` from the session: the route it ranks best, or with `instance`, the best
+	 * route of that instance alone, as a request pinned to it resolves.
+	 */
+	consume(path: Path.Valid, instance?: Instance.Valid): broadcast.Consumer;
 	/**
 	 * Whether the peer refuses an announce request overlapping one it still holds, so
 	 * discovery never holds two where one covers the other.

@@ -9790,6 +9790,27 @@ mod tests {
 			Some(0x8b),
 			"the lower node hash wins under the claims"
 		);
+
+		// A lite-06 route keys on its instance and chain, a lite-07 claim on its node, each on
+		// its own: here the claim's is lower.
+		assert_eq!(instance_key("pool/job", &"b".parse().unwrap()), 0xd16a3821c67a2d25);
+		let producer = origin(1).produce();
+		let _claim = producer.forward("pool", claim(0x7a, "a", 1)).unwrap();
+		let legacy = RouteInfo::new()
+			.with_instance("b".parse().unwrap(), 0)
+			.with_hops(hops(&[11]))
+			.with_cost(1);
+		let _legacy = producer.forward("pool", legacy).unwrap();
+		let table = producer.shared.read();
+		let winner = table
+			.best_route(
+				&Path::new("pool/job").unwrap(),
+				Horizon::default(),
+				&HashSet::new(),
+				|_| true,
+			)
+			.and_then(|entry| entry.node);
+		assert_eq!(winner, Some(0x7a), "each route keyed on its own");
 	}
 
 	/// Equal-cost advertisers of one prefix share its paths: a set of requested

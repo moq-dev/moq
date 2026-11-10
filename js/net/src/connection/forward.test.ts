@@ -58,6 +58,9 @@ class FakeSession {
 	 */
 	readonly consumed = new Map<Path.Valid, BroadcastProducer[]>();
 
+	/** The instance each consume was pinned to, in order. */
+	readonly pins: (Instance.Valid | undefined)[] = [];
+
 	/** Whether each request is synced as it opens, as one with no initial set to wait for is. */
 	syncedAtOnce = false;
 
@@ -70,7 +73,7 @@ class FakeSession {
 	/** `exclusive` stands in for a peer that refuses overlapping requests. */
 	constructor({ exclusive = false } = {}) {
 		registerWire(this, {
-			consume: (path) => this.consume(path),
+			consume: (path, instance) => this.consume(path, instance),
 			exclusive,
 			leave: () => {},
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
@@ -109,7 +112,8 @@ class FakeSession {
 		return found.stream;
 	}
 
-	consume(path: Path.Valid): BroadcastConsumer {
+	consume(path: Path.Valid, instance?: Instance.Valid): BroadcastConsumer {
+		this.pins.push(instance);
 		const producer = new BroadcastProducer();
 		const existing = this.consumed.get(path);
 		if (existing) existing.push(producer);
@@ -145,6 +149,25 @@ function record(stream: Announce.Routes): string[] {
 	})();
 	return events;
 }
+
+// A session can carry another instance's claim at the prefix, which ranks apart from this one:
+// a request through a received route consumes that route's instance, never whichever wins.
+test("a request through a received route consumes that route's instance", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+	const instance = Instance.parse("a");
+	const request = origin.request(Path.from("pool/job"));
+	await settle();
+	start(session.stream("pool/job/**"), "pool/job", { ...WireRoute.default, instance });
+	session.stream("pool/job/**").synced();
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(session.pins).toEqual([instance]);
+	request.close();
+	session.die();
+	origin.close();
+});
 
 test("a request discovers an unwatched path and waits for its initial set", async () => {
 	const origin = new OriginProducer();

@@ -26,6 +26,7 @@ import {
 	firstEligible,
 	hiddenBelow,
 	hooks,
+	routeHops,
 	scopeCaptures,
 	scopeHead,
 	scopeOverlaps,
@@ -315,9 +316,7 @@ interface Candidate extends Advertised {
  */
 function compareCandidates(a: Candidate, b: Candidate): number {
 	return (
-		compareRoutes(a.route, b.route) ||
-		Number(b.exact) - Number(a.exact) ||
-		a.route.hops.length - b.route.hops.length
+		compareRoutes(a.route, b.route) || Number(b.exact) - Number(a.exact) || routeHops(a.route) - routeHops(b.route)
 	);
 }
 

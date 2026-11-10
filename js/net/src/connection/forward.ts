@@ -291,12 +291,17 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 	});
 }
 
-/** Answer the requests under a received route by consuming them from the session. */
+/**
+ * Answer the requests under a received route by consuming them from the session, pinned to the
+ * route's instance: the session may carry another instance's claim at the prefix, which ranks
+ * apart from this one, and must never be served under this one's identity.
+ */
 async function drive(handle: Claim, conn: Session): Promise<void> {
 	const session = wireOf(conn);
+	const instance = wireOf(handle).info?.instance;
 	try {
 		for await (const request of handle.requested()) {
-			request.serve(session.consume(request.path));
+			request.serve(session.consume(request.path, instance));
 		}
 	} catch {
 		handle.close();

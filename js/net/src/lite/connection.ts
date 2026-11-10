@@ -263,7 +263,7 @@ export class Connection implements Session {
 		// Only the lite-05+ Setup Stream carries it.
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
-			consume: (path) => this.#subscriber.consume(path),
+			consume: (path, instance) => this.#subscriber.consume(path, instance),
 			exclusive: false,
 			leave: () => this.#leave(),
 			auth: this.#auth,

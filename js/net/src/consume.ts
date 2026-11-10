@@ -107,18 +107,27 @@ export class BroadcastCache {
 	}
 
 	/**
+	 * The best route of `instance` alone at `path`, whichever instance wins the path, as a
+	 * request pinned to it resolves. With no route of it, the instance alone, which the peer
+	 * resolves or refuses.
+	 */
+	pinned(path: Path.Valid, instance: Instance.Valid): Selection {
+		for (const prefix of coveringPrefixes(path)) {
+			const entries = [...(this.#announced.get(prefix)?.values() ?? [])].filter(
+				(entry) => entry.route.instance === instance,
+			);
+			const best = bestCandidate(path, prefix, entries, (entry) => entry.route);
+			if (best) return best;
+		}
+		return { identity: {}, route: { instance } };
+	}
+
+	/**
 	 * The origin node of the best route now serving `instance` at `path` (lite-07), whichever
 	 * instance wins the path, or undefined when no route names one.
 	 */
 	node(path: Path.Valid, instance: Instance.Valid): bigint | undefined {
-		for (const prefix of coveringPrefixes(path)) {
-			const routes = [...(this.#announced.get(prefix)?.values() ?? [])]
-				.map((entry) => entry.route)
-				.filter((route) => route.instance === instance);
-			const best = bestCandidate(path, prefix, routes, (route) => route);
-			if (best) return best.node;
-		}
-		return undefined;
+		return this.pinned(path, instance).route.node;
 	}
 
 	/** Clone the live cached consumer only when it serves the selected instance. */

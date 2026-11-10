@@ -1130,10 +1130,15 @@ export class Subscriber {
 	 * closed its handle, so callers close normally.
 	 *
 	 * @param name - The name of the broadcast to consume
+	 * @param pin - Consume only this instance, over its best route. A minted one names an
+	 * announcement rather than a stream, so it pins nothing.
 	 * @returns A Broadcast instance
 	 */
-	consume(path: Path.Valid): broadcast.Consumer {
-		const instance = this.#consumes.instance(path);
+	consume(path: Path.Valid, pin?: Instance.Valid): broadcast.Consumer {
+		const instance =
+			pin !== undefined && !Instance.isMinted(pin)
+				? this.#consumes.pinned(path, pin)
+				: this.#consumes.instance(path);
 		return this.#consumes.get(path, instance) ?? this.#createConsume(path, instance);
 	}
 
