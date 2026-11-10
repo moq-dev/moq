@@ -48,6 +48,6 @@ A `Producer` writes and any number of `Consumer`s read, sharing state via `kio`.
 # Testing
 
 - Tests are inline `#[cfg(test)] mod tests`; full Client/Server session tests go in the crate's `tests/integration/`.
-- Time-dependent async tests default to `#[kio::test]`'s simulated clock. Use `#[tokio::test]` with `tokio::time::pause()` only when the test needs a real tokio runtime, such as loopback sockets set up before pausing. Tests that keep real sockets running on real time assert lower bounds.
+- Time-dependent async tests default to `#[kio::test]`'s simulated clock. Use `#[tokio::test]` with `tokio::time::pause()` only when the test needs a real tokio runtime and no socket I/O races a timer: a paused clock auto-advances while a read is pending. Tests on real sockets run on real time, call `kio::clock::host_time()` (`just test` sets `KIO_DENY_HOST_TIMERS=1`), and assert lower bounds.
 - Run tests through `just` (nextest), not `cargo test`. A SLOW test is a bug to fix, not a threshold to raise.
 - Local checks build only the host platform; nightly covers the full feature matrix (`just rs features`) and Windows/macOS.
