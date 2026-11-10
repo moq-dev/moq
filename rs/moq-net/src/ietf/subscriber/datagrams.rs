@@ -12,12 +12,7 @@ pub(super) struct Requested {
 }
 
 impl Requested {
-	pub(super) fn new(
-		this: Subscriber,
-		key: TrackKey,
-		track: track::Consumer,
-		request: datagram::Request,
-	) -> Self {
+	pub(super) fn new(this: Subscriber, key: TrackKey, track: track::Consumer, request: datagram::Request) -> Self {
 		let priority = request.priority().unwrap_or(0);
 		let id = std::sync::Arc::new(());
 		this.state

@@ -4246,9 +4246,7 @@ impl SubscribeOnce {
 		// none and the copy keeps the ones it learned. Before that the answer declares them
 		// again.
 		let properties = match &self.resumed {
-			Some(idle) if !self.properties_wanted && ietf::Filter::is_draft20(this.version) => {
-				idle.properties.clone()
-			}
+			Some(idle) if !self.properties_wanted && ietf::Filter::is_draft20(this.version) => idle.properties.clone(),
 			_ => properties,
 		};
 		let timescale = properties.timescale;
