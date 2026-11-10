@@ -10,10 +10,10 @@
 [page] announced: broadcast=moqtail/ch01 active=true
 [page] announced: broadcast=moqtail/ch00_all active=true
 [page] announced: broadcast=moqtail/ch04 active=true
-[page] announced: broadcast=smoke-js-web-4337-447.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4337-447.hang track=catalog.json
 [page] announced: broadcast=moqtail/ch05 active=true
 [page] announced: broadcast=moqtail/ch00 active=true
-[page] subscribe written: id=2 broadcast=smoke-js-web-4337-447.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4337-447.hang track=catalog.json
-decoded 0 frames from smoke-js-web-4337-447.hang (vite)
+[page] announced: broadcast=smoke-js-web-4248-13498.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-js-web-4248-13498.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-js-web-4248-13498.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-js-web-4248-13498.hang track=catalog.json
+decoded 0 frames from smoke-js-web-4248-13498.hang (vite)
