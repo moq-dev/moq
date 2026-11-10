@@ -159,6 +159,7 @@ export namespace Connection {
 		timeout?: Clock.Duration;
 		tokens?: readonly string[];
 		transport?: WebTransport;
+		unsolicited?: boolean;
 		url: URL;
 		versions?: readonly string[];
 		viewers?: Bandwidth.Viewers;
