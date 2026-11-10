@@ -2155,6 +2155,13 @@ run_fetch_round() {
     local label="CLI FETCH${3:+ $3}"
     local started=$SECONDS why=""
     local cell=(case="$label" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
+    # The relay fills its miss with an upstream FETCH, which a JS publisher refuses on
+    # moq-transport by design: it serves FETCH only over moq-lite.
+    if [[ "$VERSION" == moq-transport-* && "$pub" == js-native-* ]]; then
+        echo "  SKIP  $label $pub -> $sub (a JS publisher refuses moq-transport FETCH)"
+        record skip "${cell[@]}" detail="a JS publisher refuses moq-transport FETCH"
+        return
+    fi
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  $label $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"

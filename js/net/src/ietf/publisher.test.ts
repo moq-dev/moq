@@ -2849,8 +2849,8 @@ async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["la
 }
 
 /**
- * LARGEST_OBJECT is the live edge on every draft: a Next Object subscription starts right
- * after it, and the head before it comes back by a fill or a joining FETCH that ends there.
+ * LARGEST_OBJECT is the live edge on every draft, even on draft 18, where a Next Object
+ * subscription carries that group whole from object 0 rather than starting right after it.
  */
 test("LARGEST_OBJECT is the live edge", async () => {
 	for (const version of IETF_VERSIONS) {

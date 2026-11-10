@@ -831,8 +831,8 @@ export class Publisher {
 				const ok = new SubscribeOk({
 					trackAlias: msg.requestId,
 					// Required once the track has content. A Next Object subscription starts right
-					// after it, and recovers the group's head with a FILL on draft-22 or a joining
-					// FETCH before it, both of which end here.
+					// after it and recovers the group's head with a FILL from draft 20, which ends
+					// here. On draft 18 it carries the group whole from object 0 instead.
 					largest: edge.largest && { groupId: edge.largest.group, objectId: edge.largest.object },
 					properties,
 				});

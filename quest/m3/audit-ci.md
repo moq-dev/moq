@@ -90,7 +90,8 @@ verdicts:
 - The earlier finite-track failures before draft 22 (`Error: old`, a JS
   `RESET_STREAM`) retain their split ownership: [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306)
   fixes the Rust publisher, including the removed WASM harness's quick-finish
-  case; [JS joining FETCH](/quest/m3/ietf-js-joining-fetch.md) owns the JS half.
+  case. The JS half is gone: the JS publisher refuses every FETCH, and a draft-18
+  subscription carries its first group whole instead.
 - Visibility gaps retained with existing owners: Rust benchmark tests and
   shipping sizes are measured but not on Pages yet;
   [moq-dev/moq#7510](https://github.com/moq-dev/moq/pull/7510) publishes both.

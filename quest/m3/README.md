@@ -121,7 +121,6 @@ federation) land.
 - [Publisher timeliness at relay ingest](/quest/m3/qos-publisher-timeliness.md) - follow-on capability after the release contract is stable
 - [The relay refuses a cluster peer it cannot dial](/quest/m3/relay-undialable-peers.md) - moq-tokio reports the schemes it can dial and names the missing feature when one can't, and the relay refuses an undialable peer at startup instead of retrying forever
 - [moq-transport finish interop](/quest/m3/ietf-finish.md) - the interop `finish` case runs on every even moq-transport draft instead of being skipped
-- [JS joining FETCH](/quest/m3/ietf-js-joining-fetch.md) - the JS publisher answers a joining FETCH that arrives after a quick finish, mirroring the Rust bound
 - [An Absolute join never races an older-history FETCH](/quest/m3/ietf-absolute-join-race.md) - reproduce #7680's suspected collision on main, then fix it or keep the test and delete
 - [A passing interop run stops publishers cleanly](/quest/m3/interop-shutdown-warnings.md) - no lingering publisher or unfinished-producer warning in a green interop run
 - [Dependency and alternatives audit](/quest/m3/audit-deps.md) - every dependency earns its weight, preferring fewer, and the rest are current, deduplicated, and the best maintained option
