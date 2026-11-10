@@ -259,8 +259,8 @@ Added 2026-11-09 (maintainer, /quest-complete): interop's `finish` cases with
 a cpp or rust publisher, which failed under a loaded host and passed on rerun.
 They are quarantined until their child fixes them.
 
-Resolved 2026-11-09 (maintainer, `/quest-complete`): `js/net`'s lite-07 createWritable datagram queue test failed only on code
-predating [moq-dev/moq#8195](https://github.com/moq-dev/moq/pull/8195): a write
+Resolved 2026-11-09 (maintainer, `/quest-complete`): `js/net`'s lite-07
+createWritable datagram queue test failed only on code predating [moq-dev/moq#8195](https://github.com/moq-dev/moq/pull/8195): a write
 that yielded after handing DATAGRAMS_INFO over left the first track's queue
 unopened while the reader went on. The test now reads a datagram through that
 queue before counting queues, fixed by
