@@ -51,12 +51,3 @@ that fails intermittently in CI, Nightly, or the merge queue becomes a child
 of m0's [test flakes](/quest/m0/test-flakes-2/README.md) epic. Skills that plan
 follow-ups plan a reported flake there without asking whether or where; the
 planning PR's review is the check.
-
-## Required
-
-- [m0: immediate priorities](/quest/m0/README.md) - urgent work of any kind, and maintenance of the current release
-- [m1: additive work](/quest/m1/README.md) - this cycle's improvements and fixes that need no breaking release; each ships with the next cut or as a backported patch
-- [m2: the next breaking release](/quest/m2/README.md) - every change that would need a breaking release if it landed after the cut, plus the cut gate; the cut waits on m2 alone
-- [m3: later work, higher priority](/quest/m3/README.md) - byte streams and mesh libraries first, release execution, what a named consumer needs, and bug fixes in shipped code
-- [m4: later work, lower priority](/quest/m4/README.md) - tests, tooling, benchmarks, optimizations, and features nobody waits on yet
-- [m5: deferred](/quest/m5/README.md) - gated on the outside world (hardware, a partner, a consumer, a provider's offer, or an upstream release), or speculative with no named consumer

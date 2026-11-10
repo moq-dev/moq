@@ -56,7 +56,3 @@ Rejected in planning:
   and #8088 showed that a 100-file audit PR spends weeks rebasing.
 - Folding these items into the larger quests: those wait on decisions or
   prototypes, and these do not.
-
-## Required
-
-- [Ban doc(hidden) in Rust](/quest/m2/api-shape/doc-hidden.md) - `just check` bans it; each use becomes private or documented, test-support modules documented behind their feature

@@ -111,13 +111,6 @@ promotion with bounded overlap, no failback while the working route
 delivers, and epochless exclusion.
 Add a route-health section to the routing concept page.
 
-## Required
-
-- [Metadata subscriptions](/quest/m5/route-health/meta.md) - the current lite wip and the shared model observe frames without payload in Rust and JS
-- [Track route selection](/quest/m5/route-health/selection.md) - share broadcast identity/candidates while tracks choose sources independently
-- [Automatic recovery](/quest/m5/route-health/recovery.md) - epoch-only promotion in endpoints and relays, staying on the working route
-- [Revisit the relay's default QUIC idle timeout](/quest/m5/route-health/idle-timeout.md) - keep or change the 10 s default, with the reason recorded
-
 ## Related
 
 - [Cluster routing](/quest/m2/cluster-routing/README.md) - reachability and advertisement freshness, distinct from delivery health

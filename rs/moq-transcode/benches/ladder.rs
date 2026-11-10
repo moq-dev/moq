@@ -90,7 +90,8 @@ async fn fanout(sinks: &mut [(moq_video::Size, moq_video::encode::Sink)], frame:
 			Scale::Caller => Arc::new(frame.resize(*size, &resize).unwrap()),
 			Scale::Encoder => frame.clone(),
 		};
-		sink.encode(frame).await.unwrap()
+		sink.encode(frame).await.unwrap();
+		while sink.receive().unwrap().is_some() {}
 	}))
 	.await;
 }

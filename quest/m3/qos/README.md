@@ -55,12 +55,6 @@ crate. Client stats left the line (2026-09-29)
 when media stats moved out of moq-stats onto hang tracks, which are additive
 on `main`.
 
-## Required
-
-- [Viewer lag histogram](/quest/m3/qos/lag-histogram.md) - the egress `lag`
-  histogram and `dropped` counters land on the stats totals and prefix
-  tracks
-
 ## Related
 
 - [Media stats](/quest/m3/stats/README.md) - publishers and viewers report

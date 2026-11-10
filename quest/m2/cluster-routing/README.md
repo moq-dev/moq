@@ -130,12 +130,6 @@ Each implementation updates the docs it makes stale. The separate
 [routing guide](/quest/m1/routing-guide.md) explains the combined design and
 setup after the capabilities land.
 
-## Required
-
-- [Outbound federation](/quest/m2/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
-- [A relay refuses a lite-07 session with itself](/quest/m2/cluster-routing/lite07-self-dial.md) - the self-dial refusal lite-06 has, on lite-07, whose SETUP carries no Hop ID
-
 ## Related
 
 - [Route health](/quest/m5/route-health/README.md) - epoch-only active/passive delivery monitoring and automatic recovery

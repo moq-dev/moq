@@ -164,15 +164,6 @@ Before `@moq/p2p` is first published, add its entrypoints to the API
 Extractor declaration checks, which analyze only published packages since
 [moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794).
 
-## Required
-
-- [Signaling and policy](/quest/m4/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and per-peer `iceServers` decide whether STUN is used
-- [Native pairs over ICE and QUIC](/quest/m4/p2p/native-quic.md) - two native peers connect through ICE, then `moq-quic` over the nominated path with fingerprints pinned from the offer
-- [moq-cli joins](/quest/m4/p2p/cli.md) - `--p2p` publishes a roster entry, dials native peers over ICE and QUIC, and serves browsers as a transit hop
-- [Peer route policy](/quest/m4/p2p/cost-scopes.md) - application priorities and total cost choose eligible routes, with epoch-aware handover
-- [Watch opts in](/quest/m4/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the best eligible route
-- [Harness](/quest/m4/p2p/harness.md) - the Playwright harness and the numbers behind every mapping decision
-
 ## Related
 
 - [Route health](/quest/m5/route-health/README.md) - epoch-only active/passive delivery recovery on selected connections

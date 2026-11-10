@@ -67,11 +67,6 @@ everything" branch). It belongs to
 [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md),
 which collapses that state and waits on [Drop set](/quest/m1/drop-set.md).
 
-## Required
-
-- [FFI handle state](/quest/m1/explicit-state/ffi-state.md) - moq-ffi's tasks and server, moq-c's ids, and the language wrappers hold one state each
-- [moq-net phase data](/quest/m1/explicit-state/net-phases.md) - moq-net's session and subscription state machines keep each phase's data in its variant
-
 ## Related
 
 - [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - owns the lite `TrackRun` start state and its forgotten-drops bug

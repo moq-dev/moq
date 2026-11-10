@@ -72,13 +72,6 @@ bitrate; removing a disabled rung from the catalog; an application-level
 [#2734](https://github.com/moq-dev/moq/issues/2734)); rebuilding unsupported
 encoders on every target change.
 
-## Required
-
-- [Controller](/quest/m5/ladder/controller.md) - one controller owns every
-  rung's share, target, enabled state, and send order
-- [Fetch and catalog](/quest/m5/ladder/fetch.md) - uncached FETCH encodes at
-  the shared applied target, and rung state survives a source catalog refresh
-
 ## Related
 
 - [#2848](/quest/m5/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the other sender that reserves but never follows its grant

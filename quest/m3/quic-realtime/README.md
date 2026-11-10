@@ -176,10 +176,6 @@ the upstream encoder, so a GStreamer pipeline at a fixed bitrate still queues
 when capacity drops; [its own quest](/quest/m3/quic-realtime/moqsink-feedback.md)
 owns that feedback.
 
-## Required
-
-- [moqsink encoder feedback](/quest/m3/quic-realtime/moqsink-feedback.md) - GStreamer publishers retune their encoder to the target rate
-
 ## Related
 
 - [Per-stream and per-datagram deadlines](/quest/m5/quic-deadline.md) - also consumes the forward-delay estimate
