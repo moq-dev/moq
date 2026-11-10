@@ -524,8 +524,7 @@ Claims with the same Instance serve the same Broadcast, so a relay MAY move a li
 A relay MUST NOT move a subscription to a claim with a different Instance: it stays on its Instance's claims and ends with the last of them.
 When another Broadcast wins the path, subscriptions already open stay on theirs until the subscriber drops them or the claim goes; new requests resolve the winner, and the ANNOUNCE_RESTART tells subscribers to request again.
 A receiver of an ANNOUNCE_RESTART (or of the ANNOUNCE_END and ANNOUNCE_START standing in for one) MUST NOT serve a new request under its prefix from anything resolved through the replaced claim.
-A version before this one carries no Instance, so a receiver of such a session mints one for each ANNOUNCE_START it receives, with Epoch 0, and forwards it as the claim's Instance.
-A minted Instance SHOULD start with `~` (0x7E), so a reader can tell it names an announcement rather than the publisher's stream; a publisher SHOULD NOT name its own Instance with that prefix.
+A version before this one carries no Instance, so a receiver of such a session mints one for each ANNOUNCE_START it receives, with Epoch 0, and forwards it as the claim's Instance with `Minted` set, so a reader can tell it names an announcement rather than the publisher's stream.
 A minted Instance is new for every announcement, so a publisher reconnecting or re-announcing through such a hop is another stream.
 
 #### Resolution {#resolution}
@@ -1274,6 +1273,7 @@ ANNOUNCE_START Message {
   Claim Prefix Suffix (s),
   Route ID (i),
   Instance (b),
+  Minted (8),
   Epoch (i),
   Announce Cost (i),
   [Lite-06 Chain (..)],
@@ -1298,6 +1298,12 @@ A claim never changes its Route ID.
 The stream the claim serves (see [Broadcast](#broadcast)): non-empty UTF-8 text.
 An empty or non-UTF-8 Instance is a PROTOCOL_VIOLATION.
 A relay forwards the Instance unchanged.
+
+**Minted**:
+1 when a receiver minted the Instance for a version that carries none (see [Routing](#routing)), 0 when the publisher named it.
+Any other value is a PROTOCOL_VIOLATION.
+A relay forwards it unchanged.
+An Instance minted and one named with the same text are different Instances.
 
 **Epoch**:
 Which incarnation of the Instance the claim serves: a counter the publisher raises within one Instance, 0 unless it keeps an Instance across restarts.
@@ -1376,6 +1382,7 @@ ANNOUNCE_RESTART Message {
   Message Length (i)
   Announce ID (i),
   Instance (b),
+  Minted (8),
   Epoch (i),
   Announce Cost (i),
   [Lite-06 Chain (..)],
@@ -1388,7 +1395,7 @@ Set to 0x3 to indicate an ANNOUNCE_RESTART message.
 **Announce ID**:
 As defined for [ANNOUNCE_END](#announce-end).
 
-**Instance**, **Epoch**, **Announce Cost**, and **Lite-06 Chain**:
+**Instance**, **Minted**, **Epoch**, **Announce Cost**, and **Lite-06 Chain**:
 As defined for [ANNOUNCE_START](#announce-start), replacing the claim's.
 
 ## ANNOUNCE_FLOOR {#announce-floor}
@@ -1422,6 +1429,7 @@ SUBSCRIBE Message {
   Subscribe ID (i)
   Broadcast Path (s)
   Instance (b)
+  Minted (8)
   Node ID (i)
   Track Name (s)
   Subscriber Priority (8)
@@ -1451,7 +1459,7 @@ Anchor {
 A unique identifier chosen by the subscriber.
 A Subscribe ID MUST NOT be reused within the same session, even if the prior subscription has been closed.
 
-**Instance** and **Node ID**:
+**Instance**, **Minted**, and **Node ID**:
 As in [TRACK](#track).
 
 **Subscriber Priority**:
@@ -1569,6 +1577,7 @@ TRACK Message {
   Message Length (i)
   Broadcast Path (s)
   Instance (b)
+  Minted (8)
   Node ID (i)
   Track Name (s)
 }
@@ -1577,10 +1586,10 @@ TRACK Message {
 **Broadcast Path**:
 The broadcast path of the track.
 
-**Instance**:
-The stream the subscriber expects, encoded as in [ANNOUNCE_START](#announce-start), or empty for whichever wins the path.
+**Instance** and **Minted**:
+The stream the subscriber expects, encoded as in [ANNOUNCE_START](#announce-start), or an empty Instance with Minted 0 for whichever wins the path; an empty Instance with Minted 1 is a PROTOCOL_VIOLATION.
 A publisher MUST refuse a request with UNROUTABLE when no claim of that Instance serves the path, so a request is never answered by a different stream than the one it named.
-A relay fills in the Instance of the claim it resolved when forwarding a request upstream; TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS carry it the same way.
+A relay fills in the Instance and Minted of the claim it resolved when forwarding a request upstream; TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS carry them the same way.
 
 **Node ID**:
 The origin node that serves the request, as the publisher names it on this session, or 0 for whichever the publisher selects (see [Routing](#routing)).
@@ -1651,6 +1660,7 @@ TRACKS Message {
   Message Length (i)
   Broadcast Path (s)
   Instance (b)
+  Minted (8)
   Node ID (i)
 }
 ~~~
@@ -1658,7 +1668,7 @@ TRACKS Message {
 **Broadcast Path**:
 The path of the Broadcast to list.
 
-**Instance** and **Node ID**:
+**Instance**, **Minted**, and **Node ID**:
 As in [TRACK](#track).
 The listing is pinned to the stream that answers it and ends with that stream.
 
@@ -1718,6 +1728,7 @@ DATAGRAMS Message {
   Subscribe ID (i)
   Broadcast Path (s)
   Instance (b)
+  Minted (8)
   Node ID (i)
   Track Name (s)
   Subscriber Priority (8)
@@ -1926,6 +1937,7 @@ FETCH Message {
   Message Length (i)
   Broadcast Path (s)
   Instance (b)
+  Minted (8)
   Node ID (i)
   Track Name (s)
   Subscriber Priority (8)
@@ -1939,7 +1951,7 @@ FETCH Message {
 **Broadcast Path**:
 The broadcast path of the track to fetch from.
 
-**Instance** and **Node ID**:
+**Instance**, **Minted**, and **Node ID**:
 As in [TRACK](#track).
 
 **Track Name**:
@@ -2214,7 +2226,7 @@ The `Message Length` describes the payload size on the wire.
 - Added `Instance` and `Epoch` to ANNOUNCE_START and ANNOUNCE_RESTART, and `Instance` to TRACK, TRACKS, SUBSCRIBE, and FETCH. The Instance is non-empty UTF-8 text naming one continuous stream, and a path and an Instance name one Broadcast; the Epoch is a counter within one Instance. A relay MAY move a subscription between claims with the same Instance, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between claims with different Instances. Within one Instance only its highest Epoch is eligible. A request's Instance is empty when it pins none. Replaces the first-hop identity.
 - Added ANNOUNCE_RESTART (0x3): a live advertisement now serves another Instance, or a higher Epoch of the same one.
 - An advertiser MAY announce a path it answers through a claim under the claim's Instance, so subscriptions resolved through the claim continue, and a claim still serving that Instance when the announcement ends restarts under a new one.
-- A receiver mints an Instance, starting with `~`, for each announcement a session of an earlier version delivers.
+- A receiver mints an Instance for each announcement a session of an earlier version delivers, and a `Minted` field beside every Instance (ANNOUNCE_START, ANNOUNCE_RESTART, TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS) says whether a receiver minted it, so no Instance text is reserved for minting.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
 - Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
 - Added ROUTE_HOLD (0xB), which holds a route while it recovers; ROUTE_END lets it go. Neither withdraws the origin's claims, and the subscriber echoes every ROUTE_END back.

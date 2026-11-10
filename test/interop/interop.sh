@@ -1812,6 +1812,15 @@ run_finishes() {
     fi
     for pub in "${PUB_LIST[@]}"; do
         name="finish-$pub"
+        # Quarantined: quest/m0/test-flakes-2/interop-finish.md. The cpp and rust publishers'
+        # finish cases failed under a loaded host and passed on rerun.
+        if [[ "$pub" == cpp || "$pub" == rust ]]; then
+            for sub in "${SUB_LIST[@]}"; do
+                echo "  SKIP  finish $pub -> $sub (quarantined)"
+                record skip case=finish publisher="$pub" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-finish.md"
+            done
+            continue
+        fi
         # The fixture and its .health sibling share a parent, so one prefix grant covers both:
         # moq-transport's AUTH extension carries prefixes alone.
         broadcast="$name-$$-$RANDOM/fixture.hang"

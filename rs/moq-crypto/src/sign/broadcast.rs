@@ -97,7 +97,7 @@ impl Consumer {
 	/// # Errors
 	///
 	/// [`Error::Instance`] if `inner` was not resolved through a route that carries its
-	/// publisher's instance: one a relay [minted](moq_net::Instance::is_minted) for a wire without
+	/// publisher's instance: one a session [minted](moq_net::Instance::is_minted) for a wire without
 	/// instances names the announcement, not the publisher.
 	pub fn new(inner: moq_net::broadcast::Consumer, key: PublicKey, path: moq_net::Path) -> Result<Self> {
 		let instance = inner

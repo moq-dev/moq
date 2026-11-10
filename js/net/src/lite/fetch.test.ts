@@ -80,7 +80,8 @@ test("Fetch decodes the optional delay offset before converting to milliseconds"
 		const encoded = await Writer.collect(version, (writer) =>
 			Message.encode(writer, async (w) => {
 				await w.string("room/1");
-				await w.u53(0); // no instance pin
+				await w.u53(0); // no instance pin: empty and unminted
+				await w.bool(false);
 				await w.string("video");
 				await w.u8(0);
 				await w.u62(delay + 1n);

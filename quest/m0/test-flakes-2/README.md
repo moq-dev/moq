@@ -255,10 +255,15 @@ in a loaded full `just check` on [moq-dev/moq#8325](https://github.com/moq-dev/m
 The failed log was not retained, so the failing test is unconfirmed.
 It is quarantined with `test.skip` until its child fixes it.
 
+Added 2026-11-09 (maintainer, /quest-complete): interop's `finish` cases with
+a cpp or rust publisher, which failed under a loaded host and passed on rerun.
+They are quarantined until their child fixes them.
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [js/common's worklet dev-server test holds up under load](/quest/m0/test-flakes-2/worklet-dev-server.md) - the dev-server test passes on a loaded host, and its `test.skip` is removed
 - [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the test waits for the first track's queue instead of asserting at once, and its `test.skip` is removed
+- [Interop's cpp and rust finish cases hold up under load](/quest/m0/test-flakes-2/interop-finish.md) - the publishers' finish cells pass under load, and their quarantine is removed
 - [The Go wrapper's cancelled-RecvGroup test holds up under load](/quest/m0/test-flakes-2/go-recv-cancel.md) - a `RecvGroup` after a cancelled one is woken by the next group, and its `t.Skip` is removed

@@ -43,10 +43,15 @@ fn id(raw: i32) -> u32 {
 	raw as u32
 }
 
-/// Create a route at `path` on `origin`, returning its route and broadcast fill handles.
+/// Create a route at `path` on `origin`, returning its route and broadcast fill handles. Frees
+/// the instance handle `options` names, which the call only borrows.
 fn create_route(origin: u32, path: &[u8], options: Option<&moq_route_options>) -> (u32, u32) {
+	let instance = options.map_or(0, |options| options.instance);
 	let options = options.map_or(std::ptr::null(), |options| options as *const _);
 	let route = id(unsafe { moq_origin_route(origin, path.as_ptr() as *const c_char, path.len(), options) });
+	if instance != 0 {
+		assert_eq!(moq_instance_free(instance), 0);
+	}
 	(route, id(moq_route_broadcast(route)))
 }
 
@@ -57,12 +62,15 @@ fn publish_broadcast(origin: u32, path: &[u8]) -> u32 {
 	create_route(origin, path, None).1
 }
 
-/// Route options at `cost` under the stable `instance`, borrowing it.
+/// Route options at `cost` under the stable `instance`, or a fresh one when empty.
 fn route_options(cost: u64, instance: &str, hidden: bool) -> moq_route_options {
 	moq_route_options {
 		cost,
-		instance: instance.as_ptr().cast(),
-		instance_len: instance.len(),
+		instance: if instance.is_empty() {
+			0
+		} else {
+			parse_instance(instance)
+		},
 		epoch: 0,
 		hidden,
 	}
@@ -73,24 +81,37 @@ fn hidden() -> moq_route_options {
 	route_options(0, "", true)
 }
 
-/// The instance a route serves.
-fn instance_of(route: u32) -> String {
-	read_instance(|dst| unsafe { moq_route_instance(route, dst) })
+/// A caller-owned handle naming `text`.
+fn parse_instance(text: &str) -> u32 {
+	id(unsafe { moq_instance_parse(text.as_ptr().cast(), text.len()) })
 }
 
-fn claim_instance_of(claim: u32) -> String {
-	read_instance(|dst| unsafe { moq_claim_instance(claim, dst) })
-}
-
-fn read_instance(read: impl FnOnce(&mut moq_string) -> i32) -> String {
+/// The text an instance handle names.
+fn instance_text(instance: u32) -> String {
 	let mut dst = moq_string {
 		data: std::ptr::null(),
 		len: 0,
 	};
-	assert_eq!(read(&mut dst), 0);
+	assert_eq!(unsafe { moq_instance_text(instance, &mut dst) }, 0);
 	unsafe { std::str::from_utf8(std::slice::from_raw_parts(dst.data.cast::<u8>(), dst.len)) }
 		.unwrap()
 		.to_string()
+}
+
+/// The text of a caller-owned instance handle, freeing it.
+fn take_instance(instance: u32) -> String {
+	let text = instance_text(instance);
+	assert_eq!(moq_instance_free(instance), 0);
+	text
+}
+
+/// The instance a route serves.
+fn instance_of(route: u32) -> String {
+	take_instance(id(moq_route_instance(route)))
+}
+
+fn claim_instance_of(claim: u32) -> String {
+	take_instance(id(moq_claim_instance(claim)))
 }
 
 /// Request a published broadcast via `moq_origin_request` and return its handle.
@@ -109,7 +130,6 @@ fn request_once(origin: u32, path: &[u8]) -> i32 {
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			std::ptr::null(),
 			0,
 			Some(channel_callback),
 			cb.ptr,
@@ -201,13 +221,7 @@ fn announce_info(announced: u32) -> moq_announce_event {
 		captures: std::ptr::null(),
 		captures_len: 0,
 		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT,
-		route: moq_route_info {
-			cost: 0,
-			instance: moq_string {
-				data: std::ptr::null(),
-				len: 0,
-			},
-		},
+		route: moq_route_info { cost: 0, instance: 0 },
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	info
@@ -218,16 +232,9 @@ fn fresh_instance() -> String {
 	moq_net::Instance::random().to_string()
 }
 
-/// The instance a received route carries.
+/// The instance a received route carries, owned by its announcement.
 fn route_instance(route: &moq_route_info) -> Option<String> {
-	(route.instance.len > 0).then(|| unsafe {
-		std::str::from_utf8(std::slice::from_raw_parts(
-			route.instance.data.cast::<u8>(),
-			route.instance.len,
-		))
-		.unwrap()
-		.to_string()
-	})
+	(route.instance != 0).then(|| instance_text(route.instance))
 }
 
 impl Drop for Callback {
@@ -4307,7 +4314,6 @@ fn a_new_route_at_a_path_restarts() {
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			std::ptr::null(),
 			0,
 			Some(follow_channel_callback),
 			follow_cb.ptr,
@@ -4368,7 +4374,6 @@ fn dynamic_serves_a_request_under_a_prefix() {
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			std::ptr::null(),
 			0,
 			Some(channel_callback),
 			req_cb.ptr,
@@ -4384,16 +4389,16 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	let got = unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.data.cast::<u8>(), info.len)).unwrap() };
 	assert_eq!(got, "live/cam");
 
-	// Unreadable options leave the request to answer.
-	let invalid = [0xff];
+	// Options naming a freed instance leave the request to answer.
+	let freed = parse_instance("freed");
+	assert_eq!(moq_instance_free(freed), 0);
 	let unreadable = moq_route_options {
-		instance: invalid.as_ptr().cast(),
-		instance_len: invalid.len(),
+		instance: freed,
 		..hidden()
 	};
 	assert_eq!(
 		unsafe { moq_broadcast_request_route(request, &unreadable) },
-		crate::error::MOQ_ERROR_UTF8
+		crate::error::MOQ_ERROR_NOT_FOUND
 	);
 
 	// A hidden job route answers nobody until it announces, under the instance its claim
@@ -4434,7 +4439,6 @@ fn dynamic_serves_a_held_consumer_without_taking_its_handle() {
 			origin,
 			b"live/cam".as_ptr().cast(),
 			8,
-			std::ptr::null(),
 			0,
 			Some(channel_callback),
 			result.ptr,
@@ -5311,7 +5315,6 @@ fn follow_local() {
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			std::ptr::null(),
 			0,
 			Some(follow_channel_callback),
 			cb.ptr,
@@ -5676,7 +5679,6 @@ fn follow_close_cancels() {
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			std::ptr::null(),
 			0,
 			Some(follow_channel_callback),
 			cb.ptr,
@@ -5713,7 +5715,6 @@ fn follow_delivers_a_restart() {
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			std::ptr::null(),
 			0,
 			Some(follow_channel_callback),
 			cb.ptr,
@@ -5758,7 +5759,6 @@ fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			std::ptr::null(),
 			0,
 			Some(follow_channel_callback),
 			cb.ptr,
@@ -5788,30 +5788,25 @@ fn follow_delivers_a_held_takeover_once() {
 }
 
 /// The signature of `moq_origin_request`.
-type Resolve = unsafe extern "C" fn(
-	u32,
-	*const c_char,
-	usize,
-	*const c_char,
-	usize,
-	crate::ffi::moq_status_callback,
-	*mut c_void,
-) -> i32;
+type Resolve =
+	unsafe extern "C" fn(u32, *const c_char, usize, u32, crate::ffi::moq_status_callback, *mut c_void) -> i32;
 
 /// Resolve `live` on `origin` through `call`, pinned to `instance`.
 fn resolve_pinned(call: Resolve, origin: u32, instance: &str, cb: &Callback) -> i32 {
 	let path = b"live";
-	unsafe {
+	let instance = parse_instance(instance);
+	let code = unsafe {
 		call(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			instance.as_ptr() as *const c_char,
-			instance.len(),
+			instance,
 			Some(channel_callback),
 			cb.ptr,
 		)
-	}
+	};
+	assert_eq!(moq_instance_free(instance), 0);
+	code
 }
 
 /// An instance pins both resolutions to one stream: a request for another one fails, and a
@@ -5845,17 +5840,18 @@ fn an_instance_pins_request_and_follow() {
 	let second = publish_run(origin, "live");
 	let cb = Callback::new();
 	let path = b"live";
+	let pin = parse_instance(&instance);
 	let task = id(unsafe {
 		moq_origin_follow(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			instance.as_ptr() as *const c_char,
-			instance.len(),
+			pin,
 			Some(follow_channel_callback),
 			cb.ptr,
 		)
 	});
+	assert_eq!(moq_instance_free(pin), 0);
 	let delivered = id(cb.recv());
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
@@ -5883,7 +5879,6 @@ fn follow(origin: u32, path: &[u8], cb: &Callback) -> u32 {
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			std::ptr::null(),
 			0,
 			Some(follow_channel_callback),
 			cb.ptr,
@@ -5932,7 +5927,6 @@ fn follow_delivers_the_instance_again_after_an_end() {
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			std::ptr::null(),
 			0,
 			Some(gated_follow_callback),
 			&*gate as *const Gate as *mut c_void,
@@ -8269,6 +8263,115 @@ fn announce_route_crosses_a_relay_session() {
 	}
 }
 
+/// A route received over moq-lite 06 carries a session-minted instance, and only its handle,
+/// not its text, pins a request or a follower to that stream.
+#[test]
+fn a_minted_instance_pins_request_and_follow() {
+	let source = id(moq_origin_create());
+	let sink = id(moq_origin_create());
+	let server_cb = Callback::new();
+	let (server, addr, fingerprint) = listen(&server_cb);
+	let url = format!("https://{addr}/");
+
+	let fingerprints = [moq_str(&fingerprint)];
+	let versions = [moq_str("moq-lite-06")];
+	let mut config = client_config();
+	config.tls_fingerprints = fingerprints.as_ptr();
+	config.tls_fingerprints_len = fingerprints.len();
+	config.tls_host_name = "localhost".as_ptr() as *const c_char;
+	config.tls_host_name_len = "localhost".len();
+	config.versions = versions.as_ptr();
+	config.versions_len = versions.len();
+	let client_cb = States::new();
+	let client = id(unsafe {
+		moq_session_connect(
+			url.as_ptr() as *const c_char,
+			url.len(),
+			&config,
+			source,
+			0,
+			Some(state_callback),
+			client_cb.ptr,
+		)
+	});
+	let session_cb = States::new();
+	let session =
+		id(unsafe { moq_session_request_accept(id(server_cb.recv()), 0, sink, Some(state_callback), session_cb.ptr) });
+	for cb in [&client_cb, &session_cb] {
+		assert_eq!(cb.recv().phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED);
+	}
+
+	let announced_cb = Callback::new();
+	let task = id(unsafe { moq_origin_announced(sink, std::ptr::null(), Some(channel_callback), announced_cb.ptr) });
+	let (route, broadcast) = create_route(source, b"live", Some(&route_options(0, "", false)));
+	let (announced, info) = announced_cb.recv_route();
+	let minted = info.route.instance;
+	assert_eq!(moq_instance_minted(minted), 1, "lite-06 carries no instance");
+	let named = parse_instance(&instance_text(minted));
+	assert_eq!(moq_instance_minted(named), 0, "text always names an instance");
+	assert_eq!(moq_instance_equal(minted, named), 0);
+	assert_eq!(moq_instance_equal(minted, minted), 1);
+
+	let path = b"live";
+	let cb = Callback::new();
+	let _task = id(unsafe {
+		moq_origin_request(
+			sink,
+			path.as_ptr().cast(),
+			path.len(),
+			minted,
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+	assert_eq!(moq_consume_close(id(cb.recv())), 0);
+	assert_eq!(cb.recv_terminal(), 0);
+
+	let cb = Callback::new();
+	let follow = id(unsafe {
+		moq_origin_follow(
+			sink,
+			path.as_ptr().cast(),
+			path.len(),
+			minted,
+			Some(follow_channel_callback),
+			cb.ptr,
+		)
+	});
+	assert_eq!(moq_consume_close(id(cb.recv())), 0);
+	assert_eq!(moq_origin_follow_cancel(follow), 0);
+	assert_eq!(cb.recv_terminal(), 0);
+
+	let cb = Callback::new();
+	let _task = id(unsafe {
+		moq_origin_request(
+			sink,
+			path.as_ptr().cast(),
+			path.len(),
+			named,
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+	assert!(cb.recv() < 0, "the minted instance's text names another stream");
+
+	assert_eq!(moq_instance_free(named), 0);
+	assert_eq!(moq_origin_announced_free(announced), 0);
+	assert_eq!(moq_origin_announced_cancel(task), 0);
+	assert_eq!(announced_cb.recv_announce_terminal(), 0);
+	for (session, cb) in [(session, &session_cb), (client, &client_cb)] {
+		assert_eq!(moq_session_close(session), 0);
+		cb.recv_terminal();
+	}
+	assert_eq!(moq_server_close(server), 0);
+	assert_eq!(server_cb.recv_terminal(), 0);
+	assert_eq!(moq_route_free(route), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	for origin in [source, sink] {
+		assert_eq!(moq_origin_close(origin), 0);
+	}
+}
+
 #[test]
 fn server_accepts_a_session() {
 	let served = id(moq_origin_create());
@@ -8333,7 +8436,6 @@ fn server_accepts_a_session() {
 			received,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			std::ptr::null(),
 			0,
 			Some(follow_channel_callback),
 			announced_cb.ptr,
