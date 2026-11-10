@@ -302,6 +302,11 @@ impl Routed {
 		Ok(())
 	}
 
+	/// How many of the session's announce slots the stream holds.
+	pub(super) fn held(&self) -> usize {
+		self.held.len() + self.echoing.len()
+	}
+
 	/// The peer sent a GOAWAY: its routes rank below every other. Idempotent.
 	pub(super) fn goaway(&mut self, subscriber: &Subscriber) {
 		if self.drained {

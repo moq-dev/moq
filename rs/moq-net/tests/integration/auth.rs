@@ -133,6 +133,11 @@ async fn lite_07_a_scope_change_reopens_without_letting_go() {
 }
 
 #[kio::test]
+async fn lite_07_a_scope_change_at_the_announce_cap_keeps_the_session() {
+	a_scope_change_at_the_announce_cap_keeps_the_session(LITE_07).await
+}
+
+#[kio::test]
 async fn lite_05_has_no_grant() {
 	older_versions_have_no_grant("moq-lite-05").await
 }
@@ -462,6 +467,8 @@ struct Options {
 	client_token: Option<&'static [u8]>,
 	/// The handle the client builds its session on, when not its own.
 	client_auth: Option<auth::Handle>,
+	/// The server's session limits, when not the defaults.
+	server_limits: Option<moq_net::session::Limits>,
 }
 
 struct Pair {
@@ -511,6 +518,9 @@ async fn connect(opts: Options) -> Pair {
 	}
 	if let Some(subscribe) = opts.server_subscribe {
 		server = server.with_subscriber(subscribe);
+	}
+	if let Some(limits) = opts.server_limits {
+		server = server.with_limits(limits);
 	}
 
 	let observe = client_transport.clone();
@@ -901,6 +911,43 @@ async fn a_scope_change_reopens_without_letting_go(version: &'static str) {
 		a.withdraw();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::End]);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A session holding all the announce slots it may has no room to hear its peer's claims
+/// twice, so a scope change lets the old request go before the new one takes over,
+/// rather than the handover running the peer past its cap.
+async fn a_scope_change_at_the_announce_cap_keeps_the_session(version: &'static str) {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let mut limits = moq_net::session::Limits::default();
+		// One route and its two claims.
+		limits.announces = 3;
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			server_limits: Some(limits),
+			..Default::default()
+		})
+		.await;
+		pair.server.auth().authorize(&grant(&["a"], &[]));
+
+		let x = publisher.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		x.announce().unwrap();
+		let y = publisher.route("a/y", moq_net::origin::RouteOptions::hidden()).unwrap();
+		y.announce().unwrap();
+		wait_announced(&relay.consume(), "a/y", true).await;
+
+		pair.server.auth().authorize(&grant(&["a", "b"], &[]));
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		wait_announced(&relay.consume(), "a/x", true).await;
+		wait_announced(&relay.consume(), "a/y", true).await;
+		assert_eq!(pair.server_transport.close_reason(), None);
+		assert_eq!(pair.client_transport.close_reason(), None);
 	})
 	.await
 	.expect("timed out");
