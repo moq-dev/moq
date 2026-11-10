@@ -1,9 +1,8 @@
-//! A seeded, impaired network path: a rate-limited bottleneck queue, then random loss,
-//! duplication, jitter, and reordering
+//! Test support, enabled by the `sim` feature: a seeded, impaired network path, a
+//! rate-limited bottleneck queue, then random loss, duplication, jitter, and reordering
 //!
-//! Not part of the public API. The crate's own tests drive two endpoints across a [`Link`]
-//! each way, and the `sim` feature exposes it for drivers that run QUIC on kio's
-//! simulator with no sockets.
+//! The crate's own tests drive two endpoints across a [`Link`] each way, and drivers that
+//! run QUIC on kio's simulator with no sockets use it too. It tracks the crate's internals, so it can change in any release.
 
 use rand::{RngExt, rngs::StdRng};
 
@@ -24,6 +23,7 @@ pub struct Bottleneck {
 	timed: bool,
 	/// When the link finishes serving everything queued so far
 	busy_until: Option<Instant>,
+	/// What the queue has dropped, marked, and delayed so far
 	pub stats: QueueStats,
 	/// Each queued packet's arrival and queueing delay, once set to `Some`
 	pub trace: Option<Vec<(Instant, Duration)>>,
@@ -86,9 +86,9 @@ impl Bottleneck {
 			self.stats.congested += service;
 		}
 
-		let done = busy_until + service;
+		let done = busy_until.saturating_add(service);
 		self.busy_until = Some(done);
-		let marked = self.marks_ce && done > now + self.max_queue / 2;
+		let marked = self.marks_ce && done > now.saturating_add(self.max_queue / 2);
 		self.stats.marked += marked as u64;
 		Some((done, marked))
 	}
@@ -144,9 +144,11 @@ impl Link {
 		let copies = 1 + rng.random_bool(self.duplicate) as usize;
 		let arrivals = (0..copies)
 			.map(|_| {
-				let arrival = sent + latency + rng.random_range(Duration::ZERO..=self.jitter);
+				let arrival = sent
+					.saturating_add(latency)
+					.saturating_add(rng.random_range(Duration::ZERO..=self.jitter));
 				if rng.random_bool(self.reorder) {
-					return arrival + rng.random_range(Duration::ZERO..=self.reorder_delay);
+					return arrival.saturating_add(rng.random_range(Duration::ZERO..=self.reorder_delay));
 				}
 				let arrival = self.last_arrival.map_or(arrival, |last| last.max(arrival));
 				let arrival = self.granted(arrival);
@@ -164,7 +166,7 @@ impl Link {
 		};
 		let epoch = *self.grant_epoch.get_or_insert(arrival);
 		let intervals = (arrival - epoch).as_nanos().div_ceil(grant.as_nanos());
-		epoch + Duration::from_nanos((intervals * grant.as_nanos()) as u64)
+		epoch.saturating_add(Duration::from_nanos((intervals * grant.as_nanos()) as u64))
 	}
 }
 

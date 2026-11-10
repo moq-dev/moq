@@ -45,7 +45,7 @@ This README's own work, once every child has merged:
    first, what was ruled out). Each child requires
    [the release cut](/quest/m3/release/cut.md), which removes itself from
    every `Required` and moves the questline under the re-created
-   [cut gate](/quest/m2/cut-gate/README.md) in m2, so the next run becomes
+   cut gate (`quest/m2/cut-gate/`) in m2, so the next run becomes
    ready there, once per release cycle (rule replaced 2026-11-05).
 3. Drop a child whose code was deleted or whose upstream stopped mattering,
    saying why in the PR.

@@ -47,7 +47,7 @@ impl Pair {
 	}
 
 	fn advance(&mut self, by: Duration) {
-		self.now += by;
+		self.now = self.now.saturating_add(by);
 		self.client.handle_timeout(self.now);
 		self.server.handle_timeout(self.now);
 	}

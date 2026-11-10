@@ -402,10 +402,7 @@ impl Drain {
 	}
 }
 
-/// Drives one producer tick for the benchmark. Not a public API: compiled only
-/// with the `bench` feature, which nothing enables by default.
 #[cfg(feature = "bench")]
-#[doc(hidden)]
 #[path = "produce_bench.rs"]
 pub mod bench;
 
@@ -1989,9 +1986,9 @@ mod tests {
 		.unwrap();
 		let start = kio::clock::now();
 		for phase in (0..1500).step_by(100) {
-			let at = start + Duration::from_micros(phase);
+			let at = start.saturating_add(Duration::from_micros(phase));
 			assert_eq!(
-				drain.stamp(at + interval).group,
+				drain.stamp(at.saturating_add(interval)).group,
 				drain.stamp(at).group + 1,
 				"phase {phase}us"
 			);
@@ -3116,7 +3113,7 @@ mod tests {
 
 		// Empty, acme lingers: still listed, its totals keeping the ended session.
 		drop(acme);
-		let lingering = start + Duration::from_secs(9);
+		let lingering = start.saturating_add(Duration::from_secs(9));
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
 		let mut acme = stats.bucket(moq_net::Path::from_static("acme")).await.unwrap();
 		let mut frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
@@ -3126,7 +3123,7 @@ mod tests {
 		assert_eq!(frame.tiers[""].sessions.sessions_ended, 1);
 
 		// Past the linger, acme alone is unlisted and its subscription ends.
-		let lingered = start + Duration::from_secs(20);
+		let lingered = start.saturating_add(Duration::from_secs(20));
 		assert_eq!(
 			next_listed(&mut drain, lingered, &mut tracks).await,
 			("acme".into(), false)

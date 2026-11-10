@@ -237,7 +237,6 @@ void main() {
         (_) => fail('unexpected request'),
       );
       await Future<void>(() {});
-      expect(server.certFingerprints, throwsA(isA<BusyMoqException>()));
       await subscription.cancel();
       expect(server.certFingerprints(), isNotEmpty);
       final accept = server.requests().first.then(

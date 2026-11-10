@@ -360,7 +360,7 @@ impl<S: ObjectStore> Track<S> {
 
 	/// When the object's oldest frame is due in the store.
 	fn flush_at(&self) -> Option<Instant> {
-		Some(self.object.as_ref()?.unstored + self.shared.config.flush)
+		Some(self.object.as_ref()?.unstored.saturating_add(self.shared.config.flush))
 	}
 
 	/// Store the object once its oldest frame is due, so its group continues in the next.
@@ -410,7 +410,7 @@ impl<S: ObjectStore> Track<S> {
 	fn prune_at(&self) -> Option<Instant> {
 		let dvr = self.shared.config.dvr.as_ref()?;
 		let (superseded, _) = self.superseded.front()?;
-		Some(*superseded + dvr.window + dvr.grace)
+		Some(superseded.saturating_add(dvr.window).saturating_add(dvr.grace))
 	}
 
 	/// Delete the superseded objects whose window and grace have passed.

@@ -966,11 +966,13 @@ impl<B: Backend> Room<B> {
 	/// Each round completes its reads before this step; pending read deadlines
 	/// share this clock too.
 	fn tick(&mut self) {
-		self.cache_now += if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
-			Duration::from_secs(1)
-		} else {
-			cache::DEFAULT_EXPIRY
-		};
+		self.cache_now = self
+			.cache_now
+			.saturating_add(if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+				Duration::from_secs(1)
+			} else {
+				cache::DEFAULT_EXPIRY
+			});
 		for pool in self.pools() {
 			pool.poll(self.cache_now, &kio::Waiter::noop());
 		}

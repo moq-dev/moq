@@ -13,7 +13,11 @@ use std::time::Duration;
 use bytes::{Buf, Bytes};
 use moq_net::transport::{self as net, Address, poll};
 use moq_quic::stream::{Dir, Id as StreamId};
-use moq_quic::{Side, VarInt, connection::Error as ConnectionError, mux, recv, send};
+use moq_quic::{
+	Side, VarInt,
+	connection::{Error as ConnectionError, mux},
+	recv, send,
+};
 
 use crate::transport::Transport;
 use crate::{Config, Driver, Error, SharedSocketStats};

@@ -3468,7 +3468,7 @@ impl Prefetch {
 		self.reset(compressed);
 		let mut read = log.read();
 		let mut end = 0;
-		for index in (index as u64..).take(budget.min(Self::CAP)) {
+		for index in (index as u64..=u64::MAX).take(budget.min(Self::CAP)) {
 			// Evicted or not yet committed: the guard resolves which.
 			let Ok(Some(entry)) = read.get(index) else {
 				break;

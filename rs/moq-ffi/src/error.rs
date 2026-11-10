@@ -284,7 +284,8 @@ pub enum MoqError {
 	#[error("closed")]
 	Closed,
 
-	/// A configuration call lost the race with an in-flight async operation.
+	/// A call lost the race with an in-flight async operation, such as handing off a group
+	/// while a read is pending.
 	///
 	/// The handle is still live: wait for the operation, then try again. A
 	/// cancelled handle is [`Self::Cancelled`] instead.

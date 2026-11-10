@@ -1296,9 +1296,6 @@ export interface RouteOptions {
 	 * sequences under an old instance splices unrelated groups into their tracks. The highest
 	 * epoch wins over every older one of the instance, cheaper or not. Naming an instance grants
 	 * nothing: publishing still needs the path's grant.
-	 *
-	 * Do not start a named instance with `~`: that marks one a relay minted (see
-	 * {@link Instance.isMinted}), which signing refuses to bind and a catalog's instance check skips.
 	 */
 	instance?: { id: Instance.Valid; epoch: bigint };
 }

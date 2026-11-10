@@ -185,29 +185,29 @@ mod tests {
 	#[test]
 	fn maps_across_batches_until_a_step() {
 		let mut map = WallMap::default();
-		let now = Instant::ZERO + Duration::from_secs(100);
+		let now = Instant::ZERO.saturating_add(Duration::from_secs(100));
 		let wall = Wall::UNIX_EPOCH + Duration::from_secs(1_000);
 		assert_eq!(map.map(wall), None);
 
 		map.sample(now, wall);
 		let at = wall - Duration::from_millis(3);
-		assert_eq!(map.map(at), Some(now - Duration::from_millis(3)));
+		assert_eq!(map.map(at), Some(now.saturating_sub(Duration::from_millis(3))));
 		assert_eq!(map.map(wall + Duration::from_millis(1)), None);
 
 		// A second later on both clocks, within tolerance of each other, still maps
 		let later = Duration::from_secs(1);
-		map.sample(now + later, wall + later + Duration::from_micros(500));
+		map.sample(now.saturating_add(later), wall + later + Duration::from_micros(500));
 		assert!(map.map(wall + later).is_some());
 
 		// The wall clock stepped forward: this batch maps nothing, and the next one does again
 		let step = Duration::from_secs(2) + Duration::from_millis(5);
-		map.sample(now + Duration::from_secs(2), wall + step);
+		map.sample(now.saturating_add(Duration::from_secs(2)), wall + step);
 		assert_eq!(map.map(wall + step), None);
-		map.sample(now + Duration::from_secs(3), wall + step + later);
+		map.sample(now.saturating_add(Duration::from_secs(3)), wall + step + later);
 		assert!(map.map(wall + step + later).is_some());
 
 		// And back
-		map.sample(now + Duration::from_secs(4), wall);
+		map.sample(now.saturating_add(Duration::from_secs(4)), wall);
 		assert_eq!(map.map(wall), None);
 	}
 }

@@ -704,7 +704,6 @@ pub mod config {
 // The ICE API is not necessary to interact with directly for "regular"
 // use of str0m. This is exported for other libraries that want to
 // reuse str0m's ICE implementation. This is now in the `is` crate.
-#[doc(hidden)]
 pub mod ice {
 	pub use crate::vendor::is::IceCreds;
 	pub use crate::vendor::is::stun::{StunMessage, StunMessageBuilder, StunPacket, TransId};
@@ -2116,7 +2115,6 @@ impl fmt::Debug for Rtc {
 }
 
 #[cfg(test)]
-#[doc(hidden)]
 pub fn init_crypto_default() {
 	crate::vendor::str0m::crypto::from_feature_flags().install_process_default();
 }

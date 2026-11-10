@@ -1233,7 +1233,7 @@ impl Registry {
 		}
 	}
 
-	/// Add `n` publisher-side payload bytes on `(path, tier)`. The hidden `fuzz`
+	/// Add `n` publisher-side payload bytes on `(path, tier)`. The `fuzz`
 	/// module exposes this to the stats producer bench. A report drops the entry
 	/// unless a guard still holds it.
 	#[cfg(any(test, feature = "fuzz"))]
@@ -3107,7 +3107,7 @@ mod tests {
 	fn activity_follows_recent_payload() {
 		let stats = test_stats();
 		let tier = Tier::default();
-		let at = |secs| Instant::ZERO + std::time::Duration::from_secs(secs);
+		let at = |secs| Instant::ZERO.saturating_add(std::time::Duration::from_secs(secs));
 		let activity = |secs| stats.snapshot_at(at(secs)).activity[&tier];
 		let both = |idle, active| Activity { idle, active };
 

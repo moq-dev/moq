@@ -1,4 +1,5 @@
-//! Fuzz target bodies for the wire codecs, plus the seeds they start from.
+//! Test support, enabled by the `fuzz` feature: fuzz target bodies for the wire codecs and their
+//! seeds, plus the hooks the benches and `moq-net-tests` reach private state through.
 //!
 //! Each `pub fn` here is one target: it takes raw fuzzer bytes, drives a decoder, and
 //! checks that whatever came out survives a re-encode. The bodies live in the crate
@@ -7,8 +8,7 @@
 //! here also lets the tests below replay them on stable, which is what turns a crash
 //! the fuzzer found into a regression `just check` runs.
 //!
-//! Compiled only under `cfg(test)` or the `fuzz` feature, so none of this is part of
-//! the published API. See `fuzz/README.md` for the workflow.
+//! It tracks the crate's internals, so it can change in any release. See `fuzz/README.md` for the workflow.
 
 mod ingest;
 mod request;
@@ -32,6 +32,88 @@ use crate::{
 /// One fuzz target body: it returns whether the input decoded, which is what
 /// [`seeds`] is checked against.
 pub type Target = fn(&[u8]) -> bool;
+
+/// A track holding a fragmented drop set, read by wire cursors, for the drop-set bench.
+pub struct DropSet {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	readers: Vec<track::Subscriber>,
+	shape: (usize, u64, u64, u64),
+	/// Runs added since the track was built, and since the readers subscribed.
+	added: u64,
+	fresh: u64,
+	next: u64,
+	waiter: kio::Waiter,
+}
+
+impl DropSet {
+	/// `runs` disjoint dropped runs of `span` sequences each, read by `readers` wire cursors
+	/// whose ranges hold the newest `reported` of them, each already reported.
+	pub fn new(readers: usize, runs: u64, reported: u64, span: u64) -> Self {
+		let broadcast = broadcast::Producer::new(broadcast::Info::default());
+		let track = broadcast.create_track("drops", track::Info::default()).unwrap();
+		// One run short: subscribing adds it.
+		let built = runs.saturating_sub(1);
+		for run in 0..built {
+			track.drop_groups(run * (span + 1)..run * (span + 1) + span, crate::StreamError::Old);
+		}
+		let mut set = Self {
+			_broadcast: broadcast,
+			track,
+			readers: Vec::new(),
+			shape: (readers, runs, reported, span),
+			added: 0,
+			fresh: 0,
+			next: built * (span + 1),
+			waiter: kio::Waiter::noop(),
+		};
+		set.subscribe();
+		set.added = 0;
+		set
+	}
+
+	/// Replace every reader with one holding the newest `reported` runs, each reported.
+	///
+	/// The newest run is dropped after they subscribe, so the first drop a caller times
+	/// does not carry the one-off cost of a fresh track or cursor.
+	fn subscribe(&mut self) {
+		let (readers, _, reported, span) = self.shape;
+		self.readers.clear();
+		let from = self.next.saturating_sub(reported.saturating_sub(1) * (span + 1));
+		for _ in 0..readers {
+			let mut reader = self.track.subscribe(None).with_range(from..);
+			while reader.poll_drop(&self.waiter).is_ready() {}
+			self.readers.push(reader);
+		}
+		self.drop_one();
+		self.fresh = 0;
+	}
+
+	/// Restore the counts `new` was given before either grows by more than a sixteenth:
+	/// rebuild the track once its runs have, otherwise resubscribe once the readers' have.
+	pub fn hold(&mut self) {
+		let (readers, runs, reported, span) = self.shape;
+		if self.added >= (runs / 16).max(1) {
+			*self = Self::new(readers, runs, reported, span);
+		} else if self.fresh >= (reported / 16).max(1) {
+			self.subscribe();
+		}
+	}
+
+	/// Drop one more run above the rest, and have every reader report it.
+	pub fn drop_one(&mut self) {
+		let span = self.shape.3;
+		let start = self.next;
+		self.next += span + 1;
+		self.track.drop_groups(start..start + span, crate::StreamError::Old);
+		for reader in &mut self.readers {
+			assert!(reader.poll_drop(&self.waiter).is_ready(), "the new run is owed");
+			assert!(reader.poll_drop(&self.waiter).is_pending(), "nothing else is");
+		}
+		self.added += 1;
+		self.fresh += 1;
+	}
+}
 
 /// Build a cached group with optional private object fields for model benchmarks.
 pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Finished) {
@@ -133,9 +215,12 @@ impl<const N: usize> ObjectBatch<N> {
 pub struct CanonicalStorage(crate::model::group::StorageBench);
 
 impl CanonicalStorage {
+	/// A group of `frames` 64-byte frames, each held by `views` extra owners.
 	pub fn new(frames: usize, views: usize) -> Self {
 		Self(crate::model::group::StorageBench::new(frames, views))
 	}
+
+	/// The group's stored bytes.
 	pub fn size(&self) -> u64 {
 		self.0.size()
 	}
@@ -450,6 +535,12 @@ pub fn excluding(origin: crate::origin::Consumer, peer: u64) -> crate::origin::C
 	origin.excluding(crate::Hop::from_wire(peer))
 }
 
+/// A fresh instance as a session mints one for a route an older wire delivered, for tests
+/// outside the crate that route one without an older session.
+pub fn minted_instance() -> crate::Instance {
+	crate::Instance::minted()
+}
+
 /// A peer's wire route: its hop ids, cost, and instance at an epoch, as a session
 /// decodes one, for benches and tests that land or update forwarded routes.
 ///
@@ -701,7 +792,7 @@ impl Interests {
 /// Add `n` publisher-side payload bytes on `(path, tier)`, creating the entry
 /// when the path is tracked. The stats producer bench marks a share of held
 /// paths changed this way, without a media frame. A later [`crate::stats::Registry::report`]
-/// drops the entry unless some guard still holds it. Not a public API.
+/// drops the entry unless some guard still holds it.
 pub fn bump_publisher_bytes(
 	registry: &crate::stats::Registry,
 	path: impl Into<crate::Path>,
@@ -1492,9 +1583,11 @@ pub fn pattern(data: &[u8]) -> bool {
 /// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
 /// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message
 /// (the sweep sets ROUTE_START's type byte but fills its size byte with the body
-/// pattern, so none decodes whole), the ROUTE_END echo, and ROUTE_REQUEST.
+/// pattern, so none decodes whole), the ROUTE_END echo, ROUTE_REQUEST, and a DATAGRAMS
+/// request, whose seven fields outgrow the sweep's longest body.
 const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
+	(30, &[7, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
 	(5, &[6, 4, 1, 0, 1, 0]),
 	(5, &[7, 4, 0, 1, 2, 0]),

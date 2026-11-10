@@ -18,6 +18,7 @@ Decided 2026-10-27 (maintainer), from
 the cheapest one; fix it with the route-selection rework here.
 - Feed the availability API from [Announcement availability](/quest/m2/cluster-routing/routes/availability.md).
 - Rust/JS interop covers the route messages, the floor marker, and the echo.
+- Encode lite-07's Route ID (ANNOUNCE_START) and Node ID (every TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS request, 0 when the publisher selects the node) as Rust does, and pin `js/net/src/lite/announce.test.ts`'s goldens to `lite::compress`'s `GOLDEN` and `JS_LITERAL`.
 - Leave the temporary Lite-06 Chain Setup Parameter unsent: JS translates nothing, so it keeps no chain, and a Rust peer sends the chain only to a peer that offers it.
 - Restore the native JS lite-07 lanes. Decided 2026-11-06 (maintainer,
   /quest-complete on [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)),

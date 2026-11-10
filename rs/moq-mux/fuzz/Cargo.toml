@@ -6,7 +6,7 @@
 # excluded from every gate that means "all of it" instead: libFuzzer needs a nightly
 # toolchain and sanitizer flags, so nothing in `check` or `test` may compile it.
 #
-# The target bodies live in `moq-mux`'s hidden `fuzz` module, not here: sharing them
+# The target bodies live in `moq-mux`'s `fuzz` module, not here: sharing them
 # is what lets the crate's own tests replay the corpus on stable, allocation bound
 # included.
 [package]

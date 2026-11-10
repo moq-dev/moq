@@ -7,9 +7,7 @@ The `release` line's hand-written Dart wrapper that gained `drain()` in
 [`moq`](https://pub.dev/packages/moq) 0.1.1, is on pub.dev.
 
 Check: pub.dev lists the version. It is already set on `release`
-(`dart/moq/pubspec.yaml`), so this needs a tag push, not code. The publish
-is outward-facing, so the maintainer runs it; agents do not push tags,
-dispatch workflows, or bump versions.
+(`dart/moq/pubspec.yaml`), so this needs a tag push, not code.
 
 ## Plan
 
@@ -39,7 +37,21 @@ are ready, and merge `main` into `release` for the next minor line
 separately, later. Not chosen: one combined cut that merges `main` first, or
 neither this week.
 
+Decided 2026-11-09 (maintainer, /quest-unblock): ✅ an agent pushes
+`moq-dart-v0.1.1` at `release`'s head once the combined cut's release-plz
+PR, [moq-dev/moq#8378](https://github.com/moq-dev/moq/pull/8378), merges
+(rejected: tag before #8378 merges; the maintainer pushes it). Then it checks
+that `release-dart.yml` succeeds and pub.dev lists 0.1.1, and deletes this
+quest.
+
 Public API: none. Wire: none.
+
+## Waiting
+
+- moq-dev/moq: the combined patch cut's release-plz PR,
+  [moq-dev/moq#8378](https://github.com/moq-dev/moq/pull/8378), merges into
+  `release`. Check with `gh pr view 8378 --repo moq-dev/moq --json state`;
+  then push the tag as the Plan's 2026-11-09 decision says.
 
 ## Related
 
