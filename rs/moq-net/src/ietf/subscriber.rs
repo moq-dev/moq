@@ -9014,7 +9014,7 @@ mod tests {
 	/// still drops its stragglers at once.
 	#[kio::test]
 	async fn resubscribing_lets_a_reused_alias_beat_its_subscribe_ok() {
-		let catalog = Path::from("demo");
+		let catalog = Path::new("demo").unwrap();
 		let aliases = TrackAliases::default();
 		insert_track_alias(&aliases, 0, RequestId(11)).unwrap();
 		retire_track_alias(&aliases, 0, RequestId(11), &catalog, "catalog.json");
@@ -9033,7 +9033,10 @@ mod tests {
 
 		let straggler = resolve_track_alias(&runtime, aliases.consume(), 1);
 		let mut straggler = std::pin::pin!(straggler);
-		assert!(matches!(poll!(&mut straggler), std::task::Poll::Ready(Err(Error::Cancel))));
+		assert!(matches!(
+			poll!(&mut straggler),
+			std::task::Poll::Ready(Err(Error::Cancel))
+		));
 		assert_eq!(aliases.read().retired.len(), 1);
 	}
 
