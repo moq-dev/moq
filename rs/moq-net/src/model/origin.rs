@@ -15083,7 +15083,9 @@ mod tests {
 		let standby = producer
 			.forward(
 				"room",
-				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[9, 5, 3])),
+				RouteInfo::new()
+					.with_instance(instance(), 0)
+					.with_hops(hops(&[9, 5, 3])),
 			)
 			.unwrap();
 		let pending = producer.consume().request("room/alice", None);
@@ -15125,7 +15127,9 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"last");
 
 		let _old = old.finish().unwrap();
-		let end = next_group(&mut subscription).await.map(|group| group.map(|group| group.sequence));
+		let end = next_group(&mut subscription)
+			.await
+			.map(|group| group.map(|group| group.sequence));
 		assert!(matches!(end, Ok(None)), "the incumbent's clean end, not {end:?}");
 	}
 
