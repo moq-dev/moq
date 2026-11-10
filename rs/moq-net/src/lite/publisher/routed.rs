@@ -39,6 +39,8 @@ struct Sent {
 	reach: BTreeMap<usize, route::Reach>,
 	/// Every claim the node sent for it, named as the handle names it, before filtering.
 	claims: BTreeMap<Path, node::Claim>,
+	/// How many of `claims` the stream's link never carries (see [`sends`]).
+	withheld: usize,
 	/// The node's floor for those claims.
 	floor: Option<route::Rev>,
 	/// Whether the peer was sent a floor for it yet.
@@ -48,6 +50,17 @@ struct Sent {
 impl Sent {
 	fn reach(&self) -> Option<route::Reach> {
 		self.reach.values().next().copied()
+	}
+
+	/// The node's claim at `path` is now `claim`, which `link` may withhold.
+	fn set(&mut self, link: &route::Link, path: Path, claim: Option<node::Claim>) {
+		let withheld = claim.as_ref().is_some_and(|claim| !sends(link, claim));
+		let old = match claim {
+			Some(claim) => self.claims.insert(path, claim),
+			None => self.claims.remove(&path),
+		};
+		self.withheld += usize::from(withheld);
+		self.withheld -= usize::from(old.is_some_and(|old| !sends(link, &old)));
 	}
 }
 
@@ -339,6 +352,7 @@ impl Answer {
 					shown: 0,
 					reach: BTreeMap::from([(source, reach)]),
 					claims: BTreeMap::new(),
+					withheld: 0,
 					floor: None,
 					floored: false,
 				};
@@ -377,7 +391,7 @@ impl Answer {
 				self.echo(id, source);
 				let sent = self.routes.get_mut(&id).expect("matched above");
 				for path in &paths {
-					sent.claims.remove(path);
+					sent.set(&self.link, path.clone(), None);
 				}
 				for path in paths {
 					self.sync(stream, id, path)?;
@@ -502,10 +516,7 @@ impl Answer {
 				None if self.origin.shadows(&path) => continue,
 				None => path,
 			};
-			match claim {
-				Some(claim) => sent.claims.insert(path.clone(), claim),
-				None => sent.claims.remove(&path),
-			};
+			sent.set(&self.link, path.clone(), claim);
 			paths.push(path);
 		}
 		sent.floor = floor;
@@ -521,10 +532,8 @@ impl Answer {
 		let certified = self.certified();
 		// Like the grant, the upstream horizon and the proxy preference leave claims out
 		// that a floor would certify absent.
-		let hides = (self.routes.get(&id).into_iter())
-			.flat_map(|sent| sent.claims.values())
-			.any(|claim| !sends(&self.link, claim));
 		let sent = self.routes.get_mut(&id).expect("only a held route has a batch");
+		let hides = sent.withheld > 0;
 		let Some(wire) = sent.wire else {
 			return Ok(());
 		};

@@ -54,6 +54,8 @@ deleted.
 - [io_uring quiescence on a quiet host](/quest/m4/uring-bench-followups.md) - quiet-host acceptance numbers and a nightly `worker_turns` QUIC request-reply series
 - [#2819](/quest/m4/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: validate PipeWire DMA-BUFs into the Vulkan renderer on hardware
 - [Windows.Graphics.Capture](/quest/m4/capture-wgc.md) - the WGC display and window backend verified on real Windows hardware
+- [The foreground app](/quest/m4/capture-foreground.md) - which app and window are in front, with a wait for changes, on macOS, Windows, and X11, for moq-dev/studio's source that follows the game
+- [Leaving apps out of a display capture](/quest/m4/capture-exclude.md) - a display capture that never shows chosen apps where the system can filter, for moq-dev/studio's privacy shield
 - [The moq CLI can publish a changing catalog](/quest/m4/cli-catalog-updates.md) - catalog updates mid-stream, so recovery replays need no hand-built clients
 - [The relay over QUIC on the sim](/quest/m4/quic-sim.md) - the relay and moq-tokio's `Client` and `Server` run over `moq-quic` on the seeded sim
 - [moq-shaper's own socket never passes for path loss](/quest/m4/shaper-socket.md) - relay-sized buffers and its own socket drops reported beside path drops
