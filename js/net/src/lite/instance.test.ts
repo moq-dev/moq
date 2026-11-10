@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import * as Instance from "../instance.ts";
+import * as Mint from "../mint.ts";
 import { Reader, Writer } from "../stream.ts";
 import { decodePin, decodeRoute, encodePin, encodeRoute } from "./instance.ts";
 import { Version } from "./version.ts";
@@ -28,4 +29,54 @@ test("an instance keeps a leading byte order mark", async () => {
 			epoch: 3n,
 		});
 	}
+});
+
+// The flag, not the text, says a session minted an instance: each round-trips as itself, and a
+// named instance that looks like the old `~` mark stays named.
+test("a minted instance keeps its flag, and text never builds one", async () => {
+	const minted = Mint.fresh();
+	const named = Instance.parse(Instance.text(minted));
+	expect(Instance.isMinted(minted)).toBe(true);
+	expect(Instance.isMinted(named)).toBe(false);
+	expect(named).not.toBe(minted);
+	expect(Instance.isMinted(Instance.parse("~named"))).toBe(false);
+	// U+10000 is the surrogate pair D800 DC00: well-formed text that starts with a surrogate.
+	for (const text of ["\u{10000}", "\u{10000}x", "\u{FFFF}"]) {
+		const astral = Instance.parse(text);
+		expect(Instance.isMinted(astral)).toBe(false);
+		expect(Instance.text(astral)).toBe(text);
+	}
+	// A lone surrogate is ill-formed text, which UTF-8 cannot carry.
+	expect(() => Instance.parse("\uDC00x")).toThrow();
+	// Minting interns by text, so equal minted instances are the same object.
+	expect(Mint.mint(Instance.text(minted))).toBe(minted);
+	expect(`${minted}`).toBe(Instance.text(minted));
+	// Nothing outside the session can build one, even holding its class.
+	const Class = Object.getPrototypeOf(minted).constructor;
+	expect(() => new Class(Symbol("mint"), "forged")).toThrow();
+	expect(Instance.isMinted(Object.create(Class.prototype))).toBe(false);
+	for (const instance of [minted, named]) {
+		const pin = await encoded((w) => encodePin(w, Version.DRAFT_07, instance));
+		expect(await decodePin(new Reader(undefined, pin, Version.DRAFT_07), Version.DRAFT_07)).toBe(instance);
+		const route = await encoded((w) => encodeRoute(w, Version.DRAFT_07, instance, 0n));
+		expect((await decodeRoute(new Reader(undefined, route, Version.DRAFT_07), Version.DRAFT_07)).instance).toBe(
+			instance,
+		);
+	}
+});
+
+test("a pin refuses a bad minted flag", async () => {
+	const decode = async (text: string, flag: number) => {
+		const pin = await encoded(async (w) => {
+			const bytes = new TextEncoder().encode(text);
+			await w.u53(bytes.byteLength);
+			await w.write(bytes);
+			await w.u8(flag);
+		});
+		return decodePin(new Reader(undefined, pin, Version.DRAFT_07), Version.DRAFT_07);
+	};
+	await expect(decode("a", 2)).rejects.toThrow();
+	// No instance is never minted.
+	await expect(decode("", 1)).rejects.toThrow();
+	expect(await decode("", 0)).toBeUndefined();
 });

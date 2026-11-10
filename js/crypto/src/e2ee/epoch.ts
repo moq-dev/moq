@@ -2,13 +2,13 @@
  * One publisher instance's generation epoch, the lowercase hyphenated text of a UUIDv7. The
  * instance announces it as its route's instance, so a subscriber reads it back from the
  * broadcast it resolved ({@link of}). A wire that carries no instance hands the subscriber one
- * its relay minted, which is no epoch: the application supplies the epoch over its own
+ * its session minted, which is no epoch: the application supplies the epoch over its own
  * authenticated channel then. Mirrors `moq_crypto::e2ee::Epoch`.
  *
  * @module
  */
 
-import type { Broadcast, Instance } from "@moq/net";
+import { type Broadcast, Instance } from "@moq/net";
 import { v7 } from "uuid";
 
 /** A validated UUIDv7, ordered newest last by ordinary string comparison. */
@@ -36,7 +36,8 @@ export function instance(epoch: Valid): Instance.Valid {
 /** The epoch a resolved broadcast's route announced, if its instance is one. */
 export function of(broadcast: Broadcast.Consumer): Valid | undefined {
 	const instance = broadcast.instance;
-	if (instance === undefined) return undefined;
+	// One a session minted for a wire without instances names no epoch.
+	if (instance === undefined || Instance.isMinted(instance)) return undefined;
 	try {
 		return parse(instance);
 	} catch {

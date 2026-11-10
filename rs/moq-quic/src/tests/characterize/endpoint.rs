@@ -117,7 +117,7 @@ fn unknown_cid_gets_stateless_reset() {
 	assert!(reset.len() < packet.len());
 
 	assert_eq!(answer(&mut server, now, &packet), Answer::Nothing);
-	let later = now + server.min_reset_interval();
+	let later = now.saturating_add(server.min_reset_interval());
 	assert!(matches!(answer(&mut server, later, &packet), Answer::Response(_)));
 }
 

@@ -223,7 +223,7 @@ pub async fn get(app: &axum::Router, uri: &str) -> Response<Bytes> {
 
 /// Poll `uri` until it answers 200 with a body containing `needle`, returning the body.
 pub async fn listed(app: &axum::Router, uri: &str, needle: &str) -> String {
-	let deadline = kio::clock::now() + TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(TIMEOUT);
 	loop {
 		let response = get(app, uri).await;
 		let body = String::from_utf8_lossy(response.body()).into_owned();

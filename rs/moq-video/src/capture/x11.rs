@@ -336,7 +336,7 @@ impl Capture {
 			)]
 			std::thread::sleep(self.next - now);
 		}
-		self.next = Instant::now() + self.interval;
+		self.next = Instant::now().saturating_add(self.interval);
 		// The encoder's geometry is fixed at open, so a settled change ends the
 		// stream and the caller reopens against the new size.
 		match self.settled()? {
@@ -1111,7 +1111,7 @@ mod tests {
 		observed.event(&configure(7, 800, 600), 7);
 		assert_eq!(settle.observe(&observed, now), Settled::Waiting);
 		assert_eq!(
-			settle.observe(&observed, now + super::super::settle::HOLD),
+			settle.observe(&observed, now.saturating_add(super::super::settle::HOLD)),
 			Settled::Changed
 		);
 		observed.event(&configure(7, 640, 480), 7);

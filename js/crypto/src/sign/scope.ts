@@ -1,5 +1,5 @@
 // The signed message: what a frame's signature binds besides its payload.
-import type { Instance, Path, Time } from "@moq/net";
+import { Instance, type Path, type Time } from "@moq/net";
 import { Failure } from "./failure.ts";
 import type { PublicKey, SecretKey } from "./key.ts";
 
@@ -16,7 +16,7 @@ export class Scope {
 	#prefix: Uint8Array<ArrayBuffer>;
 
 	constructor(path: Path.Valid, instance: Instance.Valid, track: string) {
-		const fields = [path, instance, track].map((field) => encoder.encode(field));
+		const fields = [path, Instance.text(instance), track].map((field) => encoder.encode(field));
 		this.#prefix = new Uint8Array(LABEL.byteLength + fields.reduce((sum, field) => sum + 8 + field.byteLength, 0));
 		const view = new DataView(this.#prefix.buffer);
 		this.#prefix.set(LABEL);

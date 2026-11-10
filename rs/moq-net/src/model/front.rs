@@ -730,7 +730,7 @@ impl Front {
 
 	fn parked_at(&self, name: &str) -> Option<Instant> {
 		match self.tracks.get(name)?.state {
-			TrackState::Parked { since } => Some(since + self.linger),
+			TrackState::Parked { since } => Some(since.saturating_add(self.linger)),
 			_ => None,
 		}
 	}
@@ -794,7 +794,7 @@ mod tests {
 			.tracks
 			.iter()
 			.filter_map(|(name, track)| match track.state {
-				TrackState::Parked { since } => Some((since + front.linger, name.clone())),
+				TrackState::Parked { since } => Some((since.saturating_add(front.linger), name.clone())),
 				_ => None,
 			})
 			.collect();
@@ -825,7 +825,9 @@ mod tests {
 				track: name("video"),
 				now: t0,
 			}),
-			&[Action::Arm { at: Some(t0 + LINGER) }],
+			&[Action::Arm {
+				at: Some(t0.saturating_add(LINGER)),
+			}],
 		);
 		assert_actions(
 			front.step(Event::Wanted { track: name("video") }),
@@ -1379,19 +1381,27 @@ mod tests {
 			}),
 			&[
 				Action::Park { track: name("video") },
-				Action::Arm { at: Some(t0 + LINGER) },
+				Action::Arm {
+					at: Some(t0.saturating_add(LINGER)),
+				},
 			],
 		);
 		// Too early: nothing released, but the deadline is armed again since the
 		// driver clears it on firing.
 		assert_actions(
-			front.step(Event::Deadline { now: t0 + LINGER / 2 }),
-			&[Action::Arm { at: Some(t0 + LINGER) }],
+			front.step(Event::Deadline {
+				now: t0.saturating_add(LINGER / 2),
+			}),
+			&[Action::Arm {
+				at: Some(t0.saturating_add(LINGER)),
+			}],
 		);
 		// The driver cleared the fired deadline itself; nothing is parked, so
 		// nothing re-arms.
 		assert_actions(
-			front.step(Event::Deadline { now: t0 + LINGER }),
+			front.step(Event::Deadline {
+				now: t0.saturating_add(LINGER),
+			}),
 			&[Action::Forget { track: name("video") }],
 		);
 		assert_actions(front.step(Event::Forgotten { track: name("video") }), &[]);
@@ -1409,7 +1419,9 @@ mod tests {
 			now: t0,
 		});
 		assert_actions(
-			front.step(Event::Deadline { now: t0 + LINGER }),
+			front.step(Event::Deadline {
+				now: t0.saturating_add(LINGER),
+			}),
 			&[Action::Forget { track: name("video") }],
 		);
 		assert_actions(
@@ -1433,7 +1445,9 @@ mod tests {
 		});
 		assert_actions(front.step(Event::Unheld), &[]);
 		assert_actions(
-			front.step(Event::Deadline { now: t0 + LINGER }),
+			front.step(Event::Deadline {
+				now: t0.saturating_add(LINGER),
+			}),
 			&[Action::Forget { track: name("video") }],
 		);
 		assert_actions(front.step(Event::Forgotten { track: name("video") }), &[Action::Retire]);
@@ -1545,7 +1559,9 @@ mod tests {
 				track: name("video"),
 				now: t0,
 			}),
-			&[Action::Arm { at: Some(t0 + LINGER) }],
+			&[Action::Arm {
+				at: Some(t0.saturating_add(LINGER)),
+			}],
 		);
 		// A returning reader reads what it holds: no query, and the linger waits.
 		assert_actions(
@@ -1567,13 +1583,15 @@ mod tests {
 				drain: false,
 			}],
 		);
-		let t1 = t0 + LINGER;
+		let t1 = t0.saturating_add(LINGER);
 		front.step(Event::Unwanted {
 			track: name("video"),
 			now: t1,
 		});
 		assert_actions(
-			front.step(Event::Deadline { now: t1 + LINGER }),
+			front.step(Event::Deadline {
+				now: t1.saturating_add(LINGER),
+			}),
 			&[Action::Forget { track: name("video") }],
 		);
 		front.step(Event::Forgotten { track: name("video") });
@@ -1598,10 +1616,14 @@ mod tests {
 				track: name("video"),
 				now: t0,
 			}),
-			&[Action::Arm { at: Some(t0 + LINGER) }],
+			&[Action::Arm {
+				at: Some(t0.saturating_add(LINGER)),
+			}],
 		);
 		assert_actions(
-			front.step(Event::Deadline { now: t0 + LINGER }),
+			front.step(Event::Deadline {
+				now: t0.saturating_add(LINGER),
+			}),
 			&[Action::Forget { track: name("video") }],
 		);
 		front.step(Event::Forgotten { track: name("video") });
@@ -1651,7 +1673,7 @@ mod tests {
 		});
 		front.step(Event::TrackAssigned {
 			track: name("audio"),
-			now: now + LINGER / 2,
+			now: now.saturating_add(LINGER / 2),
 		});
 		assert_actions(
 			front.step(Event::Wanted { track: name("video") }),
@@ -1661,13 +1683,13 @@ mod tests {
 					source: 100,
 				},
 				Action::Arm {
-					at: Some(now + LINGER + LINGER / 2),
+					at: Some(now.saturating_add(LINGER).saturating_add(LINGER / 2)),
 				},
 			],
 		);
 		assert_actions(
 			front.step(Event::Deadline {
-				now: now + LINGER + LINGER / 2,
+				now: now.saturating_add(LINGER).saturating_add(LINGER / 2),
 			}),
 			&[Action::Forget { track: name("audio") }],
 		);
@@ -1687,7 +1709,9 @@ mod tests {
 		});
 		assert_eq!(front.tracks[&name("audio")].state, TrackState::Parked { since: t0 });
 		assert_actions(
-			front.step(Event::Deadline { now: t0 + LINGER }),
+			front.step(Event::Deadline {
+				now: t0.saturating_add(LINGER),
+			}),
 			&[Action::Forget { track: name("audio") }],
 		);
 	}
@@ -1753,7 +1777,7 @@ mod tests {
 					0 => Event::Wanted { track },
 					1 => Event::Unwanted { track, now },
 					2 => {
-						now += LINGER / 4;
+						now = now.saturating_add(LINGER / 4);
 						Event::Deadline { now }
 					}
 					_ => Event::TrackInfo {
@@ -1838,7 +1862,9 @@ mod tests {
 				result: Err(Error::Dropped),
 				delivered: false,
 			},
-			Event::Deadline { now: t0 + LINGER },
+			Event::Deadline {
+				now: t0.saturating_add(LINGER),
+			},
 			Event::Forgotten { track: name("v") },
 			Event::Unheld,
 			Event::Held,
@@ -1999,7 +2025,9 @@ mod tests {
 			}),
 			&[
 				Action::Park { track: name("video") },
-				Action::Arm { at: Some(t0 + LINGER) },
+				Action::Arm {
+					at: Some(t0.saturating_add(LINGER)),
+				},
 			],
 		);
 		front.step(Event::Selected {
@@ -2046,7 +2074,9 @@ mod tests {
 			}),
 			&[
 				Action::Park { track: name("video") },
-				Action::Arm { at: Some(t0 + LINGER) },
+				Action::Arm {
+					at: Some(t0.saturating_add(LINGER)),
+				},
 			],
 		);
 	}

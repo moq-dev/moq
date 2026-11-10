@@ -233,7 +233,9 @@ Added 2026-11-09 (maintainer's standing rule that flakes join this epic):
 `js/net`'s datagram session-close-after-end test again, whose lite-05 case
 failed the merge queue for [moq-dev/moq#8276](https://github.com/moq-dev/moq/pull/8276)
 after [moq-dev/moq#8321](https://github.com/moq-dev/moq/pull/8321) re-enabled it.
-It is quarantined with `test.skip` for every version until its child fixes it.
+The test now aborts once the client has recorded the end, signalled by the
+subscriber's `yieldNow()`, and is re-enabled by
+[moq-dev/moq#8357](https://github.com/moq-dev/moq/pull/8357).
 
 Added 2026-11-09 (maintainer's standing rule that flakes join this epic):
 moq-rs's Python socket test `test_tcp_rst_and_endpoint_close_are_errors`, whose
@@ -241,11 +243,27 @@ reader got `Unroutable` after the endpoint closed during
 [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)'s loaded `just check`.
 It is quarantined with `pytest.mark.skip` until its child fixes it.
 
+Added 2026-11-09 (maintainer's standing rule that flakes join this epic): the
+Go wrapper's `TestRecvGroupCancelKeepsConsumer`, whose `RecvGroup` after a
+cancelled one missed an appended group during
+[moq-dev/moq#8363](https://github.com/moq-dev/moq/pull/8363)'s loaded
+`just check`. It is quarantined with `t.Skip` until its child fixes it.
+
+Added 2026-11-09 (maintainer, `/quest-complete`, under the flaky-test rule):
+`js/common/worklet.test.ts`'s dev-server test, a candidate for bun's 5 s timeout
+in a loaded full `just check` on [moq-dev/moq#8325](https://github.com/moq-dev/moq/pull/8325).
+The failed log was not retained, so the failing test is unconfirmed.
+It is quarantined with `test.skip` until its child fixes it.
+
+Added 2026-11-09 (maintainer, /quest-complete): interop's `finish` cases with
+a cpp or rust publisher, which failed under a loaded host and passed on rerun.
+They are quarantined until their child fixes them.
+
 Public API: none. Wire: none.
 
 ## Required
 
-- [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [js/net's bandwidth sampling test holds up under load](/quest/m0/test-flakes-2/bandwidth-sampling.md) - the sampling test counts ticks without racing the mocked clock, and its `test.skip` is removed
-- [js/net's datagram session-close-after-end test holds up under load](/quest/m0/test-flakes-2/datagram-close-end.md) - the abort is ordered after the end by an event the client observes, and its `test.skip` is removed
+- [js/common's worklet dev-server test holds up under load](/quest/m0/test-flakes-2/worklet-dev-server.md) - the dev-server test passes on a loaded host, and its `test.skip` is removed
 - [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the test waits for the first track's queue instead of asserting at once, and its `test.skip` is removed
+- [Interop's finish cases hold up under load](/quest/m0/test-flakes-2/interop-finish.md) - every publisher's finish cells pass under load, and the scenario's quarantine is removed
+- [The Go wrapper's cancelled-RecvGroup test holds up under load](/quest/m0/test-flakes-2/go-recv-cancel.md) - a `RecvGroup` after a cancelled one is woken by the next group, and its `t.Skip` is removed

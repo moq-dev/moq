@@ -333,7 +333,7 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	// Keeps the relay up for the arrival below once `established` leaves.
 	let _straggler = straggler(port).await;
 	trigger.start();
-	let deadline = kio::clock::now() + DRAIN_TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(DRAIN_TIMEOUT);
 	let goaway = kio::clock::timeout(Duration::from_secs(5), kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("no GOAWAY within 5s of the trigger")
@@ -418,7 +418,7 @@ async fn a_trigger_before_run_keeps_the_deadline_inner() {
 	// Fired while `run` is still starting. The session deadline is this instant;
 	// `drain` must not open a fresh window when it finally observes the watch.
 	trigger.start();
-	let deadline = kio::clock::now() + DRAIN_TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(DRAIN_TIMEOUT);
 	kio::clock::sleep(DRAIN_TIMEOUT / 2).await;
 
 	let run = tokio::spawn(relay.run());
@@ -556,7 +556,7 @@ fn relay_config() -> Config {
 
 /// Wait until the internal listener on `port` reports `line` at `/metrics`.
 async fn wait_metric(port: u16, line: &str) {
-	let deadline = kio::clock::now() + Duration::from_secs(5);
+	let deadline = kio::clock::now().saturating_add(Duration::from_secs(5));
 	loop {
 		let metrics = reqwest::get(format!("http://127.0.0.1:{port}/metrics"))
 			.await
