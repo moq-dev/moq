@@ -142,13 +142,13 @@ measured belongs to the media pipeline rather than the path.
 The native listener, `moq play --video off --delay 300ms --metrics native.ndjson`, joins on its own
 WebTransport session to the same relay while the publisher talks, plays into a private null sink
 ([`../lib/pulse.py`](../lib/pulse.py)) as the [native rows](#native-rows) do, and must exit cleanly
-on Ctrl-C. It is held to the epic's correctness checks, not its latency budget. Its metrics add what
+on Ctrl-C. It is held to the same correctness checks as the browser. Its metrics add what
 a mute needs: `utterances`, the media timestamp each resume after a declared silence starts from,
 and `comfort`, the device time filled with comfort noise. Each press must resume on its head frame's
 timestamp, so a lost head (which would resume one frame later) fails. The native clock is placed on
 the page's by those resumes, each less its head's container write. Each separated press's mute,
-from its release to the next press, must play comfort noise, and from the first press on the
-speaker must report no gap or stall. Each press in `summary.json` carries its `native` result
+from its release to the next press, must play comfort noise. Its gaps and stalls from the first
+press on are counted and reported. Each press in `summary.json` carries its `native` result
 beside the browser's, and `native` sums them.
 
 `presses.json` records captured chunks at each press, WebCodecs encoder and decoder inputs and
@@ -162,12 +162,12 @@ later onset can belong to the preceding utterance. Their audible latency is alwa
 separated presses have an identifiable onset.
 
 `summary.json` matches inputs, outputs, writes, and arrivals by media timestamp, so a late arrival
-is still attributed to its utterance. The command checks pipeline completeness and one latency
-budget: every separated press's `onset` stays within 140 ms, the worst measured on a MacBook Air
-with macOS 26 times 1.25, rounded up to two significant figures. It refuses missing encoder inputs,
+is still attributed to its utterance. The command checks pipeline completeness and reports latency,
+underruns, and stalls without gating them; the [audio grading](../../quest/m1/audio-jitter-target/grading.md)
+judges those. It refuses missing encoder inputs,
 a head that never reaches the listener or never decodes, submitted frames that never encode or reach the container, written frames that never reach
 the listener, reopened capture, a new encoder (a probe or a rebuilt codec) or subscription, a mute
-that disables or drops the rendition, any underrun or stall across the presses, and separated
+that disables or drops the rendition, and separated
 utterances with no audible output. It also fails on a broken driver or invalid capture.
 
 For each separated press, `delivery` is the slowest of the utterance's frames that arrived before its onset, measured

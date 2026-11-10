@@ -195,28 +195,14 @@ test("a mute that disables the rendition fails the run", async () => {
 	expect(stderr).toContain("a mute disabled or dropped the rendition");
 });
 
-test("a press past the onset budget fails the run", async () => {
+// The silence between presses is declared, so playback crosses it without counting it. Underruns
+// and stalls the player does count are reported, not failed: the audio grading judges them.
+test("an underrun or stall across the presses is reported and passes", async () => {
 	const result = trace();
-	// The first press renders at 88 ms; this one renders a millisecond past the budget.
-	result.audible[0].rendered += 53;
-	result.audible[0].at += 53;
-	const { exitCode, stderr } = await analyze(result);
-	expect(exitCode).toBe(1);
-	expect(stderr).toContain("press to render onset exceeded its 140 ms budget");
-});
-
-// The silence between presses is declared, so playback must cross it without counting it.
-test("an underrun or stall across the presses fails the run", async () => {
-	for (const playback of [
-		{ underruns: 1, stalls: 0 },
-		{ underruns: 0, stalls: 1 },
-	]) {
-		const result = trace();
-		result.playback = playback;
-		const { exitCode, stderr } = await analyze(result);
-		expect(exitCode).toBe(1);
-		expect(stderr).toContain("playback underran or stalled");
-	}
+	result.playback = { underruns: 3, stalls: 2 };
+	const { exitCode, summary } = await analyze(result);
+	expect(exitCode).toBe(0);
+	expect(summary.playback).toEqual({ underruns: 3, stalls: 2 });
 });
 
 test("the native listener's results sit beside each press", async () => {
@@ -257,10 +243,10 @@ test("a native mute without comfort noise fails the run", async () => {
 	expect(stderr).toContain("native: a mute played no comfort noise");
 });
 
-test("a native underrun or stall after the first press fails the run, and one before it does not", async () => {
-	for (const [page, fails] of [
-		[trace().presses[0].at - 1000, false],
-		[trace().presses[6].at, true],
+test("a native underrun or stall counts from the first press on, and passes", async () => {
+	for (const [page, counted] of [
+		[trace().presses[0].at - 1000, 0],
+		[trace().presses[6].at, 1],
 	] as const) {
 		for (const event of ["gap", "stall"] as const) {
 			const run = trace();
@@ -271,14 +257,16 @@ test("a native underrun or stall after the first press fails the run, and one be
 			const at = sample.render - 250;
 			if (event === "gap") sample.gaps = [{ at, ms: 20, quanta: 8, short: 1 }];
 			else sample.stalls = [{ at, stalled: true }];
-			const { exitCode, stderr } = await analyze(run, native);
-			expect(exitCode).toBe(fails ? 1 : 0);
-			if (fails) expect(stderr).toContain("native: playback underran or stalled");
+			const { exitCode, summary } = await analyze(run, native);
+			expect(exitCode).toBe(0);
+			expect(summary.native.playback).toEqual(
+				event === "gap" ? { underruns: counted, stalls: 0 } : { underruns: 0, stalls: counted },
+			);
 		}
 	}
 });
 
-test("a native underrun open as the first press lands fails the run", async () => {
+test("a native underrun open as the first press lands counts", async () => {
 	const result = trace();
 	const native = nativeTrace(result);
 	const sample = native.find((sample) => sample.at >= result.presses[0].at + NATIVE + 250);
@@ -286,7 +274,7 @@ test("a native underrun open as the first press lands fails the run", async () =
 	// It starts 100 ms before the window, which opens at the first press's head, and runs 200 ms into it.
 	const start = result.presses[0].at + NATIVE + 2;
 	sample.gaps = [{ at: sample.render - (sample.at - (start - 100)), ms: 300, quanta: 113, short: 0 }];
-	const { exitCode, stderr } = await analyze(result, native);
-	expect(exitCode).toBe(1);
-	expect(stderr).toContain("native: playback underran or stalled");
+	const { exitCode, summary } = await analyze(result, native);
+	expect(exitCode).toBe(0);
+	expect(summary.native.playback.underruns).toBe(1);
 });
