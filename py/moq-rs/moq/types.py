@@ -30,6 +30,9 @@ from moq_ffi import (
     MoqFetchGroupOptions as FetchGroupOptions,
 )
 from moq_ffi import (
+    MoqInstance as Instance,
+)
+from moq_ffi import (
     MoqOrder as Order,
 )
 from moq_ffi import (
@@ -102,6 +105,7 @@ __all__ = [
     "Frame",
     "FetchGroupOptions",
     "Grant",
+    "Instance",
     "Order",
     "Position",
     "ProtocolError",

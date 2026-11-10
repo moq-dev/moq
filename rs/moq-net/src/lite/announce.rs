@@ -1097,8 +1097,8 @@ mod tests {
 	}
 
 	/// The draft's field order, byte for byte: ANNOUNCE_START is the path base, keep, and
-	/// rest, the Route ID, the instance and epoch, and the cost; ANNOUNCE_UPDATE is the
-	/// Announce ID and the cost.
+	/// rest, the Route ID, the instance, its minted flag, the epoch, and the cost;
+	/// ANNOUNCE_UPDATE is the Announce ID and the cost.
 	#[test]
 	fn lite07_announce_layout() {
 		let encode = |msg: AnnounceBroadcast| {
@@ -1121,7 +1121,7 @@ mod tests {
 				hops: Hops::default(),
 				cost: Cost::new(6),
 			}),
-			[0, 9, 1, 2, 1, b'c', 3, 1, b'a', 5, 6]
+			[0, 10, 1, 2, 1, b'c', 3, 1, b'a', 0, 5, 6]
 		);
 		assert_eq!(
 			encode(AnnounceBroadcast::Update {
@@ -1139,7 +1139,7 @@ mod tests {
 				cost: Cost::new(6),
 				hops: Hops::default(),
 			}),
-			[3, 5, 7, 1, b'a', 5, 6]
+			[3, 6, 7, 1, b'a', 0, 5, 6]
 		);
 	}
 
@@ -1179,9 +1179,9 @@ mod tests {
 			},
 		];
 		let layouts: [&[u8]; 3] = [
-			&[0, 12, 0, 0, 1, b'c', 3, 1, b'a', 5, 6, 2, 7, 9],
+			&[0, 13, 0, 0, 1, b'c', 3, 1, b'a', 0, 5, 6, 2, 7, 9],
 			&[2, 5, 7, 6, 2, 7, 9],
-			&[3, 8, 7, 1, b'a', 5, 6, 2, 7, 9],
+			&[3, 9, 7, 1, b'a', 0, 5, 6, 2, 7, 9],
 		];
 		for (msg, layout) in msgs.iter().zip(layouts) {
 			assert_eq!(encode(msg), layout, "{msg:?}");

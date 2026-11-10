@@ -532,6 +532,12 @@ pub fn excluding(origin: crate::origin::Consumer, peer: u64) -> crate::origin::C
 	origin.excluding(crate::Hop::from_wire(peer))
 }
 
+/// A fresh instance as a session mints one for a route an older wire delivered, for tests
+/// outside the crate that route one without an older session.
+pub fn minted_instance() -> crate::Instance {
+	crate::Instance::minted()
+}
+
 /// A peer's wire route: its hop ids, cost, and instance at an epoch, as a session
 /// decodes one, for benches and tests that land or update forwarded routes.
 ///
@@ -1574,9 +1580,11 @@ pub fn pattern(data: &[u8]) -> bool {
 /// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
 /// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message
 /// (the sweep sets ROUTE_START's type byte but fills its size byte with the body
-/// pattern, so none decodes whole), the ROUTE_END echo, and ROUTE_REQUEST.
+/// pattern, so none decodes whole), the ROUTE_END echo, ROUTE_REQUEST, and a DATAGRAMS
+/// request, whose seven fields outgrow the sweep's longest body.
 const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
+	(30, &[7, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
 	(5, &[6, 4, 1, 0, 1, 0]),
 	(5, &[7, 4, 0, 1, 2, 0]),

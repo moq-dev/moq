@@ -410,10 +410,10 @@ mod tests {
 		encoder.end(0);
 	}
 
-	/// A compressed stream pinned byte for byte: `js/net/src/lite/announce.test.ts`
-	/// decodes the same hex, so a codec change on either side breaks both.
+	/// A compressed stream pinned byte for byte. `js/net/src/lite/announce.test.ts` decodes
+	/// this hex once js/net speaks the route layer (quest/m2/cluster-routing/routes/js.md).
 	const GOLDEN: &str =
-		"001200000a726f6f6d2f612f63616d0001610000000b0102036d69630001610000020200000101010009020101620001610000";
+		"001300000a726f6f6d2f612f63616d000161000000000c0102036d696300016100000002020000010101000a02010162000161000000";
 
 	#[cfg(feature = "async")]
 	fn golden() -> Vec<crate::fuzz::Announced> {
@@ -437,9 +437,9 @@ mod tests {
 		assert_eq!(crate::fuzz::decode_announces(&encoded, true), golden());
 	}
 
-	/// The literal lite-07 stream `js/net` writes for the same announcements, which
-	/// never picks a base.
-	const JS_LITERAL: &str = "001200000a726f6f6d2f612f63616d0001610000001200000a726f6f6d2f612f6d6963000161000002020000010101000e000006726f6f6d2f620001610000";
+	/// The literal lite-07 stream `js/net` will write for the same announcements once it
+	/// speaks the route layer, never picking a base.
+	const JS_LITERAL: &str = "001300000a726f6f6d2f612f63616d000161000000001300000a726f6f6d2f612f6d696300016100000002020000010101000f000006726f6f6d2f62000161000000";
 
 	#[test]
 	#[cfg(feature = "async")]

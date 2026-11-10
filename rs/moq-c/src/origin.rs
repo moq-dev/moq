@@ -41,6 +41,9 @@ pub struct Origin {
 
 	/// Broadcast requests delivered to a claim's callback, freed after serve/route/reject.
 	broadcast_request: NonZeroSlab<(moq_net::origin::Request, crate::ffi::Background)>,
+	/// Instance handles: parsed by the caller, reported by a route or claim, or owned by an
+	/// announcement record.
+	instances: NonZeroSlab<moq_net::Instance>,
 }
 
 #[derive(Clone)]
@@ -86,8 +89,8 @@ struct AnnouncedRecord {
 	capture_views: Vec<moq_string>,
 	kind: moq_announce_kind,
 	cost: u64,
-	/// The route's instance.
-	instance: String,
+	/// The route's instance handle, freed with the record.
+	instance: Id,
 }
 
 // The raw pointers only borrow immutable String allocations owned by this record.
@@ -95,7 +98,7 @@ struct AnnouncedRecord {
 unsafe impl Send for AnnouncedRecord {}
 
 impl AnnouncedRecord {
-	fn new(event: moq_net::announce::Event) -> Self {
+	fn new(event: moq_net::announce::Event, instances: &mut NonZeroSlab<moq_net::Instance>) -> Result<Self, Error> {
 		use moq_net::announce::Event;
 		let (update, kind) = match event {
 			Event::Present(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT),
@@ -115,14 +118,14 @@ impl AnnouncedRecord {
 			})
 			.collect();
 
-		Self {
+		Ok(Self {
 			prefix: update.prefix.to_string(),
 			_captures: captures,
 			capture_views,
 			kind,
 			cost: update.route.cost().value(),
-			instance: update.route.instance().to_string(),
-		}
+			instance: instances.insert(update.route.instance().clone())?,
+		})
 	}
 }
 
@@ -155,8 +158,6 @@ impl State {
 struct RouteEntry {
 	inner: moq_net::origin::Route,
 	driver: crate::ffi::Background,
-	/// The instance last read, borrowed by [Origin::route_instance].
-	instance: String,
 	/// The fill handle of the route's broadcast.
 	broadcast: Id,
 	/// Carried, not looked up, so a closed broadcast is told apart from a newer one reusing its id.
@@ -166,8 +167,6 @@ struct RouteEntry {
 struct ClaimEntry {
 	inner: moq_net::origin::Claim,
 	driver: crate::ffi::Background,
-	/// The instance last read, borrowed by [Origin::claim_instance].
-	instance: String,
 	/// The claim's request delivery task.
 	requests: Id,
 }
@@ -229,7 +228,7 @@ impl Origin {
 			};
 
 			// Hold the lock only to buffer the event; release it before the callback.
-			let announced_id = State::lock().origin.announced.insert(AnnouncedRecord::new(event))?;
+			let announced_id = State::lock().origin.announced_insert(event)?;
 			callback.call(announced_id);
 		}
 	}
@@ -244,10 +243,7 @@ impl Origin {
 			kind: announced.kind,
 			route: moq_route_info {
 				cost: announced.cost,
-				instance: moq_string {
-					data: announced.instance.as_ptr().cast::<c_char>(),
-					len: announced.instance.len(),
-				},
+				instance: announced.instance.into(),
 			},
 		};
 		Ok(())
@@ -261,7 +257,33 @@ impl Origin {
 	/// rather than on unannounce: an unannounce is its own delivered record, and auto-freeing
 	/// the prior one would race a caller still reading it.
 	pub fn announced_free(&mut self, announced: Id) -> Result<(), Error> {
-		self.announced.remove(announced).ok_or(Error::AnnouncementNotFound)?;
+		let record = self.announced.remove(announced).ok_or(Error::AnnouncementNotFound)?;
+		self.instances.remove(record.instance);
+		Ok(())
+	}
+
+	/// Buffer a delivered announce event, with a handle for its route's instance.
+	fn announced_insert(&mut self, event: moq_net::announce::Event) -> Result<Id, Error> {
+		let record = AnnouncedRecord::new(event, &mut self.instances)?;
+		let instance = record.instance;
+		self.announced.insert(record).inspect_err(|_| {
+			self.instances.remove(instance);
+		})
+	}
+
+	/// A new instance handle the caller owns.
+	pub fn instance_insert(&mut self, instance: moq_net::Instance) -> Result<Id, Error> {
+		self.instances.insert(instance)
+	}
+
+	/// The instance a handle names.
+	pub fn instance(&self, instance: Id) -> Result<&moq_net::Instance, Error> {
+		self.instances.get(instance).ok_or(Error::NotFound)
+	}
+
+	/// Release an instance handle the caller owns. An announcement's own is released with it.
+	pub fn instance_free(&mut self, instance: Id) -> Result<(), Error> {
+		self.instances.remove(instance).ok_or(Error::NotFound)?;
 		Ok(())
 	}
 
@@ -422,7 +444,6 @@ impl Origin {
 		// Read only on request: reading a hidden job's instance binds it.
 		self.routes.insert(RouteEntry {
 			inner: route,
-			instance: String::new(),
 			driver,
 			broadcast,
 			family,
@@ -443,7 +464,6 @@ impl Origin {
 		let result = origin.producer.claim(prefix, options);
 		driver.check()?;
 		let claim = result?;
-		let instance = claim.instance().to_string();
 
 		// The claim first, so the delivery task finds it once it runs; it cannot lock the
 		// state before this call returns.
@@ -452,7 +472,6 @@ impl Origin {
 		let id = match self.claims.insert(ClaimEntry {
 			inner: claim,
 			driver: driver.clone(),
-			instance,
 			requests,
 		}) {
 			Ok(id) => id,
@@ -532,15 +551,12 @@ impl Origin {
 		}
 	}
 
-	pub fn route_instance(&mut self, route: Id, dst: &mut moq_string) -> Result<(), Error> {
-		let entry = self.routes.get_mut(route).ok_or(Error::NotFound)?;
+	/// A new handle, the caller's, for the instance the route serves.
+	pub fn route_instance(&mut self, route: Id) -> Result<Id, Error> {
+		let entry = self.routes.get(route).ok_or(Error::NotFound)?;
 		entry.driver.check()?;
-		entry.instance = entry.inner.instance().to_string();
-		*dst = moq_string {
-			data: entry.instance.as_ptr().cast::<c_char>(),
-			len: entry.instance.len(),
-		};
-		Ok(())
+		let instance = entry.inner.instance().clone();
+		self.instances.insert(instance)
 	}
 
 	/// Release a route handle, returning the route for the caller to retract by dropping it.
@@ -561,15 +577,12 @@ impl Origin {
 		Ok(result?)
 	}
 
-	pub fn claim_instance(&mut self, claim: Id, dst: &mut moq_string) -> Result<(), Error> {
-		let entry = self.claims.get_mut(claim).ok_or(Error::NotFound)?;
+	/// A new handle, the caller's, for the instance the claim serves.
+	pub fn claim_instance(&mut self, claim: Id) -> Result<Id, Error> {
+		let entry = self.claims.get(claim).ok_or(Error::NotFound)?;
 		entry.driver.check()?;
-		entry.instance = entry.inner.instance().to_string();
-		*dst = moq_string {
-			data: entry.instance.as_ptr().cast::<c_char>(),
-			len: entry.instance.len(),
-		};
-		Ok(())
+		let instance = entry.inner.instance().clone();
+		self.instances.insert(instance)
 	}
 
 	/// Release a claim handle and stop its request delivery, returning the claim for the

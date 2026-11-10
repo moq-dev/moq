@@ -685,10 +685,6 @@ impl RouteOptions {
 	/// group sequences under an old instance splices unrelated groups into their tracks.
 	/// The highest epoch wins over every older one of the instance, cheaper or not.
 	/// Naming an instance grants nothing: publishing still needs the path's grant.
-	///
-	/// Do not start a named instance with `~`: that marks one a relay minted
-	/// ([`Instance::is_minted`]), which moq-crypto's signing refuses to bind and a catalog's instance
-	/// check skips.
 	pub fn with_instance(mut self, instance: Instance, epoch: u64) -> Self {
 		self.instance = Some((instance, epoch));
 		self
