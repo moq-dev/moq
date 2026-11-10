@@ -193,3 +193,5 @@ quests that require them.
 
 - [Drop set](/quest/m1/drop-set.md) - each cursor's disposition record is billed to the cache pool, as the track's drop runs are, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind` (held in m1 by an open claim)
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out (held in m1 by an open claim)
+- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - warm routes and the eligibility rule hold in route-layer sweeps, and the warm message's wire placement is chosen before the lite-07 cut
+- [Route latency](/quest/m2/route-latency.md) - the maintainer decides whether a lite-07 ROUTE carries an informational latency sum, and it lands before the cut if so

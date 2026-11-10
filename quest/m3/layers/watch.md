@@ -4,9 +4,9 @@
 
 `@moq/watch` plays a broadcast that carries a layer layout track: it
 composites each visible layer over the main picture where and when the layout
-says, mixes each audio layer in at its gain and mute, and lets a viewer
-toggle each layer the layout marks toggleable. A broadcast without one plays
-as today.
+says, mixes each audio layer in at its gain, mute, pan, and delay, and lets a
+viewer toggle each layer the layout marks toggleable. A broadcast without one
+plays as today.
 
 ## Plan
 
