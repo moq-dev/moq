@@ -10,7 +10,7 @@
  *
  * @module
  */
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { NotFound } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
@@ -31,7 +31,7 @@ export interface FillTrack {
 	/** The track's name. */
 	readonly name: string;
 	/** Insert group `sequence` into the cache, committing `info` first if the track has none. */
-	accept(sequence: bigint, info: Partial<Info> | undefined): GroupProducer;
+	accept(sequence: bigint, info: Info | undefined): GroupProducer;
 	/** Record `[start, end)` as never to be delivered. */
 	drop(start: bigint, end: bigint, error: Error): void;
 	/** Whether the track still caches group `sequence`, not failed. */
@@ -62,7 +62,7 @@ export interface Asker {
 
 // The fill operations a handle runs against the state it came from; assigned in its static block.
 let fillOps: {
-	accept(state: FillState, pending: Pending, sequence: bigint, info: Partial<Info> | undefined): GroupProducer;
+	accept(state: FillState, pending: Pending, sequence: bigint, info: Info | undefined): GroupProducer;
 	drop(state: FillState, pending: Pending, start: bigint, end: bigint): void;
 	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error): void;
 	settle(state: FillState, pending: Pending): void;
@@ -463,10 +463,10 @@ export class Fill {
 	 * The most tolerant age budget among the readers waiting on it now, or `null` for none: the
 	 * publisher's {@link Info.maxAge} alone bounds it. Each reader still enforces its own.
 	 */
-	get maxDelay(): Milli | null {
+	get maxDelay(): Duration | null {
 		let max = 0;
 		for (const asker of this.#pending.askers) max = Math.max(max, asker.maxDelay());
-		return max < NO_MAX_DELAY ? Milli(max) : null;
+		return max < NO_MAX_DELAY ? Duration.millis(max) : null;
 	}
 
 	/** Which end to fill first now: `"descending"`, newest first, if any reader asks it. */
@@ -518,10 +518,10 @@ export class Fill {
 	/**
 	 * Insert group `sequence` into the track's cache, handing it to the readers waiting on it,
 	 * and return the producer to write its frames into. `info` commits the track's {@link Info}
-	 * if it has none yet, as received metadata: an absent `maxAge` sets no publisher limit. Throws a `RangeError` outside the fill, and an error if the group was
+	 * if it has none yet. Throws a `RangeError` outside the fill, and an error if the group was
 	 * already answered or cached, or the track is closed.
 	 */
-	accept(sequence: bigint, info?: Partial<Info>): GroupProducer {
+	accept(sequence: bigint, info?: Info): GroupProducer {
 		checkSequence(sequence);
 		return fillOps.accept(this.#state, this.#pending, sequence, info);
 	}

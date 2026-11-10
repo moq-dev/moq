@@ -1,4 +1,4 @@
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type { Drain } from "../connection/goaway.ts";
 import { ProtocolViolation } from "../error.ts";
 import type { Reader, Writer } from "../stream.ts";
@@ -48,7 +48,7 @@ export class GoAway {
 	drain(): Drain {
 		return {
 			uri: this.newSessionUri,
-			timeout: this.timeout > 0n ? Milli(toNumber(this.timeout)) : undefined,
+			timeout: this.timeout > 0n ? Duration.millis(toNumber(this.timeout)) : undefined,
 		};
 	}
 

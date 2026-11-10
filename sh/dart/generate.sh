@@ -20,7 +20,7 @@ command -v dart >/dev/null 2>&1 || {
 
 # Debug builds use the environment dart/moq_ffi/hook/build.dart gets, so the hook's
 # own Cargo run during `dart test` finds this build fresh. Dart filters a hook's
-# environment, and build scripts such as aws-lc-sys's rerun when a variable they
+# environment, and build scripts such as openh264-sys2's rerun when a variable they
 # track (CC, PKG_CONFIG, ...) changes, rebuilding everything above them. This
 # mirrors includeHookEnvironmentVariable from the hooks_runner in the pinned Dart
 # SDK (1.5.0 in Dart 3.13); sh/dart/check.sh fails once the two drift apart.

@@ -158,23 +158,21 @@ impl Producer {
 		largest.is_none_or(|largest| wanted > largest).then_some(wanted)
 	}
 
-	/// Publish already-encoded frames, each at its own timestamp. Each frame is one
-	/// whole access unit in the producer's codec framing.
-	pub fn publish(&mut self, encoded: &[Encoded]) -> Result<(), Error> {
-		for frame in encoded {
-			let timestamp = Some(frame.timestamp);
-			// The encoder emits one whole access unit per frame, so flush to emit it.
-			match &mut self.codecs {
-				Codecs::H264 { split, import } => {
-					let mut frames = split.decode(&frame.payload, timestamp)?;
-					frames.extend(split.flush(timestamp)?);
-					import.decode(frames)?;
-				}
-				Codecs::H265 { split, import } => {
-					let mut frames = split.decode(&frame.payload, timestamp)?;
-					frames.extend(split.flush(timestamp)?);
-					import.decode(frames)?;
-				}
+	/// Publish one already-encoded frame at its own timestamp: one whole access unit
+	/// in the producer's codec framing.
+	pub fn publish(&mut self, encoded: &Encoded) -> Result<(), Error> {
+		let timestamp = Some(encoded.timestamp);
+		// The encoder emits one whole access unit per frame, so flush to emit it.
+		match &mut self.codecs {
+			Codecs::H264 { split, import } => {
+				let mut frames = split.decode(&encoded.payload, timestamp)?;
+				frames.extend(split.flush(timestamp)?);
+				import.decode(frames)?;
+			}
+			Codecs::H265 { split, import } => {
+				let mut frames = split.decode(&encoded.payload, timestamp)?;
+				frames.extend(split.flush(timestamp)?);
+				import.decode(frames)?;
 			}
 		}
 		Ok(())
@@ -312,6 +310,32 @@ pub struct Capture {
 	/// the recent past in the track's cache. On demand saves the capture and encode while nobody
 	/// watches, and leaves nothing to fetch from before the first viewer arrived.
 	pub on_demand: bool,
+	/// The VA-API render node the encoder opens; see [`Config::vaapi`](encoder::Config::vaapi).
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	pub vaapi: Option<std::path::PathBuf>,
+	/// The V4L2 M2M node the encoder opens; see [`Config::v4l2`](encoder::Config::v4l2).
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	pub v4l2: Option<std::path::PathBuf>,
+}
+
+#[cfg(feature = "capture")]
+impl Capture {
+	/// The encoder for a `width` x `height` source at `framerate`, with these options.
+	fn encoder(&self, width: u32, height: u32, framerate: FrameRate) -> encoder::Config {
+		let mut config = encoder::Config::new(width, height, framerate);
+		config.bitrate = self.bitrate;
+		config.codec = self.codec;
+		config.kind = self.kind.clone();
+		#[cfg(all(target_os = "linux", feature = "vaapi"))]
+		{
+			config.vaapi = self.vaapi.clone();
+		}
+		#[cfg(all(target_os = "linux", feature = "v4l2"))]
+		{
+			config.v4l2 = self.v4l2.clone();
+		}
+		config
+	}
 }
 
 /// The capture publication's current lifecycle state.
@@ -498,7 +522,8 @@ impl Owned {
 	/// End the track cleanly, best effort: it is usually already going away.
 	fn finish(self) {
 		let ended = match self {
-			Self::Track(track) => track.finish().map_err(Error::from),
+			// The caller is done with the track, so the finished handle goes with it.
+			Self::Track(track) => track.finish().map(drop).map_err(Error::from),
 			Self::Producer(mut producer) => producer.finish(),
 			Self::Done => Ok(()),
 		};
@@ -583,7 +608,7 @@ impl<E: CatalogExt> Driver<E> {
 		// waiting for an encoder that may not run yet.
 		let (rendition, join, camera) = async {
 			let camera = source.open(&options.capture).await?;
-			let mut probe_config = encoder::Config::new(
+			let mut probe_config = options.encoder(
 				camera.width(),
 				camera.height(),
 				options
@@ -592,9 +617,6 @@ impl<E: CatalogExt> Driver<E> {
 					.or_else(|| camera.framerate())
 					.unwrap_or(DEFAULT_FRAMERATE),
 			);
-			probe_config.bitrate = options.bitrate;
-			probe_config.codec = options.codec;
-			probe_config.kind = options.kind.clone();
 			probe_config.color = camera.color();
 			let rendition = probe_config.probe().await?;
 			// The encoder is built from the same defaults, so the probe's join is the one it emits.
@@ -693,11 +715,11 @@ impl CaptureSource for DeviceSource {
 /// with nothing to divide grants `None` rather than being absent. Retiring stops
 /// the `select!` arm from spinning on a channel that is permanently ready.
 #[cfg(feature = "capture")]
-type RateControl = Option<rate::Follower>;
+type RateControl = Option<rate::Grant>;
 
 /// Wait for the next target bitrate, or forever when rate control is off or finished.
 ///
-/// Cancel-safe: [`Follower::poll_next`](rate::Follower::poll_next) keeps its state in
+/// Cancel-safe: [`Grant::poll_next`](rate::Grant::poll_next) keeps its state in
 /// the follower, so losing this race to a frame drops no target.
 #[cfg(feature = "capture")]
 async fn next_target(rate: &mut RateControl) -> Result<rate::Target, moq_net::Error> {
@@ -815,7 +837,7 @@ async fn rest(
 	rate.as_ref()?;
 	match encoder.set_bitrate(ceiling).await {
 		Ok(()) => {
-			*rate = Some(rate::Follower::new(claim.consume(), rate::Policy::new(ceiling)));
+			*rate = Some(rate::Grant::new(claim.consume(), rate::Policy::new(ceiling)));
 			Some(ceiling)
 		}
 		Err(Error::BitrateUnsupported(name)) => {
@@ -889,10 +911,7 @@ async fn capture_loop<S: CaptureSource>(
 			.framerate
 			.or_else(|| camera.framerate())
 			.unwrap_or(DEFAULT_FRAMERATE);
-		let mut encoder_config = encoder::Config::new(camera.width(), camera.height(), framerate);
-		encoder_config.bitrate = options.bitrate;
-		encoder_config.codec = options.codec;
-		encoder_config.kind = options.kind.clone();
+		let mut encoder_config = options.encoder(camera.width(), camera.height(), framerate);
 		encoder_config.color = camera.color();
 		// Off macOS and iOS this opens the encoder on a dedicated thread; see `sink`.
 		// No cut on reopen: a fresh encoder opens with a keyframe on every backend,
@@ -918,7 +937,7 @@ async fn capture_loop<S: CaptureSource>(
 		// so the policy's ceiling is that rate and the target starts there. A
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
-		let mut rate = Some(rate::Follower::new(claim.consume(), rate::Policy::new(ceiling)));
+		let mut rate = Some(rate::Grant::new(claim.consume(), rate::Policy::new(ceiling)));
 		// The encoder's current target, reported again on any track the capture moves to.
 		let mut bitrate = ceiling;
 		producer.report_bitrate(bitrate);
@@ -997,10 +1016,12 @@ async fn capture_loop<S: CaptureSource>(
 			if forced.due(wanted) {
 				encoder.cut().await?;
 			}
-			let Some(encoded) = wait_capture(&demand, on_demand, encoder.encode(frame)).await? else {
+			if wait_capture(&demand, on_demand, encoder.encode(frame)).await?.is_none() {
 				break;
-			};
-			producer.publish(&encoded)?;
+			}
+			while let Some(encoded) = encoder.receive()? {
+				producer.publish(&encoded)?;
+			}
 			// A frame whose decoder identity differs from the probed one (a reopen onto another
 			// mode or backend) publishes under a new name and ends this track. Capture follows it
 			// there with a claim against the new track, which nobody watches yet: its viewers find
@@ -1096,9 +1117,13 @@ mod tests {
 		for i in 0..10u64 {
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				producer.publish(&encoded).unwrap();
+			}
 		}
-		producer.publish(&encoder.finish().unwrap()).unwrap();
+		for encoded in encoder.flush_all().unwrap() {
+			producer.publish(&encoded).unwrap();
+		}
 
 		let (_, resolved) = rendition(&catalog).expect("the importer should have registered a video rendition");
 		// Jitter and delay aside, which are measured from the frames rather than declared by either.
@@ -1170,7 +1195,9 @@ mod tests {
 			encoder.cut().unwrap();
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(timestamp).unwrap());
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				producer.publish(&encoded).unwrap();
+			}
 		}
 		producer.finish().unwrap();
 
@@ -1204,7 +1231,9 @@ mod tests {
 			let rgba = vec![0x80u8; usize::try_from(config.width * config.height * 4).unwrap()];
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(config.width, config.height)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(timestamp).unwrap());
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				producer.publish(&encoded).unwrap();
+			}
 			capture_stopped(&mut producer).unwrap();
 		}
 
@@ -1319,7 +1348,9 @@ mod tests {
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 		let frame = Frame::new(surface, Timestamp::from_micros(0).unwrap());
-		producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+		for encoded in encoder.encode_all(&frame).unwrap() {
+			producer.publish(&encoded).unwrap();
+		}
 
 		producer.finish().unwrap();
 		assert!(subscriber.recv_group().await.unwrap().is_some());
@@ -1557,7 +1588,6 @@ mod tests {
 		/// acquisition: not zero, and not the later instant the loop dequeued it.
 		#[tokio::test]
 		async fn a_late_first_frame_publishes_its_acquisition() {
-			kio::clock::host_time();
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let fixture = Fixture::start(Duration::from_secs(5), kio::clock::wall()).await;
@@ -1636,7 +1666,6 @@ mod tests {
 		/// broadcast forward with the device's spacing instead of rewinding it.
 		#[tokio::test]
 		async fn a_device_clock_restart_continues_forward() {
-			kio::clock::host_time();
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
@@ -1680,7 +1709,6 @@ mod tests {
 		/// frame after a resume lands after the idle gap, at its own acquisition.
 		#[tokio::test]
 		async fn a_restart_after_idle_keeps_the_gap() {
-			kio::clock::host_time();
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let idle = Duration::from_millis(300);
@@ -2329,7 +2357,7 @@ mod tests {
 			let mut sink = Sink::open(&config).await.unwrap();
 
 			let estimate = moq_net::bandwidth::Producer::new();
-			let mut rate = Some(rate::Follower::new(estimate.consume(), rate::Policy::new(ceiling)));
+			let mut rate = Some(rate::Grant::new(estimate.consume(), rate::Policy::new(ceiling)));
 
 			estimate.set(Some(Rate::from_mbps(1))).unwrap();
 			let next = next_target(&mut rate).await;
@@ -2455,7 +2483,7 @@ mod finished {
 					let mut producer = Producer::new(track, catalog.reserve(), rendition.clone()).unwrap();
 					for pts in [0, 33_333] {
 						let pts = moq_net::Timestamp::from_micros(pts).unwrap();
-						producer.publish(&[Encoded::new(keyframe(), pts, true)]).unwrap();
+						producer.publish(&Encoded::new(keyframe(), pts, true)).unwrap();
 					}
 					producer.finish().unwrap();
 					producer

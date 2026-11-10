@@ -8,7 +8,7 @@ use std::{
 	time::Duration,
 };
 
-use moq_tokio::{Client, Connection, moq_net};
+use moq_tokio::{Client, Connection};
 use tokio::{net::UdpSocket, sync::mpsc};
 
 const DIAL: Duration = Duration::from_secs(1);
@@ -120,7 +120,11 @@ async fn fail(connection: &Connection) {
 	let before = monitor.state().revision;
 	tokio::time::advance(DIAL).await;
 	let state = monitor.state_changed(before).await.unwrap();
-	assert!(state.failure.is_some());
+	assert!(matches!(
+		state.phase,
+		moq_tokio::connection::Phase::Connecting { failure: Some(_) }
+			| moq_tokio::connection::Phase::Disconnected { failure: Some(_) }
+	));
 }
 
 #[tokio::test(start_paused = true)]
@@ -142,7 +146,10 @@ async fn a_dropped_flow_recovers_without_moving_a_healthy_connection() {
 	let reconnect = socket_step(reconnect.established()).await.unwrap();
 	let (_, recovered_session) = socket_step(sessions.recv()).await.unwrap();
 	assert_eq!(healthy.connects(), 1);
-	assert_eq!(healthy.monitor().state().phase, moq_tokio::connection::Phase::Connected);
+	assert!(matches!(
+		healthy.monitor().state().phase,
+		moq_tokio::connection::Phase::Connected { .. }
+	));
 
 	// The original client still owns and closes endpoints created by its reconnect loops.
 	socket_step(client.close()).await;

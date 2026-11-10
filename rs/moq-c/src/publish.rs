@@ -1249,8 +1249,9 @@ impl Publish {
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let id = track;
 		let Kept { inner: track, children } = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
+		// The kept handle stays a producer, whose appends the end refuses.
 		if track.finished().is_none() {
-			track.finish()?;
+			drop(track.clone().finish()?);
 		}
 		Kept { inner: track, children }.keep(Child::Track(id));
 		Ok(())
@@ -1295,7 +1296,7 @@ impl Publish {
 		// Compressed: JSON is small and repetitive.
 		let mut info = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
-			.with_compress(true);
+			.with_compression(moq_net::track::Compression::Deflate);
 		info.refresh = refresh;
 		let track = broadcast.producer.create_track(name, info)?;
 		let producer = publish(&broadcast.catalog, track)?;
@@ -1538,7 +1539,7 @@ impl Publish {
 
 	/// Finish a raw group. No more frames can be written.
 	pub fn group_finish(&mut self, group: Id) -> Result<(), Error> {
-		let mut group = self
+		let group = self
 			.groups
 			.remove(group)
 			.and_then(|group| group.inner.take())
@@ -1948,7 +1949,7 @@ impl Publish {
 
 	pub fn datagrams_demand(&mut self, track: Id, callback: OnStatus) -> Result<Id, Error> {
 		let entry = self.datagrams.get(track).ok_or(Error::TrackNotFound)?;
-		let producer = entry.producer.clone();
+		let mut producer = entry.producer.clone();
 		let alive = entry.alive.consume();
 		let (task, mut close) = Task::new(callback);
 		let id = self.datagram_demand.insert(DatagramDemand {
@@ -1967,7 +1968,12 @@ impl Publish {
 					 biased;
 					 _ = &mut close => return Ok(()),
 					 _ = alive.closed() => return Ok(()),
-					 priority = kio::wait(|waiter| producer.poll_priority(waiter, priority)) => priority,
+					 next = kio::wait(|waiter| loop {
+						 let next = std::task::ready!(producer.poll_priority_changed(waiter));
+						 if next != priority {
+							 return std::task::Poll::Ready(next);
+						 }
+					 }) => next,
 					};
 				}
 			})

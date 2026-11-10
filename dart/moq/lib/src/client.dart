@@ -302,6 +302,22 @@ extension GrantConsumerUpdates on GrantConsumer {
   Stream<Grant?> updates() => _Grants(this);
 }
 
+/// A route's instance under the name the other bindings use.
+extension RouteInstance on MoqRoute {
+  /// The stream this route serves now. A named instance never changes. A job's
+  /// route takes its claim's current one when it first announces or when this
+  /// first reads it, so a hidden job route returns it before announcing, and
+  /// [MoqRoute.announce] fails with `Unroutable` once the claim has moved past it.
+  String instance() => instanceId();
+}
+
+/// A claim's instance under the name the other bindings use.
+extension ClaimInstance on MoqClaim {
+  /// The stream this claim serves now. A named instance never changes. Unnamed,
+  /// the claim moves to a fresh one each time a job holding its current one ends.
+  String instance() => instanceId();
+}
+
 /// A [Stream] view over an announcement cursor.
 extension AnnounceConsumerUpdates on AnnounceConsumer {
   /// Stream announce events until the cursor ends.

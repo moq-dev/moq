@@ -4,7 +4,7 @@
  * @module
  */
 
-import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
+import { Duration, Instant, now, sleepUntil } from "@moq/clock";
 import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as cache from "./cache.ts";
 import { Delivered } from "./delivered.ts";
@@ -45,7 +45,6 @@ import {
 	type TrackRequestOptions,
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
-import { rescale } from "./rescale.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
@@ -120,6 +119,13 @@ export interface Position {
 }
 
 /**
+ * How a track's frames are compressed, mirroring the Rust `track::Compression`: `"deflate"` makes
+ * each group one DEFLATE stream (draft-lcurley-moq-flate), which suits small, repetitive frames
+ * like JSON.
+ */
+export type Compression = "none" | "deflate";
+
+/**
  * A track's immutable publisher properties, fixed for the lifetime of the track.
  *
  * A producer declares these once from an {@link InfoInit} (via {@link Request.accept} or
@@ -127,43 +133,40 @@ export interface Position {
  * (resolved from the wire TRACK_INFO on lite-05+). They map 1:1 onto TRACK_INFO.
  */
 export interface Info {
-	/** Compress frame payloads per group on lite-07; other sessions receive plain frames. Defaults to false. */
-	compress?: boolean;
+	/** How frame payloads are compressed per group on lite-07; other sessions receive plain frames. */
+	compression: Compression;
 	/**
-	 * Units per second for this track's frame timestamps, or omitted (`undefined` or `null`,
-	 * which mean the same) for an untimed track, whose frames carry no timestamp.
+	 * Units per second for this track's frame timestamps, or `null` for an untimed track, whose
+	 * frames carry no timestamp.
 	 *
-	 * There is no default: a timed track declares its scale, such as {@link Timescale | Timescale.MILLI},
-	 * or {@link Timescale | Timescale.MICRO} for media that needs sub-millisecond timing. Reported in
+	 * A timed track declares its scale, such as {@link Timescale | Timescale.MILLI}, or
+	 * {@link Timescale | Timescale.MICRO} for media that needs sub-millisecond timing. Reported in
 	 * TRACK_INFO on Lite05+ and as the TIMESCALE property on moq-transport. A track received
 	 * without one (moq-lite before Lite05, or moq-transport without TIMESCALE) is untimed,
 	 * and stays untimed when served onward.
 	 */
-	timescale?: Timescale | null;
+	timescale: Timescale | null;
 	/**
-	 * Publisher Max Age: how long, in milliseconds, a superseded group stays fresh. It is
-	 * stale once either clock reaches the budget: the wall-clock time since its successor
-	 * arrived at this hop, or how far its successor's first timestamp trails the live edge.
-	 * The newest group is never stale, and an untimed track is judged by the wall clock alone.
-	 * Reported in TRACK_INFO (Lite05+) so relays re-serve with the same bound. Absence sets
-	 * no publisher limit, as on a track received without one; zero serves only the live edge.
-	 * This clamps each subscriber budget. An authored track gets zero unless its
-	 * {@link InfoInit.maxAge} asks for more. A freshness bound, not retention: a hop's cache
-	 * bounds the bytes it keeps with its own window. Rounded up to a whole millisecond by
-	 * {@link infoDefaults}, which refuses a negative or non-finite value and a result past
-	 * `Number.MAX_SAFE_INTEGER`.
+	 * Publisher Max Age: how long, in milliseconds, a superseded group stays fresh, or `null` for
+	 * no publisher limit. It is stale once either clock reaches the budget: the wall-clock time
+	 * since its successor arrived at this hop, or how far its successor's first timestamp trails
+	 * the live edge. The newest group is never stale, and an untimed track is judged by the wall
+	 * clock alone. Reported in TRACK_INFO (Lite05+) so relays re-serve with the same bound. A
+	 * track received without one has no limit; zero serves only the live edge.
+	 * This clamps each subscriber budget. A freshness bound, not retention: a hop's cache bounds
+	 * the bytes it keeps with its own window.
 	 */
-	maxAge?: Milli;
-	/** Tie-break priority between subscriptions of equal subscriber priority (`-128..=127`, higher first). Defaults to `0`. */
+	maxAge: Duration | null;
+	/** Tie-break priority between subscriptions of equal subscriber priority (`-128..=127`, higher first). */
 	priority: number;
 	/**
 	 * How many times its first frame a group's later stored bytes may grow before a joining
-	 * subscriber asks for a new group, or omitted to never ask. A join against a newest group
+	 * subscriber asks for a new group, or `null` to never ask. A join against a newest group
 	 * whose bytes after its first frame exceed this many times the first frame moves
 	 * {@link Demand.wanted} past it. The joiner still receives the cached group while the new
 	 * one is pending. `0` asks on any join after a delta. An integer in `0..2^32`.
 	 */
-	refresh?: number;
+	refresh: number | null;
 	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
 	ietf?: IetfVersion;
 	/**
@@ -175,31 +178,38 @@ export interface Info {
 }
 
 /**
- * What an author supplies to create a track: any {@link Info} field, each defaulting as
- * {@link infoDefaults} does, except {@link maxAge}.
- *
- * Received metadata is an {@link Info}, whose absent `maxAge` means no publisher limit. To serve
- * one onward unchanged, pass `{ ...info, maxAge: info.maxAge ?? null }`.
+ * What an author supplies to create a track: any {@link Info} field. `compression` defaults to
+ * `"none"`, `timescale` and `refresh` to `null`, `priority` to `0`, and `maxAge` to zero. A
+ * received {@link Info} serves onward unchanged.
  */
-export interface InfoInit extends Partial<Omit<Info, "maxAge">> {
+export interface InfoInit extends Partial<Info> {
 	/**
-	 * The publisher max age; see {@link Info.maxAge}. Omitted or `undefined` is zero, so readers
-	 * get only the live edge; `null` sets no publisher limit (the wire omits it), and a number
-	 * is that bound. A track whose readers reach back for superseded groups sets it explicitly.
+	 * The publisher max age; see {@link Info.maxAge}. Omitted is zero, so readers get only the
+	 * live edge; `null` sets no publisher limit (the wire omits it). A track whose readers reach
+	 * back for superseded groups sets it explicitly. Rounded up to a whole millisecond; a
+	 * negative or non-finite value, or one past `Number.MAX_SAFE_INTEGER`, is refused.
 	 */
-	maxAge?: Milli | null;
+	maxAge?: Duration | null;
 }
 
 /**
- * Resolve an author's {@link InfoInit} into the {@link Info} a producer commits.
+ * Resolve an author's {@link InfoInit} into the {@link Info} a producer commits, validating each field.
  * @internal
  */
 export function authoredInfo(init: InfoInit = {}): Info {
-	const { maxAge, ...rest } = init;
-	return infoDefaults({ ...rest, maxAge: maxAge === undefined ? Milli.zero : (maxAge ?? undefined) });
+	if (init.compression !== undefined && init.compression !== "none" && init.compression !== "deflate")
+		throw new TypeError(`unknown compression: ${init.compression}`);
+	const maxAge = init.maxAge === undefined ? Duration.ZERO : init.maxAge;
+	return {
+		compression: init.compression ?? "none",
+		timescale: init.timescale == null ? null : Timescale(init.timescale),
+		maxAge: maxAge === null ? null : wireMillis("maxAge", maxAge),
+		priority: priorityValue(init.priority ?? DEFAULT_PRIORITY),
+		refresh: init.refresh == null ? null : refreshRatio(init.refresh),
+		...(init.ietf === undefined ? {} : { ietf: init.ietf }),
+		...(init.unchecked ? { unchecked: true } : {}),
+	};
 }
-
-export { rescale };
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
 //
@@ -207,15 +217,12 @@ export { rescale };
 // millisecond is expected; ceil rather than round, because a budget shortened by rounding
 // skips a group the subscriber still wants. Anything that is not a duration is refused
 // here, where the field is named, rather than deep in the encoder.
-function wireMillis(field: string, value: Milli): Milli {
-	if (!Number.isFinite(value) || value < 0) {
-		throw new RangeError(`${field} must be a non-negative number of milliseconds: ${value}`);
-	}
-	const millis = Math.ceil(value);
+function wireMillis(field: string, value: Duration): Duration {
+	const millis = Math.ceil(value.asMillis());
 	if (!Number.isSafeInteger(millis)) {
 		throw new RangeError(`${field} exceeds the safe integer millisecond range: ${value}`);
 	}
-	return Milli(millis);
+	return Duration.millis(millis);
 }
 
 function priorityValue(value: number): number {
@@ -223,26 +230,6 @@ function priorityValue(value: number): number {
 		throw new RangeError(`priority must be an integer in -128..=127: ${value}`);
 	}
 	return value;
-}
-
-/**
- * Fill in any unset {@link Info} fields with their defaults, as for received metadata: an absent
- * `maxAge` stays absent, meaning no publisher limit. An authored track resolves its
- * {@link InfoInit} at {@link Producer.accept} instead, where an omitted `maxAge` is zero.
- */
-export function infoDefaults(info: Partial<Info> = {}): Info {
-	if (info.compress !== undefined && typeof info.compress !== "boolean")
-		throw new TypeError("compress must be a boolean");
-	const timescale = info.timescale == null ? undefined : Timescale(info.timescale);
-	return {
-		compress: info.compress ?? false,
-		timescale,
-		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
-		priority: priorityValue(info.priority ?? DEFAULT_PRIORITY),
-		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
-		...(info.ietf === undefined ? {} : { ietf: info.ietf }),
-		...(info.unchecked ? { unchecked: true } : {}),
-	};
 }
 
 function refreshRatio(value: number): number {
@@ -322,7 +309,7 @@ export interface Delay {
 	 * pulls it to zero, and it is forwarded upstream as is. A publisher may use it, such as to
 	 * start a cold join that far back; nothing reads it there yet.
 	 */
-	min?: Milli | null;
+	min?: Duration | null;
 	/**
 	 * How long a non-latest group stays worth delivering, by the same two clocks as
 	 * {@link Info.maxAge}: it is skipped once its successor arrived this long ago or starts this
@@ -331,7 +318,7 @@ export interface Delay {
 	 * publisher's {@link Info.maxAge} alone bounds it, which is what a reader reaching back for
 	 * history wants; read in order, see {@link Ordered} for where that can block.
 	 */
-	max?: Milli | null;
+	max?: Duration | null;
 }
 
 /**
@@ -395,7 +382,7 @@ export const Subscription: {
 } = {
 	default: () => ({
 		priority: DEFAULT_PRIORITY,
-		delay: { min: Milli.zero, max: Milli.zero },
+		delay: { min: Duration.ZERO, max: Duration.ZERO },
 		order: "descending",
 	}),
 };
@@ -411,8 +398,11 @@ function subscriptionDefaults(subscription: Subscription = Subscription.default(
 	return {
 		priority: priorityValue(subscription.priority ?? DEFAULT_PRIORITY),
 		delay: {
-			min: delay.min === null ? null : wireMillis("delay.min", delay.min ?? Milli.zero),
-			max: delay.max === null ? NO_MAX_DELAY : wireMillis("delay.max", delay.max ?? Milli.zero),
+			min: delay.min === null ? null : wireMillis("delay.min", delay.min ?? Duration.ZERO),
+			max:
+				delay.max === null
+					? Duration.millis(NO_MAX_DELAY)
+					: wireMillis("delay.max", delay.max ?? Duration.ZERO),
 		},
 		order: orderOf(subscription.order),
 		ranges: subscription.ranges === undefined ? [{}] : rangesOf(subscription.ranges),
@@ -427,10 +417,10 @@ function orderOf(order: Order | undefined): Order {
 }
 
 // The smaller of two minimums, ignoring one that went unstated (`null`).
-function smallest(a: Milli | null | undefined, b: Milli | null | undefined): Milli | null {
+function smallest(a: Duration | null | undefined, b: Duration | null | undefined): Duration | null {
 	if (a === null || a === undefined) return b ?? null;
 	if (b === null || b === undefined) return a;
-	return Milli(Math.min(a, b));
+	return a.min(b);
 }
 
 // Aggregate the preferences of `states`, matching Rust's Subscription::poll_combined.
@@ -446,7 +436,7 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 
 		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
 		combined.delay = {
-			max: Milli(Math.max(maxDelayOf(combined), maxDelayOf(subscription))),
+			max: Duration.millis(Math.max(maxDelayOf(combined), maxDelayOf(subscription))),
 			// Only stated minimums count, so one that went unstated never pulls the smallest to zero.
 			min: smallest(combined.delay?.min, subscription.delay?.min),
 		};
@@ -563,7 +553,7 @@ export interface FetchGroupOptions {
 	priority?: number;
 
 	/** Maximum age behind the live edge this caller accepts. Omission leaves the publisher's {@link Info.maxAge} as the only bound. */
-	maxDelay?: Milli;
+	maxDelay?: Duration;
 
 	/**
 	 * Abandons this fetch, rejecting with the signal's reason. Concurrent fetches of the same
@@ -850,8 +840,8 @@ let mayLand: (producer: Producer, land: Land) => boolean;
 // Recompute the producer's aggregates now, for a sink that just became a fetch; assigned in its
 // static block.
 let resubscribe: (producer: Producer) => void;
-let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: number }>;
-let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: number } | undefined;
+let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: Instant }>;
+let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: Instant } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
@@ -924,7 +914,6 @@ let ordered_: {
 	readFrame(subscriber: Subscriber): Promise<({ group: bigint; frame: number } & Frame) | undefined>;
 	readString(subscriber: Subscriber): Promise<string | undefined>;
 	readJson(subscriber: Subscriber): Promise<unknown | undefined>;
-	readBool(subscriber: Subscriber): Promise<boolean | undefined>;
 };
 
 // Constructs a Demand from within this module; assigned in the class's static block.
@@ -1070,10 +1059,7 @@ export class Producer {
 		this.#fills = new FillState({
 			name,
 			accept: (sequence, info) => {
-				// A fill's info is the publisher's metadata, whose absent maxAge means no publisher
-				// limit, not an authored track's zero.
-				if (info !== undefined && this.#state.info.peek() === undefined)
-					this.accept({ ...info, maxAge: info.maxAge ?? null });
+				if (info !== undefined && this.#state.info.peek() === undefined) this.accept(info);
 				return this.#createGroup(sequence, 0);
 			},
 			drop: (start, end, error) => this.#drop(start, end, { error }),
@@ -1246,14 +1232,14 @@ export class Producer {
 
 	// The first group that may still land from the live feed, by the rule a pending tail is judged
 	// by; see {@link Land}. Mirrors the Rust `TrackState::may_land`.
-	#landable(land: Land): { sequence: bigint; folds?: number } | undefined {
+	#landable(land: Land): { sequence: bigint; folds?: Instant } | undefined {
 		for (const run of this.#landing(land)) {
 			if (!land.delivered?.covers(run.start, run.end)) return { sequence: run.start, folds: run.folds };
 		}
 		return undefined;
 	}
 
-	*#landing(land: Land): Generator<Run & { folds?: number }> {
+	*#landing(land: Land): Generator<Run & { folds?: Instant }> {
 		if (this.#state.closed.peek() !== undefined) return;
 		let start = land.start;
 		if (!land.floor) {
@@ -1265,11 +1251,11 @@ export class Producer {
 		const declared = this.#state.end.peek()?.at;
 		const end = declared === undefined ? land.end : min(land.end, finalSequence(declared));
 		const at = now();
-		const limit = Nano.fromMilli(land.grace);
+		const limit = land.grace;
 		const drops = this.#state.drops.peek();
 		for (const gap of this.#arrivals.gaps(start, end)) {
-			const folds = gap.since === undefined ? undefined : gap.since + limit;
-			if (folds !== undefined && at >= folds) continue;
+			const folds = gap.since?.add(limit);
+			if (folds !== undefined && at.ge(folds)) continue;
 			for (const open of runGaps(drops, gap.start, gap.end)) {
 				yield { ...open, folds };
 			}
@@ -1373,7 +1359,7 @@ export class Producer {
 		try {
 			for (const { group } of this.#cache) {
 				hooks.bindGroupTimed(group, resolved);
-				hooks.bindGroupCompression(group, resolved.compress ?? false);
+				hooks.bindGroupCompression(group, resolved.compression === "deflate");
 			}
 		} catch (err) {
 			this.abort(err instanceof Error ? err : new Error(String(err)));
@@ -1429,7 +1415,7 @@ export class Producer {
 	#join(): void {
 		const ratio = this.#state.info.peek()?.refresh;
 		const latest = this.#state.latest;
-		if (ratio === undefined || latest === undefined) return;
+		if (ratio == null || latest === undefined) return;
 		const group = this.#cached.get(latest)?.group;
 		if (!group || !hooks.overRefresh(group, ratio)) return;
 		this.#refresh = true;
@@ -1793,7 +1779,7 @@ export class Producer {
 		const info = this.#state.info.peek();
 		if (info) {
 			hooks.bindGroupTimed(group, info);
-			hooks.bindGroupCompression(group, info.compress ?? false);
+			hooks.bindGroupCompression(group, info.compression === "deflate");
 		}
 	}
 
@@ -2020,11 +2006,11 @@ export class Producer {
 
 	// The grace the session's tail uses, from the max delay the track's subscribers ask for,
 	// bounded by how long the publisher keeps a superseded group fresh. The demand asked upstream is not.
-	#grace(): Milli {
+	#grace(): Duration {
 		const update = this.#state.update.peek();
-		const maxDelay = update ? maxDelayOf(update) : Milli.zero;
+		const maxDelay = Duration.millis(update ? maxDelayOf(update) : 0);
 		const maxAge = this.#state.info.peek()?.maxAge;
-		return grace(maxAge === undefined ? maxDelay : Milli(Math.min(maxDelay, maxAge)));
+		return grace(maxAge == null ? maxDelay : maxDelay.min(maxAge));
 	}
 
 	// Tell every reader whether the pending tail still owes a group below the end.
@@ -2130,15 +2116,18 @@ export class Producer {
 	}
 
 	/**
-	 * Declare the track's end after the highest sequence written. A no-op once an end is declared or the track closed,
-	 * so a cleanup path can finish whatever the track's state.
+	 * Declare the track's end after the highest sequence written, returning it as {@link Finished}.
+	 * A no-op once an end is declared or the track closed, so a cleanup path can finish whatever
+	 * the track's state. A track that closed first keeps its outcome and declares no end, so its
+	 * readers' `finished()` rejects.
 	 *
 	 * Not terminal: groups below the end may still be written. Readers end once the live edge
 	 * reaches it.
 	 */
-	finish(): void {
-		if (this.#state.end.peek() !== undefined || this.#state.closed.peek() !== undefined) return;
-		this.finishAt({ group: this.#received, frame: 0 });
+	finish(): Finished {
+		if (this.#state.end.peek() === undefined && this.#state.closed.peek() === undefined)
+			this.finishAt({ group: this.#received, frame: 0 });
+		return this;
 	}
 
 	/**
@@ -2248,6 +2237,33 @@ type Superseded = { successor?: Successor };
 // a handed-out successor's own record would retain the next one, chaining every later group to
 // the oldest held.
 type Successor = { sequence: bigint; arrived: Instant; fate: () => Error | undefined };
+
+/**
+ * A track its producer finished: its end is declared unless it closed first, and it can still
+ * take an older group below that end, be read, or be aborted or closed, but not append. {@link Producer.finish} returns it,
+ * mirroring the Rust `track::Finished`; the producer itself still refuses a group at or past the
+ * end.
+ *
+ * @public
+ */
+export interface Finished {
+	/** The track name. */
+	readonly name: string;
+	/** Settles once the track's outcome is final; see {@link Producer.closed}. */
+	readonly closed: GetPromise<Error | null>;
+	/** The track's info, once accepted. */
+	info(): Promise<Info>;
+	/** Create an older group below the end, which arrived late; see {@link Producer.createGroup}. */
+	createGroup(sequence: bigint): GroupProducer;
+	/** Serve the groups readers miss below the end; see {@link Producer.requests}. */
+	requests(): Requests;
+	/** Subscribe to this in-process track; see {@link Producer.subscribe}. */
+	subscribe(options?: Subscription): Subscriber;
+	/** Abort the track; see {@link Producer.abort}. */
+	abort(error: Error): void;
+	/** Release the track, like dropping the last Rust handle; see {@link Producer.close}. */
+	close(): void;
+}
 
 /**
  * The read side of a live track subscription, mirroring the Rust `Subscriber`.
@@ -2377,7 +2393,7 @@ export class Subscriber {
 
 		const update = this.#state.update.peek();
 		const requested = this.#fetchBudget ?? (update ? maxDelayOf(update) : 0);
-		const fresh = info?.maxAge;
+		const fresh = info?.maxAge?.asMillis();
 		return {
 			budget: fresh === undefined ? requested : Math.min(requested, fresh),
 			bounded: fresh !== undefined && requested >= fresh,
@@ -2460,8 +2476,8 @@ export class Subscriber {
 			: this.#supersededAt(this.#arrival(sequence, drift.end), drift, held);
 		if (arrived === undefined) return false;
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
-		const deadline = arrived + drift.budget * 1_000_000;
-		if (now() >= deadline) return true;
+		const deadline = arrived.since(Instant.ZERO).asNanos() + drift.budget * 1_000_000;
+		if (now().since(Instant.ZERO).asNanos() >= deadline) return true;
 		if (wake) this.#wakeAt(deadline);
 		// A closed subscriber keeps no timeline to bound the reach with.
 		if (this.#arrivals) return false;
@@ -2497,7 +2513,7 @@ export class Subscriber {
 		}
 		if (!arrival || arrived === undefined) {
 			held.successor = undefined;
-		} else if (recorded?.sequence !== arrival.sequence || recorded.arrived !== arrived || failed(recorded)) {
+		} else if (recorded?.sequence !== arrival.sequence || !recorded.arrived.eq(arrived) || failed(recorded)) {
 			// Re-recorded only on a change, so judging the same successor again allocates nothing.
 			held.successor = { sequence: arrival.sequence, arrived, fate: hooks.groupFate(arrival) };
 		}
@@ -2529,7 +2545,7 @@ export class Subscriber {
 		wall.timer?.abort();
 		const timer = new AbortController();
 		// A staleness wakeup is never a reason to hold a Node/Bun process open.
-		void sleepUntil(Instant(at), { signal: timer.signal, ref: false }).then(
+		void sleepUntil(Instant.ZERO.add(Duration.nanos(at)), { signal: timer.signal, ref: false }).then(
 			() => {
 				if (timer.signal.aborted) return;
 				wall.timer = undefined;
@@ -2941,7 +2957,7 @@ export class Subscriber {
 			// Reordered streams still owed by the live feed are not cache misses.
 			for (const run of owedRuns(producer, start, end)) {
 				insertRun(accounted, run.start, run.end);
-				if (run.folds !== undefined) this.#wakeAt(run.folds);
+				if (run.folds !== undefined) this.#wakeAt(run.folds.since(Instant.ZERO).asNanos());
 			}
 			// Below where the feed starts, only the history the copy's start rule leaves fillable.
 			const floor = fillFloor(producer, this.#window.start());
@@ -3123,7 +3139,7 @@ export class Subscriber {
 					if (held[index] && held[index].sequence < open.end) return false;
 					const owed = producer && owedGroup(producer, open.start, open.end);
 					if (owed) {
-						if (owed.folds !== undefined) this.#wakeAt(owed.folds);
+						if (owed.folds !== undefined) this.#wakeAt(owed.folds.since(Instant.ZERO).asNanos());
 						return false;
 					}
 				}
@@ -3321,7 +3337,7 @@ export class Subscriber {
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.askFetch = (subscriber, sequence) => subscriber.#askFetch(sequence);
 		hooks.fetchBudget = (subscriber, maxDelay) => {
-			subscriber.#fetchBudget = maxDelay ?? Number.POSITIVE_INFINITY;
+			subscriber.#fetchBudget = maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY;
 			subscriber.#state.fetch = true;
 			// The sink joined as a live subscriber; leave the live aggregate before anyone sees it.
 			if (subscriber.#state.producer) resubscribe(subscriber.#state.producer);
@@ -3337,7 +3353,6 @@ export class Subscriber {
 			readFrame: (subscriber) => subscriber.#readFrame(),
 			readString: (subscriber) => subscriber.#readString(),
 			readJson: (subscriber) => subscriber.#readJson(),
-			readBool: (subscriber) => subscriber.#readBool(),
 		};
 	}
 
@@ -3922,7 +3937,7 @@ export class Subscriber {
 		const producer = this.#state.producer;
 		if (start >= end || !producer) return false;
 		// Only a hole in this reader's ranges is owed to it.
-		let owed: { sequence: bigint; folds?: number } | undefined;
+		let owed: { sequence: bigint; folds?: Instant } | undefined;
 		for (const run of this.#window.runs(start, end)) {
 			owed = owedGroup(producer, run.start, run.end);
 			if (owed) break;
@@ -3935,7 +3950,7 @@ export class Subscriber {
 			return true;
 		}
 		if (this.#staleAt(owed.sequence, drift, true)) return false;
-		if (owed.folds !== undefined) this.#wakeAt(owed.folds);
+		if (owed.folds !== undefined) this.#wakeAt(owed.folds.since(Instant.ZERO).asNanos());
 		this.#state.waitingOrdered = true;
 		return true;
 	}
@@ -4095,15 +4110,6 @@ export class Subscriber {
 		const next = await this.#readString();
 		if (next === undefined) return undefined;
 		return JSON.parse(next);
-	}
-
-	/** Reads the next frame and decodes it as a one-byte boolean, throwing on a malformed frame. */
-	async #readBool(): Promise<boolean | undefined> {
-		const next = await this.#readFrame();
-		if (!next) return undefined;
-		const payload = next.payload;
-		if (payload.byteLength !== 1 || !(payload[0] === 0 || payload[0] === 1)) throw new Error("invalid bool frame");
-		return payload[0] === 1;
 	}
 
 	/**
@@ -4268,10 +4274,5 @@ export class Ordered {
 	/** Read the next frame and parse it as JSON. */
 	readJson(): Promise<unknown | undefined> {
 		return ordered_.readJson(this.#subscriber);
-	}
-
-	/** Read the next frame and decode it as a one-byte boolean, throwing on a malformed frame. */
-	readBool(): Promise<boolean | undefined> {
-		return ordered_.readBool(this.#subscriber);
 	}
 }

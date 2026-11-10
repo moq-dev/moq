@@ -108,7 +108,7 @@ impl Connected {
 
 		// Throw an error if we didn't get a 200 OK.
 		if response.status != http::StatusCode::OK {
-			return Err(super::HandshakeError::Status(response.status).into());
+			return Err(super::HandshakeError::Status(response.status.as_u16()).into());
 		}
 
 		// Validate that the server's protocol was in our request.

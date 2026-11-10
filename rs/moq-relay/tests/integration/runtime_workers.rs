@@ -9,7 +9,6 @@
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
-use moq_tokio::moq_net;
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -50,7 +49,7 @@ fn worker_config(cert: &std::path::Path, key: &std::path::Path, workers: u16) ->
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.cert = vec![cert.to_path_buf()];
 	config.listen.tls.key = vec![key.to_path_buf()];
-	config.runtime.workers = Some(workers);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(workers).unwrap());
 	config.runtime.pin = false;
 	config.auth.public = vec![moq_auth::Pattern::all()];
 	config
@@ -167,9 +166,14 @@ async fn workers_serve_quic_and_share_one_origin() {
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::origin::RouteEvent::Start(route)
-		| moq_net::origin::RouteEvent::Update(route)
-		| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
-		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: route,
+		} => Some((route, true)),
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::End,
+			announce: route,
+		} => Some((route, false)),
 	}
 }

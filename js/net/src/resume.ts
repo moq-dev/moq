@@ -45,7 +45,7 @@
  *
  * @module
  */
-import { Instant, Milli, now, sleepUntil } from "@moq/clock";
+import { Duration, Instant, now, sleepUntil } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import * as broadcast from "./broadcast.ts";
 import { Delivered } from "./delivered.ts";
@@ -130,7 +130,7 @@ function copyFailed(copy: Copy): boolean {
 // listed here. `unchecked` says how a copy arrived, not what it holds, so copies over different
 // lite versions still match. `ietf` is compared, like Rust's moq-transport `properties`.
 const INFO_FIELDS = Object.keys({
-	compress: true,
+	compression: true,
 	timescale: true,
 	maxAge: true,
 	priority: true,
@@ -140,8 +140,10 @@ const INFO_FIELDS = Object.keys({
 
 /** Two copies claiming the same content must agree on all of it, like Rust's `Info` equality. */
 function compatible(a: track.Info, b: track.Info): boolean {
-	const [x, y] = [track.infoDefaults(a), track.infoDefaults(b)];
-	return INFO_FIELDS.every((field) => x[field] === y[field]);
+	return INFO_FIELDS.every((field) => {
+		const [l, r] = [a[field], b[field]];
+		return l instanceof Duration && r instanceof Duration ? l.eq(r) : l === r;
+	});
 }
 
 /**
@@ -1106,7 +1108,7 @@ class Reader implements ResumeSource {
 				const start = max(cursor.start, copy.floor ?? 0n);
 				if (!hooks.spent(copy.sub, start, undefined, delivered)) return true;
 				// A group read from a copy it replaced may still continue from it.
-				if (this.#backs(copy, true, grace(this.#budget()))) return true;
+				if (this.#backs(copy, true, grace(Duration.millis(this.#budget())))) return true;
 			} else {
 				const retains = this.#retains(copy, delivered, edge);
 				if (retains === "wait") waits = true;
@@ -1132,7 +1134,7 @@ class Reader implements ResumeSource {
 		// Superseded once the serving copy has a group past the bound.
 		if (copy.since === undefined && end !== undefined && edge !== undefined && edge >= end) copy.since = now();
 		const budget = this.#budget();
-		const wait = grace(budget);
+		const wait = grace(Duration.millis(budget));
 		// What is under the bound is past the reader's budget a full budget after a newer group
 		// superseded it, landed or not.
 		if (copy.done === undefined && end !== undefined && !this.#expired(copy, budget)) {
@@ -1146,7 +1148,7 @@ class Reader implements ResumeSource {
 			if (hooks.hasUnreadGroup(copy.sub, cursor.start, end, delivered)) return "keep";
 		}
 		if (copy.lease > 0) return "keep";
-		const lands = copy.since !== undefined && !this.#expired(copy, wait);
+		const lands = copy.since !== undefined && !this.#expired(copy, wait.asMillis());
 		return this.#backs(copy, lands, wait) ? "keep" : undefined;
 	}
 
@@ -1154,7 +1156,7 @@ class Reader implements ResumeSource {
 	 * Whether `copy` holds a group still read, or may yet get it within `wait` when it `lands`: a
 	 * failure of the copy that group is read from continues here.
 	 */
-	#backs(copy: Copy, lands: boolean, wait: Milli): boolean {
+	#backs(copy: Copy, lands: boolean, wait: Duration): boolean {
 		for (const recover of this.out) {
 			const sequence = recover.sequence;
 			if (hooks.holdsGroup(copy.sub, sequence)) return true;
@@ -1186,10 +1188,10 @@ class Reader implements ResumeSource {
 		}
 	}
 
-	/** The reader's budget: how far behind a group may fall before it is skipped. */
-	#budget(): Milli {
+	/** The reader's budget in milliseconds: how far behind a group may fall before it is skipped. */
+	#budget(): number {
 		const subscription = this.#shell.subscription.peek();
-		return subscription ? maxDelayOf(subscription) : Milli.zero;
+		return subscription ? maxDelayOf(subscription) : 0;
 	}
 
 	/**
@@ -1198,9 +1200,9 @@ class Reader implements ResumeSource {
 	 */
 	#expired(copy: Copy, within: number): boolean {
 		if (copy.since === undefined) return false;
-		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
-		const at = copy.since + within * 1_000_000;
-		if (now() >= at) return true;
+		// Plain nanoseconds: an unenforced budget is infinite, which no Duration holds.
+		const at = copy.since.since(Instant.ZERO).asNanos() + within * 1_000_000;
+		if (now().since(Instant.ZERO).asNanos() >= at) return true;
 		this.#wakeAt(at);
 		return false;
 	}
@@ -1212,7 +1214,7 @@ class Reader implements ResumeSource {
 		const timer = new AbortController();
 		this.#wall = { at, timer };
 		// A wakeup is never a reason to hold a Node/Bun process open.
-		void sleepUntil(Instant(at), { signal: timer.signal, ref: false }).then(
+		void sleepUntil(Instant.ZERO.add(Duration.nanos(at)), { signal: timer.signal, ref: false }).then(
 			() => {
 				if (timer.signal.aborted) return;
 				this.#wall = undefined;
@@ -1739,7 +1741,7 @@ class Recover implements GroupRecover {
 				// a copy that failed, once the serving subscription will not deliver the group either.
 				if (outcome && failed && !routeFailed(outcome.error) && !copyFailed(serving)) {
 					const subscription = serving.sub.subscription.peek();
-					const maxDelay = subscription ? maxDelayOf(subscription) : Milli.zero;
+					const maxDelay = Duration.millis(subscription ? maxDelayOf(subscription) : 0);
 					const land = { start: this.sequence, end: this.sequence + 1n, floor: true, grace: grace(maxDelay) };
 					if (generation === current.generation || !hooks.mayLand(serving.sub, land)) throw outcome.error;
 					landing = new Promise<void>((resolve) => {

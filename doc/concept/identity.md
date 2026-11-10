@@ -32,8 +32,8 @@ no credential, and auth decides who may publish the path.
   keeps its instance on every route, which is what lets a subscription move
   between them.
 - **A stable instance is a promise.** A publisher may name its own instance
-  (`Route::with_instance(instance, epoch)` in Rust, `announce({ instance, epoch })`
-  in JavaScript) only if it continues the sequence space across restarts and
+  (`RouteOptions::with_instance(instance, epoch)` in Rust,
+  `origin.route(path, { instance: { id, epoch } })` in JavaScript) only if it continues the sequence space across restarts and
   announces a higher **epoch** each time, for example a counter persisted on
   disk. Breaking the promise splices unrelated groups into every reader's
   tracks. Two encoders with identical settings fed the same source still
@@ -71,7 +71,10 @@ A route resolving a path is chosen in this order:
 2. Within one instance, only its highest epoch is eligible, even over a
    cheaper route. Readers continue across an epoch change without a seam,
    because the sequence space continues.
-3. Among different instances: the preferred link, then an identified chain
+3. Among eligible routes: a route from a peer that has not sent GOAWAY
+   (a draining peer's routes rank below every other, whatever their preference
+   or cost, and serve only as a last resort), then the preferred link, then an
+   identified chain
    over an anonymous one, then the lowest cost, then a broadcast published on
    this origin, then the shortest hop chain, then a hash of the full requested
    path with the route's origin node, which moq-lite 07 carries, or else with
@@ -169,10 +172,10 @@ demand, whose instance changes each time its job restarts.
 
 A worker can advertise a prefix it serves on demand and answer with a
 broadcast it already holds. This announces no exact route: the answer belongs
-to the prefix route's instance at that path. Every answer there must continue
+to the claim's instance at that path. Every answer there must continue
 one sequence space with the same bytes. To serve different content at a path
-already served, start a new prefix route. Its first subscription stays on
-the prefix route without a restart.
+already served, start a new claim. Its first subscription stays on
+the claim without a restart.
 
 A job that may restart independently, such as a transcoder claiming
 `transcode`, instead creates each requested path's own exact route. A claim
@@ -180,7 +183,7 @@ promises capability, not content. Each requested path is a separate job,
 announced at its exact path.
 
 ```rust
-let claim = origin.route_prefix("transcode", RouteOptions::default())?;
+let claim = origin.claim("transcode", RouteOptions::default())?;
 while let Some(request) = claim.requested().await {
     // Takes the claim's instance, so readers resolved through the claim continue.
     // Hidden until its tracks exist.
@@ -200,7 +203,7 @@ earlier when its instance is first read, as a signer built from it does. Read
 first, the job announces under it or not at all: if another job under the claim
 ends in between, moving the claim to a fresh instance, `announce` fails with
 `Unroutable` and the request reaches the worker again. Ending a job's route withdraws its path, and the
-prefix route keeps answering later requests.
+claim keeps answering later requests.
 
 A lazy job's lifecycle, as a viewer of `transcode/alice` sees it through a relay:
 

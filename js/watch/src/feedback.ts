@@ -1,4 +1,4 @@
-import { Instant, type Milli, Nano, now, Wall, wall } from "@moq/clock";
+import { type Duration, type Instant, now, type Wall, wall } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 
@@ -33,7 +33,8 @@ const MAX_BROADCASTS = 4;
  */
 const MAX_RENDITIONS = 1024;
 
-type Entry = { received: Received; stalling?: Instant };
+// The stall in progress, an object of its own so an older stall ending cannot clear a newer one.
+type Entry = { received: Received; stalling?: { start: Instant } };
 
 /**
  * Cumulative counters per rendition, for each catalog broadcast a decoder read. The decoder counts
@@ -73,11 +74,11 @@ export class Tally {
 	}
 
 	/** Record a received frame at media `timestamp`, arriving at wall time `arrived`. */
-	arrive(key: Key, timestamp: Milli, arrived: Wall): void {
-		const at = Math.floor(arrived - Catalog.MOQ_EPOCH_UNIX_MILLIS);
+	arrive(key: Key, timestamp: Duration, arrived: Wall): void {
+		const at = Math.floor(arrived.asUnixMillis() - Catalog.MOQ_EPOCH_UNIX_MILLIS);
 		// A clock before the MoQ epoch has no wire encoding, so such an arrival is never recorded.
-		if (at < 0 || timestamp < 0) return;
-		this.#entry(key).received.arrival = { timestamp: Math.floor(timestamp), wall: at };
+		if (at < 0) return;
+		this.#entry(key).received.arrival = { timestamp: Math.floor(timestamp.asMillis()), wall: at };
 	}
 
 	/**
@@ -88,10 +89,11 @@ export class Tally {
 		const entry = this.#entry(key);
 		const start = now();
 		entry.received.stalls = (entry.received.stalls ?? 0) + 1;
-		entry.stalling = start;
+		const stalling = { start };
+		entry.stalling = stalling;
 		return () => {
 			const duration = elapsed(start);
-			if (entry.stalling === start) entry.stalling = undefined;
+			if (entry.stalling === stalling) entry.stalling = undefined;
 			entry.received.stalled = (entry.received.stalled ?? 0) + duration;
 			return duration;
 		};
@@ -103,7 +105,8 @@ export class Tally {
 		const report: [string, Received][] = [];
 		for (const [id, entry] of this.#broadcasts.get(path) ?? []) {
 			const received = { ...entry.received };
-			if (entry.stalling !== undefined) received.stalled = (received.stalled ?? 0) + elapsed(entry.stalling);
+			if (entry.stalling !== undefined)
+				received.stalled = (received.stalled ?? 0) + elapsed(entry.stalling.start);
 			if (received.stalled !== undefined) received.stalled = Math.floor(received.stalled);
 			if (received.arrival) received.arrival = { ...received.arrival };
 			report.push([id, received]);
@@ -116,11 +119,11 @@ export class Tally {
  * The wall time of a frame's monotonic ingress time, as a received frame records it before
  * reordering or decoder backpressure, so a frame read late still reports when it arrived.
  */
-export function arrivedAt(arrival: Milli): Wall {
-	return Wall(wall() - Math.max(0, Nano.toMilli(Nano(now())) - arrival));
+export function arrivedAt(arrival: Instant): Wall {
+	return wall().sub(now().since(arrival));
 }
 
 // Milliseconds since `start`.
 function elapsed(start: Instant): number {
-	return Nano.toMilli(Instant.durationSince(now(), start));
+	return now().since(start).asMillis();
 }

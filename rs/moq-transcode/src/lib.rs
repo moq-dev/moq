@@ -127,7 +127,7 @@ impl Transcoder {
 		// The source catalog drives everything; wait for a snapshot with a usable
 		// video rendition (the first may precede the source publishing its video).
 		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(source.track(hang::Catalog::DEFAULT_NAME)?);
-		let mut decoders = catalog::Decoders::new(config.feed_decoder());
+		let mut decoders = catalog::Decoders::new(config.decoder());
 		let (source_name, source_config, snapshot) = loop {
 			let Some(snapshot) = catalogs.next().await? else {
 				return Err(Error::NoSource);
@@ -358,7 +358,8 @@ mod tests {
 		.unwrap();
 		encoder.cut().unwrap();
 		let gray = vec![0x80u8; 320 * 240 * 4];
-		for encoded in encoder.encode(&gray_frame(&gray, 0)).unwrap() {
+		encoder.encode(&gray_frame(&gray, 0)).unwrap();
+		while let Some(encoded) = encoder.receive().unwrap() {
 			hang::container::Frame {
 				timestamp: encoded.timestamp,
 				payload: encoded.payload,
@@ -410,7 +411,8 @@ mod tests {
 				if index == 0 {
 					encoder.cut().unwrap();
 				}
-				for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+				encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
+				while let Some(encoded) = encoder.receive().unwrap() {
 					let frame = hang::container::Frame {
 						timestamp: encoded.timestamp,
 						payload: encoded.payload,
@@ -436,7 +438,7 @@ mod tests {
 		let clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
 		let source = source_catalog(320, 240);
 		let rendition = source.catalog.snapshot().video.renditions["video"].clone();
-		let decoders = catalog::Decoders::new(config.feed_decoder());
+		let decoders = catalog::Decoders::new(config.decoder());
 		let mut ladder = pipeline::Pipeline::new(
 			source.broadcast.consume(),
 			config,
@@ -479,7 +481,8 @@ mod tests {
 			encoder.cut().unwrap();
 			let timestamps: Vec<_> = (0..5).map(|index| (sequence * 5 + index) * 33_333).collect();
 			for &timestamp in &timestamps {
-				for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+				encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
+				while let Some(encoded) = encoder.receive().unwrap() {
 					hang::container::Frame {
 						timestamp: encoded.timestamp,
 						payload: encoded.payload,
@@ -1019,7 +1022,6 @@ mod tests {
 	/// do have to keep serving, and the passthrough entry has to follow.
 	#[tokio::test]
 	async fn ladder_follows_a_source_resize() {
-		kio::clock::host_time();
 		let mut source = source_catalog(640, 360);
 
 		let config = Config {
@@ -1458,7 +1460,8 @@ mod tests {
 		encoder.cut().unwrap();
 		let gray = vec![0x80u8; 320 * 240 * 4];
 		for timestamp in [0, 33_333] {
-			for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+			encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
+			while let Some(encoded) = encoder.receive().unwrap() {
 				hang::container::Frame {
 					timestamp: encoded.timestamp,
 					payload: encoded.payload,
@@ -1549,7 +1552,8 @@ mod tests {
 			let mut write = |group: &mut moq_net::group::Producer, timestamps: &[u64]| {
 				encoder.cut().unwrap();
 				for &timestamp in timestamps {
-					for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+					encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
+					while let Some(encoded) = encoder.receive().unwrap() {
 						hang::container::Frame {
 							timestamp: encoded.timestamp,
 							payload: encoded.payload,
@@ -1647,7 +1651,8 @@ mod tests {
 		let mut write = |group: &mut moq_net::group::Producer, timestamps: &[u64]| {
 			encoder.cut().unwrap();
 			for &timestamp in timestamps {
-				for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+				encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
+				while let Some(encoded) = encoder.receive().unwrap() {
 					hang::container::Frame {
 						timestamp: encoded.timestamp,
 						payload: encoded.payload,
@@ -2048,7 +2053,7 @@ mod tests {
 			write_keyframe(&mut group);
 			group.finish().unwrap();
 			match finish {
-				true => source._track.finish().unwrap(),
+				true => drop(source._track.clone().finish().unwrap()),
 				false => source._track.clone().abort(moq_net::Error::Cancel).unwrap(),
 			}
 

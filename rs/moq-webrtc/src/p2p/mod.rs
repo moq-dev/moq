@@ -468,7 +468,7 @@ impl Answerer {
 	/// one session may take the channel.
 	pub async fn accept(&self, listener: &moq_tokio::Listener) -> Result<moq_tokio::server::Request, Error> {
 		// Held until `accept_with` takes its own, so a drain that starts meanwhile waits.
-		let _establishing = listener.activity().enter().ok_or(moq_tokio::Error::Stopped)?;
+		let _establishing = listener.admission().enter().ok_or(moq_tokio::Error::Stopped)?;
 		let establish = async {
 			let opened = self.peer.channel().await?;
 			if opened.protocol != self.protocol {

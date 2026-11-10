@@ -48,7 +48,7 @@ use crate::{Error, Patterns, Result, SessionError, time::Instant};
 
 mod tokens;
 
-pub(crate) use tokens::Dial;
+pub(crate) use tokens::{Dial, locate};
 pub use tokens::{EmptyToken, Token, Tokens};
 
 /// Classify malformed AUTH messages separately from transport and local failures.
@@ -85,8 +85,10 @@ pub(crate) enum Answer {
 /// What a peer lets this side do, in this side's own paths.
 ///
 /// The paths are relative to the session's root, the same paths the session
-/// announces and subscribes with. `Grant::default()` grants nothing.
+/// announces and subscribes with. `Grant::default()` grants nothing; set the
+/// fields on it to grant more.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Grant {
 	/// The broadcasts this side may publish to the peer.
 	pub publish: Patterns,
@@ -2735,9 +2737,10 @@ impl Enforce {
 				return Poll::Ready(None);
 			};
 			match event {
-				crate::origin::RouteEvent::Start(update) | crate::origin::RouteEvent::Update(update)
-					if !self.live.contains(&update.prefix) =>
-				{
+				crate::origin::RouteEvent {
+					kind: crate::origin::RouteKind::Start | crate::origin::RouteKind::Update,
+					announce: update,
+				} if !self.live.contains(&update.prefix) => {
 					if self.pending.iter().any(|gate| gate.path == update.prefix) {
 						continue;
 					}
@@ -2751,7 +2754,10 @@ impl Enforce {
 					}
 					self.live.insert(gate.path);
 				}
-				crate::origin::RouteEvent::End(update) => {
+				crate::origin::RouteEvent {
+					kind: crate::origin::RouteKind::End,
+					announce: update,
+				} => {
 					self.live.remove(&update.prefix);
 					self.pending.retain(|gate| gate.path != update.prefix);
 				}

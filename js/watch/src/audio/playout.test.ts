@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { Manual, Micro, Milli, Nano } from "@moq/clock";
+import { Duration, Instant, Manual } from "@moq/clock";
 import * as Container from "@moq/hang/container";
 import { Time, Track, Varint } from "@moq/net";
 import { AUTO_MAX_DELAY, target } from "./latency";
@@ -54,7 +54,7 @@ function trace(frames: number, burst: number, spread: number, seed = 7): Arrival
 }
 
 /** A legacy container frame: the media timestamp, then a payload the consumer never decodes. */
-function encode(media: Micro): Uint8Array {
+function encode(media: number): Uint8Array {
 	const timestamp = Varint.encode(media);
 	const frame = new Uint8Array(timestamp.byteLength + 1);
 	frame.set(timestamp, 0);
@@ -62,8 +62,8 @@ function encode(media: Micro): Uint8Array {
 }
 
 interface Measured {
-	/** The playout target after each distinct arrival instant. */
-	targets: Milli[];
+	/** The playout target after each distinct arrival instant, in milliseconds. */
+	targets: number[];
 	/** Frames that reached the consumer's reader rather than being dropped for age. */
 	delivered: number;
 }
@@ -73,11 +73,11 @@ interface Measured {
  * consumer, on a Manual clock, one group per frame. After each arrival `budget` turns the
  * current target into the subscription's max delay, the way the decoder does.
  */
-async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<Measured> {
+async function measure(t: Arrival[], budget: (target: Duration) => Duration): Promise<Measured> {
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("audio");
-	const subscriber = track.subscribe({ delay: { max: budget(Milli.zero) } });
+	const subscriber = track.subscribe({ delay: { max: budget(Duration.ZERO) } });
 	const consumer = new Container.Consumer(subscriber, {
 		format: new Container.Legacy.Format("audio"),
 		delay: { max: AUTO_MAX_DELAY },
@@ -96,9 +96,9 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 		let next = 0;
 		while (next < t.length) {
 			const arrival = t[next].arrival;
-			clock.jump(Nano(Nano.fromMilli(Milli(arrival)) - clock.now()));
+			clock.jump(Duration.millis(arrival).saturatingSub(clock.now().since(Instant.ZERO)));
 			for (; next < t.length && t[next].arrival === arrival; next++) {
-				const media = Micro.fromMilli(t[next].media as Milli);
+				const media = t[next].media * 1000;
 				const group = track.createGroup(BigInt(next));
 				group.writeFrame({ payload: encode(media), timestamp: Time.Timestamp.fromMicros(media) });
 				group.finish();
@@ -107,8 +107,8 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 			// A macrotask boundary, so the group readers have observed everything written above.
 			await new Promise((resolve) => setImmediate(resolve));
 
-			const current = target({ measured: consumer.spread.peek(), frame: CHUNK_MS as Milli });
-			result.targets.push(current);
+			const current = target({ measured: consumer.spread.peek(), frame: Duration.millis(CHUNK_MS) });
+			result.targets.push(current.asMillis());
 			subscriber.update({ delay: { max: budget(current) } });
 		}
 	} finally {
@@ -124,20 +124,22 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 
 /** The target the estimator settles on by the end of `t`, given the subscription "auto" asks for. */
 async function settled(t: Arrival[]): Promise<number> {
-	const { targets } = await measure(t, (target) => Milli(Math.max(target, AUTO_MAX_DELAY)));
+	const { targets } = await measure(t, (target) => target.max(AUTO_MAX_DELAY));
 	return targets[targets.length - 1];
 }
 
 /** The worklet's ring at `latencyMs`. */
 function build(latencyMs: number): AudioRingBuffer {
-	return new AudioRingBuffer({ rate: RATE, channels: 1, latency: latencyMs as Milli });
+	return new AudioRingBuffer({ rate: RATE, channels: 1, latency: latencyMs });
 }
 
 interface Result {
 	/** Quanta rendered short of a full block after the warmup, i.e. audible underruns. */
 	underruns: number;
-	/** Samples inserted after the warmup that were never played: skipped or overflow-dropped. */
-	skipped: number;
+	/** Times the ring re-anchored after the warmup, dropping buffered audio rather than playing it. */
+	skips: number;
+	/** Samples time stretch added or removed after the warmup: output against the media it covered. */
+	stretched: number;
 }
 
 /**
@@ -148,40 +150,40 @@ function replay(ring: AudioRingBuffer, t: Arrival[], warmupMs: number): Result {
 	const step = (QUANTUM / RATE) * 1000;
 	const output = [new Float32Array(QUANTUM)];
 	const end = t[t.length - 1].arrival;
+	const position = () => (ring.timestamp * RATE) / 1_000_000;
 
 	let next = 0;
-	let played = 0;
-	let inserted = 0;
 	let short = 0;
+	let skips = 0;
+	let stretched = 0;
 	let started = false;
-	let mark: { played: number; inserted: number; buffered: number; short: number } | undefined;
 
 	for (let now = 0; now < end; now += step) {
+		const playhead = position();
+		const skipped = ring.skips;
 		while (next < t.length && t[next].arrival <= now) {
-			ring.write(Micro.fromMilli(t[next].media as Milli), [new Float32Array(CHUNK).fill(0.5)]);
-			inserted += CHUNK;
+			ring.write(t[next].media * 1000, [new Float32Array(CHUNK).fill(0.5)]);
 			next++;
 		}
 
 		const count = ring.read(output);
-		played += count;
+		if (now < warmupMs) {
+			if (count > 0) started = true;
+			continue;
+		}
 		if (started && count < QUANTUM) short++;
 		if (count > 0) started = true;
-
-		if (now >= warmupMs && !mark) mark = { played, inserted, buffered: ring.length, short };
+		if (ring.skips > skipped) skips += ring.skips - skipped;
+		else stretched += Math.abs(position() - playhead - count);
 	}
 
-	const from = mark ?? { played, inserted, buffered: ring.length, short };
-	return {
-		underruns: short - from.short,
-		skipped: inserted - from.inserted - (played - from.played) - (ring.length - from.buffered),
-	};
+	return { underruns: short, skips, stretched: Math.round(stretched) };
 }
 
 describe("ring replay", () => {
 	it("plays an evenly paced sender without underruns or skips", async () => {
 		const t = trace(600, 1, 10);
-		expect(replay(build(await settled(t)), t, 2000)).toEqual({ underruns: 0, skipped: 0 });
+		expect(replay(build(await settled(t)), t, 2000)).toMatchObject({ underruns: 0, skips: 0 });
 	});
 
 	it("plays a bursty sender at the measured target", async () => {
@@ -189,7 +191,7 @@ describe("ring replay", () => {
 		const t = trace(600, 3, 5);
 		const measured = await settled(t);
 		expect(measured).toBeGreaterThan(2 * CHUNK_MS);
-		expect(replay(build(measured), t, 2000)).toEqual({ underruns: 0, skipped: 0 });
+		expect(replay(build(measured), t, 2000)).toMatchObject({ underruns: 0, skips: 0 });
 	});
 
 	it("keeps a five frame flush span playing", async () => {
@@ -197,16 +199,21 @@ describe("ring replay", () => {
 		// slack above it absorbs the peak, so the flush plays instead of being cut down to the
 		// target on arrival.
 		const t = trace(600, 5, 5);
-		expect(replay(build(await settled(t)), t, 2000)).toEqual({ underruns: 0, skipped: 0 });
+		expect(replay(build(await settled(t)), t, 2000)).toMatchObject({ underruns: 0, skips: 0 });
 	});
 
-	it("underruns constantly when the target ignores the arrival spread", () => {
+	it("still underruns when the target ignores the arrival spread, but drops nothing", () => {
 		// 46ms is what the round-trip formula produced on the connection this was measured on: it
 		// describes the network and says nothing about a sender that flushes five frames at once.
+		// Every flush's trough falls below it, and the ring never slows down to cover one, since that
+		// would only settle audio behind the clock, so it runs dry on most flushes; accelerate brings
+		// each peak back down rather than skipping it.
 		const t = trace(600, 5, 5);
 		const result = replay(build(46), t, 2000);
-		expect(result.underruns).toBeGreaterThan(100);
-		expect(result.skipped).toBeGreaterThan(10 * CHUNK);
+		const flushes = (t.length - 2000 / CHUNK_MS) / 5;
+		expect(result.underruns).toBeGreaterThan(flushes / 2);
+		expect(result.skips).toBe(0);
+		expect(result.stretched).toBeGreaterThan(0);
 	});
 });
 
@@ -224,13 +231,13 @@ describe("subscription budget", () => {
 	);
 
 	// The targets across the first twenty flushes, 2.4s of them.
-	function onset(targets: Milli[]): Milli[] {
+	function onset(targets: number[]): number[] {
 		return targets.slice(PACED, PACED + 20);
 	}
 
 	it("reaches a flush that starts after the target settled", async () => {
-		const { targets, delivered } = await measure(t, (target) => Milli(Math.max(target, AUTO_MAX_DELAY)));
-		expect(targets[PACED - 1]).toBe((2 * CHUNK_MS) as Milli);
+		const { targets, delivered } = await measure(t, (target) => target.max(AUTO_MAX_DELAY));
+		expect(targets[PACED - 1]).toBe(2 * CHUNK_MS);
 		expect(delivered).toBe(t.length);
 		// Every flush lands whole, so its 100ms reaches the 95th percentile within a few intervals.
 		expect(Math.max(...onset(targets))).toBeGreaterThanOrEqual(120);

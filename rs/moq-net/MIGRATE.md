@@ -70,10 +70,10 @@ Each wrapper is now generated from its `poll_*` method, which stays available wi
 
 ### Admission completion records its own time
 
-`server::Activity::drain()` begins closing admission once its active set empties.
-`Activity::close()` and the new poll-native `poll_close()` return that instant,
+`server::Admission::drain()` begins closing admission once its active set empties.
+`Admission::close()` and the new poll-native `poll_close()` return that instant,
 even for a late observer. Replace matches against `()` with a discarded result
-or read the returned `kio::clock::Instant`. Once draining begins, the last `Active`
+or read the returned `kio::clock::Instant`. Once draining begins, the last `Admitted`
 drop closes admission synchronously, including when a close wait was cancelled.
 This is native listener bookkeeping; the protocol wire is unchanged.
 

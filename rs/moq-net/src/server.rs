@@ -20,23 +20,23 @@ use crate::{
 
 /// Tracks admitted connections until their handshake or session ends.
 #[derive(Clone, Debug, Default)]
-pub struct Activity {
-	state: std::sync::Arc<kio::Producer<ActivityState>>,
+pub struct Admission {
+	state: std::sync::Arc<kio::Producer<AdmissionState>>,
 }
 
 #[derive(Debug, Default)]
-struct ActivityState {
+struct AdmissionState {
 	active: usize,
 	draining: bool,
 	closed: Option<Instant>,
 }
 
-impl Activity {
+impl Admission {
 	/// Hold the server active until the returned guard is dropped, or `None` once closed.
-	pub fn enter(&self) -> Option<Active> {
+	pub fn enter(&self) -> Option<Admitted> {
 		let mut state = self.state.write().ok()?;
 		state.active += 1;
-		Some(Active {
+		Some(Admitted {
 			state: std::sync::Arc::downgrade(&self.state),
 		})
 	}
@@ -66,12 +66,12 @@ impl Activity {
 /// Keeps an admitted connection in the server's active set.
 #[derive(Debug)]
 #[must_use]
-pub struct Active {
+pub struct Admitted {
 	// A connection observes its source without keeping it open.
-	state: std::sync::Weak<kio::Producer<ActivityState>>,
+	state: std::sync::Weak<kio::Producer<AdmissionState>>,
 }
 
-impl Drop for Active {
+impl Drop for Admitted {
 	fn drop(&mut self) {
 		let Some(source) = self.state.upgrade() else { return };
 		let Ok(mut state) = source.write() else { return };
@@ -247,6 +247,7 @@ impl Server {
 				cost: None,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				node: None,
 				token: None,
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
@@ -312,7 +313,8 @@ impl Server {
 			Some(client_setup) => (
 				client_setup.setup.path.clone(),
 				client_setup.setup.role,
-				client_setup.setup.hop,
+				// Lite-07 declares a Node ID where older versions declare a Hop ID.
+				client_setup.setup.hop.or(client_setup.setup.node.map(crate::Hop::from)),
 				client_setup.setup.token.clone(),
 				client_setup.setup.implementation.clone(),
 				PausedHandshake::LiteSetup {
@@ -1096,11 +1098,12 @@ impl Handshake {
 		self.role
 	}
 
-	/// The Hop ID declared by the peer, when the negotiated protocol carries one.
+	/// The identity the peer declared for itself, when the negotiated protocol carries one.
 	///
 	/// A moq-lite-05+ endpoint declares this when it attaches a publish or subscribe
-	/// origin; a moq-transport endpoint declares it via the MoQ Cluster extension. Older
-	/// versions and endpoints without one return `None`.
+	/// origin: its Hop ID, or from moq-lite-07 its Node ID. A moq-transport endpoint
+	/// declares its Hop ID via the MoQ Cluster extension. Older versions and endpoints
+	/// without one return `None`. [`origin::Producer::is_own`] tells whether it is ours.
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
@@ -1450,24 +1453,24 @@ mod tests {
 		use futures::FutureExt;
 		use std::time::Duration;
 
-		let activity = Activity::default();
-		let first = activity.enter().unwrap();
-		activity.drain();
-		let last = activity.enter().expect("admission stays open while active");
+		let admission = Admission::default();
+		let first = admission.enter().unwrap();
+		admission.drain();
+		let last = admission.enter().expect("admission stays open while active");
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		drop(first);
-		assert!(activity.close().now_or_never().is_none());
+		assert!(admission.close().now_or_never().is_none());
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		let ended = kio::clock::now();
 		drop(last);
-		assert!(activity.enter().is_none(), "last drop did not close admission");
+		assert!(admission.enter().is_none(), "last drop did not close admission");
 		kio::clock::sleep(Duration::from_secs(100)).await;
-		assert_eq!(activity.close().await, ended, "the observer changed the close time");
+		assert_eq!(admission.close().await, ended, "the observer changed the close time");
 
-		let activity = Activity::default();
-		let active = activity.enter().unwrap();
-		let source = activity.state.weak();
-		drop(activity);
+		let admission = Admission::default();
+		let active = admission.enter().unwrap();
+		let source = admission.state.weak();
+		drop(admission);
 		assert!(source.is_closed(), "an active connection kept its source open");
 		drop(active);
 	}
@@ -1715,6 +1718,7 @@ mod tests {
 			role,
 			cost: None,
 			hop,
+			node: None,
 			token: None,
 			ietf: false,
 			implementation: None,
@@ -1830,7 +1834,7 @@ mod tests {
 			.with_stats(
 				registry
 					.tier(Default::default())
-					.session(crate::Path::from_static("room")),
+					.session(crate::stats::SessionInfo::new(crate::Path::from_static("room"))),
 			);
 		let Err(err) = request.ok().await else {
 			panic!("a reply the peer never took completed");
@@ -1880,7 +1884,7 @@ mod tests {
 			.with_stats(
 				registry
 					.tier(Default::default())
-					.session(crate::Path::from_static("room")),
+					.session(crate::stats::SessionInfo::new(crate::Path::from_static("room"))),
 			);
 		request.expired().await;
 		assert_eq!(kio::clock::now(), start + std::time::Duration::from_secs(5));
@@ -1972,7 +1976,7 @@ mod tests {
 			.with_stats(
 				registry
 					.tier(Default::default())
-					.session(crate::Path::from_static("room")),
+					.session(crate::stats::SessionInfo::new(crate::Path::from_static("room"))),
 			);
 		let abandoned = kio::clock::timeout(std::time::Duration::from_secs(1), request.ok()).await;
 		assert!(abandoned.is_err(), "a reply the peer never took completed");
@@ -2020,7 +2024,7 @@ mod tests {
 				.with_stats(
 					registry
 						.tier(Default::default())
-						.session(crate::Path::from_static("room")),
+						.session(crate::stats::SessionInfo::new(crate::Path::from_static("room"))),
 				)
 				.close(err.clone());
 			let failures = registry.snapshot().sessions()[0].1.sessions_failed;
@@ -2318,7 +2322,7 @@ mod tests {
 		let _echoed = origin
 			.announce(
 				"echoed-route",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_hops(echoed_hops)
 					.with_via(assigned),
 			)
@@ -2327,7 +2331,7 @@ mod tests {
 		let mut local_hops = crate::Hops::new();
 		local_hops.push(other).unwrap();
 		let _local = origin
-			.announce("local-route", crate::origin::RouteInfo::default().with_hops(local_hops))
+			.announce("local-route", crate::origin::RouteInfo::new().with_hops(local_hops))
 			.unwrap();
 
 		let (session, driver) = request.ok().await.unwrap();

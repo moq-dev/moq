@@ -12,4 +12,4 @@ Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run). Ad
 
 Public API: an additive field on `moq_mux::codec::aac::Config`. Wire: none.
 
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [api-shape/media](/quest/m2/api-shape/media.md) makes `aac::Config` `#[non_exhaustive]` before the cut, so the new field is additive.
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [moq-dev/moq#8298](https://github.com/moq-dev/moq/pull/8298) makes `aac::Config` `#[non_exhaustive]` before the cut, so the new field is additive.

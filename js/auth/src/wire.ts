@@ -127,12 +127,21 @@ export function decodeRoles<T extends { publish?: WireRole; subscribe?: WireRole
 
 /**
  * Nest each `_rate` field back into its role, so the decoded claims `Key.verify`
- * returns parse again. A role already in the capped form is left for the schema to refuse.
+ * returns parse again. Throws on a role already in the capped form, so a cap has one
+ * spelling, and on the legacy `put`/`get` form, which signing no longer accepts.
  */
 export function nestRates<
 	T extends { publish?: unknown; subscribe?: unknown; publish_rate?: number; subscribe_rate?: number },
 >(claims: T) {
 	const { publish_rate, subscribe_rate, ...rest } = claims;
+	if ("put" in rest || "get" in rest) {
+		throw new Error("legacy put/get grants are refused; sign publish and subscribe instead");
+	}
+	for (const role of [rest.publish, rest.subscribe]) {
+		if (role !== undefined && !Array.isArray(role)) {
+			throw new Error("a role is a pattern list, capped by publish_rate or subscribe_rate");
+		}
+	}
 	return {
 		...rest,
 		...(publish_rate !== undefined && { publish: { path: rest.publish ?? [], rate: publish_rate } }),

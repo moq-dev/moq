@@ -8,7 +8,7 @@ import { Broadcast } from "./broadcast";
 import { Source } from "./video/source";
 
 function publish(origin: Origin.Producer, path: string, instance?: Instance.Valid) {
-	const publication = origin.route(Path.from(path), { instance });
+	const publication = origin.route(Path.from(path), { instance: instance && { id: instance, epoch: 0n } });
 	return publication.broadcast;
 }
 
@@ -103,7 +103,7 @@ it("opens a listed include only on selection, keeping its rendition IDs its own"
 it("reads an unavailable include as offline without touching the parent", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const claim = origin.routePrefix(Path.from("room/absent.hang"));
+	const claim = origin.claim(Path.from("room/absent.hang"));
 	const requests = claim.requested();
 	const source = new Broadcast({
 		origin,

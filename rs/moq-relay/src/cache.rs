@@ -84,9 +84,8 @@ pub struct Cache {
 	pub pool: cache::Pool,
 
 	/// Ceiling on each track's max age (the latest group of every track never goes
-	/// stale). [`Duration::MAX`] imposes no ceiling, leaving each track's own max age
-	/// in force.
-	pub duration: Duration,
+	/// stale). `None` imposes no ceiling, leaving each track's own max age in force.
+	pub duration: Option<Duration>,
 
 	/// The headroom governor, not yet running.
 	pub(crate) governor: Option<futures::future::BoxFuture<'static, ()>>,
@@ -113,7 +112,7 @@ impl Config {
 			let headroom = parse_limit(headroom)?;
 			anyhow::ensure!(headroom > 0, "cache headroom must be non-zero");
 			tracing::info!(?capacity, headroom, "cache governor enabled");
-			governed = Some(governor(pool.downgrade(), capacity, headroom).boxed());
+			governed = Some(governor(system()?, pool.downgrade(), capacity, headroom).boxed());
 		} else if let Some(capacity) = capacity {
 			tracing::info!(capacity, "cache capacity set");
 		}
@@ -124,7 +123,7 @@ impl Config {
 
 		Ok(Cache {
 			pool,
-			duration: duration.unwrap_or(Duration::MAX),
+			duration,
 			governor: governed,
 		})
 	}
@@ -140,7 +139,7 @@ fn parse_limit(value: &str) -> anyhow::Result<u64> {
 			percent > 0.0 && percent <= 100.0,
 			"memory percentage must be within (0, 100], got {percent}"
 		);
-		return Ok((total_memory() as f64 * percent / 100.0) as u64);
+		return Ok((total_memory()? as f64 * percent / 100.0) as u64);
 	}
 	let size: bytesize::ByteSize = value
 		.parse()
@@ -150,13 +149,17 @@ fn parse_limit(value: &str) -> anyhow::Result<u64> {
 
 /// Total memory this process can use: the cgroup limit when confined (e.g. a
 /// container), otherwise physical memory.
-fn total_memory() -> u64 {
-	let mut sys = sysinfo::System::new();
+fn total_memory() -> anyhow::Result<u64> {
+	let mut sys = system()?;
 	sys.refresh_memory();
-	match sys.cgroup_limits() {
+	Ok(match sys.cgroup_limits() {
 		Some(limits) => limits.total_memory,
 		None => sys.total_memory(),
-	}
+	})
+}
+
+fn system() -> anyhow::Result<sysinfo::System> {
+	sysinfo::System::new().map_err(|err| anyhow::anyhow!("failed to read system memory: {err}"))
 }
 
 /// Re-size the pool periodically so at least `headroom` bytes of system memory
@@ -167,8 +170,7 @@ fn total_memory() -> u64 {
 /// into the budget, so tying the task to it means the task ends when the last
 /// thing that could use the budget does, with no guard to route through the
 /// relay's construction shapes. Returns on the first tick after that.
-async fn governor(pool: cache::PoolWeak, capacity: Option<u64>, headroom: u64) {
-	let mut sys = sysinfo::System::new();
+async fn governor(mut sys: sysinfo::System, pool: cache::PoolWeak, capacity: Option<u64>, headroom: u64) {
 	let mut interval = kio::clock::interval(GOVERNOR_INTERVAL);
 	interval.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
 
@@ -213,7 +215,7 @@ mod tests {
 	fn default_config_enables_expiry_without_clamping_media_time() {
 		let cache = Config::default().init().unwrap();
 		assert_eq!(cache.pool.expiry(), Some(cache::DEFAULT_EXPIRY));
-		assert_eq!(cache.duration, Duration::MAX);
+		assert_eq!(cache.duration, None);
 	}
 
 	#[test]
@@ -225,7 +227,7 @@ mod tests {
 		};
 		let cache = config.init().unwrap();
 		assert_eq!(cache.pool.expiry(), Some(duration));
-		assert_eq!(cache.duration, duration);
+		assert_eq!(cache.duration, Some(duration));
 	}
 
 	#[test]
@@ -286,7 +288,7 @@ mod tests {
 	fn drive(mut driver: crate::cluster::Driver) -> Arc<AtomicUsize> {
 		let running = Arc::new(AtomicUsize::new(driver.len()));
 		let report = running.clone();
-		tokio::spawn(moq_net::kio::wait(move |waiter| {
+		tokio::spawn(kio::wait(move |waiter| {
 			let poll = driver.poll(waiter);
 			report.store(driver.len(), Ordering::SeqCst);
 			poll
@@ -310,7 +312,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn governor_stops_when_pool_drops() {
 		let pool = cache::Pool::unbounded();
-		let governor = tokio::spawn(governor(pool.downgrade(), None, 1024));
+		let governor = tokio::spawn(governor(system().unwrap(), pool.downgrade(), None, 1024));
 
 		settle().await;
 		assert!(!governor.is_finished(), "governor should run while the pool lives");
@@ -323,7 +325,7 @@ mod tests {
 	async fn governor_runs_while_any_pool_clone_lives() {
 		let pool = cache::Pool::unbounded();
 		let clone = pool.clone();
-		let governor = tokio::spawn(governor(pool.downgrade(), None, 1024));
+		let governor = tokio::spawn(governor(system().unwrap(), pool.downgrade(), None, 1024));
 
 		drop(pool);
 		settle().await;

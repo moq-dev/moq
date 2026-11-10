@@ -9,14 +9,14 @@
 use std::{sync::Barrier, time::Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::server::Activity;
+use moq_net::server::Admission;
 
 fn admission(c: &mut Criterion) {
 	let mut group = c.benchmark_group("server_admission");
 	for workers in [1, 4, 16] {
 		for held in [0, 64, 4096] {
-			let activity = Activity::default();
-			let _held: Vec<_> = (0..held).map(|_| activity.enter()).collect();
+			let admission = Admission::default();
+			let _held: Vec<_> = (0..held).map(|_| admission.enter()).collect();
 			group.throughput(Throughput::Elements(workers as u64));
 			group.bench_function(BenchmarkId::new(format!("workers={workers}"), held), |b| {
 				b.iter_custom(|iterations| {
@@ -25,11 +25,11 @@ fn admission(c: &mut Criterion) {
 						let barrier = &barrier;
 						let handles: Vec<_> = (0..workers)
 							.map(|_| {
-								let activity = &activity;
+								let admission = &admission;
 								scope.spawn(move || {
 									barrier.wait();
 									for _ in 0..iterations {
-										drop(std::hint::black_box(activity.enter()));
+										drop(std::hint::black_box(admission.enter()));
 									}
 								})
 							})

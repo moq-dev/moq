@@ -81,14 +81,21 @@ int32_t moq_origin_announced_cancel(uint32_t announced);
 
 // Publishing: Routes (freeing one retracts it; moq_publish_close on its broadcast ends both)
 int32_t moq_origin_route(uint32_t origin, const char *path, uintptr_t path_len, const moq_route_options *options);
-int32_t moq_origin_route_prefix(uint32_t origin, const char *prefix, uintptr_t prefix_len, const moq_route_options *options, moq_status_callback on_request, void *user_data);
-// options (NULL for the default): hidden until moq_route_announce, a cost, and an optional stable instance with its epoch. Hops are the origin's to add.
+// options (NULL for the default): hidden until announced, a cost, and an optional stable instance with its epoch. Hops are the origin's to add.
 int32_t moq_route_broadcast(uint32_t route);
 int32_t moq_route_instance(uint32_t route, moq_string *dst);
 int32_t moq_route_announce(uint32_t route);
 int32_t moq_route_withdraw(uint32_t route);
 int32_t moq_route_set_cost(uint32_t route, uint64_t cost);
 int32_t moq_route_free(uint32_t route);
+
+// Publishing: Claims (a prefix answered on demand; freeing one retracts it)
+int32_t moq_origin_claim(uint32_t origin, const char *prefix, uintptr_t prefix_len, const moq_route_options *options, moq_status_callback on_request, void *user_data);
+int32_t moq_claim_instance(uint32_t claim, moq_string *dst);
+int32_t moq_claim_announce(uint32_t claim);
+int32_t moq_claim_withdraw(uint32_t claim);
+int32_t moq_claim_set_cost(uint32_t claim, uint64_t cost);
+int32_t moq_claim_free(uint32_t claim);
 int32_t moq_broadcast_request_path(uint32_t request, moq_string *dst);
 int32_t moq_broadcast_request_serve(uint32_t request, uint32_t broadcast);
 int32_t moq_broadcast_request_route(uint32_t request, const moq_route_options *options);
@@ -195,16 +202,17 @@ int32_t moq_audio_encoder_frame_size(uint32_t encoder);
 int32_t moq_audio_encoder_init(uint32_t encoder, moq_audio_init *dst);
 int32_t moq_audio_encoder_bitrate(uint32_t encoder, uint64_t bitrate);
 int32_t moq_audio_encoder_encode(uint32_t encoder, const float *pcm, uintptr_t pcm_len);
+int32_t moq_audio_encoder_receive(uint32_t encoder, moq_frame *dst);
+int32_t moq_audio_encoder_flush(uint32_t encoder);
 int32_t moq_audio_encoder_finish(uint32_t encoder, const float *pcm, uintptr_t pcm_len, uint64_t *discard_padding);
 int32_t moq_audio_encoder_packet(uint32_t encoder, uint32_t index, moq_frame *dst);
 int32_t moq_audio_encoder_free(uint32_t encoder);
 int32_t moq_video_encoder_create(const moq_video_encoder_input *input, const moq_video_encoder_output *output);
 int32_t moq_video_encoder_encode(uint32_t encoder, const moq_video_encoder_frame *frame);
+int32_t moq_video_encoder_receive(uint32_t encoder, moq_frame *dst);
 int32_t moq_video_encoder_cut(uint32_t encoder);
 int32_t moq_video_encoder_bitrate(uint32_t encoder, uint64_t bitrate);
 int32_t moq_video_encoder_flush(uint32_t encoder);
-int32_t moq_video_encoder_finish(uint32_t encoder);
-int32_t moq_video_encoder_packet(uint32_t encoder, uint32_t index, moq_frame *dst);
 int32_t moq_video_encoder_free(uint32_t encoder);
 ```
 

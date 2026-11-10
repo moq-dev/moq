@@ -2,6 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { SupportProbe } from "../support-probe";
+import { supported as decoderSupported } from "./supported";
 
 /**
  * A function that checks if a video configuration can be played.
@@ -36,7 +37,7 @@ export type SourceInput = {
 	target: Getter<Target | undefined>;
 
 	// A function that checks if a video configuration can be played. Renditions that fail the
-	// probe are filtered out. Nothing is selected until one is provided.
+	// probe are filtered out. Defaults to `Decoder.supported`, the WebCodecs probe.
 	supported: Getter<Supported | undefined>;
 
 	// The receive rate in bits per second this video may spend, used to auto-select a rendition
@@ -58,9 +59,13 @@ export type SourceOutput = {
 	track: Signal<string | undefined>;
 	config: Signal<Catalog.VideoConfig | undefined>;
 
-	// The receive rate, in bits per second, at which selection settles on the best rendition
-	// the target allows, or undefined when no candidate has a catalog bitrate. A player claims it
-	// as its viewer ceiling, so a grant that reaches it makes that rendition selectable.
+	/**
+	 * The receive rate, in bits per second, at which selection settles on the best rendition
+	 * the target allows, or undefined when no candidate has a catalog bitrate. A player claims it
+	 * as its viewer ceiling, so a grant that reaches it makes that rendition selectable.
+	 *
+	 * @internal Feeds the player's viewer claim.
+	 */
 	ceiling: Signal<number | undefined>;
 };
 
@@ -263,7 +268,7 @@ export class Source {
 	}
 
 	#runSupported(effect: Effect): void {
-		const supported = effect.get(this.in.supported);
+		const supported = effect.get(this.in.supported) ?? decoderSupported;
 		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
 		const broadcast = effect.get(this.in.broadcast);
 		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.video?.renditions) ?? {};

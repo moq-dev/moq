@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use bytes::Bytes;
+use moq_net::{broadcast, group, track};
 use moq_tokio::Status;
-use moq_tokio::moq_net::{self, bytes::Bytes};
-use moq_tokio::moq_net::{broadcast, group, track};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -725,7 +725,7 @@ mod tests {
 		complete.finish().unwrap();
 		wait_for(&stats.subscriptions_established, 1).await;
 		assert!(stats.ready());
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		task.await.unwrap().unwrap();
 		assert_eq!(stats.subscriptions_established.load(Ordering::Relaxed), 0);
 		assert!(stats.ready());
@@ -1016,7 +1016,7 @@ mod tests {
 			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
 			.unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let announced = discover(&origin, "bench/current");
 		subscribe(announced, own, 1, Duration::ZERO, Duration::ZERO, stats.clone())
@@ -1056,7 +1056,7 @@ mod tests {
 			.write_frame(moq_net::Timestamp::now(), serde_json::to_vec(&header).unwrap())
 			.unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		task.await.unwrap().unwrap();
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
@@ -1110,7 +1110,7 @@ mod tests {
 		wait_for(&stats.groups_recv, 2).await;
 		write_group(&mut track);
 		wait_for(&stats.groups_recv, 3).await;
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		broadcast.close();
 
 		task.await
@@ -1158,7 +1158,7 @@ mod tests {
 
 		// A last group moves the live frontier past group 2, so 1 and 2 are accounted.
 		write_group(&mut track, &[2_000]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		broadcast.close();
 
 		task.await.unwrap().unwrap();

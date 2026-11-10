@@ -98,8 +98,8 @@ pub(crate) enum Item {
 ///
 /// Put the initial [`Delay`] on the [`moq_net::track::Subscription`] before
 /// subscribing. [`new`](Self::new) inherits it, reading an unstated [`Delay::min`] as zero, and
-/// [`with_delay`](Self::with_delay) or [`set_delay`](Self::set_delay) sets the whole [`Delay`].
-/// A rendition with a catalog `warmup` builds both with a [`Playout`] instead.
+/// [`set_delay`](Self::set_delay) changes the whole [`Delay`] while reading. To build one at a
+/// delay the subscription does not carry, or with a catalog `warmup`, use a [`Playout`].
 ///
 /// ## Gaps and ends
 ///
@@ -232,7 +232,7 @@ enum Startup {
 const CONTIGUITY_TOLERANCE: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// The default decoded-byte cap: one group at the transport's size cap.
-pub(crate) const DEFAULT_MAX_BUFFER: usize = moq_net::group::MAX_CACHE_BYTES as usize;
+pub(crate) const DEFAULT_MAX_BUFFER: usize = 32 * 1024 * 1024;
 
 /// The decoded bytes a consumer's groups hold, shared with each group so one dropped by any path
 /// refunds what it held.
@@ -413,12 +413,6 @@ impl<F: Container> Consumer<F> {
 		self
 	}
 
-	/// Set the [`Delay`] as a builder; see [`set_delay`](Self::set_delay).
-	pub fn with_delay(mut self, delay: Delay) -> Self {
-		self.set_delay(delay);
-		self
-	}
-
 	/// The group sequence of the last event read.
 	pub(crate) fn group(&self) -> u64 {
 		self.group
@@ -554,7 +548,7 @@ impl<F: Container> Consumer<F> {
 			// buffers past a full max buffer, so a start is always found.
 			let any_frame = self.pending.iter_mut().enumerate().any(|(i, group)| {
 				let _ = group.poll_min_timestamp(waiter, &self.format, i == 0);
-				!group.empty
+				!group.is_empty()
 			});
 			if any_frame {
 				// A live reader takes the newest group, though its frames may still be on their
@@ -670,8 +664,8 @@ impl<F: Container> Consumer<F> {
 					Poll::Ready(Ok(None)) => {
 						// A data track's marker carries no timestamp, so it ends where this reader
 						// got to. Before the first item there is nothing to end.
-						if group.bare
-							&& !std::mem::replace(&mut group.ended, true)
+						if let Content::Bare { ended } = &mut group.content
+							&& !std::mem::replace(ended, true)
 							&& let Some(edge) = self.edge
 						{
 							let end = u64::try_from(edge.as_micros())
@@ -755,7 +749,7 @@ impl<F: Container> Consumer<F> {
 				if finished || elapsed || aged || excluded || full {
 					let _ = self.pending.front_mut().unwrap().look_all(waiter, &self.format);
 					let front = self.pending.front_mut().unwrap();
-					let empty = front.empty && matches!(front.group.poll_finished(waiter), Poll::Ready(Ok(_)));
+					let empty = front.is_empty() && matches!(front.group.poll_finished(waiter), Poll::Ready(Ok(_)));
 					let front = self.pending.front().unwrap();
 					let next_start = front.min_timestamp.map(std::time::Duration::from).or(front.max_end);
 					// A data marker has no timestamp to prove continuity across the hole.
@@ -1111,7 +1105,7 @@ impl<F: Container> Consumer<F> {
 		self.pending.retain_mut(|group| {
 			// Keep the cursor's gap and anything already decoded, including markers and faults.
 			// A never-read evicted group holds no event that its missing sequence cannot say.
-			group.sequence == current || !group.empty || !group.poll_aborted(waiter)
+			group.sequence == current || !group.is_empty() || !group.poll_aborted(waiter)
 		});
 		self.collect_at = self.pending.len().saturating_mul(2).max(1);
 	}
@@ -1239,18 +1233,7 @@ struct GroupBuffer<F: Container> {
 	// The current frame index within the group.
 	index: usize,
 
-	// Whether the group has carried any wire frame. Empty groups (zero objects) mean
-	// nothing; a finished group with wire frames and no media is a marker.
-	empty: bool,
-
-	// Whether a decodable (non-marker) frame was buffered.
-	media: bool,
-
-	// Whether this is a data track's marker group: one object with no bytes.
-	bare: bool,
-
-	// Whether a marker with no timestamp of its own was read as an end.
-	ended: bool,
+	content: Content,
 
 	// A decode error found while looking ahead, delivered after the frames buffered before it.
 	fault: Option<F::Error>,
@@ -1277,6 +1260,19 @@ struct GroupBuffer<F: Container> {
 	max_end: Option<std::time::Duration>,
 }
 
+/// What a group has carried so far.
+enum Content {
+	/// No wire frame: an empty group means nothing.
+	Empty,
+	/// Wire frames but no media, so a marker once it finishes.
+	Marker,
+	/// A data track's marker: one object with no bytes. `ended` once it was read as an end,
+	/// since it has no timestamp of its own.
+	Bare { ended: bool },
+	/// A decodable (non-marker) frame was buffered.
+	Media,
+}
+
 impl<F: Container> GroupBuffer<F> {
 	fn new(group: moq_net::group::Consumer, memory: Memory) -> Self {
 		let mut this = Self {
@@ -1284,10 +1280,7 @@ impl<F: Container> GroupBuffer<F> {
 			late: group.arrived(),
 			group,
 			index: 0,
-			empty: true,
-			media: false,
-			bare: false,
-			ended: false,
+			content: Content::Empty,
 			fault: None,
 			buffered: VecDeque::new(),
 			markers: VecDeque::new(),
@@ -1336,17 +1329,22 @@ impl<F: Container> GroupBuffer<F> {
 			Err(err) if self.poll_aborted(waiter) => return Poll::Ready(Err(Failure::Lost(err.into()))),
 			Err(err) => return Poll::Ready(Err(Failure::Decode(err.into()))),
 		};
-		self.empty = false;
+		if matches!(self.content, Content::Empty) {
+			self.content = Content::Marker;
+		}
 		let arrived = wire.arrived();
 		let size = wire.payload.len();
 		let frames = format.decode(wire).map_err(Failure::Decode)?;
 		if format.kind() == super::Kind::Data {
 			// A data track's marker is one object with no bytes, alone in its group.
-			if self.bare || (frames.is_empty() && self.media) {
-				let err = moq_net::Error::Decode(moq_net::DecodeError::ExpectedEnd).into();
-				return Poll::Ready(Err(Failure::Decode(err)));
+			match (&self.content, frames.is_empty()) {
+				(Content::Bare { .. }, _) | (Content::Media, true) => {
+					let err = moq_net::Error::Decode(moq_net::DecodeError::ExpectedEnd).into();
+					return Poll::Ready(Err(Failure::Decode(err)));
+				}
+				(_, true) => self.content = Content::Bare { ended: false },
+				(_, false) => {}
 			}
-			self.bare = frames.is_empty();
 		}
 
 		// Decoded payloads are views of the wire payload, which stays allocated while any of them is
@@ -1384,7 +1382,7 @@ impl<F: Container> GroupBuffer<F> {
 			// the container's flag otherwise so CMAF mid-group keyframes survive.
 			frame.keyframe = frame.keyframe || self.index == 0;
 			self.index += 1;
-			self.media = true;
+			self.content = Content::Media;
 
 			let cost = frame_cost(&frame);
 			views += frame.payload.len();
@@ -1495,7 +1493,12 @@ impl<F: Container> GroupBuffer<F> {
 	}
 
 	fn marker(&self) -> bool {
-		!self.empty && !self.media
+		matches!(self.content, Content::Marker | Content::Bare { .. })
+	}
+
+	/// The group has carried no wire frame.
+	fn is_empty(&self) -> bool {
+		matches!(self.content, Content::Empty)
 	}
 
 	fn charge(&mut self, bytes: usize) {
@@ -1707,7 +1710,7 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
@@ -1816,7 +1819,7 @@ mod tests {
 		let mut group = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
 		group.write_frame(ts(0), Bytes::new()).unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		assert_eq!(items(&mut reader).await, ["0", "10000", "gap 10000+0", "end 10000"]);
 	}
@@ -1858,7 +1861,7 @@ mod tests {
 			assert!(
 				matches!(reader.poll_read(&kio::Waiter::noop()), Poll::Ready(Ok(Some(Read::End { group: 2, end }))) if end == ts(10_000))
 			);
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 		}
 	}
 
@@ -1898,7 +1901,7 @@ mod tests {
 			Poll::Ready(Ok(Some(Read::Gap { .. })))
 		));
 		assert!(matches!(reader.read().await.unwrap(), Some(Read::End { group: 4, .. })));
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 	}
 
 	/// The holes a source left behind when it stopped expire together, a budget after the groups
@@ -2052,7 +2055,7 @@ mod tests {
 					}
 				}
 				group.finish().unwrap();
-				track.finish().unwrap();
+				let _track = track.finish().unwrap();
 
 				let error = loop {
 					match reader.read().await {
@@ -2100,7 +2103,7 @@ mod tests {
 		write_group(&mut track, 2, &[ts(1_000_000), ts(1_010_000)]);
 		write_marker_group(&mut track, 3, ts(1_020_000));
 		write_group(&mut track, 4, &[ts(2_000_000), ts(2_010_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert_eq!(
 			items(&mut reader).await,
 			[
@@ -2141,7 +2144,7 @@ mod tests {
 			.unwrap();
 		assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
 		write_group(&mut track, 3, &[ts(1_000_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert_eq!(items(&mut reader).await, ["gap 0+1000000", "1000000"]);
 	}
 
@@ -2172,7 +2175,7 @@ mod tests {
 			.unwrap();
 			group.finish().unwrap();
 		}
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert_eq!(items(&mut reader).await, ["0", "33000"]);
 	}
 
@@ -2199,7 +2202,7 @@ mod tests {
 			)
 			.unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert_eq!(items(&mut reader).await, ["0", "20000", "end 50000", "40000"]);
 	}
 
@@ -2214,7 +2217,7 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0)]);
 		write_marker_group(&mut track, 1, ts(0));
 		write_group(&mut track, 2, &[ts(1_000_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		assert_eq!(items(&mut consumer).await, ["0", "end 0", "1000000"]);
 	}
@@ -2233,7 +2236,7 @@ mod tests {
 		write_group(&mut track, 2, &[ts(1_000_000)]);
 		write_marker_group(&mut track, 3, ts(1_000_000));
 		write_group(&mut track, 4, &[ts(2_000_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		assert_eq!(
 			items(&mut consumer).await,
@@ -2256,7 +2259,7 @@ mod tests {
 			.finish()
 			.unwrap();
 		write_group(&mut track, 2, &[ts(1_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		assert_eq!(items(&mut consumer).await, ["0", "1000"]);
 	}
@@ -2272,7 +2275,7 @@ mod tests {
 		let mut subscriber = track.subscribe(
 			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
 		);
-		let edge = match subscriber.poll_largest(&moq_net::kio::Waiter::noop()) {
+		let edge = match subscriber.poll_largest(&kio::Waiter::noop()) {
 			std::task::Poll::Ready(Some(edge)) => edge,
 			_ => panic!("the empty group is the largest"),
 		};
@@ -2281,7 +2284,7 @@ mod tests {
 		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio));
 
 		write_group(&mut track, 2, &[ts(1_000_000), ts(1_600_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		assert_eq!(items(&mut consumer).await, ["1000000", "1600000"]);
 	}
@@ -2311,7 +2314,7 @@ mod tests {
 			.unwrap();
 		assert!(matches!(consumer.read().await.unwrap(), Some(Read::Frame { .. })));
 		write_group(&mut track, 3, &[ts(1_000_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		assert_eq!(items(&mut consumer).await, ["gap 0+1000000", "1000000"]);
 	}
@@ -2325,7 +2328,7 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0), ts(33_000), ts(66_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 3);
@@ -2348,7 +2351,7 @@ mod tests {
 		for i in 0..5u64 {
 			write_group(&mut track, i, &[ts(i * 20_000)]);
 		}
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 5);
@@ -2386,7 +2389,7 @@ mod tests {
 			let timestamps: Vec<_> = (0..5).map(|f| ts(g * 15_000 + f * 2_000)).collect();
 			write_group(&mut track, g, &timestamps);
 		}
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		// Finish group 0 after consumer has had time to accumulate pending groups
 		let finisher = tokio::spawn(async move {
@@ -2431,7 +2434,7 @@ mod tests {
 			let timestamps: Vec<_> = (0..3).map(|f| ts(g * 50_000 + f * 5_000)).collect();
 			write_group(&mut track, g, &timestamps);
 		}
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(50)).await;
@@ -2472,7 +2475,7 @@ mod tests {
 		for g in 1..10u64 {
 			write_group(&mut track, g, &[ts(g * 30_000)]);
 		}
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(50)).await;
@@ -2648,7 +2651,7 @@ mod tests {
 		write_group(&mut track, 0, &[ts(100_000)]);
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(100_000));
 		write_group(&mut track, 1, &[ts(100_000), ts(0)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let err = loop {
 			match consumer.read().await {
 				Ok(Some(_)) => continue,
@@ -2672,7 +2675,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
 		write_group(&mut track, 0, &[ts(0), ts(66_000), ts(33_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let frames = continuous_frames(&mut consumer).await;
 		assert_eq!(
 			frames.iter().map(|f| f.timestamp).collect::<Vec<_>>(),
@@ -2687,7 +2690,7 @@ mod tests {
 		write_group(&mut track, 0, &[ts(100_000)]);
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(100_000));
 		write_group(&mut track, 1, &[ts(100_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(100_000));
 	}
 
@@ -2704,7 +2707,7 @@ mod tests {
 			assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(expected));
 		}
 		write_group(&mut track, 1, &[ts(50_000), ts(83_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(
 			frames.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>(),
@@ -2723,7 +2726,7 @@ mod tests {
 			assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(expected));
 		}
 		write_group(&mut track, 1, &[ts(66_000), ts(50_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let frames = continuous_frames(&mut consumer).await;
 		assert_eq!(
 			frames.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>(),
@@ -2743,7 +2746,7 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0)]);
 		write_marker_group(&mut track, 1, ts(0));
 		write_group(&mut track, 2, &[ts(1_000_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert_eq!(items(&mut consumer).await, ["0", "end 0", "1000000"]);
 	}
 
@@ -2788,7 +2791,7 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(299)).await;
 		assert!(consumer.poll_read(&kio::Waiter::noop()).is_pending());
 		write_group(&mut track, 2, &[ts(60_000_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert_eq!(items(&mut consumer).await, ["60000000", "60060000"]);
 	}
 
@@ -2801,7 +2804,7 @@ mod tests {
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
 		write_marker_group(&mut track, 1, ts(0));
 		write_group(&mut track, 2, &[ts(1_000_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert!(matches!(consumer.read().await.unwrap(), Some(Read::Gap { .. })));
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(1_000_000));
 	}
@@ -2841,7 +2844,7 @@ mod tests {
 		write_group(&mut track, 0, &[ts(100_000)]);
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(100_000));
 		write_group(&mut track, 1, &[ts(200_000), ts(50_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(200_000));
 		let err = consumer.read().await.unwrap_err();
 		assert!(matches!(
@@ -2898,7 +2901,7 @@ mod tests {
 			.unwrap();
 		write_marker(&mut group, ts(50_000)); // the group's end
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 2, "markers are not surfaced as media");
@@ -2928,7 +2931,7 @@ mod tests {
 			)
 			.unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frame = consumer.read_frame().await.unwrap().unwrap();
 		assert!(frame.keyframe, "the marker does not consume the first-media slot");
@@ -2963,7 +2966,7 @@ mod tests {
 		}
 		group.finish().unwrap();
 		write_group(&mut track, 1, &[ts(100_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
@@ -3001,7 +3004,7 @@ mod tests {
 			)
 			.unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1, "the empty LOC payload is not submitted");
@@ -3034,7 +3037,7 @@ mod tests {
 
 		write_group(&mut track, 2, &[ts(60_000)]);
 		write_group(&mut track, 1, &[ts(30_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(10)).await;
@@ -3059,7 +3062,7 @@ mod tests {
 
 		write_group(&mut track, 0, &[ts(0)]);
 		write_group(&mut track, 1, &[ts(30_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 2);
@@ -3078,7 +3081,7 @@ mod tests {
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let result = kio::clock::timeout(Duration::from_millis(200), consumer.read()).await;
 		match result {
@@ -3134,7 +3137,7 @@ mod tests {
 		write_group(&mut track, 4, &[ts(160_000), ts(180_000)]);
 		write_group(&mut track, 5, &[ts(200_000), ts(220_000)]);
 		write_group(&mut track, 6, &[ts(240_000), ts(260_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert!(frames.len() >= 4, "Expected >= 4 frames, got {}", frames.len());
@@ -3152,7 +3155,7 @@ mod tests {
 		write_group(&mut track, 7, &[ts(80_000), ts(100_000)]);
 		write_group(&mut track, 8, &[ts(120_000), ts(140_000)]);
 		write_group(&mut track, 9, &[ts(160_000), ts(180_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert!(frames.len() >= 4, "Expected >= 4 frames, got {}", frames.len());
@@ -3368,7 +3371,7 @@ mod tests {
 
 		// Group 1's stream opens moments later, well within the 500ms budget.
 		write_group(&mut track, 1, &[ts(100_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
@@ -3400,7 +3403,7 @@ mod tests {
 
 		// Group 0 arrives moments later, well within the 500ms budget.
 		write_group(&mut track, 0, &[ts(0)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
@@ -3442,7 +3445,7 @@ mod tests {
 			)
 			.unwrap();
 		group0.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
@@ -3490,7 +3493,7 @@ mod tests {
 		);
 
 		write_group(&mut track, 4, &[ts(4_800_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
@@ -3518,7 +3521,7 @@ mod tests {
 		assert_eq!(frame.timestamp, ts(5_000_000));
 
 		write_group(&mut track, 4, &[ts(4_000_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert!(
 			read_all(&mut consumer).await.unwrap().is_empty(),
 			"the earlier group is old"
@@ -3547,7 +3550,7 @@ mod tests {
 			write_group(&mut track, 4, &[ts(4_700_000)]);
 			let first = kio::clock::timeout(Duration::from_millis(50), consumer.read_frame()).await;
 			write_group(&mut track, 3, &[ts(4_400_000)]);
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 
 			let frames = first.ok().map(|frame| frame.unwrap().unwrap());
 			let frames = frames.into_iter().chain(read_all(&mut consumer).await.unwrap());
@@ -3621,7 +3624,7 @@ mod tests {
 
 		write(&mut covering, 4_950_000);
 		covering.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let micros: Vec<u128> = read_all(&mut consumer)
 			.await
 			.unwrap()
@@ -3753,11 +3756,14 @@ mod tests {
 					.with_delay(Delay::default().with_max(Duration::from_millis(500))),
 			)
 			.with_range(5..);
-		let mut consumer =
-			Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data)).with_delay(Delay {
+		let mut consumer = Playout::new(
+			Delay {
 				min: Some(Duration::from_millis(500)),
 				max: Some(Duration::from_millis(500)),
-			});
+			},
+			Duration::ZERO,
+		)
+		.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		assert!(
 			matches!(consumer.startup, Startup::Earliest { .. }),
 			"a local range names no start, so the start still reaches back"
@@ -3860,11 +3866,14 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_delay(Delay::default().with_max(None)));
-		let mut consumer =
-			Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data)).with_delay(Delay {
+		let mut consumer = Playout::new(
+			Delay {
 				min: Some(Duration::from_millis(500)),
 				max: None,
-			});
+			},
+			Duration::ZERO,
+		)
+		.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		assert_eq!(subscribed(&consumer).subscription().delay.max, None);
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
@@ -3875,7 +3884,7 @@ mod tests {
 			"an earlier group within the min delay must be waited for"
 		);
 		write_group(&mut track, 4, &[ts(4_500_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
 		assert_eq!(micros, vec![4_500_000, 5_000_000]);
@@ -3950,7 +3959,7 @@ mod tests {
 			.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(b"FAIL"))
 			.unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		// The first frame decodes; the malformed second frame must surface as an error.
 		let first = consumer.read_frame().await;
@@ -4001,7 +4010,7 @@ mod tests {
 		write_failing(&mut group, None);
 		write_failing(&mut group, Some(0));
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
@@ -4021,7 +4030,7 @@ mod tests {
 		write_failing(&mut group, None);
 		write_failing(&mut group, Some(0));
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let event = kio::wait(|waiter| consumer.poll_event(waiter)).await;
 		assert!(matches!(event, Err(crate::Error::UnknownFormat(_))));
@@ -4041,14 +4050,15 @@ mod tests {
 
 		let mut malformed = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		write_failing(&mut malformed, None);
-		malformed.finish().unwrap();
+		let malformed_demand = malformed.demand();
+		let _malformed = malformed.finish().unwrap();
 		let mut later = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 		write_failing(&mut later, Some(10_000));
 
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
 		assert!(track.demand().wanted().is_none(), "the ended reader still subscribes");
-		assert!(!malformed.demand().wanted(), "the ended reader still holds its group");
+		assert!(!malformed_demand.wanted(), "the ended reader still holds its group");
 		assert!(!later.demand().wanted(), "the ended reader still holds a later group");
 	}
 
@@ -4152,7 +4162,7 @@ mod tests {
 		);
 
 		current.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
 	}
@@ -4173,7 +4183,7 @@ mod tests {
 		let mut newest = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 		write_failing(&mut newest, Some(10_000));
 		newest.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
@@ -4209,7 +4219,7 @@ mod tests {
 		assert_eq!(frame.timestamp, ts(10_000));
 
 		current.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
 	}
@@ -4231,7 +4241,7 @@ mod tests {
 		assert_eq!(first.timestamp, ts(0));
 
 		group.abort(moq_net::Error::Cancel).unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let read = kio::clock::timeout(Duration::from_millis(50), consumer.read()).await;
 		assert!(matches!(read, Ok(Err(crate::Error::UnknownFormat(_)))), "{read:?}");
 	}
@@ -4246,7 +4256,7 @@ mod tests {
 		write_failing(&mut group, Some(0));
 		write_failing(&mut group, None);
 		write_failing(&mut group, Some(10_000));
-		group.finish().unwrap();
+		let group = group.finish().unwrap();
 
 		// Finding the start buffers one frame; the read behind it already holds the rest.
 		let mut buffer = GroupBuffer::<FailingDecode>::new(group.consume(), Memory::new(DEFAULT_MAX_BUFFER));
@@ -4289,7 +4299,7 @@ mod tests {
 			)
 			.unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
@@ -4335,7 +4345,7 @@ mod tests {
 			write_group(&mut track, 2, &[ts(200_000)]);
 			kio::clock::sleep(Duration::from_millis(20)).await;
 			group0.finish().unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 		});
 
 		let frames = kio::clock::timeout(Duration::from_secs(2), async {
@@ -4364,7 +4374,7 @@ mod tests {
 
 		let one_hour = 3_600_000_000u64;
 		write_group(&mut track, 0, &[ts(one_hour)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
@@ -4381,7 +4391,7 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frame = consumer.read_frame().await.unwrap().unwrap();
 		assert_eq!(frame.timestamp, ts(0));
@@ -4421,7 +4431,7 @@ mod tests {
 		}
 
 		write_group(&mut track, 1, &[ts(100_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(50)).await;
@@ -4487,7 +4497,7 @@ mod tests {
 				)
 				.unwrap();
 			group7.finish().unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 		});
 
 		let _frames = kio::clock::timeout(Duration::from_secs(2), async {
@@ -4530,7 +4540,7 @@ mod tests {
 		// present (bounded by group 7's start), expiring it. Exactly a budget, so group 7's
 		// first frame is not past it and the start stays there.
 		write_group(&mut track, 9, &[ts(710_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
@@ -4551,7 +4561,7 @@ mod tests {
 
 		// Sequence 0 never arrives; sequence 1's stream opens but never carries a frame.
 		let group1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		// While group 1 is open its frames may still come, so the consumer waits.
 		assert!(
@@ -4585,7 +4595,7 @@ mod tests {
 		// arrives before them.
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		write_group(&mut track, 1, &[ts(100_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		assert!(
 			kio::clock::timeout(Duration::from_millis(50), consumer.read())
@@ -4663,7 +4673,7 @@ mod tests {
 		let consumer_track = track.subscribe(subscription);
 		assert_eq!(consumer_track.floor(), Some(7));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
@@ -4695,7 +4705,7 @@ mod tests {
 		for sequence in [7, 8, 9] {
 			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
 		}
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		assert_eq!(items(&mut consumer).await, ["800000", "900000", "1000000"]);
 	}
@@ -4723,7 +4733,7 @@ mod tests {
 
 		write_group(&mut track, 4, &[ts(400_000)]);
 		write_group(&mut track, 5, &[ts(500_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		assert_eq!(items(&mut consumer).await, ["500000"]);
 	}
@@ -4771,7 +4781,7 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 100, &[ts(3_000_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
@@ -4827,7 +4837,7 @@ mod tests {
 		write_group(&mut track, 1, &[ts(100_000)]);
 		write_group(&mut track, 2, &[ts(200_000)]);
 		write_group(&mut track, 3, &[ts(300_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(20)).await;
@@ -4863,7 +4873,7 @@ mod tests {
 			.unwrap();
 
 		write_group(&mut track, 1, &[ts(100_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(20)).await;
@@ -4905,7 +4915,7 @@ mod tests {
 
 		// Group 1: finished, 200ms ahead (well beyond the 100ms max delay)
 		write_group(&mut track, 1, &[ts(200_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(50)).await;
@@ -4932,7 +4942,7 @@ mod tests {
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
 		// Group 2: finished (group 1 is missing - sequence gap)
 		write_group(&mut track, 2, &[ts(200_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 2, "Expected group 0's second frame + group 2 (1 frame)");
@@ -4950,7 +4960,7 @@ mod tests {
 		group0.abort(moq_net::Error::Cancel).unwrap();
 
 		write_group(&mut track, 1, &[ts(30_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
@@ -4980,9 +4990,9 @@ mod tests {
 				.write(&mut group0, &[frame])
 				.unwrap();
 		}
-		group0.finish().unwrap();
+		let group0 = group0.finish().unwrap();
 		write_group(&mut track, 1, &[ts(30_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		// Take the first frame only, leaving the second unread.
 		let first = consumer.read_frame().await.unwrap().unwrap();
@@ -5020,7 +5030,7 @@ mod tests {
 		group0.abort(moq_net::Error::GroupTooLarge).unwrap();
 
 		write_group(&mut track, 1, &[ts(30_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1, "expected group 1 only, got {} frames", frames.len());
@@ -5042,7 +5052,7 @@ mod tests {
 			kio::clock::sleep(Duration::from_millis(20)).await;
 			write_group(&mut track, 1, &[ts(30_000)]);
 			kio::clock::sleep(Duration::from_millis(20)).await;
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 		});
 
 		let frames = kio::clock::timeout(Duration::from_secs(2), async {
@@ -5067,11 +5077,11 @@ mod tests {
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
-		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		group0.finish().unwrap();
 
 		write_group(&mut track, 1, &[ts(30_000)]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
@@ -5103,7 +5113,7 @@ mod tests {
 				.unwrap();
 		}
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let mut frames = Vec::new();
 		while let Some(frame) = consumer.read_frame().await.unwrap() {
@@ -5145,7 +5155,7 @@ mod tests {
 		write_duration_frame(&mut group1, ts(33_000), ts(33_000));
 		group1.finish().unwrap();
 
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let frames = kio::clock::timeout(Duration::from_secs(2), async { continuous_frames(&mut consumer).await })
 			.await
@@ -5178,7 +5188,7 @@ mod tests {
 			.unwrap();
 		write_duration_frame(&mut group1, ts(33_000), ts(33_000));
 		group1.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let frames = continuous_frames(&mut consumer).await;
 		assert_eq!(frames.len(), 2);
 	}
@@ -5204,7 +5214,7 @@ mod tests {
 		let mut group1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 		write_duration_frame(&mut group1, ts(33_000), ts(33_000));
 		group1.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		// A second frame lands on group 0 and finishes it after the consumer has
 		// had a chance to (incorrectly) skip.
@@ -5326,7 +5336,7 @@ mod tests {
 
 		let _stalled = open_group(&mut track, 0, ts(0));
 		write_group(&mut track, 1, &vec![ts(10_000); 2_000]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let reads = read_bounded(&mut consumer, MAX_BUFFER).await;
 		let timestamps = timestamps(&reads);
@@ -5355,7 +5365,7 @@ mod tests {
 		for g in 1..=500u64 {
 			write_group(&mut track, g, &[ts(g * 1_000)]);
 		}
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let reads = read_bounded(&mut consumer, MAX_BUFFER).await;
 		let timestamps = timestamps(&reads);
@@ -5727,10 +5737,10 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert!(consumer.poll_received(&kio::Waiter::noop()).is_pending());
 		assert!(
-			consumer.pending.iter().all(|group| group.empty),
+			consumer.pending.iter().all(|group| group.is_empty()),
 			"receipt must not decode payload"
 		);
 		group.finish().unwrap();

@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use hang::moq_net;
 use moq_tokio::RedactedUrl;
 use url::Url;
 
@@ -74,10 +73,7 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 		.origin
 		.route(&target.name, moq_net::origin::RouteOptions::hidden())
 		.context("failed to create broadcast")?;
-	let config = moq_mux::catalog::Config::default()
-		.with_max_age(target.max_age)
-		.with_bandwidth(target.bandwidth.clone());
-	let mut catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), config)?;
+	let mut catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), target.ingest.catalog())?;
 
 	// A relay asks for a broadcast's tracks the moment it is announced, so wait for the
 	// first keyframe to put them in the catalog.

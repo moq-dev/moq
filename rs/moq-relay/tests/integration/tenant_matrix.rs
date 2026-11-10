@@ -21,7 +21,6 @@ use axum::routing::post;
 use axum::{Json, Router};
 use moq_auth::{Event, Grant, Pattern, Patterns, Request};
 use moq_relay::Relay;
-use moq_tokio::moq_net;
 use moq_tokio::quic::driver;
 
 use crate::refusals::{client, config};
@@ -135,7 +134,7 @@ async fn start(io_uring: bool) -> Running {
 	let mut config = config(dir.path(), false);
 	config.auth.url = Some(tenants.spawn().await);
 	if io_uring {
-		config.runtime.workers = Some(1);
+		config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 		config.runtime.pin = false;
 		config.runtime.io_uring = true;
 	}
@@ -267,7 +266,11 @@ impl Watcher {
 			let changed = changed.clone();
 			async move {
 				while let Some(event) = announced.next().await {
-					if let moq_net::origin::RouteEvent::Start(route) = event {
+					if let moq_net::origin::RouteEvent {
+						kind: moq_net::origin::RouteKind::Start,
+						announce: route,
+					} = event
+					{
 						seen.lock().unwrap().push(route.prefix.to_string());
 						changed.notify_waiters();
 					}
@@ -345,17 +348,21 @@ async fn synced_listing(url: url::Url) -> BTreeSet<String> {
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			// Synced counts only once every event queued before it was read.
-			let next = moq_net::kio::wait(|waiter| match routes.poll_next(waiter) {
+			let next = kio::wait(|waiter| match routes.poll_next(waiter) {
 				Poll::Ready(event) => Poll::Ready(event),
 				Poll::Pending => routes.poll_synced(waiter).map(|()| None),
 			})
 			.await;
-			use moq_net::origin::RouteEvent;
+			use moq_net::origin::{RouteEvent, RouteKind};
 			match next {
-				Some(RouteEvent::End(route)) => listed.remove(route.prefix.as_str()),
-				Some(RouteEvent::Start(route) | RouteEvent::Update(route) | RouteEvent::Restart(route)) => {
-					listed.insert(route.prefix.to_string())
-				}
+				Some(RouteEvent {
+					kind: RouteKind::End,
+					announce: route,
+				}) => listed.remove(route.prefix.as_str()),
+				Some(RouteEvent {
+					kind: RouteKind::Start | RouteKind::Update | RouteKind::Restart,
+					announce: route,
+				}) => listed.insert(route.prefix.to_string()),
 				None => return,
 			};
 		}

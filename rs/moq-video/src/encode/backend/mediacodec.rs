@@ -151,6 +151,8 @@ pub(crate) struct MediaCodec {
 	keyframe_pending: bool,
 	/// Whether the codec still takes input. What it owes a flush is `pending`.
 	input: Input,
+	/// Access units the codec handed back and `receive` has not popped yet.
+	ready: VecDeque<Encoded>,
 }
 
 /// Whether the codec takes input.
@@ -158,8 +160,8 @@ pub(crate) struct MediaCodec {
 enum Input {
 	/// Taking frames, and back to it after every flush.
 	Open,
-	/// End of input was signalled for the last time ([`Backend::finish`]), or a
-	/// flush could not take the codec back out of it, so it refuses input for good.
+	/// A flush could not take the codec back out of end of input, so it refuses
+	/// input for good.
 	Ended,
 }
 
@@ -211,6 +213,7 @@ impl MediaCodec {
 			frame_index: 0,
 			keyframe_pending: false,
 			input: Input::Open,
+			ready: VecDeque::new(),
 		}))
 	}
 
@@ -277,10 +280,10 @@ impl MediaCodec {
 		Ok(())
 	}
 
-	/// Collect every access unit the codec has ready, waiting `timeout` on each
+	/// Queue every access unit the codec has ready, waiting `timeout` on each
 	/// round. Returns whether it reported end of stream, which is the only thing
 	/// that says the tail is out rather than still coming.
-	fn drain(&mut self, timeout: Duration, out: &mut Vec<Encoded>) -> Result<bool, Error> {
+	fn drain(&mut self, timeout: Duration) -> Result<bool, Error> {
 		loop {
 			let taken = match self
 				.codec
@@ -318,7 +321,7 @@ impl MediaCodec {
 				} else {
 					unit
 				};
-				out.push(Encoded::new(payload, timestamp, keyframe));
+				self.ready.push_back(Encoded::new(payload, timestamp, keyframe));
 			}
 
 			if flags & FLAG_END_OF_STREAM != 0 {
@@ -327,7 +330,7 @@ impl MediaCodec {
 		}
 	}
 
-	/// Signal end of input and wait the codec's tail out, returning everything it
+	/// Signal end of input and wait the codec's tail out, queueing everything it
 	/// was still holding.
 	///
 	/// The wait is the point. An encoder that buffers won't part with the frames
@@ -335,16 +338,15 @@ impl MediaCodec {
 	/// happens to be ready already truncates the stream: that is one access unit
 	/// lost per group, and on a live track the frame does not vanish but
 	/// reappears ahead of the next group's keyframe.
-	fn drain_tail(&mut self) -> Result<Vec<Encoded>, Error> {
-		let mut out = Vec::new();
-		self.signal_end_of_input(&mut out)?;
+	fn drain_tail(&mut self) -> Result<(), Error> {
+		self.signal_end_of_input()?;
 
 		for _ in 0..DRAIN_ROUNDS {
-			if self.drain(DRAIN_TIMEOUT, &mut out)? {
+			if self.drain(DRAIN_TIMEOUT)? {
 				// Anything still outstanding was discarded by the codec rather than
 				// encoded, so it will never be paired with an output.
 				self.pending.clear();
-				return Ok(out);
+				return Ok(());
 			}
 		}
 
@@ -358,7 +360,7 @@ impl MediaCodec {
 	///
 	/// ByteBuffer mode has no `AMediaCodec_signalEndOfInputStream`: that one is
 	/// for a codec fed through a surface.
-	fn signal_end_of_input(&mut self, out: &mut Vec<Encoded>) -> Result<(), Error> {
+	fn signal_end_of_input(&mut self) -> Result<(), Error> {
 		let sample_time = self.sample_time();
 		for _ in 0..DRAIN_ROUNDS {
 			let queued = match self
@@ -379,7 +381,7 @@ impl MediaCodec {
 			}
 			// Every input buffer is still with the codec; collecting its output is
 			// what frees one.
-			self.drain(OUTPUT_TIMEOUT, out)?;
+			self.drain(OUTPUT_TIMEOUT)?;
 		}
 
 		Err(Error::codec(anyhow::anyhow!(
@@ -389,25 +391,28 @@ impl MediaCodec {
 }
 
 impl Backend for MediaCodec {
-	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
 		self.input.check()?;
-		let mut out = Vec::new();
 		// Collect whatever the codec finished while the caller was elsewhere, so
 		// the input buffer asked for below isn't stuck behind an output nobody
 		// picked up.
-		self.drain(OUTPUT_TIMEOUT, &mut out)?;
+		self.drain(OUTPUT_TIMEOUT)?;
 		self.submit(frame, cut || self.keyframe_pending)?;
-		self.drain(OUTPUT_TIMEOUT, &mut out)?;
-		Ok(out)
+		self.drain(OUTPUT_TIMEOUT)?;
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
 		self.input.check()?;
 		// Every frame fed has already come back out, so there is no tail to wait
 		// for and no reason to cycle the codec through end of stream. This is the
 		// common case: the format asks for a one-frame pipeline.
 		if self.pending.is_empty() {
-			return Ok(Vec::new());
+			return Ok(());
 		}
 
 		// Flushed whatever the drain did: end of input leaves the codec refusing
@@ -430,15 +435,6 @@ impl Backend for MediaCodec {
 			self.input = Input::Ended;
 		}
 		tail
-	}
-
-	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-		self.input.check()?;
-		self.input = Input::Ended;
-		if self.pending.is_empty() {
-			return Ok(Vec::new());
-		}
-		self.drain_tail()
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
@@ -729,11 +725,8 @@ mod tests {
 		let i420 = I420::new(size, vec![0x80; I420::len(size).unwrap()]).unwrap();
 		let frame = Frame::new(crate::Surface::I420(i420), timestamp(0));
 
-		let mut encoded = backend.encode(&frame, true).unwrap();
-		if encoded.is_empty() {
-			encoded = backend.flush().unwrap();
-		}
-
+		let mut encoded = backend.encode_all(&frame, true).unwrap();
+		encoded.extend(backend.flush_all().unwrap());
 		let annexb: Vec<u8> = encoded.iter().flat_map(|frame| frame.payload.iter().copied()).collect();
 		moq_mux::codec::h264::config(&annexb).expect("a keyframe carrying its own parameter sets");
 	}

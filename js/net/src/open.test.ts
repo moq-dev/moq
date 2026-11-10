@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
-import Qmux from "@moq/qmux";
+import { Duration, Manual } from "@moq/clock";
+import { Session as Qmux } from "@moq/qmux";
 import { Version } from "./lite/version.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { lines } from "./open.ts";
@@ -93,7 +93,7 @@ test("an open waiting a round trip resets the lowest stream below it, one per wa
 		await low.write(new Uint8Array(16));
 		await mid.write(new Uint8Array(16));
 		// Before any RTT sample, an open waits 100 ms.
-		const wait = () => clock.advance(Nano.fromMilli(Milli(100)));
+		const wait = () => clock.advance(Duration.millis(100));
 
 		const below = Promise.withResolvers<void>();
 		const pending = Writer.tryOpen(client, { version, sendOrder: 0, cancel: below.promise, group: true });
@@ -135,7 +135,7 @@ test("an open makes room only once it has waited a round trip itself", async () 
 	try {
 		const low = await openGroup(client, 1);
 		await low.write(new Uint8Array(16));
-		const wait = (ms: number) => clock.advance(Nano.fromMilli(Milli(ms)));
+		const wait = (ms: number) => clock.advance(Duration.millis(ms));
 
 		const below = Promise.withResolvers<void>();
 		const pending = Writer.tryOpen(client, { version, sendOrder: 0, cancel: below.promise, group: true });
@@ -170,13 +170,13 @@ test("an open ranked above an impatient one makes room for it at once", async ()
 		await mid.write(new Uint8Array(16));
 
 		const waiting = openGroup(client, 5);
-		await clock.advance(Nano.fromMilli(Milli(100)));
+		await clock.advance(Duration.millis(100));
 		expect(orders(client)).toEqual([2]);
 
 		// The reset's credit will reach this open instead, so the one still waiting is owed another.
 		const higher = openGroup(client, 10);
 		// Well short of its own round trip.
-		await clock.advance(Nano.fromMilli(Milli(1)));
+		await clock.advance(Duration.millis(1));
 		expect(orders(client)).toEqual([]);
 
 		const incoming = server.incomingUnidirectionalStreams.getReader();
@@ -204,9 +204,9 @@ test("an RTT of 0 reads as no sample, so an open still waits 100 ms", async () =
 		await low.write(new Uint8Array(16));
 
 		const high = openGroup(client, 5);
-		await clock.advance(Nano.fromMilli(Milli(99)));
+		await clock.advance(Duration.millis(99));
 		expect(orders(client)).toEqual([1]);
-		await clock.advance(Nano.fromMilli(Milli(1)));
+		await clock.advance(Duration.millis(1));
 		await expect(low.closed).rejects.toThrow("lagged");
 
 		const incoming = server.incomingUnidirectionalStreams.getReader();

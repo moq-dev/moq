@@ -39,10 +39,7 @@ func newRoute(t *testing.T, origin *moq.OriginProducer, path string, options moq
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { runtime.KeepAlive(route) })
-	broadcast, err := route.Broadcast()
-	if err != nil {
-		t.Fatal(err)
-	}
+	broadcast := route.Broadcast()
 	return route, broadcast
 }
 
@@ -62,14 +59,11 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.RoutePrefix("", moq.RouteOptions{})
+	dynamic, err := origin.Claim("", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer dynamic.Cancel()
-	if _, err := dynamic.Broadcast(); err == nil {
-		t.Fatal("a prefix route owns no broadcast")
-	}
 
 	type result struct {
 		broadcast *moq.BroadcastConsumer
@@ -99,12 +93,9 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	}
 	defer runtime.KeepAlive(served)
 	if served.Instance() != dynamic.Instance() {
-		t.Fatal("a job's route continues the instance its prefix route lends")
+		t.Fatal("a job's route continues the instance its claim lends")
 	}
-	broadcast, err := served.Broadcast()
-	if err != nil {
-		t.Fatal(err)
-	}
+	broadcast := served.Broadcast()
 	track, err := broadcast.PublishTrack("status", timedInfo())
 	if err != nil {
 		t.Fatal(err)
@@ -149,10 +140,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The route hands out one broadcast, so closing it ends the route too.
-	again, err := served.Broadcast()
-	if err != nil {
-		t.Fatal(err)
-	}
+	again := served.Broadcast()
 	if _, err := again.PublishTrack("late", nil); !errors.Is(err, moq.ErrClosed) {
 		t.Fatalf("PublishTrack after close = %v, want ErrClosed", err)
 	}
@@ -804,9 +792,6 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if ann.Prefix != "live" {
 		t.Fatalf("prefix = %q, want %q", ann.Prefix, "live")
 	}
-	if len(ann.Route.Hops) != 0 {
-		t.Fatalf("route hops = %v, want empty for local origin", ann.Route.Hops)
-	}
 
 	bc, err := consumer.Request(ctx, ann.Prefix, nil)
 	if err != nil {
@@ -1202,8 +1187,8 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	if mediaName != "requested-audio" {
 		t.Fatalf("media name = %q, want requested-audio", mediaName)
 	}
-	if _, err := request.Name(); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("request name after accept error = %v, want ErrClosed", err)
+	if _, err := request.Name(); !errors.Is(err, moq.ErrAlreadyResponded) {
+		t.Fatalf("request name after accept error = %v, want ErrAlreadyResponded", err)
 	}
 
 	var mediaConsumer *moqmedia.TrackConsumer
@@ -1288,6 +1273,44 @@ func TestRecvGroupCancelRace(t *testing.T) {
 	wg.Wait()
 }
 
+// TestRecvGroupCancelKeepsConsumer confirms a cancelled read aborts only
+// itself: the same consumer still receives the next group.
+func TestRecvGroupCancelKeepsConsumer(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Close()
+
+	track, err := broadcast.PublishTrack("x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := track.Consume(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Cancel()
+
+	if _, err := consumer.RecvGroup(newCancelOnWait()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled RecvGroup = %v, want context.Canceled", err)
+	}
+
+	group, err := track.AppendGroup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := consumer.RecvGroup(ctx)
+	if err != nil {
+		t.Fatalf("RecvGroup after cancel = %v", err)
+	}
+	if got == nil || got.Sequence() != group.Sequence() {
+		t.Fatalf("RecvGroup after cancel = %v, want group %d", got, group.Sequence())
+	}
+}
+
 // TestConsumerCancelConcurrent confirms Cancel is safe to call repeatedly from
 // multiple goroutines (it underlies every stream's cleanup and Close path).
 func TestConsumerCancelConcurrent(t *testing.T) {
@@ -1322,7 +1345,7 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 // that one request rather than the consumer it was made on.
 func TestRequestCancelKeepsTheOrigin(t *testing.T) {
 	origin := newOrigin(t)
-	dynamic, err := origin.RoutePrefix("", moq.RouteOptions{})
+	dynamic, err := origin.Claim("", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1848,7 +1871,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.RoutePrefix("live", moq.RouteOptions{})
+	dynamic, err := origin.Claim("live", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1884,7 +1907,7 @@ func TestCancellingAHiddenAnswerRefusesTheRequest(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.RoutePrefix("live", moq.RouteOptions{})
+	dynamic, err := origin.Claim("live", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

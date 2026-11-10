@@ -18,6 +18,7 @@ from moq_ffi import (
     MoqAnchor,
     MoqBackoff,
     MoqClientTls,
+    MoqCompression,
     MoqCongestionControl,
     MoqConnectionStats,
     MoqDatagram,
@@ -299,15 +300,15 @@ class TrackInfo:
     how many times its first frame a group's later bytes may grow before a joining
     subscriber asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
     ``None`` means the track is untimed, on both publish and receive.
-    ``compress`` DEFLATEs each group on the wire to peers that support it; readers
-    always see the original frames.
+    ``compression`` compresses each group on the wire to peers that support it, ``None``
+    sending frames as written; readers always see the original frames.
     """
 
     priority: int = 0
     max_age: timedelta | None = timedelta(0)
     refresh: int | None = None
     timescale: int | None = None
-    compress: bool = False
+    compression: MoqCompression | None = None
 
     def _ffi(self) -> MoqTrackInfo:
         return MoqTrackInfo(
@@ -316,7 +317,7 @@ class TrackInfo:
             max_age_unlimited=self.max_age is None,
             refresh=self.refresh,
             timescale=self.timescale,
-            compress=self.compress,
+            compression=self.compression,
         )
 
     @staticmethod
@@ -326,7 +327,7 @@ class TrackInfo:
             max_age=None if info.max_age_unlimited else (info.max_age or timedelta(0)),
             refresh=info.refresh,
             timescale=info.timescale,
-            compress=info.compress,
+            compression=info.compression,
         )
 
 
@@ -341,7 +342,7 @@ class Backoff:
     The delay starts at ``initial``, multiplies by ``multiplier`` after each failed
     attempt, and caps at ``max``. After ``timeout`` of consecutive failures the
     connection gives up; ``timedelta(0)`` retries forever. ``None`` keeps each
-    default: 1s, x2, 5s, and a 10s window.
+    default: 1s, x2, 5s, and no give-up.
     """
 
     initial: timedelta | None = None
@@ -524,6 +525,30 @@ class VideoDecodedFrame:
         """The picture converted to tightly packed CPU pixels in ``format``."""
         return self._inner.pixels(format)
 
-    def surface(self) -> MoqVideoSurface | None:
+    def surface(self) -> VideoSurface | None:
         """The decoder's platform surface, when the decoder output asked for one."""
-        return self._inner.surface()
+        return _surface(self._inner.surface())
+
+
+class VideoSurface:
+    """A decoded frame's platform surface; match it with a fallback arm, since new platforms add kinds."""
+
+
+@dataclass(frozen=True)
+class VideoSurfacePixelBuffer(VideoSurface):
+    """An Apple ``CVPixelBufferRef`` (IOSurface-backed NV12) address, valid while its frame lives."""
+
+    pointer: int
+
+
+@dataclass(frozen=True)
+class VideoSurfaceUnknown(VideoSurface):
+    """A surface kind this version of the package does not know yet."""
+
+
+def _surface(surface: MoqVideoSurface | None) -> VideoSurface | None:
+    if surface is None:
+        return None
+    if isinstance(surface, MoqVideoSurface.PIXEL_BUFFER):
+        return VideoSurfacePixelBuffer(surface.pointer)
+    return VideoSurfaceUnknown()

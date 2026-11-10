@@ -4,7 +4,7 @@
  * @module
  */
 
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type * as Announce from "../announce.ts";
 import { Producer as AnnounceProducer, list, type Routes } from "../announced.ts";
@@ -27,16 +27,15 @@ import {
 	type WebSocketProps as WebSocketPropsType,
 	type WebTransportProps as WebTransportPropsType,
 } from "./connect.ts";
-import type { Established as EstablishedType } from "./established.ts";
-import type { Extensions as ExtensionsType } from "./extensions.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { Drain as DrainType, GoawayProps, Redirect as RedirectType } from "./goaway.ts";
 import { pumpAnnounced, Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
+import type { Session as SessionType } from "./session.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
 
 /** How long an unreferenced shared connection lingers before it actually closes. */
-const LINGER_MS = Milli(2000);
+const LINGER = Duration.millis(2000);
 
 /** Options for {@link Connection}. */
 export interface ConnectionProps {
@@ -85,7 +84,7 @@ export interface ConnectionProps {
 	 * 30000ms; `0` waits forever). An attempt that outlives it is retried like any other
 	 * failure. The same bound as the `timeout` option of {@link Connection.connect}.
 	 */
-	timeout?: Milli;
+	timeout?: Duration;
 
 	/**
 	 * How to react to the relay's GOAWAY; an unset field uses its default. Every connection
@@ -227,7 +226,7 @@ export class Connection {
 
 	#closed = new Once<Error | null>();
 	readonly #status = new Signal<ReloadStatus>("disconnected");
-	readonly #established = new Signal<EstablishedType | undefined>(undefined);
+	readonly #established = new Signal<SessionType | undefined>(undefined);
 	readonly #probe = new Signal<Getter<ProbeType | undefined> | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	readonly #allocator = new Signal<Handle | undefined>(undefined);
@@ -249,8 +248,6 @@ export class Connection {
 		// A plain list is checked and copied now, so a bad name throws here and mutating the array
 		// later changes nothing. A live list is checked as it changes, failing on `error`.
 		const fixed = normalizeVersions({ ...props, versions: Array.isArray(given) ? given : undefined });
-		// Likewise a bad timeout, before anything below exists to leak.
-		if (props?.timeout !== undefined) Milli(props.timeout);
 		refuse(props);
 		this.#signals = new Effect();
 
@@ -440,10 +437,8 @@ export namespace Connection {
 	export type WebTransportProps = WebTransportPropsType;
 	/** A server certificate hash used to pin a self-signed server. @reexport */
 	export type CertificateHash = CertificateHashType;
-	/** An established one-shot session. @reexport */
-	export type Established = EstablishedType;
-	/** The moq-transport extensions a one-shot session offers. @reexport */
-	export type Extensions = ExtensionsType;
+	/** An established MoQ session, as a one-shot connect or accept returns it. @reexport */
+	export type Session = SessionType;
 }
 
 /** The checked copy of `versions` to dial with, or why it cannot be offered. */
@@ -589,7 +584,7 @@ function acquire(url: string, versions?: readonly string[]): Entry & { release: 
 
 			// Don't hold a Node process open for a connection nobody is using.
 			taken.timer = after(
-				Nano.fromMilli(LINGER_MS),
+				LINGER,
 				() => {
 					if (pool.get(taken.key) === taken) pool.delete(taken.key);
 					taken.connection.close();

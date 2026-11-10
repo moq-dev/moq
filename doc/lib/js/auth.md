@@ -18,8 +18,8 @@ root. Tokens are interchangeable with the Rust side. Grants and claims are
 [`Pattern`](https://www.npmjs.com/package/@moq/pattern) unions: `foo` is one
 broadcast, `foo/**` is a subtree, `**` is everything. A claim or grant role may
 also carry a bitrate cap, parsed into `publish_rate` or `subscribe_rate` beside
-the pattern arrays; key scopes bound paths only, and `authorize` checks paths
-only. Answer a capped grant with `encodeGrant`, which writes the cap where the
+the pattern arrays, which is also how `Key.sign` takes it; key scopes bound
+paths only, and `authorize` checks paths only. Answer a capped grant with `encodeGrant`, which writes the cap where the
 relay reads it.
 
 ```bash

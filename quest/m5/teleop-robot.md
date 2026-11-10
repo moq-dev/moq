@@ -98,7 +98,7 @@ The framing is where the guarantee lives, not the subscription flags:
   one needs: `moq-json`'s snapshot and stream modes for JSON; plain tracks
   for opaque bytes, one group per latest value or one bounded ordered group
   for the append-log. The [compression migration](https://github.com/moq-dev/moq/pull/7046)
-  deleted moq-flate's snapshot/stream helpers, so use the track's `compress`
+  deleted moq-flate's snapshot/stream helpers, so use the track's `compression`
   flag when compression is useful, not those helpers.
 - Per-stage timestamp instrumentation, generalised from moq-boy's `status`
   track. Check it against the publisher-reported stats track

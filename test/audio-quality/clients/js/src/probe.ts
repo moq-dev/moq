@@ -10,7 +10,7 @@
  *
  * @module
  */
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Effect } from "@moq/signals";
 import type MoqWatch from "@moq/watch/element";
 import { Capture } from "./capture.ts";
@@ -50,7 +50,7 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 		if (notes.length < 200) notes.push(line.slice(0, 200));
 	};
 
-	const { audio, sync, broadcast } = watch.player;
+	const { audio, sync, broadcast } = watch;
 	const recording = capture
 		? new Capture({
 				broadcast: audio.source.in.broadcast,
@@ -124,11 +124,15 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			// Read back to back, so the pair calibrates the render clock against the viewer's.
 			at: performance.now(),
 			render: context ? context.currentTime * 1000 : undefined,
-			timestamp: audio.out.timestamp.peek(),
+			timestamp: audio.out.timestamp.peek()?.asMillis(),
 			stalled: audio.out.stalled.peek(),
-			delay: sync.out.delay.peek(),
+			clock: sync.now()?.asMillis(),
+			delay: sync.out.delay.peek().asMillis(),
 			playerUnderruns: audio.out.stats.peek()?.underruns,
-			rtt: watch.connection.probe.peek()?.rtt,
+			playerSkips: audio.out.stats.peek()?.skips,
+			trimmed: audio.out.stats.peek()?.trimmed.asMillis(),
+			accelerated: audio.out.stats.peek()?.accelerated.asMillis(),
+			rtt: watch.connection.probe.peek()?.rtt?.asMillis(),
 			jitter: audio.source.out.config.peek()?.jitter,
 			renditionDelay: audio.source.out.config.peek()?.delay,
 			outputLatency: context ? context.outputLatency * 1000 : undefined,
@@ -153,7 +157,7 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 		});
 	}
 
-	signals.interval(() => samples.push(sample()), Nano.fromMilli(Milli(SAMPLE_INTERVAL_MS)));
+	signals.interval(() => samples.push(sample()), Duration.millis(SAMPLE_INTERVAL_MS));
 
 	return {
 		drain: () => samples.splice(0, samples.length),

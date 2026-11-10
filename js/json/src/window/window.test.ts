@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
@@ -19,9 +19,9 @@ class Live {
 	events: Event<Rec>[] = [];
 	#next?: Promise<Timed<Event<Rec>> | undefined>;
 
-	constructor(config: { ops?: boolean; compress?: boolean; checkpointRecords?: number } = {}) {
-		const { compress, ...producer } = config;
-		const track = new Track.Producer("test").accept({ compress });
+	constructor(config: { ops?: boolean; compression?: Track.Compression; checkpointRecords?: number } = {}) {
+		const { compression, ...producer } = config;
+		const track = new Track.Producer("test").accept({ compression });
 		this.producer = new Producer<Rec>({ track, ...producer });
 		this.consumer = new Consumer<Rec>({ track: track.subscribe() });
 	}
@@ -199,7 +199,7 @@ test("rolling is invisible to the consumer", async () => {
 });
 
 test("compressed round-trip across rolls", async () => {
-	const live = new Live({ compress: true });
+	const live = new Live({ compression: "deflate" });
 	for (let n = 0; n < 40; n++) {
 		await live.push(n);
 		if (n >= 10) await live.pop(1);
@@ -212,7 +212,7 @@ test("compressed round-trip across rolls", async () => {
 
 // The frame count and first-frame timestamp of each group in a finished track.
 async function groups(track: Track.Producer): Promise<[number, number | undefined][]> {
-	const ordered = track.subscribe({ delay: { max: Milli(30_000) } }).ordered();
+	const ordered = track.subscribe({ delay: { max: Duration.millis(30_000) } }).ordered();
 	const out: [number, number | undefined][] = [];
 	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
 		const first = await group.readFrame();

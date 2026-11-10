@@ -64,15 +64,14 @@ pub mod origin {
 	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::NodeFilter;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, Driver, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
+		Claim, Config, Consumer, Cost, Driver, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
 		RouteOptions, Source,
 	};
 	pub use crate::route::RouteKey;
 
 	// Relay-level: every route change, for forwarding and stats. Apps read
 	// `announce` and `follow` instead.
-	#[doc(hidden)]
-	pub use super::origin_impl::{RouteEvent, Routes};
+	pub use super::origin_impl::{RouteEvent, RouteKind, Routes};
 }
 
 /// Listing the paths announced on an origin.

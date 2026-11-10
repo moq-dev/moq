@@ -7,6 +7,7 @@
 //! It also holds each frame back by one, like the Media Foundation MFT, so a
 //! drain that loses the tail shows up as a missing frame rather than passing.
 
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::thread::ThreadId;
 
@@ -82,7 +83,9 @@ pub(crate) fn refuse_once(bitrate: u64) {
 }
 
 pub(crate) struct Probe {
-	pending: Option<Encoded>,
+	/// The frame held back by one.
+	held: Option<Encoded>,
+	ready: VecDeque<Encoded>,
 	cuts: bool,
 }
 
@@ -90,7 +93,8 @@ impl Probe {
 	pub(crate) fn open(_config: &Config) -> Result<Box<dyn Backend>, Error> {
 		record("open");
 		Ok(Box::new(Self {
-			pending: None,
+			held: None,
+			ready: VecDeque::new(),
 			cuts: true,
 		}))
 	}
@@ -98,14 +102,15 @@ impl Probe {
 	pub(crate) fn open_no_cut(_config: &Config) -> Result<Box<dyn Backend>, Error> {
 		record("open");
 		Ok(Box::new(Self {
-			pending: None,
+			held: None,
+			ready: VecDeque::new(),
 			cuts: false,
 		}))
 	}
 }
 
 impl Backend for Probe {
-	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
 		// Uncontended unless a test is holding the codec here on purpose.
 		drop(GATE.lock().unwrap_or_else(|err| err.into_inner()));
 		record("encode");
@@ -117,18 +122,19 @@ impl Backend for Probe {
 		// The payload is the frame's timestamp, so a test can tell which frame a
 		// packet came from independently of what it's stamped with.
 		let payload = bytes::Bytes::from(frame.timestamp.as_micros().to_string());
-		let previous = self.pending.replace(Encoded::new(payload, frame.timestamp, cut));
-		Ok(previous.into_iter().collect())
+		let previous = self.held.replace(Encoded::new(payload, frame.timestamp, cut));
+		self.ready.extend(previous);
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
 		record("flush");
-		Ok(self.pending.take().into_iter().collect())
-	}
-
-	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-		record("finish");
-		Ok(self.pending.take().into_iter().collect())
+		self.ready.extend(self.held.take());
+		Ok(())
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {

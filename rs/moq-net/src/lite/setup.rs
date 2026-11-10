@@ -13,7 +13,7 @@ const PARAM_PATH: u64 = 0x2;
 const PARAM_ROLE: u64 = 0x3;
 /// Setup Parameter id for the link cost the dialer assigns to this connection.
 const PARAM_COST: u64 = 0x4;
-/// Setup Parameter id for the endpoint's Hop ID (before lite-07, which names routes instead).
+/// Setup Parameter id for the endpoint's Hop ID before lite-07, and its Node ID from lite-07.
 const PARAM_HOP: u64 = 0x5;
 /// Setup Parameter id for the sender's implementation, as `name/version` product tokens.
 const PARAM_IMPLEMENTATION: u64 = 0x6;
@@ -198,9 +198,12 @@ pub struct Setup {
 	/// The peer uses it to serve this endpoint's subscriptions from a route that
 	/// does not flow through it (the same split horizon the announce filter
 	/// applies). `None` when the endpoint has no meaningful identity (a
-	/// leaf that never forwards); a wire value of 0 decodes as `None`. Lite-07 names
-	/// routes instead, so it never sends one and ignores one received.
+	/// leaf that never forwards); a wire value of 0 decodes as `None`. Lite-07 declares
+	/// [`node`](Self::node) instead, so it never sends one.
 	pub hop: Option<crate::Hop>,
+	/// This endpoint's own Node ID (lite-07+), the identity it originates routes under.
+	/// A peer that receives its own Node ID has reached itself. Never 0 or qualified.
+	pub node: Option<std::num::NonZeroU64>,
 	/// The connection credential (lite-07+), which the empty-token Auth Stream names.
 	/// Sent only by the client. The parameter carries no Token Type, so it is always
 	/// [`Token::OUT_OF_BAND`](crate::setup::Token::OUT_OF_BAND).
@@ -227,6 +230,7 @@ impl std::fmt::Debug for Setup {
 			.field("role", &self.role)
 			.field("cost", &self.cost)
 			.field("hop", &self.hop)
+			.field("node", &self.node)
 			.field("token", &self.token)
 			.field("ietf", &self.ietf)
 			.field("implementation", &self.implementation)
@@ -269,6 +273,15 @@ impl<'a> Message<'a> for Setup {
 		}
 		if let Some(hop) = self.hop.filter(|_| !version.has_routes()) {
 			params.set_varint(PARAM_HOP, hop.wire_id(version.into()), version)?;
+		}
+		if let Some(node) = self.node {
+			if !version.has_routes() {
+				return Err(EncodeError::Version);
+			}
+			if node.get() & crate::route::QUALIFIED != 0 {
+				return Err(EncodeError::InvalidState);
+			}
+			params.set_varint(PARAM_HOP, node.get(), version)?;
 		}
 		if let Some(implementation) = &self.implementation {
 			params.set_bytes(PARAM_IMPLEMENTATION, implementation.as_bytes().to_vec());
@@ -336,15 +349,20 @@ impl<'a> Message<'a> for ReceivedSetup {
 		if cost == Some(0) && version.has_routes() {
 			return Err(DecodeError::InvalidValue);
 		}
-		// 0 is legal on the wire but carries no identity (it can't be excluded),
-		// so it decodes as "not declared" rather than an error. Lite-07 dropped the
-		// parameter, so it ignores one like any unknown parameter.
-		let hop = match version.has_routes() {
-			true => None,
-			false => params
-				.get_varint(PARAM_HOP, version)?
-				.and_then(std::num::NonZeroU64::new)
-				.map(crate::Hop::from),
+		// Before lite-07, 0 is legal on the wire but carries no identity (it can't be
+		// excluded), so it decodes as "not declared" rather than an error. A lite-07
+		// Node ID is never 0 or qualified.
+		let declared = params.get_varint(PARAM_HOP, version)?;
+		let (hop, node) = match version.has_routes() {
+			true => match declared {
+				None => (None, None),
+				Some(id) if id & crate::route::QUALIFIED != 0 => return Err(DecodeError::InvalidValue),
+				Some(id) => (
+					None,
+					Some(std::num::NonZeroU64::new(id).ok_or(DecodeError::InvalidValue)?),
+				),
+			},
+			false => (declared.and_then(std::num::NonZeroU64::new).map(crate::Hop::from), None),
 		};
 		let implementation = if version.has_implementation() {
 			crate::setup::decode_implementation(params.get_bytes(PARAM_IMPLEMENTATION))?
@@ -382,6 +400,7 @@ impl<'a> Message<'a> for ReceivedSetup {
 				role,
 				cost,
 				hop,
+				node,
 				token,
 				ietf,
 				implementation,
@@ -992,28 +1011,35 @@ mod tests {
 		assert_eq!(Setup::decode_slice(&buf, Version::Lite06).unwrap().0.hop, None);
 	}
 
-	/// Lite-07 names routes instead of hops: it never sends the Hop parameter, and ignores
-	/// one a peer sends like any unknown parameter.
+	/// Lite-07 carries the endpoint's Node ID in the parameter that names its Hop ID before.
 	#[test]
-	fn lite07_drops_the_hop() {
+	fn lite07_declares_the_node_instead_of_the_hop() {
 		let version = Version::Lite07;
 		let msg = Setup {
 			hop: Some(crate::Hop::new(42).unwrap()),
+			node: std::num::NonZeroU64::new(7),
 			..Default::default()
 		};
-		assert_eq!(
-			msg.encode_bytes(version).unwrap(),
-			Setup::default().encode_bytes(version).unwrap()
+		let got = Setup::decode_slice(&msg.encode_bytes(version).unwrap(), version)
+			.unwrap()
+			.0;
+		assert_eq!(got.hop, None);
+		assert_eq!(got.node, msg.node);
+		assert!(
+			msg.encode_bytes(Version::Lite06).is_err(),
+			"only lite-07 carries a Node ID"
 		);
 
-		let mut params = Parameters::default();
-		params.set_varint(super::PARAM_HOP, 42, version).unwrap();
-		let mut data = Vec::new();
-		let mut writer = Encoder::new(&mut data, version.into());
-		let prefix = writer.prefix_varint();
-		params.encode(&mut writer, version).unwrap();
-		writer.fill(prefix).unwrap();
-		assert_eq!(Setup::decode_slice(&data, version).unwrap().0.hop, None);
+		for id in [0, crate::route::QUALIFIED | 7] {
+			let mut params = Parameters::default();
+			params.set_varint(super::PARAM_HOP, id, version).unwrap();
+			let mut data = Vec::new();
+			let mut writer = Encoder::new(&mut data, version.into());
+			let prefix = writer.prefix_varint();
+			params.encode(&mut writer, version).unwrap();
+			writer.fill(prefix).unwrap();
+			assert!(Setup::decode_slice(&data, version).is_err(), "Node ID {id:#x}");
+		}
 	}
 
 	// A declared id of 0 carries no identity (it cannot be excluded), so it

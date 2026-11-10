@@ -17,7 +17,7 @@ reader will not pick it up.
 - **Stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
 - **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` ratio the same way.
 
-Compression is the track's: create it with `compress: true`, which JSON benefits
+Compression is the track's: create it with `compression: "deflate"`, which JSON benefits
 from, and readers see plain frames either way. Producers take
 a `Timed` value, `{ value, at }`, where `at` is the capture time written as
 the frame timestamp, and the snapshot and stream consumers return the same

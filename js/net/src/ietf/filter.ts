@@ -4,7 +4,6 @@
  * @module
  */
 
-import { Milli } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
 import { concat, type Reader } from "../stream.ts";
 import type { Order } from "../track.ts";
@@ -358,7 +357,7 @@ export interface Fill {
 	groupOrder?: Order;
 
 	/** FILL_TIMEOUT, bounding the fill's wait as it does a FETCH's; see {@link Parameters.fillTimeout}. */
-	fillTimeout?: Milli;
+	fillTimeout?: number;
 
 	/**
 	 * The range to fill. `undefined` means the Location Filter was omitted, which inherits
@@ -440,7 +439,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 	let rest = afterCount;
 	let filter: Filter | undefined;
 	let groupOrder: Order | undefined;
-	let fillTimeout: Milli | undefined;
+	let fillTimeout: number | undefined;
 	let rangeFilters = false;
 	let prev = 0n;
 	for (let i = 0n; i < count; i++) {
@@ -469,7 +468,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 			let value: bigint;
 			[value, rest] = unvarint(rest);
 			// The clock API holds exact numeric milliseconds.
-			fillTimeout = Milli(toNumber(value));
+			fillTimeout = toNumber(value);
 			continue;
 		}
 

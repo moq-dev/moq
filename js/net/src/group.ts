@@ -211,6 +211,22 @@ export class Demand {
 }
 
 /**
+ * A group its producer finished: every frame is written, and it can still be read, but not
+ * written to. {@link Producer.finish} returns it, mirroring the Rust `group::Finished`; the
+ * producer itself still refuses a write after the finish.
+ *
+ * @public
+ */
+export interface Finished {
+	/** Sequence number of this group within its track. */
+	readonly sequence: bigint;
+	/** Settles once the group closes: `null` on a clean close, or the abort {@link Error}. */
+	readonly closed: GetPromise<Error | null>;
+	/** A read handle for this group. */
+	consume(): Consumer;
+}
+
+/**
  * The write side of an ordered stream of frames within a track.
  *
  * @public
@@ -644,9 +660,13 @@ export class Producer {
 		return this.#state.closed.peek() !== undefined;
 	}
 
-	/** Marks the group complete: no more frames will be written. Idempotent. */
-	finish() {
+	/**
+	 * Marks the group complete, returning it as {@link Finished}: no more frames will be written.
+	 * Idempotent.
+	 */
+	finish(): Finished {
 		this.#end(null);
+		return this;
 	}
 
 	/**
@@ -1445,15 +1465,6 @@ export class Consumer {
 	async readJson(): Promise<unknown | undefined> {
 		const frame = await this.readString();
 		return frame !== undefined ? JSON.parse(frame) : undefined;
-	}
-
-	/** Reads the next frame and decodes its payload as a one-byte boolean. */
-	async readBool(): Promise<boolean | undefined> {
-		const frame = await this.readFrame();
-		if (!frame) return undefined;
-		const payload = frame.payload;
-		if (payload.byteLength !== 1 || !(payload[0] === 0 || payload[0] === 1)) throw new Error("invalid bool frame");
-		return payload[0] === 1;
 	}
 
 	/**

@@ -8,7 +8,6 @@ import type { Path } from "@moq/net";
 import * as z from "zod/mini";
 import { u53Schema } from "./catalog/integers";
 import { renditions } from "./catalog/section";
-import { measurementSchema } from "./snapshot";
 import { TransportSchema } from "./stats";
 
 /** The newest received media timestamp paired with its arrival wall time. */
@@ -46,8 +45,6 @@ export const RenditionSchema = z.object({
 			z.transform((value) => value ?? undefined),
 		),
 	),
-	// Latest playout latency in milliseconds; absent when unavailable.
-	latency: measurementSchema,
 });
 /** One rendition's delivery counters and latest playout measurements. */
 export type Rendition = z.infer<typeof RenditionSchema>;

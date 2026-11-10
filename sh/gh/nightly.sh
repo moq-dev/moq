@@ -138,13 +138,15 @@ case "$1" in
     rust-extra)
         criterion qmux --manifest-path rs/qmux/Cargo.toml --bench receive
         criterion msf -p moq-msf --bench catalog
-        # The allocation/window/play-buffer/batch/receive-bursts tables keep their stdout in the run;
+        # The allocation/window/play-buffer/batch/receive-bursts/openh264 tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-crypto -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
-            -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode -p moq-hls --features moq-quic/fuzz \
+            -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode -p moq-hls -p moq-video \
+            --features moq-json/bench,moq-quic/fuzz,moq-video/openh264 \
             --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
-            --bench producer --bench play_buffer --bench jitter --bench timeline --bench decode_clock --bench ts_programs --bench ts_video \
-            --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout --bench include
+            --bench producer --bench play_buffer --bench jitter --bench sync --bench decode_clock --bench ts_programs --bench ts_video \
+            --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout --bench include \
+            --bench openh264
         criterion audio-capture -p moq-audio --features capture --bench capture
         # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous.
         # The concurrent cases' latency percentiles stay in the run's stdout.

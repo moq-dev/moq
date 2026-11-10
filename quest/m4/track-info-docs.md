@@ -16,7 +16,7 @@ Planned 2026-11-03 (maintainer, `/quest-plan`), from the follow-ups of
 The docs say "priority, ordering, latency budget, and timescale" (Kotlin,
 Dart) and "priority, group ordering, max age, and timescale" (Swift).
 `MoqTrackInfo` (`rs/moq-ffi/src/producer.rs`) has `priority`, `max_age`,
-`refresh`, `timescale` and `compress`. Ordering and delay are subscriber-side
+`refresh`, `timescale` and `compression`. Ordering and delay are subscriber-side
 (`MoqSubscription`). #7729 adds `max_age_unlimited`, so describe the record
 as it stands when this lands.
 

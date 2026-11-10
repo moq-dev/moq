@@ -1,4 +1,4 @@
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
@@ -29,7 +29,7 @@ export type PlayerInput = {
 	/** Playback distance from the live edge. */
 	delay: Getter<Delay>;
 	/** Future-dated media held beyond the live edge. */
-	lookahead: Getter<Milli>;
+	lookahead: Getter<Duration>;
 	/** Video rendition and canvas output. */
 	video: {
 		/** Desired video rendition or quality limits. */
@@ -124,7 +124,7 @@ export class Player {
 			catalog: getter(props.catalog),
 			paused: getter(props.paused ?? false),
 			delay: getter(props.delay ?? "auto"),
-			lookahead: getter(props.lookahead ?? Milli.zero),
+			lookahead: getter(props.lookahead ?? Duration.ZERO),
 			video: {
 				target: getter<Video.Target | undefined>(props.video?.target),
 				canvas: getter(props.video?.canvas),
@@ -241,7 +241,7 @@ export class Player {
 				this.#videoEnabled.set(visible);
 			} else {
 				// Keep downloading a paused poster until a frame is painted, then stop.
-				this.#videoEnabled.set(visible && !effect.get(this.renderer.out.frame));
+				this.#videoEnabled.set(visible && !effect.get(this.renderer.painted));
 			}
 		});
 	}

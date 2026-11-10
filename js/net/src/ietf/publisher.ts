@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
+import { Duration, type Instant, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
@@ -22,7 +22,15 @@ import {
 } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, WireRoute } from "../hop.ts";
-import { finalSequence, firstEligible, hiddenBelow, hooks, presented, type ReadGroupFrame } from "../internal.ts";
+import {
+	datagramTrackInfo,
+	finalSequence,
+	firstEligible,
+	hiddenBelow,
+	hooks,
+	presented,
+	type ReadGroupFrame,
+} from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendPayload } from "../payload.ts";
@@ -145,14 +153,14 @@ function sameHops(a: Hop[], b: Hop[]): boolean {
  * loop just as effectively as one it never grants.
  */
 const ADVERTISE_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
-const ADVERTISE_TIMEOUT = Nano.fromMilli(Milli(ADVERTISE_TIMEOUT_MS));
+const ADVERTISE_TIMEOUT = Duration.millis(ADVERTISE_TIMEOUT_MS);
 
 /** How long a joining FETCH waits for the subscription it names to arrive and resolve. */
-const JOIN_TIMEOUT = Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS));
+const JOIN_TIMEOUT = Duration.millis(REQUEST_TIMEOUT_MS);
 
 /** Sleep `delay`, jittered, so a relay's namespaces don't all retry on the same tick. */
 function retryAfter(delay: number): Promise<void> {
-	return sleep(Nano.fromMilli(Milli(delay * (0.5 + Math.random() / 2))));
+	return sleep(Duration.millis(delay * (0.5 + Math.random() / 2)));
 }
 
 /**
@@ -161,9 +169,9 @@ function retryAfter(delay: number): Promise<void> {
  * A peer answers a request it declines with a retry interval, and ignoring it is how a
  * permanent refusal (unauthorized, uninterested) turns into a request every few seconds
  * for the life of the session. `"never"` is an interval of 0 or a terminal local failure;
- * a number is the epoch milliseconds before which we must not come back.
+ * an instant is when we may come back.
  */
-type Refused = "never" | number;
+type Refused = "never" | Instant;
 
 /**
  * How the peer answered an advertisement or an update: it holds the namespace, it does
@@ -543,7 +551,7 @@ export class Publisher {
 					order: msg.groupOrder,
 					// An absent budget preserves everything retained by the producer.
 					// moq-transport has no field for a minimum.
-					delay: { max: Milli(msg.maxAge ?? Varint.MAX_U53), min: null },
+					delay: { max: Duration.millis(msg.maxAge ?? Varint.MAX_U53), min: null },
 					ranges: fixed.start ? serveRanges(fixed) : undefined,
 				}),
 			);
@@ -582,6 +590,7 @@ export class Publisher {
 				track.close();
 				datagramTrack = new TrackProducer(msg.trackName).accept(selected.info);
 				track = hooks.parked(datagramTrack.subscribe({ priority: fromWire(msg.subscriberPriority) }));
+				return datagramTrackInfo(selected.info);
 			}
 			return selected.info;
 		};
@@ -817,7 +826,7 @@ export class Publisher {
 				priority,
 				order,
 				// moq-transport has no field for a minimum.
-				delay: { max: Milli(msg.maxAge ?? Varint.MAX_U53), min: null },
+				delay: { max: Duration.millis(msg.maxAge ?? Varint.MAX_U53), min: null },
 				ranges: serveRanges(range),
 			});
 			const startGroup = range.start ? range.start.group : hooks.latestSequence(track);
@@ -831,7 +840,7 @@ export class Publisher {
 			// asking the broadcast would mint a second producer nobody has accepted.
 			cache =
 				fill && fill.kind !== "empty"
-					? track.fork({ priority, order, delay: { max: Milli(Varint.MAX_U53), min: null } })
+					? track.fork({ priority, order, delay: { max: Duration.millis(Varint.MAX_U53), min: null } })
 					: undefined;
 
 			const ranked = new Priority(track, info.priority);
@@ -890,7 +899,9 @@ export class Publisher {
 						timescale,
 						priority: datagramPriority,
 					}).then(
-						() => datagramTrack?.finish(),
+						() => {
+							datagramTrack?.finish();
+						},
 						(err: unknown) => {
 							if (datagramTrack) datagramTrack.abort(error(err));
 							else console.debug(`stopping datagrams on this subscription: ${reason(err)}`);
@@ -979,7 +990,7 @@ export class Publisher {
 						const maxAge = params.maxAge;
 						if (maxAge !== undefined) {
 							const current = track.subscription.peek();
-							track.update({ ...current, delay: { ...current?.delay, max: Milli(maxAge) } });
+							track.update({ ...current, delay: { ...current?.delay, max: Duration.millis(maxAge) } });
 						}
 						// A fill holds one cache view. At most this decoded update waits behind
 						// it; request parsing then backpressures any further fill requests.
@@ -1049,7 +1060,7 @@ export class Publisher {
 								? track.fork({
 										priority: fromWire(msg.subscriberPriority),
 										order: msg.groupOrder,
-										delay: { max: Milli(Varint.MAX_U53), min: null },
+										delay: { max: Duration.millis(Varint.MAX_U53), min: null },
 									})
 								: undefined;
 						try {
@@ -1857,7 +1868,7 @@ export class Publisher {
 					ns.active.delete(key);
 					const wait = lapses.get(key)?.wait ?? RETRY_BASE;
 					lapses.set(key, { snap, wait: Math.min(wait * 2, RETRY_MAX) });
-					ns.refused.set(key, Instant.add(now(), Nano.fromMilli(Milli(wait))));
+					ns.refused.set(key, now().add(Duration.millis(wait)));
 					ns.offered.set(key, snap);
 				}
 
@@ -2012,7 +2023,7 @@ export class Publisher {
 	#offerable(key: Path.Valid, refused: Map<Path.Valid, Refused>): boolean {
 		const entry = refused.get(key);
 		if (entry === undefined) return true;
-		return entry !== "never" && now() >= entry;
+		return entry !== "never" && now().ge(entry);
 	}
 
 	/**
@@ -2032,9 +2043,7 @@ export class Publisher {
 	 * namespace: 0 means the peer does not want this again.
 	 */
 	#refusal(err: RequestError): Answer {
-		return err.retryInterval === 0n
-			? "never"
-			: Instant.add(now(), Nano.fromMilli(Milli(toNumber(err.retryInterval))));
+		return err.retryInterval === 0n ? "never" : now().add(Duration.millis(toNumber(err.retryInterval)));
 	}
 
 	/**
@@ -2061,7 +2070,7 @@ export class Publisher {
 		// leaving this one namespace unadvertised.
 		let request: RequestStream | undefined;
 		try {
-			const deadline = new Deadline(Milli(ADVERTISE_TIMEOUT_MS));
+			const deadline = new Deadline(Duration.millis(ADVERTISE_TIMEOUT_MS));
 			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
 					const opened = await RequestStream.open(this.#session, deadline, { quic: this.#quic });
@@ -2542,7 +2551,7 @@ export class Publisher {
 		const broadcast = await this.#resolve(named.trackNamespace, signal);
 		const priority = fromWire(msg.subscriberPriority);
 		const track = broadcast.track(named.trackName);
-		const cache = track.subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
+		const cache = track.subscribe({ priority, delay: { max: Duration.millis(Varint.MAX_U53), min: null } });
 		let answer: FetchAnswer | undefined;
 		try {
 			const info = await untilAborted(cache.info(), signal);
@@ -2997,8 +3006,12 @@ function untilGivenUp(group: group.Consumer, signal: AbortSignal): { signal: Abo
 	};
 }
 
-/** The Track Properties a SUBSCRIBE_OK, TRACK_STATUS, or FETCH_OK answers with. */
-function trackProperties(info: Info, wanted: boolean): Properties.Properties {
+/**
+ * The Track Properties a SUBSCRIBE_OK, TRACK_STATUS, or FETCH_OK answers with.
+ *
+ * @internal Exported for tests.
+ */
+export function trackProperties(info: Info, wanted: boolean): Properties.Properties {
 	// INCLUDE_PROPERTIES=0. The block stays present but empty, which also means the track opts
 	// out of timestamps for this requester.
 	if (!wanted) return {};
@@ -3009,7 +3022,7 @@ function trackProperties(info: Info, wanted: boolean): Properties.Properties {
 		priority: toWire(info.priority),
 		// The publisher's default, newest first.
 		groupOrder: Properties.DESCENDING,
-		maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
+		maxCacheDuration: info.maxAge === null ? undefined : BigInt(Math.ceil(info.maxAge.asMillis())),
 	};
 }
 

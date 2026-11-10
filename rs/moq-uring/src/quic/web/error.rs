@@ -63,10 +63,10 @@ pub enum HandshakeError {
 	#[error("connect: {0}")]
 	Connect(#[from] web_transport_proto::ConnectError),
 
-	/// A status that does not fit the answer: accepting with anything but 200, or rejecting
-	/// with one below 400.
+	/// An HTTP status that does not fit the answer: accepting with anything but 200, or
+	/// rejecting with one outside 400 to 599.
 	#[error("http status: {0}")]
-	Status(http::StatusCode),
+	Status(u16),
 
 	/// The response selected a subprotocol the request did not offer.
 	#[error("subprotocol not offered: {0}")]

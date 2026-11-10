@@ -13,7 +13,7 @@ import (
 // consume sink for a full-duplex peer.
 //
 // There is no Close: the origin ends once the collector reaches every owner
-// (each producer and [Route]), and its consumers
+// (each producer, [Route], and [Claim]), and its consumers
 // then fail with [ErrClosed]. Keep an owner reachable for as long as the origin
 // should live.
 type OriginProducer struct {
@@ -51,56 +51,44 @@ func (o *OriginProducer) Route(path string, options RouteOptions) (*Route, error
 	return newRoute(inner), nil
 }
 
-// RoutePrefix creates a route over prefix that serves the requests beneath it.
+// Claim claims prefix and serves the requests beneath it.
 //
-// A route claims prefix and every path beneath it ("" claims every path). A
+// A claim covers prefix and every path beneath it ("" claims every path). A
 // service that only serves some of them rejects the rest as they are requested.
-// Answer each [Route.Requested] request, and keep the route reachable while it
+// Answer each [Claim.Requested] request, and keep the claim reachable while it
 // should stay advertised.
-func (o *OriginProducer) RoutePrefix(prefix string, options RouteOptions) (*Route, error) {
-	inner, err := o.inner.RoutePrefix(prefix, options)
+func (o *OriginProducer) Claim(prefix string, options RouteOptions) (*Claim, error) {
+	inner, err := o.inner.Claim(prefix, options)
 	if err != nil {
 		return nil, err
 	}
-	return newRoute(inner), nil
+	return &Claim{inner: inner}, nil
 }
 
-// Route is a route on an origin: an exact route owning one broadcast, or a
-// prefix route yielding the requests beneath it.
+// Route is an exact route on an origin, owning one broadcast.
 //
 // [Route.Cancel], or the collector reclaiming it, retracts the route, as does
-// closing an exact route's broadcast; a [BroadcastProducer] alone does not keep
-// it announced.
+// closing its broadcast; a [BroadcastProducer] alone does not keep it
+// announced.
 type Route struct {
 	inner     *ffi.MoqRoute
 	broadcast *BroadcastProducer
 }
 
 func newRoute(inner *ffi.MoqRoute) *Route {
-	route := &Route{inner: inner}
-	// A prefix route owns no broadcast.
-	if broadcast, err := inner.Broadcast(); err == nil {
-		route.broadcast = &BroadcastProducer{inner: broadcast}
-	}
-	return route
+	return &Route{inner: inner, broadcast: &BroadcastProducer{inner: inner.Broadcast()}}
 }
 
-// Broadcast returns the broadcast an exact route owns, the same one on every
-// call, or an error on a prefix route, which owns none.
-func (r *Route) Broadcast() (*BroadcastProducer, error) {
-	if r.broadcast == nil {
-		_, err := r.inner.Broadcast()
-		return nil, err
-	}
-	return r.broadcast, nil
+// Broadcast returns the broadcast the route owns, the same one on every call.
+func (r *Route) Broadcast() *BroadcastProducer {
+	return r.broadcast
 }
 
 // Instance returns the stream this route serves now. A named instance never
-// changes. Unnamed, a prefix route moves to a fresh one each time a job holding
-// its current one ends. A job's route takes its prefix route's current one when
-// it first announces or when this first reads it. Read first, the job announces
-// under it, and [Route.Announce] fails with Unroutable once the prefix route has
-// moved past it, so a signer built from it stays valid.
+// changes. A job's route takes its claim's current one when it first announces
+// or when this first reads it. Read first, the job announces under it, and
+// [Route.Announce] fails with Unroutable once the claim has moved past it, so a
+// signer built from it stays valid.
 func (r *Route) Instance() string {
 	return r.inner.InstanceId()
 }
@@ -125,12 +113,53 @@ func (r *Route) SetCost(cost uint64) error {
 	return r.inner.SetCost(cost)
 }
 
-// Requested blocks until a consumer requests a path beneath this prefix route,
-// returning (nil, nil) once the origin closes, and at once on an exact route.
+// Cancel retracts the route now, rather than when the collector reclaims it.
+// Later calls fail with ErrCancelled. Its broadcast lives on until
+// [BroadcastProducer.Close].
+func (r *Route) Cancel() {
+	r.inner.Cancel()
+}
+
+// Claim is a prefix route on an origin: a claim that every path beneath a
+// prefix can be served, yielding each request as it arrives.
 //
-// Cancelling ctx abandons only this wait: the route stays advertised.
-func (r *Route) Requested(ctx context.Context) (*BroadcastRequest, error) {
-	inner, err := bridge.CallRelease(ctx, nil, r.inner.Requested, func(request **ffi.MoqBroadcastRequest) {
+// [Claim.Cancel], or the collector reclaiming it, retracts the claim and
+// rejects the requests still waiting.
+type Claim struct {
+	inner *ffi.MoqClaim
+}
+
+// Instance returns the stream this claim serves now. A named instance never
+// changes. Unnamed, the claim moves to a fresh one each time a job holding its
+// current one ends.
+func (c *Claim) Instance() string {
+	return c.inner.InstanceId()
+}
+
+// Announce makes the claim visible, or keeps it so.
+func (c *Claim) Announce() error {
+	return c.inner.Announce()
+}
+
+// Withdraw hides the claim from local consumers and peers alike, keeping its
+// instance: Announce brings it back. Requests beneath it are rejected
+// meanwhile.
+func (c *Claim) Withdraw() error {
+	return c.inner.Withdraw()
+}
+
+// SetCost re-prices the claim in place: lower wins among routes covering the
+// same prefix. A hidden claim keeps the price for when it next announces.
+func (c *Claim) SetCost(cost uint64) error {
+	return c.inner.SetCost(cost)
+}
+
+// Requested blocks until a consumer requests a path beneath this claim,
+// returning (nil, nil) once the claim is retracted or the origin closes.
+//
+// Cancelling ctx abandons only this wait: the claim stays advertised.
+func (c *Claim) Requested(ctx context.Context) (*BroadcastRequest, error) {
+	inner, err := bridge.CallRelease(ctx, nil, c.inner.Requested, func(request **ffi.MoqBroadcastRequest) {
 		if request != nil {
 			(*request).Destroy()
 		}
@@ -141,17 +170,16 @@ func (r *Route) Requested(ctx context.Context) (*BroadcastRequest, error) {
 	return &BroadcastRequest{inner: *inner}, nil
 }
 
-// All ranges over requested broadcasts until the route ends, a call errors, or
-// the loop breaks.
-func (r *Route) All(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
-	return bridge.Seq(ctx, r.Requested)
+// All ranges over requested broadcasts until the claim ends, a call errors, or
+// the loop breaks. Ending ctx stops the loop but leaves the claim advertised.
+func (c *Claim) All(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
+	return bridge.Seq(ctx, nil, c.Requested)
 }
 
-// Cancel retracts the route now, rather than when the collector reclaims it.
-// Pending requests are rejected and later calls fail with ErrCancelled. An exact
-// route's broadcast lives on until [BroadcastProducer.Close].
-func (r *Route) Cancel() {
-	r.inner.Cancel()
+// Cancel retracts the claim now, rather than when the collector reclaims it.
+// Pending requests are rejected and later calls fail with ErrCancelled.
+func (c *Claim) Cancel() {
+	c.inner.Cancel()
 }
 
 // BroadcastRequest is a requested broadcast that has not been answered yet.
@@ -166,11 +194,11 @@ func (r *BroadcastRequest) Path() (string, error) {
 
 // Route answers with the path's own exact route, owning a new broadcast.
 //
-// Unless options names an instance, it takes the one its prefix route lends
-// when it first announces or [Route.Instance] first reads it, so readers that resolved the path through the prefix
-// route continue on it; its end then moves the prefix route to a fresh instance,
-// so a restarted job is a new stream. A prefix route that names its instance
-// lends none, and the route mints its own. Created visible, it announces now and answers
+// Unless options names an instance, it takes the one its claim lends when it
+// first announces or [Route.Instance] first reads it, so readers that resolved
+// the path through the claim continue on it; its end then moves the claim to a
+// fresh instance, so a restarted job is a new stream. A claim that names its
+// instance lends none, and the route mints its own. Created visible, it announces now and answers
 // the waiting requesters; created hidden, they wait
 // until [Route.Announce], so the job can fill its catalog first.
 func (r *BroadcastRequest) Route(options RouteOptions) (*Route, error) {
@@ -181,7 +209,7 @@ func (r *BroadcastRequest) Route(options RouteOptions) (*Route, error) {
 	return newRoute(inner), nil
 }
 
-// Serve answers with held content under the prefix route's continuous sequence space,
+// Serve answers with held content under the claim's continuous sequence space,
 // without announcing an exact route. The broadcast remains the caller's to release.
 func (r *BroadcastRequest) Serve(broadcast *BroadcastConsumer) error {
 	return r.inner.Serve(broadcast.inner)
@@ -254,7 +282,7 @@ type AnnounceConsumer struct {
 
 // Next returns the next path becoming present or absent, or (nil, nil) when the stream ends.
 func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
-	res, err := bridge.Call(ctx, a.inner.Cancel, a.inner.Next)
+	res, err := bridge.Call(ctx, nil, a.inner.Next)
 	if err != nil || res == nil {
 		return nil, err
 	}
@@ -263,7 +291,7 @@ func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
 
 // All ranges over the listing's events until the stream ends or the loop breaks.
 func (a *AnnounceConsumer) All(ctx context.Context) iter.Seq2[AnnounceEvent, error] {
-	return bridge.Seq(ctx, a.Next)
+	return bridge.Seq(ctx, a.inner.Cancel, a.Next)
 }
 
 // Cancel stops the listing.
@@ -284,7 +312,7 @@ type Following struct {
 // instance, once another instance takes it over), then whatever serves it next. Drop
 // what was read from the previous instance then: its tracks end when its route does.
 func (a *Following) Available(ctx context.Context) (*BroadcastConsumer, error) {
-	inner, err := bridge.CallHandle(ctx, a.inner.Cancel, func(ctx context.Context) (*ffi.MoqBroadcastConsumer, error) {
+	inner, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqBroadcastConsumer, error) {
 		res, err := a.inner.Available(ctx)
 		if err != nil || res == nil {
 			return nil, err

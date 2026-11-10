@@ -203,6 +203,16 @@ pub struct Config {
 	/// `None` retains selection for CPU and native decoder/capture surfaces.
 	#[cfg(target_os = "linux")]
 	pub input: Option<crate::frame::vulkan::Device>,
+	/// The VA-API render node, such as `/dev/dri/renderD129`. `None` picks the
+	/// first that encodes, decodes, and scales, so a DMA-BUF moves between them
+	/// without a copy. A named node is used even when it fails to open.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	pub vaapi: Option<std::path::PathBuf>,
+	/// The V4L2 M2M encoder node, such as `/dev/video11`. `None` searches every
+	/// node for one that encodes H.264, which a driver whose format enumeration
+	/// is wrong can defeat.
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	pub v4l2: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -222,6 +232,10 @@ impl Config {
 			resize: None,
 			#[cfg(target_os = "linux")]
 			input: None,
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
+			vaapi: None,
+			#[cfg(all(target_os = "linux", feature = "v4l2"))]
+			v4l2: None,
 		}
 	}
 
@@ -284,13 +298,19 @@ impl Config {
 
 		// No cut: the first picture out of a fresh encoder is a keyframe on every backend, which
 		// is what carries the parameter sets, and a backend that cannot cut still probes.
-		let mut encoded = sink.encode(frame).await?;
+		sink.encode(frame).await?;
+		let mut annexb = Vec::new();
+		while let Some(encoded) = sink.receive()? {
+			annexb.extend_from_slice(&encoded.payload);
+		}
 		// A backend that pipelines holds the first frame, so drain it rather than reading nothing.
-		if encoded.is_empty() {
-			encoded = sink.flush().await?;
+		if annexb.is_empty() {
+			sink.flush().await?;
+			while let Some(encoded) = sink.receive()? {
+				annexb.extend_from_slice(&encoded.payload);
+			}
 		}
 
-		let annexb: Vec<u8> = encoded.iter().flat_map(|frame| frame.payload.iter().copied()).collect();
 		let parsed = match self.codec {
 			Codec::H264 => moq_mux::codec::h264::config(&annexb),
 			Codec::H265 => moq_mux::codec::h265::config(&annexb),
@@ -319,6 +339,17 @@ impl Config {
 		self.color.unwrap_or_else(|| Color::infer(self.size()))
 	}
 
+	/// The resize options, scaling on this encoder's VA-API node unless they name one.
+	fn resolved_resize(&self) -> Option<crate::resize::Config> {
+		let resize = self.resize.clone()?;
+		#[cfg(all(target_os = "linux", feature = "vaapi"))]
+		let resize = crate::resize::Config {
+			vaapi: resize.vaapi.or_else(|| self.vaapi.clone()),
+			..resize
+		};
+		Some(resize)
+	}
+
 	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
 	pub(crate) fn resolved_bitrate(&self) -> moq_net::bandwidth::Rate {
 		self.bitrate
@@ -332,9 +363,10 @@ pub(crate) fn default_bitrate(size: Size, framerate: FrameRate) -> moq_net::band
 	moq_net::bandwidth::Rate::from_bps((size.pixels() as f64 * framerate.as_f64() * 0.07) as u64)
 }
 
-/// Video encoder. Build one with [`Encoder::new`], feed it raw [`Frame`]s via
-/// [`encode`](Self::encode), and publish the resulting [`Encoded`] access units
-/// through a [`Producer`](super::Producer) built for the same [`Codec`].
+/// Video encoder. Build one with [`Encoder::new`], submit raw [`Frame`]s via
+/// [`encode`](Self::encode), [`receive`](Self::receive) the resulting
+/// [`Encoded`] access units until it returns `None`, and publish them through a
+/// [`Producer`](super::Producer) built for the same [`Codec`].
 ///
 /// An encoder is bound to the thread that opens it. Use [`Sink`](super::Sink)
 /// when the owner can move between threads.
@@ -388,7 +420,7 @@ impl Encoder {
 			color: config.resolved_color(),
 			pending_cut: false,
 			join: Join::new(config),
-			resize: config.resize,
+			resize: config.resolved_resize(),
 			#[cfg(target_os = "linux")]
 			input: config.input,
 			_thread_bound: PhantomData,
@@ -488,13 +520,13 @@ impl Encoder {
 		}
 	}
 
-	/// Encode one raw [`Frame`], whether it came from capture, a decoder (the
+	/// Submit one raw [`Frame`], whether it came from capture, a decoder (the
 	/// transcode input path), or your own pixels via
 	/// [`Surface::rgba`](crate::Surface::rgba).
 	///
-	/// Returns zero or more encoded access units, each carrying the timestamp of the
-	/// raw frame it came from: a backend that buffers hands back an earlier frame's
-	/// output, so the two don't always line up.
+	/// Its access units come out of [`receive`](Self::receive), each carrying the
+	/// timestamp of the raw frame it came from: a backend that buffers readies an
+	/// earlier frame's output, so the two don't always line up.
 	///
 	/// A GPU surface feeds a hardware encoder on the same device directly
 	/// (NVDEC -> NVENC never leaves the GPU, a `CVPixelBuffer` goes straight to
@@ -505,7 +537,7 @@ impl Encoder {
 	/// [`Frame::resize`](crate::Frame::resize), which
 	/// [`decode::Config::scale_hint`](crate::decode::Config::scale_hint) lets a
 	/// hardware decoder make a no-op.
-	pub fn encode(&mut self, frame: &Frame) -> Result<Vec<Encoded>, Error> {
+	pub fn encode(&mut self, frame: &Frame) -> Result<(), Error> {
 		// A transposed frame is why this compares the shape rather than a byte
 		// count: 240x320 and 320x240 hold the same number of bytes.
 		#[cfg(target_os = "linux")]
@@ -524,9 +556,9 @@ impl Encoder {
 		#[cfg(not(target_os = "linux"))]
 		let external = false;
 		let resized;
-		let frame = match self.resize {
+		let frame = match &self.resize {
 			Some(config) if !external && frame.size() != self.size => {
-				resized = frame.resize(self.size, &config)?;
+				resized = frame.resize(self.size, config)?;
 				&resized
 			}
 			_ => frame,
@@ -553,20 +585,33 @@ impl Encoder {
 		}
 		let timestamp = std::time::Duration::from(frame.timestamp);
 		let cut = self.pending_cut || (self.backend.can_cut() && self.join.due(timestamp));
-		let encoded = self.backend.encode(frame, cut)?;
+		self.backend.encode(frame, cut)?;
 		// Cleared only once the frame is through: a failed encode produced no
 		// picture, so the request still belongs to whatever comes next rather than
 		// being swallowed. The size check above returns early for the same reason.
 		self.pending_cut = false;
 		self.join.encoded(timestamp, cut);
-		self.join.observe(&encoded);
+		Ok(())
+	}
+
+	/// Pop the oldest ready access unit, or `None` while the codec holds the rest.
+	///
+	/// Call until it returns `None` after each [`encode`](Self::encode) and
+	/// [`flush`](Self::flush).
+	pub fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		let encoded = self.backend.receive()?;
+		if let Some(encoded) = &encoded {
+			self.join.observe(encoded);
+		}
 		Ok(encoded)
 	}
 
-	/// Return every access unit the codec is still holding, leaving the encoder
-	/// ready for the frames that follow. Each keeps the timestamp of the raw frame
-	/// it was encoded from, so a drained tail stays in step with what came before
-	/// it.
+	/// Mark the end of input, so [`receive`](Self::receive) returns every access
+	/// unit the codec is still holding. The encoder stays ready for the frames
+	/// that follow. Each keeps the timestamp of the raw frame it was encoded from,
+	/// so a drained tail stays in step with what came before it.
+	///
+	/// Call it before dropping the encoder, or its last frames are lost.
 	///
 	/// Reach for this at a boundary the output has to respect, which for a live
 	/// broadcast is a group: a hardware codec that pipelines holds the last frames
@@ -577,20 +622,31 @@ impl Encoder {
 	/// Not free: emptying the pipeline gives up the overlap between one frame's
 	/// encode and the next frame's submission, so flush at boundaries rather than
 	/// per frame.
-	pub fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-		let encoded = self.backend.flush()?;
-		self.join.observe(&encoded);
-		Ok(encoded)
+	pub fn flush(&mut self) -> Result<(), Error> {
+		self.backend.flush()
 	}
 
-	/// Flush the encoder, returning any buffered frames. Each keeps the timestamp
-	/// of the raw frame it was encoded from, so a drained tail stays in step with
-	/// what was published before it.
-	///
-	/// Consumes the encoder: nothing can be encoded after a flush, so this is the
-	/// last call rather than one leaving a drained encoder in your hands.
-	pub fn finish(mut self) -> Result<Vec<Encoded>, Error> {
-		self.backend.finish()
+	/// Submit `frame` and collect everything it readied.
+	#[cfg(test)]
+	pub(crate) fn encode_all(&mut self, frame: &Frame) -> Result<Vec<Encoded>, Error> {
+		self.encode(frame)?;
+		self.receive_all()
+	}
+
+	/// Flush and collect the tail.
+	#[cfg(test)]
+	pub(crate) fn flush_all(&mut self) -> Result<Vec<Encoded>, Error> {
+		self.flush()?;
+		self.receive_all()
+	}
+
+	#[cfg(test)]
+	fn receive_all(&mut self) -> Result<Vec<Encoded>, Error> {
+		let mut encoded = Vec::new();
+		while let Some(unit) = self.receive()? {
+			encoded.push(unit);
+		}
+		Ok(encoded)
 	}
 }
 
@@ -636,11 +692,11 @@ impl Join {
 		}
 	}
 
-	/// Count the keyframes among `encoded`, including those the backend placed on
+	/// Count `encoded` if it is a keyframe, including one the backend placed on
 	/// its own count, so the next is measured from the latest.
-	fn observe(&mut self, encoded: &[Encoded]) {
-		for keyframe in encoded.iter().filter(|encoded| encoded.keyframe) {
-			self.last = self.last.max(Some(keyframe.timestamp.into()));
+	fn observe(&mut self, encoded: &Encoded) {
+		if encoded.keyframe {
+			self.last = self.last.max(Some(encoded.timestamp.into()));
 		}
 	}
 }
@@ -651,6 +707,8 @@ mod tests {
 		not(feature = "openh264"),
 		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
 	)]
+
+	use std::collections::VecDeque;
 
 	use super::*;
 
@@ -720,9 +778,9 @@ mod tests {
 			if i == 0 {
 				encoder.cut().unwrap();
 			}
-			frames.extend(encoder.encode(&gray_frame(320, 240, i)).unwrap());
+			frames.extend(encoder.encode_all(&gray_frame(320, 240, i)).unwrap());
 		}
-		frames.extend(encoder.finish().unwrap());
+		frames.extend(encoder.flush_all().unwrap());
 
 		assert!(!frames.is_empty(), "encoder produced no packets");
 
@@ -764,8 +822,8 @@ mod tests {
 		let size = Size::new(320, 240);
 		let i420 = I420::new(size, vec![0x80u8; I420::len(size).unwrap()]).unwrap();
 		let frame = Frame::new(Surface::I420(i420), at(0));
-		let mut frames = encoder.encode(&frame).unwrap();
-		frames.extend(encoder.finish().unwrap());
+		let mut frames = encoder.encode_all(&frame).unwrap();
+		frames.extend(encoder.flush_all().unwrap());
 		assert!(!frames.is_empty());
 		let packets = payloads(&frames);
 		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
@@ -778,7 +836,10 @@ mod tests {
 		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())) else {
 			return;
 		};
-		assert!(matches!(encoder.encode(&gray_frame(640, 480, 0)), Err(Error::Codec(_))));
+		assert!(matches!(
+			encoder.encode_all(&gray_frame(640, 480, 0)),
+			Err(Error::Codec(_))
+		));
 	}
 
 	/// An encoder told to resize scales a frame at another size itself, so a
@@ -790,8 +851,8 @@ mod tests {
 		let Ok(mut encoder) = Encoder::new(&config) else {
 			return;
 		};
-		let mut frames = encoder.encode(&gray_frame(640, 480, 0)).unwrap();
-		frames.extend(encoder.finish().unwrap());
+		let mut frames = encoder.encode_all(&gray_frame(640, 480, 0)).unwrap();
+		frames.extend(encoder.flush_all().unwrap());
 		assert!(!frames.is_empty());
 	}
 
@@ -810,7 +871,7 @@ mod tests {
 			gray_rgba(320, 240).len(),
 			"the byte counts must collide"
 		);
-		assert!(matches!(encoder.encode(&transposed), Err(Error::Codec(_))));
+		assert!(matches!(encoder.encode_all(&transposed), Err(Error::Codec(_))));
 	}
 
 	#[test]
@@ -847,9 +908,9 @@ mod tests {
 			if i == 0 {
 				encoder.cut().unwrap();
 			}
-			frames.extend(encoder.encode(&gray_frame(320, 240, i)).unwrap());
+			frames.extend(encoder.encode_all(&gray_frame(320, 240, i)).unwrap());
 		}
-		frames.extend(encoder.finish().unwrap());
+		frames.extend(encoder.flush_all().unwrap());
 
 		assert!(!frames.is_empty(), "encoder produced no packets");
 		// VideoToolbox completes each frame before returning, so the timestamps come
@@ -895,9 +956,9 @@ mod tests {
 			if i == 0 {
 				encoder.cut().unwrap();
 			}
-			frames.extend(encoder.encode(&gray_frame(320, 240, i)).unwrap());
+			frames.extend(encoder.encode_all(&gray_frame(320, 240, i)).unwrap());
 		}
-		frames.extend(encoder.finish().unwrap());
+		frames.extend(encoder.flush_all().unwrap());
 
 		assert!(!frames.is_empty(), "encoder produced no packets");
 		let packets = payloads(&frames);
@@ -952,9 +1013,9 @@ mod tests {
 				encoder.cut().unwrap();
 			}
 			let frame = Frame::new(Surface::PixelBuffer(nv12_surface(320, 240)), at(i));
-			frames.extend(encoder.encode(&frame).unwrap());
+			frames.extend(encoder.encode_all(&frame).unwrap());
 		}
-		frames.extend(encoder.finish().unwrap());
+		frames.extend(encoder.flush_all().unwrap());
 
 		assert!(!frames.is_empty());
 		let packets = payloads(&frames);
@@ -978,8 +1039,8 @@ mod tests {
 
 		encoder.cut().unwrap();
 		let frame = Frame::new(Surface::PixelBuffer(nv12_surface(320, 240)), at(0));
-		let mut frames = encoder.encode(&frame).unwrap();
-		frames.extend(encoder.finish().unwrap());
+		let mut frames = encoder.encode_all(&frame).unwrap();
+		frames.extend(encoder.flush_all().unwrap());
 
 		assert!(!frames.is_empty());
 		let packets = payloads(&frames);
@@ -1060,9 +1121,9 @@ mod tests {
 			if i == 0 {
 				encoder.cut().unwrap();
 			}
-			frames.extend(encoder.encode(&gray_frame(640, 480, i)).unwrap());
+			frames.extend(encoder.encode_all(&gray_frame(640, 480, i)).unwrap());
 		}
-		frames.extend(encoder.finish().unwrap());
+		frames.extend(encoder.flush_all().unwrap());
 
 		assert!(!frames.is_empty(), "encoder produced no packets");
 		// The MFT buffers, so packets come back stamped with the frame they were
@@ -1116,9 +1177,9 @@ mod tests {
 			if i == 0 {
 				encoder.cut().unwrap();
 			}
-			frames.extend(encoder.encode(&frame).unwrap());
+			frames.extend(encoder.encode_all(&frame).unwrap());
 		}
-		frames.extend(encoder.finish().unwrap());
+		frames.extend(encoder.flush_all().unwrap());
 
 		// On a GPU this exercises the zero-copy texture path; the assert guards
 		// against silently testing only the CPU fallback.
@@ -1148,14 +1209,14 @@ mod tests {
 		assert_eq!(opened, config.resolved_bitrate());
 
 		// Encode first: this is the live-retune path, once the encoder exists.
-		encoder.encode(&gray_frame(320, 240, 0)).unwrap();
+		encoder.encode_all(&gray_frame(320, 240, 0)).unwrap();
 
 		let halved = opened.scaled(0.5);
 		encoder.set_bitrate(halved).unwrap();
 		assert_eq!(encoder.bitrate(), halved);
 
 		// The retuned encoder must still emit a decodable keyframe, not wedge.
-		let frames = encoder.encode(&gray_frame(320, 240, 1)).unwrap();
+		let frames = encoder.encode_all(&gray_frame(320, 240, 1)).unwrap();
 		assert!(!frames.is_empty(), "encoder produced nothing after a retune");
 		let packets = payloads(&frames);
 		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
@@ -1178,12 +1239,12 @@ mod tests {
 		assert_eq!(encoder.bitrate(), halved);
 
 		// The deferred rate is applied during this encode, which must still work.
-		let frames = encoder.encode(&gray_frame(320, 240, 0)).unwrap();
+		let frames = encoder.encode_all(&gray_frame(320, 240, 0)).unwrap();
 		assert!(!frames.is_empty());
 
 		// And the encoder is live now, so a further retune takes the direct path.
 		encoder.set_bitrate(halved.scaled(0.5)).unwrap();
-		assert!(encoder.encode(&gray_frame(320, 240, 1)).is_ok());
+		assert!(encoder.encode_all(&gray_frame(320, 240, 1)).is_ok());
 	}
 
 	#[test]
@@ -1195,26 +1256,30 @@ mod tests {
 	}
 
 	/// A backend that holds each frame back by one, like the Media Foundation MFT:
-	/// `encode` returns the *previous* frame's access unit and `finish` drains the
-	/// last. The payload is the frame's timestamp in microseconds, so a test can
-	/// tell which frame a packet came from independently of what it's stamped with.
+	/// `encode` readies the *previous* frame's access unit and `flush` the last.
+	/// The payload is the frame's timestamp in microseconds, so a test can tell
+	/// which frame a packet came from independently of what it's stamped with.
+	#[derive(Default)]
 	struct Delayed {
-		pending: Option<Encoded>,
+		held: Option<Encoded>,
+		ready: VecDeque<Encoded>,
 	}
 
 	impl Backend for Delayed {
-		fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+		fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
 			let payload = bytes::Bytes::from(frame.timestamp.as_micros().to_string());
-			let previous = self.pending.replace(Encoded::new(payload, frame.timestamp, cut));
-			Ok(previous.into_iter().collect())
+			self.ready
+				.extend(self.held.replace(Encoded::new(payload, frame.timestamp, cut)));
+			Ok(())
 		}
 
-		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-			Ok(self.pending.take().into_iter().collect())
+		fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+			Ok(self.ready.pop_front())
 		}
 
-		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-			self.flush()
+		fn flush(&mut self) -> Result<(), Error> {
+			self.ready.extend(self.held.take());
+			Ok(())
 		}
 
 		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
@@ -1241,7 +1306,7 @@ mod tests {
 			color: config.resolved_color(),
 			pending_cut: false,
 			join: Join::new(config),
-			resize: config.resize,
+			resize: config.resolved_resize(),
 			#[cfg(target_os = "linux")]
 			input: None,
 			_thread_bound: PhantomData,
@@ -1258,17 +1323,17 @@ mod tests {
 	}
 
 	impl Backend for Recorder {
-		fn encode(&mut self, _frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+		fn encode(&mut self, _frame: &Frame, cut: bool) -> Result<(), Error> {
 			self.log.lock().unwrap().push(cut);
-			Ok(Vec::new())
+			Ok(())
 		}
 
-		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-			Ok(Vec::new())
+		fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+			Ok(None)
 		}
 
-		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-			Ok(Vec::new())
+		fn flush(&mut self) -> Result<(), Error> {
+			Ok(())
 		}
 
 		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
@@ -1299,15 +1364,15 @@ mod tests {
 		let mut encoder = encoder_with(Box::new(backend), &config);
 
 		// Nothing asked for: `Config::join` places the boundaries on its own.
-		encoder.encode(&gray_frame(320, 240, 0)).unwrap();
+		encoder.encode_all(&gray_frame(320, 240, 0)).unwrap();
 
 		// Asked twice before a frame exists: one cut, on the next frame.
 		encoder.cut().unwrap();
 		encoder.cut().unwrap();
-		encoder.encode(&gray_frame(320, 240, 1)).unwrap();
+		encoder.encode_all(&gray_frame(320, 240, 1)).unwrap();
 
 		// And it does not carry into the frame after.
-		encoder.encode(&gray_frame(320, 240, 2)).unwrap();
+		encoder.encode_all(&gray_frame(320, 240, 2)).unwrap();
 
 		assert_eq!(*log.lock().unwrap(), vec![false, true, false]);
 	}
@@ -1329,7 +1394,7 @@ mod tests {
 			if i % 3 == 0 {
 				encoder.cut().unwrap();
 			}
-			encoder.encode(&gray_frame(320, 240, i)).unwrap();
+			encoder.encode_all(&gray_frame(320, 240, i)).unwrap();
 		}
 
 		assert_eq!(*log.lock().unwrap(), vec![true, false, false, true, false, false]);
@@ -1362,7 +1427,7 @@ mod tests {
 
 		// Encoding carries on at the backend's own boundaries; the refusal is the
 		// caller's to act on, not a broken encoder.
-		encoder.encode(&gray_frame(320, 240, 0)).unwrap();
+		encoder.encode_all(&gray_frame(320, 240, 0)).unwrap();
 		assert_eq!(*log.lock().unwrap(), vec![false]);
 	}
 
@@ -1399,7 +1464,7 @@ mod tests {
 			let backend = Recorder { log: log.clone(), cuts };
 			let mut encoder = encoder_with(Box::new(backend), &config);
 			for &micros in &times {
-				encoder.encode(&gray_at(micros)).unwrap();
+				encoder.encode_all(&gray_at(micros)).unwrap();
 			}
 			let log = log.lock().unwrap();
 			if !cuts {
@@ -1447,7 +1512,7 @@ mod tests {
 			let micros = (i * 33_333)
 				.checked_add_signed(jitter[i as usize % jitter.len()])
 				.unwrap();
-			encoder.encode(&gray_at(micros)).unwrap();
+			encoder.encode_all(&gray_at(micros)).unwrap();
 		}
 
 		let log = log.lock().unwrap();
@@ -1461,22 +1526,25 @@ mod tests {
 		log: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
 		interval: u32,
 		count: u32,
+		ready: VecDeque<Encoded>,
 	}
 
 	impl Backend for Counting {
-		fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+		fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
 			self.log.lock().unwrap().push(cut);
 			let keyframe = cut || self.count.is_multiple_of(self.interval);
 			self.count = if keyframe { 1 } else { self.count + 1 };
-			Ok(vec![Encoded::new(bytes::Bytes::new(), frame.timestamp, keyframe)])
+			self.ready
+				.push_back(Encoded::new(bytes::Bytes::new(), frame.timestamp, keyframe));
+			Ok(())
 		}
 
-		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-			Ok(Vec::new())
+		fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+			Ok(self.ready.pop_front())
 		}
 
-		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-			Ok(Vec::new())
+		fn flush(&mut self) -> Result<(), Error> {
+			Ok(())
 		}
 
 		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
@@ -1506,12 +1574,13 @@ mod tests {
 			log: log.clone(),
 			interval: config.keyframe_interval(),
 			count: 0,
+			ready: VecDeque::new(),
 		};
 		let mut encoder = encoder_with(Box::new(backend), &config);
 
 		// Three seconds at 60 fps: the backend keys every half second.
 		for i in 0..180 {
-			encoder.encode(&gray_at(i * 16_667)).unwrap();
+			encoder.encode_all(&gray_at(i * 16_667)).unwrap();
 		}
 		assert!(log.lock().unwrap().iter().all(|cut| !cut));
 	}
@@ -1533,10 +1602,10 @@ mod tests {
 		let mut encoder = encoder_with(Box::new(backend), &config);
 
 		for i in 0..20 {
-			encoder.encode(&gray_at(10_000_000 + i * 33_333)).unwrap();
+			encoder.encode_all(&gray_at(10_000_000 + i * 33_333)).unwrap();
 		}
 		for i in 0..40 {
-			encoder.encode(&gray_at(i * 33_333)).unwrap();
+			encoder.encode_all(&gray_at(i * 33_333)).unwrap();
 		}
 
 		let log = log.lock().unwrap();
@@ -1559,7 +1628,7 @@ mod tests {
 
 		let mut keys = Vec::new();
 		for i in 0..70 {
-			for encoded in encoder.encode(&gray_at(i * 50_000)).unwrap() {
+			for encoded in encoder.encode_all(&gray_at(i * 50_000)).unwrap() {
 				if encoded.keyframe {
 					keys.push(encoded.timestamp.as_micros() / 50_000);
 				}
@@ -1630,7 +1699,7 @@ mod tests {
 			if i == 3 {
 				encoder.cut().unwrap();
 			}
-			let encoded = encoder.encode(&gray_frame(320, 240, i)).unwrap();
+			let encoded = encoder.encode_all(&gray_frame(320, 240, i)).unwrap();
 			let joined: Vec<u8> = encoded.iter().flat_map(|f| f.payload.iter()).copied().collect();
 			per_frame.push(nal_types(&joined));
 		}
@@ -1658,16 +1727,16 @@ mod tests {
 	struct Failing;
 
 	impl Backend for Failing {
-		fn encode(&mut self, _frame: &Frame, _cut: bool) -> Result<Vec<Encoded>, Error> {
+		fn encode(&mut self, _frame: &Frame, _cut: bool) -> Result<(), Error> {
 			Err(Error::codec(anyhow::anyhow!("no")))
 		}
 
-		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-			Ok(Vec::new())
+		fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+			Ok(None)
 		}
 
-		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-			Ok(Vec::new())
+		fn flush(&mut self) -> Result<(), Error> {
+			Ok(())
 		}
 
 		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
@@ -1693,17 +1762,17 @@ mod tests {
 
 		let mut encoder = encoder_with(Box::new(Failing), &config);
 		encoder.cut().unwrap();
-		assert!(encoder.encode(&gray_frame(320, 240, 0)).is_err());
+		assert!(encoder.encode_all(&gray_frame(320, 240, 0)).is_err());
 		assert!(encoder.pending_cut, "the backend error swallowed the request");
 
 		// Rejected before the backend ever sees it, for the same reason.
-		let mut encoder = encoder_with(Box::new(Delayed { pending: None }), &config);
+		let mut encoder = encoder_with(Box::new(Delayed::default()), &config);
 		encoder.cut().unwrap();
-		assert!(encoder.encode(&gray_frame(640, 480, 0)).is_err());
+		assert!(encoder.encode_all(&gray_frame(640, 480, 0)).is_err());
 		assert!(encoder.pending_cut, "the size check swallowed the request");
 
 		// ...and the next frame that does go through claims it.
-		encoder.encode(&gray_frame(320, 240, 1)).unwrap();
+		encoder.encode_all(&gray_frame(320, 240, 1)).unwrap();
 		assert!(!encoder.pending_cut);
 	}
 
@@ -1715,13 +1784,13 @@ mod tests {
 	#[test]
 	fn a_buffering_backend_keeps_each_frames_timestamp() {
 		let config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
-		let mut encoder = encoder_with(Box::new(Delayed { pending: None }), &config);
+		let mut encoder = encoder_with(Box::new(Delayed::default()), &config);
 
 		// The packet handed back while frame `i` goes in belongs to frame `i - 1`, so
 		// it has to be stamped one frame back. Stamping at the call site (the only
 		// option when encode just returned bytes) would shift the whole stream.
 		for i in 0..5 {
-			let encoded = encoder.encode(&gray_frame(320, 240, i)).unwrap();
+			let encoded = encoder.encode_all(&gray_frame(320, 240, i)).unwrap();
 			if i == 0 {
 				assert!(encoded.is_empty(), "the first frame is still buffered");
 				continue;
@@ -1733,14 +1802,14 @@ mod tests {
 			assert_eq!(&encoded[0].payload[..], at(i - 1).as_micros().to_string().as_bytes());
 		}
 
-		// The tail: frame 4 never came back from an encode call, so `finish` drains
+		// The tail: frame 4 never came back from an encode call, so `flush` drains
 		// it, still carrying its own time rather than one the caller picks.
-		let tail = encoder.finish().unwrap();
+		let tail = encoder.flush_all().unwrap();
 		assert_eq!(tail.len(), 1);
 		assert_eq!(tail[0].timestamp, at(4));
 		assert!(
-			encoder_with(Box::new(Delayed { pending: None }), &config)
-				.finish()
+			encoder_with(Box::new(Delayed::default()), &config)
+				.flush_all()
 				.unwrap()
 				.is_empty()
 		);
@@ -1751,18 +1820,18 @@ mod tests {
 	/// without that they surface in the *next* group, ahead of its keyframe, where
 	/// a subscriber joining there cannot decode them.
 	///
-	/// The encoder stays usable afterwards, which is what separates this from
-	/// `finish`: a live track flushes at every group and keeps going.
+	/// The encoder stays usable afterwards: a live track flushes at every group
+	/// and keeps going.
 	#[test]
 	fn a_flush_empties_a_pipelined_backend_and_leaves_it_running() {
 		let config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
-		let mut encoder = encoder_with(Box::new(Delayed { pending: None }), &config);
+		let mut encoder = encoder_with(Box::new(Delayed::default()), &config);
 
 		let mut group = Vec::new();
 		for i in 0..3 {
-			group.extend(encoder.encode(&gray_frame(320, 240, i)).unwrap());
+			group.extend(encoder.encode_all(&gray_frame(320, 240, i)).unwrap());
 		}
-		group.extend(encoder.flush().unwrap());
+		group.extend(encoder.flush_all().unwrap());
 
 		// All three frames land in the group they belong to, in order.
 		let times: Vec<_> = group.iter().map(|packet| packet.timestamp).collect();
@@ -1770,9 +1839,9 @@ mod tests {
 
 		// The next group starts clean: nothing carried over, and the encoder still
 		// takes frames.
-		let mut next = encoder.encode(&gray_frame(320, 240, 3)).unwrap();
+		let mut next = encoder.encode_all(&gray_frame(320, 240, 3)).unwrap();
 		assert!(next.is_empty(), "frame 3 is buffered, so nothing comes back yet");
-		next.extend(encoder.finish().unwrap());
+		next.extend(encoder.flush_all().unwrap());
 		let times: Vec<_> = next.iter().map(|packet| packet.timestamp).collect();
 		assert_eq!(times, vec![at(3)], "the flush left something behind");
 	}
@@ -1800,7 +1869,7 @@ mod tests {
 			let surface = crate::frame::Surface::rgba(&rgba, size).unwrap();
 			encoder.cut().unwrap();
 			let frames = encoder
-				.encode(&Frame::new(surface, moq_net::Timestamp::from_micros(0).unwrap()))
+				.encode_all(&Frame::new(surface, moq_net::Timestamp::from_micros(0).unwrap()))
 				.unwrap();
 
 			let keyframe = frames.first().expect("a keyframe");
@@ -1838,7 +1907,7 @@ mod tests {
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
 		encoder.cut().unwrap();
-		let err = encoder.encode(&scaled).expect_err("a mismatched frame is refused");
+		let err = encoder.encode_all(&scaled).expect_err("a mismatched frame is refused");
 		assert!(
 			matches!(
 				err,
@@ -1858,7 +1927,7 @@ mod tests {
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
 		encoder.cut().unwrap();
-		let frames = encoder.encode(&scaled).expect("a declared space encodes");
+		let frames = encoder.encode_all(&scaled).expect("a declared space encodes");
 
 		let keyframe = frames.first().expect("a keyframe");
 		assert_eq!(declared_color(&keyframe.payload), Some(BT709_DESCRIBED));
@@ -1928,8 +1997,8 @@ mod tests {
 			};
 			let mut encoder = Encoder::new(&config).unwrap();
 			encoder.cut().unwrap();
-			let mut encoded = encoder.encode(&frame).unwrap();
-			encoded.extend(encoder.finish().unwrap());
+			let mut encoded = encoder.encode_all(&frame).unwrap();
+			encoded.extend(encoder.flush_all().unwrap());
 			assert_eq!(
 				declared_color(&encoded[0].payload),
 				Some(described()),
@@ -1947,9 +2016,13 @@ mod tests {
 			let mut decoder = crate::decode::Decoder::new(&catalog, &decode).unwrap();
 			let mut decoded = Vec::new();
 			for unit in &encoded {
-				decoded.extend(decoder.decode(&unit.payload, unit.timestamp, unit.keyframe).unwrap());
+				decoded.extend(
+					decoder
+						.decode_all(&unit.payload, unit.timestamp, unit.keyframe)
+						.unwrap(),
+				);
 			}
-			decoded.extend(decoder.flush().unwrap());
+			decoded.extend(decoder.flush_all().unwrap());
 			let picture = decoded.first().expect("a decoded picture");
 			assert_eq!(picture.surface.color(), Some(color), "{source} decoded label");
 
@@ -1974,7 +2047,7 @@ mod tests {
 			})
 			.unwrap();
 			assert!(matches!(
-				guessed.encode(&scaled),
+				guessed.encode_all(&scaled),
 				Err(Error::ColorMismatch { frame, .. }) if frame == color
 			));
 
@@ -1986,7 +2059,7 @@ mod tests {
 			})
 			.unwrap();
 			encoder.cut().unwrap();
-			let encoded = encoder.encode(&scaled).unwrap();
+			let encoded = encoder.encode_all(&scaled).unwrap();
 			assert_eq!(
 				declared_color(&encoded[0].payload),
 				Some(described()),
@@ -2019,8 +2092,8 @@ mod tests {
 				};
 				let mut encoder = Encoder::new(&config).expect("requested encoder must be available");
 				assert_eq!(encoder.name(), backend);
-				let mut encoded = encoder.encode(&frame).expect("encode WGC texture");
-				encoded.extend(encoder.finish().unwrap());
+				let mut encoded = encoder.encode_all(&frame).expect("encode WGC texture");
+				encoded.extend(encoder.flush_all().unwrap());
 				assert!(!encoded.is_empty(), "{backend} must produce a frame");
 				assert!(
 					encoded
@@ -2091,7 +2164,7 @@ mod external_tests {
 			crate::Surface::Vulkan(image),
 			moq_net::Timestamp::from_micros(0).unwrap(),
 		);
-		let error = encoder.encode(&frame).unwrap_err();
+		let error = encoder.encode_all(&frame).unwrap_err();
 		assert!(error.to_string().contains(&device().to_string()), "{error}");
 		assert!(frame.surface.to_i420().is_err());
 	}

@@ -1571,7 +1571,7 @@ impl Connection {
 	///
 	/// If this returns `false`, the connection may be either established or closed, as
 	/// [`poll_connected`](Self::poll_connected) and [`poll_closed`](Self::poll_closed) report.
-	pub fn is_handshaking(&self) -> bool {
+	pub(crate) fn is_handshaking(&self) -> bool {
 		self.state.is_handshake()
 	}
 
@@ -1593,11 +1593,6 @@ impl Connection {
 	/// packets from the peer. All drained connections have been closed.
 	pub fn is_drained(&self) -> bool {
 		self.state.is_drained()
-	}
-
-	/// Look up whether we're the client or server of this Connection
-	pub fn side(&self) -> Side {
-		self.side.side()
 	}
 
 	/// The latest socket address for this connection's peer
@@ -1698,8 +1693,8 @@ impl Connection {
 	}
 
 	/// The connection-wide receive window now in force; see [`Limits::receive_window`]
-	pub fn receive_window(&self) -> u64 {
-		self.streams.receive_window()
+	pub fn receive_window(&self) -> std::num::NonZeroU64 {
+		std::num::NonZeroU64::new(self.streams.receive_window()).expect("receive windows are non-zero limits")
 	}
 
 	/// The most receive credit one stream may hold: the largest per-stream window ever in force,

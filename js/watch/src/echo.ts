@@ -1,4 +1,4 @@
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Report, Echo as Schema } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
@@ -148,7 +148,7 @@ export class Echo {
 			effect.cleanup(() => published.close());
 			effect.cleanup(() => writer.finish());
 			effect.cleanup(write);
-			effect.interval(write, Nano.fromMilli(Milli(Report.INTERVAL)));
+			effect.interval(write, Duration.millis(Report.INTERVAL));
 
 			// Observing the probe asks the peer for PROBE updates, so only do it while someone reads them.
 			const demand = writer.track.demand();
@@ -165,7 +165,7 @@ export class Echo {
 			this.#sources.flatMap((source) => Object.entries(source.feedback(base))),
 		);
 		const rtt = this.in.probe.peek()?.rtt;
-		return rtt === undefined ? { renditions } : { transport: { rtt: Math.floor(rtt) }, renditions };
+		return rtt === undefined ? { renditions } : { transport: { rtt: Math.floor(rtt.asMillis()) }, renditions };
 	}
 
 	/** Stop publishing and release everything this holds. */

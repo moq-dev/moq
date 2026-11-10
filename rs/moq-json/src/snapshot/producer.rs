@@ -34,7 +34,7 @@ fn take<T>(inner: &Mutex<Inner<T>>) -> MutexGuard<'_, Inner<T>> {
 /// it reaches the encoder's caps. Set the track's [`refresh`](moq_net::track::Info::refresh) ratio
 /// when creating it, or joins never ask.
 ///
-/// Set [`compress`](moq_net::track::Info::compress) on that track's info too: JSON is small and
+/// Set [`compression`](moq_net::track::Info::compression) on that track's info too: JSON is small and
 /// repetitive, and moq-net compresses each delta against the snapshot earlier in its group.
 ///
 /// Cheaply clonable: clones share one underlying track and publishing state, like other MoQ
@@ -429,7 +429,7 @@ struct Track {
 impl Track {
 	/// Finish the open group without opening a replacement.
 	fn cut(&mut self) -> Result<()> {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 		Ok(())
@@ -452,7 +452,7 @@ impl Track {
 		// new one before the frame is written, so discovering the limit inside `write_frame` would
 		// leave an empty newest group behind: a snapshot consumer jumps to the newest, so the previous
 		// value would be lost even though this update reported an error.
-		if encoded.payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
+		if encoded.payload.len() as u64 > crate::MAX_GROUP_BYTES {
 			return Err(moq_net::Error::FrameTooLarge.into());
 		}
 
@@ -465,7 +465,7 @@ impl Track {
 	/// Close the open group and write a snapshot as the first frame of a new one.
 	fn write_snapshot(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
 		// The previous group is complete; no more frames will be appended to it.
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 
@@ -483,7 +483,7 @@ impl Track {
 			// Keep the group open so future deltas can be appended to it.
 			true => self.group = Some(group),
 			// One frame per group, identical to a plain JSON track.
-			false => group.finish()?,
+			false => drop(group.finish()?),
 		}
 
 		Ok(())
@@ -499,12 +499,13 @@ impl Track {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
-		// Another handle may have declared the end already, which stands.
+		// Another handle may have declared the end already, which stands. This shared state
+		// keeps its own clone, whose appends the end refuses.
 		if self.inner.finished().is_none() {
-			self.inner.finish()?;
+			drop(self.inner.clone().finish()?);
 		}
 		Ok(())
 	}

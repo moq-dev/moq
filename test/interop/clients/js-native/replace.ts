@@ -1,6 +1,6 @@
 /** Replace a claimed track while its relay is still reading, then subscribe immediately. @module */
 import assert from "node:assert/strict";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { install } from "@moq/web-transport";
 
@@ -21,7 +21,7 @@ function endpoint(address: string): URL {
 
 const published = new Moq.Origin.Producer();
 const received = [new Moq.Origin.Producer(), new Moq.Origin.Producer(), new Moq.Origin.Producer()];
-const claim = published.routePrefix(Moq.Path.from(prefix));
+const claim = published.claim(Moq.Path.from(prefix));
 const broadcast = new Moq.Broadcast.Producer();
 const path = Moq.Path.from(`${prefix}/entity`);
 let track = broadcast.createTrack("value", { maxAge: null });
@@ -96,7 +96,7 @@ try {
 			const future = sequence + 1n;
 			const fetching: Promise<Moq.Group.Consumer> = active[index + 1]
 				.track("value")
-				.fetchGroup(future, { maxDelay: Milli(Number.MAX_SAFE_INTEGER) });
+				.fetchGroup(future, { maxDelay: Duration.millis(Number.MAX_SAFE_INTEGER) });
 			const filling = (async () => {
 				for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 					try {

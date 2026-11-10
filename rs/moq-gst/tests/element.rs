@@ -1093,7 +1093,7 @@ fn a_pad_requested_from_the_eos_notify_is_refused() {
 }
 
 // A write that the producer rejects is the failure the property exists for. A frame past
-// MAX_CACHE_BYTES is the deterministic way to cause one: moq-net refuses it before reserving a group.
+// moq-net's 32 MiB frame bound is the deterministic way to cause one: moq-net refuses it before reserving a group.
 #[test]
 fn a_rejected_write_moves_the_pad_to_error() {
 	init();

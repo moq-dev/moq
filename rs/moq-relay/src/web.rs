@@ -278,11 +278,9 @@ impl Web {
 	/// RTMP opens with a byte no HTTP request or TLS ClientHello starts with, and an
 	/// RTMPS client negotiates no ALPN, so both share the web ports. Until this is
 	/// called, or once the returned consumer is dropped, they are logged and closed.
-	/// A later call replaces the earlier consumer.
-	pub fn rtmp(&mut self) -> rtmp::Incoming {
-		let (handoff, incoming) = rtmp::Handoff::new();
-		self.rtmp = handoff;
-		incoming
+	/// `None` once taken.
+	pub fn rtmp(&mut self) -> Option<rtmp::Incoming> {
+		self.rtmp.incoming()
 	}
 
 	/// Serve `tls://` on the HTTPS listener with `acceptor`, usually
@@ -466,7 +464,7 @@ impl Web {
 				crate::listener::Config {
 					health: health.clone(),
 					timeout: state.timeout,
-					activity: Some(state.shutdown.activity.clone()),
+					admission: Some(state.shutdown.admission.clone()),
 				},
 				WebAcceptor::plain(ws, rtmp.clone(), state.clone()),
 			)?;
@@ -483,7 +481,7 @@ impl Web {
 				crate::listener::Config {
 					health: health.clone(),
 					timeout: state.timeout,
-					activity: Some(state.shutdown.activity.clone()),
+					admission: Some(state.shutdown.admission.clone()),
 				},
 				WebAcceptor::tls(
 					crate::listener::Tls {
@@ -687,7 +685,7 @@ impl WebAcceptor {
 			.admission
 			.clone()
 			.and_then(|admission| admission.take())
-			.or_else(|| state.shutdown.activity.enter())
+			.or_else(|| state.shutdown.admission.enter())
 		else {
 			return;
 		};
@@ -916,15 +914,20 @@ impl<'de> serde::Deserialize<'de> for FetchGroup {
 }
 
 /// Admit a one-shot HTTP read: the auth server sees the path, the raw query, the
-/// SNI on HTTPS, the peer, and any certificate. Only a grant that may
+/// SNI on HTTPS, the dialed host, the peer, and any certificate. Only a grant that may
 /// subscribe counts as a request; the returned origin meters reads under its token.
 // The `Err` is axum's own `ErrorResponse`, so there is nothing here to box.
 #[expect(clippy::result_large_err, reason = "the error type is axum's, not ours")]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "one fact per axum extractor the handlers pass through"
+)]
 async fn admit_http(
 	state: &WebState,
 	path: String,
 	query: AuthQuery,
 	uri: &http::Uri,
+	headers: &http::HeaderMap,
 	server_name: Option<Extension<ServerName>>,
 	remote: net::SocketAddr,
 	mtls: Option<Extension<MtlsPeer>>,
@@ -939,6 +942,7 @@ async fn admit_http(
 		.map(str::to_owned)
 		.or_else(|| query.jwt.map(|jwt| format!("jwt={jwt}")));
 	request.server_name = server_name.map(|Extension(ServerName(name))| name);
+	request.host = dialed_host(uri, headers);
 	request.remote = Some(remote);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	// The listener's timeout bounds admission as it bounds the request headers. An
@@ -961,9 +965,28 @@ async fn admit_http(
 	Ok((lease.with_stats(stats), origin))
 }
 
+/// The host an HTTP request dialed, without its port: the HTTP/2 `:authority`, else
+/// the `Host` header. Lowercased to match the URL-derived transports, whose
+/// `Url::host_str` lowercases a domain.
+fn dialed_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
+	let header = || {
+		headers
+			.get(http::header::HOST)
+			.and_then(|host| host.to_str().ok())
+			.and_then(|host| host.parse::<http::uri::Authority>().ok())
+	};
+	let authority = uri.authority().cloned().or_else(header)?;
+	let host = authority.host();
+	(!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
 /// Serve the announced broadcasts for a given prefix.
 // The `Err` is axum's own `ErrorResponse`, so there is nothing here to box.
 #[expect(clippy::result_large_err, reason = "the error type is axum's, not ours")]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "one axum extractor per fact the admission needs"
+)]
 async fn serve_announced(
 	path: Option<Path<String>>,
 	Query(query): Query<AuthQuery>,
@@ -971,6 +994,7 @@ async fn serve_announced(
 	server_name: Option<Extension<ServerName>>,
 	ConnectInfo(remote): ConnectInfo<net::SocketAddr>,
 	uri: http::Uri,
+	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<String> {
 	let prefix = match path {
@@ -978,14 +1002,16 @@ async fn serve_announced(
 		None => String::new(),
 	};
 
-	let (lease, origin) = admit_http(&state, prefix, query, &uri, server_name, remote, mtls).await?;
+	let (lease, origin) = admit_http(&state, prefix, query, &uri, &headers, server_name, remote, mtls).await?;
 	let mut announced = origin.routes();
 	let mut broadcasts = Vec::new();
 
 	while let Some(event) = announced.try_next() {
-		if let moq_net::origin::RouteEvent::Start(update)
-		| moq_net::origin::RouteEvent::Update(update)
-		| moq_net::origin::RouteEvent::Restart(update) = event
+		if let moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: update,
+		} = event
 		{
 			broadcasts.push(update.prefix);
 		}
@@ -1002,6 +1028,10 @@ async fn serve_announced(
 /// Serve the given group for a given track
 // The `Err` is axum's own `ErrorResponse`, so there is nothing here to box.
 #[expect(clippy::result_large_err, reason = "the error type is axum's, not ours")]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "one axum extractor per fact the admission needs"
+)]
 async fn serve_fetch(
 	Path(path): Path<String>,
 	Query(params): Query<FetchParams>,
@@ -1009,6 +1039,7 @@ async fn serve_fetch(
 	server_name: Option<Extension<ServerName>>,
 	ConnectInfo(remote): ConnectInfo<net::SocketAddr>,
 	uri: http::Uri,
+	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<ServeGroup> {
 	// The path containts a broadcast/track
@@ -1020,7 +1051,17 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let (lease, origin) = admit_http(&state, path.join("/"), params.auth, &uri, server_name, remote, mtls).await?;
+	let (lease, origin) = admit_http(
+		&state,
+		path.join("/"),
+		params.auth,
+		&uri,
+		&headers,
+		server_name,
+		remote,
+		mtls,
+	)
+	.await?;
 	// The token's root is the canonical (alias-resolved) broadcast path.
 	let broadcast = lease.token().root.to_string();
 
@@ -1303,6 +1344,7 @@ mod tests {
 						None,
 						remote,
 						"/fetch/room/video".parse().unwrap(),
+						http::HeaderMap::new(),
 						State(state.clone()),
 					)
 					.await
@@ -1317,6 +1359,7 @@ mod tests {
 						None,
 						remote,
 						"/announced/room".parse().unwrap(),
+						http::HeaderMap::new(),
 						State(state.clone()),
 					)
 					.await
@@ -1369,6 +1412,7 @@ mod tests {
 			None,
 			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/fetch/room/video".parse().unwrap(),
+			http::HeaderMap::new(),
 			State(state.clone()),
 		)
 		.await;
@@ -1380,6 +1424,7 @@ mod tests {
 			None,
 			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/announced/room".parse().unwrap(),
+			http::HeaderMap::new(),
 			State(state.clone()),
 		)
 		.await;
@@ -1387,7 +1432,7 @@ mod tests {
 		decider.await.unwrap();
 
 		let mut report = Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, moq_net::time::Instant::now());
 		let [entry] = report.sessions.as_slice() else {
 			panic!("expected one attributed entry: {:?}", report.sessions);
 		};
@@ -1454,6 +1499,7 @@ mod tests {
 					None,
 					ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 					format!("/fetch/room/video?tier={tier}").parse().unwrap(),
+					http::HeaderMap::new(),
 					State(state.clone()),
 				)
 				.await
@@ -1470,6 +1516,7 @@ mod tests {
 				None,
 				ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 				format!("/announced/room?tier={tier}").parse().unwrap(),
+				http::HeaderMap::new(),
 				State(state.clone()),
 			)
 			.await
@@ -1493,7 +1540,7 @@ mod tests {
 		}
 		let _leases = decider.await.unwrap();
 		let mut report = Report::default();
-		state.cluster.stats.report(&mut report);
+		state.cluster.stats.report(&mut report, moq_net::time::Instant::now());
 		assert_eq!(report.traffic.len(), 2);
 		assert_eq!(report.sessions.len(), 2);
 		for label in ["first", "second"] {
@@ -1565,6 +1612,7 @@ mod tests {
 			None,
 			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/fetch/room/video?group=0".parse().unwrap(),
+			http::HeaderMap::new(),
 			State(state),
 		)
 		.await
@@ -1606,6 +1654,7 @@ mod tests {
 			None,
 			peer(),
 			"/fetch/room/video".parse().unwrap(),
+			http::HeaderMap::new(),
 			State(state.clone()),
 		)
 		.await;
@@ -1617,6 +1666,7 @@ mod tests {
 			None,
 			peer(),
 			"/announced/room".parse().unwrap(),
+			http::HeaderMap::new(),
 			State(state.clone()),
 		)
 		.await;
@@ -1970,7 +2020,8 @@ mod tests {
 
 	/// `server_name` is the SNI that selected the certificate, on an HTTP read and a
 	/// WebSocket alike, never the `Host` the client wrote; plain HTTP has no SNI, so it
-	/// reports none rather than the header. Real sockets, so this runs on the wall clock.
+	/// reports none rather than the header. `host` carries the header on both, lowercased and
+	/// without its port. Real sockets, so this runs on the wall clock.
 	#[cfg(all(unix, feature = "websocket"))]
 	#[tokio::test]
 	async fn server_name_is_the_sni_never_the_host() {
@@ -2017,19 +2068,24 @@ mod tests {
 
 			let mut stream = connect(tls).await;
 			stream
-				.write_all(b"GET /announced HTTP/1.1\r\nHost: tenant.example\r\nConnection: close\r\n\r\n")
+				.write_all(b"GET /announced HTTP/1.1\r\nHost: Tenant.Example:8443\r\nConnection: close\r\n\r\n")
 				.await
 				.unwrap();
 			let admission = admissions.next().await.expect("an HTTP admission");
 			assert_eq!(admission.request.transport, moq_auth::Transport::Http);
 			assert_eq!(admission.request.server_name.as_deref(), expected, "HTTP, tls={tls}");
+			assert_eq!(
+				admission.request.host.as_deref(),
+				Some("tenant.example"),
+				"HTTP, tls={tls}"
+			);
 			// Unanswered, the read fails as unavailable; only the request mattered.
 			drop(admission);
 			let _ = stream.read_to_end(&mut Vec::new()).await;
 
 			let mut stream = connect(tls).await;
 			stream
-				.write_all(b"GET /room HTTP/1.1\r\nHost: tenant.example\r\n")
+				.write_all(b"GET /room HTTP/1.1\r\nHost: Tenant.Example:8443\r\n")
 				.await
 				.unwrap();
 			let client = tokio::spawn(drain::upgrade_while_draining(stream, true));
@@ -2038,6 +2094,11 @@ mod tests {
 			assert_eq!(
 				admission.request.server_name.as_deref(),
 				expected,
+				"WebSocket, tls={tls}"
+			);
+			assert_eq!(
+				admission.request.host.as_deref(),
+				Some("tenant.example"),
 				"WebSocket, tls={tls}"
 			);
 			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(
@@ -2231,7 +2292,7 @@ mod tests {
 				.with_listen(&listen(None))
 				.bind()
 				.unwrap();
-			let incoming = rtmp.then(|| web.rtmp());
+			let incoming = rtmp.then(|| web.rtmp().expect("taken once"));
 			let Addrs {
 				http: Some(http),
 				https: Some(https),
@@ -2442,7 +2503,7 @@ mod tests {
 	/// sockets, so this runs on the wall clock and bounds the answer from below.
 	#[tokio::test]
 	async fn an_unanswered_http_admission_is_refused_at_the_timeout() {
-		kio::clock::host_time();
+		kio::clock::host_time(); // real HTTP sockets
 		use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 		let timeout = std::time::Duration::from_millis(200);
@@ -2531,7 +2592,7 @@ mod tests {
 	async fn websocket_upgrade_advertises_the_configured_receive_windows() {
 		use bytes::Buf;
 		use futures::StreamExt;
-		use qmux::ws::tungstenite::{Message, client::IntoClientRequest};
+		use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 		// QMux's frame type, lengths, and QUIC transport parameter values use QUIC varints.
 		fn decode_quic(bytes: &mut bytes::Bytes) -> Result<u64, &'static str> {
@@ -2564,7 +2625,7 @@ mod tests {
 			request
 				.headers_mut()
 				.insert("sec-websocket-protocol", version.alpn().parse().unwrap());
-			let (mut socket, _) = qmux::ws::tokio_tungstenite::connect_async(request).await.unwrap();
+			let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
 			let Message::Binary(mut record) = kio::clock::timeout(std::time::Duration::from_secs(5), socket.next())
 				.await
 				.unwrap()
@@ -2833,7 +2894,7 @@ mod tests {
 			fn holds_drain(&self) {
 				use futures::FutureExt;
 				assert!(
-					self.shutdown.activity().close().now_or_never().is_none(),
+					self.shutdown.admission().close().now_or_never().is_none(),
 					"a TCP-accepted web connection was absent from the drain before its upgrade"
 				);
 			}
@@ -2859,13 +2920,7 @@ mod tests {
 				"{}",
 				String::from_utf8_lossy(&response)
 			);
-			let socket = qmux::ws::tokio_tungstenite::WebSocketStream::from_raw_socket(
-				stream,
-				qmux::ws::tungstenite::protocol::Role::Client,
-				None,
-			)
-			.await;
-			let (transport, driver) = qmux::ws::Upgraded::new(socket, "qmux-01.moq-lite-06")
+			let (transport, driver) = qmux::ws::Upgraded::new(stream, "qmux-01.moq-lite-06")
 				.connect()
 				.await
 				.unwrap();
@@ -2902,9 +2957,7 @@ mod tests {
 						None => socket_step(upgrade_while_draining(web.stream, true)).await,
 					};
 					let draining = session.draining();
-					let goaway = socket_step(moq_net::kio::wait(|waiter| draining.poll(waiter)))
-						.await
-						.unwrap();
+					let goaway = socket_step(kio::wait(|waiter| draining.poll(waiter))).await.unwrap();
 					assert_eq!(goaway.uri(), "");
 					session.abort(moq_net::Error::Cancel);
 					socket_step(web.running).await.unwrap().unwrap();
@@ -2953,17 +3006,17 @@ mod tests {
 				.with_no_client_auth();
 			client.alpn_protocols = vec![b"h2".to_vec()];
 			let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
-			let activity = moq_net::server::Activity::default();
+			let admission = moq_net::server::Admission::default();
 			let bound = moq_tokio::bind::tcp("127.0.0.1:0".parse().unwrap()).unwrap();
 			let addr = bound.local_addr().unwrap();
 			let listener =
-				crate::listener::Listener::new(bound, moq_tokio::accept::Health::new("h2"), Some(activity.clone()))
+				crate::listener::Listener::new(bound, moq_tokio::accept::Health::new("h2"), Some(admission.clone()))
 					.unwrap();
 			let ((accepted, _), connected) =
 				socket_step(async { tokio::try_join!(listener.accept_stream(), tokio::net::TcpStream::connect(addr)) })
 					.await
 					.unwrap();
-			assert!(activity.close().now_or_never().is_none(), "TLS was not counted");
+			assert!(admission.close().now_or_never().is_none(), "TLS was not counted");
 			let tls = crate::listener::Tls {
 				http: RustlsConfig::from_config(tls),
 				serve,
@@ -2980,7 +3033,7 @@ mod tests {
 			.unwrap();
 			assert_eq!(stream.tls().unwrap().alpn_protocol(), Some(&b"h2"[..]));
 			assert!(
-				activity.close().now_or_never().is_some(),
+				admission.close().now_or_never().is_some(),
 				"h2 awaited request headers before releasing its admission"
 			);
 		}
@@ -3008,28 +3061,28 @@ mod tests {
 		#[tokio::test(start_paused = true)]
 		async fn later_keep_alive_upgrade_enters_from_the_handler() {
 			let mut web = DrainingWeb::new(false, true).await;
-			let pending = web.shutdown.activity().enter().unwrap();
+			let pending = web.shutdown.admission().enter().unwrap();
 			socket_step(plain_request(&mut web.stream)).await;
 			web.trigger.start();
 			let session = socket_step(upgrade_while_draining(web.stream, false)).await;
 			drop(pending);
 			let draining = session.draining();
-			let goaway = socket_step(moq_net::kio::wait(|waiter| draining.poll(waiter))).await;
+			let goaway = socket_step(kio::wait(|waiter| draining.poll(waiter))).await;
 			assert_eq!(goaway.unwrap().uri(), "");
 			session.abort(moq_net::Error::Cancel);
 			socket_step(web.running).await.unwrap().unwrap();
 		}
 
 		async fn refused_upgrade(stream: tokio::net::TcpStream) {
-			use qmux::ws::tungstenite::client::IntoClientRequest;
+			use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 			let mut request = format!("ws://{}/room", stream.peer_addr().unwrap())
 				.into_client_request()
 				.unwrap();
 			request
 				.headers_mut()
 				.insert("sec-websocket-protocol", "qmux-01.moq-lite-06".parse().unwrap());
-			let result = qmux::ws::tokio_tungstenite::client_async(request, stream).await;
-			let Err(qmux::ws::tungstenite::Error::Http(response)) = result else {
+			let result = tokio_tungstenite::client_async(request, stream).await;
+			let Err(tokio_tungstenite::tungstenite::Error::Http(response)) = result else {
 				panic!("an upgrade after drain admission closed was not refused");
 			};
 			assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
@@ -3042,7 +3095,7 @@ mod tests {
 			socket_step(plain_request(&mut web.stream)).await;
 			// Keep the listener running while admission is closed, exposing the
 			// same boundary a connection can reach just before Relay::run stops it.
-			socket_step(web.shutdown.activity().close()).await;
+			socket_step(web.shutdown.admission().close()).await;
 			socket_step(refused_upgrade(web.stream)).await;
 			let mut fresh = socket_step(tokio::net::TcpStream::connect(addr)).await.unwrap();
 			socket_step(plain_request(&mut fresh)).await;

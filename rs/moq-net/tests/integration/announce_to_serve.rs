@@ -31,7 +31,7 @@ const PATH: &str = "bcast";
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Where the observing consumer sits relative to the publisher.
@@ -44,17 +44,9 @@ enum Observer {
 
 /// Drain every route event the cursor has pending, as `kind prefix` lines.
 fn drain(announced: &mut moq_net::origin::Routes) -> Vec<String> {
-	use moq_net::origin::RouteEvent as Event;
-
 	let mut seen = Vec::new();
 	while let Some(event) = announced.try_next() {
-		let (kind, announce) = match event {
-			Event::Start(announce) => ("Start", announce),
-			Event::Update(announce) => ("Update", announce),
-			Event::Restart(announce) => ("Restart", announce),
-			Event::End(announce) => ("End", announce),
-		};
-		seen.push(format!("{kind} {}", announce.prefix));
+		seen.push(format!("{:?} {}", event.kind, event.announce.prefix));
 	}
 	seen
 }
@@ -181,7 +173,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 		first.is_closed(),
 	));
 	write_group(&track, "after");
-	track.finish().unwrap();
+	let _track = track.finish().unwrap();
 	log.push(format!(
 		"draining: {} then {}",
 		next(&mut reader).await,

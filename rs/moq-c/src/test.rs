@@ -75,11 +75,19 @@ fn hidden() -> moq_route_options {
 
 /// The instance a route serves.
 fn instance_of(route: u32) -> String {
+	read_instance(|dst| unsafe { moq_route_instance(route, dst) })
+}
+
+fn claim_instance_of(claim: u32) -> String {
+	read_instance(|dst| unsafe { moq_claim_instance(claim, dst) })
+}
+
+fn read_instance(read: impl FnOnce(&mut moq_string) -> i32) -> String {
 	let mut dst = moq_string {
 		data: std::ptr::null(),
 		len: 0,
 	};
-	assert_eq!(unsafe { moq_route_instance(route, &mut dst) }, 0);
+	assert_eq!(read(&mut dst), 0);
 	unsafe { std::str::from_utf8(std::slice::from_raw_parts(dst.data.cast::<u8>(), dst.len)) }
 		.unwrap()
 		.to_string()
@@ -194,8 +202,6 @@ fn announce_info(announced: u32) -> moq_announce_event {
 		captures_len: 0,
 		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT,
 		route: moq_route_info {
-			hops: std::ptr::null(),
-			hops_len: 0,
 			cost: 0,
 			instance: moq_string {
 				data: std::ptr::null(),
@@ -340,7 +346,19 @@ extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connectio
 		code: 0,
 		kind: 0,
 	};
-	let failed = state.failure < 0;
+	use moq_connection_phase::*;
+	// Flatten the phase data: a phase without a failure reports zero, one without a version empty.
+	let data = &state.data;
+	let (failure, version) = unsafe {
+		match state.phase {
+			MOQ_CONNECTION_PHASE_CONNECTING => (data.connecting.failure, None),
+			MOQ_CONNECTION_PHASE_CONNECTED => (0, Some(data.connected.version)),
+			MOQ_CONNECTION_PHASE_DISCONNECTED => (data.disconnected.failure, None),
+			MOQ_CONNECTION_PHASE_MIGRATING => (data.migrating.failure, Some(data.migrating.version)),
+			MOQ_CONNECTION_PHASE_CLOSED => (data.closed.failure, None),
+		}
+	};
+	let failed = failure < 0;
 	let error = failed.then(|| {
 		unsafe { std::ffi::CStr::from_ptr(moq_error()) }
 			.to_string_lossy()
@@ -350,10 +368,12 @@ extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connectio
 	let _ = sink.tx.send(Seen {
 		phase: state.phase,
 		connects: state.connects,
-		failure: state.failure,
+		failure,
 		error,
 		protocol,
-		version: borrowed_string(state.protocol.data, state.protocol.len).unwrap_or_default(),
+		version: version
+			.and_then(|version| borrowed_string(version.data, version.len))
+			.unwrap_or_default(),
 	});
 }
 
@@ -767,10 +787,10 @@ fn publish_media_labels_config_without_naming_track() {
 fn session_snapshot_error_preserves_destination() {
 	let mut dst: moq_connection_snapshot = unsafe { std::mem::zeroed() };
 	dst.stats.rtt_us = 123;
-	dst.protocol.len = 456;
+	dst.version.len = 456;
 	assert!(unsafe { moq_session_snapshot(0, &mut dst) } < 0);
 	assert_eq!(dst.stats.rtt_us, 123);
-	assert_eq!(dst.protocol.len, 456);
+	assert_eq!(dst.version.len, 456);
 }
 
 #[test]
@@ -1986,7 +2006,7 @@ fn publish_track_invalid_broadcast() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert!(moq_publish_track_group(9999) < 0);
@@ -2021,7 +2041,7 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
@@ -2040,7 +2060,7 @@ fn track_info_max_age() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 	let max_age = |info: moq_track_info| moq_net::track::Info::try_from(&info).unwrap().max_age;
 
@@ -2358,13 +2378,16 @@ fn raw_track_publish_consume() {
 
 /// Wait until a datagram producer has a reader.
 fn wait_datagram_reader(track: u32) {
-	let datagrams = State::lock()
+	let mut datagrams = State::lock()
 		.publish
 		.datagram_producer(Id::try_from(track).unwrap())
 		.expect("a datagram track");
-	let reader = kio::wait(|waiter| match datagrams.poll_priority(waiter, None) {
-		std::task::Poll::Ready(Some(_)) => std::task::Poll::Ready(()),
-		_ => std::task::Poll::Pending,
+	let reader = kio::wait(|waiter| {
+		loop {
+			if std::task::ready!(datagrams.poll_priority_changed(waiter)).is_some() {
+				return std::task::Poll::Ready(());
+			}
+		}
 	});
 	crate::ffi::RUNTIME
 		.block_on(async { kio::clock::timeout(TIMEOUT, reader).await })
@@ -2483,9 +2506,12 @@ fn a_datagram_only_track_is_read() {
 			dg_cb.ptr,
 		)
 	});
-	let reader = kio::wait(|waiter| match datagrams.poll_priority(waiter, None) {
-		std::task::Poll::Ready(Some(_)) => std::task::Poll::Ready(()),
-		_ => std::task::Poll::Pending,
+	let reader = kio::wait(|waiter| {
+		loop {
+			if std::task::ready!(datagrams.poll_priority_changed(waiter)).is_some() {
+				return std::task::Poll::Ready(());
+			}
+		}
 	});
 	crate::ffi::RUNTIME
 		.block_on(async { kio::clock::timeout(TIMEOUT, reader).await })
@@ -2644,7 +2670,7 @@ fn raw_track_subscription_options_and_update() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 	let track =
 		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
@@ -2779,7 +2805,7 @@ fn raw_track_time_anchor() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 	let track =
 		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
@@ -3759,7 +3785,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 	let payload = b"tail";
@@ -4192,10 +4218,9 @@ fn a_hidden_route_is_unroutable_until_announced() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A locally announced route carries its cost and instance, and no hops: the hop chain is
-/// the origin's to build.
+/// A locally announced route carries its cost and instance.
 #[test]
-fn route_options_carry_cost_and_instance_without_hops() {
+fn route_options_carry_cost_and_instance() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
@@ -4206,7 +4231,6 @@ fn route_options_carry_cost_and_instance_without_hops() {
 
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
-	assert_eq!(info.route.hops_len, 0, "a local route claims no hops");
 	assert_eq!(info.route.cost, 7);
 	assert_eq!(route_instance(&info.route).as_ref(), Some(&instance));
 	assert_eq!(moq_origin_announced_free(announced), 0);
@@ -4292,10 +4316,10 @@ fn a_new_route_at_a_path_restarts() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Create a prefix route over `prefix` delivering its requests through `cb`.
-fn route_prefix(origin: u32, prefix: &[u8], cb: &Callback) -> u32 {
+/// Claim `prefix`, delivering its requests through `cb`.
+fn claim(origin: u32, prefix: &[u8], cb: &Callback) -> u32 {
 	id(unsafe {
-		moq_origin_route_prefix(
+		moq_origin_claim(
 			origin,
 			prefix.as_ptr() as *const c_char,
 			prefix.len(),
@@ -4310,8 +4334,7 @@ fn route_prefix(origin: u32, prefix: &[u8], cb: &Callback) -> u32 {
 fn dynamic_serves_a_request_under_a_prefix() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
-	let dynamic = route_prefix(origin, b"live", &cb);
-	assert!(moq_route_broadcast(dynamic) < 0, "a prefix route owns no broadcast");
+	let dynamic = claim(origin, b"live", &cb);
 
 	let path = b"live/cam";
 	let req_cb = Callback::new();
@@ -4348,26 +4371,26 @@ fn dynamic_serves_a_request_under_a_prefix() {
 		crate::error::MOQ_ERROR_UTF8
 	);
 
-	// A hidden job route answers nobody until it announces, under the instance its prefix
-	// route lends.
+	// A hidden job route answers nobody until it announces, under the instance its claim
+	// lends.
 	let job = id(unsafe { moq_broadcast_request_route(request, &hidden()) });
 	assert!(
 		unsafe { moq_broadcast_request_route(request, std::ptr::null()) } < 0,
 		"request is consumed"
 	);
-	let lent = instance_of(dynamic);
+	let lent = claim_instance_of(dynamic);
 	assert_eq!(instance_of(job), lent);
 	let served = id(moq_route_broadcast(job));
 	assert_eq!(moq_route_announce(job), 0);
 	assert!(req_cb.recv() > 0);
 	req_cb.recv_terminal();
-	// The answer's route is the job's to withdraw, which moves the prefix route on.
+	// The answer's route is the job's to withdraw, which moves the claim on.
 	assert_eq!(moq_route_withdraw(job), 0);
-	assert_ne!(instance_of(dynamic), lent);
+	assert_ne!(claim_instance_of(dynamic), lent);
 	assert_eq!(moq_route_free(job), 0);
 
-	assert_eq!(moq_route_free(dynamic), 0);
-	assert!(moq_route_free(dynamic) < 0, "double-free should fail");
+	assert_eq!(moq_claim_free(dynamic), 0);
+	assert!(moq_claim_free(dynamic) < 0, "double-free should fail");
 	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_close(served), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -4379,7 +4402,7 @@ fn dynamic_serves_a_held_consumer_without_taking_its_handle() {
 	let broadcast = publish_broadcast(origin, b"source");
 	let held = consume_local(broadcast);
 	let cb = Callback::new();
-	let dynamic = route_prefix(origin, b"live", &cb);
+	let dynamic = claim(origin, b"live", &cb);
 	let result = Callback::new();
 	let _task = id(unsafe {
 		moq_origin_request(
@@ -4399,7 +4422,7 @@ fn dynamic_serves_a_held_consumer_without_taking_its_handle() {
 	assert_eq!(moq_consume_close(held), 0, "source handle remains caller-owned");
 	result.recv_terminal();
 	assert_eq!(moq_consume_close(served), 0);
-	assert_eq!(moq_route_free(dynamic), 0);
+	assert_eq!(moq_claim_free(dynamic), 0);
 	cb.recv_terminal();
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -4410,7 +4433,7 @@ fn dynamic_refuses_a_missing_callback() {
 	let origin = id(moq_origin_create());
 	let prefix = b"live";
 	let code = unsafe {
-		moq_origin_route_prefix(
+		moq_origin_claim(
 			origin,
 			prefix.as_ptr() as *const c_char,
 			prefix.len(),
@@ -4572,7 +4595,7 @@ fn track_demand_reports_the_wanted_group() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: true,
-		compress: false,
+		compression: 0,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 
@@ -4982,7 +5005,7 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
-		compress: false,
+		compression: 0,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 	let group_cb = Callback::new();
@@ -5052,7 +5075,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
 		group.finish().unwrap();
-		producer.finish().unwrap();
+		drop(producer.clone().finish().unwrap());
 	}
 	let subscribe = || {
 		let subscription = moq_net::track::Subscription::default()
@@ -5700,7 +5723,7 @@ fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 			.origin
 			.get(origin)
 			.unwrap()
-			.route_prefix(dynamic_at, moq_net::origin::RouteOptions::default())
+			.claim(dynamic_at, moq_net::origin::RouteOptions::default())
 			.unwrap()
 	};
 	let cb = Callback::new();
@@ -5817,14 +5840,14 @@ fn an_instance_pins_request_and_follow() {
 }
 
 /// Serve `prefix` on `origin` dynamically.
-fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Route {
+fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Claim {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
 	State::lock()
 		.origin
 		.get(origin)
 		.unwrap()
-		.route_prefix(prefix, moq_net::origin::RouteOptions::default())
+		.claim(prefix, moq_net::origin::RouteOptions::default())
 		.unwrap()
 }
 
@@ -6953,9 +6976,15 @@ fn video_raw_decode() {
 		}
 		let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(320, 240)).unwrap();
 		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(i * 33_333).unwrap());
-		frames.extend(encoder.encode(&frame).unwrap());
+		encoder.encode(&frame).unwrap();
+		while let Some(encoded) = encoder.receive().unwrap() {
+			frames.push(encoded);
+		}
 	}
-	frames.extend(encoder.finish().unwrap());
+	encoder.flush().unwrap();
+	while let Some(encoded) = encoder.receive().unwrap() {
+		frames.push(encoded);
+	}
 	assert!(!frames.is_empty(), "encoder produced no frames");
 
 	let origin = id(moq_origin_create());
@@ -7426,7 +7455,10 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	let connect = expected.connect.resolve();
 
 	assert!(config.has_connect_timeout);
-	assert_eq!(config.connect_timeout_us, connect.timeout.as_micros() as u64);
+	assert_eq!(
+		config.connect_timeout_us,
+		connect.timeout.unwrap_or_default().as_micros() as u64
+	);
 	assert!(config.has_failover_delay);
 	assert_eq!(config.failover_delay_us, connect.race.as_micros() as u64);
 	assert!(config.has_resolution_delay);
@@ -7440,10 +7472,13 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
 	assert!(config.has_backoff_max);
-	assert_eq!(config.backoff_max_us, expected.connect.backoff.max().as_micros() as u64);
+	assert_eq!(
+		config.backoff_max_us,
+		expected.connect.backoff.max().unwrap_or_default().as_micros() as u64
+	);
 	assert!(config.has_backoff_timeout);
 	assert_eq!(
-		expected.connect.backoff.timeout(),
+		expected.connect.backoff.timeout().unwrap_or_default(),
 		std::time::Duration::from_micros(config.backoff_timeout_us)
 	);
 
@@ -7456,7 +7491,10 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_quic_max_streams);
 	assert_eq!(config.quic_max_streams, quic.max_streams);
 	assert!(config.has_quic_idle_timeout);
-	assert_eq!(config.quic_idle_timeout_us, quic.idle_timeout.as_micros() as u64);
+	assert_eq!(
+		config.quic_idle_timeout_us,
+		quic.idle_timeout.unwrap_or_default().as_micros() as u64
+	);
 	assert_eq!(
 		config.has_quic_keep_alive.then_some(config.quic_keep_alive_us),
 		quic.keep_alive.map(|d| d.as_micros() as u64)
@@ -8143,20 +8181,16 @@ fn dial_pinned(url: &str, fingerprint: &str, publish: u32, consume: u32, user_da
 	})
 }
 
-/// Received routes expose each traversed origin in order, rather than an empty local path.
+/// A received route accumulates each session's cost across a relay and carries an instance.
 ///
 /// The relay accepts both sessions, as a relay server does: a server asks its peer about
 /// everything, while a client session asks only about what a local reader watches, which
 /// a session forwarding the relay's origin downstream is not.
 #[test]
-fn announce_route_hops_cross_a_relay_session() {
+fn announce_route_crosses_a_relay_session() {
 	let source = id(moq_origin_create());
 	let relay = id(moq_origin_create());
 	let sink = id(moq_origin_create());
-	let hops = {
-		let state = State::lock();
-		[source, relay].map(|origin| state.origin.get(Id::try_from(origin).unwrap()).unwrap().hop().get())
-	};
 	let server_cb = Callback::new();
 	let (server, addr, fingerprint) = listen(&server_cb);
 	let url = format!("https://{addr}/");
@@ -8185,11 +8219,6 @@ fn announce_route_hops_cross_a_relay_session() {
 	assert_eq!(
 		borrowed_string(info.prefix, info.prefix_len).as_deref(),
 		Some("relayed")
-	);
-	assert_eq!(info.route.hops_len, hops.len());
-	assert_eq!(
-		unsafe { std::slice::from_raw_parts(info.route.hops, info.route.hops_len) },
-		hops
 	);
 	assert_eq!(info.route.cost, 9, "each session adds its default cost of one");
 	assert!(route_instance(&info.route).is_some(), "every route carries an instance");
@@ -8262,7 +8291,7 @@ fn server_accepts_a_session() {
 		assert_eq!(connected.phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED);
 		assert_eq!(connected.connects, 1);
 		assert_eq!(connected.failure, 0);
-		assert!(!connected.version.is_empty(), "a live session names its protocol");
+		assert!(!connected.version.is_empty(), "a live session names its version");
 	}
 
 	let mut stats: moq_connection_stats = unsafe { std::mem::zeroed() };

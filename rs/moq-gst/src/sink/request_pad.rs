@@ -6,7 +6,6 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
-use hang::moq_net;
 
 use super::MediaContainer;
 use super::listed::Listed;
@@ -119,9 +118,9 @@ impl Bandwidth {
 		let mut grant = self.grant.clone();
 		// Activation emits the initial notification synchronously. Prime this clone so the task only
 		// reports subsequent changes instead of immediately duplicating that notification.
-		let _ = demand.poll_wanted_changed(&moq_net::kio::Waiter::noop());
+		let _ = demand.poll_wanted_changed(&kio::Waiter::noop());
 		if let Some(grant) = &mut grant {
-			let _ = grant.poll_changed(&moq_net::kio::Waiter::noop());
+			let _ = grant.poll_changed(&kio::Waiter::noop());
 		}
 		self.watch_task = Some(RUNTIME.spawn(async move {
 			loop {

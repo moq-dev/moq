@@ -5,8 +5,8 @@
 
 use std::time::Duration;
 
-use hang::moq_net::{self, Instance, Timestamp, origin, track};
 use moq_mux::catalog::Stream;
+use moq_net::{Instance, Timestamp, origin, track};
 
 const LITE_07: &str = "moq-lite-07-wip";
 
@@ -106,12 +106,27 @@ fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Publish
 async fn changed(follow: &mut origin::Routes) -> bool {
 	loop {
 		match follow.next().await.unwrap() {
-			origin::RouteEvent::Restart(_) => return true,
-			origin::RouteEvent::End(_) => {
-				assert!(matches!(follow.next().await, Some(origin::RouteEvent::Start(_))));
+			origin::RouteEvent {
+				kind: origin::RouteKind::Restart,
+				..
+			} => return true,
+			origin::RouteEvent {
+				kind: origin::RouteKind::End,
+				..
+			} => {
+				assert!(matches!(
+					follow.next().await,
+					Some(origin::RouteEvent {
+						kind: origin::RouteKind::Start,
+						..
+					})
+				));
 				return false;
 			}
-			origin::RouteEvent::Update(_) => {}
+			origin::RouteEvent {
+				kind: origin::RouteKind::Update,
+				..
+			} => {}
 			other => panic!("expected replacement, got {other:?}"),
 		}
 	}
@@ -146,9 +161,18 @@ async fn replacement(version: &str) {
 		.unwrap();
 	assert!(matches!(
 		catalog_follow.next().await,
-		Some(origin::RouteEvent::Start(_))
+		Some(origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			..
+		})
 	));
-	assert!(matches!(media_follow.next().await, Some(origin::RouteEvent::Start(_))));
+	assert!(matches!(
+		media_follow.next().await,
+		Some(origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			..
+		})
+	));
 
 	let held = viewer.request("live/catalog.hang", None).await.unwrap();
 	let old = moq_mux::Source::new(viewer.clone(), held);
@@ -287,7 +311,7 @@ versions! {
 /// A worker claiming `live`, answering each request with a job's exact route: the catalog,
 /// which names `./media` under the job's instance, and the media it references.
 struct Worker {
-	claim: origin::Route,
+	claim: origin::Claim,
 	jobs: std::sync::Arc<std::sync::Mutex<Vec<Job>>>,
 }
 
@@ -301,7 +325,7 @@ struct Job {
 
 impl Worker {
 	fn new(origin: &origin::Producer) -> Self {
-		let claim = origin.route_prefix("live", origin::RouteOptions::default()).unwrap();
+		let claim = origin.claim("live", origin::RouteOptions::default()).unwrap();
 		let jobs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 		let (handler, answered) = (claim.clone(), jobs.clone());
 		tokio::spawn(async move {
@@ -380,7 +404,13 @@ async fn a_player_reads_through_a_claim_on_its_first_request() {
 		.established()
 		.await
 		.unwrap();
-	assert!(matches!(routes.next().await, Some(origin::RouteEvent::Start(_))));
+	assert!(matches!(
+		routes.next().await,
+		Some(origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			..
+		})
+	));
 
 	let held = viewer.request("live/catalog.hang", None).await.unwrap();
 	let source = moq_mux::Source::new(viewer.clone(), held);
@@ -414,7 +444,10 @@ async fn a_player_reads_through_a_claim_on_its_first_request() {
 	assert_ne!(worker.claim.instance(), lent);
 	loop {
 		match routes.next().await.unwrap() {
-			origin::RouteEvent::End(end) if end.prefix.as_str() == "live/media" => break,
+			origin::RouteEvent {
+				kind: origin::RouteKind::End,
+				announce: end,
+			} if end.prefix.as_str() == "live/media" => break,
 			_ => {}
 		}
 	}

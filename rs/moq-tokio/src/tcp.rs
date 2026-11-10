@@ -292,7 +292,7 @@ impl TlsAcceptor {
 	pub async fn accept<T>(
 		&self,
 		stream: tokio_rustls::server::TlsStream<T>,
-		active: moq_net::server::Active,
+		active: moq_net::server::Admitted,
 	) -> crate::Result<crate::server::Request>
 	where
 		T: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRef<tokio::net::TcpStream> + Send + Unpin + 'static,
@@ -663,7 +663,7 @@ mod tests {
 	/// through to the loopback listener within the stagger delay.
 	#[tokio::test]
 	async fn failover_recovers_from_blackhole_candidate() {
-		kio::clock::host_time();
+		kio::clock::host_time(); // a real dial that blackholes
 		let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
 			.await
 			.expect("bind listener")

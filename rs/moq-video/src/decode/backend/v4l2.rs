@@ -48,7 +48,6 @@ pub(crate) const NAME: &str = "v4l2";
 
 /// Which node decodes: one that takes H.264 in and gives raw 4:2:0 back.
 const ROLE: Role = Role {
-	env: "MOQ_V4L2_DECODER",
 	input: &[v4l2::H264],
 	output: v4l2::RAW,
 };
@@ -112,6 +111,8 @@ pub(crate) struct V4l2 {
 	/// microseconds, and a [`Timestamp`] is an instant at its own scale, which a
 	/// round trip through microseconds would change.
 	submitted: VecDeque<(Duration, Timestamp)>,
+	/// Pictures copied out of the driver, waiting for `receive`.
+	ready: VecDeque<Frame>,
 }
 
 /// Where the decoder stands, with what each stage needs.
@@ -139,13 +140,13 @@ struct Pictures {
 }
 
 impl V4l2 {
-	pub(crate) fn open(stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, config: &Config) -> Result<Box<dyn Backend>, Error> {
 		let codec = stream.codec;
 		if codec != Codec::H264 {
 			return Err(Error::UnsupportedCodec(format!("{NAME} decodes H.264 only")));
 		}
 
-		let device = v4l2::open(&ROLE)?;
+		let device = v4l2::open(&ROLE, config.v4l2.as_deref())?;
 		// Before the first access unit, so the announcement of the stream's size
 		// cannot be missed.
 		device.subscribe_source_change()?;
@@ -185,6 +186,7 @@ impl V4l2 {
 			coded,
 			phase: Phase::Sizing { since: None },
 			submitted: VecDeque::new(),
+			ready: VecDeque::new(),
 		}))
 	}
 
@@ -335,13 +337,13 @@ impl V4l2 {
 		)
 	}
 
-	/// Collect every picture the driver has finished, re-queueing each buffer as
+	/// Queue every picture the driver has finished, re-queueing each buffer as
 	/// it is copied out.
 	///
 	/// Returns whether the sequence ended, which the driver says with
 	/// `V4L2_BUF_FLAG_LAST` on its last picture and then with `EPIPE` on any
 	/// dequeue past it.
-	fn drain(&mut self, frames: &mut Vec<Frame>) -> Result<bool, Error> {
+	fn drain(&mut self) -> Result<bool, Error> {
 		let Phase::Decoding(pictures) = &self.phase else {
 			return Ok(false);
 		};
@@ -376,7 +378,7 @@ impl V4l2 {
 
 			if let Some(decoded) = decoded {
 				let timestamp = restore(&mut self.submitted, buffer.timestamp)?;
-				frames.push(Frame::new(Surface::I420(decoded), timestamp));
+				self.ready.push_back(Frame::new(Surface::I420(decoded), timestamp));
 			}
 			if buffer.last() {
 				return Ok(true);
@@ -384,7 +386,7 @@ impl V4l2 {
 		}
 	}
 
-	/// Take the pictures still in the CAPTURE queue when a sequence ends.
+	/// Queue the pictures still in the CAPTURE queue when a sequence ends.
 	///
 	/// A source change is an implicit drain: the driver decodes everything from
 	/// before the change, marks the last of it with `V4L2_BUF_FLAG_LAST`, and only
@@ -393,12 +395,12 @@ impl V4l2 {
 	/// is a visible gap at each mid-stream resolution change. See
 	/// `Documentation/userspace-api/media/v4l/dev-decoder.rst`, "Dynamic Resolution
 	/// Change".
-	fn drain_tail(&mut self) -> Result<Vec<Frame>, Error> {
-		let mut frames = Vec::new();
+	fn drain_tail(&mut self) -> Result<(), Error> {
+		let start = self.ready.len();
 		let deadline = Instant::now() + DRAIN_TIMEOUT;
 		loop {
-			if self.drain(&mut frames)? {
-				return Ok(frames);
+			if self.drain()? {
+				return Ok(());
 			}
 			if Instant::now() >= deadline {
 				// Renegotiated anyway: a tail the driver never finished is worth less
@@ -406,10 +408,10 @@ impl V4l2 {
 				// make it arrive.
 				tracing::warn!(
 					decoder = NAME,
-					frames = frames.len(),
+					frames = self.ready.len() - start,
 					"V4L2 decoder did not end the sequence within {DRAIN_TIMEOUT:?}"
 				);
-				return Ok(frames);
+				return Ok(());
 			}
 			self.device.wait(POLL_INTERVAL);
 		}
@@ -420,17 +422,16 @@ impl V4l2 {
 	/// Returns whether a source change arrived during the drain. That event stops
 	/// the decoder at the old format, so the caller must renegotiate before it can
 	/// continue through any access units queued for the new format.
-	fn drain_sequence(&mut self) -> Result<(Vec<Frame>, bool), Error> {
-		let mut frames = Vec::new();
+	fn drain_sequence(&mut self) -> Result<bool, Error> {
 		let mut ended = false;
 		let mut changed = false;
 		let mut deadline = Instant::now() + DRAIN_TIMEOUT;
 		loop {
-			let before = frames.len();
+			let before = self.ready.len();
 			let reclaimed = self.reclaim_coded()?;
 			changed |= self.device.take_source_change();
 			if !ended {
-				ended = self.drain(&mut frames)?;
+				ended = self.drain()?;
 			}
 
 			// A source change stops the old sequence at LAST while access units for
@@ -438,10 +439,10 @@ impl V4l2 {
 			// continue, so do not wait here for buffers the stopped decoder cannot
 			// return yet.
 			if ended && (changed || self.coded.outstanding() == 0) {
-				return Ok((frames, changed));
+				return Ok(changed);
 			}
 
-			if reclaimed > 0 || frames.len() > before {
+			if reclaimed > 0 || self.ready.len() > before {
 				deadline = Instant::now() + DRAIN_TIMEOUT;
 			} else if Instant::now() >= deadline {
 				return Err(Error::codec(anyhow::anyhow!(
@@ -485,18 +486,14 @@ impl V4l2 {
 		Ok(())
 	}
 
-	/// End the stream and drain it, returning the decoder ready for the next
+	/// End the stream and drain it, leaving the decoder ready for the next
 	/// stream's keyframe or [`Phase::Failed`].
-	fn drain_stream(&mut self) -> Result<Vec<Frame>, Error> {
-		let mut frames = Vec::new();
+	fn drain_stream(&mut self) -> Result<(), Error> {
 		loop {
 			// Refused, no drain began, so the decoder carries on as it was.
 			self.device.decoder_cmd(V4L2_DEC_CMD_STOP)?;
 			let changed = match self.drain_sequence() {
-				Ok((tail, changed)) => {
-					frames.extend(tail);
-					changed
-				}
+				Ok(changed) => changed,
 				Err(err) => {
 					self.reset()?;
 					return Err(err);
@@ -515,7 +512,7 @@ impl V4l2 {
 			// even after every OUTPUT buffer was returned. Resume it, then always run
 			// a fresh drain so the flush still covers everything submitted before it.
 			if !changed {
-				return Ok(frames);
+				return Ok(());
 			}
 		}
 	}
@@ -551,7 +548,7 @@ fn restore(submitted: &mut VecDeque<(Duration, Timestamp)>, key: Duration) -> Re
 }
 
 impl Backend for V4l2 {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
 		if let Phase::Failed = self.phase {
 			return Err(failed());
 		}
@@ -561,7 +558,6 @@ impl Backend for V4l2 {
 		// event is worth waiting for. After it, checking costs one ioctl and a
 		// missed resolution change would decode the rest of the stream at the old
 		// geometry.
-		let mut frames = Vec::new();
 		if let Phase::Sizing { since } = &mut self.phase {
 			let since = *since.get_or_insert_with(Instant::now);
 			let deadline = Instant::now() + SOURCE_CHANGE_TIMEOUT;
@@ -578,7 +574,7 @@ impl Backend for V4l2 {
 						?waited,
 						"V4L2 decoder has not reported the stream's size"
 					);
-					return Ok(Vec::new());
+					return Ok(());
 				}
 				self.device.wait(POLL_INTERVAL);
 			}
@@ -586,15 +582,19 @@ impl Backend for V4l2 {
 		} else if self.device.take_source_change() {
 			// The pictures decoded before the change are still in the CAPTURE queue,
 			// and the kernel wants them taken before the queue is released.
-			frames = self.drain_tail()?;
+			self.drain_tail()?;
 			self.negotiate()?;
 		}
 
-		self.drain(&mut frames)?;
-		Ok(frames)
+		self.drain()?;
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
 		match self.phase {
 			Phase::Failed => Err(failed()),
 			// A drain only begins with both queues streaming. Before the driver has
@@ -605,12 +605,12 @@ impl Backend for V4l2 {
 				// them, so none can surface after the next stream's keyframe.
 				self.reset()?;
 				self.phase = Phase::Sizing { since: None };
-				Ok(Vec::new())
+				Ok(())
 			}
 			Phase::Decoding(_) => {
-				let frames = self.drain_stream()?;
+				self.drain_stream()?;
 				self.submitted.clear();
-				Ok(frames)
+				Ok(())
 			}
 		}
 	}

@@ -497,7 +497,7 @@ It MUST NOT select an infeasible route, and a distance only ever falls within a 
 A node MAY mark a session upstream.
 A route is down-only when it arrived on an upstream session or with its Down Only bit set; a node sends a down-only route with the bit set, and never on an upstream session.
 
-A node sends its selected route to every origin node it knows on each Announce Stream it answers, and MAY omit routes with no claim matching the stream's request.
+A node sends its selected route to an origin node on an Announce Stream it answers only while the route has a claim the stream's request presents (see [Announce](#announce)): it sends ROUTE_START before the first such claim, and once the last one is withdrawn, the batch carrying that withdrawal, closed by its floor (which certifies the withdrawal where the node can certify the request), then ROUTE_END. It starts that route on the stream again only once the subscriber echoed the ROUTE_END. A subscriber therefore holds no route for an origin node its request does not meet.
 A node that does not forward, such as a client, sends only its own route, and holds no feasibility distance for any other.
 An origin advances its Seqno whenever its own set of sessions changes.
 It never advertises a Seqno or Revision of 2^64-1: a change that would reach it instead rotates its Node ID, ending the old route everywhere and announcing its claims again under the new one.
@@ -966,6 +966,8 @@ The following Setup Parameters are defined:
 |------|----------------|-------------|
 | 0x4  | Cost           | Cost (i)    |
 |------|----------------|-------------|
+| 0x5  | Node ID        | Node ID (i) |
+|------|----------------|-------------|
 | 0x6  | Implementation | Tokens (s)  |
 |------|----------------|-------------|
 | 0x7  | Token          | Token (b)   |
@@ -1021,6 +1023,14 @@ A value of 0 is a PROTOCOL_VIOLATION: a free link would leave a route as close a
 Both endpoints send it and the two values need not match: the parameter prices the sender's own egress. A relay MUST NOT forward it.
 
 A declared cost is an assertion, not an instruction: a receiver MAY charge a locally configured value of at least 1 instead, so a peer cannot reprice its neighbours by declaring itself cheap.
+
+### Node ID Parameter {#node-id-parameter}
+The Node ID Parameter declares the Node ID the sender originates its own routes under (see [Routing](#routing)).
+Its value MUST NOT be 0 or have the most significant bit set; a receiver MUST close the session with a PROTOCOL_VIOLATION if it does.
+
+A receiver that receives its own Node ID has reached itself, such as a relay dialing an address of its own, and SHOULD close the session.
+A Node ID in SETUP is declared, not proven, and a receiver MUST NOT authorize on it.
+Either endpoint MAY send it, and an endpoint that originates no routes omits it, having no Node ID to declare. A relay MUST NOT forward it.
 
 ### Implementation Parameter {#implementation-parameter}
 The Implementation Parameter names the sender's software, so a peer can attribute a session to its build.
@@ -2189,11 +2199,12 @@ The `Message Length` describes the payload size on the wire.
 - An advertiser MAY announce a path it answers through a claim under the claim's Instance, so subscriptions resolved through the claim continue, and a claim still serving that Instance when the announcement ends restarts under a new one.
 - A receiver mints an Instance, starting with `~`, for each announcement a session of an earlier version delivers.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
-- Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list, ANNOUNCE_OK's Hop ID, and the SETUP Hop parameter (0x5).
+- Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
 - Added ROUTE_HOLD (0xB), which holds a route while it recovers; ROUTE_END lets it go. Neither withdraws the origin's claims, and the subscriber echoes every ROUTE_END back.
 - Added ROUTE_REQUEST (0xA), sent by the subscriber on the Announce Stream to ask for a route with a newer seqno when every route it has is infeasible.
 - Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.
 - A route presents only its most specific claim covering the requested prefix, moved to the next covering claim when it is withdrawn rather than ended.
+- A route goes on a stream only while it has a claim the request presents, and ends after the batch withdrawing its last claim. It starts on that stream again only once the subscriber echoed the ROUTE_END.
 - Added `Node ID` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the origin node the first hop selected, followed by every later hop.
 - Replaced Warm and Cold Route Cost with the origin's Announce Cost, unchanged in transit. ANNOUNCE_UPDATE carries only the Announce Cost.
 - The Cost parameter must be at least 1.

@@ -32,6 +32,10 @@ deduplicating and upgrading dependencies.
 
 What to check first:
 
+- The [benchmark history](https://git.moq.dev/bench/)'s `bench-gate-cost` rows: `crate/*/instructions` ranks every
+  crate's and dependency's rustc instructions in a cold gate (`cold/`) and after
+  a moq-net edit (`moq-net/`), and flags the nights each one moved. Build
+  script runs are not attributed per crate; see bench/README.md.
 - Fat LTO is kept, but the shipping-profile comparison below no longer
   favors it on build cost. From equally cold targets thin cut the whole
   build's wall by 12.5% at about equal CPU, and the archive has shrunk since

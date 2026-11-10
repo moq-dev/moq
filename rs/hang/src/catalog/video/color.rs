@@ -22,7 +22,7 @@ pub struct Color {
 	pub matrix: Option<u8>,
 
 	/// The numeric range of the samples.
-	pub range: Option<Range>,
+	pub range: Option<ColorRange>,
 
 	/// The display the content was mastered on, as SMPTE ST 2086.
 	pub mastering: Option<Mastering>,
@@ -34,7 +34,7 @@ pub struct Color {
 /// The numeric range of the samples, as H.273's `VideoFullRangeFlag`.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
-pub enum Range {
+pub enum ColorRange {
 	/// Studio swing: 8-bit luma spans 16..235 and chroma 16..240.
 	Limited,
 	/// Full swing: every 8-bit code is used.
@@ -88,7 +88,7 @@ mod test {
 			primaries: Some(9),
 			transfer: Some(16),
 			matrix: Some(9),
-			range: Some(Range::Limited),
+			range: Some(ColorRange::Limited),
 			mastering: Some(Mastering {
 				red: Chromaticity { x: 0.708, y: 0.292 },
 				green: Chromaticity { x: 0.17, y: 0.797 },

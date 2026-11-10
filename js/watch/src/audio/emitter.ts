@@ -1,9 +1,9 @@
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
 // How long a volume change ramps for.
-const FADE = Milli(200);
+const FADE = Duration.millis(200);
 
 /** Signals the emitter reads. */
 export type EmitterInput = {
@@ -99,7 +99,7 @@ export class Emitter {
 
 			// Linear, like the publisher's gain: an exponential ramp can't start from or reach silence.
 			const volume = effect.get(this.in.muted) ? 0 : effect.get(this.in.volume);
-			gain.gain.linearRampToValueAtTime(volume, gain.context.currentTime + Milli.toSecond(FADE));
+			gain.gain.linearRampToValueAtTime(volume, gain.context.currentTime + FADE.asSecs());
 		});
 	}
 

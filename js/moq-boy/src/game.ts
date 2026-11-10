@@ -6,7 +6,7 @@
  *
  * @module
  */
-import { Nano, Second } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
@@ -37,7 +37,7 @@ interface Command {
 }
 
 // Close the session to the emulator after 60s of no input.
-const FEEDBACK_IDLE = Nano.fromSecond(Second(60));
+const FEEDBACK_IDLE = Duration.secs(60);
 
 // Game Boy native resolution.
 const GB_WIDTH = 160;
@@ -115,8 +115,9 @@ export class Game {
 	/** The Game Boy buttons currently held down. */
 	readonly heldButtons = new Set<string>();
 
-	// Internal command publishing state.
+	// The command waiting for the session to open, consumed once written.
 	#command = new Moq.Signals.Signal<Command | undefined>(undefined);
+	readonly #connection: Moq.Connection;
 	#feedbackActive = new Moq.Signals.Signal(false);
 
 	constructor(config: GameConfig) {
@@ -124,6 +125,7 @@ export class Game {
 		this.sessionId = sessionId;
 		this.expanded = expanded;
 		this.#endpoint = config.endpoint;
+		this.#connection = connection;
 
 		// Derive active state from expanded + hovered.
 		this.#signals.run(this.#runActive.bind(this));
@@ -213,23 +215,25 @@ export class Game {
 		this.sendCommand({ type: "buttons", buttons: [...this.heldButtons] });
 	}
 
-	/** Send a command to the emulator. */
+	/** Send a command to the emulator. Dropped while disconnected, since it would land late and out of context. */
 	sendCommand(cmd: Record<string, unknown>) {
+		if (this.#connection.status.peek() !== "connected") return;
+
 		// Open the session on input, with idle timeout.
 		this.#feedbackActive.set(true);
 
 		this.#command.set({ cmd, timestamps: this.#timestamps() }, true);
 	}
 
-	/** Collect media timestamps at each pipeline stage for latency measurement. */
+	/** Collect media timestamps, in milliseconds, at each pipeline stage for latency measurement. */
 	#timestamps(): { label: string; ts: number }[] {
 		const entries: { label: string; ts: number }[] = [];
 		const received = this.sync.out.timestamp.peek();
-		if (received != null) entries.push({ label: "received", ts: received });
+		if (received != null) entries.push({ label: "received", ts: received.asMillis() });
 		const decoded = this.videoDecoder.out.timestamp.peek();
-		if (decoded != null) entries.push({ label: "decoded", ts: decoded });
+		if (decoded != null) entries.push({ label: "decoded", ts: decoded.asMillis() });
 		const rendered = this.videoRenderer.out.timestamp.peek();
-		if (rendered != null) entries.push({ label: "rendered", ts: rendered });
+		if (rendered != null) entries.push({ label: "rendered", ts: rendered.asMillis() });
 		return entries;
 	}
 
@@ -306,11 +310,9 @@ export class Game {
 	}
 
 	#runSession(connection: Moq.Connection, effect: Moq.Signals.Effect) {
-		// Gate on a live connection: a dial is answered only through the relay.
-		if (effect.get(connection.status) !== "connected") return;
-
-		if (!effect.get(this.active)) {
-			// Clear feedback state when deactivating.
+		// Gate on a live connection, since a dial is answered only through the relay. Losing it or
+		// deactivating drops pending input, which would otherwise replay on the next session.
+		if (effect.get(connection.status) !== "connected" || !effect.get(this.active)) {
 			this.#feedbackActive.set(false);
 			this.#command.set(undefined);
 			return;
@@ -364,6 +366,7 @@ export class Game {
 		// One command per group, so a late one never holds up the next.
 		const value = { ...command.cmd, timestamps: command.timestamps };
 		open.producer.writeFrame({ payload: new TextEncoder().encode(JSON.stringify(value)) });
+		this.#command.set(undefined);
 	}
 
 	// Read the emulator's replies until the session ends.

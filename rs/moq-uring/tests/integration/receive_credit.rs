@@ -96,12 +96,7 @@ fn partial_frame_gives_way() {
 	let high = broadcast.broadcast().create_track("high", timed()).expect("high track");
 
 	let certs = support::certs().expect("certificates");
-	let server_config = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
-	);
+	let server_config = quic::server::Config::new(certs.server(&[ALPN]));
 	let socket = |handle: &moq_uring::Handle| {
 		handle
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -109,9 +104,7 @@ fn partial_frame_gives_way() {
 	};
 	let server_sock = socket(&handle);
 	let server_addr = server_sock.local_addr().expect("server addr");
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec![ALPN.to_string()];
-	dial.verify = false;
+	let mut dial = quic::client::Config::new(support::client_tls(&[ALPN]));
 	dial.transport.limits.receive_window = std::num::NonZeroU64::new(WINDOW as u64);
 	let client_sock = socket(&handle);
 
@@ -250,12 +243,7 @@ fn javascript_partial_frame_gives_way() {
 	});
 
 	let certs = support::certs().expect("certificates");
-	let mut server = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&["h3"], quic::server::ClientAuth::None)
-			.expect("tls"),
-	);
+	let mut server = quic::server::Config::new(certs.server(&["h3"]));
 	server.transport.limits.receive_window = std::num::NonZeroU64::new(WINDOW as u64);
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -291,7 +279,7 @@ fn javascript_partial_frame_gives_way() {
 				.await
 				.expect("handshake");
 			let session = request
-				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(ALPN))
+				.respond(web_transport_proto::ConnectResponse::OK.with_protocol(ALPN))
 				.await
 				.expect("respond");
 			let (session, driver) = moq_net::Server::new()
