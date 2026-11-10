@@ -1,6 +1,7 @@
 //! Subscribe to an encoded audio track and emit raw PCM.
 
 use std::collections::VecDeque;
+use std::task::Poll;
 
 use kio::clock::Instant;
 use moq_mux::container::Read as Encoded;
@@ -8,6 +9,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
+use super::backpressure::{self, Backpressure};
 use super::decoder::{Config, Decoder};
 use crate::jitter::{self, Target};
 use crate::resample::{Remix, Resampler};
@@ -163,6 +165,24 @@ pub struct Consumer {
 	target: Target,
 	/// Where arrival times are measured from.
 	origin: Instant,
+	/// Packets read and observed but not yet decoded, held by the [`Backpressure`] gate.
+	pending: VecDeque<Encoded>,
+	/// The track ended, or failed with this error, behind whatever is pending.
+	ended: Option<Option<Error>>,
+	/// The gate, while its [`Backpressure`] handle lives, and the version last judged.
+	gate: Option<kio::Consumer<backpressure::State>>,
+	seen: u64,
+	/// The latest gap or end handed over: a playhead at or before it is from the timeline it ended.
+	boundary: Option<Duration>,
+	/// The duration of the latest decoded packet, which the next one is taken to match.
+	frame: Duration,
+}
+
+/// Whether a pending packet may decode.
+enum Admit {
+	Now,
+	At(kio::clock::Instant),
+	Wait,
 }
 
 struct ActivitySpan {
@@ -272,6 +292,12 @@ impl Consumer {
 			end_group: 0,
 			terminal_start: None,
 			origin: now(),
+			pending: VecDeque::new(),
+			ended: None,
+			gate: None,
+			seen: 0,
+			boundary: None,
+			frame: Duration::ZERO,
 		})
 	}
 
@@ -312,6 +338,18 @@ impl Consumer {
 		self.resolved_layout
 	}
 
+	/// Gate decoding behind the returned [`Backpressure`], replacing any earlier gate.
+	///
+	/// [`read`](Self::read) keeps reading packets as they arrive and holds them encoded
+	/// until the gate admits them. Dropping the handle decodes every packet as it arrives
+	/// again.
+	pub fn backpressure(&mut self) -> Backpressure {
+		let (backpressure, gate) = Backpressure::new();
+		self.gate = Some(gate);
+		self.seen = 0;
+		backpressure
+	}
+
 	/// Read decoded PCM or a track boundary, or `None` when the track ends.
 	///
 	/// [`Frame::activity`] reports whether the packet these samples came from
@@ -330,7 +368,7 @@ impl Consumer {
 				return Ok(Some(frame));
 			}
 
-			let (mux_frame, track_start) = match self.track.read().await? {
+			let (mux_frame, track_start) = match self.next().await? {
 				Some(Encoded::Frame { group, frame }) => {
 					let first = !std::mem::replace(&mut self.started, true);
 					// A later group after a declared end comes from a fresh encoder; the end's
@@ -348,6 +386,7 @@ impl Consumer {
 				}
 				// Behind whatever the resampler held from before the loss.
 				Some(Encoded::Gap { timestamp, duration }) => {
+					self.boundary = Some(timestamp.into());
 					self.started = true;
 					// The restart forgets the end, but the silence across it stays declared.
 					if self.end.is_some() {
@@ -363,6 +402,7 @@ impl Consumer {
 				// after the end, starting before it, once a fresh encoder or the track's end
 				// drains it.
 				Some(Encoded::End { group, end }) => {
+					self.boundary = Some(end.into());
 					self.end = Some(end);
 					self.end_group = group;
 					self.frames_decoded = 0;
@@ -373,12 +413,7 @@ impl Consumer {
 				None => return Ok(self.flush()?.map(Read::Frame)),
 			};
 
-			// Every packet the container hands over is an arrival, including one the
-			// decoder is about to refuse, so it is observed before anything can fail.
-			let arrival = jitter::millis(now().duration_since(self.origin));
 			let timestamp = mux_frame.timestamp;
-			let media = timestamp.value() as f64 * 1000.0 / timestamp.scale().as_u64() as f64;
-			self.target.observe(arrival, media);
 
 			// Undeclared holes are routine: a skipped stalled group, a packet the
 			// decoder refused, an ingest that resynced. Drop every stage's state at
@@ -438,6 +473,7 @@ impl Consumer {
 			let covered = decoded.len() / self.decoder.layout().channels() as usize + trimmed;
 			if covered > 0 {
 				self.target.set_frame(covered as f64 * 1000.0 / rate as f64);
+				self.frame = Duration::from_secs_f64(covered as f64 / rate as f64);
 			}
 			if let Some(end) = self.end {
 				let terminal_start = *self
@@ -531,6 +567,118 @@ impl Consumer {
 			if let Some(frame) = self.frame(pcm, timestamp, activity)? {
 				self.ready.push_back(Read::Frame(frame));
 			}
+		}
+	}
+
+	/// The next packet or boundary the gate admits, reading and observing every packet
+	/// that arrives meanwhile, or `None` once the track ends.
+	async fn next(&mut self) -> Result<Option<Encoded>, Error> {
+		loop {
+			let deadline = match self.pending.front() {
+				Some(Encoded::Frame { frame, .. }) => match self.admit(frame.timestamp.into()) {
+					Admit::Now => return Ok(self.pending.pop_front()),
+					Admit::At(at) => Some(at),
+					Admit::Wait => None,
+				},
+				Some(_) => return Ok(self.pending.pop_front()),
+				None => match self.ended.as_mut() {
+					Some(failed) => return failed.take().map_or(Ok(None), Err),
+					None => None,
+				},
+			};
+
+			let gate = self.gate.as_ref().filter(|gate| !gate.is_closed());
+			let seen = self.seen;
+			let mut sleep = std::pin::pin!(deadline.map(kio::clock::sleep_until));
+			let track = &mut self.track;
+			let ended = self.ended.is_some();
+			let read = kio::wait(|waiter| {
+				if !ended && let Poll::Ready(read) = track.poll_read(waiter) {
+					return Poll::Ready(Some(read));
+				}
+				if let Some(gate) = gate
+					&& gate
+						.poll(waiter, |state| match state.version != seen {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						})
+						.is_ready()
+				{
+					return Poll::Ready(None);
+				}
+				if let Some(sleep) = sleep.as_mut().as_pin_mut()
+					&& waiter.poll_future(sleep).is_ready()
+				{
+					return Poll::Ready(None);
+				}
+				Poll::Pending
+			})
+			.await;
+
+			match read {
+				Some(Ok(Some(read))) => {
+					// Every packet the container hands over is an arrival, including one the
+					// decoder will refuse, so it is observed before anything can fail.
+					if let Encoded::Frame { frame, .. } = &read {
+						let arrival = jitter::millis(now().duration_since(self.origin));
+						let media = frame.timestamp.value() as f64 * 1000.0 / frame.timestamp.scale().as_u64() as f64;
+						self.target.observe(arrival, media);
+					}
+					self.pending.push_back(read);
+				}
+				Some(Ok(None)) => self.ended = Some(None),
+				Some(Err(err)) => self.ended = Some(Some(err.into())),
+				None => {}
+			}
+		}
+	}
+
+	/// Whether the pending packet at `timestamp` may decode now, and if not, when it may.
+	fn admit(&mut self, timestamp: Duration) -> Admit {
+		let Some(gate) = self.gate.as_ref().filter(|gate| !gate.is_closed()) else {
+			return Admit::Now;
+		};
+		let state = gate.read();
+		self.seen = state.version;
+		if state.hold.is_zero() || self.ended.is_some() {
+			return Admit::Now;
+		}
+		// Media queued behind the packet covers the hold, or nothing more continues it.
+		let mut queued = self.pending.iter().skip(1).rev();
+		let covered = match queued.next() {
+			Some(Encoded::Frame { frame, .. }) => {
+				Duration::from(frame.timestamp) >= timestamp + state.hold
+					|| queued.any(|read| !matches!(read, Encoded::Frame { .. }))
+			}
+			Some(_) => true,
+			None => false,
+		};
+		if covered {
+			return Admit::Now;
+		}
+
+		let boundary = self.boundary;
+		let Some((playhead, at)) = state
+			.playhead
+			.filter(|(playhead, _)| boundary.is_none_or(|boundary| *playhead > boundary))
+		else {
+			return Admit::Wait;
+		};
+		// Due once the playhead is within the floor of where this packet's output ends.
+		let end = timestamp + self.frame;
+		let reach = playhead + state.floor;
+		let due = match end.checked_sub(reach) {
+			Some(ahead) => at.checked_add(ahead),
+			// Before the clock's origin is long past.
+			None => match at.checked_sub(reach - end) {
+				Some(due) => Some(due),
+				None => return Admit::Now,
+			},
+		};
+		match due {
+			Some(due) if due > kio::clock::Instant::now() => Admit::At(due),
+			Some(_) => Admit::Now,
+			None => Admit::Wait,
 		}
 	}
 
@@ -1935,6 +2083,81 @@ mod tests {
 			read.push((frame.timestamp.as_micros(), frame.data.len() / size_of::<f32>()));
 		}
 		read
+	}
+
+	/// Backpressure holds packets encoded while still reading and timing every one:
+	/// stalled, a packet decodes once the media behind it covers the hold, and with
+	/// a playhead, once that is within the floor of where the packet ends.
+	#[tokio::test(start_paused = true)]
+	async fn backpressure_holds_packets_encoded_until_the_ring_has_room() {
+		const PACKET: Duration = Duration::from_millis(20);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"audio",
+			Options {
+				delay: Delay {
+					max: Some(Duration::from_secs(1)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		let backpressure = consumer.backpressure();
+		backpressure.set_latency(Duration::from_millis(100), Duration::from_millis(200));
+
+		let payload: Bytes = vec![0u8; 960 * size_of::<f32>()].into();
+		let mut write = |index: u32| {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::try_from(PACKET * index).unwrap(),
+					duration: None,
+					payload: payload.clone(),
+					keyframe: true,
+				})
+				.unwrap();
+		};
+		let read = async |consumer: &mut Consumer, wait: Duration| {
+			kio::clock::timeout(wait, next_frame(consumer))
+				.await
+				.ok()
+				.map(|frame| Duration::from(frame.unwrap().unwrap().timestamp))
+		};
+
+		// Ten packets cover 180 ms behind the first, short of the hold.
+		for index in 0..10 {
+			write(index);
+		}
+		assert_eq!(read(&mut consumer, Duration::from_secs(1)).await, None);
+		assert_eq!(consumer.pending.len(), 10, "every packet is read and held encoded");
+		write(10);
+		assert_eq!(read(&mut consumer, Duration::ZERO).await, Some(Duration::ZERO));
+
+		// The first packet ends sounding in half a second, so the next one, ending
+		// 20 ms later, is within the 100 ms floor of the playhead 80 ms before that.
+		let sounds = kio::clock::Instant::now().checked_add(Duration::from_millis(500)).unwrap();
+		backpressure.observe(Timestamp::try_from(PACKET).unwrap(), sounds);
+		assert_eq!(read(&mut consumer, Duration::from_millis(419)).await, None);
+		assert_eq!(read(&mut consumer, Duration::from_millis(1)).await, Some(PACKET));
+
+		// The track's end leaves nothing to wait for.
+		producer.finish().unwrap();
+		let mut rest = 0;
+		while next_frame(&mut consumer).await.unwrap().is_some() {
+			rest += 1;
+		}
+		assert_eq!(rest, 9);
 	}
 
 	/// A packet that doesn't continue the last one is a hole, not a splice: the

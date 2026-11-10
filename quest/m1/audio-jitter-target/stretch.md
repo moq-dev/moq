@@ -126,7 +126,6 @@ Public API: none expected. Wire: none.
 ## Required
 
 - [The audio harness grades the stretch model](/quest/m1/audio-jitter-target/grading.md) - the gates that pushed toward zero underruns and zero lag are gone before this is measured against them
-- [Native backpressure](/quest/m1/audio-jitter-target/native-backpressure.md) - native holds its ring at a floor and the rest of the target encoded, as the browser does, so one rule reads the same buffer in both
 
 ## Closes
 
