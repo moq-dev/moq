@@ -4,8 +4,8 @@
 
 A client whose first walk of the peer's addresses establishes no MoQ session
 stops and returns that walk's error instead of retrying. Once a session has
-been established, the reconnect loop retries every later failure with
-backoff: each failed handshake grows the delay, and a session that stays up
+been established, the reconnect loop retries later failures with backoff, as
+it does today: each failed handshake grows the delay, and a session that stays up
 for `Backoff::healthy` (1 s by default) resets it, so relay restarts and
 redeploys still recover. When the client and relay share no MoQ version, the
 relay logs the versions offered against those it accepts, and the client
@@ -43,7 +43,9 @@ against a client on its default versions) before fixing.
 
 The error-kind matching in `Verdict::from(&Error)` is deleted by
 [the follow-up](/quest/m2/reconnect-no-error-kinds.md), since `Verdict` is
-public and its removal breaks. This quest leaves `Verdict` as it is.
+public and its removal breaks. This quest leaves `Verdict` as it is, so after
+a first session a `Refused` or `Fatal` verdict still ends the loop until
+that quest lands.
 
 Run the `verify-reconnect` skill's TLA+ model of the connect policy, and
 update the model with the new rule.

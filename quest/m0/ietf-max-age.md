@@ -31,7 +31,12 @@ cache pool allows.
 The encode sites are `Properties::restated` and `Properties::encode` in
 `rs/moq-net/src/ietf/properties.rs` and `maxCacheDuration` in
 `js/net/src/ietf/publisher.ts`. Keep a property the publisher sealed inside
-Immutable Properties forwarded as it was sent. Test it the way the issue
+Immutable Properties forwarded as it was sent: `contradicts` in the same file
+compares a sealed `MAX_CACHE_DURATION` against the restated one, so once
+restated carries none, that arm would refuse such a track at every ingress.
+Treat the sealed value as advisory, as `DEFAULT_PUBLISHER_GROUP_ORDER`
+already is, and turn `a_sealed_max_cache_duration_matches_the_track` into a
+test that it is forwarded rather than compared. Test it the way the issue
 reproduced it: a subscriber that joins after the catalog's only group was
 written still reads it through a relay that honors §12.3, if the interop
 runner can run one, and otherwise with a unit test on what gets encoded.
