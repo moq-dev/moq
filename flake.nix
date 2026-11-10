@@ -30,7 +30,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     # The quest CLI, which also serves the quest guide and skills the stubs in
-    # .claude/skills call. Bump the rev to upgrade them.
+    # .claude/skills call. `nix flake update quest` upgrades them.
     quest = {
       url = "github:moq-dev/quest";
       inputs.nixpkgs.follows = "nixpkgs";
