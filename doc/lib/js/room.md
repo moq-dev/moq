@@ -59,6 +59,5 @@ Under a CSP that refuses `blob:`, host the worklets and worker as described
 for [watch](/lib/js/watch#strict-csp) and [publish](/lib/js/publish#strict-csp),
 then call both `Watch.assets()` and `Publish.assets()`.
 
-
 See the package [README](https://github.com/moq-dev/moq/blob/main/js/room/README.md)
 for the full API.

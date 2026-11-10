@@ -13,4 +13,3 @@ default:
 [private]
 wait url="http://localhost:4443/certificate.sha256":
     ../sh/demo/wait.sh "$@"
-
