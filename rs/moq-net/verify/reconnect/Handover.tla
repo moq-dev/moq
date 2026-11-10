@@ -383,23 +383,27 @@ ProbeFails ==
 ProbeGetsThrough ==
     /\ probing
     /\ phase = "live" /\ probe = "dialing"
-    /\ IF Goaway(live)
-       \* The peer's GOAWAY wins over a probe that got through with it.
-       THEN /\ probe' = "wait"
-            /\ probing' = FALSE
-            /\ UNCHANGED <<phase, live, pred, queue, sess, timer, dial, dialTo,
-                           lc, lcSess, migrating, spred, started, ended>>
+    \* A watcher that is ready rejects the probe: the peer's GOAWAY wins over a
+    \* probe that got through with it, and so does `Err(Closed)`, which the
+    \* watcher returns once the session closed. The close and the watcher
+    \* ending are not one step, so a closed session may still be promoted.
+    /\ \/ /\ (Goaway(live) \/ (watch /\ ~sess[live].open))
+          /\ probe' = "wait"
+          /\ probing' = FALSE
+          /\ UNCHANGED <<phase, live, pred, queue, sess, timer, dial, dialTo,
+                         lc, lcSess, migrating, spred, started, ended>>
        \* The fallback sends its own GOAWAY and drains as the predecessor while
        \* the handshake over the preferred transport is the dial in flight.
-       ELSE /\ phase' = "dialing"
-            /\ timer' = [timer EXCEPT !["dial"] = FALSE, !["handover"] = FALSE]
-            /\ sess' = [Abort(sess, pred) EXCEPT ![live].sent = TRUE]
-            /\ pred' = live
-            /\ live' = None
-            /\ probe' = "none"
-            /\ dial' = "handshake"
-            /\ dialTo' = sess[live].ep
-            /\ Emit(Append(queue, "Migrating"), live)
+       \/ /\ ~Goaway(live)
+          /\ phase' = "dialing"
+          /\ timer' = [timer EXCEPT !["dial"] = FALSE, !["handover"] = FALSE]
+          /\ sess' = [Abort(sess, pred) EXCEPT ![live].sent = TRUE]
+          /\ pred' = live
+          /\ live' = None
+          /\ probe' = "none"
+          /\ dial' = "handshake"
+          /\ dialTo' = sess[live].ep
+          /\ Emit(Append(queue, "Migrating"), live)
     /\ UNCHANGED <<watch, target, used, misdials>>
 
 Caller == Connected \/ Failed \/ ProbeFails \/ ProbeGetsThrough
@@ -472,9 +476,10 @@ Spec == Init /\ [][Next]_vars
 
 \* States that differ only in what nothing reads again count as one: a
 \* closed session's details past who closed it, a deadline of a phase the
-\* policy left, and where no dial is headed.
+\* policy left, and where no dial is headed. The live session keeps every
+\* field after it closes: `LiveEnds` still reads its GOAWAY and age.
 Seen(s) ==
-    IF sess[s].open THEN sess[s]
+    IF sess[s].open \/ s = live THEN sess[s]
     ELSE [Unused EXCEPT !.by = sess[s].by, !.closing = sess[s].closing]
 Due(t) ==
     CASE t = "dial" -> timer[t] /\ phase = "dialing"
