@@ -2222,13 +2222,12 @@ impl AnnouncePrefix {
 		self.replacing = None;
 		let (subscriber, prefix, snapshot) = (self.subscriber.clone(), self.prefix.clone(), self.snapshot.take());
 		// One that never reached its loop has fed the node nothing to hand over. One that
-		// did gives back its announce slots, since the replacement takes slots for the same
-		// claims: the replacement gets the whole cap, and what the old one keeps was bounded
-		// by the cap it took it under.
+		// did moves its announce slots onto a budget of its own, since the replacement takes
+		// slots for the same claims: the replacement gets the session's whole cap.
 		let replacing = match &mut self.state {
 			PrefixState::Run(step) => {
 				if let Some(routed) = &mut step.run.routed {
-					routed.release_slots();
+					routed.hand_over();
 				}
 				Some(Box::new(self))
 			}
