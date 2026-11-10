@@ -96,8 +96,7 @@ export type AnnounceBroadcast =
 // is safe, and a receiver must end the session over one. `UNKNOWN_HOP` identifies
 // nothing, so any number of hops may be unknown.
 //
-// `ProtocolViolation` so a receipt takes the session down rather than the one stream,
-// matching what `ietf/cluster.ts` throws for the identical rule.
+// `ProtocolViolation` so a receipt takes the session down rather than the one stream.
 function checkHops(hops: Hop[]) {
 	if (hops.length > MAX_HOPS) {
 		throw new ProtocolViolation(`hop count ${hops.length} exceeds maximum ${MAX_HOPS}`);

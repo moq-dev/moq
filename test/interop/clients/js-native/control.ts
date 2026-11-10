@@ -1,7 +1,6 @@
 /** Real JS wire peer for a TRACK_STATUS query. */
 import assert from "node:assert/strict";
 import * as Moq from "@moq/net";
-import { offered } from "../../../../js/net/src/connection/extensions.ts";
 import { exchangeSetup } from "../../../../js/net/src/connection/handshake.ts";
 import type * as Ietf from "../../../../js/net/src/ietf/index.ts";
 import { NativeSession } from "../../../../js/net/src/ietf/session.ts";
@@ -20,8 +19,7 @@ const quic = new Qmux(new URL(address), {
 	requireProtocol: true,
 });
 await quic.ready;
-const extensions = offered({ auth: false, solicit: false });
-await exchangeSetup(quic, version, "interop-control", { client: true, extensions });
+await exchangeSetup(quic, version, "interop-control", { client: true });
 
 const session = new NativeSession(quic, version, true);
 try {
