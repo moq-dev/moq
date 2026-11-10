@@ -38,13 +38,14 @@ TELEMETRY_INTERVAL = 0.1
 # Pending driver commands held before publishers are made to wait.
 COMMAND_QUEUE_DEPTH = 64
 
-# An autonomous truck that has not moved this far in this long is wedged, not
-# waiting: Traffic Manager would have deleted it, which is what the hero role
-# forbids, so this is where a stuck truck gets unstuck. Town10's lights cycle in
-# well under a minute, and the trucks queued behind a wedged one respawn with it
-# rather than sit there once it is gone. Displacement rather than speed, because
-# a truck grinding against a barrier reports velocity while going nowhere.
-STUCK_TIMEOUT = 300.0
+# A truck that has not moved this far in this long is wedged or abandoned, not
+# waiting: Traffic Manager would have deleted an autonomous one, which is what
+# the hero role forbids, and a driver's open tab holds its lease, e-stop
+# included, for as long as it stays open. Town10's lights cycle in well under a
+# minute, so this clears a light plus the queue behind it. Displacement rather
+# than speed, because a truck grinding against a barrier reports velocity while
+# going nowhere.
+STUCK_TIMEOUT = 120.0
 STUCK_DISTANCE = 2.0
 
 
@@ -168,6 +169,8 @@ class TruckSession:
     async def _loop(self) -> None:
         while True:
             command = await self._next_command()
+            if self._drivers.revoked(command):
+                continue
             if command.kind == "respawn":
                 # Respawn changes the simulated actor rather than the shared
                 # drive contract. Only the lease holder may move the truck.
@@ -237,37 +240,39 @@ class TruckSession:
         into the session's task group rather than being retried, so the timer
         cannot outlive the track it publishes to.
 
-        The stuck watchdog rides on the same tick. It only ever fires for a
-        truck nobody holds: a stationary truck under a driver is the driver's
-        business. A driverless truck whose e-stop is still latched is not, since
-        nobody may come back to reset it: it respawns like an autonomous one,
-        and the respawn clears the latch. So does the handback: a released
-        truck steers itself onto a lane before Traffic Manager takes it, and
-        nothing else runs often enough to drive it.
+        The tick also drives the handback: a released truck steers itself
+        onto a lane before Traffic Manager takes it, and nothing else runs
+        often enough to drive it.
+
+        The stuck watchdog rides on the same tick, for every truck but one
+        handing back, which engages autonomy within a tick once it slows to
+        walking pace. A driver who parked and left the tab open, or e-stopped
+        and never reset, holds the lease for as long as it heartbeats, so the
+        respawn revokes that driver's session: the player lets go rather than
+        reclaiming the fresh spawn, and the fresh gate clears any latch.
         """
         while True:
             await asyncio.sleep(TELEMETRY_INTERVAL)
             telemetry = self._truck.telemetry()
             if self._drive.driver is None and not self._drive.estopped:
                 self._truck.release()
-            if (
-                self._drive.driver is not None
-                # Mid-handback: the truck is still coasting onto a lane, and
-                # engages autonomy within a tick once it slows to walking pace.
-                or not (self._drive.estopped or self._truck.autonomous)
-                or not self._clock.running
-            ):
+            handing_back = self._drive.driver is None and not (self._drive.estopped or self._truck.autonomous)
+            if handing_back or not self._clock.running:
                 # A parked world is not a stuck truck: nothing is meant to be
                 # moving, and respawning on that would fire every STUCK_TIMEOUT
                 # for as long as nobody watches.
                 self._stuck.reset()
             elif self._stuck.update(telemetry.pose, asyncio.get_running_loop().time()):
+                holder = self._drive.holder
                 log.warning(
-                    "%s: no movement in %.0f s with nobody driving%s, respawning",
+                    "%s: no movement in %.0f s%s%s, respawning",
                     self._truck.name,
                     STUCK_TIMEOUT,
+                    f", taking the lease from {self._drive.driver}" if holder is not None else "",
                     f", clearing the e-stop latched by {self._drive.estop_by}" if self._drive.estopped else "",
                 )
+                if holder is not None:
+                    self._drivers.revoke(*holder)
                 self._respawn()
                 telemetry = self._truck.telemetry()
             self._publish(telemetry)

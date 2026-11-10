@@ -264,18 +264,27 @@ async def serving(scenario, monkeypatch: pytest.MonkeyPatch) -> None:
     commands: asyncio.Queue = asyncio.Queue()
     drivers = publish.Drivers("truck1", commands)
     task = asyncio.create_task(drivers.run(SimpleNamespace()))
+    # Raced against the endpoint, so a failed pump fails the test rather than leaving it waiting.
+    play = asyncio.create_task(scenario(endpoint, drivers, commands, Drive()))
     try:
-        await scenario(endpoint, drivers, commands, Drive())
+        await asyncio.wait({task, play}, return_when=asyncio.FIRST_COMPLETED)
+        # The pump never returns on its own, so one that ended failed, whichever finished first.
+        if task.done():
+            task.result()
+            raise AssertionError("the driver endpoint stopped before the scenario finished")
+        play.result()
     finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        play.cancel()
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
     assert endpoint.opened == [("carla", "truck1")]
     assert endpoint.closed
 
 
 async def next_command(commands: asyncio.Queue, gate: Drive):
-    command = await asyncio.wait_for(commands.get(), timeout=1)
+    command = await commands.get()
     gate.apply(command)
     return command
 
@@ -439,5 +448,31 @@ def test_replies_reach_only_their_own_open_session(monkeypatch: pytest.MonkeyPat
         # The pump releasing the lease may race a reply to the gone session.
         drivers.reply(Command(kind="drive", driver_id="driver-abc", session="s1"), {"sequence": 2})
         assert first.replies == [{"sequence": 1}]
+
+    asyncio.run(serving(scenario, monkeypatch))
+
+
+def test_a_revoked_session_ends_and_nothing_it_sends_reaches_the_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario(endpoint: Endpoint, drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        session = endpoint.dial("driver-abc", "s1")
+        session.send(DRIVE)
+        claim = await next_command(commands, gate)
+        assert not drivers.revoked(claim)
+
+        # A heartbeat already queued ahead of the revoke.
+        session.send(DRIVE)
+        queued = await commands.get()
+        drivers.revoke("driver-abc", "s1")
+        # The player reads the end of its replies and lets go.
+        assert session.finished
+        assert drivers.revoked(queued)
+
+        # One still in flight stops the pump, which reports the departure last.
+        session.send(DRIVE)
+        left = await commands.get()
+        assert (left.kind, left.session) == ("driver_left", "s1")
+        assert drivers.revoked(left)
+        # Reading the departure forgets the session.
+        assert not drivers.revoked(left)
 
     asyncio.run(serving(scenario, monkeypatch))
