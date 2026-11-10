@@ -12,10 +12,18 @@ and how many moves warm routes caused.
 
 ## Plan
 
-- Implement what [Prove cache-aware routing](/quest/m2/cache-routing-proof.md)
-  settles and pass its fixtures: the warm message where it placed it, warm
-  state per neighbor derived from each front's demand, and eligibility over
-  the router's feasibility distances.
+- Implement the rules the epic's Plan records as proven, which
+  `rs/moq-net/src/route/tests/cache.rs` models over the real router: the
+  Warm Routes SETUP extension (warm routes on the announce stream, and the
+  relay each pull serves on SUBSCRIBE), warm state per neighbor derived from
+  each front's demand, and eligibility through `Router::eligible` with the
+  rendezvous hash ordering tied routes. Port that file's fixtures and sweep
+  to the implementation, or drive it from them.
+- First make `sweep_cache_routing_long` settle: 4 of its 3000 scenarios
+  never do under the epic's item 10, and its `#[ignore]` comes off once they
+  do. Land after the overtaking-echo fix that
+  [moq-dev/moq#8447](https://github.com/moq-dev/moq/pull/8447) found, which
+  item 8's argument needs.
 - Extend today's selection rather than adding a second selector.
   `route_order` in `rs/moq-net/src/model/origin.rs` already hashes equal
   routes per path, and a front already moves to a better route of its own
@@ -25,7 +33,7 @@ and how many moves warm routes caused.
 - Bound the warm state a peer can make a relay hold by design, as
   announcements are bounded.
 - Only relay sessions that negotiated warm routes exchange them. A browser
-  never parents, so `js/net` needs at most to skip the message.
+  never parents and never negotiates them, so `js/net` needs nothing.
 - Export upstream copies held, warm routes sent and received, and moves by
   cause through the relay's existing metrics.
 - `rs/moq-net/AGENTS.md` says a relay behaves the same warm or cold. That
@@ -34,11 +42,8 @@ and how many moves warm routes caused.
   rewording to the maintainer.
 
 Public API: report any relay configuration added for warm routes. Wire: the
-warm message as the proof placed it, with its draft section in the same PR.
-
-## Required
-
-- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - the fixtures and wire placement this implements
+Warm Routes extension as the epic's Plan designs it, with its draft section in
+the same PR.
 
 ## Related
 

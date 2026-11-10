@@ -198,7 +198,6 @@ quests that require them.
 - [Promote the routes epic out of cluster routing](/quest/m2/promote-cluster-routes.md) - no epic holds another, once the open PRs under it land
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - the wire names every abandoned group and the drop signal is public, so readers count losses instead of stalling
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out (held in m1 by an open claim)
-- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - warm routes and the eligibility rule hold in route-layer sweeps, and the warm message's wire placement is chosen before the lite-07 cut
 - [Route latency](/quest/m2/route-latency.md) - the maintainer decides whether a lite-07 ROUTE carries an informational latency sum, and it lands before the cut if so
 - [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Unbounded groups](/quest/m2/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh

@@ -74,6 +74,67 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    accepting a SETUP extension). The implementation stays in m3. This
    replaces item 6's rule that choosing lite-07 went back to the maintainer.
 
+Proof results 2026-11-10 ([moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457)),
+modeled in `rs/moq-net/src/route/tests/cache.rs` over the real `Router`:
+
+8. **Item 4 holds.** No sweep step in 3000 churned scenarios formed a
+   per-broadcast cycle, and the fixtures fail when either the feasibility
+   check or the hash order is dropped. The router answers it with the
+   crate-private `Router::eligible`, which marks a route tied at the
+   feasibility distance so the caller applies the hash. The argument needs a
+   feasibility distance that never rises while a neighbor holds the advert;
+   the overtaking echo that
+   [moq-dev/moq#8447](https://github.com/moq-dev/moq/pull/8447) found breaks
+   that, which [the implementation](/quest/m3/cache-routing/select.md) must
+   not ship before it is fixed.
+9. **Proposed amendment to item 2: each pull names whom it serves.** "Demand
+   besides N's" can't be told from one hop: if B's only demand is a relay
+   pulling on N's behalf, B counts warm toward N, N joins B, B's demand
+   vanishes, and the cycle repeats every linger. A SUBSCRIBE carries
+   `Serves`: alone (a local reader, or two or more roots below it), a single
+   root relay's Node ID, or unknown (a peer that never negotiated, which
+   warms nothing). N counts B warm only when B serves alone or a root other
+   than N and N's own root. A narrowed warm route stands until the copy's
+   linger runs out, as the withdrawal already does.
+10. **Proposed amendment to item 3: price a dependent copy at its cost.**
+    Link-only pricing has no steady state when two relays each keep the
+    other warm (sweep scenario 2062 flips forever). A warm route carries its
+    sender's own price for its pull; a receiver the copy depends on (its
+    serves names only the receiver's root) pays link plus that cost, an
+    independent one pays the link alone, and a relay moves only for a
+    strictly lower `(draining, price)`. With exact information that is a
+    potential game on the forest's total link cost. Under the sweep's churn,
+    2996 of 3000 scenarios settle; 4 (the first is 478) never do, as two
+    carriers keep a narrowed route standing while two relays swap between
+    them. `sweep_cache_routing_long` reproduces them behind `#[ignore]`.
+    The Goal's "cheapest cold route" becomes "cheapest given the copies the
+    others hold" under this rule.
+11. **Item 6 placement: an additive SETUP extension, Warm Routes**, decided
+    by the proof. Only m3 relays use it, so lite-07 would carry Rust and JS
+    codecs that js/net never runs, and it would freeze a shape items 9 and
+    10 still revise; the bytes are the same either way, and it stays clear of
+    [Route latency](/quest/m2/route-latency.md)'s ROUTE change. The
+    parameter's value is empty. `WARM_START` (a new announce-stream type,
+    not 0x5, which ANNOUNCE_TAKEOVER held) carries the Route ID it travels
+    under, the path suffix, the Instance and Minted encoded as in
+    ANNOUNCE_START, then the serves and cost, and assigns a Warm ID; `WARM_END` carries the
+    Warm ID. It follows the ROUTE_START it names on the announce stream the
+    carrier answers, and a ROUTE_END retires the warm routes under it.
+    SUBSCRIBE and SUBSCRIBE_UPDATE gain a trailing Serves field when the
+    extension is negotiated. The hash is the Resolution section's FNV-1a
+    rendezvous hash of the path and the neighbor's Node ID. A peer that
+    never negotiates sees only cold routes, and its pulls serve unknown.
+    About 4.5 warm messages per reader change across the sweep's churn,
+    which also flaps links and advances seqnos; an idle broadcast sends
+    none.
+12. **Costs the sweeps measured.** A full LAN mesh of 6 relays pulls one
+    uplink copy per broadcast; a ring of 6 keeps 13 copies for 8 broadcasts,
+    one per hash local minimum. An origin seqno advance that reaches a child
+    before its warm parent makes the parent's older route ineligible, so the
+    child moves off and back (2 moves in the chain fixture); origins advance
+    on every announce stream open and close, so fewer advances cut this
+    churn.
+
 Prior art: warm/cold route prices
 ([moq-dev/moq#2925](https://github.com/moq-dev/moq/pull/2925)) were deleted
 by prefix routes ([moq-dev/moq#3225](https://github.com/moq-dev/moq/pull/3225)),
@@ -98,7 +159,6 @@ This README's own work, once its children land:
 
 ## Required
 
-- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - warm routes and the eligibility rule hold in route-layer sweeps, and the wire placement is chosen
 - [Warm routes and per-broadcast parent selection](/quest/m3/cache-routing/select.md) - relays advertise warm routes and pull each broadcast through the cheapest eligible neighbor
 
 ## Related
