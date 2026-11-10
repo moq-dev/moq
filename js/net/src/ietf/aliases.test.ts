@@ -95,6 +95,28 @@ test("a later subscribe reclaims a retired alias", async () => {
 	expect(await aliases.get(7n)).toBe(fresh);
 });
 
+// Subscribing to a track again forgets its tombstone, so a publisher that reuses the alias
+// (draft-22 section 3.1.3) can have its first group beat the SUBSCRIBE_OK. Another track's
+// tombstone still drops its stragglers at once.
+test("a resubscribe lets a reused alias beat its SUBSCRIBE_OK", async () => {
+	const aliases = new TrackAliases<object>();
+	const catalog = { broadcast: "demo", name: "catalog.json" };
+	const old = {};
+	aliases.set(0n, old, catalog);
+	aliases.retire(0n, old);
+	const video = {};
+	aliases.set(1n, video, { broadcast: "demo", name: "video" });
+	aliases.retire(1n, video);
+
+	aliases.resubscribe(catalog);
+
+	const early = aliases.get(0n);
+	const fresh = {};
+	aliases.set(0n, fresh, catalog);
+	expect(await early).toBe(fresh);
+	await expect(aliases.get(1n)).rejects.toBeInstanceOf(RetiredTrackAlias);
+});
+
 // Tombstones are bounded: a session churning through subscriptions must not accumulate
 // one entry per alias it ever used.
 test("retired aliases are capped", async () => {

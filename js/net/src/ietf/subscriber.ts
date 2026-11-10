@@ -1573,6 +1573,7 @@ export class Subscriber {
 		// that the stream is recorded, so settling this promise hands it back to be torn down.
 		if (cancelled.aborted) throw new Error("subscribe cancelled before it was sent");
 
+		this.#aliases.resubscribe({ broadcast, name: request.name });
 		const bounds = wireSpan(request.subscription.ranges ?? [{}]);
 		const msg = new Subscribe({
 			requestId,
