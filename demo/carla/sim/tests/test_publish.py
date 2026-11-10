@@ -264,9 +264,16 @@ async def serving(scenario, monkeypatch: pytest.MonkeyPatch) -> None:
     commands: asyncio.Queue = asyncio.Queue()
     drivers = publish.Drivers("truck1", commands)
     task = asyncio.create_task(drivers.run(SimpleNamespace()))
+    # Raced against the endpoint, so a failed pump fails the test rather than leaving it waiting.
+    play = asyncio.create_task(scenario(endpoint, drivers, commands, Drive()))
     try:
-        await scenario(endpoint, drivers, commands, Drive())
+        await asyncio.wait({task, play}, return_when=asyncio.FIRST_COMPLETED)
+        if not play.done():
+            task.result()
+            raise AssertionError("the driver endpoint stopped before the scenario finished")
+        play.result()
     finally:
+        play.cancel()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -275,7 +282,7 @@ async def serving(scenario, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def next_command(commands: asyncio.Queue, gate: Drive):
-    command = await asyncio.wait_for(commands.get(), timeout=1)
+    command = await commands.get()
     gate.apply(command)
     return command
 
@@ -452,7 +459,7 @@ def test_a_revoked_session_ends_and_nothing_it_sends_reaches_the_gate(monkeypatc
 
         # A heartbeat already queued ahead of the revoke.
         session.send(DRIVE)
-        queued = await asyncio.wait_for(commands.get(), timeout=1)
+        queued = await commands.get()
         drivers.revoke("driver-abc", "s1")
         # The player reads the end of its replies and lets go.
         assert session.finished
@@ -460,7 +467,7 @@ def test_a_revoked_session_ends_and_nothing_it_sends_reaches_the_gate(monkeypatc
 
         # One still in flight stops the pump, which reports the departure last.
         session.send(DRIVE)
-        left = await asyncio.wait_for(commands.get(), timeout=1)
+        left = await commands.get()
         assert (left.kind, left.session) == ("driver_left", "s1")
         assert drivers.revoked(left)
         # Reading the departure forgets the session.

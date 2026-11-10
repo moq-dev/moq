@@ -40,7 +40,12 @@ class Replies:
         self.revoked_sessions.append((driver, session))
 
     def revoked(self, command: Command) -> bool:
-        return (command.driver_id, command.session) in self.revoked_sessions
+        key = (command.driver_id, command.session)
+        if key not in self.revoked_sessions:
+            return False
+        if command.kind == "driver_left":
+            self.revoked_sessions.remove(key)
+        return True
 
 
 class DemandPublisher:
@@ -601,6 +606,8 @@ def test_a_revoked_drivers_commands_never_reclaim_the_fresh_spawn() -> None:
                 await task
         assert session._drive.driver is None and not session._drive.estopped
         assert session._drivers.sent == []
+        # Its departure was read last, which forgot the session.
+        assert session._drivers.revoked_sessions == []
 
     asyncio.run(scenario())
 
