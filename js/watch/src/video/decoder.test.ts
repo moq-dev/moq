@@ -748,7 +748,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 				await microtasks();
 				expect(reset).not.toHaveBeenCalled();
 				expect(playback.pictures.find((picture) => picture.timestamp === 100_000)?.closed).toBe(false);
-				expect(playback.resets).toBe(boundary === "hole" ? 1 : 0);
+				expect(playback.resets).toBe(0);
 				await clock.advance(1200);
 				expect(playback.decoder.out.timestamp.peek()).toEqual(Duration.millis(boundary === "hole" ? 200 : 100));
 			} finally {
@@ -1693,8 +1693,8 @@ describe("Decoder with a warmup rendition", () => {
 			await run.push(MAX, at(11n, 1333));
 			expect(run.current()).toEqual([1333, MAX]);
 
-			// Only the min-delay codec restarted at the skip.
-			expect(run.playback.resets).toBe(1);
+			// Neither codec restarted: the keyframe the min-delay decoder skipped to re-primes it.
+			expect(run.playback.resets).toBe(0);
 			expect(run.playback.decoded[MAX]).toEqual(
 				[1000, 1033, 1066, 1100, 1266, 1300, 1333].map((ms) => ms * 1000),
 			);
@@ -1709,12 +1709,12 @@ describe("Decoder with a warmup rendition", () => {
 		try {
 			for (const lane of [MIN, MAX]) await run.push(lane, at(10n, 1000, true), at(10n, 1033));
 
-			// Past the max-delay decoder's budget too: both skip and restart their codecs.
+			// Past the max-delay decoder's budget too: both skip, keeping their codecs.
 			await run.push(MIN, gap, at(12n, 1600, true));
 			expect(run.current()).toEqual([1600, MIN]);
 			await run.push(MAX, gap, at(12n, 1600, true));
 			expect(run.current()).toEqual([1600, MAX]);
-			expect(run.playback.resets).toBe(2);
+			expect(run.playback.resets).toBe(0);
 			ascending(run.shown);
 		} finally {
 			await run.close();
@@ -1954,9 +1954,9 @@ describe("Decoder with a warmup rendition", () => {
 	it("keeps the max-delay decoder continuous through a live stall shorter than one sweep", async () => {
 		const { decoded, resets, shown } = await stall(1000);
 		const stalled = [690, 720, 750, 780, 810, 840, 870].map((ms) => ms * 1000);
-		// The min-delay decoder skipped the rest of group 2 and restarted at group 3.
+		// The min-delay decoder skipped the rest of group 2 and resumed at group 3.
 		for (const ms of stalled) expect(decoded[MIN]).not.toContain(ms);
-		expect(resets).toBe(1);
+		expect(resets).toBe(0);
 		// The max-delay decoder waited for it.
 		for (const ms of stalled) expect(decoded[MAX]).toContain(ms);
 		// Stripes showed until the max-delay picture caught up, then it took over again.
@@ -1968,7 +1968,7 @@ describe("Decoder with a warmup rendition", () => {
 	it("skips both decoders on a live stall longer than one sweep", async () => {
 		const { decoded, resets, shown } = await stall(1400);
 		for (const lane of [MIN, MAX]) expect(decoded[lane]).not.toContain(690_000);
-		expect(resets).toBe(2);
+		expect(resets).toBe(0);
 		expect(shown.at(-1)?.[1]).toBe(MAX);
 		ascending(shown);
 	});
@@ -2094,10 +2094,10 @@ for (const kind of ["legacy", "cmaf"] as const) {
 				}
 				for (const lane of [MIN, MAX]) expect(playback.payloads[lane]).toEqual([patched, delta, recovery]);
 
-				// A skip resets the min-delay codec, so the group it reopens on is rewritten again.
+				// A skip keeps the open codec, so the group it resumes on is left alone.
 				await push(MIN, gap, at(13n, 1900, true, recovery));
-				expect(playback.resets).toBe(1);
-				expect(playback.payloads[MIN].at(-1)).toEqual(patched);
+				expect(playback.resets).toBe(0);
+				expect(playback.payloads[MIN].at(-1)).toEqual(recovery);
 			} finally {
 				playback.close();
 				await microtasks();
@@ -2120,7 +2120,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			try {
 				expect(playback.codecs).toBe(1);
 				await push(MIN, at(10n, 1000, true, recovery), gap, at(13n, 1900, true, recovery));
-				expect(playback.resets).toBe(1);
+				expect(playback.resets).toBe(0);
 				expect(playback.payloads[MIN]).toEqual([recovery, recovery]);
 			} finally {
 				playback.close();
