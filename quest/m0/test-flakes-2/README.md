@@ -253,6 +253,5 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the test waits for the first track's queue instead of asserting at once, and its `test.skip` is removed
 - [The Go wrapper's cancelled-RecvGroup test holds up under load](/quest/m0/test-flakes-2/go-recv-cancel.md) - a `RecvGroup` after a cancelled one is woken by the next group, and its `t.Skip` is removed
