@@ -1,4 +1,4 @@
-import { expect, onTestFinished, spyOn, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
@@ -25,7 +25,6 @@ import { Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { unwanted } from "../util/demand.ts";
 import { wireOf } from "../wire.ts";
-import type * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { SubscribeRefused, toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
@@ -50,9 +49,6 @@ function publish(origin: OriginProducer, path: Path.Valid) {
 }
 
 const VERSION = Version.DRAFT_18;
-
-/** A session that negotiated MoQ Cluster alone. */
-const CLUSTER = { cluster: true };
 
 /** How long to wait for a stream before calling it absent, which is how a regression reports. */
 const STREAM_WAIT = 1000;
@@ -142,18 +138,12 @@ async function declinePublishNamespace(stream: Stream, retryInterval = 1n): Prom
 function publisher(
 	transport: WebTransport,
 	{
-		requiresSolicitation = false,
 		session,
-		cluster,
 		grant,
-		activeCount,
 		auth,
 	}: {
-		requiresSolicitation?: boolean;
 		session?: Session;
-		cluster?: Cluster.Hops;
 		grant?: Signal<Grant | undefined>;
-		activeCount?: boolean;
 		auth?: Tokens;
 	} = {},
 ): { pub: Publisher; origin: OriginProducer } {
@@ -164,10 +154,7 @@ function publisher(
 			quic: transport,
 			session: inner,
 			publish: origin.consume(),
-			requiresSolicitation,
-			cluster,
 			grant,
-			activeCount,
 			auth,
 		}),
 		origin,
@@ -1228,7 +1215,7 @@ test("a declined advertisement is retried on the next change", async () => {
  */
 test("a subscription below an advertised route hears it as the empty suffix", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
-	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
+	const { pub, origin } = publisher(pair.server);
 	publish(origin, Path.from("dash"));
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
@@ -1261,7 +1248,7 @@ test("a subscription below an advertised route hears it as the empty suffix", as
  */
 test("a subscription outside a covering route's claim does not hear it", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
-	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
+	const { pub, origin } = publisher(pair.server);
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room/chat"))]));
 	const dynamic = chat.claim(Path.from("room"));
 
@@ -1292,7 +1279,7 @@ test("a subscription outside a covering route's claim does not hear it", async (
  */
 test("a subscription hears the best covering route its claim allows", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
-	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
+	const { pub, origin } = publisher(pair.server);
 	const scoped = (path: string) =>
 		origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from(path))]));
 	const chat = scoped("room/chat").claim(Path.from("room"), { cost: 1n });
@@ -1332,7 +1319,6 @@ test("a subscription hears a broader covering route when the narrowest cannot se
 		quic: pair.server,
 		session: new NativeSession(pair.server, VERSION, true),
 		publish: tenant.consume(),
-		requiresSolicitation: true,
 	});
 	const chat = origin
 		.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/chat"))]))
@@ -1371,7 +1357,6 @@ test("a covering route's claim is compared relative to the served root", async (
 		quic: pair.server,
 		session: new NativeSession(pair.server, VERSION, true),
 		publish: tenant.consume(),
-		requiresSolicitation: true,
 	});
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/room/chat"))]));
 	const dynamic = chat.claim(Path.from("tenant/room"));
@@ -1534,40 +1519,6 @@ test("closing the session ends the unsolicited announce loop", async () => {
 	origin.close();
 });
 
-/**
- * A peer that declared a Hop ID gets one on every advertisement: it is what lets the peer
- * tell that an advertisement it hears back came from us. A peer that declared nothing has
- * not read ours either, so sending it the parameters would be a protocol violation.
- */
-test("an advertisement carries our hop id once the peer declared one", async () => {
-	const self: Hop = HopSchema.parse(7n);
-
-	for (const peer of [HopSchema.parse(9n), undefined]) {
-		const pair = createMockTransportPair(ALPN.DRAFT_18);
-		const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
-		publish(origin, Path.from("mine"));
-		void pub.runPublishNamespaces();
-
-		const stream = await nextStream(pair.client);
-		expect(await stream.reader.u53()).toBe(PublishNamespace.id);
-
-		if (peer === undefined) {
-			// Nothing negotiated, so the parameters are absent: reading the message as a
-			// negotiated one finds no HOP_PATH and rejects.
-			await expect(PublishNamespace.decode(stream.reader, VERSION, CLUSTER)).rejects.toThrow();
-		} else {
-			// Our own Hop ID is the last entry, and we originate everything we advertise,
-			// so it is the only one. The cost is 0: we are already producing the content.
-			const msg = await PublishNamespace.decode(stream.reader, VERSION, CLUSTER);
-			expect(msg.trackNamespace).toBe(Path.from("mine"));
-			expect(msg.params.cluster).toEqual({ hops: [self], cost: 0n });
-			await acceptPublishNamespace(stream);
-		}
-
-		origin.close();
-	}
-});
-
 /** Advance time in steps until `done` holds, failing once `limit` has passed without it. */
 async function advanceUntil(clock: Manual, done: () => boolean, limit: number, step = 50) {
 	for (let elapsed = 0; !done(); elapsed += step) {
@@ -1616,34 +1567,32 @@ async function take(clock: Manual, queue: Stream[]): Promise<Stream> {
 	return stream;
 }
 
-/** Read one PUBLISH_NAMESPACE and its cluster parameters, then accept it. */
-async function acceptClustered(stream: Stream): Promise<Cluster.Advert | undefined> {
+/** Read one PUBLISH_NAMESPACE, then accept it. */
+async function acceptAdvert(stream: Stream): Promise<Path.Valid> {
 	expect(await stream.reader.u53()).toBe(PublishNamespace.id);
-	const msg = await PublishNamespace.decode(stream.reader, VERSION, CLUSTER);
+	const msg = await PublishNamespace.decode(stream.reader, VERSION);
 	await acceptPublishNamespace(stream);
-	return msg.params.cluster;
+	return msg.trackNamespace;
 }
 
 /** Read one REQUEST_UPDATE off a PUBLISH_NAMESPACE stream. */
-async function readUpdate(stream: Stream): Promise<Cluster.Update> {
+async function readUpdate(stream: Stream): Promise<PublishNamespaceUpdate> {
 	expect(await stream.reader.u53()).toBe(PublishNamespaceUpdate.id);
-	return (await PublishNamespaceUpdate.decode(stream.reader, VERSION)).update;
+	return await PublishNamespaceUpdate.decode(stream.reader, VERSION);
 }
 
-/** A clustered publisher on a manual clock, with every stream it opens collected. */
-function clustered(requiresSolicitation = false, auth?: Tokens) {
+/** A publisher on a manual clock, with every stream it opens collected. */
+function announcer(auth?: Tokens) {
 	const clock = new Manual();
 	const installed = clock.install();
-	const self: Hop = HopSchema.parse(7n);
-	const peer: Hop = HopSchema.parse(9n);
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
-	const { pub, origin } = publisher(pair.server, { cluster: { self, peer }, requiresSolicitation, auth });
+	const { pub, origin } = publisher(pair.server, { auth });
 	const streams = accepted(pair.client);
 	const close = () => {
 		origin.close();
 		installed.close();
 	};
-	return { clock, self, pair, pub, origin, streams, close };
+	return { clock, pair, pub, origin, streams, close };
 }
 
 const VIA: Hop = HopSchema.parse(3n);
@@ -1651,70 +1600,36 @@ const MID: Hop = HopSchema.parse(4n);
 const OTHER: Hop = HopSchema.parse(5n);
 
 /**
- * A reprice is a REQUEST_UPDATE on the request that already carries the namespace, with
- * only what changed. A cost that drops to 0 has to say so: REQUEST_UPDATE keeps an omitted
- * parameter, so leaving it out would leave the peer holding the old price.
- */
-test("a price change on a held namespace is one REQUEST_UPDATE, not a withdrawal", async () => {
-	const { clock, self, pub, origin, streams, close } = clustered();
-	try {
-		const broadcast = origin.route(Path.from("mine"), { hidden: true });
-		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
-		void pub.runPublishNamespaces();
-
-		const stream = await take(clock, streams);
-		expect(await acceptClustered(stream)).toEqual({ hops: [VIA, self], cost: 4n });
-
-		wireOf(broadcast).update({ hops: [VIA], cost: 8n });
-		expect(await readUpdate(stream)).toEqual({ hops: undefined, cost: 8n });
-		await acceptPublishNamespace(stream);
-
-		wireOf(broadcast).update({ hops: [VIA], cost: 0n });
-		expect(await readUpdate(stream)).toEqual({ hops: undefined, cost: 0n });
-		await acceptPublishNamespace(stream);
-
-		// Still the one request, still open: nothing was withdrawn or advertised again.
-		const more = watch(stream.reader.done());
-		await clock.advance(Duration.ZERO);
-		expect(more.state).toBe("pending");
-		expect(streams).toHaveLength(0);
-	} finally {
-		close();
-	}
-});
-
-test("a hop path change behind the same publisher is one REQUEST_UPDATE carrying HOP_PATH", async () => {
-	const { clock, self, pub, origin, streams, close } = clustered();
-	try {
-		const broadcast = origin.route(Path.from("mine"), { hidden: true });
-		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
-		void pub.runPublishNamespaces();
-
-		const stream = await take(clock, streams);
-		await acceptClustered(stream);
-
-		wireOf(broadcast).update({ hops: [VIA, MID], cost: 4n });
-		expect(await readUpdate(stream)).toEqual({ hops: [VIA, MID, self], cost: undefined });
-		await acceptPublishNamespace(stream);
-
-		const more = watch(stream.reader.done());
-		await clock.advance(Duration.ZERO);
-		expect(more.state).toBe("pending");
-		expect(streams).toHaveLength(0);
-	} finally {
-		close();
-	}
-});
-
-/**
- * NAMESPACE has no REQUEST_UPDATE; the receiver reads a repeat as a replacement. That holds
- * for a new original publisher too.
+ * moq-transport carries no hop path or cost, so a route change behind the same publisher is
+ * nothing the peer can see: no REQUEST_UPDATE, and no withdrawal.
  */
 test.each([
-	["a hop path and cost change", [VIA, MID], 8n],
+	["a price change", [VIA], 8n],
+	["a hop path change", [VIA, MID], 4n],
 	["a first-hop change", [OTHER], 4n],
-] as const)("a solicited namespace takes %s as one NAMESPACE and no NAMESPACE_DONE", async (_, hops, cost) => {
-	const { clock, self, pair, pub, origin, close } = clustered(true);
+] as const)("%s on a held PUBLISH_NAMESPACE sends nothing", async (_, hops, cost) => {
+	const { clock, pub, origin, streams, close } = announcer();
+	try {
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
+		void pub.runPublishNamespaces();
+
+		const stream = await take(clock, streams);
+		expect(await acceptAdvert(stream)).toBe(Path.from("mine"));
+
+		wireOf(broadcast).update({ hops: [...hops], cost });
+		const more = watch(stream.reader.done());
+		await clock.advance(Duration.ZERO);
+		expect(more.state).toBe("pending");
+		expect(streams).toHaveLength(0);
+	} finally {
+		close();
+	}
+});
+
+/** The same holds for a solicited NAMESPACE: no repeat, and no NAMESPACE_DONE. */
+test("a route change on a solicited namespace sends nothing", async () => {
+	const { clock, pair, pub, origin, close } = announcer();
 	try {
 		const broadcast = origin.route(Path.from("mine"), { hidden: true });
 		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
@@ -1724,55 +1639,16 @@ test.each([
 		if (!stream) throw new Error("the subscription stream was never accepted");
 		void pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }), stream);
 
-		const entry = async () => {
-			expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
-			return await SubscribeNamespaceEntry.decode(subscription.reader, VERSION, CLUSTER);
-		};
-
 		expect(await subscription.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(subscription.reader, VERSION);
-		expect(await entry()).toMatchObject({
-			suffix: Path.from("mine"),
-			params: { cluster: { hops: [VIA, self], cost: 4n } },
-		});
+		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+		expect((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix).toBe(Path.from("mine"));
 
-		wireOf(broadcast).update({ hops: [...hops], cost });
-		expect(await entry()).toMatchObject({
-			suffix: Path.from("mine"),
-			params: { cluster: { hops: [...hops, self], cost } },
-		});
-
+		wireOf(broadcast).update({ hops: [OTHER], cost: 8n });
 		const more = watch(subscription.reader.u53());
 		await clock.advance(Duration.ZERO);
 		expect(more.state).toBe("pending");
 		subscription.close();
-	} finally {
-		close();
-	}
-});
-
-/**
- * A different original publisher updates the PUBLISH_NAMESPACE in place, as any other
- * change does: withdrawing it would make the namespace briefly vanish downstream.
- */
-test("a first-hop change is one REQUEST_UPDATE carrying HOP_PATH, not a withdrawal", async () => {
-	const { clock, self, pub, origin, streams, close } = clustered();
-	try {
-		const broadcast = origin.route(Path.from("mine"), { hidden: true });
-		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
-		void pub.runPublishNamespaces();
-
-		const stream = await take(clock, streams);
-		await acceptClustered(stream);
-
-		wireOf(broadcast).update({ hops: [OTHER], cost: 4n });
-		expect(await readUpdate(stream)).toEqual({ hops: [OTHER, self], cost: undefined });
-		await acceptPublishNamespace(stream);
-
-		const more = watch(stream.reader.done());
-		await clock.advance(Duration.ZERO);
-		expect(more.state).toBe("pending");
-		expect(streams).toHaveLength(0);
 	} finally {
 		close();
 	}
@@ -1842,7 +1718,7 @@ function carriedTokens() {
  */
 test("swapping a route's token is one REQUEST_UPDATE carrying it", async () => {
 	const tokens = new Tokens();
-	const { clock, pub, origin, streams, close } = clustered(false, tokens);
+	const { clock, pub, origin, streams, close } = announcer(tokens);
 	const { sent, restore } = carriedTokens();
 	try {
 		const broadcast = origin.route(Path.from("mine"), { hidden: true });
@@ -1850,11 +1726,11 @@ test("swapping a route's token is one REQUEST_UPDATE carrying it", async () => {
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
-		await acceptClustered(stream);
+		await acceptAdvert(stream);
 		expect(sent).toEqual(["first"]);
 
 		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("second") });
-		expect(await readUpdate(stream)).toEqual({ hops: undefined, cost: undefined });
+		await readUpdate(stream);
 		await acceptPublishNamespace(stream);
 		expect(sent).toEqual(["first", "second"]);
 		expect(streams).toHaveLength(0);
@@ -1867,7 +1743,7 @@ test("swapping a route's token is one REQUEST_UPDATE carrying it", async () => {
 /** A token another session issued is never carried, so swapping between two sends nothing. */
 test("a foreign route token is not carried", async () => {
 	const foreign = new Tokens();
-	const { clock, pub, origin, streams, close } = clustered(false, new Tokens());
+	const { clock, pub, origin, streams, close } = announcer(new Tokens());
 	const { sent, restore } = carriedTokens();
 	try {
 		const broadcast = origin.route(Path.from("mine"), { hidden: true });
@@ -1875,7 +1751,7 @@ test("a foreign route token is not carried", async () => {
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
-		await acceptClustered(stream);
+		await acceptAdvert(stream);
 		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: foreign.issue("second") });
 		const more = watch(stream.reader.u53());
 		await clock.advance(Duration.ZERO);
@@ -1890,7 +1766,7 @@ test("a foreign route token is not carried", async () => {
 /** REQUEST_UPDATE cannot name a token on a request that had none, so the request restarts. */
 test("naming a token on an unnamed request makes it again", async () => {
 	const tokens = new Tokens();
-	const { clock, pub, origin, streams, close } = clustered(false, tokens);
+	const { clock, pub, origin, streams, close } = announcer(tokens);
 	const { sent, restore } = carriedTokens();
 	try {
 		const broadcast = origin.route(Path.from("mine"), { hidden: true });
@@ -1898,11 +1774,11 @@ test("naming a token on an unnamed request makes it again", async () => {
 		void pub.runPublishNamespaces();
 
 		const old = await take(clock, streams);
-		await acceptClustered(old);
+		await acceptAdvert(old);
 		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
 
 		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
-		await acceptClustered(await take(clock, streams));
+		await acceptAdvert(await take(clock, streams));
 		expect(sent).toEqual([undefined, "first"]);
 	} finally {
 		restore();
@@ -1913,7 +1789,7 @@ test("naming a token on an unnamed request makes it again", async () => {
 /** Closing a route's token drops it from the request, which REQUEST_UPDATE cannot do. */
 test("closing a route's token makes its request again without it", async () => {
 	const tokens = new Tokens();
-	const { clock, pub, origin, streams, close } = clustered(false, tokens);
+	const { clock, pub, origin, streams, close } = announcer(tokens);
 	const { sent, restore } = carriedTokens();
 	try {
 		const broadcast = origin.route(Path.from("mine"), { hidden: true });
@@ -1922,11 +1798,11 @@ test("closing a route's token makes its request again without it", async () => {
 		void pub.runPublishNamespaces();
 
 		const old = await take(clock, streams);
-		await acceptClustered(old);
+		await acceptAdvert(old);
 		token.close();
 
 		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
-		await acceptClustered(await take(clock, streams));
+		await acceptAdvert(await take(clock, streams));
 		expect(sent).toEqual(["first", undefined]);
 	} finally {
 		restore();
@@ -1935,7 +1811,7 @@ test("closing a route's token makes its request again without it", async () => {
 });
 
 test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async () => {
-	const { clock, pub, origin, streams, close } = clustered();
+	const { clock, pub, origin, streams, close } = announcer();
 	try {
 		const broadcastRoute = origin.route(Path.from("mine"), { hidden: true });
 		const broadcast = broadcastRoute.broadcast;
@@ -1943,21 +1819,21 @@ test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async (
 		void pub.runPublishNamespaces();
 
 		const old = await take(clock, streams);
-		await acceptClustered(old);
+		await acceptAdvert(old);
 
 		republish(origin, broadcast);
 
 		// Draft-18+ withdraws by cancelling the request, never a FIN.
 		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
 		const next = await take(clock, streams);
-		expect(await acceptClustered(next)).toMatchObject({ cost: 4n });
+		expect(await acceptAdvert(next)).toBe(Path.from("mine"));
 	} finally {
 		close();
 	}
 });
 
 test("a republish withdraws the solicited NAMESPACE and sends it again", async () => {
-	const { pair, pub, origin, close } = clustered(true);
+	const { pair, pub, origin, close } = announcer();
 	try {
 		const broadcastRoute = origin.route(Path.from("mine"), { hidden: true });
 		const broadcast = broadcastRoute.broadcast;
@@ -1971,16 +1847,14 @@ test("a republish withdraws the solicited NAMESPACE and sends it again", async (
 		expect(await subscription.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(subscription.reader, VERSION);
 		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
-		await SubscribeNamespaceEntry.decode(subscription.reader, VERSION, CLUSTER);
+		await SubscribeNamespaceEntry.decode(subscription.reader, VERSION);
 
 		republish(origin, broadcast);
 
 		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntryDone.id);
 		expect((await SubscribeNamespaceEntryDone.decode(subscription.reader, VERSION)).suffix).toBe(Path.from("mine"));
 		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
-		expect((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION, CLUSTER)).suffix).toBe(
-			Path.from("mine"),
-		);
+		expect((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix).toBe(Path.from("mine"));
 		subscription.close();
 	} finally {
 		close();
@@ -1996,16 +1870,17 @@ test.each([
 	["waits out its retry interval", 10_000n],
 	["that forbids retrying is never re-offered", 0n],
 ])("a refused update %s", async (_, retryInterval) => {
-	const { clock, pub, origin, streams, close } = clustered();
+	const tokens = new Tokens();
+	const { clock, pub, origin, streams, close } = announcer(tokens);
 	try {
 		const broadcast = origin.route(Path.from("mine"), { hidden: true });
-		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
-		await acceptClustered(stream);
+		await acceptAdvert(stream);
 
-		wireOf(broadcast).update({ hops: [VIA], cost: 8n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("second") });
 		await readUpdate(stream);
 		await declinePublishNamespace(stream, retryInterval);
 
@@ -2025,7 +1900,7 @@ test.each([
 		// Past the interval, the next backoff (at most its ceiling) brings it back.
 		await advanceUntil(clock, () => streams.length > 0, 6_500);
 		const fresh = await take(clock, streams);
-		expect(await acceptClustered(fresh)).toMatchObject({ cost: 8n });
+		expect(await acceptAdvert(fresh)).toBe(Path.from("mine"));
 	} finally {
 		close();
 	}
@@ -2037,19 +1912,20 @@ test.each([
  * instead of ending.
  */
 test("a refused update whose peer closes the request keeps the loop running", async () => {
-	const { clock, pub, origin, streams, close } = clustered();
+	const tokens = new Tokens();
+	const { clock, pub, origin, streams, close } = announcer(tokens);
 	try {
 		const broadcast = origin.route(Path.from("mine"), { hidden: true });
-		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
 		let failed: unknown;
 		void pub.runPublishNamespaces().catch((err: unknown) => {
 			failed = err;
 		});
 
 		const stream = await take(clock, streams);
-		await acceptClustered(stream);
+		await acceptAdvert(stream);
 
-		wireOf(broadcast).update({ hops: [VIA], cost: 8n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("second") });
 		await readUpdate(stream);
 		await declinePublishNamespace(stream, 1n);
 		stream.close();
@@ -2057,7 +1933,7 @@ test("a refused update whose peer closes the request keeps the loop running", as
 		await advanceUntil(clock, () => streams.length > 0 || failed !== undefined, 10_000);
 		expect(failed).toBeUndefined();
 		const fresh = await take(clock, streams);
-		expect(await acceptClustered(fresh)).toMatchObject({ cost: 8n });
+		expect(await acceptAdvert(fresh)).toBe(Path.from("mine"));
 	} finally {
 		close();
 	}
@@ -2068,19 +1944,21 @@ test("a refused update whose peer closes the request keeps the loop running", as
  * without reading it: a change landing while one waits for its answer goes out after.
  */
 test("a change while an update is unanswered waits for its answer", async () => {
-	const { clock, pub, origin, streams, close } = clustered();
+	const tokens = new Tokens();
+	const { clock, pub, origin, streams, close } = announcer(tokens);
+	const { sent, restore } = carriedTokens();
 	try {
 		const broadcast = origin.route(Path.from("mine"), { hidden: true });
-		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
-		await acceptClustered(stream);
+		await acceptAdvert(stream);
 
-		wireOf(broadcast).update({ hops: [VIA], cost: 8n });
-		expect(await readUpdate(stream)).toEqual({ hops: undefined, cost: 8n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("second") });
+		await readUpdate(stream);
 
-		wireOf(broadcast).update({ hops: [VIA], cost: 12n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("third") });
 		const second = watch(stream.reader.u53());
 		await clock.advance(Duration.millis(1_000));
 		expect(second.state).toBe("pending");
@@ -2090,12 +1968,11 @@ test("a change while an update is unanswered waits for its answer", async () => 
 		await clock.advance(Duration.ZERO);
 		expect(second.state).toBe("resolved");
 		expect(second.value).toBe(PublishNamespaceUpdate.id);
-		expect((await PublishNamespaceUpdate.decode(stream.reader, VERSION)).update).toEqual({
-			hops: undefined,
-			cost: 12n,
-		});
+		await PublishNamespaceUpdate.decode(stream.reader, VERSION);
 		await acceptPublishNamespace(stream);
+		expect(sent).toEqual(["first", "second", "third"]);
 	} finally {
+		restore();
 		close();
 	}
 });
@@ -2106,14 +1983,14 @@ test("a change while an update is unanswered waits for its answer", async () => 
  * on a backoff instead of a stream per turn of the loop.
  */
 test("an advertisement the peer keeps ending comes back on a growing backoff", async () => {
-	const { clock, pub, origin, streams, close } = clustered();
+	const { clock, pub, origin, streams, close } = announcer();
 	try {
 		wireOf(origin.route(Path.from("mine"), { hidden: true })).update({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
 		let stream = await take(clock, streams);
 		for (const wait of [100, 200, 400, 800]) {
-			await acceptClustered(stream);
+			await acceptAdvert(stream);
 			stream.writer.close();
 			await clock.advance(Duration.ZERO);
 
@@ -2130,20 +2007,21 @@ test("an advertisement the peer keeps ending comes back on a growing backoff", a
 });
 
 /**
- * A peer that never answers an update cannot be assumed to hold either price, so the
+ * A peer that never answers an update cannot be assumed to hold either token, so the
  * request is dropped and the namespace comes back on a fresh one.
  */
 test("an unanswered update drops the request and re-offers the namespace fresh", async () => {
-	const { clock, pub, origin, streams, close } = clustered();
+	const tokens = new Tokens();
+	const { clock, pub, origin, streams, close } = announcer(tokens);
 	try {
 		const broadcast = origin.route(Path.from("mine"), { hidden: true });
-		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
-		await acceptClustered(stream);
+		await acceptAdvert(stream);
 
-		wireOf(broadcast).update({ hops: [VIA], cost: 8n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("second") });
 		await readUpdate(stream);
 		const reset = watch(stream.reader.u53());
 
@@ -2156,37 +2034,10 @@ test("an unanswered update drops the request and re-offers the namespace fresh",
 		expect(reset.state).toBe("rejected");
 		await advanceUntil(clock, () => streams.length > 0, 200);
 		const fresh = await take(clock, streams);
-		expect(await acceptClustered(fresh)).toMatchObject({ cost: 8n });
+		expect(await acceptAdvert(fresh)).toBe(Path.from("mine"));
 	} finally {
 		close();
 	}
-});
-
-/**
- * MoQ Cluster carries one static cost, and nothing at all without it, so a route change
- * the peer cannot see must not withdraw and advertise the namespace again.
- */
-test.each([
-	["an unchanged price with Cluster", HopSchema.parse(9n)],
-	["any re-price without Cluster", undefined],
-])("%s sends nothing", async (_, peer) => {
-	using clock = manual();
-	const self: Hop = HopSchema.parse(7n);
-	const pair = createMockTransportPair(ALPN.DRAFT_18);
-	const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
-	const broadcast = origin.route(Path.from("mine"), { cost: 4n });
-	void pub.runPublishNamespaces();
-
-	const stream = await nextStream(pair.client);
-	expect(await stream.reader.u53()).toBe(PublishNamespace.id);
-	const msg = await PublishNamespace.decode(stream.reader, VERSION, { cluster: peer !== undefined });
-	expect(msg.trackNamespace).toBe(Path.from("mine"));
-	await acceptPublishNamespace(stream);
-
-	broadcast.setCost(peer === undefined ? 8n : 4n);
-	await noStream(pair.client, clock);
-
-	origin.close();
 });
 
 test("subscription completion sends PUBLISH_DONE on every supported draft", async () => {
@@ -3329,16 +3180,15 @@ test("draft-22: PUBLISH_DONE waits for a queued group and counts every stream", 
 });
 
 /**
- * A peer that did not send SOLICIT still gets NAMESPACE on its SUBSCRIBE_NAMESPACE
- * stream on draft-16 and later: one for a match that already exists, one announced
- * after, then NAMESPACE_DONE when that announcement ends.
+ * A SUBSCRIBE_NAMESPACE stream gets NAMESPACE on draft-16 and later: one for a match that
+ * already exists, one announced after, then NAMESPACE_DONE when that announcement ends.
  */
 test.each([["draft-18", Version.DRAFT_18]] as const)(
-	"a non-SOLICIT %s SUBSCRIBE_NAMESPACE carries NAMESPACE then NAMESPACE_DONE",
+	"a %s SUBSCRIBE_NAMESPACE carries NAMESPACE then NAMESPACE_DONE",
 	async (_, version) => {
 		const pair = createMockTransportPair(ALPN.DRAFT_18);
 		const session = new NativeSession(pair.server, version, true);
-		const { pub, origin } = publisher(pair.server, { requiresSolicitation: false, session });
+		const { pub, origin } = publisher(pair.server, { session });
 		const early = publish(origin, Path.from("early-cam"));
 
 		const subscription = await Stream.open(pair.client, { version });
@@ -3377,68 +3227,76 @@ test.each([["draft-18", Version.DRAFT_18]] as const)(
 	},
 );
 
+/**
+ * moq-transport has no way to ask for hidden namespaces, so neither discovery path carries
+ * one under a prefix that doesn't name it, as moq-lite does. A prefix naming the dot
+ * segment still lists it.
+ */
 for (const version of [Version.DRAFT_18] as const) {
-	for (const declared of [false, true]) {
-		for (const solicited of [false, true]) {
-			for (const optIn of [false, true]) {
-				test(`hidden negotiation: ${version}, declared=${declared}, solicited=${solicited}, optIn=${optIn}`, async () => {
-					const pair = createMockTransportPair(ALPN.DRAFT_18);
-					const origin = new OriginProducer();
-					// Authorization heads must not replace the request's empty visibility prefix.
-					const scope = new Path.Patterns([
-						Path.Pattern.subtree(Path.from(".stats")),
-						Path.Pattern.subtree(Path.from("visible")),
-					]);
-					const pub = new Publisher({
-						quic: pair.server,
-						session: new NativeSession(pair.server, version, true),
-						publish: origin.scope(Path.empty(), scope).consume(),
-						requiresSolicitation: solicited,
-						hidden: declared,
-					});
-					publish(origin, Path.from(".stats/node"));
-					publish(origin, Path.from("visible"));
-					let subscription: Stream | undefined;
-					let run: Promise<void>;
-					if (solicited) {
-						subscription = await Stream.open(pair.client, { version: version });
-						const accepted = await Stream.accept(pair.server, version);
-						if (!accepted) throw new Error("missing subscription");
-						run = pub.runSubscribeNamespace(
-							new SubscribeNamespace({ requestId: 0n, namespace: Path.empty(), hidden: optIn }),
-							accepted,
-						);
-						expect(await subscription.reader.u53()).toBe(RequestOk.id);
-						await RequestOk.decode(subscription.reader, version);
-					} else {
-						run = pub.runPublishNamespaces();
-					}
-					const expected = !declared || (solicited && optIn) ? [".stats/node", "visible"] : ["visible"];
-					const advertisements: Stream[] = [];
-					for (const path of expected) {
-						if (subscription && true) {
-							expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
-							expect((await SubscribeNamespaceEntry.decode(subscription.reader, version)).suffix).toBe(
-								Path.from(path),
-							);
-						} else {
-							const stream = await Stream.accept(pair.client, version);
-							if (!stream) throw new Error("missing advertisement");
-							advertisements.push(stream);
-							expect(await stream.reader.u53()).toBe(PublishNamespace.id);
-							const msg = await PublishNamespace.decode(stream.reader, version);
-							expect(msg.trackNamespace).toBe(Path.from(path));
-							await stream.writer.u53(RequestOk.id);
-							await new RequestOk({}).encode(stream.writer, version);
-						}
-					}
-					subscription?.close();
-					origin.close();
-					await run;
-					for (const stream of advertisements) stream.close();
-				});
+	for (const [kind, prefix, expected] of [
+		["unsolicited", "", ["visible"]],
+		["solicited", "", ["visible"]],
+		["solicited", ".stats", ["node"]],
+	] as const) {
+		test(`hidden namespaces: ${version}, ${kind} at "${prefix}" hears ${expected.join(", ")}`, async () => {
+			using clock = manual();
+			const pair = createMockTransportPair(ALPN.DRAFT_18);
+			const origin = new OriginProducer();
+			// Authorization heads must not replace the request's empty visibility prefix.
+			const scope = new Path.Patterns([
+				Path.Pattern.subtree(Path.from(".stats")),
+				Path.Pattern.subtree(Path.from("visible")),
+			]);
+			const pub = new Publisher({
+				quic: pair.server,
+				session: new NativeSession(pair.server, version, true),
+				publish: origin.scope(Path.empty(), scope).consume(),
+			});
+			publish(origin, Path.from(".stats/node"));
+			publish(origin, Path.from("visible"));
+			let subscription: Stream | undefined;
+			let run: Promise<void>;
+			if (kind === "solicited") {
+				subscription = await Stream.open(pair.client, { version });
+				const accepted = await Stream.accept(pair.server, version);
+				if (!accepted) throw new Error("missing subscription");
+				run = pub.runSubscribeNamespace(
+					new SubscribeNamespace({ requestId: 0n, namespace: Path.from(prefix) }),
+					accepted,
+				);
+				expect(await subscription.reader.u53()).toBe(RequestOk.id);
+				await RequestOk.decode(subscription.reader, version);
+			} else {
+				run = pub.runPublishNamespaces();
 			}
-		}
+			const advertisements: Stream[] = [];
+			for (const path of expected) {
+				if (subscription) {
+					expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+					expect((await SubscribeNamespaceEntry.decode(subscription.reader, version)).suffix).toBe(
+						Path.from(path),
+					);
+				} else {
+					const stream = await Stream.accept(pair.client, version);
+					if (!stream) throw new Error("missing advertisement");
+					advertisements.push(stream);
+					expect(await stream.reader.u53()).toBe(PublishNamespace.id);
+					const msg = await PublishNamespace.decode(stream.reader, version);
+					expect(msg.trackNamespace).toBe(Path.from(path));
+					await stream.writer.u53(RequestOk.id);
+					await new RequestOk({}).encode(stream.writer, version);
+				}
+			}
+			// Nothing else follows: the hidden one stays off the wire.
+			const more = subscription
+				? subscription.reader.u53().then(() => true)
+				: Stream.accept(pair.client, version).then((stream) => stream !== undefined);
+			expect(await settlesWithin(more, clock, Duration.millis(50))).toBe(false);
+			subscription?.close();
+			origin.close();
+			await run;
+			for (const stream of advertisements) stream.close();
+		});
 	}
 }
 
@@ -3721,7 +3579,6 @@ test("a paused relay subscription reacquires its upstream datagrams", async () =
 		quic: fx.pair.server,
 		session: new NativeSession(fx.pair.server, V22, false),
 		publish: relay.consume(),
-		requiresSolicitation: false,
 	});
 	const received = fx.pair.client.datagrams.readable.getReader();
 	const { client } = await runSubscribe(
@@ -4025,7 +3882,6 @@ test("namespace subscription survives requester FIN and stops on STOP_SENDING", 
 	const pair = createMockTransportPair(ALPN.DRAFT_22);
 	const { pub, origin } = publisher(pair.server, {
 		session: new NativeSession(pair.server, version, false),
-		requiresSolicitation: true,
 	});
 	const client = await Stream.open(pair.client, { version: version });
 	const server = await Stream.accept(pair.server, version);
@@ -4056,7 +3912,6 @@ test("namespace updates move the prefix after acknowledgement", async () => {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const { pub, origin } = publisher(pair.server, {
 			session: new NativeSession(pair.server, version, false),
-			requiresSolicitation: true,
 		});
 		const old = publish(origin, Path.from("old/first"));
 		const fresh = publish(origin, Path.from("new/second"));
@@ -4096,58 +3951,6 @@ test("namespace updates move the prefix after acknowledgement", async () => {
 		}
 	}
 });
-
-/** MoQ Active Count: the REQUEST_OK counts the NAMESPACEs sent ahead of any change. */
-test("a counted answer names the NAMESPACEs that follow it", async () => {
-	for (const activeCount of [true, false]) {
-		const pair = createMockTransportPair(ALPN.DRAFT_18);
-		const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, activeCount });
-		publish(origin, Path.from("a"));
-		publish(origin, Path.from("b"));
-
-		const subscription = await Stream.open(pair.client, { version: VERSION });
-		const accepted = await Stream.accept(pair.server, VERSION);
-		if (!accepted) throw new Error("the subscription stream was never accepted");
-		void pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }), accepted);
-
-		expect(await subscription.reader.u53()).toBe(RequestOk.id);
-		const ok = await RequestOk.decode(subscription.reader, VERSION);
-		expect(ok.parameters.activeCount).toBe(activeCount ? 2 : undefined);
-		const suffixes = [];
-		for (let i = 0; i < 2; i++) {
-			expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
-			suffixes.push((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix);
-		}
-		expect(suffixes.sort()).toEqual([Path.from("a"), Path.from("b")]);
-
-		subscription.close();
-		origin.close();
-	}
-});
-
-/** ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE, so one on any other REQUEST_OK is a violation. */
-test.each([0, Number.MAX_SAFE_INTEGER + 2])(
-	"an ACTIVE_COUNT of %p answering a PUBLISH_NAMESPACE closes the session",
-	async (count) => {
-		const pair = createMockTransportPair(ALPN.DRAFT_18);
-		const { pub, origin } = publisher(pair.server, { activeCount: true });
-		const warn = spyOn(console, "warn").mockImplementation(() => void 0);
-		onTestFinished(() => warn.mockRestore());
-		void pub.runPublishNamespaces();
-		publish(origin, Path.from("a"));
-
-		const stream = await nextStream(pair.client);
-		expect(await readPublishNamespace(stream)).toBe(Path.from("a"));
-		const parameters = new Parameters();
-		parameters.activeCount = count;
-		await stream.writer.u53(RequestOk.id);
-		await new RequestOk({ parameters }).encode(stream.writer, VERSION);
-
-		const closed = await pair.server.closed;
-		expect(closed.closeCode).toBe(new ProtocolViolation("").code);
-		origin.close();
-	},
-);
 
 test("draft-22: a range update replaces the live subscription bounds", async () => {
 	const fx = fixture();

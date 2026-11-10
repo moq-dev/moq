@@ -148,8 +148,7 @@ class Session:
 class GrantConsumer:
     """Follows the grant a session's peer gave it, returned by :meth:`Session.grants`.
 
-    AUTH is only on ``moq-lite-07-wip`` and on moq-transport sessions that negotiate
-    the MoQ Auth extension; elsewhere the grant stays ``None``. Iterate it for the
+    AUTH is only on ``moq-lite-07-wip``; elsewhere the grant stays ``None``. Iterate it for the
     current grant and then each change, until the session ends::
 
         async for grant in session.grants():

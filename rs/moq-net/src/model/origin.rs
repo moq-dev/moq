@@ -110,8 +110,7 @@ pub struct Config {
 
 	/// Longest hop path a session using this origin accepts or forwards (default 32).
 	///
-	/// Applies to moq-lite-03+ hop paths and the negotiated MoQ Cluster extension on
-	/// moq-transport. A forwarded path counts this origin's own hop too, including
+	/// Applies to moq-lite-03+ hop paths. A forwarded path counts this origin's own hop too, including
 	/// when the receiving peer reconstructs that hop from the announce handshake.
 	/// Protocols without a hop path cannot reveal or bound the depth they hide. No wire
 	/// carries a path longer than 32, so a larger value acts as 32.
@@ -8409,7 +8408,7 @@ impl Routes {
 	///
 	/// Synced is relative to the session's peer, never global: a relay answers with
 	/// what it holds without waiting on its own upstreams. Versions that cannot mark
-	/// the boundary (moq-lite-03/04, and moq-transport without MoQ Active Count) catch
+	/// the boundary (moq-lite-03/04, and moq-transport) catch
 	/// up once the peer accepts the request, or once it is sent when nothing answers.
 	///
 	/// Level-triggered: ready whenever synced, and once the cursor is closed.

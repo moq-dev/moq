@@ -10,20 +10,8 @@ export const SetupOption = {
 	MaxAuthTokenCacheSize: 4n,
 	Authority: 5n,
 	Implementation: 7n,
-	/** HOP_ID, from the MoQ Cluster extension. See `cluster.ts`. */
-	HopId: 0x40b54n,
-	/** RELAY_COST, from the MoQ Cluster extension. See `cluster.ts`. */
-	RelayCost: 0x40b56n,
-	/** SOLICIT, from the MoQ Solicit extension. See `solicit.ts`. */
-	Solicit: 0x40b5an,
-	/** HIDDEN, from the MoQ Hidden extension. See `hidden.ts`. */
-	Hidden: 0x40b5cn,
 	/** Subscriber max age, from the MoQ Timestamp extension. */
 	MaxAge: 0x915c4n,
-	/** AUTH, from the MoQ Auth extension. See `auth.ts`. */
-	Auth: 0x40b70n,
-	/** ACTIVE_COUNT, from the MoQ Active Count extension. See `active_count.ts`. */
-	ActiveCount: 0x40b64n,
 } as const;
 
 // Unknown SETUP options may repeat, including GREASE (draft-22 section 9.1).

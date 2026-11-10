@@ -77,11 +77,7 @@ fn both() -> BTreeSet<String> {
 /// Every version that marks the boundary syncs with the whole initial set.
 #[kio::test]
 async fn an_exact_boundary_catches_up_with_the_initial_set() {
-	for version in [
-		"moq-lite-05",
-		"moq-lite-06",
-		"moq-lite-07-wip",
-	] {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		assert_eq!(synced(version).await, both(), "{version}");
 	}
 }

@@ -34,7 +34,6 @@ test.each(["lite", "ietf", "fetch", "track"] as const)(
 						quic: pair.server,
 						session: new NativeSession(pair.server, IetfVersion.DRAFT_22, false),
 						publish: origin.consume(),
-						requiresSolicitation: false,
 					})
 				: new LitePublisher(pair.server, LiteVersion.DRAFT_06, randomHop(), origin.consume());
 		const tasks: Promise<void>[] = [];

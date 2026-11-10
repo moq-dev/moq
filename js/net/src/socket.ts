@@ -34,7 +34,8 @@ const reliable: Track.Subscription = {
 const cancelled = () => new StreamError(StreamCode.Cancel, { message: "socket operation cancelled" });
 const ended = () => new StreamError(StreamCode.SessionClosed, { message: "socket endpoint closed" });
 // Unsupported has no registered stream code, as in Rust: it maps to Internal.
-const unreachable = () => new Error("socket endpoint is unreachable behind a moq-lite hop before 07");
+const unreachable = () =>
+	new Error("socket endpoint is unreachable behind a moq-lite hop before 07 or a moq-transport hop");
 
 function segment(id: string): void {
 	if (!id || id.includes("/") || id.includes("\\")) throw new TypeError("socket id must be one plain segment");

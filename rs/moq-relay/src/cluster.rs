@@ -1610,7 +1610,7 @@ impl Cluster {
 		};
 		// A cluster peer (a `peer` grant, which the LAN credential also gets) discovers
 		// hidden routes whether or not it asks. A peer that predates the hidden opt-in
-		// (below moq-lite-07-wip, or moq-transport without MoQ Hidden) would otherwise
+		// (below moq-lite-07-wip, or moq-transport) would otherwise
 		// lose every dot path during a rolling upgrade. A client certificate alone is a
 		// fact for the auth server, never this exemption.
 		// TODO: drop the exemption once deployed peers all opt in.

@@ -31,9 +31,14 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 			accept({ url, transport: pair.server, publish: publish.consume() }),
 		]);
 		const announced = destination.routes(undefined, { hidden: true });
+		// moq-transport has no way to ask for hidden broadcasts, so it never carries one.
+		const expected =
+			protocol === Lite.ALPN_07_WIP
+				? ["client/other/live", "client/room/.hidden", "client/room/live"]
+				: ["client/other/live", "client/room/live"];
 		try {
 			const received: string[] = [];
-			for (let index = 0; index < 3; index++) {
+			for (let index = 0; index < expected.length; index++) {
 				const update = await withTimeout(
 					announced.next(),
 					Duration.millis(1000),
@@ -43,7 +48,7 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 				received.push(update.prefix);
 			}
 			await new Promise<void>((resolve) => setImmediate(resolve));
-			expect(received.sort()).toEqual(["client/other/live", "client/room/.hidden", "client/room/live"]);
+			expect(received.sort()).toEqual(expected);
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			expect([...(await announcedView(consume)).peek().keys()].sort()).toEqual([
 				Path.from("other/live"),

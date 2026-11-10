@@ -759,10 +759,11 @@ async function announcedUntil(announced: Announce.Routes, until: string) {
 
 // A `.`-named broadcast is left out of discovery unless the request opts in or names the
 // dot segment. lite-06 cannot carry the opt-in, so its peer never lists the hidden path.
-for (const [protocol, carriesOptIn] of [
-	[Lite.ALPN_07_WIP, true],
-	[Lite.ALPN_06, false],
-	[Ietf.ALPN.DRAFT_18, true],
+// moq-transport cannot either, but a request naming the dot segment still lists it.
+for (const [protocol, carriesOptIn, namesDot] of [
+	[Lite.ALPN_07_WIP, true, true],
+	[Lite.ALPN_06, false, false],
+	[Ietf.ALPN.DRAFT_18, false, true],
 ] as const) {
 	test(`integration: ${protocol} hides dot paths from discovery`, async () => {
 		const pair = createMockTransportPair(protocol);
@@ -785,7 +786,7 @@ for (const [protocol, carriesOptIn] of [
 		if (carriesOptIn) await announcedUntil(opted, ".x/y");
 		else expect(await announcedUntil(opted, "visible")).toEqual(["visible"]);
 
-		if (carriesOptIn) {
+		if (namesDot) {
 			const named = client.routes(Path.Pattern.parse(".x/**"));
 			expect(await announcedUntil(named, ".x/y")).toEqual([".x/y"]);
 			named.close();
@@ -2656,7 +2657,9 @@ test("create then announce is discoverable on the wire", async () => {
 	origin.close();
 });
 
-test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
+// moq-transport syncs discovery on the peer's answer, before its first NAMESPACE, so a request
+// made at connect reports absence there rather than resolve through the covering route.
+test.each([Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	"a held answer's first subscribe succeeds on %s without an exact route",
 	async (protocol) => {
 		const pair = createMockTransportPair(protocol);
@@ -2691,42 +2694,40 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 );
 
 // Without an instance on the wire nothing says the job's route continues the claim's stream.
-test.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
-	"publishing a job still resets its first subscribe on %s",
-	async (protocol) => {
-		const pair = createMockTransportPair(protocol);
-		const origin = new OriginProducer();
-		const consumer = new OriginProducer();
-		const handle = origin.claim(Path.empty());
-		const serving = (async () => {
-			const requests = handle.requested();
-			const request = (await requests.next()).value;
-			if (!request) throw new Error("missing job request");
-			const job = request.route({ hidden: true });
-			job.broadcast.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("job"));
-			job.announce();
-			return job;
-		})();
-		const [client, server] = await Promise.all([
-			connect(url, { transport: pair.client, consume: consumer }),
-			accept(pair.server, url, { publish: origin.consume() }),
-		]);
-		const requested = consumer.request(Path.from("live/cam"));
-		const remote = await waitFor(requested.active, (broadcast) => broadcast !== undefined);
-		if (!remote) throw new Error("request did not resolve");
-		const track = remote.track("chat").subscribe().ordered();
-		await expect(track.readString()).rejects.toBeInstanceOf(Error);
-		const job = await serving;
-		track.close();
-		requested.close();
-		handle.close();
-		job.close();
-		client.abort();
-		server.abort();
-		origin.close();
-		consumer.close();
-	},
-);
+// moq-transport is left out for the reason above: its first request reports absence.
+test.each([Lite.ALPN_06])("publishing a job still resets its first subscribe on %s", async (protocol) => {
+	const pair = createMockTransportPair(protocol);
+	const origin = new OriginProducer();
+	const consumer = new OriginProducer();
+	const handle = origin.claim(Path.empty());
+	const serving = (async () => {
+		const requests = handle.requested();
+		const request = (await requests.next()).value;
+		if (!request) throw new Error("missing job request");
+		const job = request.route({ hidden: true });
+		job.broadcast.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("job"));
+		job.announce();
+		return job;
+	})();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, consume: consumer }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+	const requested = consumer.request(Path.from("live/cam"));
+	const remote = await waitFor(requested.active, (broadcast) => broadcast !== undefined);
+	if (!remote) throw new Error("request did not resolve");
+	const track = remote.track("chat").subscribe().ordered();
+	await expect(track.readString()).rejects.toBeInstanceOf(Error);
+	const job = await serving;
+	track.close();
+	requested.close();
+	handle.close();
+	job.close();
+	client.abort();
+	server.abort();
+	origin.close();
+	consumer.close();
+});
 
 // On lite-07 a job's exact route continues its claim's minted instance, so a reader resolved
 // through the claim keeps its broadcast and its subscription once that route lands.

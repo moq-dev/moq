@@ -50,7 +50,6 @@ function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority
 		quic: pair.server,
 		session: new NativeSession(pair.server, version, false),
 		publish: origin.consume(),
-		requiresSolicitation: false,
 		grant,
 	});
 	const publication = origin.route(Path.from("room"));

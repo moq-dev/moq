@@ -1095,7 +1095,7 @@ test("announced accepts a non-prefix scope before any session exists", () => {
 
 /**
  * A watcher on the consume origin syncs only once the session has delivered the
- * server's initial set, exactly on versions that count it (lite-05+, MoQ Active Count), and
+ * server's initial set, exactly on versions that mark it (lite-05+), and
  * a reconnect takes it back until the next session's set lands.
  */
 test("a watcher syncs with the server's initial set, and again after a reconnect", async () => {

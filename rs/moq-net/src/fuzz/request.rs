@@ -166,10 +166,7 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 	let mut seeds = Vec::new();
 	for (index, version) in super::IETF_VERSIONS.iter().enumerate() {
 		let messages: Vec<(u64, Vec<u8>)> = vec![
-			encode(
-				&ietf::RequestOk { largest: None },
-				*version,
-			),
+			encode(&ietf::RequestOk { largest: None }, *version),
 			encode(
 				&ietf::RequestError {
 					error_code: 1,

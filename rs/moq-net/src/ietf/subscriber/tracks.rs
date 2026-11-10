@@ -1906,9 +1906,7 @@ mod tests {
 			let msg: ietf::SubscribeTracks = body.message(self.version).unwrap();
 			assert_eq!(msg.prefix.as_str(), "bcast");
 			assert!(!msg.forward, "the listing asks for every track's objects");
-			let ok = ietf::RequestOk {
-				largest: None,
-			};
+			let ok = ietf::RequestOk { largest: None };
 			write(&mut stream, ietf::RequestOk::ID, &ok).await;
 			assert_eq!(event(&mut self.tracks).as_deref(), Some("synced"));
 			stream
@@ -1960,9 +1958,7 @@ mod tests {
 			assert_eq!(id, ietf::SubscribeUpdate::ID, "not resumed");
 			let resume: ietf::SubscribeUpdate = body.message(self.version).unwrap();
 			assert_eq!(resume.forward, Some(true));
-			let ok = ietf::RequestOk {
-				largest: None,
-			};
+			let ok = ietf::RequestOk { largest: None };
 			write(video, ietf::RequestOk::ID, &ok).await;
 			let reader = kio::clock::timeout(TIMEOUT, reader)
 				.await
@@ -2359,9 +2355,7 @@ mod tests {
 				..Default::default()
 			},
 		};
-		let answer = ietf::RequestOk {
-			largest: None,
-		};
+		let answer = ietf::RequestOk { largest: None };
 
 		// The first answer declares DYNAMIC_GROUPS, and group 5 lands with a delta.
 		let (track, first, _serving) = h.read_track("video").await;

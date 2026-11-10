@@ -28,13 +28,11 @@
 //! that carried a token is held to that token's grant alone and ends with it; any other
 //! request is held to the session's scope, which a token carried by a request never joins.
 //!
-//! moq-transport carries the same exchange when both sides negotiate the MoQ Auth
-//! extension. Older moq-lite versions, and peers that do not negotiate it, carry no
-//! AUTH exchange: there the grant stays `None`. On moq-transport `add` still succeeds,
-//! with a grant that stays unknown, since a request that names the auth carries its
-//! token; on moq-lite without AUTH it fails with [`Error::Unsupported`]. Both wires carry
-//! a grant's patterns as they are, and refuse one too large for a single AUTH_OK rather
-//! than trim it.
+//! Older moq-lite versions and moq-transport carry no AUTH exchange: there the grant stays
+//! `None`. On moq-transport `add` still succeeds, with a grant that stays unknown, since a
+//! request that names the auth carries its token; on moq-lite without AUTH it fails with
+//! [`Error::Unsupported`]. moq-lite carries a grant's patterns as they are, and refuses one
+//! too large for a single AUTH_OK rather than trim it.
 
 use std::{
 	collections::{BTreeMap, VecDeque},

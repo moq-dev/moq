@@ -157,25 +157,16 @@ async fn tcp_sessions_carry_writes_both_ways() {
 		dialed.producer.write_frame(None, &write[..]).unwrap();
 	}
 	for write in [b"one", b"two", b"six"] {
-		assert_eq!(
-			read(&mut accepted.consumer).await.unwrap().unwrap(),
-			write
-		);
+		assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), write);
 	}
 	accepted.producer.write_frame(None, &b"pong"[..]).unwrap();
 	assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), b"pong");
 
 	// FIN, each way.
 	dialed.producer.finish().unwrap();
-	assert_eq!(
-		read(&mut accepted.consumer).await.unwrap(),
-		None
-	);
+	assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
 	accepted.producer.finish().unwrap();
-	assert_eq!(
-		read(&mut dialed.consumer).await.unwrap(),
-		None
-	);
+	assert_eq!(read(&mut dialed.consumer).await.unwrap(), None);
 }
 
 /// A long session is one group of many writes, read in order.
@@ -221,10 +212,7 @@ async fn a_reset_tcp_half_fails_the_read() {
 	producer.write_frame(None, &b"partial"[..]).unwrap();
 	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"partial");
 	producer.abort(Error::Cancel).unwrap();
-	assert!(
-		read(&mut accepted.consumer).await.is_err(),
-		"a reset read as FIN"
-	);
+	assert!(read(&mut accepted.consumer).await.is_err(), "a reset read as FIN");
 }
 
 /// A slow reader paces the writer through every hop, and a session longer than a group's
@@ -420,10 +408,7 @@ async fn track_sessions_carry_messages_both_ways() {
 		send(&dialed.producer, message);
 	}
 	for message in [b"one", b"two", b"six"] {
-		assert_eq!(
-			recv(&mut reader).await.unwrap().unwrap(),
-			message
-		);
+		assert_eq!(recv(&mut reader).await.unwrap().unwrap(), message);
 	}
 	send(&accepted.producer, b"pong");
 	assert_eq!(recv(&mut replies).await.unwrap().unwrap(), b"pong");

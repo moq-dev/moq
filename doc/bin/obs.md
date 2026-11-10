@@ -24,10 +24,8 @@ The source plays Opus, AAC-LC (mono or stereo), and PCM audio. A channel count n
 Enter a relay URL explicitly. On the shared anonymous relay, use a unique path
 such as `https://cdn.moq.dev/anon/your-stream`. A URL with `?jwt=` fills the
 token field. Editing the token while live presents the new one without
-reconnecting, on a session that carries in-band authorization: a
-`moq-transport` draft-18 or later version pinned under Advanced settings, with
-a relay that negotiates the MoQ Auth extension. The default protocol does not
-yet, so there the dock reports the new token as refused and it applies on the
+reconnecting, on a session that carries in-band authorization, which only
+moq-lite-07-wip does. The default protocol does not yet, so there the dock reports the new token as refused and it applies on the
 next reconnect or Go Live.
 
 By default the dock tunes the encoder for low latency on this stream only:

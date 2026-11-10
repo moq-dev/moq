@@ -11,8 +11,8 @@ use crate::{
 use std::task::{Poll, ready};
 
 use super::{
-	Control, Message, Namespaces, PublishNamespaces, Publisher, RecvFill, RecvGroup, Subscriber, Version, max_age, peer,
-	request_stream::Reject, request_update, subscriber::is_protocol_violation,
+	Control, Message, Namespaces, PublishNamespaces, Publisher, RecvFill, RecvGroup, Subscriber, Version, max_age,
+	peer, request_stream::Reject, request_update, subscriber::is_protocol_violation,
 };
 
 type RecvStream = crate::transport::boxed::RecvStream;
@@ -78,7 +78,6 @@ pub struct Config {
 	/// Uni streams that arrived before that pre-read SETUP (see [`PeerSetup::early`]),
 	/// classified by the session before it accepts any more.
 	pub early_unis: Vec<Reader<RecvStream, crate::Version>>,
-
 
 	/// The Implementation our SETUP advertises, or `None` to omit it.
 	pub implementation: Option<String>,
@@ -607,7 +606,6 @@ pub struct PeerSetup {
 	/// these once it starts. QUIC stream credit bounds how many can pile up.
 	pub early: Vec<Reader<RecvStream, crate::Version>>,
 }
-
 
 /// Server: reads the peer's SETUP off its uni stream before starting the
 /// session, resolving to that stream plus what it declared.
@@ -1360,15 +1358,15 @@ impl Dispatch {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
 		loop {
 			let accepted = 'accept: {
-						let broken = self.fatal.poll(waiter, |fatal| match fatal.is_some() {
-							true => Poll::Ready(()),
-							false => Poll::Pending,
-						});
-						if let Poll::Ready(mut fatal) = broken
-							&& let Some(err) = fatal.take()
-						{
-							break 'accept Poll::Ready(Err(err));
-						}
+				let broken = self.fatal.poll(waiter, |fatal| match fatal.is_some() {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				});
+				if let Poll::Ready(mut fatal) = broken
+					&& let Some(err) = fatal.take()
+				{
+					break 'accept Poll::Ready(Err(err));
+				}
 				if std::mem::take(&mut self.charge) && self.budget.poll_yield(waiter).is_pending() {
 					break 'accept Poll::Pending;
 				}
@@ -1663,8 +1661,6 @@ impl Drop for AuthClose {
 	}
 }
 
-
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1789,7 +1785,7 @@ mod tests {
 			authority: None,
 			token: None,
 			peer_setup_stream: None,
-			// The requests wait on the peer's SETUP (MoQ Hidden).
+			// The requests wait on the peer's SETUP.
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Link::new(false),
 			early_unis: Vec::new(),
@@ -2035,11 +2031,7 @@ mod tests {
 	/// loop up at all.
 	#[kio::test]
 	async fn a_peer_is_told_unasked() {
-		assert_eq!(
-			announce_occurrences().await,
-			1,
-			"no unsolicited PUBLISH_NAMESPACE"
-		);
+		assert_eq!(announce_occurrences().await, 1, "no unsolicited PUBLISH_NAMESPACE");
 	}
 
 	/// A publishing draft-18 session. Everything it needs to keep running is held here.

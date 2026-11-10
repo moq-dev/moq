@@ -15,10 +15,7 @@ pub(crate) struct Peer {
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
 ///
-/// The publisher blocks on this before its first advertisement: the SETUP decides both
-/// what an advertisement carries (MoQ Cluster) and whether one may be sent unasked (MoQ
-/// Solicit), so nothing can go out until it arrives. Cheap to clone; every handle
-/// shares the same slot.
+/// Cheap to clone; every handle shares the same slot.
 #[derive(Clone, Default)]
 pub(crate) struct PeerSetup {
 	slot: kio::Shared<Option<Peer>>,

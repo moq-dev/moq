@@ -1486,7 +1486,6 @@ async fn lite_07_a_revoked_grant_cancels_its_datagram_subscriptions() {
 /// A grant that fits no single AUTH_OK is withheld, never trimmed: the presenter is told
 /// it is unsupported, nothing of the message reaches the wire, and the session and the
 /// token that did fit are untouched.
-
 async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'static str) {
 	within(async {
 		let mut pair = connect(Options {

@@ -1100,9 +1100,8 @@ impl Handshake {
 	/// The identity the peer declared for itself, when the negotiated protocol carries one.
 	///
 	/// A moq-lite-05+ endpoint declares this when it attaches a publish or subscribe
-	/// origin: its Hop ID, or from moq-lite-07 its Node ID. A moq-transport endpoint
-	/// declares its Hop ID via the MoQ Cluster extension. Older versions and endpoints
-	/// without one return `None`. [`origin::Producer::is_own`] tells whether it is ours.
+	/// origin: its Hop ID, or from moq-lite-07 its Node ID. moq-transport, older versions,
+	/// and endpoints without one return `None`. [`origin::Producer::is_own`] tells whether it is ours.
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.

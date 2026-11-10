@@ -92,7 +92,6 @@ for (const protocol of protocols) {
 					quic: pair.server,
 					session: new NativeSession(pair.server, protocol.version, true),
 					publish: origin.consume(),
-					requiresSolicitation: false,
 				});
 				running = publisher.runSubscribe(
 					new IetfSubscribe({
@@ -205,7 +204,6 @@ for (const protocol of protocols) {
 				quic: pair.server,
 				session: new NativeSession(pair.server, protocol.version, true),
 				publish: origin.consume(),
-				requiresSolicitation: false,
 			});
 			running = publisher.runSubscribe(
 				new IetfSubscribe({

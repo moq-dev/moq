@@ -41,14 +41,14 @@ subset drops. What a peer actually observes against this implementation:
 - **Priority.** Higher is served first. This stack's priorities run from -128 to 127 with 0 unset, and go out on the IETF wire, which ranks lower first, as `127 - priority`: an unset priority is IETF 127. An omitted subscriber or publisher priority reads as the drafts' default of IETF 128, one step below unset, so a relay forwards it unchanged. A relay's upstream subscription carries the highest priority its subscribers ask for and updates it as they come and go; its group order stays as the `SUBSCRIBE` asked, since no draft lets an update change it.
 - **Size.** An object extension block larger than 64 KiB ends that subgroup stream. The session stays up. This cap is ours, not the draft's.
 
-Several project drafts extend the IETF wire without breaking it, since `SETUP`
-ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
-[solicit](/draft/moq-solicit) to make announcements opt-in,
-[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
-[auth](/draft/moq-auth) to tell each peer what it may publish and subscribe to,
-[active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
-before a `SUBSCRIBE_NAMESPACE` is synced, and
-[probe](/draft/moq-probe) for bandwidth estimation. Rust sessions request PROBE
+Our own extensions (hop paths, hidden namespaces, in-band grants, and an exact
+sync point for discovery) ride moq-lite only; moq-transport carries none of
+them. Over moq-transport a route has no hop path, so it is anonymous; hidden
+(`.`-named) namespaces are left out of discovery unless the prefix names them;
+only a client announces unasked, while a server answers `SUBSCRIBE_NAMESPACE`;
+and the grant stays unknown, so the URL or `SETUP` token is what authorizes.
+One project draft still extends the IETF wire, since `SETUP` ignores unknown
+parameters: [probe](/draft/moq-probe) for bandwidth estimation. Rust sessions request PROBE
 only while an owned `recv_bandwidth()` consumer or a `viewers()` viewer is held.
 The consumer reads the estimate, and a viewer reads its share of it; session
 statistics do not request PROBE. The viewers' ceilings, summed, are the PROBE target, sent only

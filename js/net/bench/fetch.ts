@@ -43,7 +43,6 @@ for (const groups of [2, 128]) {
 					quic: pair.server,
 					session: new NativeSession(pair.server, version, false),
 					publish: origin.consume(),
-					requiresSolicitation: true,
 				});
 				return { pair, publisher, uni: pair.client.incomingUnidirectionalStreams.getReader() };
 			});

@@ -217,8 +217,8 @@ impl Client {
 		setup::implementation(self.implementation.as_deref().unwrap_or(crate::IMPLEMENTATION))
 	}
 
-	/// Price this link, in the units the rest of the mesh uses (moq-lite-06+, and
-	/// moq-transport via the MoQ Cluster extension).
+	/// Price this link, in the units the rest of the mesh uses (moq-lite-06+). moq-transport
+	/// carries no cost, so there the price is applied locally.
 	///
 	/// The dialer is the side that knows what a link costs, because it chose the peer:
 	/// use `1` for a sibling in the same datacenter and something large for another

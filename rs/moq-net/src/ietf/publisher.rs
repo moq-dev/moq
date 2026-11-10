@@ -708,7 +708,7 @@ struct Namespaces {
 	/// Requests whose stream woke the loop, so a wake polls those rather than every
 	/// update in flight.
 	woken: Arc<Woken>,
-	/// What we may advertise: our grant (MoQ Auth) and the ceiling on the peer.
+	/// What we may advertise: our grant and the ceiling on the peer.
 	permit: crate::auth::Permit,
 	/// The dispatcher-owned gate for a solicited namespace request.
 	gate: Option<crate::auth::Gate>,
@@ -738,7 +738,6 @@ impl Namespaces {
 			epoch: 0,
 		}
 	}
-
 
 	/// Whether we may advertise `path`. An unknown grant allows everything.
 	fn permitted(&self, path: &crate::Path) -> bool {
@@ -851,7 +850,7 @@ enum NamespaceEvent {
 	Update(Option<(crate::announce::Announce, bool, bool)>),
 	/// The retry sleep fired: re-offer whatever the peer should be holding and isn't.
 	Retry,
-	/// Our grant (MoQ Auth) or the ceiling changed: re-check every namespace against it.
+	/// Our grant or the ceiling changed: re-check every namespace against it.
 	Regrant(crate::auth::Permit),
 	/// The queued update at the front got this request ID.
 	Renew(RequestId),
@@ -926,7 +925,7 @@ pub(super) struct Publisher {
 	// Shared across request handlers; None marks a dispatched subscription still resolving.
 	joins: kio::Shared<HashMap<RequestId, Option<Joined<GroupOf<Transport>>>>>,
 	version: Version,
-	// Our grant (MoQ Auth): only what it lets us publish is advertised and served, and a
+	// Our grant: only what it lets us publish is advertised and served, and a
 	// shrink withdraws what it no longer covers.
 	auth: crate::auth::Link,
 	// Dispatched finite serves, including those not yet polled.
@@ -1195,7 +1194,7 @@ impl SubscribeRequest {
 		// refused by the lookup, on this request alone.
 		tracing::debug!(id = %msg.request_id, broadcast = %self.broadcast(), track = %msg.track_name, "subscribe started");
 
-		// Serve only what our grant lets us publish (MoQ Auth), and stop once it no
+		// Serve only what our grant lets us publish, and stop once it no
 		// longer does. Checked before resolving, so a denied request never reaches the
 		// origin. Our own authorization of the peer (the limit) admits a request without a
 		// token; an AUTHORIZATION TOKEN on the request goes to the application to verify for
@@ -2751,7 +2750,7 @@ impl Publisher {
 		}
 	}
 
-	/// Bound what we publish by the grant this session's tokens earn (MoQ Auth).
+	/// Bound what we publish by the grant this session's tokens earn.
 	pub fn with_auth(mut self, auth: crate::auth::Link) -> Self {
 		self.auth = auth;
 		self
@@ -3558,10 +3557,9 @@ impl Publisher {
 				match (advert.wanted(), held) {
 					(true, _) => {
 						tracing::debug!(broadcast = %absolute, "namespace");
-						stream.writer.buffer_message(
-							ietf::Namespace::ID,
-							&ietf::Namespace { suffix: suffix.clone() },
-						)?;
+						stream
+							.writer
+							.buffer_message(ietf::Namespace::ID, &ietf::Namespace { suffix: suffix.clone() })?;
 					}
 					(false, true) => {
 						tracing::debug!(broadcast = %absolute, "namespace_done");
@@ -5590,11 +5588,7 @@ enum ForwardState {
 }
 
 impl ForwardNamespaces {
-	fn new(
-		publisher: &Publisher,
-		announced: crate::origin::Routes,
-		prefix: crate::Path,
-	) -> Self {
+	fn new(publisher: &Publisher, announced: crate::origin::Routes, prefix: crate::Path) -> Self {
 		Self {
 			announced,
 			prefix,
@@ -5980,12 +5974,7 @@ struct NamespaceLoop {
 }
 
 impl NamespaceLoop {
-	fn new(
-		publisher: &Publisher,
-		announced: crate::origin::Routes,
-		prefix: crate::Path,
-		ns: Namespaces,
-	) -> Self {
+	fn new(publisher: &Publisher, announced: crate::origin::Routes, prefix: crate::Path, ns: Namespaces) -> Self {
 		Self {
 			token: ns.gate.as_ref().and_then(|gate| gate.token_guard()),
 			ns,
@@ -6033,7 +6022,12 @@ impl PublishNamespaces {
 		// Split horizon, as the solicited loop applies it: never advertise a route back to
 		// the peer it came from.
 		let origin = publisher.advertising(publisher.origin.clone());
-		let run = NamespaceLoop::new(&publisher, origin.routes(), crate::Path::empty(), Namespaces::new(Target::Requests));
+		let run = NamespaceLoop::new(
+			&publisher,
+			origin.routes(),
+			crate::Path::empty(),
+			Namespaces::new(Target::Requests),
+		);
 		Self { publisher, run }
 	}
 
@@ -6057,6 +6051,7 @@ struct NamespaceServe {
 	state: NamespaceServeState,
 }
 
+#[expect(clippy::large_enum_variant, reason = "a machine's enum is its storage")]
 enum NamespaceServeState {
 	Start(Option<super::token::RequestToken>),
 	Admit(Admit),
@@ -16556,12 +16551,7 @@ mod serve_tests {
 			version,
 		);
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
-		writer
-			.encode(&ietf::RequestOk {
-				largest: None,
-			})
-			.await
-			.unwrap();
+		writer.encode(&ietf::RequestOk { largest: None }).await.unwrap();
 		log.writes.lock().unwrap().clone()
 	}
 
@@ -17065,12 +17055,7 @@ mod serve_tests {
 				VERSION,
 			);
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
-			writer
-				.encode(&ietf::RequestOk {
-					largest: None,
-				})
-				.await
-				.unwrap();
+			writer.encode(&ietf::RequestOk { largest: None }).await.unwrap();
 			log.writes.lock().unwrap().clone()
 		};
 		let written = h.log.writes.lock().unwrap().clone();
@@ -18314,12 +18299,7 @@ mod tests {
 
 		// The response names no request id: it rides the request's stream.
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
-		writer
-			.encode(&ietf::RequestOk {
-				largest: None,
-			})
-			.await
-			.unwrap();
+		writer.encode(&ietf::RequestOk { largest: None }).await.unwrap();
 
 		let writes = log.writes.lock().unwrap();
 		writes.clone()
@@ -18462,7 +18442,11 @@ mod tests {
 	}
 
 	async fn advertise_with_hidden(case: Discovery<'_>) -> crate::lite::test_transport::Log {
-		let Discovery { version, prefix, scoped } = case;
+		let Discovery {
+			version,
+			prefix,
+			scoped,
+		} = case;
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _cam = origin.announce("cam", crate::origin::RouteInfo::new()).unwrap();
 		let _stats = origin.announce(".stats/node", crate::origin::RouteInfo::new()).unwrap();

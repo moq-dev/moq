@@ -46,7 +46,6 @@ async function measure(protocol: string, groups: number, viewers: number) {
 					quic: pair.server,
 					session: new NativeSession(pair.server, IetfVersion.DRAFT_22, true),
 					publish: origin.consume(),
-					requiresSolicitation: false,
 				});
 	const streams: Stream[] = [];
 	for (let viewer = 0; viewer < viewers; viewer++) {

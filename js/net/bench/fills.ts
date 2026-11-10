@@ -33,7 +33,6 @@ for (const groups of [2, 16, 128]) {
 					quic: pair.server,
 					session: new NativeSession(pair.server, version, false),
 					publish: origin.consume(),
-					requiresSolicitation: true,
 				});
 				const uni = pair.client.incomingUnidirectionalStreams.getReader();
 				const client = await Stream.open(pair.client, { version });

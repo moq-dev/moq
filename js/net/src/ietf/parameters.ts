@@ -26,10 +26,6 @@ export const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
 const MSG_PARAM_GROUP_ORDER = 0x22n;
 /// INCLUDE_PROPERTIES, draft-22's opt-out from Track Properties.
 const MSG_PARAM_INCLUDE_PROPERTIES = 0x35n;
-/// ROUTE_COST, from the MoQ Cluster extension. See `cluster.ts`.
-const MSG_PARAM_ROUTE_COST = 0x40b58n;
-/// HIDDEN, from the MoQ Hidden extension. See `hidden.ts`.
-const MSG_PARAM_HIDDEN = 0x40b5en;
 const MSG_PARAM_MAX_AGE = 0x915c6n;
 
 // Bytes parameter IDs (odd)
@@ -39,10 +35,6 @@ const MSG_PARAM_LARGEST_OBJECT = 0x09n;
 const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
 /// FILL_PARAMETERS, draft-22's request for a backfill.
 const MSG_PARAM_FILL_PARAMETERS = 0x23n;
-/// HOP_PATH, from the MoQ Cluster extension. See `cluster.ts`.
-const MSG_PARAM_HOP_PATH = 0x40b57n;
-/// ACTIVE_COUNT, from the MoQ Active Count extension.
-const MSG_PARAM_ACTIVE_COUNT = 0x40b66n;
 
 /** Which control message the parameter block belongs to. Omitted keeps the unfiltered decode. */
 type ControlMessage =
@@ -57,7 +49,6 @@ type ControlMessage =
 	| "fetch-ok"
 	| "request-ok"
 	| "request-update"
-	| "namespace"
 	| "namespace-update";
 
 /** True when this draft's definition of `message` includes `id`. */
@@ -132,7 +123,7 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 		case "namespace-update":
 			return auth || id === 0x34n;
 		case "subscribe-namespace":
-			return auth || id === MSG_PARAM_HIDDEN;
+			return auth;
 		case "publish":
 			return (
 				(objectTimeout && from20) ||
@@ -146,15 +137,13 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				(order && from20)
 			);
 		case "publish-namespace":
-			return auth || id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST;
+			return auth;
 		case "fetch":
 			return auth || id === MSG_PARAM_FILL_TIMEOUT || priority || (filter && from20) || order || range || include;
 		case "fetch-ok":
 			return false;
 		case "request-ok":
-			return expires || largest || id === MSG_PARAM_ACTIVE_COUNT;
-		case "namespace":
-			return id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST;
+			return expires || largest;
 	}
 }
 
@@ -185,10 +174,7 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT:
 		case MSG_PARAM_MAX_CACHE_DURATION:
 		case MSG_PARAM_EXPIRES:
-		case MSG_PARAM_ROUTE_COST:
-		case MSG_PARAM_HIDDEN:
 		case MSG_PARAM_MAX_AGE:
-		case MSG_PARAM_ACTIVE_COUNT:
 			return "varint";
 		case MSG_PARAM_PUBLISHER_PRIORITY:
 		case MSG_PARAM_SUBSCRIBER_PRIORITY:
@@ -203,7 +189,6 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 			return "filter";
 		case MSG_PARAM_AUTHORIZATION_TOKEN:
 		case MSG_PARAM_FILL_PARAMETERS:
-		case MSG_PARAM_HOP_PATH:
 			return "bytes";
 		default:
 			if (MSG_PARAM_REPEATABLE.includes(id)) return "bytes";
@@ -323,32 +308,6 @@ export class Parameters {
 		}
 	}
 
-	/** HIDDEN (MoQ Hidden): also advertise hidden namespaces. Absent and 0 both mean no. */
-	get hidden(): boolean {
-		const v = this.vars.get(MSG_PARAM_HIDDEN);
-		if (v === undefined || v === 0n) return false;
-		if (v === 1n) return true;
-		throw new Error(`invalid HIDDEN parameter: ${v}`);
-	}
-
-	set hidden(v: boolean) {
-		if (v) this.vars.set(MSG_PARAM_HIDDEN, 1n);
-		else this.vars.delete(MSG_PARAM_HIDDEN);
-	}
-
-	/** How many NAMESPACE messages follow a REQUEST_OK before the subscription is synced (MoQ Active Count). */
-	get activeCount(): number | undefined {
-		const v = this.vars.get(MSG_PARAM_ACTIVE_COUNT);
-		if (v === undefined) return undefined;
-		if (v > BigInt(Number.MAX_SAFE_INTEGER)) throw new ProtocolViolation(`ACTIVE_COUNT too large: ${v}`);
-		return Number(v);
-	}
-
-	set activeCount(v: number | undefined) {
-		if (v === undefined) this.vars.delete(MSG_PARAM_ACTIVE_COUNT);
-		else this.vars.set(MSG_PARAM_ACTIVE_COUNT, BigInt(v));
-	}
-
 	// --- Bytes accessors ---
 
 	get largest(): MessageLocation | undefined {
@@ -403,24 +362,6 @@ export class Parameters {
 	set fillTimeout(v: number | undefined) {
 		if (v === undefined) this.vars.delete(MSG_PARAM_FILL_TIMEOUT);
 		else this.vars.set(MSG_PARAM_FILL_TIMEOUT, BigInt(v));
-	}
-
-	/** HOP_PATH: the hop chain an advertisement traversed, as its raw parameter value. */
-	get hopPath(): Uint8Array | undefined {
-		return this.bytes.get(MSG_PARAM_HOP_PATH);
-	}
-
-	set hopPath(v: Uint8Array) {
-		this.bytes.set(MSG_PARAM_HOP_PATH, v);
-	}
-
-	/** ROUTE_COST: the accumulated cost of that path. Absent means 0. */
-	get routeCost(): bigint | undefined {
-		return this.vars.get(MSG_PARAM_ROUTE_COST);
-	}
-
-	set routeCost(v: bigint) {
-		this.vars.set(MSG_PARAM_ROUTE_COST, v);
 	}
 
 	/** Encode the block. */

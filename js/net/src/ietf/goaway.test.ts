@@ -5,12 +5,10 @@ import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
-import { AuthMessage, AuthOk, IetfAuthWire } from "./auth.ts";
 import { Connection } from "./connection.ts";
 import { GoAway } from "./goaway.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { RequestOk } from "./request.ts";
-import { NativeSession } from "./session.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { ALPN, Version } from "./version.ts";
 
@@ -142,52 +140,6 @@ for (const [version, alpn] of [
 	[Version.DRAFT_18, ALPN.DRAFT_18],
 	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const) {
-	test(`${alpn} AUTH replies handle GOAWAY across grants`, async () => {
-		const pair = createMockTransportPair(alpn);
-		const wire = new IetfAuthWire(new NativeSession(pair.client, version, true));
-		const stream = await wire.present(new Uint8Array());
-		const peer = await Stream.accept(pair.server, version);
-		if (!peer) throw new Error("no AUTH stream");
-		try {
-			await peer.writer.u53(GoAway.id);
-			await new GoAway({ newSessionUri: "" }).encode(peer.writer, version);
-			await new AuthOk(new Path.Patterns(), new Path.Patterns()).encode(peer.writer, version);
-			expect(await wire.read(stream)).toEqual({
-				grant: { publish: new Path.Patterns(), subscribe: new Path.Patterns(), expires: undefined },
-			});
-			await peer.writer.u53(GoAway.id);
-			await new GoAway({ newSessionUri: "" }).encode(peer.writer, version);
-			await expect(wire.read(stream)).rejects.toThrow("second GOAWAY");
-		} finally {
-			pair.client.close();
-		}
-	});
-
-	test(`${alpn} an AUTH presenter can send GOAWAY before withdrawing`, async () => {
-		const pair = createMockTransportPair(alpn);
-		const wire = new IetfAuthWire(new NativeSession(pair.client, version, true));
-		const stream = await Stream.open(pair.client, { version });
-		const peer = await Stream.accept(pair.server, version);
-		if (!peer) throw new Error("no AUTH stream");
-		try {
-			await new AuthMessage(1n, new Uint8Array()).encode(peer.writer, version);
-			expect(await stream.reader.u53()).toBe(AuthMessage.id);
-			await wire.accept(stream);
-			const withdrawn = wire.withdrawn(stream);
-			await peer.writer.u53(GoAway.id);
-			await new GoAway({ newSessionUri: "" }).encode(peer.writer, version);
-			peer.writer.close();
-			await withdrawn;
-		} finally {
-			pair.client.close();
-		}
-	});
-}
-
-for (const [version, alpn] of [
-	[Version.DRAFT_18, ALPN.DRAFT_18],
-	[Version.DRAFT_22, ALPN.DRAFT_22],
-] as const) {
 	test(`${alpn} namespace discovery reads GOAWAY before its response and between entries`, async () => {
 		const pair = createMockTransportPair(alpn);
 		const control = await Stream.open(pair.client, { version });
@@ -231,7 +183,8 @@ for (const [version, alpn] of [
 			quic: pair.server,
 			control,
 			version,
-			client: false,
+			// Only a client announces unasked.
+			client: true,
 			publish: origin.consume(),
 		});
 		try {
@@ -262,7 +215,7 @@ for (const [version, alpn] of [
 				quic: pair.server,
 				control,
 				version,
-				client: false,
+				client: true,
 				publish: origin.consume(),
 			});
 			const offered = async () => {

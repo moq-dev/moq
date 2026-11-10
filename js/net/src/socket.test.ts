@@ -641,7 +641,7 @@ for (const protocol of ["tcp", "track"] as const) {
 	});
 }
 
-for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ietf.ALPN.DRAFT_22]) {
+for (const alpn of [Lite.ALPN_07_WIP]) {
 	for (const protocol of ["tcp", "track"] as const) {
 		test(`socket ${protocol} refusal reaches a routed dialer over ${alpn}`, async () => {
 			const clock = time();
@@ -683,7 +683,7 @@ for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ie
 	}
 }
 
-for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ietf.ALPN.DRAFT_22]) {
+for (const alpn of [Lite.ALPN_07_WIP]) {
 	for (const protocol of ["tcp", "track"] as const) {
 		test(`pending socket ${protocol} acceptance over ${alpn} has no arbitrary deadline`, async () => {
 			const clock = time();
@@ -733,66 +733,70 @@ for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ie
 	}
 }
 
-// A moq-lite client session before 07 never carries the endpoint's hidden broadcast, so its peer
-// could never find it. Its dials and accepts fail as unsupported instead of waiting, as in Rust.
-test("a socket endpoint behind a lite-06 client fails its dials and accepts, not the server's", async () => {
-	const clock = time();
-	const ao = new Origin.Producer();
-	const bo = new Origin.Producer();
-	origins.add(ao);
-	origins.add(bo);
-	const a = new Socket.Endpoint(ao, Path.from("room"), "alice");
-	const b = new Socket.Endpoint(bo, Path.from("room"), "bob");
-	// Already waiting before the session attaches, as when an endpoint's client reconnects.
-	const waiting = a.dialTcp("bob").then(
-		() => undefined,
-		(error: unknown) => error,
-	);
-	const pair = createMockTransportPair(Lite.ALPN_06);
-	const url = new URL("https://localhost/socket");
-	const [client, server] = await Promise.all([
-		connect({ url, transport: pair.client, publish: ao.consume(), consume: ao }),
-		acceptConnection({ url, transport: pair.server, publish: bo.consume(), consume: bo }),
-	]);
-	let heard = false;
-	const next = b.acceptTcp().then(
-		() => {
-			heard = true;
-		},
-		() => {},
-	);
-	try {
-		const unsupported = /unreachable behind a moq-lite hop before 07/;
-		expect(((await waiting) as Error).message).toMatch(unsupported);
-		await expect(a.dialTcp("bob")).rejects.toThrow(unsupported);
-		await expect(a.dialTrack("bob")).rejects.toThrow(unsupported);
-		await expect(a.acceptTcp()).rejects.toThrow(unsupported);
-		await expect(a.acceptTrack()).rejects.toThrow(unsupported);
-		// The server's endpoint keeps accepting, and never heard a dial it can't answer.
-		await clock.advance(Duration.secs(3600));
-		expect(heard).toBe(false);
-
-		// The session's end releases the endpoint: an accept waits again.
-		client.abort();
-		await client.closed;
-		let accepted: unknown;
-		const accepting = a.acceptTcp().then(
-			(value) => {
-				accepted = value;
-			},
-			(error: unknown) => {
-				accepted = error;
-			},
+// A moq-lite client session before 07, or a moq-transport one, never carries the endpoint's hidden
+// broadcast, so its peer could never find it. Its dials and accepts fail as unsupported instead of
+// waiting, as in Rust.
+test.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
+	"a socket endpoint behind a %s client fails its dials and accepts, not the server's",
+	async (alpn) => {
+		const clock = time();
+		const ao = new Origin.Producer();
+		const bo = new Origin.Producer();
+		origins.add(ao);
+		origins.add(bo);
+		const a = new Socket.Endpoint(ao, Path.from("room"), "alice");
+		const b = new Socket.Endpoint(bo, Path.from("room"), "bob");
+		// Already waiting before the session attaches, as when an endpoint's client reconnects.
+		const waiting = a.dialTcp("bob").then(
+			() => undefined,
+			(error: unknown) => error,
 		);
-		await clock.advance(Duration.ZERO);
-		expect(accepted).toBeUndefined();
-		a.close();
-		await accepting;
-	} finally {
-		client.abort();
-		server.abort();
-		a.close();
-		b.close();
-		await next;
-	}
-});
+		const pair = createMockTransportPair(alpn);
+		const url = new URL("https://localhost/socket");
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client, publish: ao.consume(), consume: ao }),
+			acceptConnection({ url, transport: pair.server, publish: bo.consume(), consume: bo }),
+		]);
+		let heard = false;
+		const next = b.acceptTcp().then(
+			() => {
+				heard = true;
+			},
+			() => {},
+		);
+		try {
+			const unsupported = /unreachable behind a moq-lite hop before 07 or a moq-transport hop/;
+			expect(((await waiting) as Error).message).toMatch(unsupported);
+			await expect(a.dialTcp("bob")).rejects.toThrow(unsupported);
+			await expect(a.dialTrack("bob")).rejects.toThrow(unsupported);
+			await expect(a.acceptTcp()).rejects.toThrow(unsupported);
+			await expect(a.acceptTrack()).rejects.toThrow(unsupported);
+			// The server's endpoint keeps accepting, and never heard a dial it can't answer.
+			await clock.advance(Duration.secs(3600));
+			expect(heard).toBe(false);
+
+			// The session's end releases the endpoint: an accept waits again.
+			client.abort();
+			await client.closed;
+			let accepted: unknown;
+			const accepting = a.acceptTcp().then(
+				(value) => {
+					accepted = value;
+				},
+				(error: unknown) => {
+					accepted = error;
+				},
+			);
+			await clock.advance(Duration.ZERO);
+			expect(accepted).toBeUndefined();
+			a.close();
+			await accepting;
+		} finally {
+			client.abort();
+			server.abort();
+			a.close();
+			b.close();
+			await next;
+		}
+	},
+);

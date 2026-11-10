@@ -12,9 +12,9 @@ upstream bandwidth.
 
 Each broadcast carries the list of relays it passed through. That hop list
 catches loops and picks the shortest route, and every relay breaks ties the
-same way so the cluster converges instead of flapping. Both wire protocols
-carry it: natively on moq-lite up to moq-lite-06, and via the
-[cluster extension](/draft/moq-cluster) on moq-transport.
+same way so the cluster converges instead of flapping. moq-lite up to
+moq-lite-06 carries it natively; moq-transport carries none, so a route learned
+over it is anonymous and priced at the link's cost.
 
 moq-lite-07-wip carries no hop list. Each publishing node declares a random
 routing identity, and relays run a distance-vector route to it, loop-free by
@@ -109,8 +109,7 @@ max_hops = 6
 ```
 
 The same setting is `--cluster-max-hops` or `MOQ_CLUSTER_MAX_HOPS`. It covers
-moq-lite-03 through moq-lite-06 and moq-transport drafts 18 through 22 when
-the MoQ Cluster extension is negotiated. moq-lite-07-wip routes carry no hop
+moq-lite-03 through moq-lite-06. moq-lite-07-wip routes carry no hop
 path, so it does not bound them. A forwarded path counts this relay's
 own hop even when its peer appends it on receipt. Older versions and peers
 without hop paths hide their depth, which this setting cannot bound.

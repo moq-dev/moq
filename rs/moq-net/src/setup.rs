@@ -71,9 +71,7 @@ pub(crate) fn implementation(value: &str) -> Option<String> {
 	(!value.is_empty()).then(|| value.to_owned())
 }
 
-/// The SETUP extensions this side offers.
-///
-/// Turning one off connects as a peer that does not speak that extension.
+/// The SETUP extensions this side offers, none by default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]

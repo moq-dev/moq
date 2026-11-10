@@ -8,13 +8,12 @@ import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
+import { hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
-import { AuthMessage, IetfAuthWire } from "./auth.ts";
-import * as Cluster from "./cluster.ts";
 import type { RequestKind } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
@@ -64,19 +63,19 @@ export class Connection implements Session {
 	/** moq-transport has no PROBE, so this stays empty; see {@link Session.probe}. */
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
-	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Session.auth}. */
+	/** Our tokens, which requests carry; see {@link Session.auth}. */
 	get auth(): Auth.Handle {
 		return this.#auth.handle;
 	}
 
-	// Our tokens and grants, and the answers to the peer's (MoQ Auth).
+	// Our tokens, for the requests that carry them.
 	#auth: AuthSession;
 
 	// The established WebTransport session.
 	#quic: WebTransport;
 
-	// Whether this side opened the session. Only a server may name a redirect, and only
-	// the dialing side fails loud on a publication its grant does not cover.
+	// Whether this side opened the session. Only a server may name a redirect, and only a
+	// client announces unasked.
 	#client: boolean;
 
 	// Opens request streams and allocates request IDs.
@@ -87,14 +86,6 @@ export class Connection implements Session {
 
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
-
-	// What the peer declared about being solicited; see {@link Ietf.solicitFromSetup}.
-	#solicit: boolean | undefined;
-	// Whether our SETUP declared MoQ Solicit, which is what makes an unasked announce a fault.
-	#declaredSolicit: boolean;
-
-	// The Hop IDs this session declared; see {@link Cluster}.
-	#cluster?: Cluster.Hops;
 
 	// The peer's GOAWAY, read off its SETUP stream.
 	#goaway = new Once<Drain>();
@@ -108,8 +99,6 @@ export class Connection implements Session {
 	 * @param quic - The WebTransport session
 	 * @param control - The SETUP stream, which then carries GOAWAY
 	 * @param version - The negotiated protocol version
-	 * @param solicit - What the peer's SETUP declared (undefined when it declared nothing)
-	 * @param cluster - The Hop IDs the SETUP exchange settled, on the versions that negotiate them
 	 * @param early - Uni streams that arrived before the peer's SETUP
 	 *
 	 * @internal
@@ -121,15 +110,9 @@ export class Connection implements Session {
 		version,
 		client,
 		publish,
-		solicit,
-		hidden = false,
 		maxAge = false,
-		activeCount = false,
-		cluster,
-		auth = false,
 		handle,
 		early = [],
-		extensions,
 		peerImplementation,
 	}: {
 		url: URL;
@@ -140,30 +123,12 @@ export class Connection implements Session {
 		client: boolean;
 		/** The origin whose broadcasts are served to the peer. Omit to publish nothing. */
 		publish?: OriginConsumer;
-		/**
-		 * What the peer declared about being solicited. `undefined` means it declared
-		 * nothing, which is the one case where announcing at us unasked is not a bug.
-		 */
-		solicit?: boolean;
-		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
-		hidden?: boolean;
 		/** Whether the peer accepts subscriber max age. */
 		maxAge?: boolean;
-		/** Whether both SETUPs declared MoQ Active Count. */
-		activeCount?: boolean;
-		/**
-		 * The Hop IDs this session declared (MoQ Cluster). `undefined` on a version that
-		 * cannot negotiate the extension, as is a `peer` the peer never declared.
-		 */
-		cluster?: Cluster.Hops;
-		/** Whether MoQ Auth is negotiated: offered by both SETUPs. */
-		auth?: boolean;
 		/** The auth handle to build the session on, or undefined for one of its own. */
 		handle?: Auth.Handle;
 		/** Uni streams that arrived before the peer's SETUP, type unread. */
 		early?: Reader[];
-		/** What our own SETUP offered; every extension when omitted. */
-		extensions?: { solicit: boolean };
 		/** The implementation the peer's SETUP advertised, read before the session starts. */
 		peerImplementation?: string;
 	}) {
@@ -181,9 +146,7 @@ export class Connection implements Session {
 
 		// What the peer's connection credential earns by default: publishing anything to us,
 		// since we consume on demand, and subscribing to whatever we publish.
-		const session = this.#session;
 		this.#auth = new AuthSession({
-			wire: auth ? new IetfAuthWire(session) : undefined,
 			requests: true,
 			peerGrant: {
 				publish: new Path.Patterns([Path.Pattern.all()]),
@@ -196,7 +159,13 @@ export class Connection implements Session {
 		// finds this session still active.
 		const leave = () => this.#auth.close();
 		void quic.closed.then(leave, leave);
-		this.#client = client;
+		// moq-transport can't ask for hidden routes, so a client publishes none of them, and a
+		// socket endpoint behind it is unreachable, as behind a moq-lite client before 07. A
+		// server leaves it to the client, whose origin holds that endpoint.
+		if (client && publish) {
+			const withholding = hooks.withholdHidden(publish);
+			void quic.closed.then(withholding, withholding);
+		}
 
 		this.#auth.violated.subscribe((err) => {
 			if (err) this.#violated(err);
@@ -206,33 +175,21 @@ export class Connection implements Session {
 			quic: this.#quic,
 			session: this.#session,
 			publish,
-			requiresSolicitation: solicit ?? false,
-			hidden,
-			activeCount,
-			cluster,
 			grant: this.#auth.scope,
 			auth: this.#auth,
-			ready: this.#auth.setupAnswered(),
 		});
-		this.#solicit = solicit;
-		this.#declaredSolicit = extensions?.solicit ?? true;
-		this.#cluster = cluster;
 		this.#subscriber = new Subscriber({
 			maxAge,
 			session: this.#session,
 			quic,
-			cluster,
-			hidden,
-			activeCount,
 			goaway: this.#goaway,
 			grant: this.#auth.scope,
 			auth: this.#auth,
 		});
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
-			// The drafts refuse overlapping SUBSCRIBE_NAMESPACEs (PREFIX_OVERLAP). A peer that
-			// declared MoQ Solicit is ours and holds both; any other may enforce it.
-			exclusive: solicit === undefined,
+			// The drafts refuse overlapping SUBSCRIBE_NAMESPACEs (PREFIX_OVERLAP).
+			exclusive: true,
 			// Drained locally only: this compatibility layer sends no client GOAWAY.
 			leave: () => {
 				if (this.#phase.kind === "open") this.#phase = { kind: "leaving" };
@@ -299,19 +256,11 @@ export class Connection implements Session {
 
 	async #run(early: Reader[]): Promise<void> {
 		try {
-			// All run together. runPublishNamespaces is a no-op when the peer asked to be
-			// solicited; otherwise it pushes PUBLISH_NAMESPACE. A SUBSCRIBE_NAMESPACE stream
-			// is filled either way. A NAMESPACE is discovery,
-			// not a second route.
-			const tasks = [
-				this.#runBidis(),
-				this.#runUnis(early),
-				this.#runDatagrams(),
-				this.#publisher.runPublishNamespaces(),
-			];
-			// Fail loud on a publication our grant never covers, once the peer has answered the
-			// credential we presented at setup.
-			if (this.#client) tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered(), this.#auth));
+			// All run together. Only a client pushes PUBLISH_NAMESPACE: moq-transport carries no
+			// hop path, so two relays pushing at each other would loop. A SUBSCRIBE_NAMESPACE
+			// stream is filled either way. A NAMESPACE is discovery, not a second route.
+			const tasks = [this.#runBidis(), this.#runUnis(early), this.#runDatagrams()];
+			if (this.#client) tasks.push(this.#publisher.runPublishNamespaces());
 			await Promise.all(tasks);
 		} catch (err) {
 			if (this.#phase.kind !== "closed") {
@@ -397,32 +346,9 @@ export class Connection implements Session {
 
 			// Subscriber handles incoming notifications
 			case BigInt(PublishNamespace.id): {
-				const decoded = PublishNamespace.decode(stream.reader, this.#session.version, {
-					cluster: Cluster.negotiated(this.#cluster),
-				});
+				const decoded = PublishNamespace.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "publish_namespace", decoded);
-				if (!msg) break;
-
-				// Unless we declined it, we declare that advertisements to us must be
-				// solicited (MoQ Solicit), and writing the option at all proves the peer
-				// implements the extension, whichever value it chose. It also cannot have
-				// advertised before reading our SETUP, since our SETUP is what says whether
-				// advertising unasked is allowed. So this is a bug in the peer, and a
-				// silent one on both sides if we tolerate it. Without our declaration an
-				// unasked announce is what we invited.
-				if (this.#declaredSolicit && this.#solicit !== undefined) {
-					throw new ProtocolViolation(
-						`unsolicited publish_namespace from a peer that implements MoQ Solicit: broadcast=${msg.trackNamespace}`,
-					);
-				}
-
-				await handed(this.#subscriber.runPublishNamespace(msg, stream));
-				break;
-			}
-			case BigInt(AuthMessage.id): {
-				// Only a peer that negotiated MoQ Auth may send one.
-				if (!this.#auth.negotiated) throw new ProtocolViolation("AUTH without MoQ Auth");
-				await this.#auth.serve(stream);
+				if (msg) await handed(this.#subscriber.runPublishNamespace(msg, stream));
 				break;
 			}
 			case BigInt(Publish.id): {

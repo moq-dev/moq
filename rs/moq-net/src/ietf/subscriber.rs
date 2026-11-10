@@ -963,8 +963,6 @@ enum Admit {
 	Token(Option<crate::auth::Hold>),
 }
 
-
-
 /// How a live advertisement ends, written once its route is released.
 #[derive(Debug)]
 enum Withdraw {
@@ -995,7 +993,6 @@ struct Advertisement {
 	/// not; the namespace's route shares it rather than taking a second.
 	slot: crate::auth::Hold,
 }
-
 
 /// A joining request may be abandoned before it takes an ID. Once committed, the session
 /// owns ending it on the wire.
@@ -1070,7 +1067,7 @@ pub(super) struct Subscriber {
 	// deliberately past draft-22 section 9.2's SHOULD NOT: refusing them would
 	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
-	// Our grant (MoQ Auth): a subscription it stops covering is cancelled.
+	// Our grant: a subscription it stops covering is cancelled.
 	auth: crate::auth::Link,
 	// Namespaces the peer may have announced at once (`session::Limits::announces`), and
 	// tracks it lists to us.
@@ -1184,7 +1181,7 @@ impl Subscriber {
 		}
 	}
 
-	/// Bound what we subscribe to by the grant this session's tokens earn (MoQ Auth),
+	/// Bound what we subscribe to by the grant this session's tokens earn,
 	/// and what the peer may publish to us by the session's limit, as either changes.
 	pub fn with_auth(mut self, auth: crate::auth::Link) -> Self {
 		self.auth = auth;
@@ -1194,7 +1191,6 @@ impl Subscriber {
 			.push(move |waiter: &kio::Waiter| this.poll_limit(&mut epoch, waiter));
 		self
 	}
-
 
 	/// Follow the session's limit, attaching every withheld namespace a new limit
 	/// covers. Each route's own serve task holds itself back when a limit no longer
@@ -1896,10 +1892,9 @@ impl Subscriber {
 
 	/// Buffer REQUEST_OK on the bidi stream.
 	fn buffer_ok(&self, stream: &mut Stream<Transport, Version>) -> Result<(), Error> {
-		stream.writer.buffer_message(
-			ietf::RequestOk::ID,
-			&ietf::RequestOk { largest: None },
-		)
+		stream
+			.writer
+			.buffer_message(ietf::RequestOk::ID, &ietf::RequestOk { largest: None })
 	}
 
 	/// Buffer the REQUEST_ERROR refusing a PUBLISH_NAMESPACE on the bidi stream that carries it.
@@ -1991,7 +1986,6 @@ struct LiveAnnounce {
 	step: LiveStep,
 }
 
-#[expect(clippy::large_enum_variant, reason = "a machine's enum is its storage")]
 enum LiveStep {
 	/// Attaching the route and answering.
 	Attach,
@@ -3133,7 +3127,7 @@ struct RunSubscribe {
 	/// Holds the session busy while the request waits on authorization or TRACK_STATUS.
 	/// Past that, only a subscription or a fill counts.
 	setup: Option<crate::session::Working>,
-	/// Subscribe only to what our grant covers (MoQ Auth), and cancel once it no longer
+	/// Subscribe only to what our grant covers, and cancel once it no longer
 	/// does, leaving the rest of the session alone.
 	gate: crate::auth::Gate,
 	/// Group FETCHes for cache misses: standalone, so they outlive each subscription.
@@ -8134,12 +8128,7 @@ mod tests {
 		);
 
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
-		writer
-			.encode(&ietf::RequestOk {
-				largest: None,
-			})
-			.await
-			.unwrap();
+		writer.encode(&ietf::RequestOk { largest: None }).await.unwrap();
 		writer.varint(ietf::Namespace::ID).await.unwrap();
 		writer
 			.encode(&ietf::Namespace {
@@ -8226,12 +8215,7 @@ mod tests {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
-		writer
-			.encode(&ietf::RequestOk {
-				largest: None,
-			})
-			.await
-			.unwrap();
+		writer.encode(&ietf::RequestOk { largest: None }).await.unwrap();
 		let namespace = |suffix| ietf::Namespace {
 			suffix: crate::Path::new(suffix).unwrap(),
 		};
@@ -10356,10 +10340,7 @@ mod tests {
 					track_namespace: crate::Path::from_static("room/host"),
 					authorization_token: None,
 				};
-				let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-					stream,
-					msg,
-				));
+				let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, msg,));
 				assert_eq!(
 					futures::poll!(run.as_mut()).is_ready(),
 					reset || super::super::request_stream::fin_cancels(version),
@@ -10552,7 +10533,8 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
 		let log = session.log.clone();
-		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
+		let (origin, driver) =
+			crate::origin::Producer::new(crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 		let consumer = origin.consume();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The tests drive the loop directly, so nothing spawns; leaking keeps the
@@ -10630,10 +10612,7 @@ mod tests {
 		let (mut subscriber, _consumer, mut stream, driver, _log) = update_harness(script).await;
 		std::mem::forget(driver);
 
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
-			&mut stream,
-			None,
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(&mut stream, None,));
 		let mut result = None;
 		for _ in 0..20 {
 			if let std::task::Poll::Ready(res) = futures::poll!(run.as_mut()) {
@@ -10906,10 +10885,7 @@ mod tests {
 			}
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 		let mut announced = false;
 		for _ in 0..500 {
@@ -10937,10 +10913,7 @@ mod tests {
 			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
-			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-				stream,
-				token_publish_namespace(),
-			));
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 			let accepted = async { requests.next().await.expect("a request") };
 			let request = match futures::future::select(std::pin::pin!(accepted), run.as_mut()).await {
@@ -11019,10 +10992,7 @@ mod tests {
 			std::future::pending::<()>().await
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 		let mut ended = false;
 		for _ in 0..500 {
@@ -11065,10 +11035,7 @@ mod tests {
 			}
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 		let mut ended = false;
 		for _ in 0..500 {
 			let _ = futures::poll!(acceptor.as_mut());
@@ -11116,10 +11083,7 @@ mod tests {
 			}
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 		let mut routed = false;
 		for _ in 0..500 {
 			let _ = futures::poll!(acceptor.as_mut());
@@ -11166,10 +11130,7 @@ mod tests {
 			std::future::pending::<()>().await
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 		let mut routed = false;
 		for _ in 0..500 {
 			let _ = futures::poll!(acceptor.as_mut());
@@ -11229,10 +11190,7 @@ mod tests {
 		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 		let mut next = std::pin::pin!(requests.next());
 		let mut issued = None;
@@ -11323,10 +11281,7 @@ mod tests {
 				}
 			};
 			let mut acceptor = std::pin::pin!(acceptor);
-			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-				stream,
-				token_publish_namespace(),
-			));
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 			for _ in 0..500 {
 				let _ = futures::poll!(acceptor.as_mut());
@@ -11388,10 +11343,7 @@ mod tests {
 			std::future::pending::<()>().await
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 		let mut routed = false;
 		for _ in 0..500 {
@@ -11442,10 +11394,8 @@ mod tests {
 				let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 					.await
 					.unwrap();
-				let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-					stream,
-					token_publish_namespace(),
-				));
+				let mut run =
+					std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 				let accepted = async { requests.next().await.expect("a request") };
 				let request = match futures::future::select(std::pin::pin!(accepted), run.as_mut()).await {
 					futures::future::Either::Left((request, _)) => request,
@@ -11525,10 +11475,7 @@ mod tests {
 			std::future::pending::<()>().await
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 		for _ in 0..200 {
 			let _ = futures::poll!(acceptor.as_mut());
@@ -11573,10 +11520,7 @@ mod tests {
 				}
 			};
 			let mut acceptor = std::pin::pin!(acceptor);
-			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-				stream,
-				token_publish_namespace(),
-			));
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 			// No time is advanced: the refusal must end the announce on its own, not by letting the
 			// 60s grant lapse.
@@ -11637,10 +11581,8 @@ mod tests {
 			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
-			let run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-				stream,
-				tokenless_announce("other/alice"),
-			));
+			let run =
+				std::pin::pin!(subscriber.run_publish_namespace_stream(stream, tokenless_announce("other/alice"),));
 			run_to_end(run).await.unwrap();
 			assert_eq!(
 				replies(&session.log, ietf::RequestOk::ID),
@@ -11671,10 +11613,8 @@ mod tests {
 			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
-			let run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-				stream,
-				tokenless_announce("room/alice"),
-			));
+			let run =
+				std::pin::pin!(subscriber.run_publish_namespace_stream(stream, tokenless_announce("room/alice"),));
 			run_to_end(run).await.unwrap();
 			assert_eq!(replies(&session.log, ietf::RequestOk::ID), 0, "{version}: acknowledged");
 			assert_eq!(
@@ -11700,10 +11640,8 @@ mod tests {
 			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
-			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-				stream,
-				tokenless_announce("other/alice"),
-			));
+			let mut run =
+				std::pin::pin!(subscriber.run_publish_namespace_stream(stream, tokenless_announce("other/alice"),));
 			for _ in 0..20 {
 				assert!(futures::poll!(run.as_mut()).is_pending());
 				settle().await;
@@ -11805,16 +11743,14 @@ mod tests {
 		for _ in 0..500 {
 			let _ = futures::poll!(acceptor.as_mut());
 			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended early");
-			if answered.load(std::sync::atomic::Ordering::Relaxed) >= 4 && routed_now(&consumer, "room/alice").is_some() {
+			if answered.load(std::sync::atomic::Ordering::Relaxed) >= 4 && routed_now(&consumer, "room/alice").is_some()
+			{
 				both = true;
 				break;
 			}
 			settle().await;
 		}
-		assert!(
-			both,
-			"both buffered updates must each be verified (4 total)"
-		);
+		assert!(both, "both buffered updates must each be verified (4 total)");
 	}
 
 	/// Draft-22 advertises MAX_REQUEST_UPDATES, so a peer that leaves more outstanding than that on
@@ -11844,10 +11780,7 @@ mod tests {
 			std::future::pending::<()>().await
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 		let mut result = None;
 		for _ in 0..2000 {
@@ -11901,10 +11834,7 @@ mod tests {
 			std::future::pending::<()>().await
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 		for _ in 0..2000 {
 			let _ = futures::poll!(acceptor.as_mut());
@@ -11944,10 +11874,7 @@ mod tests {
 			std::future::pending::<()>().await
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 		for _ in 0..2000 {
 			let _ = futures::poll!(acceptor.as_mut());
@@ -11986,10 +11913,7 @@ mod tests {
 			std::future::pending::<()>().await
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 		let mut result = None;
 		for _ in 0..4000 {
@@ -12035,10 +11959,7 @@ mod tests {
 			std::future::pending::<()>().await
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 
 		// The announce attaches, then the flood overflows the guard, possibly within one poll.
 		for _ in 0..200 {
@@ -12059,7 +11980,7 @@ mod tests {
 		);
 	}
 
-	/// Like [`auth_announce_harness`] but the session never negotiated the MoQ Auth extension,
+	/// Like [`auth_announce_harness`] but nothing ever answers the session's tokens,
 	/// so its union is `None` forever, and the application set `limit`, if any.
 	fn auth_announce_harness_no_ext(
 		version: Version,
@@ -12156,10 +12077,7 @@ mod tests {
 				}
 			};
 			let mut acceptor = std::pin::pin!(acceptor);
-			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-				stream,
-				token_publish_namespace(),
-			));
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 			let mut routed = false;
 			for _ in 0..500 {
 				let _ = futures::poll!(acceptor.as_mut());
@@ -12196,10 +12114,7 @@ mod tests {
 				std::future::pending::<()>().await
 			};
 			let mut acceptor = std::pin::pin!(acceptor);
-			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-				stream,
-				token_publish_namespace(),
-			));
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 			let mut ended = false;
 			for _ in 0..500 {
 				let _ = futures::poll!(acceptor.as_mut());
@@ -12244,10 +12159,7 @@ mod tests {
 			}
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 		let mut ended = false;
 		for _ in 0..500 {
 			let _ = futures::poll!(acceptor.as_mut());
@@ -12308,10 +12220,7 @@ mod tests {
 			std::future::pending::<()>().await
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 		let mut ended = false;
 		for _ in 0..500 {
 			let _ = futures::poll!(acceptor.as_mut());
@@ -12378,10 +12287,7 @@ mod tests {
 			std::future::pending::<()>().await
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-		));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 		let mut ended = None;
 		for _ in 0..500 {
 			let _ = futures::poll!(acceptor.as_mut());
@@ -12432,10 +12338,7 @@ mod tests {
 				std::future::pending::<()>().await
 			};
 			let mut acceptor = std::pin::pin!(acceptor);
-			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-				stream,
-				token_publish_namespace(),
-			));
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, token_publish_namespace(),));
 			let mut ended = false;
 			for _ in 0..300 {
 				let _ = futures::poll!(acceptor.as_mut());
@@ -12470,8 +12373,7 @@ mod tests {
 		let mut msg = token_publish_namespace();
 		msg.authorization_token = None;
 
-		let mut run =
-			std::pin::pin!(subscriber.run_publish_namespace_stream(stream, msg));
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(stream, msg));
 		let mut routed = false;
 		for _ in 0..500 {
 			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended early");
@@ -17321,13 +17223,7 @@ mod new_group_tests {
 
 	async fn answer(stream: &mut PeerStream) {
 		stream.writer.varint(ietf::RequestOk::ID).await.unwrap();
-		stream
-			.writer
-			.encode(&ietf::RequestOk {
-				largest: None,
-			})
-			.await
-			.unwrap();
+		stream.writer.encode(&ietf::RequestOk { largest: None }).await.unwrap();
 		settle().await;
 	}
 
