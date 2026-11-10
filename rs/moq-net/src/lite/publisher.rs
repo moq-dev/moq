@@ -972,6 +972,7 @@ impl AnnounceServe {
 				hidden,
 				self.shared.auth.clone(),
 			)
+			.with_peer_setup(self.shared.peer_setup.clone())
 		});
 
 		// The identity whose routes we filter out. Lite-04/05 carry it per
@@ -1406,6 +1407,7 @@ impl AnnounceRun {
 					instance,
 					epoch,
 					cost,
+					hops: crate::Hops::new(),
 				})?;
 				self.sent(stream)?;
 			}
@@ -3237,7 +3239,7 @@ impl Request for FetchServe {
 					}
 					let capped = msg.end_frame.is_some();
 					let timescale = stamp.map(|stamp| stamp.timescale);
-					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale)?;
+					let records = lite::ietf::Records::new(ietf, capped, timescale);
 
 					*self = Self::Serve {
 						group,
@@ -3261,6 +3263,9 @@ impl Request for FetchServe {
 					records,
 				} => loop {
 					ready!(writer.poll_flush(waiter))?;
+					if let Some(records) = records {
+						ready!(records.poll_state(writer, group, waiter))?;
+					}
 					if let Some(pending) = chunk {
 						ready!(writer.poll_write(waiter, pending))?;
 						if !bytes::Buf::has_remaining(pending) {
@@ -6284,17 +6289,8 @@ impl GroupServe {
 			frame_start: self.frame_start,
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
-		let records = header.and_then(|()| {
-			lite::ietf::Records::start(
-				&mut writer,
-				self.ctx.ietf,
-				&self.group,
-				self.capped,
-				self.ctx.stamp.map(|stamp| stamp.timescale),
-			)
-		});
-		let records = match records {
-			Ok(records) => records,
+		let records = match header {
+			Ok(()) => lite::ietf::Records::new(self.ctx.ietf, self.capped, self.ctx.stamp.map(|stamp| stamp.timescale)),
 			Err(err) => {
 				// The header wrote nothing, so the group-stream reset has nothing to pin
 				// it to this subscription. The run loop reads the slot and resets the
@@ -6383,6 +6379,13 @@ impl GroupServe {
 										break 'serve Err(err);
 									}
 									return Poll::Pending;
+								}
+							}
+							if let Some(records) = records {
+								match records.poll_state(writer, &mut self.group, waiter) {
+									Poll::Ready(Ok(())) => {}
+									Poll::Ready(Err(err)) => break 'serve Err(err),
+									Poll::Pending => return Poll::Pending,
 								}
 							}
 							if let Some(pending) = chunk {

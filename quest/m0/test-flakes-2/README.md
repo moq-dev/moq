@@ -233,7 +233,9 @@ Added 2026-11-09 (maintainer's standing rule that flakes join this epic):
 `js/net`'s datagram session-close-after-end test again, whose lite-05 case
 failed the merge queue for [moq-dev/moq#8276](https://github.com/moq-dev/moq/pull/8276)
 after [moq-dev/moq#8321](https://github.com/moq-dev/moq/pull/8321) re-enabled it.
-It is quarantined with `test.skip` for every version until its child fixes it.
+The test now aborts once the client has recorded the end, signalled by the
+subscriber's `yieldNow()`, and is re-enabled by
+[moq-dev/moq#8357](https://github.com/moq-dev/moq/pull/8357).
 
 Added 2026-11-09 (maintainer's standing rule that flakes join this epic):
 moq-rs's Python socket test `test_tcp_rst_and_endpoint_close_are_errors`, whose
@@ -246,6 +248,4 @@ Public API: none. Wire: none.
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [js/net's bandwidth sampling test holds up under load](/quest/m0/test-flakes-2/bandwidth-sampling.md) - the sampling test counts ticks without racing the mocked clock, and its `test.skip` is removed
-- [js/net's datagram session-close-after-end test holds up under load](/quest/m0/test-flakes-2/datagram-close-end.md) - the abort is ordered after the end by an event the client observes, and its `test.skip` is removed
 - [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the test waits for the first track's queue instead of asserting at once, and its `test.skip` is removed

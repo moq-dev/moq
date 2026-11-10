@@ -852,9 +852,14 @@ mod probe {
 				Surface::I420(gradient(index)),
 				moq_net::Timestamp::from_micros(index * 33_333).unwrap(),
 			);
-			for encoded in encoder.encode(&frame).context("encode")? {
+			encoder.encode(&frame).context("encode")?;
+			while let Some(encoded) = encoder.receive().context("encode")? {
 				out.push(encoded.payload.to_vec());
 			}
+		}
+		encoder.flush().context("flush")?;
+		while let Some(encoded) = encoder.receive().context("flush")? {
+			out.push(encoded.payload.to_vec());
 		}
 		Ok(out)
 	}
@@ -1053,7 +1058,10 @@ mod probe {
 		let mut frames = Vec::new();
 		for (index, unit) in stream()?.into_iter().enumerate() {
 			let timestamp = moq_net::Timestamp::from_micros(index as u64 * 33_333).unwrap();
-			frames.extend(decoder.decode(&unit.into(), timestamp, index == 0).context("decode")?);
+			decoder.decode(&unit.into(), timestamp, index == 0).context("decode")?;
+			while let Some(frame) = decoder.receive().context("decode")? {
+				frames.push(frame);
+			}
 		}
 		let Some(Surface::Texture(texture)) = frames.first().map(|f| &f.surface) else {
 			bail!("the crate's decoder did not produce a GPU texture on this machine");
@@ -1115,11 +1123,12 @@ mod probe {
 		let mut frames = Vec::new();
 		for (index, unit) in units.iter().enumerate() {
 			let timestamp = moq_net::Timestamp::from_micros(index as u64 * 33_333).unwrap();
-			frames.extend(
-				decoder
-					.decode(&unit.clone().into(), timestamp, index == 0)
-					.context("decode")?,
-			);
+			decoder
+				.decode(&unit.clone().into(), timestamp, index == 0)
+				.context("decode")?;
+			while let Some(frame) = decoder.receive().context("decode")? {
+				frames.push(frame);
+			}
 		}
 		let Some(first) = frames.into_iter().next() else {
 			bail!("the decoder did not produce a frame on this machine");
@@ -1164,6 +1173,11 @@ mod probe {
 							encoder
 								.encode(&resized)
 								.with_context(|| format!("ladder rung {rung} encode"))?;
+							while encoder
+								.receive()
+								.with_context(|| format!("ladder rung {rung} encode"))?
+								.is_some()
+							{}
 						}
 					}
 					Ok(())
@@ -1202,6 +1216,7 @@ mod probe {
 						decoder
 							.decode(&unit.clone().into(), timestamp, index == 0)
 							.context("live ladder decode")?;
+						while decoder.receive().context("live ladder decode")?.is_some() {}
 						timestamp_index += 1;
 					}
 				}

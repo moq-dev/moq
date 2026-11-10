@@ -211,8 +211,11 @@ public enum Video {
             ffi = try MoqVideoEncoder(input: input, output: output)
         }
 
-        /// Encode one picture, returning any access units now available.
-        public func encode(_ frame: Frame) throws -> [Packet] { try ffi.encode(frame: frame) }
+        /// Submit one picture, whose access units `receive` returns.
+        public func encode(_ frame: Frame) throws { try ffi.encode(frame: frame) }
+
+        /// Pop the oldest ready access unit, or nil while the codec holds the rest; call until nil.
+        public func receive() throws -> Packet? { try ffi.receive() }
 
         /// Force the next encoded picture to start a new group.
         public func cut() throws { try ffi.cut() }
@@ -220,10 +223,7 @@ public enum Video {
         /// Retune the live encoder in bits per second.
         public func setBitrate(_ bitrate: UInt64) throws { try ffi.setBitrate(bitrate: bitrate) }
 
-        /// Drain buffered access units and keep the encoder open.
-        public func flush() throws -> [Packet] { try ffi.flush() }
-
-        /// Drain and close the encoder.
-        public func finish() throws -> [Packet] { try ffi.finish() }
+        /// Mark the end of input, so `receive` returns every access unit the codec still holds, without closing the encoder.
+        public func flush() throws { try ffi.flush() }
     }
 }

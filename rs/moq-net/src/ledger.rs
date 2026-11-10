@@ -251,6 +251,11 @@ impl Ledger {
 			.map(|(_, run)| run.end)
 	}
 
+	/// The exclusive end of the highest accounted run starting at or below `sequence`.
+	pub fn end_below(&self, sequence: u64) -> Option<u64> {
+		self.runs.range(..=sequence).next_back().map(|(_, run)| run.end)
+	}
+
 	/// The accounted runs overlapping `groups`, clipped to it, lowest first.
 	pub fn accounted(&self, groups: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
 		// From the run holding the first group, if one does.

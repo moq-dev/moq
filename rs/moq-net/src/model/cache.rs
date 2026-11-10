@@ -903,6 +903,15 @@ impl Track {
 		}
 	}
 
+	/// Open an empty bill against this account, for bookkeeping the track keeps beside its
+	/// groups, such as its drop set.
+	pub(super) fn extra(self: &Arc<Self>) -> Extra {
+		Extra {
+			track: Some(self.clone()),
+			bytes: AtomicU64::new(0),
+		}
+	}
+
 	/// Bill `bytes` of a failed group's head while a hand-off holds it for a successor route.
 	///
 	/// Readers that stop polling can hold a hand-off indefinitely, so the head is billed

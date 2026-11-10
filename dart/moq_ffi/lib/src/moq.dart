@@ -16896,9 +16896,9 @@ class FfiConverterMoqVideoDecodedFrame {
 
 abstract class MoqVideoEncoderInterface {
   void cut();
-  List<MoqVideoPacket> encode({required MoqVideoFrame frame});
-  List<MoqVideoPacket> finish();
-  List<MoqVideoPacket> flush();
+  void encode({required MoqVideoFrame frame});
+  void flush();
+  MoqVideoPacket? receive();
   void setBitrate({required int bitrate});
 }
 
@@ -16961,36 +16961,32 @@ class MoqVideoEncoder implements MoqVideoEncoderInterface {
     }, moqExceptionErrorHandler);
   }
 
-  List<MoqVideoPacket> encode({required MoqVideoFrame frame}) {
-    return rustCallWithLifter(
-      (status) => uniffi_moq_ffi_fn_method_moqvideoencoder_encode(
+  void encode({required MoqVideoFrame frame}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqvideoencoder_encode(
         uniffiClonePointer(),
         FfiConverterMoqVideoFrame.lower(frame),
         status,
-      ),
-      FfiConverterSequenceMoqVideoPacket.lift,
-      moqExceptionErrorHandler,
-    );
+      );
+    }, moqExceptionErrorHandler);
   }
 
-  List<MoqVideoPacket> finish() {
+  void flush() {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqvideoencoder_flush(
+        uniffiClonePointer(),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+
+  MoqVideoPacket? receive() {
     return rustCallWithLifter(
-      (status) => uniffi_moq_ffi_fn_method_moqvideoencoder_finish(
+      (status) => uniffi_moq_ffi_fn_method_moqvideoencoder_receive(
         uniffiClonePointer(),
         status,
       ),
-      FfiConverterSequenceMoqVideoPacket.lift,
-      moqExceptionErrorHandler,
-    );
-  }
-
-  List<MoqVideoPacket> flush() {
-    return rustCallWithLifter(
-      (status) => uniffi_moq_ffi_fn_method_moqvideoencoder_flush(
-        uniffiClonePointer(),
-        status,
-      ),
-      FfiConverterSequenceMoqVideoPacket.lift,
+      FfiConverterOptionalMoqVideoPacket.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -19504,6 +19500,53 @@ class FfiConverterOptionalMoqVideoHint {
   }
 }
 
+class FfiConverterOptionalMoqVideoPacket {
+  static MoqVideoPacket? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqVideoPacket.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqVideoPacket?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqVideoPacket.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqVideoPacket?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([MoqVideoPacket? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqVideoPacket.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqVideoPacket? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalMoqVideoPacket.allocationSize(value),
+    );
+    FfiConverterOptionalMoqVideoPacket.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqVideoPacket? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqVideoPacket.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
 class FfiConverterOptionalMoqVideoProducer {
   static MoqVideoProducer? lift(RustBuffer buf) {
     return FfiConverterOptionalMoqVideoProducer.read(buf.asUint8List()).value;
@@ -19997,51 +20040,6 @@ class FfiConverterSequenceMoqRange {
   }
 
   static RustBuffer lower(List<MoqRange> value) {
-    final buf = Uint8List(allocationSize(value));
-    write(value, buf);
-    return toRustBuffer(buf);
-  }
-}
-
-class FfiConverterSequenceMoqVideoPacket {
-  static List<MoqVideoPacket> lift(RustBuffer buf) {
-    return FfiConverterSequenceMoqVideoPacket.read(buf.asUint8List()).value;
-  }
-
-  static LiftRetVal<List<MoqVideoPacket>> read(Uint8List buf) {
-    List<MoqVideoPacket> res = [];
-    final length = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
-    int offset = buf.offsetInBytes + 4;
-    for (var i = 0; i < length; i++) {
-      final ret = FfiConverterMoqVideoPacket.read(
-        Uint8List.view(buf.buffer, offset),
-      );
-      offset += ret.bytesRead;
-      res.add(ret.value);
-    }
-    return LiftRetVal(res, offset - buf.offsetInBytes);
-  }
-
-  static int write(List<MoqVideoPacket> value, Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, value.length);
-    int offset = buf.offsetInBytes + 4;
-    for (var i = 0; i < value.length; i++) {
-      offset += FfiConverterMoqVideoPacket.write(
-        value[i],
-        Uint8List.view(buf.buffer, offset),
-      );
-    }
-    return offset - buf.offsetInBytes;
-  }
-
-  static int allocationSize(List<MoqVideoPacket> value) {
-    return value
-            .map((l) => FfiConverterMoqVideoPacket.allocationSize(l))
-            .fold(0, (a, b) => a + b) +
-        4;
-  }
-
-  static RustBuffer lower(List<MoqVideoPacket> value) {
     final buf = Uint8List(allocationSize(value));
     write(value, buf);
     return toRustBuffer(buf);
@@ -23513,19 +23511,19 @@ external void uniffi_moq_ffi_fn_method_moqvideoencoder_cut(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<
-  RustBuffer Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)
->(assetId: _uniffiAssetId)
-external RustBuffer uniffi_moq_ffi_fn_method_moqvideoencoder_encode(
+@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqvideoencoder_encode(
   Pointer<Void> ptr,
   RustBuffer frame,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external RustBuffer uniffi_moq_ffi_fn_method_moqvideoencoder_finish(
+external void uniffi_moq_ffi_fn_method_moqvideoencoder_flush(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -23533,7 +23531,7 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqvideoencoder_finish(
 @Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external RustBuffer uniffi_moq_ffi_fn_method_moqvideoencoder_flush(
+external RustBuffer uniffi_moq_ffi_fn_method_moqvideoencoder_receive(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -24745,10 +24743,10 @@ external int uniffi_moq_ffi_checksum_method_moqvideoencoder_cut();
 external int uniffi_moq_ffi_checksum_method_moqvideoencoder_encode();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqvideoencoder_finish();
+external int uniffi_moq_ffi_checksum_method_moqvideoencoder_flush();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqvideoencoder_flush();
+external int uniffi_moq_ffi_checksum_method_moqvideoencoder_receive();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqvideoencoder_set_bitrate();
@@ -25662,13 +25660,13 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqvideoencoder_cut() != 28527) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqvideoencoder_encode() != 513) {
+  if (uniffi_moq_ffi_checksum_method_moqvideoencoder_encode() != 42494) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqvideoencoder_finish() != 5918) {
+  if (uniffi_moq_ffi_checksum_method_moqvideoencoder_flush() != 24167) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqvideoencoder_flush() != 4585) {
+  if (uniffi_moq_ffi_checksum_method_moqvideoencoder_receive() != 33059) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqvideoencoder_set_bitrate() != 34315) {

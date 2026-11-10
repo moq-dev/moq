@@ -5084,6 +5084,7 @@ dependencies = [
  "anyhow",
  "ash",
  "ashpd",
+ "bench-harness",
  "block2 0.6.2",
  "bytemuck",
  "bytes",

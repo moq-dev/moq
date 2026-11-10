@@ -55,8 +55,10 @@ pub fn update_supported(version: Version) -> bool {
 /// The path is as it appears on the wire: on lite-07 it may name a base announcement,
 /// resolved against the stream's history by [`AnnounceDecoder`](super::AnnounceDecoder).
 ///
-/// Lite-07 names the route each claim travels under in place of a hop chain, so `hops`
-/// must be empty there and `route` must be 0 on every earlier version.
+/// Lite-07 names the route each claim travels under in place of a hop chain, and `route`
+/// must be 0 on every earlier version. There `hops` is the Lite-06 Chain instead: the
+/// chain of a claim learned over moq-lite-06, empty for every other claim, and sent only
+/// to a peer that offered the Lite-06 Chain Setup Parameter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnounceBroadcast {
 	/// ANNOUNCE_START (lite-06) / active (older): a broadcast is now available.
@@ -88,6 +90,7 @@ pub enum AnnounceBroadcast {
 		instance: Option<Instance>,
 		epoch: u64,
 		cost: Cost,
+		hops: Hops,
 	},
 	/// An unknown lite-06+ announce type. The length-prefixed body was skipped so
 	/// the stream stays up; it does not assign an announce id.
@@ -216,20 +219,41 @@ fn decode_route_id(r: &mut Decoder<'_>, version: Version) -> Result<u64, DecodeE
 	}
 }
 
-/// Encode a lite-06+ announcement's hop chain, which lite-07 replaces with its Route ID.
+/// Encode a lite-06 announcement's hop chain, which lite-07 replaces with its Route ID.
 fn encode_chain(w: &mut Encoder<'_>, version: Version, hops: &Hops) -> Result<(), EncodeError> {
 	match version.has_routes() {
-		true if !hops.is_empty() => Err(EncodeError::InvalidState),
 		true => Ok(()),
 		false => hops.encode(w, version),
 	}
 }
 
-/// Decode a lite-06+ announcement's hop chain, empty on lite-07.
+/// Decode a lite-06 announcement's hop chain, empty on lite-07.
 fn decode_chain(r: &mut Decoder<'_>, version: Version) -> Result<Hops, DecodeError> {
 	match version.has_routes() {
 		true => Ok(Hops::default()),
 		false => Hops::decode(r, version),
+	}
+}
+
+/// Encode lite-07's trailing Lite-06 Chain, omitted when empty. A lite-06 compatibility
+/// field: the lite-07 to lite-08 migration deletes it.
+fn encode_lite06_chain(w: &mut Encoder<'_>, version: Version, hops: &Hops) -> Result<(), EncodeError> {
+	match version.has_routes() && !hops.is_empty() {
+		true => hops.encode(w, version),
+		false => Ok(()),
+	}
+}
+
+/// Decode lite-07's trailing Lite-06 Chain: present only when bytes remain, and never
+/// empty, so an empty chain has one spelling.
+fn decode_lite06_chain(r: &mut Decoder<'_>, version: Version) -> Result<Hops, DecodeError> {
+	if !version.has_routes() || r.is_empty() {
+		return Ok(Hops::default());
+	}
+	let hops = Hops::decode(r, version)?;
+	match hops.is_empty() {
+		true => Err(DecodeError::InvalidValue),
+		false => Ok(hops),
 	}
 }
 
@@ -310,22 +334,26 @@ impl Encode<Version> for AnnounceBroadcast {
 					super::instance::encode_route(w, version, instance.as_ref(), *epoch)?;
 					encode_chain(w, version, hops)?;
 					cost.encode(w, version)?;
+					encode_lite06_chain(w, version, hops)?;
 				}
 				Self::EndedId { id } => w.varint(*id)?,
 				Self::Update { id, hops, cost } => {
 					w.varint(*id)?;
 					encode_chain(w, version, hops)?;
 					cost.encode(w, version)?;
+					encode_lite06_chain(w, version, hops)?;
 				}
 				Self::Restart {
 					id,
 					instance,
 					epoch,
 					cost,
+					hops,
 				} => {
 					w.varint(*id)?;
 					super::instance::encode_route(w, version, instance.as_ref(), *epoch)?;
 					cost.encode(w, version)?;
+					encode_lite06_chain(w, version, hops)?;
 				}
 				Self::Synced => {}
 				Self::RouteStart { node, advert } => {
@@ -410,22 +438,35 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 						let suffix = PathRef::decode(&mut body, version)?;
 						let route = decode_route_id(&mut body, version)?;
 						let (instance, epoch) = super::instance::decode_route(&mut body, version)?;
+						let hops = decode_chain(&mut body, version)?;
+						let cost = Cost::decode(&mut body, version)?;
 						Self::Active {
 							suffix,
 							route,
 							instance,
 							epoch,
-							hops: decode_chain(&mut body, version)?,
-							cost: Cost::decode(&mut body, version)?,
+							hops: match version.has_routes() {
+								true => decode_lite06_chain(&mut body, version)?,
+								false => hops,
+							},
+							cost,
 						}
 					}
 					SYNCED if version.has_synced() => Self::Synced,
 					ANNOUNCE_END => Self::EndedId { id: body.varint()? },
-					ANNOUNCE_UPDATE => Self::Update {
-						id: body.varint()?,
-						hops: decode_chain(&mut body, version)?,
-						cost: Cost::decode(&mut body, version)?,
-					},
+					ANNOUNCE_UPDATE => {
+						let id = body.varint()?;
+						let hops = decode_chain(&mut body, version)?;
+						let cost = Cost::decode(&mut body, version)?;
+						Self::Update {
+							id,
+							hops: match version.has_routes() {
+								true => decode_lite06_chain(&mut body, version)?,
+								false => hops,
+							},
+							cost,
+						}
+					}
 					ANNOUNCE_RESTART if version.has_announce_restart() => {
 						let id = body.varint()?;
 						let (instance, epoch) = super::instance::decode_route(&mut body, version)?;
@@ -434,6 +475,7 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 							instance,
 							epoch,
 							cost: Cost::decode(&mut body, version)?,
+							hops: decode_lite06_chain(&mut body, version)?,
 						}
 					}
 					ROUTE_START if version.has_routes() => {
@@ -1048,6 +1090,7 @@ mod tests {
 				instance: Some(Instance::random()),
 				epoch,
 				cost,
+				hops: Hops::default(),
 			};
 			assert_eq!(broadcast_round_trip(&restart, Version::Lite07), restart);
 		}
@@ -1094,36 +1137,61 @@ mod tests {
 				instance: Some("a".parse().unwrap()),
 				epoch: 5,
 				cost: Cost::new(6),
+				hops: Hops::default(),
 			}),
 			[3, 6, 7, 1, b'a', 0, 5, 6]
 		);
 	}
 
-	/// Lite-07 names a claim's route instead of its hop chain, so a chain is refused there.
+	/// Lite-07 carries a lite-06 chain after the cost, only when it is not empty, so an
+	/// explicitly empty one is refused.
 	#[test]
-	fn lite07_refuses_a_hop_chain() {
+	fn lite07_carries_a_trailing_lite06_chain() {
 		let mut hops = Hops::new();
 		hops.push(Hop::new(7).unwrap()).unwrap();
-		let refused = [
+		hops.push(Hop::new(9).unwrap()).unwrap();
+		let encode = |msg: &AnnounceBroadcast| {
+			let mut buf = Vec::new();
+			msg.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
+				.unwrap();
+			buf
+		};
+		let msgs = [
 			AnnounceBroadcast::Active {
-				route: 0,
+				route: 3,
 				instance: Some("a".parse().unwrap()),
-				epoch: 0,
-				suffix: PathRef::literal(Path::from_static("cam")),
+				epoch: 5,
+				suffix: PathRef::literal(Path::from_static("c")),
 				hops: hops.clone(),
-				cost: Cost::default(),
+				cost: Cost::new(6),
 			},
 			AnnounceBroadcast::Update {
-				id: 0,
+				id: 7,
+				hops: hops.clone(),
+				cost: Cost::new(6),
+			},
+			AnnounceBroadcast::Restart {
+				id: 7,
+				instance: Some("a".parse().unwrap()),
+				epoch: 5,
+				cost: Cost::new(6),
 				hops,
-				cost: Cost::default(),
 			},
 		];
-		for msg in refused {
-			let mut buf = Vec::new();
-			let res = msg.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07);
-			assert!(matches!(res, Err(EncodeError::InvalidState)), "{msg:?}");
+		let layouts: [&[u8]; 3] = [
+			&[0, 12, 0, 0, 1, b'c', 3, 1, b'a', 5, 6, 2, 7, 9],
+			&[2, 5, 7, 6, 2, 7, 9],
+			&[3, 8, 7, 1, b'a', 5, 6, 2, 7, 9],
+		];
+		for (msg, layout) in msgs.iter().zip(layouts) {
+			assert_eq!(encode(msg), layout, "{msg:?}");
+			assert_eq!(broadcast_round_trip(msg, Version::Lite07), *msg);
 		}
+
+		// An ANNOUNCE_UPDATE whose chain is present but empty.
+		let mut empty: &[u8] = &[2, 3, 7, 6, 0];
+		let res = crate::coding::decode_buf(&mut empty, Version::Lite07, |r, v| AnnounceBroadcast::decode(r, v));
+		assert!(res.is_err(), "{res:?}");
 	}
 
 	/// Only lite-07 carries a Route ID: a non-zero one has nowhere to go earlier, and an
@@ -1154,6 +1222,7 @@ mod tests {
 			instance: Some("a".parse().unwrap()),
 			epoch: 0,
 			cost: Cost::default(),
+			hops: Hops::default(),
 		};
 		let mut buf = Vec::new();
 		assert!(matches!(

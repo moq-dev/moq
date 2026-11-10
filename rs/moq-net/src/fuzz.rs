@@ -33,6 +33,88 @@ use crate::{
 /// [`seeds`] is checked against.
 pub type Target = fn(&[u8]) -> bool;
 
+/// A track holding a fragmented drop set, read by wire cursors, for the drop-set bench.
+pub struct DropSet {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	readers: Vec<track::Subscriber>,
+	shape: (usize, u64, u64, u64),
+	/// Runs added since the track was built, and since the readers subscribed.
+	added: u64,
+	fresh: u64,
+	next: u64,
+	waiter: kio::Waiter,
+}
+
+impl DropSet {
+	/// `runs` disjoint dropped runs of `span` sequences each, read by `readers` wire cursors
+	/// whose ranges hold the newest `reported` of them, each already reported.
+	pub fn new(readers: usize, runs: u64, reported: u64, span: u64) -> Self {
+		let broadcast = broadcast::Producer::new(broadcast::Info::default());
+		let track = broadcast.create_track("drops", track::Info::default()).unwrap();
+		// One run short: subscribing adds it.
+		let built = runs.saturating_sub(1);
+		for run in 0..built {
+			track.drop_groups(run * (span + 1)..run * (span + 1) + span, crate::StreamError::Old);
+		}
+		let mut set = Self {
+			_broadcast: broadcast,
+			track,
+			readers: Vec::new(),
+			shape: (readers, runs, reported, span),
+			added: 0,
+			fresh: 0,
+			next: built * (span + 1),
+			waiter: kio::Waiter::noop(),
+		};
+		set.subscribe();
+		set.added = 0;
+		set
+	}
+
+	/// Replace every reader with one holding the newest `reported` runs, each reported.
+	///
+	/// The newest run is dropped after they subscribe, so the first drop a caller times
+	/// does not carry the one-off cost of a fresh track or cursor.
+	fn subscribe(&mut self) {
+		let (readers, _, reported, span) = self.shape;
+		self.readers.clear();
+		let from = self.next.saturating_sub(reported.saturating_sub(1) * (span + 1));
+		for _ in 0..readers {
+			let mut reader = self.track.subscribe(None).with_range(from..);
+			while reader.poll_drop(&self.waiter).is_ready() {}
+			self.readers.push(reader);
+		}
+		self.drop_one();
+		self.fresh = 0;
+	}
+
+	/// Restore the counts `new` was given before either grows by more than a sixteenth:
+	/// rebuild the track once its runs have, otherwise resubscribe once the readers' have.
+	pub fn hold(&mut self) {
+		let (readers, runs, reported, span) = self.shape;
+		if self.added >= (runs / 16).max(1) {
+			*self = Self::new(readers, runs, reported, span);
+		} else if self.fresh >= (reported / 16).max(1) {
+			self.subscribe();
+		}
+	}
+
+	/// Drop one more run above the rest, and have every reader report it.
+	pub fn drop_one(&mut self) {
+		let span = self.shape.3;
+		let start = self.next;
+		self.next += span + 1;
+		self.track.drop_groups(start..start + span, crate::StreamError::Old);
+		for reader in &mut self.readers {
+			assert!(reader.poll_drop(&self.waiter).is_ready(), "the new run is owed");
+			assert!(reader.poll_drop(&self.waiter).is_pending(), "nothing else is");
+		}
+		self.added += 1;
+		self.fresh += 1;
+	}
+}
+
 /// Build a cached group with optional private object fields for model benchmarks.
 pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Finished) {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
@@ -542,6 +624,7 @@ impl RouteNode {
 			cost: 0,
 			upstream: false,
 			learned: false,
+			chain: crate::Hops::new(),
 		}
 	}
 
@@ -643,6 +726,7 @@ impl RouteRelay {
 			cost,
 			upstream: false,
 			learned: false,
+			chain: crate::Hops::new(),
 		}
 	}
 

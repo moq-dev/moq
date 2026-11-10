@@ -790,13 +790,19 @@ impl<'a> Epochs<'a> {
 /// under a new instance, so a hash would keep its dead session winning half the time
 /// until the transport times out.
 fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
+	// A lite-07 claim ranks as the one hop to its origin node: the rest of its hops are
+	// the moq-lite-06 chain it carries only for loop detection and translation.
+	let (anonymous, hops) = match entry.node {
+		Some(_) => (false, 1),
+		None => (entry.is_anonymous(), entry.hops.len()),
+	};
 	(
 		entry.draining,
 		Reverse(entry.preference),
-		entry.is_anonymous(),
+		anonymous,
 		entry.cost,
 		!entry.local,
-		entry.hops.len(),
+		hops,
 		match (entry.node, entry.link == Link::Local && entry.prefix == *path) {
 			(_, true) => (0, 0),
 			// Every node that knows the claim ranks its origin node alike.
@@ -2280,6 +2286,12 @@ impl Producer {
 		self.hop
 	}
 
+	/// Whether `id`, as a peer declared it, names this origin: its hop id, or the Node ID
+	/// its moq-lite-07 sessions declare.
+	pub fn is_own(&self, id: NonZeroU64) -> bool {
+		id == self.hop || self.consume().node_id() == Some(id)
+	}
+
 	/// The key sessions prove for this origin.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn route_key(&self) -> Option<super::origin::RouteKey> {
@@ -3737,6 +3749,9 @@ impl OwnClaims {
 			upstream: false,
 			// Only a route published here has crossed no node.
 			learned: !route.hops.is_empty(),
+			// Kept, so the claim that crossed into lite-07 here is still recognized
+			// wherever it leaves for lite-06 again.
+			chain: route.hops,
 		};
 		self.best.insert(announce.prefix.clone(), claim);
 		self.feed(announce.prefix);
@@ -7164,6 +7179,18 @@ impl Consumer {
 		self
 	}
 
+	/// The Node ID this origin's moq-lite-07 sessions declare, without creating the route
+	/// node: its identity once created, or the one it will declare. `None` only before a
+	/// node whose hop leaves nothing to derive draws a random one.
+	pub(crate) fn node_id(&self) -> Option<NonZeroU64> {
+		let node = self.shared.lock().route_node.clone();
+		let id = match node {
+			Some((node, _)) => Some(node.declared()),
+			None => crate::route::node::declared_for(self.hop),
+		};
+		id.and_then(NonZeroU64::new)
+	}
+
 	/// The route layer node every lite-07 session on this origin shares, created on
 	/// first use along with the task that feeds it the routes this node serves
 	/// itself: everything in the table the route layer did not select. It is caught up
@@ -9937,6 +9964,32 @@ mod tests {
 		let route = announced.expect_next_active("room").await;
 		assert!(!route.is_anonymous());
 		assert_eq!(route.cost, Cost::new(5));
+	}
+
+	#[kio::test]
+	async fn a_lite07_claims_carried_chain_does_not_rank_it() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().routes();
+
+		let _native = producer
+			.announce(
+				"room",
+				RouteInfo::new().with_hops(hops(&[10])).with_cost(5).with_node(Some(10)),
+			)
+			.unwrap();
+		announced.expect_next_active("room").await;
+
+		let _carried = producer
+			.announce(
+				"room",
+				RouteInfo::new()
+					.with_hops(hops(&[0, 7, 20]))
+					.with_cost(1)
+					.with_node(Some(20)),
+			)
+			.unwrap();
+		let route = announced.expect_next_active("room").await;
+		assert_eq!(route.cost, Cost::new(1));
 	}
 
 	#[kio::test]
