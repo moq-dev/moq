@@ -12,9 +12,10 @@ playback decision does not change here.
 Decided 2026-11-09 (maintainer, /quest-complete on
 [moq-dev/moq#8361](https://github.com/moq-dev/moq/pull/8361)): ✅ keep the
 PR's metrics half and revert its playback changes (rejected: land its stretch
-keyed to the lag at arrival). That stretch sped up into a thin buffer, taking
-AAC `step` from 0 to 614 underruns a minute, and removed native's only
-slow-down. It was built on the rule the
+keyed to the lag at arrival). That stretch held audio on a clock that goes
+stale after a path-delay step, taking AAC `step` from 0 to 614 underruns a
+minute, where `main`'s slow-down had hidden the stale clock by settling
+behind it. It was built on the rule the
 [epic](/quest/m1/audio-jitter-target/README.md) replaced the same day, so the
 PR's recorded decisions "accept AAC step underruns" and "p50 within one pitch
 period" go with it.
