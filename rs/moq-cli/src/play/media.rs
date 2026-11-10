@@ -1190,7 +1190,7 @@ mod tests {
 			.into_iter()
 			.find(|part| part.sample == 0.25)
 			.expect("played audio");
-		let due = start + encoder;
+		let due = start.checked_add(encoder).expect("test deadline overflows");
 		assert!(
 			first.from.max(due) - first.from.min(due) <= Duration::from_millis(1),
 			"audio sounded at {:?}, due {:?}",

@@ -901,7 +901,10 @@ mod tests {
 		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
 		audio.received(moq_net::Timestamp::ZERO, start);
 		audio.set_target(jitter);
-		assert_eq!(media.presentation.due(moq_net::Timestamp::ZERO), Some(start + jitter));
+		assert_eq!(
+			media.presentation.due(moq_net::Timestamp::ZERO),
+			start.checked_add(jitter)
+		);
 
 		let (encoder, delay) = tokio::sync::watch::channel(Some(Duration::from_millis(200)));
 		let budget = Duration::from_secs(1);
@@ -933,7 +936,7 @@ mod tests {
 		settle().await;
 		assert_eq!(
 			media.presentation.due(moq_net::Timestamp::ZERO),
-			Some(start + Duration::from_millis(200)),
+			start.checked_add(Duration::from_millis(200)),
 			"audio plays in sync with the delayed video"
 		);
 
