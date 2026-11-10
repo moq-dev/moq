@@ -258,5 +258,5 @@ Public API: none. Wire: none.
 ## Required
 
 - [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the test waits for the first track's queue instead of asserting at once, and its `test.skip` is removed
-- [Interop's cpp and rust finish cases hold up under load](/quest/m0/test-flakes-2/interop-finish.md) - the publishers' finish cells pass under load, and their quarantine is removed
+- [Interop's finish cases hold up under load](/quest/m0/test-flakes-2/interop-finish.md) - every publisher's finish cells pass under load, and the scenario's quarantine is removed
 - [The Go wrapper's cancelled-RecvGroup test holds up under load](/quest/m0/test-flakes-2/go-recv-cancel.md) - a `RecvGroup` after a cancelled one is woken by the next group, and its `t.Skip` is removed
