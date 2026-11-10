@@ -8416,6 +8416,68 @@ mod serve_group_test {
 		}
 	}
 
+	/// Residual, found by `rs/moq-net/verify/subscribe` (`StreamWins`): a group whose stream
+	/// wrote its FIN but goes stale before the acknowledgement resets with OLD and is named in
+	/// a stale drop under the update then in effect, and a later update serves it again. The
+	/// subscriber may have read that stream whole before sending the update, so the draft's
+	/// "having served it, neither serves it again nor names it in another drop" breaks: once
+	/// its copy evicted the group, it records it stale (see the subscriber's
+	/// `a_finished_group_wins_over_a_late_stale_drop_once_evicted`), and the publisher sends
+	/// the whole group a second time.
+	#[kio::test]
+	async fn residual_a_stale_unacknowledged_fin_drops_and_resends_a_served_group() {
+		let budget = Duration::from_millis(1500);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber =
+			track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(budget)));
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()).with_unacked_fin(), subscriber);
+		let update = |update, max_delay| lite::SubscribeUpdate {
+			wanted_group: None,
+			priority: 0,
+			max_delay,
+			min_delay: None,
+			ranges: vec![(0, lite::Range::span(None, 0, None, None))],
+			order: Order::Descending,
+			update,
+		};
+
+		// Group 0 goes out whole: every frame and the FIN, which the peer has yet to
+		// acknowledge.
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), 1);
+
+		// The subscriber read it whole, then sent update 1, which changes nothing here.
+		run.update(update(1, budget));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+
+		// Group 1 starts 1s in, and group 2 at 6s leaves group 0 past the budget while its FIN
+		// is still unacknowledged.
+		write_group(&mut track, 1, 1000);
+		write_group(&mut track, 2, 6000);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(
+			drop_updates(&mut writer, &log, Version::Lite07).await,
+			[(0, 0, 1)],
+			"the served group is named stale under update 1"
+		);
+
+		// An update that widens the budget re-offers it: a second stream for a group whose
+		// first one went out whole.
+		let opened = run.ctx.outcomes.opened.load(Ordering::Relaxed);
+		run.update(update(2, Duration::from_secs(10)));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(
+			run.ctx.outcomes.opened.load(Ordering::Relaxed),
+			opened + 1,
+			"group 0 is served again"
+		);
+	}
+
 	/// A lite-07 group whose stream expired but that the track still caches is judged again
 	/// under an update: served again once the budget covers it, and dropped again under the
 	/// new update while it is still stale.
