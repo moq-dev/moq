@@ -971,7 +971,7 @@ export class Reload {
 }
 
 /**
- * Pump `upstream` into `producer` for the rest of `effect`'s run: its events, then an `end`
+ * Pump `upstream` into `producer` for the rest of `effect`'s run: its events, then an `offline`
  * for each route still active once it closes or the run ends, so nothing clings to a source
  * that went away. Synced follows the upstream's, and owes those retractions too.
  *
@@ -986,7 +986,8 @@ export function pumpAnnounced(effect: Effect, upstream: Announce.Routes, produce
 		if (producer.closed.peek() !== undefined || active.size === 0) return;
 		// Behind first, so a reader parked on the stream takes these as owed, not as news.
 		producer.behind();
-		for (const entry of active.values()) producer.append({ ...entry, kind: "end" });
+		// The source went away, which says nothing of whether the origin ended them.
+		for (const entry of active.values()) producer.append({ ...entry, kind: "offline" });
 		active.clear();
 	};
 
@@ -1006,7 +1007,7 @@ export function pumpAnnounced(effect: Effect, upstream: Announce.Routes, produce
 			for (;;) {
 				const entry = await effect.race(upstream.next());
 				if (!entry || !live || producer.closed.peek() !== undefined) break;
-				if (entry.kind === "end") active.delete(entry.prefix);
+				if (entry.kind === "end" || entry.kind === "offline") active.delete(entry.prefix);
 				else active.set(entry.prefix, entry);
 				producer.append(entry);
 			}

@@ -95,7 +95,7 @@ pub async fn answer(argv: &[OsString]) -> Option<String> {
 	// Whatever happens below, the shell gets an answer. `render` of an empty result
 	// is a well-formed "no candidates", which is the right thing to say when a
 	// lookup has outlived the keystroke that asked for it.
-	let answer = timeout_at(Instant::now() + CEILING, complete(&request, staged))
+	let answer = timeout_at(Instant::now().saturating_add(CEILING), complete(&request, staged))
 		.await
 		.unwrap_or_default();
 
@@ -239,7 +239,7 @@ async fn sources<T, E>(
 	found: impl Future<Output = Result<Vec<T>, E>>,
 	describe: impl Fn(&T) -> Candidate<'static>,
 ) -> Vec<Candidate<'static>> {
-	match timeout_at(Instant::now() + BUDGET, found).await {
+	match timeout_at(Instant::now().saturating_add(BUDGET), found).await {
 		Ok(Ok(items)) => items.iter().map(describe).collect(),
 		Ok(Err(_)) | Err(_) => Vec::new(),
 	}

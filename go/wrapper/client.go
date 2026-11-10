@@ -314,7 +314,7 @@ func (c *Client) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 
 // Follow follows path, resolving each stream that serves it. A non-nil
 // instance follows only that stream.
-func (c *Client) Follow(path string, instance *string) (*Following, error) {
+func (c *Client) Follow(path string, instance *Instance) (*Following, error) {
 	return c.consumer.Follow(path, instance)
 }
 
@@ -323,7 +323,7 @@ func (c *Client) Follow(path string, instance *string) (*Following, error) {
 // route, or a dynamic fallback on the origin, or an error. Unlike Follow, it
 // does not wait for a future announcement. A non-nil instance refuses any other
 // stream.
-func (c *Client) Request(ctx context.Context, path string, instance *string) (*BroadcastConsumer, error) {
+func (c *Client) Request(ctx context.Context, path string, instance *Instance) (*BroadcastConsumer, error) {
 	return c.consumer.Request(ctx, path, instance)
 }
 

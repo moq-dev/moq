@@ -24,11 +24,11 @@ tokio, swept over links and subscribers.
 Decided 2026-10-22 (maintainer), from the io_uring audit: cluster dials
 stay measure-gated. WebRTC data channels stay on tokio. TCP and
 WebSocket move onto the workers through
-[Stream transports](/quest/m4/perf/stream/README.md), which its own
+[Stream transports](/quest/m4/stream-transports/README.md), which its own
 decision exempts from a gate.
 
 Public API: none until the port. Wire: none.
 
 ## Related
 
-- [Stream transports](/quest/m4/perf/stream/README.md) - the TCP and WebSocket half, ported in m4
+- [Stream transports](/quest/m4/stream-transports/README.md) - the TCP and WebSocket half, ported in m4

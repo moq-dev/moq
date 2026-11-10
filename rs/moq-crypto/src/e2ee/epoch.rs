@@ -35,7 +35,13 @@ impl Epoch {
 
 	/// The epoch a resolved broadcast's route announced, if its instance is one.
 	pub fn of(broadcast: &moq_net::broadcast::Consumer) -> Option<Self> {
-		broadcast.info().instance.as_ref()?.as_str().parse().ok()
+		// One a session minted for a wire without instances names no epoch.
+		let instance = broadcast
+			.info()
+			.instance
+			.clone()
+			.filter(|instance| !instance.is_minted())?;
+		instance.as_str().parse().ok()
 	}
 }
 

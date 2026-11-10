@@ -58,7 +58,6 @@ pub mod recv;
 mod runtime;
 pub mod send;
 #[cfg(feature = "sim")]
-#[doc(hidden)]
 pub mod sim;
 mod work_limiter;
 

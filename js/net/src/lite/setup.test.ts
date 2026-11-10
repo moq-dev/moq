@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { HopSchema } from "../hop.ts";
-import { Reader, Writer } from "../stream.ts";
+import { encodeVarint, Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { ProbeLevel, Role, Setup } from "./setup.ts";
 import { Version } from "./version.ts";
@@ -147,6 +147,14 @@ test("hop 0 decodes as absent", async () => {
 	// 0 carries no identity (it cannot be excluded), so it decodes as undefined.
 	const got = await decodeParam(PARAM_HOP, Varint.encode(0));
 	expect(got.hop).toBeUndefined();
+});
+
+test("lite-07 Node ID is never 0 or qualified", async () => {
+	for (const id of [0n, (1n << 63n) | 7n]) {
+		await expect(decodeParam(PARAM_HOP, encodeVarint(id, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
+	}
+	const qualified = new Setup({ hop: HopSchema.parse((1n << 63n) | 7n) });
+	await expect(bytes((w) => qualified.encode(w, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
 });
 
 test("SETUP with implementation round-trips", async () => {

@@ -270,7 +270,7 @@ impl Refresh {
 		self.waiting.push_back(Waiting {
 			request,
 			facts,
-			deadline: kio::clock::now() + super::ATTACH_TIMEOUT,
+			deadline: kio::clock::now().saturating_add(super::ATTACH_TIMEOUT),
 		});
 		self.dispatch();
 	}

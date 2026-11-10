@@ -75,7 +75,7 @@ impl Room {
 		loop {
 			match self.announced.poll_next(waiter) {
 				Poll::Ready(Some(announce::Event::Present(announce))) => self.listed(announce.prefix),
-				Poll::Ready(Some(announce::Event::Absent(announce))) => {
+				Poll::Ready(Some(announce::Event::Absent(announce) | announce::Event::Offline(announce))) => {
 					let Some(index) = self.participants.iter().position(|p| p.path == announce.prefix) else {
 						continue;
 					};
@@ -87,6 +87,8 @@ impl Room {
 						broadcast: None,
 					}));
 				}
+				// A participant stays listed while its path is held; its follow resumes it.
+				Poll::Ready(Some(announce::Event::Available(_) | announce::Event::Unavailable(_))) => {}
 				Poll::Ready(None) => return Poll::Ready(None),
 				Poll::Pending => break,
 			}

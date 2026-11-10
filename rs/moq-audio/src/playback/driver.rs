@@ -967,7 +967,7 @@ impl Driver {
 	fn schedule(&mut self) -> Instant {
 		let wait = self.retry.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
 		self.retry = (self.retry * 2).min(RETRY_MAX);
-		Instant::now() + wait
+		Instant::now().saturating_add(wait)
 	}
 
 	/// Whether the failures the live stream has reported require a rebuild.
@@ -1315,7 +1315,7 @@ mod tests {
 
 			// Deadlines rather than a plain park, so a lost wake fails the test
 			// instead of hanging it.
-			let first = requests.wait_with(Some(Instant::now() + PATIENCE), |timeout| {
+			let first = requests.wait_with(Some(Instant::now().saturating_add(PATIENCE)), |timeout| {
 				let _ = parking.send(());
 				park(timeout);
 			});
@@ -1323,7 +1323,7 @@ mod tests {
 			sent.send(()).unwrap();
 
 			// Syncs racing in behind the first are fine; only silence is not.
-			let deadline = Instant::now() + PATIENCE;
+			let deadline = Instant::now().saturating_add(PATIENCE);
 			let stopped = loop {
 				match requests.wait(Some(deadline)) {
 					Work::Shutdown => break true,
@@ -1360,7 +1360,7 @@ mod tests {
 
 		let driver = std::thread::spawn(move || {
 			requests.attach();
-			requests.wait(Some(Instant::now() + PATIENCE))
+			requests.wait(Some(Instant::now().saturating_add(PATIENCE)))
 		});
 
 		assert!(
@@ -1395,7 +1395,7 @@ mod tests {
 		// The deadline is never reached: the first park returns with nothing
 		// pending, as a spurious wake does, and the second brings the sync.
 		let mut parks = 0;
-		let work = requests.wait_with(Some(Instant::now() + PATIENCE), |_| {
+		let work = requests.wait_with(Some(Instant::now().saturating_add(PATIENCE)), |_| {
 			parks += 1;
 			match parks {
 				1 => {}

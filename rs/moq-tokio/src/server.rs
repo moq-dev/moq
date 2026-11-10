@@ -1822,9 +1822,10 @@ impl Request {
 		self.handshake.requests()
 	}
 
-	/// The Hop ID the peer declared in its SETUP (moq-lite-05+).
+	/// The identity the peer declared in its SETUP (moq-lite-05+).
 	///
-	/// A peer declares this when it attaches a publish or subscribe origin.
+	/// A peer declares this when it attaches a publish or subscribe origin:
+	/// its Hop ID, or from moq-lite-07 its Node ID.
 	/// Older versions and peers without one return `None`.
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
@@ -1962,9 +1963,14 @@ mod tests {
 	/// The next route and whether it is active.
 	#[cfg(all(feature = "uds", unix))]
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-		match announced.next().await? {
-			moq_net::announce::Event::Present(route) => Some((route, true)),
-			moq_net::announce::Event::Absent(route) => Some((route, false)),
+		loop {
+			return match announced.next().await? {
+				moq_net::announce::Event::Present(route) => Some((route, true)),
+				moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => {
+					Some((route, false))
+				}
+				moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
+			};
 		}
 	}
 
@@ -2759,7 +2765,7 @@ mod tests {
 		// `serve` binds the socket; wait for it. Keep the last error, since a bind
 		// failure is the only clue to why it never showed up.
 		const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
-		let deadline = kio::clock::now() + std::time::Duration::from_secs(5);
+		let deadline = kio::clock::now().saturating_add(std::time::Duration::from_secs(5));
 		let mut delay = std::time::Duration::from_millis(1);
 		while let Err(err) = tokio::net::UnixStream::connect(&path).await {
 			assert!(kio::clock::now() < deadline, "unix listener never bound: {err}");

@@ -15,7 +15,7 @@ export async function announcedView(
 		for await (const event of stream)
 			value.update((previous) => {
 				const next = new Map(previous);
-				if (event.kind === "end") next.delete(event.prefix);
+				if (event.kind === "end" || event.kind === "offline") next.delete(event.prefix);
 				else next.set(event.prefix, event.route);
 				return next;
 			});

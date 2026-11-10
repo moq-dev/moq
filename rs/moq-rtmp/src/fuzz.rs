@@ -1,4 +1,5 @@
-//! The fuzz target body for the AMF0 receive views, plus the seeds it starts from.
+//! Test support, enabled by the `fuzz` feature: the fuzz target body for the AMF0 receive views,
+//! plus its seeds.
 //!
 //! The target reads an RTMP AMF0 message through the borrowed views a session uses, walking every
 //! value a peer supplied, and checks that it allocates nothing: the views keep the encoded bytes
@@ -6,8 +7,7 @@
 //! lives here rather than in `fuzz/fuzz_targets/` because the `rml` module is private, and so the
 //! tests below replay it on stable.
 //!
-//! Compiled only under `cfg(test)` or the `fuzz` feature, so none of this is part of the published
-//! API. See `fuzz/README.md` for the workflow.
+//! It tracks the crate's internals, so it can change in any release. See `fuzz/README.md` for the workflow.
 
 use crate::rml::amf0::{Amf0Value, Value, allocation::measure, serialize};
 use crate::rml::messages::MessagePayload;

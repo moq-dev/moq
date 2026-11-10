@@ -58,10 +58,8 @@ mod runtime;
 pub mod secret;
 #[cfg(feature = "_transport")]
 pub mod server;
-#[doc(hidden)]
 pub mod settings;
 #[cfg(all(feature = "sim", feature = "net"))]
-#[doc(hidden)]
 pub mod sim;
 #[cfg(feature = "tcp")]
 pub mod tcp;

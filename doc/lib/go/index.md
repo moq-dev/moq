@@ -70,7 +70,7 @@ for event, err := range announced.All(ctx) {
     // handed each new run, with Available returning nil while the path is offline.
     present, ok := event.(moq.AnnounceEventPresent)
     if !ok {
-        continue // AnnounceEventAbsent
+        continue // absent, offline, or a change in availability
     }
     ann := present.Announce
     // Prefix stays origin-relative; Captures is a list, empty without wildcards.

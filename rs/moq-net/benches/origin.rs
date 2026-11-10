@@ -32,7 +32,7 @@
 //! A claim's answer, and its retraction moving the claim to a fresh instance, is swept
 //! over the paths the claim already answered and the cursors watching it.
 //!
-//! Peer claims land through the hidden `fuzz` module, as a session lands them.
+//! Peer claims land through the `fuzz` module, as a session lands them.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench origin`.
 
