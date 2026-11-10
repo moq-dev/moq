@@ -144,7 +144,7 @@ epoch, and `TRACK`, `TRACKS`, `SUBSCRIBE` and `FETCH` name the instance they
 pin. A restart onto another instance, or a higher epoch of the same one, is
 advertised before the old one is withdrawn, so the path is never absent. Older
 moq-lite versions and moq-transport carry no instance, so the receiving session
-mints one for each announcement, marked with a leading `~`: a reconnect or a
+mints one for each announcement, flagged as minted: a reconnect or a
 re-announcement through such a hop is another stream, and the first
 subscription through a claim is reset once the output's route arrives. A peer
 that ignores the end and start may keep cached objects of the old run under

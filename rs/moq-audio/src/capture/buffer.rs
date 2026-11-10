@@ -459,7 +459,7 @@ mod tests {
 		let step = Duration::from_micros(1_000_000 * CHUNK_FRAMES as u64 / 48_000);
 		for index in 0..3 {
 			let samples = reader.recv().await.unwrap();
-			assert_eq!(samples.captured, Some(captured + step * (index as u32)));
+			assert_eq!(samples.captured, Some(captured.saturating_add(step * (index as u32))));
 		}
 	}
 }

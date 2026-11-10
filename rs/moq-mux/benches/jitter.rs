@@ -20,7 +20,7 @@ async fn steer(tracks: u16, floors: u64) -> u64 {
 	buffer.expect(1..=tracks);
 	let waiter = kio::Waiter::noop();
 	for second in 0..floors * 2 {
-		let at = start + Duration::from_secs(second);
+		let at = start.saturating_add(Duration::from_secs(second));
 		tokio::time::advance(at.saturating_duration_since(kio::clock::now())).await;
 		for track in 1..=tracks {
 			let arrival = jitter::Arrival {

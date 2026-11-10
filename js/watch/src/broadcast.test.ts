@@ -6,6 +6,7 @@ import * as Msf from "@moq/msf";
 import * as Moq from "@moq/net";
 import { Origin, Path } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import * as Mint from "../../net/src/mint.ts";
 import { Broadcast } from "./broadcast";
 
 function publish(origin: Origin.Producer, path: Path.Valid) {
@@ -342,7 +343,7 @@ describe("relativeBroadcast", () => {
 		const siblingRoute = owner.route(Path.from("a/source"), { instance: { id: siblingInstance, epoch: 0n } });
 		const sibling = siblingRoute.broadcast;
 		// A route over a wire that carries no instance has one its session minted.
-		const plainRoute = owner.route(Path.from("a/plain"), { instance: { id: Moq.Instance.minted(), epoch: 0n } });
+		const plainRoute = owner.route(Path.from("a/plain"), { instance: { id: Mint.fresh(), epoch: 0n } });
 		const plain = plainRoute.broadcast;
 		const source = new Broadcast({
 			origin: owner,

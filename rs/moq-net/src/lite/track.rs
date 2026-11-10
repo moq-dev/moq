@@ -512,8 +512,8 @@ mod test {
 			track: Cow::Borrowed("v"),
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
-		// Length, the path, an empty instance, the node, then the track name.
-		assert_eq!(&buf[..], [9, 4, b'r', b'o', b'o', b'm', 0, 5, 1, b'v']);
+		// Length, the path, an empty unminted instance, the node, then the track name.
+		assert_eq!(&buf[..], [10, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 1, b'v']);
 		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, 5);
 
 		let buf = msg.encode_bytes(Version::Lite06).unwrap();

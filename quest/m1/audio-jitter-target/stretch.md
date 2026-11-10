@@ -52,9 +52,10 @@ Decisions for this quest:
   both are worth taking.
 - Order: ✅ after native backpressure (rejected: this first; one quest for
   both). The level this rule reads is everything received ahead of the
-  playhead, decoded or still encoded, and the backlog while audio trails
-  sits encoded upstream in the browser. One mirrored rule needs both players
-  to split the buffer the same way.
+  playhead, decoded or still encoded. The browser keeps the part of the
+  target above its ring's floor encoded, and a buffered player its whole
+  lookahead, while native decodes everything at once. One mirrored rule needs
+  both players to split the buffer the same way.
 - Clock step: ✅ deferred (rejected: plan it now; drop it). The shared
   clock's reference only moves earlier, so after a lasting path-delay step
   audio would settle behind a stale clock. Report what the `step` rows' lag
@@ -72,10 +73,15 @@ What the audit of `main` found (2026-11-09, `10772522a5`):
   expands, fast-accelerates at 20 ms of excess, stays silent after an
   underrun until the whole target refills, parks on a target rise, and turns
   the stretch off in buffered mode.
-- [moq-dev/moq#8361](https://github.com/moq-dev/moq/pull/8361) sped up into a
-  thin buffer and took AAC `step` from 0 to 614 underruns a minute. A
-  speed-up is admitted only while the buffer stays above the target by the
-  lag it removes.
+- [moq-dev/moq#8361](https://github.com/moq-dev/moq/pull/8361) held native
+  audio on the clock and took AAC `step` from 0 to 614 underruns a minute.
+  Its own analysis: the clock's reference never moves later, so after the 5
+  to 60 ms step the clock-aligned depth sits about 55 ms short of the
+  estimator's target, less than AAC's 160 ms PES spacing, and `main` had
+  hidden that by settling a burst behind. It already admitted a speed-up only
+  inside the excess, so that rule alone prevents nothing here. Under this
+  model the slow-down lets audio settle behind the stale clock rather than
+  underrun, which is the lag the deferred clock decision is about.
 
 Recommendations:
 
@@ -117,18 +123,10 @@ decision now runs a filter.
 
 Public API: none expected. Wire: none.
 
-## Waiting
-
-- moq-dev/moq: [moq-dev/moq#8380](https://github.com/moq-dev/moq/pull/8380)
-  merges, planning native backpressure
-  (`/quest/m1/audio-jitter-target/native-backpressure.md`). Then list that
-  quest under Required and delete this item. It asks native to mirror the
-  browser's stalled refill to the full target; this quest then changes the
-  refill in both.
-
 ## Required
 
 - [The audio harness grades the stretch model](/quest/m1/audio-jitter-target/grading.md) - the gates that pushed toward zero underruns and zero lag are gone before this is measured against them
+- [Native backpressure](/quest/m1/audio-jitter-target/native-backpressure.md) - native holds its ring at a floor and the rest of the target encoded, as the browser does, so one rule reads the same buffer in both
 
 ## Closes
 

@@ -329,8 +329,12 @@ mod tests {
 			.start_paused(true)
 			.build()
 			.unwrap();
-		let (mut sleep, at) =
-			runtime.block_on(async { (sleep(Duration::MAX), crate::clock::now() + Duration::from_secs(1)) });
+		let (mut sleep, at) = runtime.block_on(async {
+			(
+				sleep(Duration::MAX),
+				crate::clock::now().saturating_add(Duration::from_secs(1)),
+			)
+		});
 		sleep.reset(at);
 		runtime.block_on(sleep);
 	}

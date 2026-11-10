@@ -1,6 +1,5 @@
 package dev.moq
 
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -62,7 +61,7 @@ fun GroupConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
  *
  * Collect it once: the handle is cancelled when collection ends, however it ends.
  */
-fun AnnounceConsumer.updates(): Flow<AnnounceEvent> = pull { next() }.onCompletion { cancel() }
+fun AnnounceConsumer.updates(): Flow<AnnounceEvent> = pull({ cancel() }) { next() }
 
 /**
  * The session's grant, as `grants().updates()`: the current one, then each change, null while there
@@ -89,7 +88,7 @@ fun GrantConsumer.updates(): Flow<Grant?> =
         .onCompletion { cancel() }
 
 /** Emits [next] until it returns null, checking for cancellation before each pull. */
-private fun <T : Any> pull(next: suspend () -> T?): Flow<T> = flow {
+internal fun <T : Any> pull(next: suspend () -> T?): Flow<T> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
@@ -97,11 +96,11 @@ private fun <T : Any> pull(next: suspend () -> T?): Flow<T> = flow {
 }
 
 /**
- * [pull], calling [cancel] when the collector is cancelled so the native handle wakes a pending
- * [next] and releases the stream.
+ * [pull], calling [cancel] when collection ends, however it ends, so the native handle wakes a
+ * pending [next] and releases the stream. Collect it once.
  */
 internal fun <T : Any> pull(cancel: () -> Unit, next: suspend () -> T?): Flow<T> =
-    pull(next).onCompletion { cause -> if (cause is CancellationException) cancel() }
+    pull(next).onCompletion { cancel() }
 
 /** Stream of datagram tracks requested by consumers. */
 fun DatagramRequests.requestedDatagrams(): Flow<DatagramRequest> =

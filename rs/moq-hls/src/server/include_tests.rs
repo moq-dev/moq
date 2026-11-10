@@ -88,7 +88,7 @@ async fn request(server: &Server, uri: &str) -> (StatusCode, String) {
 }
 
 async fn master(server: &Server, contains: &str, present: bool) -> String {
-	let deadline = kio::clock::now() + Duration::from_secs(10);
+	let deadline = kio::clock::now().saturating_add(Duration::from_secs(10));
 	loop {
 		let (status, body) = request(server, "/room/live/master.m3u8?jwt=viewer").await;
 		if status == StatusCode::OK && body.contains(contains) == present {
@@ -225,7 +225,7 @@ async fn a_failed_parent_catalog_stops_its_includes() {
 	master(&server, "include/", true).await;
 	let uri = format!("/room/live/@{root}/include/rung%2Fa/video/same/@{child}/media.m3u8");
 	parent_catalog_track.abort(moq_net::Error::Cancel).unwrap();
-	let deadline = kio::clock::now() + Duration::from_secs(10);
+	let deadline = kio::clock::now().saturating_add(Duration::from_secs(10));
 	// A live include's playlist waits for media this test never writes, so bound each request.
 	while !matches!(
 		kio::clock::timeout(Duration::from_secs(1), request(&server, &uri)).await,
@@ -305,7 +305,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	frames(&next, 3);
 	let _next = next.finish().unwrap();
 	drop(held);
-	let deadline = kio::clock::now() + Duration::from_secs(10);
+	let deadline = kio::clock::now().saturating_add(Duration::from_secs(10));
 	let ended = loop {
 		let (status, playlist) = request(&server, &uri).await;
 		if status == StatusCode::OK && playlist.contains("#EXT-X-ENDLIST") {

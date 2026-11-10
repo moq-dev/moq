@@ -219,16 +219,17 @@ impl Routed {
 				route,
 				instance,
 				epoch,
+				hops,
 				cost,
-				..
 			} => {
 				let path = self.path(prefix, &decoder.start(suffix)?)?;
-				let claim = claim(instance, epoch, cost)?;
+				let claim = claim(instance, epoch, cost, hops)?;
 				self.start(decoder.last(), route, path, claim)?;
 			}
-			Msg::Update { id, cost, .. } => {
+			Msg::Update { id, hops, cost } => {
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				claim.claim.cost = cost.value();
+				claim.claim.chain = hops;
 				let change = (claim.path.clone(), Some(claim.claim.clone()));
 				self.pending(id, change)?;
 			}
@@ -237,8 +238,9 @@ impl Routed {
 				instance,
 				epoch,
 				cost,
+				hops,
 			} => {
-				let fresh = self::claim(instance, epoch, cost)?;
+				let fresh = self::claim(instance, epoch, cost, hops)?;
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				claim.claim = fresh;
 				let change = (claim.path.clone(), Some(claim.claim.clone()));
@@ -417,16 +419,31 @@ impl Routed {
 		if !self.permit.within_limit(path.as_str()) {
 			return;
 		}
+		let key = (id, claim);
+		// The chain a claim of `id` travels to a lite-06 peer: the one it crossed into
+		// lite-07 with, then its origin node, so a relay it reaches back through
+		// recognizes it. A chain already naming this node looped back across lite-06,
+		// and the hop limit bounds the whole path across both versions.
+		let mut hops = served.claim.chain.clone();
+		if hops.push(route::node::hop(id)).is_err()
+			|| subscriber.names_self(&hops)
+			|| hops.len() > self.origin.max_hops().get()
+		{
+			tracing::debug!(route = %subscriber.log_path(&path), node = id, "dropping looped claim");
+			for entry in self.previous.remove(&key).into_iter().chain(self.served.remove(&key)) {
+				entry.route.dynamic.withdrawn();
+			}
+			return;
+		}
 		// A route held without a path to it serves only as a last resort, like a draining
 		// peer's, at its real cost.
 		let route = crate::origin::RouteInfo::new()
 			.with_instance(served.claim.instance.clone(), served.claim.epoch)
-			.with_hops(hops(id))
+			.with_hops(hops)
 			.with_cost(served.claim.cost.saturating_add(served.metric))
 			.with_via(subscriber.via(None))
 			.with_node(Some(id))
 			.with_draining(self.drained || !served.available);
-		let key = (id, claim);
 		if let Some(entry) = self.previous.remove(&key) {
 			self.served.insert(key.clone(), entry);
 		}
@@ -506,22 +523,20 @@ fn refused(_: route::Error) -> Error {
 }
 
 /// A claim off the wire. Lite-07 names every claim's instance.
-fn claim(instance: Option<crate::Instance>, epoch: u64, cost: crate::origin::Cost) -> Result<node::Claim, Error> {
+fn claim(
+	instance: Option<crate::Instance>,
+	epoch: u64,
+	cost: crate::origin::Cost,
+	chain: crate::Hops,
+) -> Result<node::Claim, Error> {
 	Ok(node::Claim {
 		instance: instance.ok_or(Error::ProtocolViolation)?,
 		epoch,
 		cost: cost.value(),
 		upstream: false,
 		learned: false,
+		chain,
 	})
-}
-
-/// The hop chain a claim of `id` travels to a lite-06 peer, so a relay it reaches
-/// back through recognizes it.
-fn hops(id: route::Id) -> crate::Hops {
-	let mut hops = crate::Hops::new();
-	hops.push(route::node::hop(id)).expect("one hop fits any chain");
-	hops
 }
 
 /// Whether `permit`'s limit admits the peer's claim at the absolute `path`.
