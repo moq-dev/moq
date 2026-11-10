@@ -93,6 +93,7 @@ bridge-check:
     cd bridge && cargo fmt --check
     cd bridge && bash ../../../sh/local.sh cargo clippy --locked --all-targets -- -D warnings
     cd bridge && bash ../../../sh/local.sh cargo test --locked
+    cd bridge && RUSTDOCFLAGS="-D warnings" bash ../../../sh/local.sh cargo doc --locked --no-deps
 
 # Format the bridge and apply its lint fixes.
 bridge-fix:

@@ -161,8 +161,9 @@ module bench '^bench/' \
 # package, so that module covers it.
 module carla '^demo/carla/(sim/|justfile$)' \
     tools='uv'
-# The CARLA demo's GPU bridge, a Cargo workspace of its own.
-module carla_bridge '^demo/carla/(bridge/|justfile$)' \
+# The CARLA demo's GPU bridge, a Cargo workspace of its own. It also matches
+# the rs/ crates it path-depends on, so their API changes compile it.
+module carla_bridge '^(\.cargo/config\.toml$|demo/carla/(bridge/|justfile$)|rs/(hang|kio|moq-(json|loc|msf|mux|net|nvenc|pattern|video))/)' \
     tools='cargo' compiles='check fix' fix
 # swift needs no tools: it skips off macOS by design, and platform.yml is its
 # real gate. Its formatter is absent where nixpkgs cannot build it (see
