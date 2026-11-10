@@ -33,3 +33,4 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in GitHub's merge queue, one tested entry at a time, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one drops a queued PR
 - [Agent build output can't fill the desktop's disk](/quest/m0/agent-disk-budget.md) - finished agent checkouts reclaim their mbx targets automatically, so parallel agent builds stop filling the root disk
+- [MoQ builds against rind 0.4 and its corrected adapters](/quest/m0/rind-adapters.md) - the calls rind 0.4 and its adapter patch releases change, adapted the day they publish
