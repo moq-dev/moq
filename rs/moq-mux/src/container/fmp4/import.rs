@@ -2007,7 +2007,7 @@ mod tests {
 			assert!(matches!(err, crate::Error::Cmaf(Error::BackwardsDataOffset)), "{err:?}");
 			assert!(consumer.recv_group().now_or_never().is_none());
 			assert_eq!(import.decode(&[0xA5; 8]).unwrap_err().to_string(), err.to_string());
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			assert!(consumer.recv_group().now_or_never().unwrap().unwrap().is_none());
 		}
 	}
@@ -2041,12 +2041,8 @@ mod tests {
 			assert_eq!(import.cut().unwrap_err().to_string(), first);
 			assert_eq!(import.seek(100).unwrap_err().to_string(), first);
 			assert_eq!(import.discontinuity().unwrap_err().to_string(), first);
-			import.finish().unwrap();
-			assert_eq!(import.decode(&[]).unwrap_err().to_string(), first);
-			assert_eq!(
-				import.decode(&box_header(b"free", Some(0))).unwrap_err().to_string(),
-				first
-			);
+			// The accepted media still ends cleanly.
+			let _import = import.finish().unwrap();
 		}
 	}
 
@@ -2141,7 +2137,7 @@ mod tests {
 				import.decode(&box_header(b"mdat", Some(4))).unwrap_err().to_string(),
 				err.to_string()
 			);
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 		}
 
 		// A short moof declares one field-less sample per body byte past the base, and no more.
@@ -2350,7 +2346,7 @@ mod tests {
 						"unreferenced payload must not enter the output cache"
 					);
 				}
-				import.finish().unwrap();
+				let _finished = import.finish().unwrap();
 			}
 		}
 	}
@@ -2408,7 +2404,7 @@ mod tests {
 				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&sample).unwrap();
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			assert_eq!(groups(&mut consumer), [(100, Some(1))], "passthrough: {passthrough}");
 		}
 	}
@@ -2427,7 +2423,8 @@ mod tests {
 				.decode(&media_header(id, 1024, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&[0xA5; SIZE / 2]).unwrap();
-			let err = import.finish().unwrap_err();
+			// In place, so the tracks can be inspected after the failure.
+			let err = import.finish_in_place().unwrap_err();
 			assert!(matches!(err, crate::Error::Mp4(_)), "{err:?}");
 			assert_eq!(
 				groups(&mut consumer),
@@ -2463,7 +2460,7 @@ mod tests {
 				import.decode(&[0xA5; SIZE / 2]).unwrap_err().to_string(),
 				err.to_string()
 			);
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			assert_eq!(groups(&mut consumer), [(0, Some(1))], "passthrough: {passthrough}");
 		}
 	}

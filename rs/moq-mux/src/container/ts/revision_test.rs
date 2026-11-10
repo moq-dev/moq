@@ -107,7 +107,7 @@ async fn reexport_frames(spans: &[(u16, &Span<'_>)], intervals: u64) -> Vec<Fram
 	let mut mux = Mux::default();
 	mux.packet(CLOCK_PID, Flags::pcr(ticks));
 	import.decode(&mux.bytes()).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 	catalog.finish().unwrap();
 
 	drain(&mut export.unwrap(), &mut frames).await;
@@ -434,7 +434,7 @@ async fn a_listed_track_keeps_its_descriptors() {
 		.unwrap()
 		.descriptors = vec![language(FRA)];
 	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 3_000, 6_000).await;
-	audio.finish().unwrap();
+	let _finished = audio.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -489,9 +489,9 @@ async fn the_clock_moves_behind_the_pmt_naming_its_pid() {
 	)
 	.await;
 	remove(&mut catalog, &name);
-	clock.finish().unwrap();
+	let _finished = clock.finish().unwrap();
 	live(&mut export, &mut frames, start, &mut [(&mut other, 0x21)], 3_000, 6_000).await;
-	other.finish().unwrap();
+	let _finished = other.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -562,7 +562,7 @@ async fn a_program_descriptor_change_revises_the_pmt() {
 		data: bytes::Bytes::from_static(&[0xaa; 6]),
 	}];
 	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 3_000, 6_000).await;
-	audio.finish().unwrap();
+	let _finished = audio.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -763,8 +763,8 @@ async fn a_pid_recorded_after_its_track_takes_the_held_frames_along() {
 	for millis in (3_500..6_000).step_by(20) {
 		write_aac(&mut [&mut first, &mut second], millis);
 	}
-	first.finish().unwrap();
-	second.finish().unwrap();
+	let _finished = first.finish().unwrap();
+	let _finished = second.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -838,8 +838,8 @@ async fn a_pid_recorded_while_its_frame_is_held_takes_the_frame_along() {
 		.mpegts
 		.tracks
 		.insert(name, super::catalog::Track::new(OTHER_AUDIO_PID));
-	first.finish().unwrap();
-	second.finish().unwrap();
+	let _finished = first.finish().unwrap();
+	let _finished = second.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -882,9 +882,9 @@ async fn a_track_ending_while_its_frame_is_held_stays_for_the_frame() {
 		Some(OTHER_AUDIO_PID),
 		"the second track's frame is held"
 	);
-	second.finish().unwrap();
+	let _finished = second.finish().unwrap();
 	remove(&mut catalog, &name);
-	first.finish().unwrap();
+	let _finished = first.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -928,7 +928,7 @@ async fn a_track_taking_a_pid_over_goes_out_behind_the_tail_before_it() {
 	for millis in (3_000..3_800).step_by(20) {
 		write_marked(&mut old, millis, OLD);
 	}
-	old.finish().unwrap();
+	let _finished = old.finish().unwrap();
 	remove(&mut catalog, &name);
 	settle(&mut export, &mut frames).await;
 	let (_, mut new) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
@@ -942,8 +942,8 @@ async fn a_track_taking_a_pid_over_goes_out_behind_the_tail_before_it() {
 		5_000,
 	)
 	.await;
-	new.finish().unwrap();
-	other.finish().unwrap();
+	let _finished = new.finish().unwrap();
+	let _finished = other.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -984,7 +984,7 @@ async fn a_pid_that_leaves_the_pmt_is_gone_until_it_returns() {
 		2_000,
 	)
 	.await;
-	old.finish().unwrap();
+	let _finished = old.finish().unwrap();
 	remove(&mut catalog, &name);
 	live(&mut export, &mut frames, start, &mut [(&mut other, 0x21)], 2_000, 5_000).await;
 	assert!(!export.stats().streams.contains_key(&AUDIO_PID), "the PID left the PMT");
@@ -1059,8 +1059,8 @@ async fn a_held_frame_moved_onto_a_pid_taken_over_waits_for_the_tail() {
 		write_marked(&mut old, millis, OLD);
 		write_marked(&mut new, millis, NEW);
 	}
-	old.finish().unwrap();
-	new.finish().unwrap();
+	let _finished = old.finish().unwrap();
+	let _finished = new.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -1104,7 +1104,7 @@ async fn a_pid_taken_from_a_stream_that_never_ends_cuts_it() {
 		)
 		.await;
 		remove(&mut catalog, &name);
-		successor.finish().unwrap();
+		let _finished = successor.finish().unwrap();
 	}
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
@@ -1147,8 +1147,8 @@ async fn a_track_recorded_on_the_pmt_pid_after_the_catalog_moves_it_takes_anothe
 		6_000,
 	)
 	.await;
-	first.finish().unwrap();
-	added.finish().unwrap();
+	let _finished = first.finish().unwrap();
+	let _finished = added.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -1189,7 +1189,7 @@ async fn a_moved_pmt_moves_behind_a_new_pat() {
 	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 0, 3_000).await;
 	catalog.modify().unwrap().ext.mpegts.program = Some(program(MOVED_PMT_PID));
 	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 3_000, 6_000).await;
-	audio.finish().unwrap();
+	let _finished = audio.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -1268,9 +1268,9 @@ async fn a_pmt_moved_onto_a_draining_stream_waits_for_it() {
 		4_000,
 	)
 	.await;
-	leaving.finish().unwrap();
+	let _finished = leaving.finish().unwrap();
 	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 4_000, 6_000).await;
-	audio.finish().unwrap();
+	let _finished = audio.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -1325,9 +1325,9 @@ async fn a_catalog_dropping_the_pmt_pid_cancels_a_waiting_move() {
 	live(&mut export, &mut frames, start, &mut tracks, 3_000, 3_500).await;
 	catalog.modify().unwrap().ext.mpegts.program = Some(program(0));
 	live(&mut export, &mut frames, start, &mut tracks, 3_500, 4_000).await;
-	leaving.finish().unwrap();
+	let _finished = leaving.finish().unwrap();
 	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 4_000, 6_000).await;
-	audio.finish().unwrap();
+	let _finished = audio.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -1409,7 +1409,7 @@ async fn a_pmt_moved_while_its_tables_go_out_moves_behind_them() {
 		write_marked(&mut audio, millis, 0x21);
 		settle(&mut export, &mut frames).await;
 	}
-	audio.finish().unwrap();
+	let _finished = audio.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -1515,7 +1515,7 @@ async fn a_revision_out_before_the_one_it_follows_takes_its_version() {
 	)
 	.await;
 	for track in [&mut first, &mut added, &mut cue] {
-		track.finish().unwrap();
+		track.end_with(None).unwrap();
 	}
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
@@ -1554,7 +1554,7 @@ async fn a_stream_taking_a_pid_over_leaves_the_buffer_before_it() {
 	)
 	.await;
 	remove(&mut catalog, &name);
-	before.finish().unwrap();
+	let _finished = before.finish().unwrap();
 	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 3_000, 6_000).await;
 
 	let track = broadcast
@@ -1592,7 +1592,7 @@ async fn a_stream_taking_a_pid_over_leaves_the_buffer_before_it() {
 	private.cut(None).unwrap();
 	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 6_000, 9_000).await;
 	for track in [&mut first, &mut private] {
-		track.finish().unwrap();
+		track.end_with(None).unwrap();
 	}
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
@@ -1702,7 +1702,7 @@ async fn tracks_withdrawn_before_sending_anything_go() {
 		open.push(withdrawn);
 	}
 	assert_eq!(export.tracks(), 1);
-	first.finish().unwrap();
+	let _finished = first.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 	drop(open);
@@ -1778,7 +1778,7 @@ async fn the_clock_moves_behind_the_last_packet_of_the_pmt_naming_its_pid() {
 					})
 					.collect();
 				drop(guard);
-				clock.finish().unwrap();
+				clock.end_with(None).unwrap();
 			}
 			_ => {}
 		}
@@ -1787,7 +1787,7 @@ async fn the_clock_moves_behind_the_last_packet_of_the_pmt_naming_its_pid() {
 		}
 		settle(&mut export, &mut frames).await;
 	}
-	other.finish().unwrap();
+	let _finished = other.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -1830,7 +1830,7 @@ async fn a_rate_change_applies_behind_the_revision_it_comes_with() {
 		}];
 	}
 	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 3_000, 6_000).await;
-	audio.finish().unwrap();
+	let _finished = audio.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
@@ -1923,8 +1923,8 @@ async fn withdraw_and_return(listed: bool) {
 		back + 1_000,
 	)
 	.await;
-	first.finish().unwrap();
-	second.finish().unwrap();
+	let _finished = first.finish().unwrap();
+	let _finished = second.finish().unwrap();
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 

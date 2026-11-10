@@ -1065,7 +1065,9 @@ mod test {
 		assert_eq!(back[1].0, 2);
 		assert_ne!(back[1].1, both[1].1, "the returning program is a new instance");
 
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+
+		let programs = &finished.programs;
 		let stats = programs.stats();
 		assert_eq!(stats.streams[&0x61].units, 8, "program 1 delivered every frame");
 		assert_eq!(stats.streams[&0x71].units, 4, "the returning program counts on");
@@ -1091,7 +1093,8 @@ mod test {
 		}
 		let running: Vec<_> = instances(&programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [2]);
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		assert_eq!(programs.stats().streams[&0x71].units, 4, "program 2 read on");
 	}
 
@@ -1152,7 +1155,8 @@ mod test {
 		assert_eq!(units(&programs), 1, "program 2 still holds the second picture");
 		programs.decode(&pictures.next().unwrap()).unwrap();
 		assert_eq!(units(&programs), 2, "the second picture counts once");
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		assert_eq!(units(&programs), 3);
 	}
 
@@ -1413,7 +1417,7 @@ mod test {
 		mux.packet(0x1fff, Flags::default());
 		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
 		assert_eq!(programs.stats().pts_error, 1);
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1458,7 +1462,7 @@ mod test {
 				assert_eq!(stats.pmt_error, 2 * u64::from(!continuing), "{stats:?}");
 				assert_eq!(stats.pts_error, u64::from(!continuing), "{stats:?}");
 				assert_eq!(stats.streams[&0x61].pts_error, stats.pts_error);
-				programs.finish().unwrap();
+				let _finished = programs.finish().unwrap();
 			}
 		}
 	}
@@ -1522,7 +1526,8 @@ mod test {
 			}
 		}
 		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		let stats = programs.stats();
 		assert_eq!(stats.streams[&0x61].units, 8, "program 2 delivers every frame");
 		assert_eq!(stats.pcr_repetition_error, 1, "program 1 grades its clock");
@@ -1559,7 +1564,8 @@ mod test {
 		assert_eq!(units(&programs), 1, "program 2 still holds the second picture");
 		programs.decode(&pictures.next().unwrap()).unwrap();
 		assert_eq!(units(&programs), 2, "the second picture counts once");
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		assert_eq!(units(&programs), 3);
 	}
 
@@ -1589,7 +1595,8 @@ mod test {
 		assert_eq!(programs.programs.len(), 4);
 		step(&mut mux, &[(2, 0x100), (4, 0x100)], 1);
 		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		let running: Vec<_> = instances(&programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [2, 4]);
 		let units = |pid| programs.stats().streams[&pid].units;
@@ -1617,7 +1624,7 @@ mod test {
 		mux.pat(&[]);
 		programs.decode(&mux.out).unwrap();
 		assert!(programs.programs.is_empty());
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 	}
 
 	/// A PAT naming another transport stream is refused while a program runs, before it retires
@@ -1747,7 +1754,8 @@ mod test {
 		for chunk in input.chunks(100) {
 			programs.decode(chunk).unwrap();
 		}
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		assert_eq!(programs.programs.len(), 1, "only program 50 has a PMT");
 
 		let consumer = origin.consume().request("event/50.hang", None).await.unwrap();
@@ -1812,7 +1820,8 @@ mod test {
 			catalog::Config::default(),
 		);
 		programs.decode(&two_section_pat()).unwrap();
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		assert_eq!(programs.programs.len(), 2);
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 		assert_eq!(renditions(&origin, "event/2.hang").await, 1);
@@ -1853,7 +1862,8 @@ mod test {
 			data.extend(mp2_pes(pid, 0, 90_000, fills));
 		}
 		programs.decode(&data).unwrap();
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 
 		let started: Vec<_> = programs.programs.iter().map(|program| program.number).collect();
 		assert_eq!(started, [7, 900]);
@@ -1885,7 +1895,8 @@ mod test {
 		}
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
 		programs.decode(&data).unwrap();
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 
 		let started: Vec<_> = programs.programs.iter().map(|program| program.number).collect();
 		assert_eq!(started, [1]);
@@ -1907,7 +1918,7 @@ mod test {
 		data.extend(psi_packets(0x0100, &mut 0, &[], &sections));
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
 		programs.decode(&data).unwrap();
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 	}
 
@@ -1929,7 +1940,7 @@ mod test {
 		data.extend(packets);
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
 		programs.decode(&data).unwrap();
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 	}
 
@@ -2066,7 +2077,8 @@ mod test {
 			catalog::Config::default(),
 		);
 		programs.decode(&two_section_pat()).unwrap();
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		assert!(
 			programs.programs.iter().all(|program| program.route.is_announced()),
 			"every program announces"
@@ -2104,7 +2116,8 @@ mod test {
 		for packet in packets {
 			programs.decode(packet).unwrap();
 		}
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		assert!(
 			programs.programs.iter().all(|program| program.route.is_announced()),
 			"every program is announced once it has declared its tracks"
@@ -2140,7 +2153,8 @@ mod test {
 		let input = two_programs();
 		programs.decode(&input[..3 * 188]).unwrap();
 
-		let Err(err) = programs.finish() else {
+		// The finish's own steps, so the programs can be inspected after the failure.
+		let Err(err) = programs.end() else {
 			panic!("the PMTs have no configured media")
 		};
 		assert!(err.to_string().contains("declared a track"), "{err:#}");
@@ -2243,7 +2257,7 @@ mod test {
 			"no program is known before the PAT is whole"
 		);
 		programs.decode(&input[100..]).unwrap();
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		let after = kio::clock::wall();
 
 		for (path, fills) in [("event/1.hang", [0xAA, 0xBB]), ("event/2.hang", [0xCC, 0xDD])] {

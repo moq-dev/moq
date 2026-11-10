@@ -481,7 +481,7 @@ async fn record(profile: Profile) -> Recording {
 	let consumer = broadcast.consume();
 	let mut import = super::Import::new(broadcast.clone(), catalog.reserve());
 	import.decode(&profile.clip().ts).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 	let snapshot = catalog.snapshot();
 
 	let whole = (snapshot.ext.mpegts.tracks.iter()).filter(|(_, track)| {

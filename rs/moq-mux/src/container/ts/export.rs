@@ -5322,7 +5322,7 @@ mod tests {
 				for at in (40..=end).step_by(40) {
 					publisher.write(frame(at)).unwrap();
 				}
-				publisher.finish().unwrap();
+				publisher.end_with(None).unwrap();
 			}
 			let waiter = kio::Waiter::noop();
 			for index in order {

@@ -2116,9 +2116,9 @@ mod test {
 	fn a_short_track_declares_its_interval_when_it_finishes() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut video = video0(&mut broadcast, &catalog, &[0, 500]);
+		let video = video0(&mut broadcast, &catalog, &[0, 500]);
 		assert_eq!(catalog.snapshot().media.join, None, "still measuring");
-		video.finish().unwrap();
+		let _finished = video.finish().unwrap();
 		assert_eq!(
 			catalog.snapshot().media.interval(),
 			Some(std::time::Duration::from_millis(500))
@@ -2303,7 +2303,7 @@ mod test {
 			}
 		}
 		away.block_on(async {
-			video.finish().unwrap();
+			let _finished = video.finish().unwrap();
 			catalog.finish().unwrap();
 		});
 

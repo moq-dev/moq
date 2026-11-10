@@ -1655,9 +1655,7 @@ mod tests {
 			}
 			assert_eq!(import.cluster_timestamp, timestamp);
 		}
-		import.finish().unwrap();
-		import.finish().unwrap();
-		assert!(matches!(import.decode(&[0]), Err(crate::Error::Finished)));
+		let _import = import.finish().unwrap();
 	}
 
 	/// A WebM prefix declaring `entries`, leaving an unknown-size Segment and Cluster open.
@@ -1752,7 +1750,7 @@ mod tests {
 			read.extend_from_slice(&chunk);
 		}
 		assert_eq!(read.len(), 1 + SIZE);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	#[test]
@@ -1770,7 +1768,7 @@ mod tests {
 			import.decode(&[0]),
 			Err(crate::Error::Moq(moq_net::Error::FrameTooLarge))
 		));
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	#[test]
@@ -1865,7 +1863,7 @@ mod tests {
 			import.decode(&entry_ending_in(&header(id, SIZE), SIZE)).unwrap();
 			feed_unretained(&mut import, SIZE).unwrap();
 			assert_eq!(import.tracks.len(), 1, "{id:x?}");
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 		}
 	}
 
@@ -2099,7 +2097,7 @@ mod tests {
 			.unwrap();
 		feed_unretained(&mut import, SIZE).unwrap();
 		assert_eq!(import.tracks.len(), 1);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	#[tokio::test]
@@ -2121,7 +2119,7 @@ mod tests {
 		import.decode(b"key").unwrap();
 		let mut frame = first_frame(&catalog, &consumer).await;
 		assert_eq!(frame.read_all().await.unwrap(), b"\0key"[..]);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	/// Output nobody reads is evicted by its track, so the importer keeps accepting input.
@@ -2135,7 +2133,7 @@ mod tests {
 			import.decode(&simple_block(1, payload.len() as u64)).unwrap();
 			import.decode(&payload).unwrap();
 		}
-		import.finish().unwrap();
+		let _import = import.finish().unwrap();
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -2147,9 +2145,9 @@ mod tests {
 		import.decode(&simple_block(1, 1024)).unwrap();
 		import.decode(&[4; 512]).unwrap();
 		let mut frame = first_frame(&catalog, &consumer).await;
-		let err = import.finish().unwrap_err();
+		// In place, so the frame fails from the finish rather than from dropping the importer.
+		let err = import.finish_in_place().unwrap_err();
 		assert!(matches!(err, crate::Error::Mkv(Error::Truncated)));
-		// The importer is still owned, and the frame fails rather than waiting on it.
 		let read = frame.read_all().now_or_never().expect("the cut-short frame must fail");
 		assert!(matches!(
 			read,
@@ -2172,7 +2170,11 @@ mod tests {
 				for piece in data.chunks(chunk) {
 					import.decode(piece).unwrap();
 				}
-				assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+				// In place, so the catalog still lists the ended tracks.
+				assert!(matches!(
+					import.finish_in_place(),
+					Err(crate::Error::Mkv(Error::Truncated))
+				));
 				let snapshot = catalog.snapshot();
 				let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
 				let subscription = moq_net::track::Subscription::default()
@@ -2205,7 +2207,11 @@ mod tests {
 			.unwrap();
 		import.decode(&[0xec, 0x81]).unwrap();
 		assert!(clocks.drain().is_empty(), "no block has anchored the catalog yet");
-		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+		// In place, so the catalog still lists the ended tracks.
+		assert!(matches!(
+			import.finish_in_place(),
+			Err(crate::Error::Mkv(Error::Truncated))
+		));
 		assert!(
 			!clocks.drain().is_empty(),
 			"finish must release the initial catalog reservation"
@@ -2237,18 +2243,5 @@ mod tests {
 			let read = kio::clock::timeout(WAIT, frame.read_all()).await.unwrap();
 			assert!(read.is_err(), "a frame cut short must not read as complete: {read:?}");
 		}
-	}
-
-	/// A failed finish is final: later input and a retried finish report its cause.
-	#[test]
-	fn a_failed_finish_reports_its_cause() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-		let mut import = Import::new(broadcast, catalog.reserve());
-		// An EBML header declaring a byte it never sends.
-		import.decode(&[0x1a, 0x45, 0xdf, 0xa3, 0x81]).unwrap();
-		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
-		assert!(matches!(import.decode(&[0]), Err(crate::Error::Mkv(Error::Truncated))));
-		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
 	}
 }

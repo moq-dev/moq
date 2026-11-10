@@ -149,7 +149,7 @@ mod tests {
 			for chunk in data.chunks(chunk) {
 				import.decode(chunk).unwrap();
 			}
-			import.finish().unwrap();
+			let import = import.finish().unwrap();
 			Box::new(import)
 		}
 	}
@@ -169,7 +169,7 @@ mod tests {
 			for chunk in data.chunks(CHUNK) {
 				import.decode(chunk).unwrap();
 			}
-			import.finish().unwrap();
+			let import = import.finish().unwrap();
 			Box::new(import)
 		});
 	}

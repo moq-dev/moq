@@ -1284,7 +1284,7 @@ mod test {
 		for packet in CLIP[half..].chunks(188) {
 			import.decode(packet).unwrap();
 		}
-		import.finish().unwrap();
+		let import = import.finish().unwrap();
 		assert_eq!(import.stats().health(), [0; 9]);
 	}
 
@@ -1389,7 +1389,7 @@ mod test {
 				Resume::Stalled => feed.run(100, 200, |t, _| t * MS, |_, part| part != Part::Pcr),
 			}
 			import.decode(&std::mem::take(&mut feed.out)).unwrap();
-			import.finish().unwrap();
+			let import = import.finish().unwrap();
 			let stats = import.stats();
 			let (pat, pts, pcr) = match resume {
 				Resume::Eof | Resume::Delayed => (0, 0, 0),
@@ -1427,7 +1427,7 @@ mod test {
 			assert!(import.held() >= 188, "the step is held");
 			wait(200).await;
 			if eof {
-				import.finish().unwrap();
+				import.finish_in_place().unwrap();
 			} else {
 				// The streams carry on 200 ms later without a PCR, clearing the step: the PCR
 				// is missing from when the held one arrived.

@@ -1042,6 +1042,12 @@ where
 		self.producer.inner.subscribe(None)
 	}
 
+	/// The jitter, bitrate, delay, and framerate measured from every frame written; see
+	/// [`Producer::estimate`].
+	pub fn estimate(&self) -> crate::catalog::Estimate {
+		self.producer.estimate()
+	}
+
 	/// Release the track's cache, reporting `err` to readers that have not drained it; see
 	/// [`moq_net::track::Finished::abort`].
 	pub fn abort(self, err: moq_net::Error) {
@@ -1116,7 +1122,7 @@ mod tests {
 		for i in 0..80u64 {
 			producer.write(sized_frame(i * 25_000, i % 10 == 0, 5_000)).unwrap();
 		}
-		producer.finish().unwrap();
+		let producer = producer.finish().unwrap();
 
 		let estimate = producer.estimate();
 		assert_eq!(estimate.jitter, None, "PTS spacing alone is not jitter");
@@ -1269,11 +1275,14 @@ mod tests {
 	/// A finished rendition may be kept around, but its media stops holding the others back.
 	#[test]
 	fn a_finished_rendition_stops_holding_others_back() {
-		let (_broadcast, catalog, mut tracks) = renditions(&["ended", "live"]);
-		tracks[0].write(frame(10_000_000, true)).unwrap();
-		tracks[0].finish().unwrap();
+		let (_broadcast, catalog, tracks) = renditions(&["ended", "live"]);
+		let Ok([mut ended, mut live]) = <[_; 2]>::try_from(tracks) else {
+			unreachable!("two renditions")
+		};
+		ended.write(frame(10_000_000, true)).unwrap();
+		let _ended = ended.finish().unwrap();
 
-		tracks[1].write(frame(1_000_000, true)).unwrap();
+		live.write(frame(1_000_000, true)).unwrap();
 		assert_eq!(catalog.snapshot().video.renditions["live"].delay, None);
 	}
 
@@ -1390,7 +1399,7 @@ mod tests {
 		producer.discontinuity().unwrap();
 		// Resumed 40 minutes later, on a re-anchored clock.
 		producer.write(sized_frame(2_405_070_000, true, 5_000)).unwrap();
-		producer.finish().unwrap();
+		let producer = producer.finish().unwrap();
 
 		assert_eq!(producer.estimate().jitter, None);
 		assert_eq!(producer.estimate().bitrate, None);
@@ -1486,7 +1495,7 @@ mod tests {
 		producer.discontinuity().unwrap();
 		// Resumed on a re-anchored clock, 40 minutes later.
 		producer.write(frame(2_405_070_000, true)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let groups = collect_payloads(consumer).await;
 		assert_eq!(groups.len(), 3);
@@ -1533,7 +1542,7 @@ mod tests {
 			// With no group open, a cut's bound is a point nothing reached.
 			producer.cut(Some(Timestamp::from_micros(90_000).unwrap())).unwrap();
 			producer.discontinuity().unwrap();
-			producer.finish().unwrap();
+			let _finished = producer.finish().unwrap();
 
 			let groups = collect_payloads(consumer).await;
 			assert_eq!(
@@ -1556,7 +1565,7 @@ mod tests {
 		producer.write(frame(10_000, false)).unwrap();
 		producer.write(frame(20_000, true)).unwrap(); // keyframe → new group
 		producer.write(frame(30_000, false)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		assert_eq!(collect_groups(consumer).await, vec![2, 2]);
 	}
@@ -1583,7 +1592,7 @@ mod tests {
 			let keyframe = producer.needs_keyframe();
 			producer.write(frame(ts, keyframe)).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		assert_eq!(collect_groups(consumer).await, vec![3, 2]);
 	}
@@ -1615,7 +1624,7 @@ mod tests {
 			.cut(Some(moq_net::Timestamp::from_micros(15_000).unwrap()))
 			.unwrap();
 		producer.write(frame(20_000, true)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let groups = collect_payloads(consumer).await;
 		assert_eq!(groups[0], vec![(0, 2), (10_000, 2), (15_000, 0)]);
@@ -1632,7 +1641,7 @@ mod tests {
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(20_000, false)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		assert_eq!(collect_payloads(consumer).await, vec![vec![(0, 2), (20_000, 2)]]);
 	}
@@ -1664,7 +1673,7 @@ mod tests {
 			.cut(Some(moq_net::Timestamp::from_micros(15_000).unwrap()))
 			.unwrap();
 		producer.write(frame(20_000, true)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let groups = collect_loc_payloads(consumer).await;
 		assert_eq!(groups[0], vec![(0, 2), (10_000, 2), (15_000, 0)]);
@@ -1685,7 +1694,7 @@ mod tests {
 			.cut(Some(moq_net::Timestamp::from_micros(30_000).unwrap()))
 			.unwrap();
 		producer.write(frame(40_000, true)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		assert_eq!(
 			collect_loc_payloads(consumer).await,
@@ -1705,7 +1714,7 @@ mod tests {
 			.cut(Some(moq_net::Timestamp::from_micros(15_000).unwrap()))
 			.unwrap();
 		producer.write(frame(20_000, true)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		assert_eq!(
 			collect_loc_payloads(consumer).await,
@@ -1726,7 +1735,7 @@ mod tests {
 			.cut(Some(moq_net::Timestamp::from_micros(15_000).unwrap()))
 			.unwrap();
 		producer.write(frame(20_000, true)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		assert_eq!(collect_groups(consumer).await, vec![2, 1]);
 	}
@@ -1760,7 +1769,7 @@ mod tests {
 		producer.write(frame(0, true)).unwrap(); // seq 0
 		producer.seek(42).unwrap();
 		producer.write(frame(10_000, true)).unwrap(); // seq 42
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		assert_eq!(collect_sequences(consumer).await, vec![0, 42]);
 	}
@@ -1775,7 +1784,7 @@ mod tests {
 		producer.seek(5).unwrap();
 		producer.write(frame(0, true)).unwrap(); // seq 5
 		producer.write(frame(10_000, true)).unwrap(); // seq 6 (auto-incremented)
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		assert_eq!(collect_sequences(consumer).await, vec![5, 6]);
 	}
@@ -1809,7 +1818,7 @@ mod tests {
 		producer.write(frame(0, true)).unwrap(); // group 0 opens
 		producer.write(frame(33_000, false)).unwrap(); // buffered
 		producer.write(frame(66_000, true)).unwrap(); // rolls group 0 over -> flush with next = 66ms
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let writes = recording.0.borrow();
 		let group0 = &writes[0];
@@ -1843,7 +1852,7 @@ mod tests {
 		producer.write(frame_at(3003, false)).unwrap();
 		producer.write(frame_at(6006, false)).unwrap();
 		producer.cut(None).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let writes = recording.0.borrow();
 		let group = &writes[0];
@@ -1877,7 +1886,7 @@ mod tests {
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(20_000, false)).unwrap();
 		producer.write(frame(40_000, false)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(60_000, 0)));
 	}
 
@@ -1892,7 +1901,7 @@ mod tests {
 		producer.write(frame(160_000, true)).unwrap();
 		producer.write(frame(200_000, false)).unwrap();
 		producer.cut(Some(Timestamp::from_micros(240_000).unwrap())).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let groups = collect_payloads(consumer).await;
 		assert_eq!(groups[0], vec![(0, 2), (120_000, 2), (40_000, 2), (80_000, 2)]);
 		assert_eq!(
@@ -1910,7 +1919,7 @@ mod tests {
 		for (index, timestamp) in [0, 16_000, 32_000, 65_000, 98_000].into_iter().enumerate() {
 			producer.write(frame(timestamp, index == 0)).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(131_000, 0)));
 	}
 
@@ -1923,7 +1932,7 @@ mod tests {
 		first.duration = Some(Timestamp::from_micros(40_000).unwrap());
 		producer.write(first).unwrap();
 		producer.write(frame(40_000, false)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(80_000, 0)));
 	}
 
@@ -1978,7 +1987,7 @@ mod tests {
 		producer.write(frame(166_000, false)).unwrap();
 		producer.write(frame(150_000, true)).unwrap();
 		producer.write(frame(183_000, false)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let groups = collect_payloads(consumer).await;
 		assert_eq!(groups[1][..2], [(150_000, 2), (183_000, 2)]);
 	}
@@ -2012,7 +2021,7 @@ mod tests {
 		for (index, timestamp) in [0, 66_000, 33_000].into_iter().enumerate() {
 			producer.write(frame(timestamp, index == 0)).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let groups = collect_payloads(consumer).await;
 		assert_eq!(groups[0][..3], [(0, 2), (66_000, 2), (33_000, 2)]);
 	}
@@ -2026,7 +2035,7 @@ mod tests {
 		producer.write(frame(33_000, false)).unwrap();
 		producer.write(frame(66_000, true)).unwrap();
 		producer.write(frame(50_000, false)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let groups = collect_payloads(consumer).await;
 		assert_eq!(groups[1][0], (66_000, 2));
 		assert_eq!(groups[1][1], (50_000, 2));
@@ -2042,7 +2051,7 @@ mod tests {
 		producer.discontinuity().unwrap();
 		producer.write(frame(1_020_000, true)).unwrap();
 		producer.write(frame(1_040_000, false)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let groups = collect_payloads(consumer).await;
 		assert_eq!(groups.last().unwrap().last(), Some(&(1_060_000, 0)));
 	}
@@ -2060,7 +2069,7 @@ mod tests {
 		producer.discontinuity().unwrap();
 		// Resumed 10ms later, inside the 40ms cadence measured before the break.
 		producer.write(frame(1_050_000, true)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let mut consumer =
 			crate::container::Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Video));

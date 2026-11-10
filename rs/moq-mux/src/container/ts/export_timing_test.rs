@@ -362,7 +362,7 @@ impl Live {
 		}
 		self.stalled.clear();
 		drop(self.video.clone().finish().unwrap());
-		self.audio.finish().unwrap();
+		self.audio.end_with(None).unwrap();
 	}
 
 	/// Run the clock to `at`, letting every leg read whenever it would have on its own.
