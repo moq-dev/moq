@@ -79,8 +79,8 @@ impl Default for Options {
 /// track.
 pub struct Producer {
 	encoder: Encoder,
-	/// A publish that failed after the codec advanced past its packet: every later call reports the
-	/// cause rather than stamping what follows, and ending fails the track with it.
+	/// A publish that failed after the codec advanced past its packet, which ended the track with an
+	/// error: every later call reports the cause rather than stamping what follows.
 	failed: Option<Error>,
 	bitrate: moq_net::bandwidth::Rate,
 	input: Input,
@@ -277,6 +277,17 @@ impl Producer {
 	/// The cause of an earlier publish failure, which ended the track.
 	fn check(&self) -> Result<(), Error> {
 		self.failed.clone().map_or(Ok(()), Err)
+	}
+
+	/// End the track with an error past everything published, so subscribers stop waiting on it
+	/// while this producer is still held. Readers keep every packet published before it.
+	fn fail_track(&mut self) {
+		let _ = self.track.cut(None);
+		let track = self.track.track();
+		let next = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
+		let _ = track
+			.clone()
+			.finish_at(moq_net::track::Position::group(next), Some(moq_net::StreamError::Internal.into()));
 	}
 
 	/// The name of the published track, which is [`Options::track`] resolved.
@@ -487,6 +498,7 @@ impl Producer {
 			// The codec and its timestamp queue already advanced past this packet, so no later
 			// write could stamp what follows: end the producer with the cause.
 			if let Err(err) = self.publish(packet, timestamp) {
+				self.fail_track();
 				self.failed = Some(err.clone());
 				return Err(err);
 			}
