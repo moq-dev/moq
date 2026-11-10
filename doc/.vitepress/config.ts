@@ -211,7 +211,6 @@ export default defineConfig({
 								{ text: "moq-video", link: "/lib/rs/moq-video" },
 								{ text: "moq-audio", link: "/lib/rs/moq-audio" },
 								{ text: "moq-auth", link: "/lib/rs/moq-auth" },
-								{ text: "moq-room", link: "/lib/rs/moq-room" },
 								{ text: "moq-json", link: "/lib/rs/moq-json" },
 								{ text: "kio", link: "/lib/rs/kio" },
 							],

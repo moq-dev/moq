@@ -25,7 +25,7 @@ protocol. A publisher in Python is consumable by a subscriber in Swift.
 | You need | Start with |
 | --- | --- |
 | A browser player or camera publisher | [@moq/watch](/lib/js/watch) and [@moq/publish](/lib/js/publish), with web components or a headless API |
-| A meeting roster and chat | [@moq/room](/lib/js/room) or [moq-room](/lib/rs/moq-room) |
+| A meeting roster and chat | [@moq/room](/lib/js/room) |
 | Native media capture, encode, decode, or playback | [Rust audio](/lib/rs/moq-audio) and [video](/lib/rs/moq-video), or the media and codec layers in your language binding |
 | To import an existing media stream | [moq-mux](/lib/rs/moq-mux), or a [gateway](/bin/#gateways) if you want a ready-to-run tool |
 | State snapshots, chat logs, or other JSON data | [@moq/json](/lib/js/json), [moq-json](/lib/rs/moq-json), or your binding's [JSON layer](/lib/layers#json) |

@@ -4784,21 +4784,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-room"
-version = "0.2.11"
-dependencies = [
- "kio",
- "moq-auth",
- "moq-json",
- "moq-net",
- "moq-room",
- "moq-tokio",
- "thiserror 2.0.21",
- "tokio",
- "workspace-hack",
-]
-
-[[package]]
 name = "moq-rtmp"
 version = "0.3.11"
 dependencies = [

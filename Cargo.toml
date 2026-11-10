@@ -30,7 +30,6 @@ default-members = [
     "rs/moq-pattern",
     "rs/moq-quic",
     "rs/moq-relay",
-    "rs/moq-room",
     "rs/moq-rtmp",
     "rs/moq-rtsp",
     "rs/moq-shaper",
