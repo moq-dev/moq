@@ -85,7 +85,6 @@ lite-07; bitrate enforcement is not part of the next release.
 - [Safari WebTransport](/quest/m5/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
 - [moq-video in the browser](/quest/m5/video-web.md) - getUserMedia, getDisplayMedia, WebCodecs, and VideoFrame import into wgpu, for moq-dev/studio's web studio
 - [moq-audio in the browser](/quest/m5/audio-web.md) - AudioWorklet capture and playback and WebCodecs Opus and AAC, for the web studio's audio
-- [moq-audio filter chain](/quest/m5/audio-filters.md) - per-source suppression, gate, compressor, limiter, ducking, and plugins, which moq-dev/studio configures
 - [Mesh keys](/quest/m5/mesh-keys.md) - parked: encrypted and HMAC-authenticated mesh broadcasts through a wrapped `.keys` track
 - [rust2-ts reaches moq-net's model](/quest/m5/rs2ts-model-ready.md) - rust2's translator is ready to translate the model
 - [Keep moq-net's model in rust2-ts's subset](/quest/m5/rs2ts-model-subset.md) - safe twins for the model's internal `unsafe`, `dyn Expiry` as an enum, once rust2-ts reaches the model
@@ -99,7 +98,6 @@ lite-07; bitrate enforcement is not part of the next release.
 - [Native compression flush](/quest/m5/native-compression-flush.md) - report the per-frame nonfinal flush requirement in existing browser discussions
 - [Native synchronous codecs](/quest/m5/native-compression-sync.md) - report the stateful small-frame synchronous API requirement
 - [Native browser codecs](/quest/m5/native-compression-adopt.md) - adopt native operations when timing, frame and resource contracts hold
-- [AudioToolbox encode](/quest/m5/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
 - [Vendor-free CARLA bridge](/quest/m5/carla-bridge.md) - the CARLA demo's GPU bridge lets moq-video pick the encoder, and its stand-in test runs on AMD as well as NVIDIA
 - [Performance survey follow-ups](/quest/m5/performance-survey/README.md) - benchmark the source audit's transport, browser, media and serving risks before optimizing
 - [Receive pool](/quest/m5/receive-pool.md) - one byte budget per worker covers every connection's receive credit and the cache, billing each frame once
@@ -137,8 +135,6 @@ lite-07; bitrate enforcement is not part of the next release.
 - [io_uring thread check](/quest/m5/uring-transport-machines.md) - the relay fanout bench measures `moq_uring::transport::Local`'s per-call thread check after the transport is boxed, removing it only if it shows
 - [Opus implementation](/quest/m5/audio-opus-backend.md) - compare Opus codec quality, CPU, build cost, and the loss recovery each backend offers
 - [Latency ledger](/quest/m5/latency-ledger.md) - a viewer reports its share of playback delay stage by stage: jitter buffer and device
-- [Media Foundation decode](/quest/m5/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
-- [Media Foundation encode](/quest/m5/audio-encode-mediafoundation.md) - Windows encodes AAC-LC
 - [MediaCodec decode](/quest/m5/audio-decode-mediacodec.md) - Android decodes HE-AAC, multichannel AAC, and what else the device offers
 - [MediaCodec encode](/quest/m5/audio-encode-mediacodec.md) - Android encodes AAC-LC
 - [#2848](/quest/m5/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the Opus producer follows its bandwidth grant through the settled `moq_mux::rate::Control`

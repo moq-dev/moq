@@ -23,7 +23,15 @@ moq-audio's encoder took in m2 before the cut
 (decided 2026-11-07, maintainer, /quest-plan from the API sweep of open PRs
 and remaining quests), so it adds no break and waits on no other encoder backend; its round-trip test still needs its platform decoder.
 
+Decided 2026-11-09 (maintainer, moq-dev/studio /quest-audit): this moved from
+m5 to m3. The studio's m0
+[destinations](https://github.com/moq-dev/studio/blob/main/quest/m0/destinations.md)
+wait on it through the
+[AAC pin quest](https://github.com/moq-dev/studio/blob/main/quest/m0/pin-aac-encode.md)
+for RTMP ingests that require AAC, and m3 is where work a named consumer
+waits on belongs.
+
 ## Required
 
-- [Media Foundation decode](/quest/m5/audio-decode-mediafoundation.md) - the round-trip regression decodes through it
+- [Media Foundation decode](/quest/m3/audio-decode-mediafoundation.md) - the round-trip regression decodes through it
 

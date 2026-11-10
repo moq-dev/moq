@@ -24,6 +24,12 @@ ones. Behind the decode seam as the first candidate on `target_os =
 
 Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): moq-audio's codecs return zero or more outputs with `flush` before the cut, so this backend adds no break. `decode::Consumer` still places each packet by the one output it returns and refuses any other count, so if this backend holds or splits output, it also teaches the consumer to place that output.
 
+Changed 2026-11-09 (moq-dev/studio /quest-audit): this moved from m5 to m3
+with [Media Foundation encode](/quest/m3/audio-encode-mediafoundation.md),
+which the maintainer moved for moq-dev/studio's destinations and which
+requires this for its round-trip regression. A quest an m3 quest requires
+joins m3.
+
 ## Related
 
 - [Windows decoded frames](/quest/m5/obs-decode-windows.md) - the OBS Windows line this feeds

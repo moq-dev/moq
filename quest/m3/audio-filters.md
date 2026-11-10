@@ -15,6 +15,11 @@ Changed 2026-11-02 (maintainer): the studio moved to moq-dev/studio. The
 chain lands here with its own tests and benchmark; the studio's panel and
 scene-file shape follow a pin bump there.
 
+Decided 2026-11-09 (maintainer, moq-dev/studio /quest-audit): this moved from
+m5 to m3. The studio's m0 audio filters wait on it through the
+[filter chain pin quest](https://github.com/moq-dev/studio/blob/main/quest/m0/pin-audio-filters.md),
+and m3 is where work a named consumer waits on belongs.
+
 Decided 2026-11-02 (maintainer): the chain runs on the capture producer
 before `capture::Producer` fans out to its consumers, so
 the bus and a source's own track both carry filtered audio; gain and mute
