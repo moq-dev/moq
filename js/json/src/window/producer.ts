@@ -18,6 +18,8 @@ export interface Finished<T> {
 	readonly window: T[];
 	/** Absolute index of the oldest retained record; see {@link Producer.offset}. */
 	readonly offset: number;
+	/** Abort the track with an error; see {@link Producer.abort}. */
+	abort(err: Error): void;
 }
 
 /**

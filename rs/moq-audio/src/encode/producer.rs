@@ -285,9 +285,10 @@ impl Producer {
 		let _ = self.track.cut(None);
 		let track = self.track.track();
 		let next = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
-		let _ = track
-			.clone()
-			.finish_at(moq_net::track::Position::group(next), Some(moq_net::StreamError::Internal.into()));
+		let _ = track.clone().finish_at(
+			moq_net::track::Position::group(next),
+			Some(moq_net::StreamError::Internal.into()),
+		);
 	}
 
 	/// The name of the published track, which is [`Options::track`] resolved.

@@ -1007,11 +1007,11 @@ mod tests {
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let subscriber = broadcast.consume();
-		let mut producer = moq_mux::container::Producer::new(
+		let producer = moq_mux::container::Producer::new(
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 		);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -1098,7 +1098,7 @@ mod tests {
 					.unwrap();
 			}
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let decode = Options {
 			decoder: Config {

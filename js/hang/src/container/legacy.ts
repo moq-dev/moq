@@ -73,8 +73,10 @@ function micros(timestamp: Duration): number {
  * {@link Producer.finish} returns it, mirroring the Rust `container::Finished`; the producer itself
  * still refuses a frame after the finish.
  */
-// biome-ignore lint/suspicious/noEmptyInterface: nothing is left to call once the track is released.
-export interface Finished {}
+export interface Finished {
+	/** Abort the track with an error; see {@link Producer.abort}. */
+	abort(err: Error): void;
+}
 
 /** Writes legacy-container frames into a MoQ track, starting a new group on each keyframe. */
 export class Producer {

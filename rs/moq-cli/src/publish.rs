@@ -227,11 +227,11 @@ impl PublishDecoder {
 				import.finish()?;
 				FinishedDecoder::Avc3(import)
 			}
-			Self::Fmp4(d) => FinishedDecoder::Fmp4(d.finish()?),
-			Self::Ts(d) => FinishedDecoder::Ts(d.finish()?),
-			Self::TsPrograms(d) => FinishedDecoder::TsPrograms(d.finish()?),
-			Self::TsPassthrough(d) => FinishedDecoder::TsPassthrough(d.finish()?),
-			Self::Flv(d) => FinishedDecoder::Flv(d.finish()?),
+			Self::Fmp4(d) => FinishedDecoder::Fmp4(Box::new(d.finish()?)),
+			Self::Ts(d) => FinishedDecoder::Ts(Box::new(d.finish()?)),
+			Self::TsPrograms(d) => FinishedDecoder::TsPrograms(Box::new(d.finish()?)),
+			Self::TsPassthrough(d) => FinishedDecoder::TsPassthrough(Box::new(d.finish()?)),
+			Self::Flv(d) => FinishedDecoder::Flv(Box::new(d.finish()?)),
 		})
 	}
 
@@ -252,11 +252,11 @@ impl PublishDecoder {
 /// A [`PublishDecoder`] whose tracks finished, holding them so they stay servable.
 enum FinishedDecoder {
 	Avc3(Box<moq_mux::codec::h264::Import>),
-	Fmp4(fmp4::Finished),
-	Ts(ts::Finished<ts::Ext>),
-	TsPrograms(ts::programs::Finished),
-	TsPassthrough(ts::passthrough::Finished),
-	Flv(flv::Finished),
+	Fmp4(Box<fmp4::Finished>),
+	Ts(Box<ts::Finished<ts::Ext>>),
+	TsPrograms(Box<ts::programs::Finished>),
+	TsPassthrough(Box<ts::passthrough::Finished>),
+	Flv(Box<flv::Finished>),
 }
 
 impl FinishedDecoder {

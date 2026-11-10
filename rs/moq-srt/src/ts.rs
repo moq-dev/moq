@@ -128,8 +128,8 @@ struct Finished {
 
 /// What a finished [`Publisher`] holds to keep serving its broadcasts.
 enum Ended {
-	One { _finished: Finished },
-	All { _finished: ts::programs::Finished },
+	One { _finished: Box<Finished> },
+	All { _finished: Box<ts::programs::Finished> },
 }
 
 impl Publisher {
@@ -239,12 +239,24 @@ impl Publisher {
 				let finished = one.instance.finish()?;
 				let broadcasts = vec![finished.route.broadcast().clone()];
 				let stats = finished.import.stats();
-				(Ended::One { _finished: finished }, broadcasts, stats)
+				(
+					Ended::One {
+						_finished: Box::new(finished),
+					},
+					broadcasts,
+					stats,
+				)
 			}
 			Importer::All(programs) => {
 				let finished = programs.finish().map_err(moq_mux::Error::from)?;
 				let (broadcasts, stats) = (finished.broadcasts(), finished.stats());
-				(Ended::All { _finished: finished }, broadcasts, stats)
+				(
+					Ended::All {
+						_finished: Box::new(finished),
+					},
+					broadcasts,
+					stats,
+				)
 			}
 		};
 		// The drain at end of input can publish a frame nothing vouched for.

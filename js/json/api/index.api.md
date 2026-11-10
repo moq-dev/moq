@@ -163,6 +163,7 @@ export namespace Window {
 		skip: Window.Span;
 	};
 	export interface Finished<T> {
+		abort(err: Error): void;
 		readonly offset: number;
 		readonly window: T[];
 	}
