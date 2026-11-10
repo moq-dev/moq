@@ -646,7 +646,7 @@ impl PendingAcks {
 
 	pub(super) fn max_ack_delay_timeout(&self, max_ack_delay: Duration) -> Option<Instant> {
 		self.earliest_ack_eliciting_since_last_ack_sent
-			.map(|earliest_unacked| earliest_unacked + max_ack_delay)
+			.map(|earliest_unacked| earliest_unacked.saturating_add(max_ack_delay))
 	}
 
 	/// Whether any ACK frames can be sent even if doing so requires a dedicated packet
@@ -1042,8 +1042,8 @@ mod test {
 		let mut dedup = Dedup::new();
 
 		let t1 = Instant::now();
-		let t2 = t1 + Duration::from_millis(2);
-		let t3 = t2 + Duration::from_millis(5);
+		let t2 = t1.saturating_add(Duration::from_millis(2));
+		let t3 = t2.saturating_add(Duration::from_millis(5));
 		assert_eq!(acks.ack_delay(t1), Duration::from_millis(0));
 		assert_eq!(acks.ack_delay(t2), Duration::from_millis(0));
 		assert_eq!(acks.ack_delay(t3), Duration::from_millis(0));

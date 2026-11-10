@@ -9,6 +9,7 @@ use crate::consumer::MoqTrackConsumer;
 use crate::consumer::{MoqAnchor, MoqDelay, MoqOrder, MoqRange, MoqSubscription, moq_subscription_defaults};
 use crate::datagram::*;
 use crate::error::{MoqError, MoqProtocolError, MoqProtocolKind};
+use crate::instance::MoqInstance;
 use crate::json::{
 	MoqJsonSnapshotConfig, MoqJsonSnapshotConsumer, MoqJsonSnapshotProducer, MoqJsonStreamConsumer,
 	MoqJsonStreamProducer, MoqJsonWindowConfig, MoqJsonWindowConsumer, MoqJsonWindowEvent, MoqJsonWindowProducer,
@@ -134,21 +135,15 @@ fn fast_backoff() -> MoqBackoff {
 	}
 }
 
-async fn wait_for_config_error(
-	mut op: impl FnMut() -> Result<(), MoqError>,
-	want: impl Fn(&MoqError) -> bool,
-) -> MoqError {
+/// Wait until an `accept` is parked on `server`'s queue.
+async fn wait_until_accepting(server: &MoqServer) {
 	kio::clock::timeout(TIMEOUT, async {
-		loop {
-			match op() {
-				Err(err) if want(&err) => return err,
-				Ok(()) => tokio::task::yield_now().await,
-				Err(err) => panic!("unexpected configuration error while waiting: {err:?}"),
-			}
+		while !server.accepting() {
+			tokio::task::yield_now().await;
 		}
 	})
 	.await
-	.expect("timed out waiting for the expected configuration error")
+	.expect("timed out waiting for accept to park");
 }
 
 /// Wait until `read_frame` has taken `group` off the ordered cursor.
@@ -432,7 +427,7 @@ async fn route_options_reach_the_announced_route() {
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let info = next_announced(&announced).await.route;
 	assert_eq!(info.cost, 9);
-	assert_eq!(info.instance, route.instance_id());
+	assert_eq!(Some(info.instance), route.instance_id());
 
 	// Re-pricing changes the route in place: the listing never reports it, but a fresh
 	// listing reads the new price under the same instance.
@@ -440,7 +435,7 @@ async fn route_options_reach_the_announced_route() {
 	let repriced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let info = next_announced(&repriced).await.route;
 	assert_eq!(info.cost, 4);
-	assert_eq!(info.instance, route.instance_id());
+	assert_eq!(Some(info.instance), route.instance_id());
 
 	route.broadcast().close().unwrap();
 }
@@ -456,28 +451,23 @@ async fn route_options_name_an_instance_or_refuse() {
 		.route(
 			"instance-route".into(),
 			MoqRouteOptions {
-				instance: Some("cam".into()),
+				instance: Some(MoqInstance::parse("cam".into()).unwrap()),
 				epoch: 3,
 				..Default::default()
 			},
 		)
 		.unwrap();
-	assert_eq!(route.instance_id(), "cam");
-	assert_eq!(next_announced(&announced).await.route.instance, "cam");
+	let served = route.instance_id().unwrap();
+	assert_eq!(served.text(), "cam");
+	assert!(!served.is_minted());
+	assert_eq!(next_announced(&announced).await.route.instance, served);
 
-	// An instance is never empty, and the refusal creates nothing.
-	let empty = MoqRouteOptions {
-		instance: Some(String::new()),
-		..Default::default()
-	};
+	// An instance is never empty, and text never names a minted one.
 	assert!(matches!(
-		origin.route("refused".into(), empty.clone()),
+		MoqInstance::parse(String::new()),
 		Err(MoqError::InvalidInstance { .. })
 	));
-	assert!(matches!(
-		origin.claim("refused".into(), empty),
-		Err(MoqError::InvalidInstance { .. })
-	));
+	assert!(!MoqInstance::parse("~cam".into()).unwrap().is_minted());
 
 	route.cancel();
 }
@@ -490,7 +480,7 @@ async fn a_new_route_at_a_path_restarts_its_followers() {
 	let following = consumer.follow("instance-route".into(), None).unwrap();
 	let first = origin.route("instance-route".into(), Default::default()).unwrap();
 	let announce = next_announced(&announced).await;
-	assert_eq!(announce.route.instance, first.instance_id());
+	assert_eq!(Some(announce.route.instance), first.instance_id());
 	following.available().await.unwrap().unwrap();
 
 	// A new run of the same publisher is a new route with its own instance: followers
@@ -508,7 +498,7 @@ async fn a_new_route_at_a_path_restarts_its_followers() {
 	first.withdraw().unwrap();
 	second.withdraw().unwrap();
 	match next_event(&announced).await {
-		MoqAnnounceEvent::Absent { announce } => assert_eq!(announce.route.instance, second.instance_id()),
+		MoqAnnounceEvent::Absent { announce } => assert_eq!(Some(announce.route.instance), second.instance_id()),
 		other => panic!("expected an absence, got {other:?}"),
 	}
 
@@ -3712,7 +3702,7 @@ async fn resolve_honors_the_reference_instance() {
 	let served = moq_net::Instance::random().to_string();
 	let other = moq_net::Instance::random().to_string();
 	let options = MoqRouteOptions {
-		instance: Some(served.clone()),
+		instance: Some(MoqInstance::parse(served.clone()).unwrap()),
 		..Default::default()
 	};
 
@@ -3784,7 +3774,10 @@ async fn announce_and_withdraw_toggle_discovery() {
 			}
 		}
 	}
-	assert_eq!(wait_live(&announced, true).await.route.instance, route.instance_id());
+	assert_eq!(
+		Some(wait_live(&announced, true).await.route.instance),
+		route.instance_id()
+	);
 
 	route.withdraw().unwrap();
 	wait_live(&announced, false).await;
@@ -3797,7 +3790,10 @@ async fn announce_and_withdraw_toggle_discovery() {
 
 	// Announcing again brings the same stream back.
 	route.announce().unwrap();
-	assert_eq!(wait_live(&announced, true).await.route.instance, route.instance_id());
+	assert_eq!(
+		Some(wait_live(&announced, true).await.route.instance),
+		route.instance_id()
+	);
 	kio::clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("timed out requesting the reannounced broadcast")
@@ -5061,11 +5057,11 @@ async fn dynamic_broadcast_request() {
 	let served = job.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
 	// Only announce answers the requester, under the claim's instance and after admission.
-	let instance = job.instance_id();
+	let instance = job.instance_id().unwrap();
 	job.announce().unwrap();
 	// A re-price keeps the instance the answer was announced under.
 	job.set_cost(7).unwrap();
-	assert_eq!(job.instance_id(), instance);
+	assert_eq!(job.instance_id(), Some(instance.clone()));
 	assert!(matches!(request.path(), Err(MoqError::AlreadyResponded)));
 
 	let broadcast = kio::clock::timeout(TIMEOUT, requesting)
@@ -6279,7 +6275,7 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let followed = origin.consume().follow("live".into(), None).unwrap();
 	let options = MoqRouteOptions {
-		instance: Some(moq_net::Instance::random().to_string()),
+		instance: Some(MoqInstance::wrap(moq_net::Instance::random())),
 		..Default::default()
 	};
 	let first_route = origin.route("live".into(), options.clone()).unwrap();
@@ -6323,7 +6319,7 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 async fn an_instance_pins_request_and_follow() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let instance = moq_net::Instance::random().to_string();
+	let instance = MoqInstance::wrap(moq_net::Instance::random());
 	let first = origin
 		.route(
 			"live".into(),
@@ -6338,13 +6334,10 @@ async fn an_instance_pins_request_and_follow() {
 		.await
 		.expect("timed out requesting the pinned instance")
 		.unwrap();
-	assert_eq!(
-		pinned.inner().info().instance.as_ref().map(ToString::to_string),
-		Some(instance.clone())
-	);
+	assert_eq!(pinned.inner().info().instance.as_ref(), Some(&instance.0));
 	let err = kio::clock::timeout(
 		TIMEOUT,
-		consumer.request("live".into(), Some(moq_net::Instance::random().to_string())),
+		consumer.request("live".into(), Some(MoqInstance::wrap(moq_net::Instance::random()))),
 	)
 	.await
 	.expect("timed out requesting another instance")
@@ -6355,11 +6348,6 @@ async fn an_instance_pins_request_and_follow() {
 		crate::error::MoqErrorScope::Stream,
 		crate::error::MoqProtocolKind::Unroutable,
 	);
-	assert!(matches!(
-		consumer.follow("live".into(), Some(String::new())),
-		Err(MoqError::InvalidInstance { .. })
-	));
-
 	let followed = consumer.follow("live".into(), Some(instance.clone())).unwrap();
 	kio::clock::timeout(TIMEOUT, followed.available())
 		.await
@@ -6373,10 +6361,7 @@ async fn an_instance_pins_request_and_follow() {
 		.await
 		.expect("timed out requesting the takeover")
 		.unwrap();
-	assert_ne!(
-		takeover.inner().info().instance.as_ref().map(ToString::to_string),
-		Some(instance)
-	);
+	assert_ne!(takeover.inner().info().instance.as_ref(), Some(&instance.0));
 	// Another instance taking over ends the pinned follow, which hands out nothing else.
 	let ended = kio::clock::timeout(TIMEOUT, followed.available())
 		.await
@@ -6392,6 +6377,80 @@ async fn an_instance_pins_request_and_follow() {
 	drop(takeover);
 	first.broadcast().close().unwrap();
 	second.broadcast().close().unwrap();
+}
+
+/// A route that crossed lite-06 carries an instance its session minted. The announcement
+/// reports it minted, and passing that instance back pins request and follow to its stream,
+/// while its text names another, named instance that nothing serves.
+#[tokio::test]
+async fn a_minted_instance_pins_request_and_follow() {
+	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let versions = vec!["moq-lite-06".to_string()];
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		versions: versions.clone(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	let addr = kio::clock::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let accepting = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accepting.accept().await.unwrap().expect("a session");
+		request.accept(None, None).await.expect("handshake failed")
+	});
+	let broadcast = create_announced(&server_origin, "live");
+
+	let viewer = MoqOriginProducer::new(MoqOriginConfig::default());
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		versions,
+		bind: Some("127.0.0.1:0".into()),
+		consume: Some(viewer.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	let _session = kio::clock::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+	let _server_session = kio::clock::timeout(TIMEOUT, accept).await.unwrap().unwrap();
+
+	let consumer = viewer.consume();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let minted = next_announced(&announced).await.route.instance;
+	assert!(minted.is_minted());
+
+	let pinned = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), Some(minted.clone())))
+		.await
+		.expect("timed out requesting the minted instance")
+		.unwrap();
+	assert_eq!(pinned.inner().info().instance.as_ref(), Some(&minted.0));
+	let followed = consumer.follow("live".into(), Some(minted.clone())).unwrap();
+	let resolved = kio::clock::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("timed out following the minted instance")
+		.unwrap()
+		.expect("the minted instance");
+	assert_eq!(resolved.inner().info().instance.as_ref(), Some(&minted.0));
+
+	let named = MoqInstance::parse(minted.text()).unwrap();
+	assert_ne!(named, minted);
+	let err = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), Some(named)))
+		.await
+		.expect("timed out requesting the named text")
+		.err()
+		.expect("the same text, named, is another instance");
+	assert_protocol(
+		&err,
+		crate::error::MoqErrorScope::Stream,
+		crate::error::MoqProtocolKind::Unroutable,
+	);
+	drop(broadcast);
 }
 
 /// Dropping a handed-out handle changes nothing about the path, so the follower hands out
@@ -6852,14 +6911,10 @@ async fn server_cancel_releases_the_bound_port() {
 	.unwrap();
 	let addr = server.listen().await.expect("listen failed");
 
-	// Park an accept on the server lock, the state a live server is closed in.
+	// Park an accept on the queue, the state a live server is closed in.
 	let accepting = server.clone();
 	let accept = tokio::spawn(async move { accepting.accept().await });
-	wait_for_config_error(
-		|| server.cert_fingerprints().map(drop),
-		|err| matches!(err, MoqError::Busy),
-	)
-	.await;
+	wait_until_accepting(&server).await;
 
 	server.cancel();
 
@@ -6909,6 +6964,61 @@ async fn server_cancel_during_listen_releases_the_port() {
 	server.cancel();
 	std::net::UdpSocket::bind(addr).expect("cancel should release the socket before it returns");
 	drop(listen);
+}
+
+/// A cancelled server lets go of its configured origins, though its handle lives on.
+#[tokio::test]
+async fn server_cancel_releases_its_origins() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(origin.clone()),
+		consume: Some(origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	server.listen().await.expect("listen failed");
+	assert!(Arc::strong_count(&origin) > 1);
+
+	// Parked, then left unpolled, as a foreign cancel leaves it until `rust_future_free`.
+	let mut accept = Box::pin(server.accept());
+	let waker = std::task::Waker::noop();
+	assert!(
+		accept
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(waker))
+			.is_pending()
+	);
+
+	server.cancel();
+	assert_eq!(
+		Arc::strong_count(&origin),
+		1,
+		"the cancelled server still holds the origin"
+	);
+	drop(accept);
+}
+
+/// A listen that fails to bind leaves the server idle, so it can listen again once the
+/// address frees up.
+#[tokio::test]
+async fn server_listen_retries_after_a_failed_bind() {
+	let config = |bind: String| MoqServerConfig {
+		bind: Some(bind),
+		tls: localhost_tls(),
+		..Default::default()
+	};
+	let holder = MoqServer::new(config("127.0.0.1:0".into())).unwrap();
+	let addr = holder.listen().await.expect("listen failed");
+
+	let server = MoqServer::new(config(addr.clone())).unwrap();
+	assert!(matches!(server.listen().await, Err(MoqError::Bind { .. })));
+	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Bind { .. })));
+
+	holder.cancel();
+	assert_eq!(server.listen().await.expect("the retry should bind"), addr);
+	server.cancel();
 }
 
 /// A foreign cancel only stops polling an accept; uniffi drops it later, at `rust_future_free`.
@@ -6971,6 +7081,36 @@ async fn server_accept_cancelled_before_free_leaves_the_session() {
 
 	server_session.cancel(0);
 	server.cancel();
+}
+
+/// An accept queued behind a foreign-cancelled one, which keeps the queue until freed, still
+/// resolves on `cancel`.
+#[tokio::test]
+async fn server_cancel_wakes_an_accept_queued_behind_an_unfreed_one() {
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
+	server.listen().await.expect("listen failed");
+
+	// Parked, then left unpolled, as a foreign cancel leaves it until `rust_future_free`.
+	let mut unfreed = Box::pin(server.accept());
+	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+	assert!(unfreed.as_mut().poll(&mut cx).is_pending());
+
+	let queued = server.clone();
+	let queued = tokio::spawn(async move { queued.accept().await });
+	tokio::task::yield_now().await;
+
+	server.cancel();
+	let queued = kio::clock::timeout(TIMEOUT, queued)
+		.await
+		.expect("the queued accept never saw the cancel")
+		.expect("accept task panicked");
+	assert!(matches!(queued, Err(MoqError::Cancelled)));
+	drop(unfreed);
 }
 
 #[tokio::test]
@@ -7792,7 +7932,7 @@ async fn cancelling_a_session_aborts_its_first_dial() {
 }
 
 #[tokio::test]
-async fn server_cert_fingerprints_busy_during_accept_and_cancelled_after() {
+async fn server_cert_fingerprints_during_accept_and_cancelled_after() {
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),
 		tls: localhost_tls(),
@@ -7807,11 +7947,10 @@ async fn server_cert_fingerprints_busy_during_accept_and_cancelled_after() {
 	let accepting = server.clone();
 	let accept = tokio::spawn(async move { accepting.accept().await });
 
-	wait_for_config_error(
-		|| server.cert_fingerprints().map(drop),
-		|err| matches!(err, MoqError::Busy),
-	)
-	.await;
+	wait_until_accepting(&server).await;
+	server
+		.cert_fingerprints()
+		.expect("fingerprints available while an accept is parked");
 
 	server.cancel();
 	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Cancelled)));
@@ -8210,8 +8349,8 @@ async fn data_track_names_cannot_collide() {
 	first.finish().unwrap();
 }
 
-/// In-memory sessions whose protocol and origin drivers use the paused test clock.
-async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
+/// In-memory sessions on `version` whose protocol and origin drivers use the paused test clock.
+async fn memory_pair(version: &str) -> (Arc<MoqSession>, Arc<MoqSession>) {
 	fn origin() -> crate::origin::Origin {
 		let mut config = moq_net::origin::Config::default();
 		config.pool = moq_net::cache::Pool::unbounded();
@@ -8224,7 +8363,7 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 	}
 	let a = origin();
 	let b = origin();
-	let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+	let version: moq_net::Version = version.parse().unwrap();
 	let mut transport = moq_net::transport::memory::Config::default();
 	transport.protocol = Some(version.alpn().into());
 	transport.stream_buffer = 1024;
@@ -8256,7 +8395,7 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 
 #[tokio::test(start_paused = true)]
 async fn shutdown_without_waiter_survives_session_disposal() {
-	let (publisher, subscriber) = memory_shutdown_pair().await;
+	let (publisher, subscriber) = memory_pair("moq-lite-07-wip").await;
 	let broadcast = create_announced(&publisher.publish(), "tail");
 	let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
 	let remote = await_announced(&subscriber.consume(), "tail").await;
@@ -8282,7 +8421,7 @@ async fn shutdown_without_waiter_survives_session_disposal() {
 
 #[tokio::test(start_paused = true)]
 async fn shutdown_failure_survives_a_discarded_waiter() {
-	let (publisher, subscriber) = memory_shutdown_pair().await;
+	let (publisher, subscriber) = memory_pair("moq-lite-07-wip").await;
 	let broadcast = create_announced(&publisher.publish(), "live");
 	let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
 	let remote = await_announced(&subscriber.consume(), "live").await;
@@ -8303,6 +8442,32 @@ async fn shutdown_failure_survives_a_discarded_waiter() {
 		assert!(matches!(error, MoqError::Protocol { details } if details.kind == MoqProtocolKind::DeliveryTimeout));
 	}
 	subscriber.cancel(0);
+}
+
+/// A track's reader sees `Closed` when the session under it closes, whichever side closed it.
+#[tokio::test(start_paused = true)]
+async fn a_closed_session_ends_its_tracks_as_closed() {
+	for version in ["moq-lite-07-wip", "moq-transport-18"] {
+		for publisher_closes in [false, true] {
+			let (publisher, subscriber) = memory_pair(version).await;
+			let broadcast = create_announced(&publisher.publish(), "live");
+			let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
+			let remote = await_announced(&subscriber.consume(), "live").await;
+			let reader = remote.subscribe_track("data".into(), None).await.unwrap();
+			shutdown_ready(&track, &reader).await;
+			match publisher_closes {
+				true => publisher.cancel(0),
+				false => subscriber.cancel(0),
+			}
+			let Err(error) = reader.read_frame().await else {
+				panic!("{version}: the track outlived its session");
+			};
+			assert!(
+				matches!(error, MoqError::Closed),
+				"{version}, publisher_closes={publisher_closes}: {error:?}"
+			);
+		}
+	}
 }
 
 /// Real sockets exercise the FFI runtime and both accepted/client session handles.

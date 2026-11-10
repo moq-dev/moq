@@ -27,14 +27,14 @@ export function run(): void {
 			const start = performance.now();
 			for (let i = 0; i < count * (order === "rolling" ? 2 : 1); i++) {
 				const sequence = keys[i];
-				const at = order === "rolling" ? Instant.ZERO.add(Duration.millis(i)) : Instant.ZERO;
+				const at = order === "rolling" ? Instant.ZERO.saturatingAdd(Duration.millis(i)) : Instant.ZERO;
 				ledger.account(sequence, sequence + 1n, at);
 				ledger.expire(at, grace);
 				if (!ledger.covers(sequence, sequence + 1n)) throw new Error("arrival missing");
 			}
 			const arrivals = count * (order === "rolling" ? 2 : 1);
 			console.log(`${count},${order},${(((performance.now() - start) * 1e6) / arrivals).toFixed(0)}`);
-			ledger.expire(Instant.ZERO.add(Duration.millis(count * 3)), grace);
+			ledger.expire(Instant.ZERO.saturatingAdd(Duration.millis(count * 3)), grace);
 			if (!ledger.covers(0n, BigInt(arrivals * 2 - 1)) || ledger.hasGaps())
 				throw new Error("expiration incomplete");
 		}

@@ -32,21 +32,16 @@ pub enum Codec {
 	AmrWb,
 	H264,
 	// TODO show this when we support h265.
-	#[doc(hidden)]
 	H265,
 	Vp8,
 	Vp9,
 	// TODO show this when we support Av1.
-	#[doc(hidden)]
 	Av1,
 	/// Technically not a codec, but used in places where codecs go
 	/// in `a=rtpmap` lines.
-	#[doc(hidden)]
 	Rtx,
 	/// For RTP mode. No codec.
-	#[doc(hidden)]
 	Null,
-	#[doc(hidden)]
 	Unknown,
 }
 

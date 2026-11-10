@@ -164,7 +164,11 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 		for (const index of [0, 1]) {
 			const body = await Writer.collect(version, async (w) => {
 				await w.string("room");
-				if (version === Lite.DRAFT_07) await w.u53(0);
+				if (version === Lite.DRAFT_07) {
+					// No pinned instance: empty and unminted.
+					await w.u53(0);
+					await w.bool(false);
+				}
 				await w.string("video");
 				await w.u8(0);
 				if (version === Lite.DRAFT_07) await w.u53(0);

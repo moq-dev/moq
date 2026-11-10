@@ -317,7 +317,7 @@ impl Pair {
 	/// A client and server with a connection mid-handshake.
 	fn new() -> Self {
 		let mut pair = Self {
-			now: Instant::ZERO + Duration::from_secs(1),
+			now: Instant::ZERO.saturating_add(Duration::from_secs(1)),
 			client: Peer::new(Side::Client, 4433),
 			server: Peer::new(Side::Server, 4434),
 			sent: HashMap::new(),
@@ -729,7 +729,7 @@ impl Pair {
 			}
 			Op::Tick => self.tick(),
 			Op::Advance { millis } => {
-				self.now += Duration::from_millis(millis.into());
+				self.now = self.now.saturating_add(Duration::from_millis(millis.into()));
 				self.poll(Side::Client);
 				self.poll(Side::Server);
 			}

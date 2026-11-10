@@ -117,7 +117,7 @@ export class File {
 					const due = Math.floor(now().since(zero).asSecs() * IMAGE_FRAME_RATE);
 					index = Math.max(index, due);
 
-					const at = zero.add(Duration.secs(index / IMAGE_FRAME_RATE));
+					const at = zero.saturatingAdd(Duration.secs(index / IMAGE_FRAME_RATE));
 					index++;
 
 					await sleepUntil(at, signal);

@@ -117,7 +117,7 @@ async fn synced(announced: &mut origin::Routes) -> Vec<String> {
 				announce,
 			} => seen.push(announce.prefix.to_string()),
 			origin::RouteEvent {
-				kind: origin::RouteKind::End,
+				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				announce,
 			} => seen.retain(|prefix| *prefix != announce.prefix.as_str()),
 			origin::RouteEvent {
@@ -438,7 +438,7 @@ async fn settled(announced: &mut origin::Routes, held: &mut Vec<String>) -> bool
 				announce,
 			} => held.push(announce.prefix.to_string()),
 			origin::RouteEvent {
-				kind: origin::RouteKind::End,
+				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				announce,
 			} => {
 				ended = true;

@@ -34,14 +34,15 @@ async function received(reader: TrackSubscriber, count: number): Promise<bigint[
 function redropped(reader: TrackSubscriber): Promise<void> {
 	return new Promise((resolve) => {
 		let cleared = false;
-		const dispose = hooks.givenUp(reader, 1n).changed.subscribe(() => {
+		const check = () => {
 			const held = hooks.staleHeld(reader, 1n, 3n);
 			if (held.length === 0) cleared = true;
 			else if (cleared && held.length === 1 && held[0].start === 1n && held[0].end === 3n) {
-				dispose();
+				for (const dispose of disposes) dispose();
 				resolve();
 			}
-		});
+		};
+		const disposes = hooks.givenUp(reader, 1n).changed.map((signal) => signal.subscribe(check));
 	});
 }
 

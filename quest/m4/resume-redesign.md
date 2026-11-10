@@ -91,7 +91,3 @@ serving copy's upstream closed, followed by a read.
 ## Required
 
 - [Release cut](/quest/m3/release/cut.md) - wait for the release in flight to ship
-
-## Related
-
-- [Recover reads its budget without a sync](/quest/m5/recover-budget.md) - a per-frame cost this deletes

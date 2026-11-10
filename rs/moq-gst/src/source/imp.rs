@@ -3975,7 +3975,7 @@ mod session_tests {
 
 		/// Move the timestamps of later frames `by` ahead.
 		fn skip(&mut self, by: Duration) {
-			self.start -= by;
+			self.start = self.start.saturating_sub(by);
 		}
 	}
 
@@ -6266,7 +6266,7 @@ mod session_tests {
 			matches!(
 				event,
 				moq_net::origin::RouteEvent {
-					kind: moq_net::origin::RouteKind::End,
+					kind: moq_net::origin::RouteKind::Offline,
 					..
 				}
 			)
@@ -6348,7 +6348,7 @@ mod session_tests {
 		let errors = || {
 			[&publisher, &subscriber].map(|pipeline| pipeline.bus().unwrap().pop_filtered(&[gst::MessageType::Error]))
 		};
-		let deadline = kio::clock::now() + Duration::from_secs(30);
+		let deadline = kio::clock::now().saturating_add(Duration::from_secs(30));
 		let mut samples = Vec::new();
 		while samples.len() < FRAMES * CHANNELS {
 			assert!(

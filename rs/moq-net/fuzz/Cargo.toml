@@ -6,7 +6,7 @@
 # excluded from every gate that means "all of it" instead: libFuzzer needs a nightly
 # toolchain and sanitizer flags, so nothing in `check` or `test` may compile it.
 #
-# The target bodies live in `moq-net`'s hidden `fuzz` module, not here: `lite` and
+# The target bodies live in `moq-net`'s `fuzz` module, not here: `lite` and
 # `ietf` are private modules, so this crate cannot reach a single decoder, and sharing
 # the bodies is what lets the crate's own tests replay the corpus on stable.
 [package]

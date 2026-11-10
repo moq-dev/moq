@@ -39,7 +39,7 @@ fn cap_receive(rate: u64) -> Limits {
 
 /// Drive the pair for `duration`, calling `app` at least every millisecond of simulated time
 fn run(pair: &mut Pair, duration: Duration, mut app: impl FnMut(&mut Pair)) {
-	let end = pair.time + duration;
+	let end = pair.time.saturating_add(duration);
 	while pair.time < end {
 		app(pair);
 		pair.drive_client();
@@ -47,7 +47,7 @@ fn run(pair: &mut Pair, duration: Duration, mut app: impl FnMut(&mut Pair)) {
 		let next = [pair.client.next_wakeup(), pair.server.next_wakeup()]
 			.into_iter()
 			.flatten()
-			.chain([pair.time + Duration::from_millis(1), end])
+			.chain([pair.time.saturating_add(Duration::from_millis(1)), end])
 			.min()
 			.unwrap();
 		pair.time = pair.time.max(next);
@@ -174,7 +174,7 @@ fn mixed_traffic_under_the_cap_loses_no_datagrams() {
 	let (mut next, mut sent, mut received, mut read) = (pair.time, 0, 0, 0);
 	run(&mut pair, Duration::from_secs(5), |pair| {
 		if pair.time >= next {
-			next += Duration::from_millis(10);
+			next = next.saturating_add(Duration::from_millis(10));
 			pair.client_send(client_ch, s)
 				.write(&mut &vec![0; per_tick][..])
 				.unwrap();
@@ -474,7 +474,7 @@ fn a_packet_past_the_credit_deadline_grants_it() {
 	pair.time = deadline;
 	pair.client_conn_mut(client_ch).ping();
 	pair.drive_client();
-	pair.time = deadline + LATENCY;
+	pair.time = deadline.saturating_add(LATENCY);
 	pair.server.timeouts.remove(&server_ch);
 	pair.drive_server();
 	pair.server.timeouts.insert(server_ch, deadline);

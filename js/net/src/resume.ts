@@ -1214,7 +1214,7 @@ class Reader implements ResumeSource {
 		const timer = new AbortController();
 		this.#wall = { at, timer };
 		// A wakeup is never a reason to hold a Node/Bun process open.
-		void sleepUntil(Instant.ZERO.add(Duration.nanos(at)), { signal: timer.signal, ref: false }).then(
+		void sleepUntil(Instant.ZERO.saturatingAdd(Duration.nanos(at)), { signal: timer.signal, ref: false }).then(
 			() => {
 				if (timer.signal.aborted) return;
 				this.#wall = undefined;
@@ -1707,7 +1707,7 @@ class Recover implements GroupRecover {
 				if (given.error && !routeFailed(given.error) && !copyFailed(serving)) {
 					throw given.error;
 				}
-				waits.push(given.changed);
+				waits.push(...given.changed);
 				// A newer copy's track caches it: continue from there.
 				if (!failed && generation !== current.generation) {
 					const cached = hooks.cachedGroup(serving.sub, this.sequence, index);

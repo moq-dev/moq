@@ -20,6 +20,7 @@ from moq_ffi import (
 from ._stream import _Stream
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
+from .types import Instance
 
 Announce = MoqAnnounce
 """A route over a prefix: the origin-relative ``prefix``, what each filter wildcard
@@ -32,18 +33,31 @@ each broadcast's exact path, so subscribers can enumerate broadcasts from routes
 """
 
 AnnounceEvent = MoqAnnounceEvent
-"""What :class:`AnnounceConsumer` yields: :data:`AnnounceEventPresent` or
-:data:`AnnounceEventAbsent`, each carrying an :data:`Announce` as ``announce``.
+"""What :class:`AnnounceConsumer` yields: :data:`AnnounceEventPresent`,
+:data:`AnnounceEventUnavailable`, :data:`AnnounceEventAvailable`,
+:data:`AnnounceEventAbsent`, or :data:`AnnounceEventOffline`, each carrying an
+:data:`Announce` as ``announce``.
 
 Another publisher instance taking a path over keeps it present; hold
 :meth:`OriginConsumer.follow` to see the broadcast change.
 """
 
 AnnounceEventPresent = MoqAnnounceEvent.PRESENT
-"""A route now covers the path, which was absent."""
+"""A route now covers the path, which was absent; it may arrive unavailable."""
+
+AnnounceEventUnavailable = MoqAnnounceEvent.UNAVAILABLE
+"""The present path lost every usable path to its origin but may recover one:
+it stays present while requests for it may fail."""
+
+AnnounceEventAvailable = MoqAnnounceEvent.AVAILABLE
+"""The present path recovered a usable path: request it again."""
 
 AnnounceEventAbsent = MoqAnnounceEvent.ABSENT
-"""No route covers the path any more; carries its last route."""
+"""The origin withdrew the path; carries its last route."""
+
+AnnounceEventOffline = MoqAnnounceEvent.OFFLINE
+"""This side let go of the path, which its origin may still serve: the session it
+arrived on closed, or the network lost every path to it. Carries its last route."""
 
 
 class AnnounceConsumer(_Stream[MoqAnnounceEvent]):
@@ -102,7 +116,7 @@ class Following:
         self._inner.cancel()
 
 
-def _options(*, hidden: bool, cost: int, instance: str | None, epoch: int) -> MoqRouteOptions:
+def _options(*, hidden: bool, cost: int, instance: Instance | None, epoch: int) -> MoqRouteOptions:
     return MoqRouteOptions(hidden=hidden, cost=cost, instance=instance, epoch=epoch)
 
 
@@ -117,7 +131,7 @@ class BroadcastRequest:
         """The requested broadcast path."""
         return self._inner.path()
 
-    def route(self, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0) -> Route:
+    def route(self, *, hidden: bool = False, cost: int = 0, instance: Instance | None = None, epoch: int = 0) -> Route:
         """Answer with the path's own exact :class:`Route`, owning a new broadcast.
 
         Unless ``instance`` names one, the route takes the instance its claim lends when it
@@ -164,13 +178,14 @@ class Route:
         return self._broadcast
 
     @property
-    def instance(self) -> str:
+    def instance(self) -> Instance | None:
         """The stream this route serves now.
 
         A named instance never changes. A job's route takes its claim's current one when it
         first announces or when this first reads it. Read first, the job announces under it,
         and :meth:`announce` fails with ``Unroutable`` once the claim has moved past it, so a
-        signer built from it stays valid. Withdrawing and announcing keep it."""
+        signer built from it stays valid. Withdrawing and announcing keep it. Once cancelled,
+        it is the last one read or announced, or ``None`` for a hidden route that did neither."""
         return self._inner.instance_id()
 
     def announce(self) -> None:
@@ -216,7 +231,7 @@ class Claim(_Stream[BroadcastRequest]):
         self._inner = inner
 
     @property
-    def instance(self) -> str:
+    def instance(self) -> Instance:
         """The stream this claim serves now.
 
         A named instance never changes. Unnamed, the claim moves to a fresh one each time a
@@ -276,7 +291,7 @@ class OriginConsumer:
         """
         return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter, hidden=hidden)))
 
-    def follow(self, path: str, *, instance: str | None = None) -> Following:
+    def follow(self, path: str, *, instance: Instance | None = None) -> Following:
         """Follow the broadcast at ``path``, resolving each publisher instance that serves it.
 
         A broadcast created on this origin resolves once it is announced, like a
@@ -286,7 +301,7 @@ class OriginConsumer:
         """
         return Following(self._inner.follow(path, instance))
 
-    async def request(self, path: str, *, instance: str | None = None) -> BroadcastConsumer:
+    async def request(self, path: str, *, instance: Instance | None = None) -> BroadcastConsumer:
         """Request the broadcast at ``path``, resolving one publisher instance as soon as it can be served.
 
         Resolves through the best announced route covering the path: an
@@ -322,7 +337,7 @@ class OriginProducer:
         return OriginConsumer(self._inner.consume())
 
     def route(
-        self, path: str, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0
+        self, path: str, *, hidden: bool = False, cost: int = 0, instance: Instance | None = None, epoch: int = 0
     ) -> Route:
         """Create a :class:`Route` at exactly ``path``, owning a new broadcast to fill.
 
@@ -336,7 +351,7 @@ class OriginProducer:
         return Route(self._inner.route(path, _options(hidden=hidden, cost=cost, instance=instance, epoch=epoch)))
 
     def claim(
-        self, prefix: str, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0
+        self, prefix: str, *, hidden: bool = False, cost: int = 0, instance: Instance | None = None, epoch: int = 0
     ) -> Claim:
         """Claim ``prefix`` and yield the requests beneath it as a :class:`Claim`.
 

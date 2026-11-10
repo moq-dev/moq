@@ -64,11 +64,15 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    fresh rather than reviving ANNOUNCE_TAKEOVER, which
    [moq-dev/moq#8063](https://github.com/moq-dev/moq/pull/8063) deleted in
    favor of instance continuity. The proof sizes it and
-   picks lite-07 or an additive SETUP extension. The maintainer leans toward
-   lite-07 if the message is small; choosing lite-07 goes back to the
-   maintainer, since it moves the implementation into m2. (rejected:
+   picks lite-07 or an additive SETUP extension. (rejected:
    reusing ANNOUNCE_TAKEOVER's slot)
-7. ✅ m3, after the m2 route layer it ranks on. (rejected: m2; m4)
+7. ✅ m3, after the m2 route layer it ranks on. (rejected: m2; m4) Amended
+   2026-11-09 (maintainer, /quest-plan from Kixel's audit of its fleet plan):
+   ✅ the proof alone moves to m2, ahead of the lite-07 cut, and lands the
+   message's draft section and codec there if it places it in lite-07
+   (rejected: a design-only sizing quest in m2; leaving the proof in m3 and
+   accepting a SETUP extension). The implementation stays in m3. This
+   replaces item 6's rule that choosing lite-07 went back to the maintainer.
 
 Prior art: warm/cold route prices
 ([moq-dev/moq#2925](https://github.com/moq-dev/moq/pull/2925)) were deleted
@@ -94,11 +98,10 @@ This README's own work, once its children land:
 
 ## Required
 
-- [Prove cache-aware routing](/quest/m3/cache-routing/proof.md) - warm routes and the eligibility rule hold in route-layer sweeps, and the wire placement is chosen
+- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - warm routes and the eligibility rule hold in route-layer sweeps, and the wire placement is chosen
 - [Warm routes and per-broadcast parent selection](/quest/m3/cache-routing/select.md) - relays advertise warm routes and pull each broadcast through the cheapest eligible neighbor
 
 ## Related
 
 - [Cluster routing](/quest/m2/cluster-routing/README.md) - the node routes and feasibility distances this ranks on
 - [Relays split horizon per session](/quest/m3/route-split-horizon.md) - per-session suppression of node routes, beside warm routes' per-neighbor rule
-- [Route health](/quest/m5/route-health/README.md) - stalled-delivery failover, separate from choosing where a copy is pulled

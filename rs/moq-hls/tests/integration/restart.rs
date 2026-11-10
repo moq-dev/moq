@@ -74,7 +74,7 @@ async fn takeover(version: &str, case: Case) {
 
 	// The new instance numbers its groups and segments from zero again.
 	let mut new = Publisher::new(&pair.publisher, "live", Default::default());
-	let deadline = kio::clock::now() + TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(TIMEOUT);
 	let current = loop {
 		let current = server.broadcaster("live").await.expect("announced");
 		// Each broadcaster builds its own renditions, so only the replaced one still holds this.

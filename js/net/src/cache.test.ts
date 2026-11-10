@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import { Duration, Manual, yieldNow } from "@moq/clock";
 import * as cache from "./cache.ts";
-import { StreamCode, TooFarBehind } from "./error.ts";
-import { hooks } from "./internal.ts";
+import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
+import { hooks, staleHole } from "./internal.ts";
+import { RUN_OVERHEAD as ARRIVAL_OVERHEAD } from "./ledger.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 // Run `fn` on a manual clock, stepped in milliseconds.
@@ -272,5 +273,236 @@ test("the debt sheds the front of an open live edge", async () => {
 		expect(pool.used).toBeLessThanOrEqual(capacity + 512 * 1024);
 		// A reader that never read lost the shed front.
 		await expect(behind?.readFrame()).rejects.toThrow();
+	});
+});
+
+// Every run a fresh reader of `producer` is told was given up: what the track still holds.
+function dropsHeld(producer: TrackProducer): bigint[] {
+	const reader = producer.subscribe({ delay: { max: null } });
+	const held: bigint[] = [];
+	for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader)) held.push(run.start);
+	reader.close();
+	return held;
+}
+
+const old = () => ({ error: new StreamError(StreamCode.Old) });
+
+// A drop-only flood of disjoint runs bills the pool and sheds its lowest runs to stay within it,
+// with no cached group to evict; a shed run is unknown again, so a reader reports only the runs
+// the track still holds. Mirrors Rust `a_drop_flood_stays_within_the_pool`.
+test("a drop flood stays within the pool", () => {
+	const runs = 1000n;
+	const capacity = 64 * cache.RUN_OVERHEAD;
+	const pool = new cache.Pool({ capacity });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const reader = producer.subscribe({ delay: { max: null } });
+	const reported: bigint[] = [];
+	for (let run = 0n; run < runs; run++) {
+		hooks.dropTrackGroups(producer, 2n * run, 2n * run + 1n, old());
+		expect(pool.used).toBeLessThanOrEqual(capacity + 2 * cache.RUN_OVERHEAD);
+		// Midway, the reader takes in every run held then and reports the lowest; the rest are
+		// shed before it reports them.
+		if (run === runs / 2n) {
+			const first = hooks.tryDrop(reader);
+			if (!first) throw new Error("a run is owed");
+			reported.push(first.start);
+		}
+	}
+	const held = dropsHeld(producer);
+	// Each drop is accounted in the arrivals too, whose gaps are folded before any run is shed.
+	expect(hooks.arrivalRuns(producer)).toBeLessThanOrEqual(2);
+	expect(pool.used).toBe(held.length * cache.RUN_OVERHEAD + (hooks.arrivalRuns(producer) - 1) * ARRIVAL_OVERHEAD);
+	expect(held[0]).toBeGreaterThan(0n);
+	expect(held.every((start, i) => i === 0 || start === held[i - 1] + 2n)).toBe(true);
+	expect(held[held.length - 1]).toBe(2n * (runs - 1n));
+	for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader)) reported.push(run.start);
+	expect(reported.slice(1)).toEqual(held);
+});
+
+// A peer fragmenting its arrivals under a grace that never folds a gap bills each run to the pool,
+// which folds the oldest gaps early to stay within it. Mirrors Rust `an_arrival_flood_stays_within_the_pool`.
+test("an arrival flood stays within the pool", () => {
+	const groups = 1000n;
+	const capacity = 64 * ARRIVAL_OVERHEAD;
+	const pool = new cache.Pool({ capacity });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	// A reader that waits for a late group indefinitely, so no gap folds by its grace.
+	const reader = producer.subscribe({ delay: { max: null } });
+	for (let group = 0n; group < groups; group++) producer.createGroup(2n * group).finish();
+	const runs = hooks.arrivalRuns(producer);
+	expect(runs).toBeGreaterThan(1);
+	expect(runs).toBeLessThan(Number(groups));
+	expect(pool.used).toBeLessThanOrEqual(capacity + 2 * cache.ENTRY_OVERHEAD);
+	reader.close();
+});
+
+// A frame write that folds an arrival gap to pay its debt wakes a reader parked on that gap, which
+// has no grace timer to wake it.
+test("folding an arrival gap wakes the reader parked on it", async () => {
+	const pool = new cache.Pool({ capacity: 1 });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const reader = producer.subscribe({
+		delay: { max: null },
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }],
+	});
+	// Group 0 is dropped rather than cached, so the protected live edge is the only group and the
+	// gap below it is the first thing a payment takes: no other signal moves.
+	hooks.dropTrackGroups(producer, 0n, 1n, old());
+	const live = producer.createGroup(2n);
+	live.writeFrame({ payload: new Uint8Array(8) });
+	for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup());
+	for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader));
+	let woken = 0;
+	const dispose = hooks.groupChanged(reader, () => woken++);
+	expect(hooks.arrivalRuns(producer)).toBe(2);
+	// Past the write threshold that settles debt.
+	live.writeFrame({ payload: new Uint8Array(512 * 1024) });
+	expect(hooks.arrivalRuns(producer)).toBe(1);
+	await yieldNow();
+	expect(woken).toBeGreaterThan(0);
+	dispose();
+	reader.close();
+});
+
+// A closed track bills none of its arrival gaps, so an account the pool's sweep keeps for its drops
+// holds no bytes for them.
+test("a closed track releases its arrival gaps from the pool", async () => {
+	await withClock(() => {
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
+		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		const reader = producer.subscribe({ delay: { max: null } });
+		producer.createGroup(0n).finish();
+		producer.createGroup(2n).finish();
+		expect(hooks.arrivalRuns(producer)).toBe(2);
+		const used = pool.used;
+		producer.close();
+		expect(pool.used).toBe(used - ARRIVAL_OVERHEAD);
+		reader.close();
+	});
+});
+
+// A run given up longer than the pool's idle window ago is forgotten by the sweep, even on a
+// track that caches nothing, and a run given up since stays. Mirrors Rust
+// `the_sweep_forgets_runs_past_the_expiry_window`.
+test("the sweep forgets runs past the idle window", async () => {
+	await withClock(async (clock) => {
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
+		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		// A local track keeps what it skipped above its newest group, which its end relies on.
+		const local = pooled(pool, "local");
+		local.skipGroups(5n, 10n);
+		hooks.dropTrackGroups(producer, 0n, 1n, old());
+		hooks.dropTrackGroups(producer, 2n, 3n, old());
+		await clock.advance(500);
+		hooks.dropTrackGroups(producer, 4n, 5n, old());
+		// Each run and its expiry are billed, and so are the two gaps between the drops the
+		// arrivals account.
+		expect(pool.used).toBe(4 * (cache.RUN_OVERHEAD + cache.BORN_OVERHEAD) + 2 * ARRIVAL_OVERHEAD);
+
+		// The sweep at 1.5 s forgets the first two, given up at 0 s.
+		await clock.advance(1_000);
+		expect(dropsHeld(producer)).toEqual([4n]);
+		expect(pool.used).toBe(2 * (cache.RUN_OVERHEAD + cache.BORN_OVERHEAD));
+
+		await clock.advance(1_000);
+		expect(dropsHeld(producer)).toEqual([]);
+		expect(dropsHeld(local)).toEqual([5n]);
+		expect(pool.used).toBe(cache.RUN_OVERHEAD + cache.BORN_OVERHEAD);
+	});
+});
+
+// A local skip kept above the track's edge is dated once the edge passes it, or once the track
+// closes, so an expiry scan past its window forgets it with no other drop to rearm it, and its
+// bill leaves the pool. Mirrors Rust `a_kept_local_skip_expires_once_the_edge_passes_it`; Rust
+// frees a closed track's drops with its state.
+test("a kept local skip expires once the edge passes it or the track closes", async () => {
+	await withClock(async (clock) => {
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
+		const passed = pooled(pool);
+		const closed = pooled(pool, "closed");
+		passed.skipGroups(0n, 10n);
+		closed.skipGroups(0n, 10n);
+		await clock.advance(3_000);
+		expect(dropsHeld(passed)).toEqual([0n]);
+		expect(dropsHeld(closed)).toEqual([0n]);
+
+		// The write's own expiry scan finds the skip.
+		passed.createGroup(10n).finish();
+		expect(dropsHeld(passed)).toEqual([]);
+
+		const used = pool.used;
+		closed.close();
+		expect(pool.used).toBe(used - cache.RUN_OVERHEAD - cache.BORN_OVERHEAD);
+	});
+});
+
+// A received stale run the pool forgets is accounted for, as an evicted group is: no reader waits
+// on it from the live feed, so a reader that wants it asks a fill. Mirrors Rust
+// `a_reader_asks_a_fill_for_a_forgotten_run_it_judged`.
+test("a forgotten stale run is asked of a fill", async () => {
+	await withClock(async (clock) => {
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
+		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		const requests = producer.requests();
+		producer.createGroup(0n).finish();
+		hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500));
+		producer.createGroup(3n).finish();
+		await clock.advance(2_000);
+
+		const reader = producer.subscribe({
+			ranges: [{ start: { absolute: 1n } }],
+			delay: { max: Duration.millis(60_000) },
+			order: "ascending",
+		});
+		// The live group first, in arrival order; the next read asks for what it misses.
+		expect((await reader.recvGroup())?.sequence).toBe(3n);
+		const next = reader.recvGroup();
+		const asked: bigint[][] = [];
+		for (;;) {
+			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+			if (!fill) break;
+			asked.push([fill.start, fill.end]);
+		}
+		expect(asked).toEqual([[1n, 3n]]);
+
+		reader.close();
+		requests.close();
+		await next.catch(() => undefined);
+	});
+});
+
+// A received copy that reached its end through a skip stays ended once the pool forgets the skip,
+// since the forgotten run stays accounted for. Mirrors Rust
+// `a_reached_end_outlives_its_expired_drops`.
+test("a reached end outlives its forgotten skip", async () => {
+	await withClock(async (clock) => {
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
+		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		producer.createGroup(0n).finish();
+		hooks.skipTrackGroups(producer, 1n, 3n);
+		hooks.endTrack(producer, { group: 3n, frame: 0 });
+		const done = (reader: ReturnType<TrackProducer["subscribe"]>) => {
+			for (let recv = hooks.tryRecvGroup(reader, false); ; recv = hooks.tryRecvGroup(reader, false)) {
+				if (recv.kind !== "group") return recv.kind;
+				recv.group.close();
+			}
+		};
+		const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
+		expect(done(reader)).toBe("done");
+
+		await clock.advance(3_000);
+		expect(dropsHeld(producer)).toEqual([]);
+		expect(done(reader)).toBe("done");
+		const late = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
+		expect(done(late)).toBe("done");
+		reader.close();
+		late.close();
 	});
 });

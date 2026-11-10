@@ -83,4 +83,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the identity and selection views the index serves
-- [Front parking](/quest/m5/origin-front-parks.md) - replaces the `routed_broadcast` watch loop this wakes

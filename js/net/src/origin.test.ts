@@ -444,11 +444,29 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: WireRoute.default });
 
 	dispose();
-	expect(await announced.next()).toMatchObject({ prefix: path, kind: "end" });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "offline" });
 	expect(wireOf(consumer).routes(path)).toBe(false);
 
 	announced.close();
 	upstream.close();
+	origin.close();
+});
+
+test("a received route its announcer ends ends, and one its session loses goes offline", async () => {
+	const origin = new Producer();
+	const announced = origin.consume().routes();
+
+	const ended = wireOf(origin).receive(Path.from("ended"), WireRoute.default);
+	const lost = wireOf(origin).receive(Path.from("lost"), WireRoute.default);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("ended"), kind: "start" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("lost"), kind: "start" });
+
+	wireOf(ended).end();
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("ended"), kind: "end" });
+	lost.close();
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("lost"), kind: "offline" });
+
+	announced.close();
 	origin.close();
 });
 
@@ -465,7 +483,7 @@ test("announced keeps a broader covering route at its prefix", async () => {
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
 
 	dispose();
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "end" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "offline" });
 
 	announced.close();
 	upstream.close();

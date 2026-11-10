@@ -237,7 +237,7 @@ impl<T: Transport> Run<T> {
 						let deadline = self
 							.phase
 							.deadline()
-							.unwrap_or_else(|| kio::clock::now() + CLOSE_TIMEOUT);
+							.unwrap_or_else(|| kio::clock::now().saturating_add(CLOSE_TIMEOUT));
 						self.phase = Phase::Closing(deadline);
 					}
 					Step::Failed(err) => self.finish(Err(err)),
@@ -307,7 +307,7 @@ impl<T: Transport> Run<T> {
 		let _ = state.conn.poll_closed(waiter);
 		state.check_lost();
 		if state.conn.is_closed() && matches!(self.phase, Phase::Open) {
-			self.phase = Phase::Flushing(now + CLOSE_TIMEOUT);
+			self.phase = Phase::Flushing(now.saturating_add(CLOSE_TIMEOUT));
 		}
 		let drained = state.conn.is_drained();
 		let deadline = state.conn.poll_timeout();

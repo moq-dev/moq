@@ -1750,7 +1750,7 @@ mod tests {
 		// 132.3 frames per tick, so the blocks alternate in size.
 		let period = Duration::from_millis(3);
 		// 333 ticks: 999 ms, which is 44,055.9 frames.
-		let end = start + period * 333;
+		let end = start.saturating_add(period * 333);
 		let clock = tokio::spawn(async move {
 			let mut interval = kio::clock::interval_at(start, period);
 			interval.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);

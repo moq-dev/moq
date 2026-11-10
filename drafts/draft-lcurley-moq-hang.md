@@ -756,7 +756,7 @@ It MUST fail the rendition rather than fall back to another stream, including on
 A later catalog update naming another Instance for an already-resolved path MUST NOT replace the resolved broadcast; the renditions naming the other Instance fail instead.
 A new catalog instance resolves its references afresh.
 
-A route that crossed an older moq-lite version or MoQ Transport carries an Instance its receiver minted, starting with `~` {{moql}}, which names the announcement rather than the publisher's stream, so there `instance` is best effort: the consumer reads the broadcast it resolved.
+A route that crossed an older moq-lite version or MoQ Transport carries an Instance its receiver minted {{moql}}, which names the announcement rather than the publisher's stream, so there `instance` is best effort: the consumer reads the broadcast it resolved.
 A consumer MUST NOT treat a catalog's `instance` as evidence that a subscription may resume across routes.
 A consumer that predates the field ignores it and does not gain its guarantee.
 

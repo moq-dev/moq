@@ -217,7 +217,7 @@ mod tests {
 
 	fn advance_time(duration: Duration) {
 		TIME.with(|t| {
-			*t.borrow_mut() += duration;
+			t.replace_with(|now| now.saturating_add(duration));
 		})
 	}
 }

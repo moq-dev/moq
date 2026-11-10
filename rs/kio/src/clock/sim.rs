@@ -380,7 +380,7 @@ pub fn attach(deadlines: &Deadlines) {
 /// Outside [`run`].
 pub async fn advance(duration: Duration) {
 	let runtime = expect_current();
-	let at = runtime.now() + duration;
+	let at = runtime.now().saturating_add(duration);
 	runtime.advance_to(at);
 	yield_now().await;
 }
@@ -697,7 +697,7 @@ mod tests {
 	/// until that deadline, rather than waking itself and spinning.
 	#[crate::test]
 	async fn a_same_deadline_reset_does_not_wake() {
-		let at = crate::clock::now() + Duration::from_secs(1);
+		let at = crate::clock::now().saturating_add(Duration::from_secs(1));
 		let mut sleep = Box::pin(crate::clock::sleep(Duration::from_secs(1)));
 		let mut polls = 0;
 		std::future::poll_fn(|cx| {
@@ -808,7 +808,7 @@ mod tests {
 	}
 
 	fn at(secs: u64) -> Instant {
-		Instant::ZERO + Duration::from_secs(secs)
+		Instant::ZERO.saturating_add(Duration::from_secs(secs))
 	}
 
 	#[test]
@@ -1001,7 +1001,7 @@ mod tests {
 		assert_eq!(ticks.tick().await, at(3));
 		assert_eq!(
 			crate::clock::now(),
-			Instant::ZERO + Duration::from_millis(3500),
+			Instant::ZERO.saturating_add(Duration::from_millis(3500)),
 			"caught up at once"
 		);
 		assert_eq!(ticks.tick().await, at(4));
@@ -1023,7 +1023,10 @@ mod tests {
 		ticks.tick().await;
 		advance(Duration::from_millis(3500)).await;
 		assert_eq!(ticks.tick().await, at(1));
-		assert_eq!(ticks.tick().await, Instant::ZERO + Duration::from_millis(4500));
+		assert_eq!(
+			ticks.tick().await,
+			Instant::ZERO.saturating_add(Duration::from_millis(4500))
+		);
 	}
 
 	#[crate::test]
@@ -1166,7 +1169,7 @@ mod tests {
 				Pin::new(&mut *polled.borrow_mut()).poll(cx)
 			}));
 			yield_now().await;
-			let target = crate::clock::now() + Duration::from_secs(3);
+			let target = crate::clock::now().saturating_add(Duration::from_secs(3));
 			sleep.borrow_mut().reset(target);
 			task.await.unwrap();
 			assert_eq!(crate::clock::now(), target);
@@ -1193,7 +1196,7 @@ mod tests {
 		crate::clock::sleep(Duration::from_secs(1)).await;
 
 		let mut deadline = Deadline::new(&deadlines);
-		deadline.set(Some(crate::clock::now() + Duration::from_secs(1)));
+		deadline.set(Some(crate::clock::now().saturating_add(Duration::from_secs(1))));
 		assert_eq!(count.0.load(Ordering::SeqCst), 1, "the parked owner was not woken");
 	}
 
@@ -1245,7 +1248,7 @@ mod tests {
 			polls.push(now);
 			match polls.len() {
 				3 => Err("done"),
-				n => Ok(Some(now + Duration::from_secs(n as u64))),
+				n => Ok(Some(now.saturating_add(Duration::from_secs(n as u64)))),
 			}
 		})
 		.await;

@@ -18,7 +18,7 @@ minimized corpus, and uploads failure inputs as workflow artifacts.
 
 ## How it fits together
 
-The target bodies are not in `fuzz_targets/`; they are in `moq-net`'s hidden `fuzz`
+The target bodies are not in `fuzz_targets/`; they are in `moq-net`'s `fuzz`
 module (`src/fuzz.rs`), and the files here are one-line shims. Two reasons:
 
 - `lite` and `ietf` are private modules, so an outside crate cannot reach a single

@@ -361,7 +361,7 @@ encoder_packet audioPacket(std::vector<uint8_t> &payload, int64_t pts)
 // The output's broadcast as the relay serves it, or null once the wait times out.
 std::shared_ptr<moq::BroadcastConsumer> relayBroadcast(TestRelay &relay)
 {
-	auto announced = TestOk(relay.origin->consume()->follow("room", std::nullopt), "follow");
+	auto announced = TestOk(relay.origin->consume()->follow("room", nullptr), "follow");
 	auto available = announced->available();
 	if (available.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
 		return nullptr;
@@ -411,7 +411,7 @@ struct MoQOutputStatsTest {
 		const auto *present = std::get_if<moq::AnnounceEvent::kPresent>(&event->get_variant());
 		if (!present)
 			return std::nullopt;
-		return present->announce.route.instance;
+		return present->announce.route.instance->text();
 	}
 
 	static std::shared_ptr<moq::Session> Session(MoQOutput &output)
@@ -433,7 +433,7 @@ struct MoQOutputStatsTest {
 	static void Disconnect(MoQOutput &output)
 	{
 		std::lock_guard<std::mutex> lock(output.mutex);
-		output.live = false;
+		output.link = MoQOutput::Link::kLost;
 	}
 	// A fast first connect and drop can coalesce before the UI observes Connected.
 	static bool ObserveCoalescedFirstConnect(MoQOutput &output)
@@ -443,12 +443,16 @@ struct MoQOutputStatsTest {
 		if (!current || !current->session)
 			return false;
 		current->pending.reset();
-		current->connected = false;
+		{
+			std::lock_guard<std::mutex> lock(output.mutex);
+			output.link = MoQOutput::Link::kPending;
+		}
 		output.connect_time_ms = 0;
 		auto state = current->session->state();
 		state.phase = moq::ConnectionPhase::kDisconnected{};
 		output.OnState(current, std::move(state));
-		return current->connected && !current->live && output.GetConnectTime() > 0;
+		std::lock_guard<std::mutex> lock(output.mutex);
+		return output.link == MoQOutput::Link::kLost && output.GetConnectTime() > 0;
 	}
 
 	// Whether every audio and video track holds a reservation.

@@ -52,6 +52,16 @@ them passed in:
   a gate on it would decode at a depth the sink has already outrun and could
   not replace #8362's hold.
 
+Decided 2026-11-09 (maintainer, /quest-unblock): the gate must not start
+audio early when a shared catalog delay is under the ring's cap, with a test.
+✅ Fix it here (rejected: pad the missing lead in
+[moq-dev/moq#8362](https://github.com/moq-dev/moq/pull/8362)). With a shared delay
+that fits the sink's cap, that PR writes the frame without its hold-path lead
+padding, so audio can start up to ~150 ms early
+(`rs/moq-cli/src/play/media.rs`). The browser-mirroring refill starts with the
+whole target ahead of the playhead and replaces that padding path, so the fix
+lands with the gate.
+
 Keep the gate inside moq-audio's consumer if that stays additive; if it needs
 a public API change, it moves to m2.
 

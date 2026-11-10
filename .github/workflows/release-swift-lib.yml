@@ -31,7 +31,7 @@ on:
   # Publishes only a protected release tag at the run's commit; see
   # "Require a release tag at the run's commit".
   workflow_run: # zizmor: ignore[dangerous-triggers]
-    workflows: ["Release FFI", "Release Swift FFI"]
+    workflows: ["Release FFI"]
     types:
       - completed
 
@@ -54,8 +54,7 @@ jobs:
     if: >-
       github.repository_owner == 'moq-dev' &&
       (github.event_name != 'workflow_run' ||
-       ((github.event.workflow_run.name == 'Release FFI' || github.event.workflow_run.conclusion == 'success') &&
-        github.event.workflow_run.event == 'push' &&
+       (github.event.workflow_run.event == 'push' &&
         github.event.workflow_run.head_repository.full_name == github.repository &&
         startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v')))
     permissions:

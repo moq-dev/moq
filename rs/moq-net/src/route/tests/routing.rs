@@ -808,6 +808,27 @@ fn a_newer_request_raises_the_pending_one() {
 	assert_eq!(requests(&mut relay), [], "older than the pending one");
 }
 
+/// A route starved at the last seqno asks for nothing newer, since its origin rotates
+/// to a new identity rather than advance past it.
+#[test]
+fn a_route_starved_at_the_last_seqno_requests_nothing() {
+	let (origin, a, b) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.join(origin, a, 1);
+	sim.join(a, b, 1);
+	originate(&mut sim, origin, 7, MAX);
+	assert!(sim.run());
+	assert!(sim.route(b, 7).is_some());
+
+	sim.kill(origin);
+	originate(&mut sim, origin, 7, 0);
+	sim.reconnect(origin);
+	let requests = sim.stats.requests;
+	assert!(sim.run());
+	assert!(sim.starved(a, 7), "seqno 0 is older than the last one a remembers");
+	assert_eq!(sim.stats.requests, requests, "nothing follows the last seqno");
+}
+
 /// Each message recomputes only the identity it names, so the work a message
 /// costs does not grow with how many other origins a node routes to.
 #[test]

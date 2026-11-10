@@ -15,7 +15,7 @@ import { StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as FrameConsumer } from "./frame.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type WireRoute } from "./hop.ts";
-import type * as Instance from "./instance.ts";
+import * as Instance from "./instance.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
@@ -228,7 +228,7 @@ export interface DropRun extends Run, Hole {
 }
 
 /** Whether two runs say the same thing, so they may merge. */
-function sameHole(a: DropRun, b: DropRun): boolean {
+export function sameHole(a: DropRun, b: DropRun): boolean {
 	return (
 		toStreamCode(a.error) === toStreamCode(b.error) &&
 		!a.skip === !b.skip &&
@@ -535,6 +535,8 @@ export const hooks: {
 	releaseTrack: (producer: Producer) => void;
 	/** Cache a new track's groups into its broadcast's `pool`, before it caches any. Assigned by `track.ts`. */
 	poolTrack: (producer: Producer, pool: Pool) => void;
+	/** How many runs a track's arrivals hold, for tests. Assigned by `track.ts`. */
+	arrivalRuns: (producer: Producer) => number;
 	/**
 	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
 	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
@@ -729,7 +731,7 @@ export const hooks: {
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
 	holdsGroup: (subscriber: Subscriber, sequence: bigint) => boolean;
 	/** The error the subscriber's track gave `sequence` up with, if it did, and what changes it. */
-	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown> };
+	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
 	 * The parts of `[start, end)` the subscriber's track still holds as a received stale run: one
 	 * new terms superseded is gone. Mirrors the Rust crate-private `track::Subscriber::stale_held`.
@@ -908,6 +910,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	poolTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	arrivalRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
 	trackReleased: () => {
@@ -1309,12 +1314,13 @@ export class Epochs {
 }
 
 /**
- * Prefer a route that is not draining (a peer that sent GOAWAY ranks below every other), then
- * identified publishers, then lower static cost.
+ * Prefer a route that is neither draining (a peer that sent GOAWAY) nor unavailable (held),
+ * which rank below every other, then identified publishers, then lower static cost.
  */
 export function compareRoutes(a: WireRoute, b: WireRoute): number {
+	const last = (route: WireRoute) => Number((route.draining ?? false) || route.available === false);
 	return (
-		Number(a.draining ?? false) - Number(b.draining ?? false) ||
+		last(a) - last(b) ||
 		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
 		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
 	);
@@ -1331,8 +1337,8 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
 	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
 	if (order !== 0 || path === prefix) return order;
-	const ha = spreadHash(path, a.instance ?? "");
-	const hb = spreadHash(path, b.instance ?? "");
+	const ha = spreadHash(path, a.instance ? Instance.text(a.instance) : "");
+	const hb = spreadHash(path, b.instance ? Instance.text(b.instance) : "");
 	if (ha !== hb) return ha < hb ? -1 : 1;
 	const ca = chainHash(path, a.hops);
 	const cb = chainHash(path, b.hops);

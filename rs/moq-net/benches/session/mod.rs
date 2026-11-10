@@ -43,6 +43,10 @@
 //! `session_join_*` times a new viewer connecting, resolving a broadcast, and
 //! receiving its latest group, swept over what the relays already announce.
 //!
+//! `session_announce` times one broadcast announced and withdrawn beside many a publisher
+//! already announces, until every viewer session saw both, swept over those broadcasts and
+//! the viewers: a change's cost grows with the viewers it reaches, never with the claims held.
+//!
 //! `session_dash_*` models the moq.pro dash aggregator: one session following
 //! every node's per-project stats broadcast, each announced by a peer relay, at
 //! one small frame per track per tick. Throughput counts tracks, so a flat
@@ -601,7 +605,8 @@ struct Cluster<B: Backend> {
 	/// One datagram track per broadcast, indexed like [`path`], for datagram shapes only.
 	datagrams: Vec<datagram::Producer>,
 	_broadcasts: Vec<origin::Route>,
-	_origins: Vec<origin::Producer>,
+	/// Each publisher's origin, indexed like `publisher`.
+	origins: Vec<origin::Producer>,
 	_pairs: Vec<Pair>,
 	next_hop: u64,
 	/// The relay and publisher caches; each viewer owns its own.
@@ -621,7 +626,7 @@ impl<B: Backend> Cluster<B> {
 			tracks: Vec::new(),
 			datagrams: Vec::new(),
 			_broadcasts: Vec::new(),
-			_origins: Vec::new(),
+			origins: Vec::new(),
 			_pairs: Vec::new(),
 			next_hop: 0,
 			pools: Vec::new(),
@@ -689,7 +694,7 @@ impl<B: Backend> Cluster<B> {
 			let target = &this.relays[publisher % shape.relays];
 			options.server_subscribe = Some(B::origin(target).clone());
 			this._pairs.push(B::connect(options, target, false).await);
-			this._origins.push(origin);
+			this.origins.push(origin);
 		}
 
 		this
@@ -966,11 +971,13 @@ impl<B: Backend> Room<B> {
 	/// Each round completes its reads before this step; pending read deadlines
 	/// share this clock too.
 	fn tick(&mut self) {
-		self.cache_now += if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
-			Duration::from_secs(1)
-		} else {
-			cache::DEFAULT_EXPIRY
-		};
+		self.cache_now = self
+			.cache_now
+			.saturating_add(if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+				Duration::from_secs(1)
+			} else {
+				cache::DEFAULT_EXPIRY
+			});
 		for pool in self.pools() {
 			pool.poll(self.cache_now, &kio::Waiter::noop());
 		}
@@ -1467,6 +1474,69 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 							tokio::task::yield_now().await;
 						}
 						elapsed
+					})
+				})
+			});
+		}
+	}
+	group.finish();
+}
+
+/// `(broadcasts, viewers)` shapes for [`announce`].
+const ANNOUNCE: [(usize, usize); 4] = [(16, 1), (4096, 1), (16, 64), (4096, 64)];
+
+/// One more broadcast announced and withdrawn beside `broadcasts` a publisher already
+/// announces through one relay, timed until each of `viewers` sessions saw both.
+fn announce<B: Backend>(c: &mut Criterion) {
+	let mut group = c.benchmark_group(format!("{}session_announce", B::PREFIX));
+	for version in VERSIONS {
+		for (broadcasts, viewers) in ANNOUNCE {
+			let rt = runtime();
+			let mut room = None;
+			let id = format!("{version}/broadcasts={broadcasts}/viewers={viewers}");
+			group.bench_function(BenchmarkId::from_parameter(id), |b| {
+				let (cluster, routes, next) = room.get_or_insert_with(|| {
+					rt.block_on(async {
+						let shape = Shape {
+							publishers: 1,
+							broadcasts,
+							viewers,
+							..Shape::BASE
+						};
+						let mut cluster = Cluster::<B>::new(version, shape, false).await;
+						let mut routes = Vec::new();
+						for _ in 0..viewers {
+							let viewer = cluster.join(0, false).await;
+							let mut announced = viewer.origin.consume().routes();
+							for _ in 0..broadcasts {
+								let event = announced.next().await.expect("announced");
+								assert_eq!(event.kind, origin::RouteKind::Start);
+							}
+							routes.push((viewer, announced));
+						}
+						(cluster, routes, broadcasts)
+					})
+				});
+				b.iter_custom(|iters| {
+					rt.block_on(async {
+						let start = Instant::now();
+						for _ in 0..iters {
+							// A fresh path each time: a broadcast's identity never comes back.
+							let route = cluster.origins[0]
+								.route(path(*next), origin::RouteOptions::default())
+								.unwrap();
+							*next += 1;
+							for (_, announced) in routes.iter_mut() {
+								let event = announced.next().await.expect("announced");
+								assert_eq!(event.kind, origin::RouteKind::Start);
+							}
+							drop(route);
+							for (_, announced) in routes.iter_mut() {
+								let event = announced.next().await.expect("withdrawn");
+								assert_eq!(event.kind, origin::RouteKind::End);
+							}
+						}
+						start.elapsed()
 					})
 				})
 			});
@@ -2098,6 +2168,8 @@ pub(crate) fn session<B: Backend>(c: &mut Criterion) {
 	);
 
 	join::<B>(c, "relays", [1, 2, 8].map(|relays| Shape { relays, ..base }));
+
+	announce::<B>(c);
 
 	churn::<B>(c, "sessions", [1, 16, 128].map(|sessions| Churn { sessions, held: 16 }));
 	churn::<B>(

@@ -15,7 +15,7 @@ pub(super) fn initial(events: impl IntoIterator<Item = origin::RouteEvent>) -> V
 				announce: update,
 			} => (update, true),
 			origin::RouteEvent {
-				kind: origin::RouteKind::End,
+				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				announce: update,
 			} => (update, false),
 		};

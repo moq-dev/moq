@@ -170,11 +170,11 @@ fn transient(err: &Error) -> bool {
 /// Whether a token's stream ending with `err` is the peer's verdict on it: a refusal that
 /// will not pass, [`Error::Unsupported`], or a clean close after a grant. Anything else
 /// left the token undecided.
-fn verdict(slot: &Slot, err: &Error) -> bool {
-	(slot.refused && !transient(err))
+fn verdict(phase: &Phase, err: &Error) -> bool {
+	(matches!(phase, Phase::Refused { .. }) && !transient(err))
 		|| matches!(err, Error::Unsupported)
 		// The peer ended the grant without revoking it.
-		|| (matches!(err, Error::Cancel) && slot.grant.is_some())
+		|| (matches!(err, Error::Cancel) && matches!(phase, Phase::Granted(_)))
 }
 
 /// The shared state behind one [`Handle`]: the tokens it presents, and every session
@@ -248,39 +248,57 @@ struct Slot {
 	token: Bytes,
 	/// Presented by the session itself at setup, so enforcement waits on it.
 	setup: bool,
-	/// The latest AUTH_OK, `None` before the first and after the token ends.
-	grant: Option<Grant>,
-	/// Handed to the driver to open its AUTH stream, which then owns ending it.
-	streamed: bool,
-	/// The latest reply: `Ok` for an AUTH_OK, the refusal otherwise.
-	answered: Option<Result<()>>,
-	/// The peer refused the current attempt with an AUTH_ERROR.
-	refused: bool,
-	/// The delay before the last retry, which the next one doubles.
-	retry: Option<Duration>,
-	/// Why the token ended on this session, once it has.
-	ended: Option<Error>,
-	/// The last [`Credential`] clone dropped: the driver closes the stream.
-	withdrawn: bool,
+	phase: Phase,
 }
 
-impl Slot {
-	fn new(token: Bytes, setup: bool, answered: Option<Result<()>>) -> Self {
-		let ended = match &answered {
-			Some(Err(err)) => Some(err.clone()),
+/// Where one session is with one token. Each `backoff` is the delay before the last retry,
+/// which the next one doubles.
+enum Phase {
+	/// Waiting for the driver to open its AUTH stream: first presented, or between retries.
+	Queued { backoff: Option<Duration> },
+	/// Its stream is open and the driver owns ending it, but the peer has not replied.
+	Pending { backoff: Option<Duration> },
+	/// The peer's latest reply on the open stream is this AUTH_OK.
+	Granted(Grant),
+	/// The peer refused the current attempt with an AUTH_ERROR; the driver retries or ends it.
+	Refused { backoff: Option<Duration> },
+	/// The last [`Credential`] clone dropped while its stream was open: the driver closes the
+	/// stream, and any grant holds until then.
+	Withdrawn { grant: Option<Grant> },
+	/// Only requests carry it, on a version without AUTH, so nothing will answer.
+	Requests,
+	/// Over on this session, and why.
+	Ended(Error),
+}
+
+impl Phase {
+	/// The grant the token adds to the union.
+	fn grant(&self) -> Option<&Grant> {
+		match self {
+			Self::Granted(grant) | Self::Withdrawn { grant: Some(grant) } => Some(grant),
 			_ => None,
-		};
-		Self {
-			token,
-			setup,
-			grant: None,
-			streamed: false,
-			answered,
-			refused: false,
-			retry: None,
-			ended,
-			withdrawn: false,
 		}
+	}
+
+	/// Whether the token has its answer: a grant, an end, or none to wait for.
+	fn answered(&self) -> bool {
+		!matches!(
+			self,
+			Self::Queued { .. } | Self::Pending { .. } | Self::Refused { .. } | Self::Withdrawn { grant: None }
+		)
+	}
+
+	/// Why the token ended here, once it has.
+	fn ended(&self) -> Option<&Error> {
+		match self {
+			Self::Ended(err) => Some(err),
+			_ => None,
+		}
+	}
+
+	/// Still wanted and not over: neither withdrawn nor ended.
+	fn live(&self) -> bool {
+		!matches!(self, Self::Withdrawn { .. } | Self::Ended(_))
 	}
 }
 
@@ -331,12 +349,19 @@ impl Attached {
 		if !self.active() {
 			return None;
 		}
-		let answered = match (self.supported, self.requests) {
-			(true, _) => None,
-			(false, true) => Some(Ok(())),
-			(false, false) => Some(Err(Error::Unsupported)),
+		let (phase, answered) = match (self.supported, self.requests) {
+			(true, _) => (Phase::Queued { backoff: None }, None),
+			(false, true) => (Phase::Requests, Some(Ok(()))),
+			(false, false) => (Phase::Ended(Error::Unsupported), Some(Err(Error::Unsupported))),
 		};
-		self.slots.insert(id, Slot::new(token.clone(), false, answered.clone()));
+		self.slots.insert(
+			id,
+			Slot {
+				token: token.clone(),
+				setup: false,
+				phase,
+			},
+		);
 		if self.supported {
 			self.opening.push_back(id);
 		}
@@ -348,12 +373,14 @@ impl Attached {
 		let Some(slot) = self.slots.get_mut(&id) else {
 			return;
 		};
-		if slot.ended.is_some() {
-			return;
+		match slot.phase {
+			Phase::Ended(_) => return,
+			// Nothing will read a withdrawn slot again, and its driver finds it gone.
+			Phase::Withdrawn { .. } => {
+				self.slots.remove(&id);
+			}
+			_ => slot.phase = Phase::Ended(err.clone()),
 		}
-		slot.grant = None;
-		slot.answered.get_or_insert(Err(err.clone()));
-		slot.ended = Some(err.clone());
 		self.epoch += 1;
 		self.recompute();
 	}
@@ -363,17 +390,25 @@ impl Attached {
 		let Some(slot) = self.slots.get_mut(&id) else {
 			return;
 		};
-		slot.withdrawn = true;
-		// Already over, or no stream whose close would end it: nothing left to close.
-		if slot.ended.is_some() || !slot.streamed {
-			self.opening.retain(|opening| *opening != id);
-			self.slots.remove(&id);
-			self.recompute();
-		}
+		slot.phase = match &mut slot.phase {
+			// The open stream's close is what ends it, and its grant holds until then.
+			Phase::Pending { .. } | Phase::Refused { .. } => Phase::Withdrawn { grant: None },
+			Phase::Granted(grant) => Phase::Withdrawn {
+				grant: Some(std::mem::take(grant)),
+			},
+			Phase::Withdrawn { .. } => return,
+			// Already over, or no stream whose close would end it: nothing left to close.
+			Phase::Queued { .. } | Phase::Requests | Phase::Ended(_) => {
+				self.opening.retain(|opening| *opening != id);
+				self.slots.remove(&id);
+				self.recompute();
+				return;
+			}
+		};
 	}
 
 	fn recompute(&mut self) {
-		let mut granted = self.slots.values().filter_map(|slot| slot.grant.as_ref()).peekable();
+		let mut granted = self.slots.values().filter_map(|slot| slot.phase.grant()).peekable();
 		if granted.peek().is_none() && !self.replied {
 			return;
 		}
@@ -589,6 +624,35 @@ impl Permit {
 			return None;
 		}
 		Some(crate::model::interest_prefixes(limit))
+	}
+
+	/// The one prefix the grant and the limit together confine this direction to, or
+	/// `None` when they confine it to several or to none. A request for it, rather than
+	/// one above it, is one the peer's floors can certify.
+	#[cfg(feature = "async")]
+	pub(crate) fn region(&self) -> Option<crate::Path> {
+		let heads = |patterns: &Option<Patterns>| patterns.as_ref().map(crate::model::interest_prefixes);
+		let regions = match (heads(&self.granted), heads(&self.limit)) {
+			(None, None) => return None,
+			(Some(regions), None) | (None, Some(regions)) => regions,
+			(Some(granted), Some(limit)) => {
+				let mut meet: Vec<crate::Path> = (granted.iter())
+					.flat_map(|a| limit.iter().map(move |b| (a, b)))
+					.filter_map(|(a, b)| match () {
+						_ if a.has_prefix(b) => Some(a.clone()),
+						_ if b.has_prefix(a) => Some(b.clone()),
+						_ => None,
+					})
+					.collect();
+				meet.sort();
+				meet.dedup();
+				meet
+			}
+		};
+		match regions.as_slice() {
+			[region] => Some(region.clone()),
+			_ => None,
+		}
 	}
 
 	/// Whether both set the same limit on the peer, whatever either was granted.
@@ -928,11 +992,21 @@ impl Link {
 				return Err(err.clone());
 			}
 			// Without AUTH only a request presents it, so nothing will answer.
-			let answered = (!link.supported).then_some(Ok(()));
-			link.slots.insert(id, Slot::new(token, true, answered));
-			if link.supported {
-				link.opening.push_back(id);
-			}
+			let phase = match link.supported {
+				true => {
+					link.opening.push_back(id);
+					Phase::Queued { backoff: None }
+				}
+				false => Phase::Requests,
+			};
+			link.slots.insert(
+				id,
+				Slot {
+					token,
+					setup: true,
+					phase,
+				},
+			);
 			state.next_id += 1;
 			Ok(id)
 		})?;
@@ -957,7 +1031,7 @@ impl Link {
 				return None;
 			}
 			let slot = link.slots.get(&auth.presented.id)?;
-			slot.ended.is_none().then(|| slot.token.clone())
+			slot.phase.ended().is_none().then(|| slot.token.clone())
 		})
 	}
 
@@ -1035,10 +1109,9 @@ impl Link {
 			let token = link.opening.pop_front().expect("checked non-empty");
 			// Withdrawn or ended before its stream opened: nothing to present.
 			if let Some(slot) = link.slots.get_mut(&token)
-				&& slot.ended.is_none()
+				&& let Phase::Queued { backoff } = slot.phase
 			{
-				slot.streamed = true;
-				slot.refused = false;
+				slot.phase = Phase::Pending { backoff };
 				return Poll::Ready(Some((token, slot.token.clone())));
 			}
 		}
@@ -1050,14 +1123,14 @@ impl Link {
 		let link = self.id();
 		let _ = ready_or!(self.state().poll(waiter, |state| {
 			match state.links.get(&link).and_then(|link| link.slots.get(&id)) {
-				Some(slot) if !slot.withdrawn && slot.ended.is_none() => Poll::Pending,
+				Some(slot) if slot.phase.live() => Poll::Pending,
 				_ => Poll::Ready(()),
 			}
 		}));
 		Poll::Ready(())
 	}
 
-	/// Record an AUTH_OK for the token.
+	/// Record an AUTH_OK on the token's open stream.
 	pub(crate) fn granted(&self, id: u64, grant: Grant) {
 		// One parseable line per AUTH_OK, so the grant the peer actually sent is observable
 		// without an API; the interop harness checks it against the token it minted.
@@ -1072,12 +1145,11 @@ impl Link {
 			let Some(slot) = link.slots.get_mut(&id) else {
 				return;
 			};
-			if slot.ended.is_some() {
+			// Only an open stream carries a reply, and a withdrawn token's grant no longer widens.
+			if !matches!(slot.phase, Phase::Pending { .. } | Phase::Granted(_)) {
 				return;
 			}
-			slot.grant = Some(grant);
-			slot.answered = Some(Ok(()));
-			slot.retry = None;
+			slot.phase = Phase::Granted(grant);
 			link.replied = true;
 			link.recompute();
 			state.answer(id, Ok(Answer::Granted));
@@ -1086,15 +1158,43 @@ impl Link {
 		});
 	}
 
+	/// Open the token's stream as the driver does, if it is still queued.
+	#[cfg(test)]
+	pub(crate) fn open(&self, id: u64) {
+		self.with(|link| {
+			if let Some(slot) = link.slots.get_mut(&id)
+				&& let Phase::Queued { backoff } = slot.phase
+			{
+				link.opening.retain(|opening| *opening != id);
+				slot.phase = Phase::Pending { backoff };
+			}
+		});
+	}
+
+	/// Record an AUTH_OK for the token as the driver does: on its stream, opened first if it
+	/// is still queued.
+	#[cfg(test)]
+	pub(crate) fn grant(&self, id: u64, grant: Grant) {
+		self.open(id);
+		self.granted(id, grant);
+	}
+
 	/// Record an AUTH_ERROR for the token: a reply that grants nothing, so a refused
 	/// setup token leaves an empty union rather than an unknown (unrestricted) one.
 	/// The driver then calls [`retry`](Self::retry), as on every end of the token's stream.
 	pub(crate) fn refused(&self, id: u64) {
 		self.with(|link| {
-			if let Some(slot) = link.slots.get_mut(&id) {
-				slot.refused = true;
-				link.replied = true;
-			}
+			let Some(slot) = link.slots.get_mut(&id) else {
+				return;
+			};
+			link.replied = true;
+			slot.phase = match slot.phase {
+				Phase::Pending { backoff } | Phase::Refused { backoff } => Phase::Refused { backoff },
+				// A refusal after a grant revokes it.
+				Phase::Granted(_) => Phase::Refused { backoff: None },
+				_ => return,
+			};
+			link.recompute();
 		});
 	}
 
@@ -1114,21 +1214,23 @@ impl Link {
 				return None;
 			}
 			let slot = link.slots.get_mut(&id)?;
+			// Only an open stream is presented again; a grant resets the backoff.
+			let backoff = match slot.phase {
+				Phase::Pending { backoff } | Phase::Refused { backoff } => backoff,
+				Phase::Granted(_) => None,
+				_ => return None,
+			};
 			// A protocol violation ends the session anyway.
-			if slot.withdrawn || slot.ended.is_some() || verdict(slot, err) || matches!(err, Error::ProtocolViolation) {
+			if verdict(&slot.phase, err) || matches!(err, Error::ProtocolViolation) {
 				return None;
 			}
-			if bound && !slot.refused {
+			if bound && !matches!(slot.phase, Phase::Refused { .. }) {
 				return None;
 			}
-			slot.refused = false;
-			slot.streamed = false;
-			slot.grant = None;
+			let delay = backoff.map_or(RETRY_INITIAL, |delay| (delay * 2).min(RETRY_MAX));
 			// Unanswered again, as on its first presentation: a request or publication the
 			// token might cover waits for the retry's verdict rather than being judged without it.
-			slot.answered = None;
-			let delay = slot.retry.map_or(RETRY_INITIAL, |delay| (delay * 2).min(RETRY_MAX));
-			slot.retry = Some(delay);
+			slot.phase = Phase::Queued { backoff: Some(delay) };
 			link.epoch += 1;
 			link.recompute();
 			Some(delay)
@@ -1148,8 +1250,8 @@ impl Link {
 				return Err(Error::GoingAway);
 			}
 			match link.slots.get_mut(&id) {
-				Some(slot) if !slot.withdrawn && slot.ended.is_none() => {
-					slot.streamed = true;
+				Some(slot) if let Phase::Queued { backoff } = slot.phase => {
+					slot.phase = Phase::Pending { backoff };
 					Ok(slot.token.clone())
 				}
 				_ => Err(Error::Cancel),
@@ -1170,11 +1272,7 @@ impl Link {
 			// token: that session's own answer decides, even mid-retry with no grant right now.
 			let superseded = !attached(&mut state.links, link_id).active()
 				&& state.links.iter().any(|(other, link)| {
-					*other != link_id
-						&& link.active() && link
-						.slots
-						.get(&id)
-						.is_some_and(|slot| slot.ended.is_none() && !slot.withdrawn)
+					*other != link_id && link.active() && link.slots.get(&id).is_some_and(|slot| slot.phase.live())
 				});
 			// A handle of the session's own has no next session to present it, so any end is final.
 			let bound = state.bound;
@@ -1185,15 +1283,15 @@ impl Link {
 			let settled = !slot.setup
 				&& !superseded
 				&& link.closed.is_none()
-				&& !slot.withdrawn
-				&& slot.ended.is_none()
-				&& (bound || verdict(slot, &err));
-			slot.grant = None;
-			slot.answered.get_or_insert(Err(err.clone()));
-			slot.ended.get_or_insert(err.clone());
-			// The handle is gone and the token is over: nothing will read the slot again.
-			if slot.withdrawn {
-				link.slots.remove(&id);
+				&& slot.phase.live()
+				&& (bound || verdict(&slot.phase, &err));
+			match slot.phase {
+				Phase::Ended(_) => {}
+				// The handle is gone and the token is over: nothing will read the slot again.
+				Phase::Withdrawn { .. } => {
+					link.slots.remove(&id);
+				}
+				_ => slot.phase = Phase::Ended(err.clone()),
 			}
 			// Even with the union unchanged, a request carrying this token must drop it.
 			link.epoch += 1;
@@ -1212,7 +1310,7 @@ impl Link {
 			let pending = state
 				.links
 				.get(&id)
-				.is_some_and(|link| link.slots.values().any(|slot| slot.setup && slot.answered.is_none()));
+				.is_some_and(|link| link.slots.values().any(|slot| slot.setup && !slot.phase.answered()));
 			match pending {
 				true => Poll::Pending,
 				false => Poll::Ready(()),
@@ -1233,7 +1331,7 @@ impl Link {
 				|| !link
 					.slots
 					.values()
-					.any(|slot| !slot.token.is_empty() && slot.answered.is_none() && !slot.withdrawn)
+					.any(|slot| !slot.token.is_empty() && !slot.phase.answered() && slot.phase.live())
 			{
 				Poll::Ready(())
 			} else {
@@ -1344,25 +1442,26 @@ impl Link {
 			link.supported = false;
 			link.opening.clear();
 			let requests = link.requests;
+			// Nothing will read a withdrawn slot again.
+			link.slots
+				.retain(|_, slot| !matches!(slot.phase, Phase::Withdrawn { .. }));
 			let mut answers = Vec::new();
 			for (id, slot) in &mut link.slots {
-				if slot.withdrawn {
-					continue;
-				}
 				let answer = match requests {
 					true => Ok(()),
 					false => Err(Error::Unsupported),
 				};
-				slot.answered.get_or_insert(answer.clone());
-				if let Err(err) = &answer {
-					slot.ended.get_or_insert(err.clone());
+				// Called before any stream opens, so every slot not over is still queued.
+				if !matches!(slot.phase, Phase::Ended(_)) {
+					slot.phase = match requests {
+						true => Phase::Requests,
+						false => Phase::Ended(Error::Unsupported),
+					};
 				}
 				if !slot.setup {
 					answers.push((*id, answer));
 				}
 			}
-			// Nothing will read a withdrawn slot again.
-			link.slots.retain(|_, slot| !slot.withdrawn);
 			for (id, answer) in answers {
 				state.answer(id, answer.map(|()| Answer::Requests));
 			}
@@ -1402,9 +1501,9 @@ impl Link {
 			link.closed = Some(err.clone());
 			link.opening.clear();
 			for slot in link.slots.values_mut() {
-				slot.grant = None;
-				slot.answered.get_or_insert(Err(err.clone()));
-				slot.ended.get_or_insert(err.clone());
+				if !matches!(slot.phase, Phase::Ended(_)) {
+					slot.phase = Phase::Ended(err.clone());
+				}
 			}
 			link.recompute();
 			Some(match state.bound {
@@ -1561,8 +1660,8 @@ impl Selector {
 	fn current<'a>(&self, state: &'a State) -> Option<&'a Grant> {
 		match *self {
 			Self::Union => state.live()?.union.as_ref(),
-			Self::Token(id) => state.live()?.slots.get(&id)?.grant.as_ref(),
-			Self::Setup { link, id } => state.links.get(&link)?.slots.get(&id)?.grant.as_ref(),
+			Self::Token(id) => state.live()?.slots.get(&id)?.phase.grant(),
+			Self::Setup { link, id } => state.links.get(&link)?.slots.get(&id)?.phase.grant(),
 		}
 	}
 
@@ -1578,7 +1677,7 @@ impl Selector {
 				None => Some(Error::Cancel),
 			},
 			Self::Setup { link, id } => match state.links.get(&link).and_then(|link| link.slots.get(&id)) {
-				Some(slot) => slot.ended.clone(),
+				Some(slot) => slot.phase.ended().cloned(),
 				None => Some(Error::Cancel),
 			},
 		}
@@ -2755,7 +2854,7 @@ impl Enforce {
 					self.live.insert(gate.path);
 				}
 				crate::origin::RouteEvent {
-					kind: crate::origin::RouteKind::End,
+					kind: crate::origin::RouteKind::End | crate::origin::RouteKind::Offline,
 					announce: update,
 				} => {
 					self.live.remove(&update.prefix);
@@ -2788,7 +2887,7 @@ mod tests {
 	async fn a_request_waits_for_an_unanswered_token() {
 		let handle = Link::new(true);
 		let setup = handle.present(Bytes::new(), true).unwrap();
-		handle.granted(setup.presented.id, Grant::default());
+		handle.grant(setup.presented.id, Grant::default());
 		let token = handle.present(Bytes::from_static(b"new"), false).unwrap();
 		let mut gate = Gate::new(handle.clone(), crate::Path::from_static("room"), Direction::Subscribe);
 		let waiter = kio::Waiter::noop();
@@ -2796,7 +2895,7 @@ mod tests {
 			gate.poll_ready(&waiter).is_pending(),
 			"request refused before token answered"
 		);
-		handle.granted(token.presented.id, Grant::all());
+		handle.grant(token.presented.id, Grant::all());
 		assert!(gate.poll_ready(&waiter).is_ready());
 		assert!(gate.poll_denied(&waiter).is_pending());
 	}
@@ -2819,7 +2918,7 @@ mod tests {
 			"judged before the retry answered"
 		);
 		handle.reopen(id).unwrap();
-		handle.granted(id, Grant::all());
+		handle.grant(id, Grant::all());
 		assert!(gate.poll_ready(&waiter).is_ready());
 		assert!(handle.within_grant(Direction::Publish, "room"));
 	}
@@ -2830,7 +2929,7 @@ mod tests {
 	fn a_withdrawn_route_ends_the_wait() {
 		let handle = Link::new(true);
 		let setup = handle.present(Bytes::new(), true).unwrap();
-		handle.granted(setup.presented.id, Grant::default());
+		handle.grant(setup.presented.id, Grant::default());
 		let _unanswered = handle.present(Bytes::from_static(b"new"), false).unwrap();
 		let route = kio::Producer::<()>::default();
 		let mut gate = Gate::announced(
@@ -2858,7 +2957,7 @@ mod tests {
 	fn a_covered_request_never_waits_for_an_unanswered_token() {
 		let handle = Link::new(true);
 		let first = handle.present(Bytes::from_static(b"first"), false).unwrap();
-		handle.granted(first.presented.id, Grant::all());
+		handle.grant(first.presented.id, Grant::all());
 		let _unanswered = handle.present(Bytes::from_static(b"renewal"), false).unwrap();
 		let mut gate = Gate::new(handle, crate::Path::from_static("room"), Direction::Subscribe);
 		assert!(gate.poll_ready(&kio::Waiter::noop()).is_ready());
@@ -3029,6 +3128,24 @@ mod tests {
 		assert_eq!(everything.regions(), None, "a root grant confines nothing");
 	}
 
+	/// The region is where the grant and the limit meet, and only when that is one prefix.
+	#[cfg(feature = "async")]
+	#[test]
+	fn the_region_is_where_grant_and_limit_meet() {
+		let permit = |granted: Option<&[&str]>, limit: Option<&[&str]>| Permit {
+			granted: granted.map(patterns),
+			limit: limit.map(patterns),
+		};
+		let path = crate::Path::from_static;
+		assert_eq!(permit(None, None).region(), None);
+		assert_eq!(permit(Some(&["a"]), None).region(), Some(path("a")));
+		assert_eq!(permit(None, Some(&["a/b"])).region(), Some(path("a/b")));
+		assert_eq!(permit(Some(&["a"]), Some(&["a/b", "c"])).region(), Some(path("a/b")));
+		assert_eq!(permit(Some(&[""]), Some(&["a"])).region(), Some(path("a")));
+		assert_eq!(permit(Some(&["a", "b"]), None).region(), None, "two regions");
+		assert_eq!(permit(Some(&["a"]), Some(&["b"])).region(), None, "they never meet");
+	}
+
 	/// A limit replaces the last one, narrower or wider, and applies to a version
 	/// without AUTH too.
 	#[test]
@@ -3058,7 +3175,7 @@ mod tests {
 	fn the_limit_alone_decides_what_the_peer_offers() {
 		let handle = Link::new(true);
 		let token = handle.present(Bytes::new(), true).unwrap();
-		handle.granted(0, grant(&[], &[]));
+		handle.grant(0, grant(&[], &[]));
 		assert!(!handle.allows(Direction::Subscribe, "room/bob/cam"));
 		assert!(handle.within_limit(Direction::Subscribe, "room/bob/cam"));
 
@@ -3166,6 +3283,21 @@ mod tests {
 		assert!(handle.poll_withdrawn(id, &kio::Waiter::noop()).is_ready());
 	}
 
+	/// An AUTH_OK racing the withdrawal of its token reaches a stream that is closing: it
+	/// never widens what the session may do.
+	#[test]
+	fn a_withdrawn_token_takes_no_grant() {
+		let handle = Link::new(true);
+		let setup = handle.present(Bytes::new(), true).unwrap();
+		handle.grant(setup.presented.id, Grant::default());
+		let auth = handle.present(Bytes::from_static(b"jwt"), false).unwrap();
+		let id = opened(&handle);
+		drop(auth);
+		assert!(handle.poll_withdrawn(id, &kio::Waiter::noop()).is_ready());
+		handle.granted(id, Grant::all());
+		assert!(!handle.within_grant(Direction::Publish, "room"));
+	}
+
 	fn opened(link: &Link) -> u64 {
 		match link.poll_opening(&kio::Waiter::noop()) {
 			Poll::Ready(Some((id, _))) => id,
@@ -3182,7 +3314,7 @@ mod tests {
 		assert!(matches!(Link::attach(&handle, true, false), Err(Error::Duplicate)));
 		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&first);
-		first.granted(id, Grant::all());
+		first.grant(id, Grant::all());
 		assert!(matches!(
 			auth.poll_answered(&kio::Waiter::noop()),
 			Poll::Ready(Ok(Answer::Granted))
@@ -3219,7 +3351,7 @@ mod tests {
 		let handle = Handle::new();
 		let session = Link::attach(&handle, true, false).unwrap();
 		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
-		session.granted(opened(&session), Grant::all());
+		session.grant(opened(&session), Grant::all());
 		session.close(Error::Cancel);
 		assert_eq!(auth.grant().peek(), None);
 		assert!(matches!(
@@ -3274,7 +3406,7 @@ mod tests {
 		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
 		assert!(Selector::Token(auth.id()).ended(&handle.state.read()).is_none());
 		let id = opened(&successor);
-		successor.granted(id, Grant::all());
+		successor.grant(id, Grant::all());
 		assert!(matches!(
 			auth.poll_answered(&kio::Waiter::noop()),
 			Poll::Ready(Ok(Answer::Granted))
@@ -3295,7 +3427,7 @@ mod tests {
 
 		let successor = Link::attach(&handle, true, false).unwrap();
 		assert_eq!(opened(&successor), id);
-		successor.granted(id, Grant::all());
+		successor.grant(id, Grant::all());
 		draining.refused(id);
 		draining.ended(id, Error::Session(SessionError::Unauthorized));
 		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
@@ -3316,7 +3448,7 @@ mod tests {
 
 		let successor = Link::attach(&handle, true, false).unwrap();
 		assert_eq!(opened(&successor), id);
-		successor.granted(id, Grant::all());
+		successor.grant(id, Grant::all());
 		successor.refused(id);
 		let busy = Error::Session(SessionError::TooManyRequests);
 		assert_eq!(successor.retry(id, &busy), Some(RETRY_INITIAL));
@@ -3326,7 +3458,7 @@ mod tests {
 		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
 
 		assert_eq!(successor.reopen(id).unwrap().as_ref(), b"jwt");
-		successor.granted(id, Grant::all());
+		successor.grant(id, Grant::all());
 		assert_eq!(auth.grant().peek(), Some(Grant::all()));
 	}
 
@@ -3366,7 +3498,7 @@ mod tests {
 		let id = opened(&link);
 		let lost = Error::Stream(crate::StreamError::Internal);
 
-		link.granted(id, Grant::all());
+		link.grant(id, Grant::all());
 		assert_eq!(link.retry(id, &lost), Some(RETRY_INITIAL));
 		assert_eq!(auth.grant().peek(), None, "the lost stream's grant is gone");
 		assert_eq!(link.token(&auth).as_deref(), Some(&b"jwt"[..]));
@@ -3376,14 +3508,14 @@ mod tests {
 		assert_eq!(link.reopen(id).unwrap().as_ref(), b"jwt");
 		assert_eq!(link.retry(id, &lost), Some(RETRY_INITIAL * 2));
 		link.reopen(id).unwrap();
-		link.granted(id, Grant::all());
+		link.grant(id, Grant::all());
 		assert!(gate.poll_ready(&kio::Waiter::noop()).is_ready());
 		assert_eq!(link.retry(id, &lost), Some(RETRY_INITIAL), "a grant resets the backoff");
 		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
 
 		// A clean close after a grant is the peer's verdict, not a lost stream.
 		link.reopen(id).unwrap();
-		link.granted(id, Grant::all());
+		link.grant(id, Grant::all());
 		assert_eq!(link.retry(id, &Error::Cancel), None);
 		link.ended(id, Error::Cancel);
 		assert!(matches!(
@@ -3431,7 +3563,7 @@ mod tests {
 		assert_eq!(link.retry(id, &busy), None, "only a refusal retries");
 
 		link.reopen(id).unwrap();
-		link.granted(id, Grant::all());
+		link.grant(id, Grant::all());
 		assert!(matches!(
 			auth.poll_answered(&kio::Waiter::noop()),
 			Poll::Ready(Ok(Answer::Granted))

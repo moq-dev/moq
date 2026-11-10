@@ -44,6 +44,11 @@ pub(crate) struct Claim {
 	/// older version: sent only to a peer this node proxies for, so a node that does
 	/// not proxy is never transit. Always unset on a claim off the wire.
 	pub learned: bool,
+	/// The hop chain of a claim learned over moq-lite-06 or moq-transport, which
+	/// lite-07 carries as the Lite-06 Chain; empty for a native claim. A relay
+	/// translating the claim back to lite-06 extends it, so a node the claim reaches
+	/// again recognizes its own hop and drops it. Deleted with lite-06 compatibility.
+	pub chain: crate::Hops,
 }
 
 /// A shown claim as the origin serves it through the selected route.
@@ -80,8 +85,9 @@ pub(crate) enum Output {
 		claim: Path,
 		served: Served,
 	},
-	/// Stop serving `claim` of `id` through this stream.
-	Unserve { id: Id, claim: Path },
+	/// Stop serving `claim` of `id` through this stream. `ended` when the claim's origin
+	/// withdrew it, as far as this node knows; otherwise the node let go of it here.
+	Unserve { id: Id, claim: Path, ended: bool },
 }
 
 /// The node every lite-07 session of one origin shares.
@@ -227,7 +233,7 @@ impl Outbox {
 			}
 			// Each serving change replaces the last: the session acts on where the claim
 			// ends up, in place when it keeps its instance.
-			Output::Serve { id, ref claim, .. } | Output::Unserve { id, ref claim } => {
+			Output::Serve { id, ref claim, .. } | Output::Unserve { id, ref claim, .. } => {
 				let key = (id, claim.clone());
 				if let Some(&seq) = self.serving.get(&key)
 					&& let Output::Serve { served, .. } = &output
@@ -262,7 +268,7 @@ impl Outbox {
 				}
 				None => {
 					let (_, output) = self.serves.pop_first()?;
-					if let Output::Serve { id, claim, .. } | Output::Unserve { id, claim } = &output {
+					if let Output::Serve { id, claim, .. } | Output::Unserve { id, claim, .. } = &output {
 						self.serving.remove(&(*id, claim.clone()));
 					}
 					return Some(output);
@@ -383,6 +389,7 @@ impl Home {
 					Output::Unserve {
 						id,
 						claim: claim.clone(),
+						ended: false,
 					},
 				);
 			}
@@ -651,13 +658,17 @@ impl State {
 				self.router.echo(key, id);
 			}
 		}
-		// The shown claims are read in place; the events only say which changed.
-		self.router.events();
+		// The shown claims are read in place; the events only say which changed, and
+		// whether a claim that went was ended by its origin or let go here.
+		let mut ended = BTreeMap::new();
+		for event in self.router.events() {
+			ended.insert((event.id, event.claim), event.kind == super::Kind::End);
+		}
 		let changed = self.router.changed();
 		let declared = self.router.declared();
 		for (id, claims) in changed {
 			if Some(id) != declared {
-				self.home(id, claims);
+				self.home(id, claims, &ended);
 			}
 		}
 	}
@@ -666,7 +677,7 @@ impl State {
 	/// route to it that can carry the claim, keeping it where it is, unavailable, while
 	/// there is none. Only `claims`, whose shown state changed, are served anew, unless
 	/// the routes changed too.
-	fn home(&mut self, id: Id, claims: BTreeSet<Path>) {
+	fn home(&mut self, id: Id, claims: BTreeSet<Path>, ended: &BTreeMap<(Id, Path), bool>) {
 		let routes: Routes = (self.router.routes(id).into_iter())
 			.map(|(key, metric)| (key, metric, self.router.name(key, id)))
 			.collect();
@@ -751,6 +762,7 @@ impl State {
 			let Some(home) = self.homes.remove(&(id, claim.clone())) else {
 				continue;
 			};
+			let ended = ended.get(&(id, claim.clone())).copied().unwrap_or(false);
 			for key in home.keys.into_keys() {
 				push(
 					&self.queues,
@@ -758,6 +770,7 @@ impl State {
 					Output::Unserve {
 						id,
 						claim: claim.clone(),
+						ended,
 					},
 				);
 			}
@@ -860,6 +873,7 @@ mod tests {
 			cost,
 			upstream: false,
 			learned: false,
+			chain: crate::Hops::new(),
 		}
 	}
 
@@ -916,7 +930,8 @@ mod tests {
 			served(outputs(&receive)),
 			[Output::Unserve {
 				id: 1,
-				claim: p("live/x")
+				claim: p("live/x"),
+				ended: true
 			}]
 		);
 	}
@@ -956,7 +971,8 @@ mod tests {
 			served(outputs(&far)),
 			[Output::Unserve {
 				id: 1,
-				claim: p("live/x")
+				claim: p("live/x"),
+				ended: false
 			}]
 		);
 		assert!(served(outputs(&near)).is_empty(), "the remaining route serves on");

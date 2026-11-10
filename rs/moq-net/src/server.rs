@@ -253,6 +253,8 @@ impl Server {
 				implementation: self.implementation(),
 				// Filled by `lite::start` from the attached origin handles.
 				route_key: None,
+				// Filled by `lite::start` from the version.
+				lite06_chain: false,
 			}
 		} else {
 			lite::Setup::default()
@@ -1723,6 +1725,7 @@ mod tests {
 			ietf: false,
 			implementation: None,
 			route_key: None,
+			lite06_chain: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 		.unwrap();
@@ -1826,7 +1829,7 @@ mod tests {
 			.with_bi(moql_setup())
 			.withholding_credit();
 		let start = kio::clock::now();
-		let deadline = start + DEFAULT_TIMEOUT;
+		let deadline = start.saturating_add(DEFAULT_TIMEOUT);
 		let request = Server::new()
 			.accept_request(start, session.clone())
 			.await
@@ -1856,7 +1859,7 @@ mod tests {
 			FakeSession::new(ALPN_LITE_05, []),
 			FakeSession::new(ALPN_LITE, []),
 		] {
-			let deadline = kio::clock::now() + std::time::Duration::from_secs(3);
+			let deadline = kio::clock::now().saturating_add(std::time::Duration::from_secs(3));
 			let accept = Server::new()
 				.accept_request(kio::clock::now(), session.clone())
 				.with_deadline(Some(deadline));
@@ -1887,7 +1890,10 @@ mod tests {
 					.session(crate::stats::SessionInfo::new(crate::Path::from_static("room"))),
 			);
 		request.expired().await;
-		assert_eq!(kio::clock::now(), start + std::time::Duration::from_secs(5));
+		assert_eq!(
+			kio::clock::now(),
+			start.saturating_add(std::time::Duration::from_secs(5))
+		);
 		let version = Version::Lite(lite::Version::Lite05);
 		assert_eq!(session.close_code(), Some(version.session_code(&SessionError::Timeout)));
 		let failed = registry.snapshot().sessions()[0].1.sessions_failed;

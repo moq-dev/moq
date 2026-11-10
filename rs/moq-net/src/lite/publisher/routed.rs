@@ -39,6 +39,8 @@ struct Sent {
 	reach: BTreeMap<usize, route::Reach>,
 	/// Every claim the node sent for it, named as the handle names it, before filtering.
 	claims: BTreeMap<Path, node::Claim>,
+	/// How many of `claims` the stream's link never carries (see [`sends`]).
+	withheld: usize,
 	/// The node's floor for those claims.
 	floor: Option<route::Rev>,
 	/// Whether the peer was sent a floor for it yet.
@@ -48,6 +50,17 @@ struct Sent {
 impl Sent {
 	fn reach(&self) -> Option<route::Reach> {
 		self.reach.values().next().copied()
+	}
+
+	/// The node's claim at `path` is now `claim`, which `link` may withhold.
+	fn set(&mut self, link: &route::Link, path: Path, claim: Option<node::Claim>) {
+		let withheld = claim.as_ref().is_some_and(|claim| !sends(link, claim));
+		let old = match claim {
+			Some(claim) => self.claims.insert(path, claim),
+			None => self.claims.remove(&path),
+		};
+		self.withheld += usize::from(withheld);
+		self.withheld -= usize::from(old.is_some_and(|old| !sends(link, &old)));
 	}
 }
 
@@ -109,6 +122,11 @@ pub(super) struct Answer {
 	phase: Phase,
 	/// Passes before the stream yields, so a peer flooding replies cannot hold the task.
 	budget: kio::coop::Budget,
+	/// The peer's SETUP, which says whether it reads the Lite-06 Chain. `None` sends no
+	/// chain.
+	peer_setup: Option<lite::PeerSetup>,
+	/// Whether the claims sent carry their Lite-06 Chain, known once the peer's SETUP is.
+	chains: bool,
 }
 
 impl Answer {
@@ -141,7 +159,15 @@ impl Answer {
 			permit: Default::default(),
 			phase: Phase::Init,
 			budget: kio::coop::Budget::new(32),
+			peer_setup: None,
+			chains: false,
 		}
+	}
+
+	/// Send each claim's Lite-06 Chain if the peer's SETUP offers to read it.
+	pub(super) fn with_peer_setup(mut self, peer_setup: lite::PeerSetup) -> Self {
+		self.peer_setup = Some(peer_setup);
+		self
 	}
 
 	/// Run the stream until the peer closes it, or `withdrawing` closes it here.
@@ -155,6 +181,9 @@ impl Answer {
 			// Start from the grant the setup token earns, so the initial set never
 			// advertises something it would end a moment later.
 			ready!(self.gate.poll_setup_answered(waiter));
+			if let Some(peer_setup) = &self.peer_setup {
+				self.chains = ready!(peer_setup.poll_lite06_chain(waiter));
+			}
 			if let Poll::Ready(permit) = self.gate.poll_permit(&mut self.epoch, waiter) {
 				self.permit = permit;
 			}
@@ -323,6 +352,7 @@ impl Answer {
 					shown: 0,
 					reach: BTreeMap::from([(source, reach)]),
 					claims: BTreeMap::new(),
+					withheld: 0,
 					floor: None,
 					floored: false,
 				};
@@ -361,7 +391,7 @@ impl Answer {
 				self.echo(id, source);
 				let sent = self.routes.get_mut(&id).expect("matched above");
 				for path in &paths {
-					sent.claims.remove(path);
+					sent.set(&self.link, path.clone(), None);
 				}
 				for path in paths {
 					self.sync(stream, id, path)?;
@@ -486,10 +516,7 @@ impl Answer {
 				None if self.origin.shadows(&path) => continue,
 				None => path,
 			};
-			match claim {
-				Some(claim) => sent.claims.insert(path.clone(), claim),
-				None => sent.claims.remove(&path),
-			};
+			sent.set(&self.link, path.clone(), claim);
 			paths.push(path);
 		}
 		sent.floor = floor;
@@ -505,10 +532,8 @@ impl Answer {
 		let certified = self.certified();
 		// Like the grant, the upstream horizon and the proxy preference leave claims out
 		// that a floor would certify absent.
-		let hides = (self.routes.get(&id).into_iter())
-			.flat_map(|sent| sent.claims.values())
-			.any(|claim| !sends(&self.link, claim));
 		let sent = self.routes.get_mut(&id).expect("only a held route has a batch");
+		let hides = sent.withheld > 0;
 		let Some(wire) = sent.wire else {
 			return Ok(());
 		};
@@ -550,6 +575,11 @@ impl Answer {
 		let wanted = (sent.claims.get(&path))
 			.filter(|claim| self.shows(&path) && sends(&self.link, claim))
 			.cloned();
+		// The Lite-06 Chain goes only to a peer that reads it.
+		let chain = (wanted.as_ref())
+			.filter(|_| self.chains)
+			.map(|claim| claim.chain.clone())
+			.unwrap_or_default();
 		let key = (id, path);
 		match (self.live.get_mut(&key), wanted) {
 			(None, Some(claim)) => {
@@ -565,7 +595,7 @@ impl Answer {
 					route: wire,
 					instance: Some(claim.instance.clone()),
 					epoch: claim.epoch,
-					hops: crate::Hops::new(),
+					hops: chain,
 					cost: origin::Cost::new(claim.cost),
 				})?;
 				let announce = announce.expect("lite-07 assigns announce ids");
@@ -575,7 +605,7 @@ impl Answer {
 			(Some((announce, held)), Some(claim)) => {
 				let announce = *announce;
 				let restart = held.instance != claim.instance || held.epoch != claim.epoch;
-				let reprice = held.cost != claim.cost;
+				let update = held.cost != claim.cost || (self.chains && held.chain != claim.chain);
 				if restart {
 					tracing::debug!(route = %key.1, "restart");
 					stream.writer.buffer(&Msg::Restart {
@@ -583,11 +613,12 @@ impl Answer {
 						instance: Some(claim.instance.clone()),
 						epoch: claim.epoch,
 						cost: origin::Cost::new(claim.cost),
+						hops: chain,
 					})?;
-				} else if reprice {
+				} else if update {
 					stream.writer.buffer(&Msg::Update {
 						id: announce,
-						hops: crate::Hops::new(),
+						hops: chain,
 						cost: origin::Cost::new(claim.cost),
 					})?;
 				}

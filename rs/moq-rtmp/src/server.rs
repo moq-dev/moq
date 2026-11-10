@@ -421,7 +421,7 @@ impl Server {
 						tracing::warn!(%err, "failed to accept RTMP connection; continuing");
 						let wait = self.accept_delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
 						self.accept_delay = (self.accept_delay * 2).min(ACCEPT_RETRY_MAX);
-						self.accept_retry = Some(kio::clock::Instant::now() + wait);
+						self.accept_retry = Some(kio::clock::Instant::now().saturating_add(wait));
 					}
 				},
 			}
@@ -1227,7 +1227,7 @@ async fn pump<S: Stream>(
 	peer: SocketAddr,
 ) -> anyhow::Result<End> {
 	let mut buffer = [0u8; READ_BUFFER];
-	let mut media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+	let mut media_deadline = kio::clock::Instant::now().saturating_add(PUBLISH_IDLE_TIMEOUT);
 	loop {
 		let mut finished = false;
 		while let Some(result) = work.pop_front() {
@@ -1240,11 +1240,11 @@ async fn pump<S: Stream>(
 				ServerSessionResult::RaisedEvent(event) => match event {
 					// A timestamp restart ends this publisher; isolated malformed tags are skipped.
 					ServerSessionEvent::AudioDataReceived { data, timestamp, .. } => {
-						media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+						media_deadline = kio::clock::Instant::now().saturating_add(PUBLISH_IDLE_TIMEOUT);
 						publisher.push(flv::TAG_AUDIO, timestamp.value, &data)?;
 					}
 					ServerSessionEvent::VideoDataReceived { data, timestamp, .. } => {
-						media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+						media_deadline = kio::clock::Instant::now().saturating_add(PUBLISH_IDLE_TIMEOUT);
 						publisher.push(flv::TAG_VIDEO, timestamp.value, &data)?;
 					}
 					ServerSessionEvent::PublishStreamFinished { .. } => finished = true,

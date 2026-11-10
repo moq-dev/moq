@@ -21,6 +21,9 @@ const PARAM_IMPLEMENTATION: u64 = 0x6;
 const PARAM_TOKEN: u64 = 0x7;
 /// Setup Parameter id for the sender's route key proof (lite-07+).
 const PARAM_ROUTE_KEY: u64 = 0x8;
+/// Setup Parameter id offering to receive the Lite-06 Chain on lite-07 announcements, a
+/// lite-06 compatibility extension that the lite-07 to lite-08 migration deletes.
+const PARAM_LITE06_CHAIN: u64 = 0x9;
 /// Setup Parameter id offering the `ietf` extension (draft-lcurley-moq-ietf): "IETF" in ASCII.
 const PARAM_IETF: u64 = 0x4945_5446;
 
@@ -216,6 +219,9 @@ pub struct Setup {
 	pub implementation: Option<String>,
 	/// Proof that the sender holds its route key, bound to this session (lite-07+).
 	pub route_key: Option<crate::route::Proof>,
+	/// Whether the sender reads the Lite-06 Chain on lite-07 announcements, so the peer
+	/// sends it the chain of every claim learned over moq-lite-06. Lite-07 only.
+	pub lite06_chain: bool,
 }
 
 impl std::fmt::Debug for Setup {
@@ -235,6 +241,7 @@ impl std::fmt::Debug for Setup {
 			.field("ietf", &self.ietf)
 			.field("implementation", &self.implementation)
 			.field("route_key", &self.route_key)
+			.field("lite06_chain", &self.lite06_chain)
 			.finish()
 	}
 }
@@ -308,6 +315,12 @@ impl<'a> Message<'a> for Setup {
 				return Err(EncodeError::Version);
 			}
 			params.set_bytes(PARAM_ROUTE_KEY, proof.to_bytes());
+		}
+		if self.lite06_chain {
+			if !version.has_routes() {
+				return Err(EncodeError::Version);
+			}
+			params.set_bytes(PARAM_LITE06_CHAIN, Vec::new());
 		}
 
 		params.encode(w, version)
@@ -391,6 +404,11 @@ impl<'a> Message<'a> for ReceivedSetup {
 			}
 			_ => None,
 		};
+		let lite06_chain = match params.get_bytes(PARAM_LITE06_CHAIN) {
+			Some([]) if version.has_routes() => true,
+			Some(_) if version.has_routes() => return Err(DecodeError::InvalidValue),
+			_ => false,
+		};
 
 		Ok(Self {
 			role_present: role_code.is_some(),
@@ -405,6 +423,7 @@ impl<'a> Message<'a> for ReceivedSetup {
 				ietf,
 				implementation,
 				route_key,
+				lite06_chain,
 			},
 		})
 	}
@@ -609,6 +628,12 @@ impl PeerSetup {
 		self.poll_get(waiter, |setup| setup.cost)
 	}
 
+	/// Poll whether the peer reads the Lite-06 Chain, waiting until its SETUP arrives.
+	/// Every lite-07 session offers it, so the peer's offer alone negotiates it.
+	pub fn poll_lite06_chain(&self, waiter: &kio::Waiter) -> std::task::Poll<bool> {
+		self.poll_get(waiter, |setup| setup.lite06_chain)
+	}
+
 	/// Poll for the [`Hop`](crate::Hop) id the peer declared in its SETUP `Hop`
 	/// parameter. `None` when it declared none: a leaf with no identity worth excluding.
 	pub fn poll_hop(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<crate::Hop>> {
@@ -796,6 +821,25 @@ mod tests {
 		valued.extend([1, 7]);
 		valued[0] += 1;
 		assert!(Setup::decode_slice(&valued, Version::Lite07).is_err());
+	}
+
+	/// The Lite-06 Chain offer is an empty parameter that only lite-07 sends, and lite-06
+	/// ignores like any unknown parameter.
+	#[test]
+	fn lite06_chain_offer_is_lite07_only() {
+		let msg = Setup {
+			lite06_chain: true,
+			..Default::default()
+		};
+		let buf = msg.encode_bytes(Version::Lite07).unwrap();
+		// Length, one parameter, its ID, and an empty value.
+		assert_eq!(buf, &[0x03, 0x01, 0x09, 0x00][..]);
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite07).unwrap().0, msg);
+		assert!(matches!(msg.encode_bytes(Version::Lite06), Err(EncodeError::Version)));
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite06).unwrap().0, Setup::default());
+
+		// A value it does not define is refused.
+		assert!(Setup::decode_slice(&[0x04, 0x01, 0x09, 0x01, 0x07], Version::Lite07).is_err());
 	}
 
 	/// Route key proofs are accepted only on lite-07 and must have the fixed wire size.

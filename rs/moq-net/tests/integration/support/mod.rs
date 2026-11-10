@@ -56,6 +56,7 @@ pub enum Kind {
 	Update,
 	Restart,
 	End,
+	Offline,
 }
 
 /// Every update per prefix the watcher has seen. Await [`kio::clock::sim::idle`]
@@ -94,6 +95,10 @@ pub fn watch(mut announced: origin::Routes) -> mpsc::UnboundedReceiver<(String, 
 					kind: origin::RouteKind::End,
 					announce,
 				} => (Kind::End, announce),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Offline,
+					announce,
+				} => (Kind::Offline, announce),
 			};
 			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
 				break;

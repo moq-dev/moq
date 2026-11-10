@@ -37,5 +37,4 @@ alongside the `objc2-core-audio-types` the crate already carries.
 
 ## Related
 
-- [Media Foundation decode](/quest/m5/audio-decode-mediafoundation.md) - the same shape on Windows
-- [MediaCodec decode](/quest/m5/audio-decode-mediacodec.md) - the same shape on Android
+- [Media Foundation decode](/quest/m3/audio-decode-mediafoundation.md) - the same shape on Windows

@@ -20,7 +20,6 @@ deleted.
 - [Wire fuzz coverage](/quest/m4/wire-fuzz-coverage.md) - the cmsg walks in moq-sock and moq-uring have invariant fuzz targets, and the unsafe peer input reaches runs under Miri
 - [VA-API renderer tests](/quest/m4/vaapi-render-tests.md) - the VA-API renderer, decode, and transcode tests run in `just rs gpu` on AMD and Intel and fail instead of skipping, and hosted CI reports them ignored
 - [One Ruff pin and Swift formatting on aarch64-linux](/quest/m4/format-gate-followups.md) - only the dev shell pins Ruff, and aarch64-linux checks Swift formatting once nixpkgs builds `swiftc` there
-- [Weekly mutation testing on critical modules](/quest/m4/mutants.md) - cargo-mutants runs weekly on moq-auth and moq-net's permission, resume, and expiry code
 - [P2P](/quest/m4/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [Challenge proof for certificate credentials](/quest/m4/cert-challenge.md) - a relay can require a signed nonce, so a certificate credential replayed within its time window admits nothing
 - [Benchmark sources](/quest/m4/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
@@ -35,6 +34,8 @@ deleted.
 - [Upstream reports](/quest/m4/upstream-reports.md) - report the faad, retina, and mr-boxington bugs found before the cut
 - [moq-net's library tests pass under cargo test](/quest/m4/net-test-subscriber.md) - two moq-net tests stop each installing a global tracing subscriber, so plain `cargo test -p moq-net --lib` passes
 - [Perf](/quest/m4/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
+- [kio channel contention](/quest/m4/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes, promoted out of Perf
+- [Stream transports](/quest/m4/stream-transports/README.md) - qmux drives its own WebSocket and TCP sockets in one task, then serves them from the io_uring workers, promoted out of Perf
 - [Transport x version benches](/quest/m4/bench-transport-sweep.md) - the session benches sweep transports as well as versions
 - [Shared group serving and ingest](/quest/m4/shared-serve.md) - Rust's moq-lite and moq-transport sessions serve and ingest groups through one poll machine each, with only wire encoding per protocol
 - [Shared group serving and ingest in JS](/quest/m4/shared-serve-js.md) - the same split in js/net, following the Rust seam
@@ -53,6 +54,8 @@ deleted.
 - [io_uring quiescence on a quiet host](/quest/m4/uring-bench-followups.md) - quiet-host acceptance numbers and a nightly `worker_turns` QUIC request-reply series
 - [#2819](/quest/m4/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: validate PipeWire DMA-BUFs into the Vulkan renderer on hardware
 - [Windows.Graphics.Capture](/quest/m4/capture-wgc.md) - the WGC display and window backend verified on real Windows hardware
+- [The foreground app](/quest/m4/capture-foreground.md) - which app and window are in front, with a wait for changes, on macOS, Windows, and X11, for moq-dev/studio's source that follows the game
+- [Leaving apps out of a display capture](/quest/m4/capture-exclude.md) - a display capture that never shows chosen apps where the system can filter, for moq-dev/studio's privacy shield
 - [The moq CLI can publish a changing catalog](/quest/m4/cli-catalog-updates.md) - catalog updates mid-stream, so recovery replays need no hand-built clients
 - [The relay over QUIC on the sim](/quest/m4/quic-sim.md) - the relay and moq-tokio's `Client` and `Server` run over `moq-quic` on the seeded sim
 - [moq-shaper's own socket never passes for path loss](/quest/m4/shaper-socket.md) - relay-sized buffers and its own socket drops reported beside path drops
