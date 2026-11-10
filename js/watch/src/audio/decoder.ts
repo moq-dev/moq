@@ -14,7 +14,6 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
-import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { hosted } from "../assets";
 import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
@@ -203,9 +202,6 @@ export class Decoder {
 
 	// The broadcast instance the ring's timeline belongs to. See #runDecoder.
 	#instance?: Moq.Broadcast.Consumer["closed"];
-
-	// Fans received frames out to open `arrivals()` handles; retains nothing without one.
-	#arrivals = new ArrivalProducer();
 
 	#signals = new Effect();
 	#phase = new Signal<Phase>({ kind: "stopped" });
@@ -660,15 +656,13 @@ export class Decoder {
 					if (this.#onRead(next)) {
 						this.#reprime(decoder, decoderConfig, order);
 					}
-					if (next.kind === "gap") this.#arrivals.write(gap(next));
 					continue;
 				}
 				const { frame } = next;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = frame.timestamp;
-				const late = this.#track.received(timestamp, frame.arrival);
-				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
+				this.#track.received(timestamp, frame.arrival);
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -747,14 +741,12 @@ export class Decoder {
 					if (this.#onRead(next)) {
 						this.#reprime(decoder, decoderConfig, order);
 					}
-					if (next.kind === "gap") this.#arrivals.write(gap(next));
 					continue;
 				}
 				const { frame } = next;
 
 				const timestamp = frame.timestamp;
-				const late = this.#track.received(timestamp, frame.arrival);
-				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
+				this.#track.received(timestamp, frame.arrival);
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -1054,18 +1046,8 @@ export class Decoder {
 		return true;
 	}
 
-	/**
-	 * Observe every frame and gap received from now until the handle or this decoder closes.
-	 *
-	 * Each open handle queues every entry until read, so read it continuously or close it.
-	 */
-	arrivals(): Arrivals {
-		return this.#arrivals.consume();
-	}
-
 	/** Stop and release everything this holds. */
 	close() {
-		this.#arrivals.close();
 		this.#signals.close();
 	}
 

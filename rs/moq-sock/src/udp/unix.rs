@@ -16,8 +16,6 @@ use socket2::SockRef;
 
 use super::{EcnCodepoint, RecvMeta, Transmit, TransportError, UdpSockRef, cmsg};
 
-#[cfg(apple_fast)]
-use super::apple_fast::{msghdr_x, recv_via_recvmsg_x, send};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use super::linux::{LinuxError, gso};
 
@@ -37,13 +35,6 @@ pub struct UdpSocketState {
 	/// In particular, we do not use IP_TOS cmsg_type in this case,
 	/// which is not supported on Linux <3.13 and results in not sending the UDP packet at all.
 	sendmsg_einval: AtomicBool,
-
-	/// Whether to use Apple's fast `sendmsg_x`/`recvmsg_x` APIs.
-	///
-	/// These private APIs provide better performance but may not be available on all
-	/// Apple OS versions. Callers must verify availability before enabling.
-	#[cfg(apple_fast)]
-	apple_fast_path: AtomicBool,
 
 	/// Cached `SO_SNDBUF`.
 	#[cfg(apple)]
@@ -161,8 +152,6 @@ impl UdpSocketState {
 			gro_segments,
 			may_fragment,
 			sendmsg_einval: AtomicBool::new(false),
-			#[cfg(apple_fast)]
-			apple_fast_path: AtomicBool::new(false),
 			#[cfg(apple)]
 			send_buffer_size: AtomicUsize::new(io.send_buffer_size().unwrap_or(usize::MAX)),
 		})
@@ -193,21 +182,6 @@ impl UdpSocketState {
 	}
 
 	/// Receives datagrams into `bufs`, filling one [`RecvMeta`] per message, and returns how many messages arrived.
-	#[cfg(apple_fast)]
-	pub fn recv(
-		&self,
-		socket: UdpSockRef<'_>,
-		bufs: &mut [IoSliceMut<'_>],
-		meta: &mut [RecvMeta],
-	) -> io::Result<usize> {
-		if self.is_apple_fast_path_enabled() {
-			recv_via_recvmsg_x(self, socket.0, bufs, meta)
-		} else {
-			recv_single(socket.0, bufs, meta)
-		}
-	}
-
-	/// Receives datagrams into `bufs`, filling one [`RecvMeta`] per message, and returns how many messages arrived.
 	#[cfg(any(
 		target_os = "openbsd",
 		target_os = "netbsd",
@@ -215,7 +189,7 @@ impl UdpSocketState {
 		target_os = "redox",
 		target_os = "hurd",
 		solarish,
-		apple_slow
+		apple
 	))]
 	pub fn recv(
 		&self,
@@ -364,48 +338,6 @@ impl UdpSocketState {
 		self.sendmsg_einval.store(true, Ordering::Relaxed)
 	}
 
-	/// Enables Apple's fast UDP datapath using private `sendmsg_x`/`recvmsg_x` APIs
-	///
-	/// Once enabled, this also updates [`max_gso_segments`] to allow batched sends.
-	///
-	/// # Safety
-	///
-	/// These APIs may crash on unsupported OS versions, so callers must verify
-	/// availability before enabling.
-	///
-	/// [`max_gso_segments`]: Self::max_gso_segments
-	#[cfg(apple_fast)]
-	pub unsafe fn set_apple_fast_path(&self) {
-		self.apple_fast_path.store(true, Ordering::Relaxed);
-		self.max_gso_segments.store(BATCH_SIZE, Ordering::Relaxed);
-	}
-
-	/// Returns whether Apple's fast UDP datapath is enabled for this socket
-	#[cfg(apple_fast)]
-	pub fn is_apple_fast_path_enabled(&self) -> bool {
-		self.apple_fast_path.load(Ordering::Relaxed)
-	}
-
-	/// Disables Apple's fast UDP datapath, reverting to `sendmsg`/`recvmsg`
-	#[cfg(apple_fast)]
-	fn disable_apple_fast_path(&self) {
-		self.apple_fast_path.store(false, Ordering::Relaxed);
-		self.max_gso_segments.store(1, Ordering::Relaxed);
-	}
-
-	/// Resolves an Apple fast-path function pointer via `resolver`
-	///
-	/// Disables the fast path if the symbol is absent so that future calls use the slow path
-	/// directly.
-	#[cfg(apple_fast)]
-	pub(crate) fn resolve_apple_fast_fn<T>(&self, resolver: fn() -> Option<T>) -> Option<T> {
-		let f = resolver();
-		if f.is_none() {
-			self.disable_apple_fast_path();
-		}
-		f
-	}
-
 	/// Smallest `SO_SNDBUF` that mitigates <https://feedbackassistant.apple.com/feedback/23671230>:
 	/// On macOS, a non-blocking SOCK_DGRAM `sendmsg`/`sendmsg_x` call with ancillary data returns
 	/// `EWOULDBLOCK` when the payload length is at or just under `SO_SNDBUF`.
@@ -512,7 +444,7 @@ fn send(
 	}
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", apple_fast))]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(super) fn send_individual_datagrams(
 	state: &UdpSocketState,
 	io: SockRef<'_>,
@@ -530,22 +462,18 @@ pub(super) fn send_individual_datagrams(
 			segment_size: None,
 			src_ip: transmit.src_ip,
 		};
-		#[cfg(apple_fast)]
-		send_single(state, io, &transmit)?;
-		#[cfg(not(apple_fast))]
 		send(state, io, &transmit)?;
 	}
 
 	Ok(())
 }
 
-#[cfg(any(target_os = "openbsd", target_os = "netbsd", apple_slow))]
+#[cfg(any(target_os = "openbsd", target_os = "netbsd", apple))]
 fn send(state: &UdpSocketState, io: SockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
 	send_single(state, io, transmit)
 }
 
 #[cfg(any(target_os = "openbsd", target_os = "netbsd", apple))]
-#[cfg_attr(apple_fast, allow(dead_code, reason = "unused when apple_fast is enabled"))]
 pub(crate) fn send_single(state: &UdpSocketState, io: SockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
 	let mut hdr: libc::msghdr = unsafe { mem::zeroed() };
 	let mut iov: libc::iovec = unsafe { mem::zeroed() };
@@ -610,7 +538,6 @@ fn recv_via_recvmmsg(io: SockRef<'_>, bufs: &mut [IoSliceMut<'_>], meta: &mut [R
 	solarish,
 	apple
 ))]
-#[cfg_attr(apple_fast, allow(dead_code, reason = "unused when apple_fast is enabled"))]
 pub(crate) fn recv_single(io: SockRef<'_>, bufs: &mut [IoSliceMut<'_>], meta: &mut [RecvMeta]) -> io::Result<usize> {
 	let mut name = MaybeUninit::<libc::sockaddr_storage>::uninit();
 	let mut ctrl = cmsg::Aligned(MaybeUninit::<[u8; cmsg::LEN]>::uninit());
@@ -628,7 +555,6 @@ pub(crate) fn recv_single(io: SockRef<'_>, bufs: &mut [IoSliceMut<'_>], meta: &m
 	Ok(1)
 }
 
-#[cfg_attr(apple_fast, allow(dead_code, reason = "unused when apple_fast is enabled"))]
 fn prepare_msg(
 	transmit: &Transmit<'_>,
 	dst_addr: &socket2::SockAddr,
@@ -672,10 +598,6 @@ fn prepare_msg(
 		encoder.push(libc::IPPROTO_IPV6, libc::IPV6_TCLASS, ecn);
 	}
 
-	// On apple_fast, prepare_msg is only compiled for send_single (fallback path), while the main
-	// send path uses prepare_msg_x with msghdr_x. gso::set_segment_size has a different signature
-	// when apple_fast is enabled, and it's a no-op on non-Linux platforms anyway.
-	#[cfg(not(apple_fast))]
 	if let Some(segment_size) = transmit.effective_segment_size() {
 		gso::set_segment_size(&mut encoder, segment_size as u16);
 	}
@@ -720,7 +642,6 @@ fn prepare_msg(
 	encoder.finish();
 }
 
-#[cfg_attr(apple_fast, allow(dead_code, reason = "unused when apple_fast is enabled"))]
 fn prepare_recv(
 	buf: &mut IoSliceMut<'_>,
 	name: &mut MaybeUninit<libc::sockaddr_storage>,
@@ -901,18 +822,13 @@ pub(crate) fn decode_socket_addr(name: &libc::sockaddr_storage) -> io::Result<So
 	}
 }
 
-#[cfg(not(apple_slow))]
+#[cfg(not(apple))]
 // Chosen somewhat arbitrarily; might benefit from additional tuning.
 pub(crate) const BATCH_SIZE: usize = 32;
 
-#[cfg(apple_slow)]
+#[cfg(apple)]
 pub(crate) const BATCH_SIZE: usize = 1;
 
-// On Apple platforms using the `sendmsg_x` call, UDP datagram segmentation is not
-// offloaded to the NIC or even the kernel, but instead done here in user space in
-// [`send`]) and then passed to the OS as individual `iovec`s (up to `BATCH_SIZE`).
-// The initial value is 1 (no batching); callers can enable batching via
-// `UdpSocketState::set_apple_fast_path()` which updates `max_gso_segments`.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 mod gso {
 	use super::*;
@@ -921,10 +837,8 @@ mod gso {
 		1
 	}
 
-	#[cfg_attr(apple_fast, allow(dead_code, reason = "unused when apple_fast is enabled"))]
-	pub(super) fn set_segment_size(
-		#[cfg(not(apple_fast))] _encoder: &mut cmsg::Encoder<'_, libc::msghdr>,
-		#[cfg(apple_fast)] _encoder: &mut cmsg::Encoder<'_, msghdr_x>,
+		pub(super) fn set_segment_size(
+		_encoder: &mut cmsg::Encoder<'_, libc::msghdr>,
 		_segment_size: u16,
 	) {
 	}
@@ -997,38 +911,6 @@ pub(crate) fn retry_if_interrupted(mut f: impl FnMut() -> isize) -> io::Result<i
 mod tests {
 	use super::*;
 	use std::{net::UdpSocket, sync::mpsc, thread};
-
-	#[test]
-	#[cfg(apple_fast)]
-	fn missing_apple_fast_symbol_preserves_pending_segments() {
-		let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-		let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-		receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-		let state = UdpSocketState::new((&sender).into()).unwrap();
-		// No private API is called: force symbol resolution to fail before sending.
-		unsafe { state.set_apple_fast_path() };
-		assert!(state.resolve_apple_fast_fn::<()>(|| None).is_none());
-		assert!(!state.is_apple_fast_path_enabled());
-		assert_eq!(state.max_gso_segments(), 1);
-		let contents = [1, 1, 1, 1, 2, 2, 2, 2, 3, 3];
-		state
-			.try_send(
-				(&sender).into(),
-				&Transmit {
-					destination: receiver.local_addr().unwrap(),
-					ecn: None,
-					contents: &contents,
-					segment_size: Some(4),
-					src_ip: None,
-				},
-			)
-			.unwrap();
-		let mut buffer = [0; 16];
-		for expected in contents.chunks(4) {
-			let len = receiver.recv(&mut buffer).unwrap();
-			assert_eq!(&buffer[..len], expected);
-		}
-	}
 
 	#[test]
 	fn recv_single_after_truncation_returns_would_block_instead_of_spin() {

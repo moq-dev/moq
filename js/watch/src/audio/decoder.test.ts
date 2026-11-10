@@ -369,7 +369,6 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		stats: () => decoder.out.stats.peek(),
 		timestamp: () => decoder.out.timestamp.peek(),
 		feedback: () => decoder.feedback(Moq.Path.from("watched")),
-		arrivals: () => decoder.arrivals(),
 		error: decoder.out.error,
 		play,
 		// Remove the rendition from the catalog, then restore it.
@@ -478,26 +477,12 @@ it("decodes an audio packet inside a group after a gap", async () => {
 	const playback = await play(Duration.millis(100));
 	try {
 		await playback.play();
-		// Opened late, so it observes only the gap and frame below.
-		const arrivals = playback.arrivals();
 		playback.push({ kind: "gap", timestamp: Duration.micros(20_000), duration: Duration.micros(40_000) });
 		const next = frame();
 		next.frame.keyframe = false;
 		playback.push(next);
 		await microtasks();
 		expect(playback.inserted()).toContain(next.frame.timestamp.asMicros());
-		expect(await arrivals.next()).toEqual({
-			kind: "gap",
-			timestamp: Duration.millis(20),
-			duration: Duration.millis(40),
-		});
-		expect(await arrivals.next()).toMatchObject({
-			kind: "frame",
-			timestamp: next.frame.timestamp,
-			arrival: next.frame.arrival,
-		});
-		arrivals.close();
-		expect(await arrivals.next()).toBeUndefined();
 	} finally {
 		playback.close();
 		await microtasks();
@@ -1252,7 +1237,6 @@ async function livePlayback(burst: number) {
 	return {
 		sync,
 		error: decoder.out.error,
-		arrivals: () => decoder.arrivals(),
 		// Lose one whole group without changing the following media timestamps or arrival cadence.
 		async hole() {
 			if (held.length) throw new Error("a hole needs an empty delivery burst");
@@ -1327,11 +1311,6 @@ it("a missing live group re-primes without clearing decoded PCM or resetting Syn
 	const playback = await livePlayback(1);
 	const reset = spyOn(playback.sync, "reset");
 	const prime = spyOn(AudioDecoder.prototype, "reset");
-	const arrivals = playback.arrivals();
-	const received: { kind: string }[] = [];
-	const reading = (async () => {
-		for await (const arrival of arrivals) received.push(arrival);
-	})();
 	try {
 		await playback.run(1000);
 		const ring = playback.ring();
@@ -1340,15 +1319,12 @@ it("a missing live group re-primes without clearing decoded PCM or resetting Syn
 		await playback.hole();
 		expect(ring?.length).toBe(buffered);
 		await playback.run(2000);
-		expect(received.some((arrival) => arrival.kind === "gap")).toBe(true);
 		expect(prime).toHaveBeenCalledTimes(1);
 		expect(reset).not.toHaveBeenCalled();
 		expect(playback.ring()).toBe(ring);
 		expect(ring?.stalled).toBe(false);
 		expect(playback.error.peek()).toBeUndefined();
 	} finally {
-		arrivals.close();
-		await reading;
 		await playback.close();
 	}
 });

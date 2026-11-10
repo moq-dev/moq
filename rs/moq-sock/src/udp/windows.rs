@@ -127,28 +127,6 @@ impl UdpSocketState {
 		})
 	}
 
-	/// Enable or disable receive offloading.
-	///
-	/// Also referred to as UDP Receive Segment Coalescing Offload (URO) on Windows.
-	///
-	/// <https://learn.microsoft.com/en-us/windows-hardware/drivers/network/udp-rsc-offload>
-	///
-	/// Disabled by default on Windows due to <https://github.com/quinn-rs/quinn/issues/2041>.
-	pub fn set_gro(&self, socket: UdpSockRef<'_>, enable: bool) -> io::Result<()> {
-		set_socket_option(
-			&*socket.0,
-			WinSock::IPPROTO_UDP,
-			WinSock::UDP_RECV_MAX_COALESCED_SIZE,
-			match enable {
-				// u32 per
-				// https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-udp-socket-options.
-				// Choice of 2^16 - 1 inspired by msquic.
-				true => u16::MAX as u32,
-				false => 0,
-			},
-		)
-	}
-
 	/// Sends a [`Transmit`] on the given socket without any additional error handling.
 	pub fn try_send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
 		send(socket, transmit, self.ecn_v4_supported, self.ecn_v6_supported)

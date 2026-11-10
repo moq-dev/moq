@@ -121,11 +121,6 @@ qmux-bench:
     bunx tsc --noEmit --project net/bench/tsconfig.json
     bun net/bench/qmux.ts
 
-# Sweep open arrival handles against their unread backlog.
-arrivals-bench:
-    uv run --no-project python ../sh/js/install.py frozen
-    bun watch/bench/arrivals.ts
-
 # Reduce and compare the worst known peer grant shapes, swept over AUTH_OK size.
 pattern-bench:
     uv run --no-project python ../sh/js/install.py frozen

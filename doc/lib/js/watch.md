@@ -215,30 +215,6 @@ leave the connection's estimate unclaimed. Without a claim, video selects the be
 `video.target` allows. To stop the relay probing while still adapting, keep the claim and call
 `connection.viewers.setTarget(0)`.
 
-To chart when each audio frame arrived against when it plays, open an
-`arrivals()` handle on the audio decoder. It yields every frame received while it is open, stamped
-when the frame came off the transport, and a gap wherever media after an earlier
-frame will never arrive (a latency skip, a hole):
-
-```ts
-const arrivals = player.audio.arrivals();
-for await (const entry of arrivals) {
-    if (entry.kind === "gap") {
-        // Break the plotted line; nothing arrived from `timestamp` for `duration`.
-        continue;
-    }
-    const { timestamp, arrival, late } = entry;
-    // `late`: arrived after its playback deadline.
-}
-```
-
-A gap's span is an upper bound: without per-frame durations it starts at the
-last frame's timestamp, and it covers any pause the publisher declared.
-
-Unread frames queue on the handle, so keep reading and keep your own window.
-Leaving the loop or calling `arrivals.close()` stops observing and releases
-them; nothing is retained without an open handle.
-
 ## Buffered playback
 
 By default the player minimizes latency: it time-stretches received audio

@@ -12,10 +12,6 @@ rust-version.workspace = true
 keywords = ["quic", "networking", "reuseport"]
 categories = ["network-programming"]
 
-[features]
-# Batch `udp` sends and receives through Apple's private sendmsg_x/recvmsg_x.
-fast-apple-datapath = []
-
 [dependencies]
 arc-swap = "1.9"
 core_affinity = "0.8"

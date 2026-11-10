@@ -7,19 +7,10 @@
 mod guid;
 mod version;
 
-// The bindgen output is plain C-ABI type/enum/fn-pointer definitions, so the
-// "linux" bindings compile on any non-Windows target. On macOS the crate only
-// needs to compile (NVENC is never actually loaded there), so reuse them.
+// The bindgen output is plain C-ABI type/enum/fn-pointer definitions generated
+// for Linux, the only target that loads the driver. They compile on every
+// target, so the crate builds elsewhere as a stub that never loads NVENC.
 #[allow(warnings, reason = "bindgen output")]
 #[rustfmt::skip]
-#[cfg(not(target_os = "windows"))]
 mod linux_sys;
-#[cfg(not(target_os = "windows"))]
 pub use linux_sys::*;
-
-#[allow(warnings, reason = "bindgen output")]
-#[rustfmt::skip]
-#[cfg(target_os = "windows")]
-mod windows_sys;
-#[cfg(target_os = "windows")]
-pub use windows_sys::*;

@@ -154,7 +154,6 @@ macos-test:
     source sh/checks.sh
     run just rs test --manifest-path rs/moq-auth/Cargo.toml
     run just rs test -p kio -p hang -p moq-tokio -p moq-sock
-    run just rs test -p moq-sock --features fast-apple-datapath
     run just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
     # Runner has no camera; these tests need none.
     run just rs test -p moq-video --no-default-features --features capture -E 'test(/^capture::avfoundation::tests::/)'

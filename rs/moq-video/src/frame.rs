@@ -660,16 +660,6 @@ impl Surface {
 		crate::convert::rgba(self, config)
 	}
 
-	/// Convert to owned, tightly packed BGRA8 pixels on the CPU.
-	///
-	/// The same conversion as [`to_rgba`](Self::to_rgba) with red and blue
-	/// exchanged. Reach for it when the destination wants that order, which is
-	/// most of them: GPUI's `RenderImage`, Direct2D, and Win32 generally. Doing
-	/// it here is one pass over the frame; converting to RGBA and swapping the
-	/// channels afterwards is two.
-	pub fn to_bgra(&self, config: &crate::convert::Config) -> Result<crate::convert::Bgra, Error> {
-		crate::convert::bgra(self, config)
-	}
 
 	/// The pixels as a CoreVideo pixel buffer, the mirror of
 	/// [`into_i420`](Self::into_i420) pointing the other way.

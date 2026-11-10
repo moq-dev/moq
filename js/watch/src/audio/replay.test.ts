@@ -209,35 +209,6 @@ describe("replay at auto", () => {
 	});
 });
 
-describe("ingress diagnostics", () => {
-	it("keeps recorded arrival and lateness when delivery is held", async () => {
-		const trace = [0, 20, 40].map((timestamp) => ({ timestamp, at: timestamp + 1000, group: 0, duration: 20 }));
-		const run = async (decodeAfter?: number) => {
-			let window: Quantum["arrivals"] = [];
-			for await (const quantum of replay(trace, {
-				rate: RATE,
-				config: CONFIG,
-				delay: Duration.millis(100),
-				duration: 300,
-				decodeAfter,
-			}))
-				window = quantum.arrivals;
-			return window;
-		};
-		const direct = await run();
-		const held = await run(1200);
-		expect(held).toEqual(direct);
-		expect(held).toEqual(
-			trace.map((entry) => ({
-				kind: "frame" as const,
-				timestamp: Duration.millis(entry.timestamp),
-				arrival: Instant.ZERO.saturatingAdd(Duration.millis(entry.at)),
-				late: false,
-			})),
-		);
-	});
-});
-
 describe("recorded frame durations", () => {
 	it("keeps missing packets out of the codec term even when most packets are absent", async () => {
 		const trace = Array.from({ length: 600 }, (_, i) => ({
