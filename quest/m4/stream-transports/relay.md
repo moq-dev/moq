@@ -15,7 +15,7 @@ relay serves `listen`'s `tcp`/`unix` listeners beside it from the shared tokio
 runtime, through `init_streams` (`rs/moq-relay/src/relay.rs`). Move the TCP
 listeners onto the workers: each worker binds its own listener in the
 reuseport group and runs the router from
-[ring TCP](/quest/m4/perf/stream/ring.md) on it. A Unix socket has no reuseport
+[ring TCP](/quest/m4/stream-transports/ring.md) on it. A Unix socket has no reuseport
 group, so a `unix` listener keeps its one shared acceptor; the integration
 test covers it too.
 
@@ -41,5 +41,5 @@ worker.
 
 ## Required
 
-- [Ring TCP](/quest/m4/perf/stream/ring.md) - the module and adapters this
+- [Ring TCP](/quest/m4/stream-transports/ring.md) - the module and adapters this
   serves from

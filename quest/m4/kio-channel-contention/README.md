@@ -112,7 +112,7 @@ Decided (maintainer, 2026-10-14):
   an append-only log primitive with front eviction
   (Append-only log (`kio::log`)), which
   much of moq-net could adopt
-  ([Log adoption](/quest/m4/perf/kio-channel-contention/log-adoption.md)).
+  ([Log adoption](/quest/m4/kio-channel-contention/log-adoption.md)).
 - Rejected, so later sessions don't re-propose them:
   - Left-right (two copies, writer swaps the active one): before reusing the
     old copy the writer must see every reader leave it, an O(consumers) scan
@@ -220,7 +220,7 @@ landing the end-state storage once. So the log moved to m1, ahead of Front
 eviction, scoped to `GroupState`'s frames with the above as its expected
 win, and no longer waits on the spikes: they change how much it wins, not
 the storage Front eviction needs. `TrackState` arrival order moved to
-[Log adoption](/quest/m4/perf/kio-channel-contention/log-adoption.md), which
+[Log adoption](/quest/m4/kio-channel-contention/log-adoption.md), which
 waited on them until both reported (below).
 A 2026-10-22 staging CDN chat profile (default tokio runtime, `f57c0aad`,
 DWARF stacks, 36% incomplete) put waiter registration at 1.97% self-time, the
@@ -470,5 +470,5 @@ Decided (maintainer, 2026-11-01, cluster spike):
 
 ## Required
 
-- [Plan relay-per-thread on a worker mesh that never re-announces](/quest/m4/perf/kio-channel-contention/relay-per-thread.md) - measure no-re-announce, weigh it against per-track replicas, and decide whether log adoption waits on it
-- [Log adoption](/quest/m4/perf/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win
+- [Plan relay-per-thread on a worker mesh that never re-announces](/quest/m4/kio-channel-contention/relay-per-thread.md) - measure no-re-announce, weigh it against per-track replicas, and decide whether log adoption waits on it
+- [Log adoption](/quest/m4/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win

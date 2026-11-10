@@ -7,7 +7,7 @@ one cluster per worker thread linked by a mesh that never re-announces peer
 routes to peers. It weighs that design against the replica spike's
 per-track replicas, sets how routes from outside the relay reach every
 worker, measures announce state and propagation with no-re-announce, and
-decides whether [Log adoption](/quest/m4/perf/kio-channel-contention/log-adoption.md)
+decides whether [Log adoption](/quest/m4/kio-channel-contention/log-adoption.md)
 waits on it.
 
 ## Plan
