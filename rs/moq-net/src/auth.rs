@@ -1129,10 +1129,9 @@ impl Link {
 		});
 	}
 
-	/// Record an AUTH_OK for the token as the driver does: on its stream, opened first if it
-	/// is still queued.
+	/// Open the token's stream as the driver does, if it is still queued.
 	#[cfg(test)]
-	pub(crate) fn grant(&self, id: u64, grant: Grant) {
+	pub(crate) fn open(&self, id: u64) {
 		self.with(|link| {
 			if let Some(slot) = link.slots.get_mut(&id)
 				&& let Phase::Queued { backoff } = slot.phase
@@ -1141,6 +1140,13 @@ impl Link {
 				slot.phase = Phase::Pending { backoff };
 			}
 		});
+	}
+
+	/// Record an AUTH_OK for the token as the driver does: on its stream, opened first if it
+	/// is still queued.
+	#[cfg(test)]
+	pub(crate) fn grant(&self, id: u64, grant: Grant) {
+		self.open(id);
 		self.granted(id, grant);
 	}
 
@@ -1237,11 +1243,7 @@ impl Link {
 			// token: that session's own answer decides, even mid-retry with no grant right now.
 			let superseded = !attached(&mut state.links, link_id).active()
 				&& state.links.iter().any(|(other, link)| {
-					*other != link_id
-						&& link.active() && link
-						.slots
-						.get(&id)
-						.is_some_and(|slot| slot.phase.live())
+					*other != link_id && link.active() && link.slots.get(&id).is_some_and(|slot| slot.phase.live())
 				});
 			// A handle of the session's own has no next session to present it, so any end is final.
 			let bound = state.bound;
@@ -1412,7 +1414,8 @@ impl Link {
 			link.opening.clear();
 			let requests = link.requests;
 			// Nothing will read a withdrawn slot again.
-			link.slots.retain(|_, slot| !matches!(slot.phase, Phase::Withdrawn { .. }));
+			link.slots
+				.retain(|_, slot| !matches!(slot.phase, Phase::Withdrawn { .. }));
 			let mut answers = Vec::new();
 			for (id, slot) in &mut link.slots {
 				let answer = match requests {
@@ -1647,7 +1650,6 @@ impl Selector {
 			Self::Setup { link, id } => match state.links.get(&link).and_then(|link| link.slots.get(&id)) {
 				Some(slot) => slot.phase.ended().cloned(),
 				None => Some(Error::Cancel),
-
 			},
 		}
 	}

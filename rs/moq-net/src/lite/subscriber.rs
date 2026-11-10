@@ -10588,7 +10588,6 @@ enum PipelinedState {
 }
 
 impl Pipelined {
-
 	/// Drive the SUBSCRIBE onto the wire; its responses wait for the accept. Only a failure
 	/// to send it is ready.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
@@ -11921,7 +11920,6 @@ impl ServeLoop {
 			return Poll::Pending;
 		};
 		settle.poll(waiter, |tail| {
-
 			owed.as_ref()
 				.is_some_and(|owed| owed.iter().all(|owed| tail.covers(owed.clone())))
 		})

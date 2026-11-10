@@ -3132,7 +3132,6 @@ impl Subscriber {
 	) -> Option<Idle> {
 		let mut once = SubscribeOnce::new(self, broadcast_path, track_name, target, gate)?;
 		kio::wait(|waiter| once.poll(waiter, self, broadcast_path, track_name, group_fetches)).await
-
 	}
 }
 
@@ -3946,7 +3945,9 @@ impl SubscribeOnce {
 					Poll::Ready(peer) => self.write(this, broadcast_path, track_name, target, req, held, peer),
 					Poll::Pending => Flow::Wait(OnceStep::Write { target, req, held }),
 				},
-				OnceStep::Answer(answering) => self.answer(waiter, this, broadcast_path, track_name, group_fetches, answering),
+				OnceStep::Answer(answering) => {
+					self.answer(waiter, this, broadcast_path, track_name, group_fetches, answering)
+				}
 				OnceStep::Abandon {
 					mut cancelling,
 					resumed,
@@ -3985,22 +3986,24 @@ impl SubscribeOnce {
 						shared.poll(waiter);
 					}
 					match self.poll_end(waiter, this, group_fetches, &mut serving) {
-						Poll::Ready(end) => match self.ended(this, broadcast_path, track_name, group_fetches, &mut serving, end) {
-							Served::Continue => Flow::Next(OnceStep::Serve(serving)),
-							Served::Ended(ending) => self.finish(this, serving, ending),
-							Served::Settle {
-								settle,
-								fill,
-								count,
-								end,
-							} => Flow::Next(OnceStep::Settle {
-								serving,
-								settle,
-								fill,
-								count,
-								end,
-							}),
-						},
+						Poll::Ready(end) => {
+							match self.ended(this, broadcast_path, track_name, group_fetches, &mut serving, end) {
+								Served::Continue => Flow::Next(OnceStep::Serve(serving)),
+								Served::Ended(ending) => self.finish(this, serving, ending),
+								Served::Settle {
+									settle,
+									fill,
+									count,
+									end,
+								} => Flow::Next(OnceStep::Settle {
+									serving,
+									settle,
+									fill,
+									count,
+									end,
+								}),
+							}
+						}
 						Poll::Pending => Flow::Wait(OnceStep::Serve(serving)),
 					}
 				}
@@ -4347,9 +4350,7 @@ impl SubscribeOnce {
 		mut answering: Answering,
 	) -> Flow {
 		let _ = group_fetches.poll(waiter);
-		let Answering {
-			req, held, resumed, ..
-		} = &mut answering;
+		let Answering { req, held, resumed, .. } = &mut answering;
 		let response = match req.stream.writer.poll_flush(waiter) {
 			Poll::Ready(Ok(())) => this.poll_read_answer(waiter, &mut req.stream, &mut req.messages, held.as_mut()),
 			Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
@@ -4378,11 +4379,7 @@ impl SubscribeOnce {
 				// A session abort drained the subscription, and the copy with it.
 				Some(_) if !state.subscribes.contains_key(&req.id) => Poll::Ready(AnswerWait::Gone),
 				Some(idle) => crate::util::poll_unwanted(&mut idle.demand, waiter).map(|()| AnswerWait::Unused),
-				None => match state
-					.subscribes
-					.get_mut(&req.id)
-					.and_then(|held| held.pending.as_mut())
-				{
+				None => match state.subscribes.get_mut(&req.id).and_then(|held| held.pending.as_mut()) {
 					None => Poll::Ready(AnswerWait::Gone),
 					Some(pending) => {
 						crate::util::poll_unwanted(&mut pending.demand(), waiter).map(|()| AnswerWait::Unused)
@@ -4435,9 +4432,7 @@ impl SubscribeOnce {
 			track = %track_name,
 			"subscribe abandoned before it was accepted"
 		);
-		let Answering {
-			req, held, resumed, ..
-		} = answering;
+		let Answering { req, held, resumed, .. } = answering;
 		// A held subscription is still the track's entry: pause it again, owing the
 		// answer to the resume as well.
 		if let Some(held) = held
@@ -4722,7 +4717,6 @@ impl SubscribeOnce {
 		Flow::Next(OnceStep::Serve(Serving { req, live }))
 	}
 
-
 	/// The event that ends or updates the Established subscription.
 	fn poll_end(
 		&mut self,
@@ -4955,7 +4949,6 @@ impl SubscribeOnce {
 			state.fetches.insert(update_id, FillRequest::Update(request_id));
 		}
 		Poll::Ready(ServeEnd::Update(update_id, update, bounds))
-
 	}
 
 	/// Act on an event of the Established subscription.
@@ -5084,7 +5077,13 @@ impl SubscribeOnce {
 	}
 
 	/// The publisher's end, its data streams accounted for, reaches the copy.
-	fn settled(&mut self, this: &Subscriber, mut serving: Serving, fill: kio::Producer<Fill>, end: Result<(), Error>) -> Flow {
+	fn settled(
+		&mut self,
+		this: &Subscriber,
+		mut serving: Serving,
+		fill: kio::Producer<Fill>,
+		end: Result<(), Error>,
+	) -> Flow {
 		// No tail is coming for the head. Only TRACK_ENDED makes it the whole group, even one
 		// that lands after this. Any other end leaves the group open upstream, so the head is
 		// cut short rather than passed off as the whole group.
@@ -9504,7 +9503,7 @@ mod tests {
 		let log = session.log.clone();
 		let auth = crate::auth::Link::new(true);
 		let setup = auth.present(bytes::Bytes::new(), true).unwrap();
-		auth.granted(setup.id(), crate::auth::Grant::default());
+		auth.grant(setup.id(), crate::auth::Grant::default());
 		let unanswered = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		let subscriber = Subscriber::new(
@@ -9669,7 +9668,7 @@ mod tests {
 	fn revocable_auth() -> (crate::auth::Link, crate::auth::Credential) {
 		let auth = crate::auth::Link::new(true);
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
-		auth.granted(0, crate::auth::Grant::all());
+		auth.grant(0, crate::auth::Grant::all());
 		(auth, cred)
 	}
 
@@ -12452,7 +12451,7 @@ mod tests {
 		let auth = crate::auth::Link::new(true);
 		let requests = auth.handle().requests();
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
-		auth.granted(
+		auth.grant(
 			0,
 			crate::auth::Grant {
 				publish: crate::Patterns::new(),
@@ -12727,7 +12726,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Link::new(true);
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
-		auth.granted(0, crate::auth::Grant::all());
+		auth.grant(0, crate::auth::Grant::all());
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth);
 		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
