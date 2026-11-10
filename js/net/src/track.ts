@@ -1414,7 +1414,7 @@ export class Producer {
 		const limit = land.grace;
 		const drops = this.#state.drops;
 		for (const gap of this.#arrivals.gaps(start, end)) {
-			const folds = gap.since?.add(limit);
+			const folds = gap.since?.saturatingAdd(limit);
 			if (folds !== undefined && at.ge(folds)) continue;
 			for (const open of runGaps(drops.overlapping(gap.start, gap.end), gap.start, gap.end)) {
 				yield { ...open, folds };
@@ -2708,7 +2708,7 @@ export class Subscriber {
 		wall.timer?.abort();
 		const timer = new AbortController();
 		// A staleness wakeup is never a reason to hold a Node/Bun process open.
-		void sleepUntil(Instant.ZERO.add(Duration.nanos(at)), { signal: timer.signal, ref: false }).then(
+		void sleepUntil(Instant.ZERO.saturatingAdd(Duration.nanos(at)), { signal: timer.signal, ref: false }).then(
 			() => {
 				if (timer.signal.aborted) return;
 				wall.timer = undefined;

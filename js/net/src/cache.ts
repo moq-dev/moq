@@ -197,7 +197,7 @@ export class Pool {
 		if (this.#sweep !== undefined || this.#expiry === undefined || this.#tracks.size === 0) return;
 		const sweep = new AbortController();
 		this.#sweep = sweep;
-		const at = now().add(TICK.mul(this.#expiry / 2));
+		const at = now().saturatingAdd(TICK.mul(this.#expiry / 2));
 		void sleepUntil(at, { signal: sweep.signal, ref: false }).then(
 			() => {
 				if (this.#sweep !== sweep) return;

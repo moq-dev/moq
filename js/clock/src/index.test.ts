@@ -33,7 +33,7 @@ function manual(): Manual {
 // Read an instant or wall time as a plain number for assertions.
 const ns = (at: Instant): number => at.since(Instant.ZERO).asNanos();
 const ms = (at: Wall): number => at.asUnixMillis();
-const instant = (nanos: number): Instant => Instant.ZERO.add(Duration.nanos(nanos));
+const instant = (nanos: number): Instant => Instant.ZERO.saturatingAdd(Duration.nanos(nanos));
 const unix = (millis: number): Wall => Wall.unixMillis(millis);
 const START = ms(Manual.WALL_START);
 
@@ -46,7 +46,6 @@ test("durations convert units and refuse to become numbers", () => {
 	expect(() => Duration.millis(Number.POSITIVE_INFINITY)).toThrow(RangeError);
 	expect(() => instant(Number.NaN)).toThrow(RangeError);
 	expect(() => Duration.millis(1).sub(Duration.millis(2))).toThrow(RangeError);
-	expect(() => Instant.ZERO.sub(Duration.nanos(1))).toThrow(RangeError);
 	expect(Duration.millis(1).saturatingSub(Duration.millis(2)).isZero()).toBe(true);
 	expect(instant(5).since(instant(9)).isZero()).toBe(true);
 	expect(`${Duration.micros(1500)}`).toBe("1.5ms");
@@ -66,6 +65,23 @@ test("durations convert units and refuse to become numbers", () => {
 		// @ts-expect-error a duration does not convert to a number
 		void (Duration.millis(1) as number);
 	}
+});
+
+test("moving past either end of a range is checked or saturates", () => {
+	// Past the longest duration, a nanosecond count is no longer finite.
+	const longest = Duration.secs(Number.MAX_VALUE);
+	expect(Instant.ZERO.checkedSub(Duration.nanos(1))).toBeUndefined();
+	expect(instant(5).saturatingSub(Duration.nanos(9))).toEqual(Instant.ZERO);
+	expect(instant(5).checkedSub(Duration.nanos(5))).toEqual(Instant.ZERO);
+	expect(instant(5).checkedAdd(Duration.nanos(4))).toEqual(instant(9));
+	expect(Instant.ZERO.checkedAdd(longest)).toBeUndefined();
+	const last = Instant.ZERO.saturatingAdd(longest);
+	expect(last.gt(instant(Number.MAX_SAFE_INTEGER))).toBe(true);
+	expect(last.saturatingAdd(Duration.nanos(1))).toEqual(last);
+	expect(longest.checkedAdd(longest)).toBeUndefined();
+	expect(longest.saturatingAdd(longest).ge(longest)).toBe(true);
+	expect(Duration.secs(1).checkedAdd(Duration.millis(1))).toEqual(Duration.millis(1001));
+	expect(Duration.secs(1).saturatingAdd(Duration.millis(1))).toEqual(Duration.millis(1001));
 });
 
 test("durations keep a whole count of any unit exact past 2^53 ns", () => {
