@@ -1254,6 +1254,17 @@ export function spreadHash(path: string, instance: string): bigint {
 }
 
 /**
+ * The draft's Rendezvous Hash: FNV-1a 64 of `path` then the origin's Node ID as 8 little-endian
+ * bytes, so every node that knows the same lite-07 claims ranks them alike. Mirrors the node key
+ * of `route_order` in `rs/moq-net`.
+ */
+export function rendezvousHash(path: string, node: bigint): bigint {
+	const bytes: number[] = [];
+	for (let shift = 0n; shift < 64n; shift += 8n) bytes.push(Number((node >> shift) & 0xffn));
+	return fnv(path, bytes);
+}
+
+/**
  * Settles among one instance's routes: FNV-1a 64 of `path` then each hop, oldest first, as 8
  * little-endian bytes. Mirrors `chain_key` in `rs/moq-net`.
  */
@@ -1316,22 +1327,31 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 	const last = (route: WireRoute) => Number((route.draining ?? false) || route.available === false);
 	return (
 		last(a) - last(b) ||
-		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
+		Number(a.node === undefined && isAnonymous(a)) - Number(b.node === undefined && isAnonymous(b)) ||
 		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
 	);
 }
 
 /**
  * Order eligible routes at `prefix` resolving `path` by preference, hop count, then the spread
- * hash of each instance, then, within one instance, the hash of its chain. The hashes only
- * spread a prefix's paths: at the prefix itself a tie is left for the newest to win, so a
- * publisher that restarts under a new instance takes over from its lingering session at once,
- * matching `route_order` in rs/moq-net for routes a node did not get from a cluster peer, which
- * is every route here.
+ * hash of each instance, then, within one instance, the hash of its chain. A lite-07 route counts
+ * as the one hop to its origin node, and ranks by the rendezvous hash of that node instead. The
+ * hashes only spread a prefix's paths: at the prefix itself a tie is left for the newest to win,
+ * so a publisher that restarts under a new instance takes over from its lingering session at
+ * once, matching `route_order` in rs/moq-net for routes a node did not get from a cluster peer,
+ * which is every route here.
  */
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
-	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
+	const hops = (route: WireRoute) => (route.node !== undefined ? 1 : route.hops.length);
+	const order = compareRoutes(a, b) || hops(a) - hops(b);
 	if (order !== 0 || path === prefix) return order;
+	if (a.node !== undefined || b.node !== undefined) {
+		// Rust keys a lite-07 claim by its node and every other by its instance and chain, which
+		// never meet on one session: compare by node where both have one.
+		const ra = a.node !== undefined ? rendezvousHash(path, a.node) : 0n;
+		const rb = b.node !== undefined ? rendezvousHash(path, b.node) : 0n;
+		return ra < rb ? -1 : ra > rb ? 1 : 0;
+	}
 	const ha = spreadHash(path, a.instance ? Instance.text(a.instance) : "");
 	const hb = spreadHash(path, b.instance ? Instance.text(b.instance) : "");
 	if (ha !== hb) return ha < hb ? -1 : 1;

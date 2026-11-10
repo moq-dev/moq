@@ -238,7 +238,7 @@ async fn run(relay: bool, js_publishes: bool) {
 }
 
 #[tokio::test]
-#[ignore = "JS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md"]
+#[ignore = "requires Bun; run by just test datagram-tracks in the interop workflow"]
 async fn datagram_tracks_javascript() {
 	for relay in [false, true] {
 		for js_publishes in [false, true] {

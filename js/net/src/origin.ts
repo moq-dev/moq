@@ -33,6 +33,7 @@ import {
 } from "./internal.ts";
 import * as Path from "./path.ts";
 import { Front } from "./resume.ts";
+import { Own } from "./route.ts";
 import { closeUnwanted } from "./util/announce.ts";
 import {
 	type Advertised,
@@ -114,6 +115,11 @@ class Scope {
 			else if (Path.hasPrefix(head, relative) && this.overlaps(absolute)) return [relative];
 		}
 		return out;
+	}
+
+	/** Whether this scope allows everything beneath the root-relative `prefix`. */
+	covers(prefix: Path.Valid): boolean {
+		return this.allowed?.contains(Path.Pattern.subtree(Path.encode(Path.join(this.root, prefix)))) ?? true;
 	}
 
 	/** Whether this scope allows anything beneath the absolute `prefix`. */
@@ -614,6 +620,9 @@ class OriginState {
 	// republish diffs as retract-then-announce and a re-price as another active.
 	originated = new Signal<Advertisements | undefined>(new Map());
 
+	// The lite-07 route identity every session originates these advertisements under.
+	own = new Own(() => this.originated.peek());
+
 	// Every open prefix route's server, advertised or not, so the origin's close ends each
 	// handler loop even for a route that is hidden or withdrawn.
 	servers = new Set<ServeState>();
@@ -840,15 +849,14 @@ class OriginState {
 	reroute(path: Path.Valid, slot: RequestSlot): void {
 		if (this.retained.has(slot)) return;
 		const current = slot.route.peek();
-		// Until it resolves, a pinned slot takes the best route of its instance; then it stays on
-		// that instance, like any detached slot.
+		// A pinned slot follows its instance from the start, and a detached one once it resolved.
 		if (slot.pin !== undefined && !(current?.front && current.source)) {
-			this.pick(path, slot, slot.pin);
+			this.follow(path, slot, slot.pin, undefined);
 			return;
 		}
 		if (current?.front && current.source) {
 			if (this.detached.get(path)?.has(slot)) {
-				this.failover(path, slot, current.source, current.instance);
+				this.follow(path, slot, current.instance, current.source);
 				return;
 			}
 			if (!this.serves(path, current.source, current.instance, false)) {
@@ -866,52 +874,24 @@ class OriginState {
 	}
 
 	/**
-	 * Keep a detached slot on its instance: on its own source while that serves, else on another
-	 * route of the same instance, which serves the same bytes, keeping the old front until that one
-	 * answers. Without such a route the slot ends.
+	 * Keep `slot` on `instance` through its cheapest route, as Rust's lookup does whichever
+	 * instance wins `path`: a local broadcast announced under it, else its best route, each serving
+	 * the same bytes. A move to a route that has not answered yet keeps the front `source` gave
+	 * until it does. Without a route a resolved slot ends, and an unresolved one waits, its handles
+	 * ending once discovery syncs. Without an instance, nothing says another source serves the same
+	 * bytes, so the slot stays on `source` until it stops serving.
 	 */
-	failover(path: Path.Valid, slot: RequestSlot, source: object, instance: Instance.Valid | undefined): void {
-		if (this.serves(path, source, instance, true)) {
-			// Its own source serves again: a takeover still pending speaks for nobody.
-			slot.failover = undefined;
-			return;
-		}
-		// A local broadcast announced under the instance serves the same bytes with no round trip.
-		const local = this.local.peek()?.get(path);
-		if (instance !== undefined && local && this.advertisedLocal.peek()?.get(path)?.instance === instance) {
-			slot.failover = undefined;
-			this.retain(path, slot, undefined);
-			slot.route.set({ front: local, instance, source: local });
-			return;
-		}
-		const entry =
-			instance === undefined
-				? undefined
-				: this.bestEntry(
-						path,
-						(candidate) => !candidate.server || candidate.route.peek().instance !== instance,
-					);
-		if (!entry?.server) {
+	follow(
+		path: Path.Valid,
+		slot: RequestSlot,
+		instance: Instance.Valid | undefined,
+		source: object | undefined,
+	): void {
+		if (instance === undefined) {
+			if (source && this.serves(path, source, instance, true)) return;
 			this.drop(path, slot, unroutable());
 			return;
 		}
-		const served = entry.server.served.get(path);
-		if (!served || served.closed.peek() !== undefined) {
-			slot.failover = entry;
-			entry.server.enqueue(path);
-			return;
-		}
-		slot.failover = undefined;
-		this.retain(path, slot, served);
-		slot.route.set({ front: served, instance, source: entry.identity });
-	}
-
-	/**
-	 * Resolve a pinned slot that has not resolved yet through the best route of `instance` alone,
-	 * as Rust's lookup does, whichever instance wins `path`. Without one it waits, and its handles
-	 * end once discovery syncs.
-	 */
-	pick(path: Path.Valid, slot: RequestSlot, instance: Instance.Valid): void {
 		const skip = (candidate: RouteEntry) => !candidate.server || candidate.route.peek().instance !== instance;
 		const entry = this.bestEntry(path, skip);
 		const local = this.local.peek()?.get(path);
@@ -921,13 +901,20 @@ class OriginState {
 			this.localWins(path, entry, skip)
 		) {
 			slot.failover = undefined;
+			if (source === local) return;
 			this.retain(path, slot, undefined);
 			slot.route.set({ front: local, instance, source: local });
 			return;
 		}
 		if (!entry?.server) {
 			slot.failover = undefined;
-			slot.route.set(undefined);
+			if (source) this.drop(path, slot, unroutable());
+			else slot.route.set(undefined);
+			return;
+		}
+		if (entry.identity === source) {
+			// Already on the cheapest: a takeover still pending speaks for nobody.
+			slot.failover = undefined;
 			return;
 		}
 		const served = entry.server.served.get(path);
@@ -935,7 +922,7 @@ class OriginState {
 			// Held by the slot, so the pending request outlives a forget.
 			slot.failover = entry;
 			entry.server.enqueue(path);
-			slot.route.set({ instance });
+			if (!source) slot.route.set({ instance });
 			return;
 		}
 		slot.failover = undefined;
@@ -2107,6 +2094,8 @@ export class Consumer implements Reader {
 					: new Derived([state.originated], (routes) => scope.projectRoutes(routes)),
 			local: (path, instance) => this.#local(scope.path(path), instance),
 			demand: (path, instance, signal) => this.#demand(scope.path(path), instance, signal),
+			own: state.own,
+			covers: (prefix) => scope.covers(prefix),
 		});
 	}
 
@@ -2329,7 +2318,7 @@ export class Consumer implements Reader {
 				this.#state.detached.set(path, detached);
 			}
 			detached.add(created);
-			this.#state.pick(path, created, pin);
+			this.#state.follow(path, created, pin, undefined);
 		} else if (!slot) {
 			// Seeded through the constructor, so a path the table already routes resolves on the
 			// first read. It must not go through a silent set: that still captures the pre-seed

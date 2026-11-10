@@ -19,7 +19,7 @@ import {
 	TimestampMismatch,
 } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
-import { HopSchema, isAnonymous, MAX_HOPS, UNKNOWN_HOP, WireRoute } from "../hop.ts";
+import { type Hop, HopSchema, isAnonymous, MAX_HOPS, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
@@ -30,7 +30,14 @@ import type { Producer } from "../track.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
 import * as Varint from "../varint.ts";
-import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
+import {
+	type AnnounceBroadcast,
+	AnnounceInit,
+	AnnounceOk,
+	AnnounceRequest,
+	decodeAnnounceReplyMaybe,
+	encodeAnnounceBroadcast,
+} from "./announce.ts";
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
@@ -175,6 +182,34 @@ const PUBLISHER_A = HopSchema.parse(7n);
 const PUBLISHER_B = HopSchema.parse(8n);
 const PUBLISHER_C = HopSchema.parse(9n);
 const PEER = HopSchema.parse(2n);
+
+// Lite-07 origin nodes, and the route a peer advertises to each.
+const NODE_A = 0x7an;
+const NODE_B = 0x8bn;
+const ADVERT = { seqno: 1n, metric: 0n, downOnly: false };
+
+/**
+ * Write a claim the way `version` carries it: before lite-07 with its hop chain, and on lite-07
+ * under a route of its own to `node`, closed by its floor. Route IDs count from 0 per stream, so
+ * one helper serves one stream.
+ */
+function claimer(version: Version) {
+	let routes = 0n;
+	return async (
+		w: Writer,
+		suffix: Path.Valid,
+		{ instance, hops, node }: { instance?: Instance.Valid; hops: Hop[]; node: bigint },
+	) => {
+		if (version !== Version.DRAFT_07) {
+			await encodeAnnounceBroadcast(w, { status: "active", suffix, instance, hops }, version);
+			return;
+		}
+		const route = routes++;
+		await encodeAnnounceBroadcast(w, { status: "routeStart", node, advert: ADVERT }, version);
+		await encodeAnnounceBroadcast(w, { status: "active", suffix, route, instance }, version);
+		await encodeAnnounceBroadcast(w, { status: "floor", id: route }, version);
+	};
+}
 
 test("an announce consumer closed while its stream opens sends nothing on it", async () => {
 	const opening = Promise.withResolvers<void>();
@@ -357,25 +392,22 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 	await settle();
 	const room = Path.from("room");
 
-	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
+	const v = Version.DRAFT_07;
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, v));
 	const first = Instance.random();
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "active", suffix: room, instance: first, hops: [PUBLISHER_A] },
-			Version.DRAFT_07,
-		),
-	);
+	await send((w) => claimer(v)(w, room, { instance: first, hops: [], node: NODE_A }));
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { instance: first } });
 	const held = subscriber.consume(room);
 
 	// Another instance: a restart, and the handle already out stays.
 	for (const instance of [Instance.random(), Instance.random()]) {
-		await send((w) =>
-			encodeAnnounceBroadcast(w, { status: "restart", id: 0n, instance, hops: [PUBLISHER_B] }, Version.DRAFT_07),
-		);
+		await send(async (w) => {
+			await encodeAnnounceBroadcast(w, { status: "restart", id: 0n, instance, cost: 3n }, v);
+			await encodeAnnounceBroadcast(w, { status: "floor", id: 0n }, v);
+		});
 		const restarted = await announced.next();
-		expect(restarted).toMatchObject({ prefix: room, kind: "restart", route: { hops: [PUBLISHER_B, PEER] } });
+		// Priced past the route's metric and this session's link.
+		expect(restarted).toMatchObject({ prefix: room, kind: "restart", route: { cost: 4n } });
 		expect(restarted?.route.instance).toBe(instance);
 		const fresh = subscriber.consume(room);
 		expect(fresh.closed).not.toBe(held.closed);
@@ -383,7 +415,10 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 		fresh.close();
 	}
 
-	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_07));
+	await send(async (w) => {
+		await encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, v);
+		await encodeAnnounceBroadcast(w, { status: "floor", id: 0n }, v);
+	});
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "end" });
 
 	held.close();
@@ -404,24 +439,15 @@ test.each([
 	const job = Path.from("pool/job");
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, version));
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "active", suffix: pool, instance: named(version, "a"), hops: [PUBLISHER_A] },
-			version,
-		),
-	);
+	await send((w) => claimer(version)(w, pool, { instance: named(version, "a"), hops: [PUBLISHER_A], node: NODE_A }));
 	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start" });
 	const held = subscriber.consume(job);
 
 	if (version === Version.DRAFT_07) {
-		await send((w) =>
-			encodeAnnounceBroadcast(
-				w,
-				{ status: "restart", id: 0n, instance: named(version, "b"), hops: [PUBLISHER_B] },
-				version,
-			),
-		);
+		await send(async (w) => {
+			await encodeAnnounceBroadcast(w, { status: "restart", id: 0n, instance: named(version, "b") }, version);
+			await encodeAnnounceBroadcast(w, { status: "floor", id: 0n }, version);
+		});
 		expect(await announced.next()).toMatchObject({ prefix: pool, kind: "restart" });
 	} else {
 		await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, version));
@@ -669,35 +695,6 @@ test("an update replaces an announce that was skipped as a reflected loop", asyn
 	// Retiring the id ends what the update attached, and nothing else.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "end" });
-
-	announced.close();
-	subscriber.close();
-});
-
-test("an update keeps the instance of an announce skipped as a reflected loop", async () => {
-	const SELF = 1n;
-	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07, SELF);
-	const announced = subscriber.routes();
-	await settle();
-
-	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
-
-	// Skipped: the chain reflects back through us. The instance still names the instance.
-	const instance = Instance.random();
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "active", suffix: Path.from("room"), instance, hops: [HopSchema.parse(SELF)] },
-			Version.DRAFT_07,
-		),
-	);
-	await settle();
-
-	// An update never carries the instance, so the attached route takes the one the start named.
-	await send((w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [PUBLISHER_A] }, Version.DRAFT_07));
-	const started = await announced.next();
-	expect(started).toMatchObject({ prefix: Path.from("room"), kind: "start" });
-	expect(started?.route.instance).toBe(instance);
 
 	announced.close();
 	subscriber.close();
@@ -2110,7 +2107,8 @@ test("consumes resolve the serving prefix and pin its instance", async () => {
 	const pool = Path.from("pool");
 	const job = Path.from("pool/job");
 	const instance = Instance.random();
-	await encodeAnnounceBroadcast(peer, { status: "active", suffix: pool, instance, hops: [PUBLISHER_A] }, version);
+	const claim = claimer(version);
+	await claim(peer, pool, { instance, hops: [], node: NODE_A });
 	await announced.next();
 	const held = subscriber.consume(job);
 	const info = held
@@ -2121,15 +2119,11 @@ test("consumes resolve the serving prefix and pin its instance", async () => {
 	await streams[1].reading;
 	const reader = new Reader(undefined, new Uint8Array(Buffer.concat(streams[1].written)), version);
 	expect(await reader.u53()).toBe(StreamId.Track);
-	expect((await Track.decode(reader, version)).instance).toBe(instance);
+	expect(await Track.decode(reader, version)).toMatchObject({ instance, node: NODE_A });
 
 	// The more specific source's instance shadows the covering source's.
 	const other = Instance.random();
-	await encodeAnnounceBroadcast(
-		peer,
-		{ status: "active", suffix: job, instance: other, hops: [PUBLISHER_B] },
-		version,
-	);
+	await claim(peer, job, { instance: other, hops: [], node: NODE_B });
 	await announced.next();
 	const fresh = subscriber.consume(job);
 	expect(fresh.closed).not.toBe(held.closed);
@@ -2142,9 +2136,10 @@ test("consumes resolve the serving prefix and pin its instance", async () => {
 	await streams[2].reading;
 	const freshReader = new Reader(undefined, new Uint8Array(Buffer.concat(streams[2].written)), version);
 	await freshReader.u53();
-	expect((await Track.decode(freshReader, version)).instance).toBe(other);
+	expect(await Track.decode(freshReader, version)).toMatchObject({ instance: other, node: NODE_B });
 
 	await encodeAnnounceBroadcast(peer, { status: "endedId", id: 1n }, version);
+	await encodeAnnounceBroadcast(peer, { status: "floor", id: 1n }, version);
 	await announced.next();
 	const fallback = subscriber.consume(job);
 	expect(fallback.closed).toBe(held.closed);
@@ -2166,22 +2161,11 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 		await send((w) => new AnnounceOk(PEER, 0).encode(w, version));
 		const pool = Path.from("pool");
 		const job = Path.from("pool/job");
-		await send((w) =>
-			encodeAnnounceBroadcast(
-				w,
-				{ status: "active", suffix: pool, instance: named(version, "a"), hops: [PUBLISHER_A] },
-				version,
-			),
-		);
+		const claim = claimer(version);
+		await send((w) => claim(w, pool, { instance: named(version, "a"), hops: [PUBLISHER_A], node: NODE_A }));
 		await announced.next();
 		const held = subscriber.consume(job);
-		await send((w) =>
-			encodeAnnounceBroadcast(
-				w,
-				{ status: "active", suffix: job, instance: named(version, "b"), hops: [PUBLISHER_B] },
-				version,
-			),
-		);
+		await send((w) => claim(w, job, { instance: named(version, "b"), hops: [PUBLISHER_B], node: NODE_B }));
 		await announced.next();
 		const fresh = subscriber.consume(job);
 		expect(fresh.closed).not.toBe(held.closed);
@@ -3579,4 +3563,136 @@ test("a cancelled legacy datagram lookup cannot refuse a stream answer arriving 
 		remote.close();
 		subscriber.close();
 	}
+});
+
+// A lite-07 peer's announce stream, after the request: what the peer writes, and the replies
+// the subscriber sends back.
+async function routedStream() {
+	const version = Version.DRAFT_07;
+	const { quic, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const announced = subscriber.routes();
+	const stream = await opened(0);
+	const peer = new Writer(
+		new WritableStream<Uint8Array>({ write: (chunk) => stream.inbound.enqueue(new Uint8Array(chunk)) }),
+		version,
+	);
+	const replies = new Reader(stream.outbound, undefined, version);
+	expect(await replies.u53()).toBe(StreamId.Announce);
+	await AnnounceRequest.decode(replies, version);
+	await new AnnounceOk(PEER, 0).encode(peer, version);
+	const send = (msg: AnnounceBroadcast) => encodeAnnounceBroadcast(peer, msg, version);
+	return { subscriber, announced, send, replies, version };
+}
+
+test("a lite-07 batch applies at its floor, and a held route turns unavailable", async () => {
+	const { subscriber, announced, send, replies, version } = await routedStream();
+	const room = Path.from("room");
+	const other = Path.from("other");
+	const a = Instance.parse("a");
+
+	// Nothing under a route shows before its floor, even while another route's batch lands.
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: room, route: 0n, instance: a, cost: 2n });
+	await send({ status: "routeStart", node: NODE_B, advert: ADVERT });
+	await send({ status: "active", suffix: other, route: 1n, instance: a });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: other, kind: "start" });
+	await send({ status: "synced" });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	// The claim's cost, the route's metric, and this session's link.
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { cost: 3n, node: NODE_A } });
+
+	// A held route keeps its claims, unavailable, until an update makes it usable again.
+	await send({ status: "routeHold", id: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "update", route: { available: false } });
+	await send({ status: "routeUpdate", id: 0n, advert: { ...ADVERT, metric: 5n } });
+	expect(await announced.next()).toMatchObject({
+		prefix: room,
+		kind: "update",
+		route: { available: true, cost: 8n },
+	});
+
+	// A route the peer lets go takes its claims offline, and is echoed back.
+	await send({ status: "routeEnd", id: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "offline" });
+	expect(await decodeAnnounceReplyMaybe(replies, version)).toEqual({ kind: "echo", id: 0n });
+	// Its Announce IDs went with it.
+	await send({ status: "endedId", id: 0n });
+	await expect(announced.next()).rejects.toThrow(ProtocolViolation);
+
+	subscriber.close();
+});
+
+test("a lite-07 path served by two routes fails over when the cheaper one ends", async () => {
+	const { subscriber, announced, send, replies, version } = await routedStream();
+	const room = Path.from("room");
+	const a = Instance.parse("a");
+	const b = Instance.parse("b");
+
+	await send({ status: "routeStart", node: NODE_A, advert: { ...ADVERT, metric: 5n } });
+	await send({ status: "active", suffix: room, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { instance: a, node: NODE_A } });
+
+	// Another origin claims the path more cheaply: it takes over, as another instance.
+	await send({ status: "routeStart", node: NODE_B, advert: ADVERT });
+	await send({ status: "active", suffix: room, route: 1n, instance: b });
+	await send({ status: "floor", id: 1n });
+	expect(await announced.next()).toMatchObject({
+		prefix: room,
+		kind: "restart",
+		route: { instance: b, node: NODE_B },
+	});
+	const consumed = subscriber.consume(room);
+
+	// Its route ending falls back to the other, and the next consume names that origin.
+	await send({ status: "routeEnd", id: 1n });
+	expect(await announced.next()).toMatchObject({
+		prefix: room,
+		kind: "restart",
+		route: { instance: a, node: NODE_A },
+	});
+	expect(await decodeAnnounceReplyMaybe(replies, version)).toEqual({ kind: "echo", id: 1n });
+	expect(subscriber.consume(room).closed).not.toBe(consumed.closed);
+
+	consumed.close();
+	announced.close();
+	subscriber.close();
+});
+
+test.each([
+	[
+		"a second route to one origin node",
+		[
+			{ status: "routeStart", node: NODE_A, advert: ADVERT },
+			{ status: "routeStart", node: NODE_A, advert: ADVERT },
+		],
+	],
+	[
+		"a route claiming one path twice",
+		[
+			{ status: "routeStart", node: NODE_A, advert: ADVERT },
+			{ status: "active", suffix: Path.from("room"), route: 0n, instance: Instance.parse("a") },
+			{ status: "active", suffix: Path.from("room"), route: 0n, instance: Instance.parse("b") },
+		],
+	],
+	[
+		"a claim under an unknown route",
+		[{ status: "active", suffix: Path.from("room"), route: 0n, instance: Instance.parse("a") }],
+	],
+	["a floor for an unknown route", [{ status: "floor", id: 0n }]],
+] as [string, AnnounceBroadcast[]][])("lite-07 %s is a violation", async (_, messages) => {
+	const version = Version.DRAFT_07;
+	const { subscriber, send, settle, sessionEnded } = announceHarness(version);
+	const announced = subscriber.routes();
+	await settle();
+	await send(async (w) => {
+		await new AnnounceOk(PEER, 0).encode(w, version);
+		for (const msg of messages) await encodeAnnounceBroadcast(w, msg, version);
+	});
+	await expect(announced.next()).rejects.toThrow(ProtocolViolation);
+	expect((await sessionEnded())?.closeCode).toBe(SessionCode.ProtocolViolation);
+	announced.close();
+	subscriber.close();
 });

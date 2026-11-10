@@ -20,7 +20,8 @@ import {
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
-import { Cost, type Hop, routesEqual, type WireRoute } from "../hop.ts";
+import { Cost, type Hop, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
+import type * as Instance from "../instance.ts";
 import {
 	type DropRun,
 	datagramTrackInfo,
@@ -49,7 +50,16 @@ import { max, min } from "../util/sequence.ts";
 import { Budget } from "../util/yield.ts";
 import type { Resolved } from "../window.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
-import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
+import {
+	type Advert,
+	type AnnounceBroadcast,
+	AnnounceInit,
+	AnnounceOk,
+	type AnnounceReply,
+	type AnnounceRequest,
+	decodeAnnounceReplyMaybe,
+	encodeAnnounceBroadcast,
+} from "./announce.ts";
 import { Datagram as DatagramMessage, type Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import type { Fetch } from "./fetch.ts";
@@ -78,18 +88,16 @@ import { encodeTracksEvent, type Tracks as TracksMessage } from "./tracks.ts";
 import {
 	hasAnnounceId,
 	hasAnnounceOk,
-	hasAnnounceRestart,
 	hasCompression,
 	hasDatagrams,
 	hasDatagramTracks,
 	hasEndError,
-	hasInstance,
 	hasLargest,
 	hasProbeRtt,
 	hasRanges,
 	hasRouteCost,
+	hasRoutes,
 	hasSkip,
-	hasSynced,
 	hasTrackStream,
 	keepsSubscribeOpen,
 	resolvesStart,
@@ -618,6 +626,7 @@ export class Publisher {
 	async #runAnnounce(msg: AnnounceRequest, stream: Stream) {
 		if (this.#withdrawal.closing.peek()) return;
 		console.debug(`announce: prefix=${msg.prefix}`);
+		if (hasRoutes(this.version)) return this.#runRouted(msg, stream);
 
 		// Keyed by suffix, valued by identity plus route, so a republish diffs as a restart
 		// and a re-price as an update.
@@ -642,25 +651,15 @@ export class Publisher {
 			auth: undefined,
 		});
 
-		// Another instance is another stream, and a newer epoch of the same one is no new
-		// stream but must still be ranked by the peer, so lite-07 restarts in place for either.
-		const restarted = (prev: Advertised, next: Advertised): boolean =>
-			!sameInstance(prev, next) ||
-			(hasInstance(this.version) && (prev.route.epoch ?? 0n) !== (next.route.epoch ?? 0n));
+		// Another instance is another stream, which these versions announce as an end and a start.
+		const restarted = (prev: Advertised, next: Advertised): boolean => !sameInstance(prev, next);
 
 		const announce = async (suffix: Path.Valid, route: WireRoute) => {
 			console.debug(`announce: broadcast=${suffix} active=true instance=${route.instance}`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{
-					status: "active",
-					suffix,
-					instance: route.instance,
-					epoch: route.epoch,
-					hops: wireHops(route),
-					cost: route.cost,
-				},
+				{ status: "active", suffix, hops: wireHops(route), cost: route.cost },
 				this.version,
 			);
 		};
@@ -684,27 +683,10 @@ export class Publisher {
 			);
 		};
 
-		// Another instance or epoch: ANNOUNCE_RESTART on lite-07, an end and a start before it.
+		// Another instance: an end and a start.
 		const restart = async (suffix: Path.Valid, route: WireRoute) => {
-			const id = announceIds.get(suffix);
-			if (id === undefined || !hasAnnounceRestart(this.version)) {
-				await retract(suffix);
-				await announce(suffix, route);
-				return;
-			}
-			console.debug(`announce: broadcast=${suffix} restart=true instance=${route.instance} epoch=${route.epoch}`);
-			await encodeAnnounceBroadcast(
-				stream.writer,
-				{
-					status: "restart",
-					id,
-					instance: route.instance,
-					epoch: route.epoch,
-					hops: wireHops(route),
-					cost: route.cost,
-				},
-				this.version,
-			);
+			await retract(suffix);
+			await announce(suffix, route);
 		};
 
 		// Lite06+ retracts by announce id; older versions repeat the path (ended announces
@@ -752,94 +734,6 @@ export class Publisher {
 			const ready = this.#ready.then(() => "ready" as const);
 			if ((await race([ready, stream.reader.closed, this.#withdrawal.closing])) !== "ready") {
 				if (this.#withdrawal.closing.peek()) {
-					stream.close();
-					await stream.writer.closed;
-				}
-				return;
-			}
-
-			if (hasSynced(this.version)) {
-				dispose();
-				const pending = new Map<Path.Valid, { end: boolean; next?: Advertised }>();
-				const closed = new Once<null | Error>();
-				void stream.reader.closed.then(
-					() => closed.set(null),
-					(err: unknown) => closed.set(error(err)),
-				);
-				let wake: (() => void) | undefined;
-				let ended = false;
-				const queue = () => {
-					const table = this.#advertised.peek();
-					ended = table === undefined;
-					const latest = table ? visible(table) : new Map<Path.Valid, Advertised>();
-					for (const suffix of pending.keys()) {
-						if (!active.has(suffix) && !latest.has(suffix)) pending.delete(suffix);
-					}
-					for (const suffix of active.keys()) {
-						if (!latest.has(suffix)) pending.set(suffix, { end: true });
-					}
-					for (const [suffix, snap] of latest) {
-						const prev = active.get(suffix);
-						const queued = pending.get(suffix);
-						if (
-							queued?.end ||
-							!prev ||
-							restarted(prev, snap) ||
-							!routesEqual(onWire(prev.route), onWire(snap.route))
-						) {
-							pending.set(suffix, { end: queued?.end ?? false, next: snap });
-						} else {
-							pending.delete(suffix);
-						}
-					}
-					wake?.();
-				};
-				const stopTable = this.#advertised.subscribe(queue);
-				const stopGrant = this.#grant?.subscribe(queue);
-				dispose = () => {
-					stopTable();
-					stopGrant?.();
-				};
-				queue();
-				let remaining: number | undefined = pending.size;
-				await new AnnounceOk(this.hop, 0).encode(stream.writer, this.version);
-				for (;;) {
-					if (remaining !== undefined && (remaining === 0 || pending.size === 0)) {
-						remaining = undefined;
-						await encodeAnnounceBroadcast(stream.writer, { status: "synced" }, this.version);
-					}
-					const departed = closed.peek();
-					if (departed instanceof Error) throw departed;
-					if (this.#withdrawal.closing.peek() || departed === null || (ended && pending.size === 0)) break;
-					const first = pending.entries().next();
-					if (first.done) {
-						const changed = new Promise<"changed">((resolve) => {
-							wake = () => resolve("changed");
-						});
-						if ((await race([changed, stream.reader.closed, this.#withdrawal.closing])) !== "changed")
-							break;
-						continue;
-					}
-					const [suffix, entry] = first.value;
-					if (entry.end) {
-						if (entry.next) pending.set(suffix, { end: false, next: entry.next });
-						else pending.delete(suffix);
-						active.delete(suffix);
-						await retract(suffix);
-					} else if (entry.next) {
-						pending.delete(suffix);
-						const prev = active.get(suffix);
-						active.set(suffix, entry.next);
-						if (!prev) await announce(suffix, entry.next.route);
-						else if (restarted(prev, entry.next)) await restart(suffix, entry.next.route);
-						else await update(suffix, entry.next.route);
-					}
-					if (remaining !== undefined) remaining -= 1;
-				}
-				if (this.#withdrawal.closing.peek()) {
-					if (remaining !== undefined)
-						await encodeAnnounceBroadcast(stream.writer, { status: "synced" }, this.version);
-					for (const suffix of active.keys()) await retract(suffix);
 					stream.close();
 					await stream.writer.closed;
 				}
@@ -919,6 +813,222 @@ export class Publisher {
 		}
 	}
 
+	// Lite-07: answer the peer's request from this origin's own route. A browser forwards nothing,
+	// so the stream carries at most one route, this origin's, and only while it shows the peer one
+	// of its claims. Mirrors `publisher/routed.rs` in rs/moq-net for a node that does not proxy.
+	async #runRouted(msg: AnnounceRequest, stream: Stream) {
+		const origin = this.#publish && wireOf(this.#publish);
+
+		// The route while the peer holds it: from the first claim shown until the last one goes.
+		let route: { id: bigint; node: bigint; seqno: bigint } | undefined;
+		let nextRoute = 0n;
+		let nextAnnounce = 0n;
+		// Route IDs ended and not yet echoed, and the origin node each reached. A route starts on
+		// the stream again only once its last end is echoed.
+		const ending = new Map<bigint, bigint>();
+		// The claims the peer holds, by suffix.
+		const live = new Map<Path.Valid, { id: bigint; snap: Advertised }>();
+
+		// A hidden claim stays off the wire unless the request opted in.
+		const carries = (covered: Path.Valid) => msg.hidden || !hiddenBelow(msg.prefix, covered);
+		const visible = (table: Advertisements): Map<Path.Valid, Advertised> => {
+			const out = presented(msg.prefix, table, carries);
+			const grant = this.#grant?.peek();
+			if (grant) {
+				for (const suffix of [...out.keys()]) {
+					if (!grant.publish.matches(Path.join(msg.prefix, suffix))) out.delete(suffix);
+				}
+			}
+			return out;
+		};
+		// Whether a floor may certify the whole requested prefix: nothing the handle's scope or our
+		// grant leaves out lies beneath it, since the peer cannot tell what was left out from what
+		// is gone. A hidden claim left out does not count: the peer did not ask to see it.
+		const certified = () => {
+			const grant = this.#grant?.peek();
+			if (grant && !grant.publish.contains(Path.Pattern.subtree(msg.prefix))) return false;
+			return origin?.covers(msg.prefix) ?? true;
+		};
+
+		const write = (out: AnnounceBroadcast) => encodeAnnounceBroadcast(stream.writer, out, this.version);
+
+		// End the route on the wire: it retires every claim under it.
+		const end = async () => {
+			if (!route) return;
+			const { id, node } = route;
+			route = undefined;
+			live.clear();
+			ending.set(id, node);
+			await write({ status: "routeEnd", id });
+		};
+
+		// Bring the peer's view in line with the origin's: one batch of claim changes, closed by its
+		// floor, ending the route once it shows nothing.
+		const sync = async () => {
+			// Read together, so the floor certifies exactly the claims it closes.
+			const table = this.#advertised.peek();
+			const identity = origin?.own.identity.peek();
+			const revision = origin?.own.revision();
+			const latest = table && identity ? visible(table) : new Map<Path.Valid, Advertised>();
+			const certifies = certified();
+
+			// A rotated identity ends the old route with every claim under it.
+			if (route && route.node !== identity?.node) await end();
+			if (!identity) return;
+			// Shown once the peer echoes the route's last end.
+			for (const node of ending.values()) if (node === identity.node) return;
+
+			let changed = false;
+			for (const [suffix, { id }] of [...live]) {
+				if (latest.has(suffix)) continue;
+				live.delete(suffix);
+				changed = true;
+				console.debug(`announce: broadcast=${suffix} active=false`);
+				await write({ status: "endedId", id });
+			}
+			if (route && route.seqno !== identity.seqno) {
+				route.seqno = identity.seqno;
+				await write({ status: "routeUpdate", id: route.id, advert: advert(identity.seqno) });
+			}
+			for (const [suffix, snap] of latest) {
+				const prev = live.get(suffix);
+				if (prev && !restarted(prev.snap, snap) && routesEqual(onWire(prev.snap.route), onWire(snap.route)))
+					continue;
+				changed = true;
+				if (!route) {
+					route = { id: nextRoute++, node: identity.node, seqno: identity.seqno };
+					await write({ status: "routeStart", node: identity.node, advert: advert(identity.seqno) });
+				}
+				const { instance, epoch, cost } = snap.route;
+				if (!prev) {
+					const id = nextAnnounce++;
+					live.set(suffix, { id, snap });
+					console.debug(`announce: broadcast=${suffix} active=true instance=${instance}`);
+					await write({ status: "active", suffix, route: route.id, instance, epoch, cost });
+				} else if (restarted(prev.snap, snap)) {
+					live.set(suffix, { id: prev.id, snap });
+					console.debug(`announce: broadcast=${suffix} restart=true instance=${instance} epoch=${epoch}`);
+					await write({ status: "restart", id: prev.id, instance, epoch, cost });
+				} else {
+					live.set(suffix, { id: prev.id, snap });
+					await write({ status: "update", id: prev.id, cost });
+				}
+			}
+			if (!route || !changed) return;
+			await write({ status: "floor", id: route.id, revision: certifies ? revision : undefined });
+			if (live.size === 0) await end();
+		};
+
+		const advert = (seqno: bigint): Advert => ({ seqno, metric: 0n, downOnly: false });
+		// What the peer decodes for a claim: lite-07 carries its instance, epoch, and cost.
+		const onWire = (route: WireRoute): WireRoute => ({ ...route, auth: undefined });
+		const restarted = (prev: Advertised, next: Advertised): boolean =>
+			!sameInstance(prev, next) || (prev.route.epoch ?? 0n) !== (next.route.epoch ?? 0n);
+
+		// Anything that may change what the peer is owed marks the stream dirty and wakes the loop,
+		// which alone writes. A change landing mid-sync leaves it dirty for the next pass.
+		let dirty = true;
+		let notify: (() => void) | undefined;
+		const poke = () => {
+			dirty = true;
+			notify?.();
+		};
+
+		// Replies arrive on their own task.
+		const replies: AnnounceReply[] = [];
+		let departed: Error | null | undefined;
+		void (async () => {
+			try {
+				for (;;) {
+					const reply = await decodeAnnounceReplyMaybe(stream.reader, this.version);
+					if (!reply) break;
+					replies.push(reply);
+					notify?.();
+				}
+				departed = null;
+			} catch (err) {
+				departed = error(err);
+			}
+			notify?.();
+		})();
+
+		// Woken by the origin's claims, our grant, or the identity they are originated under.
+		const sources = [this.#advertised, this.#grant, origin?.own.identity];
+		const stops = sources.map((source) => source?.subscribe(poke));
+		try {
+			// Nothing is announced before the grant it would be checked against. A local close
+			// meanwhile finishes the stream with nothing announced.
+			const ready = this.#ready.then(() => "ready" as const);
+			if ((await race([ready, stream.reader.closed, this.#withdrawal.closing])) !== "ready") {
+				if (this.#withdrawal.closing.peek()) {
+					stream.close();
+					await stream.writer.closed;
+				}
+				return;
+			}
+
+			// This origin's set of sessions changed.
+			origin?.own.bump();
+			await new AnnounceOk(UNKNOWN_HOP, 0).encode(stream.writer, this.version);
+			dirty = false;
+			await sync();
+			// Every route the peer holds has its floor by now.
+			await write({ status: "synced" });
+
+			for (;;) {
+				const reply = replies.shift();
+				if (reply?.kind === "echo") {
+					if (!ending.delete(reply.id))
+						throw new ProtocolViolation(`echo of route ${reply.id}, which is not ending`);
+					// The route may start again.
+					dirty = true;
+					continue;
+				}
+				if (reply?.kind === "request") {
+					// Answered through the identity: a raised seqno or a rotation marks the stream dirty.
+					origin?.own.request(reply.node, reply.seqno);
+					continue;
+				}
+
+				if (departed instanceof Error) throw departed;
+				if (departed === null || this.#withdrawal.closing.peek()) break;
+				if (dirty) {
+					dirty = false;
+					await sync();
+					continue;
+				}
+				const woke = new Promise<void>((resolve) => {
+					notify = resolve;
+				});
+				await race([woke, this.#withdrawal.closing]);
+				notify = undefined;
+			}
+			if (this.#withdrawal.closing.peek()) {
+				await end();
+				stream.close();
+				await stream.writer.closed;
+			}
+		} finally {
+			for (const stop of stops) stop?.();
+		}
+	}
+
+	/**
+	 * The broadcast a request names, from this session's origin. A request naming an origin node
+	 * other than this one is not ours to serve: a browser forwards nothing.
+	 */
+	async #resolve(
+		msg: { broadcast: Path.Valid; instance?: Instance.Valid; node: bigint },
+		signal: AbortSignal,
+	): Promise<broadcast.Consumer | undefined> {
+		const origin = this.#publish && wireOf(this.#publish);
+		if (!origin) return undefined;
+		if (msg.node !== 0n && msg.node !== origin.own.node) {
+			throw new StreamError(StreamCode.Unroutable, { message: `origin node ${msg.node} is not this one` });
+		}
+		return origin.local(msg.broadcast, msg.instance) ?? (await origin.demand(msg.broadcast, msg.instance, signal));
+	}
+
 	/**
 	 * Handles a subscribe message.
 	 * @param msg - The subscribe message
@@ -969,10 +1079,7 @@ export class Publisher {
 
 		let front: broadcast.Consumer | undefined;
 		try {
-			front =
-				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast, msg.instance) ??
-					(await wireOf(this.#publish).demand(msg.broadcast, msg.instance, left.signal)));
+			front = await this.#resolve(msg, left.signal);
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -1246,10 +1353,7 @@ export class Publisher {
 		try {
 			let front: broadcast.Consumer | undefined;
 			try {
-				front =
-					this.#publish &&
-					(wireOf(this.#publish).local(msg.broadcast, msg.instance) ??
-						(await wireOf(this.#publish).demand(msg.broadcast, msg.instance, holding)));
+				front = await this.#resolve(msg, holding);
 			} catch (err: unknown) {
 				stream.writer.reset(error(err));
 				return;
@@ -1977,10 +2081,7 @@ export class Publisher {
 			() => hold.abort(),
 		);
 		try {
-			const front =
-				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast, msg.instance) ??
-					(await wireOf(this.#publish).demand(msg.broadcast, msg.instance, hold.signal)));
+			const front = await this.#resolve(msg, hold.signal);
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			let info: TrackInfoMessage;
@@ -2059,11 +2160,7 @@ export class Publisher {
 		let tracks: broadcast.Tracks | undefined;
 		try {
 			if (watch.revoked()) throw unauthorized(msg.broadcast);
-			const origin = this.#publish && wireOf(this.#publish);
-			const front =
-				origin &&
-				(origin.local(msg.broadcast, msg.instance) ??
-					(await origin.demand(msg.broadcast, msg.instance, cancel.signal)));
+			const front = await this.#resolve(msg, cancel.signal);
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			tracks = wireOf(front).tracks(this);
@@ -2201,11 +2298,7 @@ export class Publisher {
 				() => cancel.abort(new StreamError(StreamCode.Cancel)),
 				(err) => cancel.abort(error(err)),
 			);
-			const origin = this.#publish && wireOf(this.#publish);
-			const front =
-				origin &&
-				(origin.local(msg.broadcast, msg.instance) ??
-					(await origin.demand(msg.broadcast, msg.instance, cancel.signal)));
+			const front = await this.#resolve(msg, cancel.signal);
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 			track = front.datagrams(msg.track);
 			track.setPriority(msg.priority);

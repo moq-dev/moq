@@ -8,16 +8,17 @@ import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
-import { type Hop, randomHop } from "../hop.ts";
+import { type Hop, HopSchema, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import { hooks } from "../internal.ts";
 import { lines } from "../open.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
+import type { Own } from "../route.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import { Observed } from "../util/observed.ts";
 import { withTimeout } from "../util/timeout.ts";
-import { registerWire } from "../wire.ts";
+import { registerWire, wireOf } from "../wire.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { LiteAuthWire } from "./auth.ts";
 import { Datagrams } from "./datagram.ts";
@@ -40,10 +41,10 @@ import {
 	hasDatagramTracks,
 	hasGoaway,
 	hasHidden,
-	hasNodeId,
 	hasPadding,
 	hasProbeRtt,
 	hasRouteKey,
+	hasRoutes,
 	hasSetupStream,
 	hasTrackStream,
 	hasTracks,
@@ -114,6 +115,8 @@ export class Connection implements Session {
 
 	// Module for contributing tracks.
 	#publisher: Publisher;
+	// The lite-07 route identity our published claims are originated under, if we publish.
+	#own?: Own;
 
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
@@ -238,6 +241,7 @@ export class Connection implements Session {
 			this.#fail(err);
 		});
 
+		this.#own = publish && wireOf(publish).own;
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish, {
 			grant: this.#auth.scope,
 			ready: this.#auth.setupAnswered(),
@@ -426,7 +430,7 @@ export class Connection implements Session {
 	// called after this point, so there is nothing to narrow yet. Before lite-07 the hop
 	// declares our session identity so the peer can filter reflected announcements
 	// (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it). From lite-07 the parameter
-	// is a Node ID, which this per-connection hop is not: we originate no routes, so we omit it.
+	// is the Node ID our published claims originate under, omitted when we publish nothing.
 	async #sendSetup(): Promise<void> {
 		const writer = await Writer.open(this.#quic, { version: this.#version });
 		try {
@@ -435,7 +439,7 @@ export class Connection implements Session {
 			const routeKey = hasRouteKey(this.#version) ? await proveRouteKey(this.#quic, this.#client) : undefined;
 			await new Setup({
 				probe,
-				hop: hasNodeId(this.#version) ? undefined : this.hop,
+				hop: hasRoutes(this.#version) ? this.#own && HopSchema.parse(this.#own.node) : this.hop,
 				token: this.#token,
 				implementation: this.#implementation,
 				routeKey,

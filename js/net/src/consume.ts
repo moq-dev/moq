@@ -38,7 +38,8 @@ class Validity {
 	}
 }
 
-type Selection = Served & { readonly validity?: Validity };
+// The route a consume selected: its instance, and the origin node its requests name (lite-07).
+type Selection = Served & { readonly route: Pick<WireRoute, "instance" | "node">; readonly validity?: Validity };
 
 class Blind implements Selection {
 	readonly identity = {};
