@@ -1607,7 +1607,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_stuck_init_leaves_the_manifest_to_its_siblings() {
 		let (origin, broadcast, _catalog, _video0) = inline_sibling().await;
-		let (_media, mut open) = open_tail(broadcast.broadcast(), "video1", 3);
+		let (_media, open) = open_tail(broadcast.broadcast(), "video1", 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
@@ -1654,7 +1654,7 @@ mod tests {
 			video0.gop(sequence);
 		}
 		// video1's only cached group is still open, so its init build parks on it.
-		let (video1, mut open) = open_tail(broadcast.broadcast(), "video1", 3);
+		let (video1, open) = open_tail(broadcast.broadcast(), "video1", 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
@@ -1751,14 +1751,14 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn an_ended_manifest_stays_dynamic_while_an_init_builds() {
 		let (origin, broadcast, mut catalog, mut video0) = inline_sibling().await;
-		let (media, mut open) = open_tail(broadcast.broadcast(), "video1", 3);
+		let (media, open) = open_tail(broadcast.broadcast(), "video1", 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").unwrap();
 		until_listed(&rendition, 3).await;
 		video0.finish();
-		media.finish().unwrap();
+		let _media = media.finish().unwrap();
 		catalog.finish().unwrap();
 		kio::clock::timeout(Duration::from_secs(5), async {
 			while !rendition.snapshot().finished {
@@ -1785,7 +1785,7 @@ mod tests {
 		// it lists nothing.
 		let (origin, broadcast, mut catalog, _video1) = inline_pair("video0").await;
 		// Its earlier groups already left the cache, so the open one is the only candidate.
-		let (_media, mut open) = open_tail(broadcast.broadcast(), "video0", 1);
+		let (_media, open) = open_tail(broadcast.broadcast(), "video0", 1);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
@@ -1899,7 +1899,7 @@ mod tests {
 			media.write(vp8_frame(micros, true)).unwrap();
 		}
 
-		let deadline = kio::clock::now() + Duration::from_secs(5);
+		let deadline = kio::clock::now().saturating_add(Duration::from_secs(5));
 		let new = loop {
 			let current = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 			if !Arc::ptr_eq(&current, &old) {
@@ -2695,7 +2695,7 @@ mod tests {
 		media.finish().unwrap();
 		catalog.finish().unwrap();
 
-		let deadline = kio::clock::now() + Duration::from_secs(5);
+		let deadline = kio::clock::now().saturating_add(Duration::from_secs(5));
 		let manifest = loop {
 			let manifest = broadcaster.manifest(None).unwrap().expect("manifest renders");
 			if manifest.contains(" type=\"static\"") {
@@ -3647,7 +3647,7 @@ mod tests {
 
 		/// The track ends cleanly, staying retained while the handle lives.
 		fn finish(&mut self) {
-			self.track.finish().unwrap();
+			drop(self.track.clone().finish().unwrap());
 		}
 	}
 

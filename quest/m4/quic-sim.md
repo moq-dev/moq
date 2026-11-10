@@ -11,7 +11,7 @@ deterministically with no sockets.
 
 Already landed: MoQ sessions over moq-quic on the sim. The QUIC driver
 spawns on the simulator inside `kio::clock::sim::run`, under moq-tokio's
-hidden `sim` feature. `quic::driver::sim::Network` binds a socket per address
+`sim` feature. `quic::driver::sim::Network` binds a socket per address
 and carries datagrams across moq-quic's seeded `Link` (now
 `moq_quic::sim`), so one seed replays a run.
 `rs/moq-tokio/tests/integration/sim.rs` builds both endpoints on the raw
@@ -22,8 +22,9 @@ What remains:
 
 - moq-tokio's `Client` and `Server` bind their QUIC endpoint from an address
   (`crate::bind::udp`), so a sim test cannot reach them yet. Pick how a
-  caller hands either one a `driver::endpoint::Socket`, such as a hidden
-  `sim`-only hook. That API choice belongs to the maintainer.
+  caller hands either one a `driver::endpoint::Socket`, such as a
+  documented `sim`-only hook (`just check` bans `#[doc(hidden)]`). That API
+  choice belongs to the maintainer.
 - Route the session-level spawns that `server.rs`, `connection.rs`, and
   `origin.rs` still send through `crate::runtime::spawn` through
   `runtime::Spawner`, as `transport.rs` and the WebTransport session already
@@ -37,7 +38,3 @@ Keep random loss for recovery correctness. Any acceptance or performance
 consumer uses a rate below its media bitrate behind a deep but finite queue,
 and checks that the queue overflowed. A stalled sender that never filled the
 queue is not evidence about congestion loss.
-
-## Related
-
-- [Per-stream and per-datagram deadlines](/quest/m5/quic-deadline.md) - a consumer

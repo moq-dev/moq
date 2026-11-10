@@ -200,7 +200,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					self.following(&end);
 					self.state = State::Settling {
 						end,
-						deadline: kio::clock::now() + self.follow,
+						deadline: kio::clock::now().saturating_add(self.follow),
 					};
 				}
 				State::Settling { end, deadline } => {
@@ -377,7 +377,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				end: Err(
 					anyhow::anyhow!("replacement broadcast `{}` ended before serving its catalog", self.path).into(),
 				),
-				deadline: kio::clock::now() + self.follow,
+				deadline: kio::clock::now().saturating_add(self.follow),
 			},
 		}
 	}

@@ -56,8 +56,8 @@
   `--echo` when it adds one: they would publish rendition IDs and per-track
   counters in plaintext beside it.
 - Decided 2026-10-22 (maintainer): the publisher's solicit option moved here
-  from [encoder feedback](/quest/m5/stats-encoder-feedback.md), which keeps
-  only the adaptation loop and reuses `--echo-path`.
+  from the encoder feedback quest, since deleted, which kept only the
+  adaptation loop.
 - `export --echo` counts no drops in `late`: `Received::report`
   (`rs/moq-mux/src/stats.rs`) fills only frames, bytes, and arrival while the
   TS release section holds the drops (from
@@ -68,4 +68,3 @@ Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and r
 ## Related
 
 - [Encrypted native CLI](/quest/m5/e2ee/cli.md) - refuses stats and feedback on an encrypted broadcast
-- [Encoder feedback](/quest/m5/stats-encoder-feedback.md) - the adaptation loop that reads what `--echo-path` solicits

@@ -599,7 +599,7 @@ impl Watched {
 	fn lapsed(&mut self, now: crate::time::Instant) -> Refused {
 		let wait = self.lapse;
 		self.lapse = (wait * 2).min(RETRY_MAX);
-		Refused::Until(now + wait)
+		Refused::Until(now.saturating_add(wait))
 	}
 }
 
@@ -1378,6 +1378,9 @@ impl SubscribeRequest {
 
 	/// Mark the subscription for joining FETCHes from the boundary it serves from: the
 	/// prefix ending right after `largest`.
+	///
+	/// The end is exclusive, and End Object 0 reads the whole group, which is that prefix
+	/// when `largest` is the last Object ID a group can hold.
 	fn save_join(
 		&self,
 		filter: Filter,
@@ -1392,7 +1395,7 @@ impl SubscribeRequest {
 			(Filter::NextObject, Some(largest)) => Joined::Group {
 				end: Location {
 					group: largest.group,
-					object: largest.object + 1,
+					object: largest.object.checked_add(1).unwrap_or(0),
 				},
 				cache: cache.clone(),
 				namespace: self.msg.track_namespace.clone(),
@@ -3878,7 +3881,7 @@ impl Publisher {
 			if matches!(&written, Poll::Ready(Ok(())))
 				&& matches!(request.pending, Some(NamespacePending::Writing { .. }))
 			{
-				let deadline = now + ADVERTISE_TIMEOUT;
+				let deadline = now.saturating_add(ADVERTISE_TIMEOUT);
 				request.pending = Some(NamespacePending::Answer(deadline));
 				inflight.push_back((deadline, suffix.clone()));
 			}
@@ -4025,11 +4028,15 @@ impl Publisher {
 	///
 	/// 0 is the peer asking not to be offered this again, which is what keeps a permanent
 	/// refusal (unauthorized, uninterested) from becoming a request every few seconds for
-	/// the life of the session.
+	/// the life of the session. An interval past the clock's range reads the same way.
 	fn refusal(&self, retry_interval: u64) -> Refused {
 		match retry_interval {
 			0 => Refused::Never,
-			ms => Refused::Until(self.runtime.now() + Duration::from_millis(ms)),
+			ms => self
+				.runtime
+				.now()
+				.checked_add(Duration::from_millis(ms))
+				.map_or(Refused::Never, Refused::Until),
 		}
 	}
 
@@ -4131,12 +4138,19 @@ impl Publisher {
 		let mut initial = std::collections::BTreeMap::new();
 		while let Some(event) = announced.try_next() {
 			match event {
-				crate::origin::RouteEvent::Start(update)
-				| crate::origin::RouteEvent::Update(update)
-				| crate::origin::RouteEvent::Restart(update) => {
+				crate::origin::RouteEvent {
+					kind:
+						crate::origin::RouteKind::Start
+						| crate::origin::RouteKind::Update
+						| crate::origin::RouteKind::Restart,
+					announce: update,
+				} => {
 					initial.insert(update.prefix.clone(), update);
 				}
-				crate::origin::RouteEvent::End(update) => {
+				crate::origin::RouteEvent {
+					kind: crate::origin::RouteKind::End | crate::origin::RouteKind::Offline,
+					announce: update,
+				} => {
 					initial.remove(&update.prefix);
 				}
 			}
@@ -5803,7 +5817,7 @@ impl ForwardNamespaces {
 					true => {
 						self.retry_at = self
 							.retry_at
-							.or_else(|| Some(publisher.runtime.now() + jitter(self.retry_delay)))
+							.or_else(|| Some(publisher.runtime.now().saturating_add(jitter(self.retry_delay))))
 					}
 					false => {
 						self.retry_at = None;
@@ -5898,11 +5912,18 @@ impl ForwardNamespaces {
 		}
 		if let Poll::Ready(next) = self.announced.poll_next(waiter) {
 			return Poll::Ready(NamespaceEvent::Update(next.map(|event| match event {
-				crate::origin::RouteEvent::Start(update) | crate::origin::RouteEvent::Update(update) => {
-					(update, true, false)
-				}
-				crate::origin::RouteEvent::Restart(update) => (update, true, true),
-				crate::origin::RouteEvent::End(update) => (update, false, false),
+				crate::origin::RouteEvent {
+					kind: crate::origin::RouteKind::Start | crate::origin::RouteKind::Update,
+					announce: update,
+				} => (update, true, false),
+				crate::origin::RouteEvent {
+					kind: crate::origin::RouteKind::Restart,
+					announce: update,
+				} => (update, true, true),
+				crate::origin::RouteEvent {
+					kind: crate::origin::RouteKind::End | crate::origin::RouteKind::Offline,
+					announce: update,
+				} => (update, false, false),
 			})));
 		}
 		if self.retry.poll(waiter).is_ready() {
@@ -6705,7 +6726,6 @@ impl TrackServe {
 	fn serve_group(&mut self, group: group::Consumer, slice: GroupSlice) -> GroupServe {
 		let group = if self.compression { group.compressed() } else { group };
 		let sequence = group.sequence;
-		let wire = group.wire();
 		let msg = ietf::GroupHeader {
 			track_alias: self.request_id.0,
 			group_id: sequence,
@@ -6715,17 +6735,10 @@ impl TrackServe {
 			// model ranks higher-first and this wire field lower-first.
 			publisher_priority: super::priority::to_wire(self.track.info().priority),
 			// Carry per-object timestamps as extension headers (the Timestamp
-			// Object Property) only when TIMESCALE was declared.
+			// Object Property) only when TIMESCALE was declared. The relay state adds
+			// to these once it settles (see `GroupState::Describe`).
 			flags: ietf::GroupFlags {
-				has_extensions: self.compression
-					|| self.timescale.is_some()
-					|| wire.as_ref().is_some_and(|wire| wire.extensions),
-				first_object: wire
-					.as_ref()
-					.map_or(slice.skip == 0, |wire| wire.first_object && slice.skip <= wire.first_id),
-				// A stream capped by the range stops before the group may end, so its
-				// FIN cannot claim END_OF_GROUP.
-				has_end: slice.until.is_none() && wire.as_ref().is_none_or(|wire| wire.has_end),
+				has_extensions: self.compression || self.timescale.is_some(),
 				..Default::default()
 			},
 		};
@@ -6892,8 +6905,8 @@ impl TrackServe {
 				Poll::Ready(Ok(Some(datagram))) => datagram,
 				Poll::Ready(Ok(None)) => {
 					self.datagrams = None;
-					if let Some(track) = &mut self.datagram_track {
-						let _ = track.finish();
+					if let Some(track) = &self.datagram_track {
+						let _ = track.finish_shared();
 					}
 					return;
 				}
@@ -7557,6 +7570,11 @@ struct GroupServe {
 enum GroupState {
 	/// Waiting for stream credit on this machine's own session handle.
 	Open,
+	/// The stream is open, and its header waits for the group's relay state, which a relayed
+	/// group settles after it becomes visible.
+	Describe {
+		writer: Writer<crate::transport::boxed::SendStream, Version>,
+	},
 	/// Streaming objects: the write buffer drains first, then the pending chunk,
 	/// then the pending frame, then the next frame.
 	Serve {
@@ -7589,7 +7607,7 @@ impl Drop for GroupServe {
 	fn drop(&mut self) {
 		// The writer's own fallback would say CANCELLED, which a lapse is not.
 		if self.lapse.as_ref().is_some_and(Lapse::lapsed)
-			&& let GroupState::Serve { writer, .. } | GroupState::Closed { writer } =
+			&& let GroupState::Describe { writer } | GroupState::Serve { writer, .. } | GroupState::Closed { writer } =
 				std::mem::replace(&mut self.state, GroupState::Done)
 		{
 			writer.reset(super::error::EXPIRED_AUTH_TOKEN);
@@ -7602,17 +7620,11 @@ impl GroupServe {
 		session: Transport,
 		msg: ietf::GroupHeader,
 		rank: Rank<GroupOf<Transport>>,
-		mut group: group::Consumer,
+		group: group::Consumer,
 		timescale: Option<Timescale>,
 		version: Version,
 		slice: GroupSlice,
 	) -> Self {
-		if group.wire().is_none() {
-			// Only the end: a start would clamp past a prefix the group never held,
-			// which `skip_to` leaves to fail as `Lagged`.
-			group.skip_to(slice.skip);
-			group = group.with_end(slice.until);
-		}
 		Self {
 			session,
 			opened: Default::default(),
@@ -7682,7 +7694,25 @@ impl GroupServe {
 		self
 	}
 
-	/// Wait for stream credit, then write the group header, leaving the machine serving.
+	/// Fill in the header flags and the read slice from the group's relay state.
+	fn describe(&mut self, wire: Option<group::Wire>) {
+		let flags = &mut self.msg.flags;
+		flags.has_extensions |= wire.as_ref().is_some_and(|wire| wire.extensions);
+		flags.first_object = wire.as_ref().map_or(self.slice.skip == 0, |wire| {
+			wire.first_object && self.slice.skip <= wire.first_id
+		});
+		// A stream capped by the range stops before the group may end, so its FIN cannot
+		// claim END_OF_GROUP.
+		flags.has_end = self.slice.until.is_none() && wire.as_ref().is_none_or(|wire| wire.has_end);
+		if wire.is_none() {
+			// Only the end: a start would clamp past a prefix the group never held, which
+			// `skip_to` leaves to fail as `Lagged`.
+			self.group.skip_to(self.slice.skip);
+			self.group.end_at(self.slice.until);
+		}
+	}
+
+	/// Wait for stream credit, leaving the machine to describe the group on its stream.
 	/// Gives up once the group can no longer be sent, so a parked group never spends the
 	/// credit it was waiting for on a reset.
 	fn poll_open(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -7713,17 +7743,8 @@ impl GroupServe {
 		};
 		self.opened.fetch_add(1, Ordering::Relaxed);
 
-		let mut writer = Writer::new(stream, self.version);
-		if let Err(err) = writer.buffer(&self.msg) {
-			self.state = GroupState::Done;
-			return Poll::Ready(Err(err));
-		}
-		self.state = GroupState::Serve {
-			writer,
-			frame: None,
-			chunk: None,
-			batch: Box::new(arrayvec::ArrayVec::new()),
-			batch_pos: 0,
+		self.state = GroupState::Describe {
+			writer: Writer::new(stream, self.version),
 		};
 		Poll::Ready(Ok(()))
 	}
@@ -7744,6 +7765,36 @@ impl GroupServe {
 					ready!(self.poll_open(waiter))?;
 					// The current rank, which already includes anything `moved` saw.
 					moved = None;
+				}
+				GroupState::Describe { writer } => {
+					if let Some(priority) = moved.take() {
+						writer.set_priority(priority);
+					}
+					// The peer closing first cancels the group.
+					if writer.poll_closed(waiter).is_ready() {
+						self.state = GroupState::Done;
+						return Poll::Ready(Err(Error::Cancel));
+					}
+					let wire = match ready!(self.group.poll_wire(waiter)) {
+						Ok(wire) => wire,
+						Err(err) => {
+							self.state = GroupState::Done;
+							return Poll::Ready(Err(err));
+						}
+					};
+					let GroupState::Describe { mut writer } = std::mem::replace(&mut self.state, GroupState::Done)
+					else {
+						unreachable!("matched above");
+					};
+					self.describe(wire);
+					writer.buffer(&self.msg)?;
+					self.state = GroupState::Serve {
+						writer,
+						frame: None,
+						chunk: None,
+						batch: Box::new(arrayvec::ArrayVec::new()),
+						batch_pos: 0,
+					};
 				}
 				GroupState::Serve {
 					writer,
@@ -8235,13 +8286,14 @@ mod group_priority_test {
 					None,
 				);
 				assert!(serve.poll(&kio::Waiter::noop()).is_pending());
+				let mut group = Some(group);
 				if finished {
-					group.finish().unwrap();
+					group.take().unwrap().finish().unwrap();
 					assert!(serve.poll(&kio::Waiter::noop()).is_pending());
 					assert!(log.trail().iter().any(|(_, event)| matches!(event, Sent::Finish)));
 				}
 				track.finish_at(track::Position { group: 5, frame: 5 }, None).unwrap();
-				if !finished {
+				if let Some(group) = group {
 					group.finish().unwrap();
 				}
 				kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
@@ -8373,7 +8425,7 @@ mod group_priority_test {
 		group
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
 			.unwrap();
-		group.finish().unwrap();
+		let group = group.finish().unwrap();
 
 		let msg = ietf::GroupHeader {
 			track_alias: 0,
@@ -8634,6 +8686,89 @@ mod group_priority_test {
 		.await;
 	}
 
+	/// A relay ingest publishes a group before it reads the header that describes it, so the
+	/// egress header waits for that state rather than describing a plain group.
+	#[kio::test]
+	async fn a_group_header_waits_for_its_relay_state() {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone());
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			// Keeps a superseded group, so the later group landing does not give up on this one.
+			track::Info::default().with_max_age(None),
+		);
+		let mut serve = TrackServe::new(
+			crate::driver::Transport::new(session.clone()),
+			track.subscribe(Some(
+				track::Subscription::default().with_delay(track::Delay::default().with_max(None)),
+			)),
+			RequestId(0),
+			Version::Draft18,
+			ServeRange::default(),
+			None,
+		);
+
+		let group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		assert!(futures::poll!(kio::wait(|waiter| serve.poll(waiter))).is_pending());
+		// A later group is served meanwhile, its stream independent of the one waiting.
+		let mut later = track.create_group(group::Info { sequence: 1 }).unwrap();
+		later.write_frame(None, b"later".as_slice()).unwrap();
+		later.finish().unwrap();
+		for _ in 0..8 {
+			assert!(futures::poll!(kio::wait(|waiter| serve.poll(waiter))).is_pending());
+			kio::clock::sim::yield_now().await;
+		}
+		let written = log.writes.lock().unwrap().clone();
+		assert!(written.windows(5).any(|window| window == b"later"));
+
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: false,
+				first_id: 3,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		let mut frame = group
+			.create_object(frame::Header {
+				info: frame::Info {
+					size: 1,
+					timestamp: None,
+				},
+				fields: Some(std::sync::Arc::new(crate::model::object::Fields {
+					id: 3,
+					properties: Default::default(),
+				})),
+				inflated: None,
+			})
+			.unwrap();
+		frame.write(b"x".as_slice()).unwrap();
+		frame.finish().unwrap().finish().unwrap();
+		let _finished = track.finish().unwrap();
+		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
+
+		let mut streams = std::collections::BTreeMap::<usize, Vec<u8>>::new();
+		for (stream, sent) in log.trail() {
+			if let crate::lite::test_transport::Sent::Write(bytes) = sent {
+				streams.entry(stream).or_default().extend(bytes);
+			}
+		}
+		let header = streams
+			.into_values()
+			.filter_map(|bytes| {
+				let mut buf = bytes::Bytes::from(bytes);
+				crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| ietf::GroupHeader::decode(r, v)).ok()
+			})
+			.find(|header| header.group_id == 0)
+			.expect("group 0's header");
+		assert!(header.flags.has_extensions);
+		assert!(!header.flags.first_object);
+	}
+
 	/// Serve one group of a track with `info` and decode the subgroup header it opens with.
 	async fn serve_group_header(info: track::Info) -> ietf::GroupHeader {
 		let log = crate::lite::test_transport::Log::default();
@@ -8645,7 +8780,7 @@ mod group_priority_test {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"hello".as_slice()).unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
@@ -8820,6 +8955,48 @@ mod group_priority_test {
 		let mut edge = track.append_group().unwrap();
 		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(serving.await, Err(Error::Old)));
+	}
+
+	/// A group whose stream opened but whose relay state never settled still expires once a
+	/// successor lands, rather than holding the stream until its ingest ends.
+	#[kio::test]
+	async fn a_group_waiting_for_its_relay_state_expires() {
+		let session = SinkSession::new(crate::lite::test_transport::Log::default());
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			track::Info::default(),
+		);
+		let mut subscriber = track.subscribe(None);
+		let _stalled = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("stalled group");
+
+		let mut serve = GroupServe::new(
+			crate::driver::Transport::new(session.clone()),
+			ietf::GroupHeader {
+				track_alias: 0,
+				group_id: 0,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: Default::default(),
+			},
+			Rank::solo(kio::Producer::new(0).consume()),
+			group,
+			None,
+			Version::Draft18,
+			GroupSlice::default(),
+		);
+		let mut serving = std::pin::pin!(kio::wait(|waiter| serve.poll_serve(waiter)));
+		assert!(
+			futures::poll!(serving.as_mut()).is_pending(),
+			"the relay state is unsettled"
+		);
+
+		let mut edge = track.create_group(group::Info { sequence: 1 }).unwrap();
+		edge.write_frame(None, b"edge".as_slice()).unwrap();
 		edge.finish().unwrap();
 
 		assert!(matches!(serving.await, Err(Error::Old)));
@@ -9052,7 +9229,7 @@ mod subscribe_cursor_test {
 		}
 
 		let subscriber = track.subscribe(None);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
@@ -9185,7 +9362,7 @@ mod serve_tests {
 						.run_subscription(&mut stream, &mut serving, &mut finished, &mut goaways, &mut updates);
 				let mut run = std::pin::pin!(run);
 				assert!(futures::poll!(run.as_mut()).is_pending());
-				h.track.finish().unwrap();
+				h.track.finish_shared().unwrap();
 				assert!(matches!(run.await, Some(Served::Track(Ok(())))), "{version}");
 			}
 			// The same reader now watches cancellation while the final marker waits for credit.
@@ -9725,7 +9902,7 @@ mod serve_tests {
 		.await;
 
 		group.finish().unwrap();
-		h.track.finish().unwrap();
+		h.track.finish_shared().unwrap();
 		kio::clock::timeout(std::time::Duration::from_secs(10), serve)
 			.await
 			.expect("the track's end ends the subscription")
@@ -9793,7 +9970,7 @@ mod serve_tests {
 		// Group 2 arrives later, so a verdict that forgot group 1 would wait for 2's deadline.
 		wait(serve.as_mut(), 10).await;
 		append();
-		h.track.finish().unwrap();
+		h.track.finish_shared().unwrap();
 		serve_until(serve.as_mut(), "group 2's stream finished", || finished() == 3).await;
 
 		// Groups 0 and 1 go idle past the cache window long before the deadline.
@@ -10803,7 +10980,7 @@ mod serve_tests {
 		let mut running: Running = Box::pin(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
 		let request = taken_token(&mut running, &mut requests).await;
 		let issued = request.accept(crate::auth::Grant {
-			expires: expires.map(|after| h.publisher.runtime.now() + after),
+			expires: expires.map(|after| h.publisher.runtime.now().saturating_add(after)),
 			..crate::auth::Grant::all()
 		});
 		assert!(futures::poll!(running.as_mut()).is_pending());
@@ -11197,7 +11374,7 @@ mod serve_tests {
 			);
 		}
 
-		h.track.finish().unwrap();
+		h.track.finish_shared().unwrap();
 		served(h, serve).await;
 		h.session.reopen();
 	}
@@ -11998,7 +12175,7 @@ mod serve_tests {
 			let mut later = h.track.create_group(group::Info { sequence: 4 }).unwrap();
 			later.write_frame(timestamp(), b"wanted".as_slice()).unwrap();
 			later.finish().unwrap();
-			h.track.finish().unwrap();
+			h.track.finish_shared().unwrap();
 			serving.await.unwrap();
 			assert_eq!(
 				occurrences(&h.log, b"after-update"),
@@ -12095,7 +12272,7 @@ mod serve_tests {
 				group.write_frame(timestamp(), payload.as_slice()).unwrap();
 			}
 			group.finish().unwrap();
-			h.track.finish().unwrap();
+			h.track.finish_shared().unwrap();
 			serving.await.unwrap();
 			assert_eq!(
 				occurrences(&h.log, b"history"),
@@ -12153,7 +12330,7 @@ mod serve_tests {
 		})
 		.await;
 		// Group 1 stays open: the end falls after it.
-		h.track.finish().unwrap();
+		h.track.finish_shared().unwrap();
 		let update = ietf::SubscribeUpdate {
 			request_id: RequestId(2),
 			subscriber_priority: None,
@@ -12244,7 +12421,7 @@ mod serve_tests {
 		})
 		.await;
 		group.finish().unwrap();
-		h.track.finish().unwrap();
+		h.track.finish_shared().unwrap();
 		serving.await.unwrap();
 		assert_eq!(occurrences(&h.log, b"history"), 0, "the historical fill is refused");
 		assert_eq!(occurrences(&h.log, b"live"), 1, "the live group is not repeated");
@@ -12314,7 +12491,7 @@ mod serve_tests {
 				group.write_frame(timestamp(), payload).unwrap();
 				group.finish().unwrap();
 			}
-			h.track.finish().unwrap();
+			h.track.finish_shared().unwrap();
 			serving.await.unwrap();
 			assert_eq!(occurrences(&h.log, b"history"), 0, "the historical fill is refused");
 			assert_eq!(occurrences(&h.log, b"excluded"), 0, "the live floor stays at group 4");
@@ -12825,7 +13002,7 @@ mod serve_tests {
 					assert!(futures::poll!(serving.as_mut()).is_pending());
 				}
 				frame.finish().unwrap().finish().unwrap();
-				h.track.finish().unwrap();
+				h.track.finish_shared().unwrap();
 				served(&h, serving.as_mut()).await;
 				assert_eq!(occurrences(&h.log, payload), 1, "{version} streamed={streamed}");
 				assert!(h.log.resets().is_empty(), "{version} streamed={streamed}");
@@ -12851,6 +13028,32 @@ mod serve_tests {
 					.collect();
 				assert_eq!(ids, [5], "{version} streamed={streamed}");
 			}
+		}
+	}
+
+	/// An upstream's Largest Object can be the last Object ID a group holds, which no
+	/// exclusive end within the group follows: the join asks for that whole group, which
+	/// this cache holds only the head of.
+	#[kio::test]
+	async fn a_joining_fetch_through_the_last_object_id_reads_its_whole_group() {
+		const LATEST: u64 = 5;
+
+		for version in JOINING_DRAFTS {
+			let mut h = serve(version);
+			publish_groups(&mut h, LATEST);
+			h.track.report_object(LATEST, u64::MAX);
+			settle().await;
+
+			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let mut serve = std::pin::pin!(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+			);
+			registered(&h, serve.as_mut()).await;
+			assert_eq!(joining_refusal(&h, version).await, DOES_NOT_EXIST, "{version}");
 		}
 	}
 
@@ -13220,7 +13423,7 @@ mod serve_tests {
 	/// request ends with it: a finished subscription keeps its join until the subscriber
 	/// closes the request.
 	async fn finish_and_retain(h: &Serve, mut serving: std::pin::Pin<&mut impl Future<Output = Result<(), Error>>>) {
-		h.track.finish().unwrap();
+		h.track.finish_shared().unwrap();
 		for _ in 0..200 {
 			assert!(
 				futures::poll!(serving.as_mut()).is_pending(),
@@ -13388,7 +13591,7 @@ mod serve_tests {
 			};
 			*writable = false;
 			drop(writable);
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			for _ in 0..50 {
 				assert!(futures::poll!(serving.as_mut()).is_pending(), "{version}");
 				settle().await;
@@ -13453,7 +13656,7 @@ mod serve_tests {
 				registered_as(&h, RequestId(id), serving.as_mut()).await;
 				servings.push(serving);
 			}
-			h.track.finish().unwrap();
+			h.track.finish_shared().unwrap();
 			for _ in 0..50 {
 				for serving in &mut servings {
 					assert!(futures::poll!(serving.as_mut()).is_pending(), "{version}");
@@ -14508,7 +14711,7 @@ mod serve_tests {
 		publish_pairs(h, 5, None);
 		match largest {
 			Largest::Finished => {
-				h.track.finish().unwrap();
+				h.track.finish_shared().unwrap();
 				None
 			}
 			Largest::Live => Some(h.track.create_group(group::Info { sequence: 5 }).unwrap()),
@@ -14523,7 +14726,7 @@ mod serve_tests {
 			}
 			Largest::IdleFinished => {
 				h.track.set_idle();
-				h.track.finish().unwrap();
+				h.track.finish_shared().unwrap();
 				None
 			}
 			Largest::Aborted => {
@@ -14591,7 +14794,7 @@ mod serve_tests {
 		let version = Version::Draft22;
 		let mut h = serve(version);
 		publish_pairs(&mut h, 5, None);
-		let mut empty = h.track.create_group(group::Info { sequence: 5 }).unwrap();
+		let empty = h.track.create_group(group::Info { sequence: 5 }).unwrap();
 		empty.finish().unwrap();
 		settle().await;
 
@@ -14680,7 +14883,7 @@ mod serve_tests {
 		for version in FETCH_DRAFTS {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 5, None);
-			h.track.finish().unwrap();
+			h.track.finish_shared().unwrap();
 			settle().await;
 
 			let buf = standalone_fetch(
@@ -14709,7 +14912,7 @@ mod serve_tests {
 			for end in [1, 2] {
 				let mut h = serve(version);
 				publish_pairs(&mut h, 5, None);
-				h.track.finish().unwrap();
+				h.track.finish_shared().unwrap();
 				settle().await;
 
 				let buf = standalone_fetch(
@@ -15581,7 +15784,9 @@ mod serve_tests {
 						group.finish().unwrap();
 					}
 					// An empty finished track: nothing to serve but the marker.
-					_ => track.finish().unwrap(),
+					_ => {
+						track.finish_shared().unwrap();
+					}
 				}
 				(None, Some((broadcast, track)))
 			}
@@ -16433,7 +16638,7 @@ mod serve_tests {
 				group.write_frame(crate::Timestamp::ZERO, payload.as_slice()).unwrap();
 			}
 			group.finish().unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 
 			let range = ServeRange {
 				start: Some(Location { group: 0, object: 0 }),
@@ -18438,6 +18643,18 @@ mod tests {
 	/// uninterested) into a request every few seconds for the life of the session.
 	#[kio::test]
 	async fn a_refusal_that_forbids_retrying_is_not_retried() {
+		refused_once(0).await;
+	}
+
+	/// The largest retry interval a peer can encode is past the clock's range: it waits
+	/// forever rather than panicking the publisher.
+	#[kio::test]
+	async fn a_refusal_past_the_clock_s_range_is_not_retried() {
+		refused_once(crate::coding::varint::MAX_QUIC).await;
+	}
+
+	/// Refuse the only advertisement with `retry_interval`, and assert it is never re-offered.
+	async fn refused_once(retry_interval: u64) {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
@@ -18446,7 +18663,7 @@ mod tests {
 
 		// Every stream is answered with the same refusal, so a retry would show up as a
 		// second occurrence on the wire.
-		let refusal = publish_namespace_error(VERSION, 0).await;
+		let refusal = publish_namespace_error(VERSION, retry_interval).await;
 		let session =
 			crate::lite::test_transport::ScriptedSession::per_stream(vec![refusal.clone(), refusal.clone(), refusal]);
 		let log = session.log.clone();
@@ -21514,7 +21731,7 @@ mod compression_tests {
 				group.write_frame(crate::Timestamp::ZERO, payload.clone()).unwrap();
 			}
 			group.finish().unwrap();
-			track.finish().unwrap();
+			track.finish_shared().unwrap();
 			let response = ietf::SubscribeOk {
 				track_alias: 0,
 				largest: None,

@@ -2,7 +2,7 @@
 // lite subscriber's `FillServeRun` does: below where the copy's feed started, by the copy's start
 // rule, and inside the copy, once it evicted what it received.
 import { expect, test } from "bun:test";
-import { Elapsed, Manual, Milli, Nano, sleep, timeout } from "@moq/clock";
+import { Duration, Elapsed, Manual, sleep, timeout } from "@moq/clock";
 import { DEFAULT_EXPIRY } from "../cache.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
@@ -92,7 +92,7 @@ async function take(reader: Subscriber, count: number): Promise<Map<bigint, stri
 // deadline only after draining them.
 async function idle(clock: Manual, reader: Subscriber): Promise<boolean> {
 	try {
-		(await clock.drive(timeout(Nano.fromMilli(Milli(200)), reader.recvGroup())))?.close();
+		(await clock.drive(timeout(Duration.millis(200), reader.recvGroup())))?.close();
 		return false;
 	} catch (err) {
 		if (err instanceof Elapsed) return true;
@@ -102,7 +102,7 @@ async function idle(clock: Manual, reader: Subscriber): Promise<boolean> {
 
 // Groups 0 to 4, one per second: a group is as old as the start of the one after it, so a
 // reader with a half-second budget starts at group 3, on lite-06 and later.
-const NARROW: Subscription = { delay: { max: Milli(500) } };
+const NARROW: Subscription = { delay: { max: Duration.millis(500) } };
 const WIDE: Subscription = { delay: { max: null }, order: "ascending" };
 
 function populate(track: Producer): void {
@@ -204,7 +204,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 
 			// Both caches age out what nobody touched, a prune slice past the window; only the
 			// live edge stays.
-			await clock.advance(Nano.fromMilli(Milli(DEFAULT_EXPIRY + 10_000)));
+			await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
 			write(peer.track.createGroup(4n), 4n, "live");
 			expect((await first.recvGroup())?.sequence).toBe(4n);
 			const before = peer.fetches();
@@ -346,9 +346,9 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		expect((await live.nextGroup())?.sequence).toBe(2n);
 		await clock.drive(
 			timeout(
-				Nano.fromMilli(Milli(2000)),
+				Duration.millis(2000),
 				(async () => {
-					while (hooks.holdsGroup(reader, 0n)) await sleep(Nano.fromMilli(Milli(10)));
+					while (hooks.holdsGroup(reader, 0n)) await sleep(Duration.millis(10));
 				})(),
 			),
 		);

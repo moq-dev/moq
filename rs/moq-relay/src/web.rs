@@ -1007,9 +1007,11 @@ async fn serve_announced(
 	let mut broadcasts = Vec::new();
 
 	while let Some(event) = announced.try_next() {
-		if let moq_net::origin::RouteEvent::Start(update)
-		| moq_net::origin::RouteEvent::Update(update)
-		| moq_net::origin::RouteEvent::Restart(update) = event
+		if let moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: update,
+		} = event
 		{
 			broadcasts.push(update.prefix);
 		}
@@ -1065,7 +1067,7 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let deadline = kio::clock::now() + tokio::time::Duration::from_secs(30);
+	let deadline = kio::clock::now().saturating_add(tokio::time::Duration::from_secs(30));
 
 	// The lease outlives this handler: the body streams after it returns, so the
 	// response holds the lease and ends it when the last frame is served.

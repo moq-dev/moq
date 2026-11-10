@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Fetch } from "./fetch.ts";
@@ -51,7 +51,7 @@ test("Fetch round-trips on draft-03/04/05", async () => {
 test("Fetch carries omitted and explicit maxDelay on draft-07", async () => {
 	expect((await roundtrip(Version.DRAFT_07, sample())).maxDelay).toBeUndefined();
 
-	for (const maxDelay of [Milli(0), Milli(250), Milli(Number.MAX_SAFE_INTEGER)]) {
+	for (const maxDelay of [0, 250, Number.MAX_SAFE_INTEGER]) {
 		const got = await roundtrip(
 			Version.DRAFT_07,
 			new Fetch({ broadcast: Path.from("room/1"), track: "video", priority: 3, maxDelay, group: 42n }),
@@ -66,7 +66,7 @@ test("Fetch carries omitted and explicit maxDelay on draft-07", async () => {
 				broadcast: Path.from("room/1"),
 				track: "video",
 				priority: 3,
-				maxDelay: Milli(250),
+				maxDelay: 250,
 				group: 42n,
 			}),
 		),
@@ -80,7 +80,8 @@ test("Fetch decodes the optional delay offset before converting to milliseconds"
 		const encoded = await Writer.collect(version, (writer) =>
 			Message.encode(writer, async (w) => {
 				await w.string("room/1");
-				await w.u53(0); // no instance pin
+				await w.u53(0); // no instance pin: empty and unminted
+				await w.bool(false);
 				await w.string("video");
 				await w.u8(0);
 				await w.u62(delay + 1n);
@@ -90,11 +91,10 @@ test("Fetch decodes the optional delay offset before converting to milliseconds"
 			}),
 		);
 		const decoded = Fetch.decode(new Reader(undefined, encoded, version), version);
-		if (delay === BigInt(Number.MAX_SAFE_INTEGER))
-			expect((await decoded).maxDelay).toBe(Milli(Number.MAX_SAFE_INTEGER));
+		if (delay === BigInt(Number.MAX_SAFE_INTEGER)) expect((await decoded).maxDelay).toBe(Number.MAX_SAFE_INTEGER);
 		else await expect(decoded).rejects.toThrow(RangeError);
 	}
 	const unsafe = sample();
-	unsafe.maxDelay = Milli(Number.MAX_SAFE_INTEGER + 1);
+	unsafe.maxDelay = Number.MAX_SAFE_INTEGER + 1;
 	await expect(encode(version, unsafe)).rejects.toThrow(RangeError);
 });

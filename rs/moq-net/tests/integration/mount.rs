@@ -67,8 +67,18 @@ async fn drain(routes: &mut origin::Routes) -> Vec<(bool, String)> {
 	let mut events = Vec::new();
 	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), routes.next()).await {
 		match event.expect("announce ended") {
-			origin::RouteEvent::Start(announce) => events.push((true, announce.prefix.to_string())),
-			origin::RouteEvent::End(announce) => events.push((false, announce.prefix.to_string())),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				announce,
+			} => events.push((true, announce.prefix.to_string())),
+			origin::RouteEvent {
+				kind: origin::RouteKind::End,
+				announce,
+			} => events.push((false, announce.prefix.to_string())),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Offline,
+				announce,
+			} => events.push((false, format!("offline {}", announce.prefix))),
 			_ => {}
 		}
 	}
@@ -97,6 +107,16 @@ fn ended(paths: &[&str]) -> Vec<(bool, String)> {
 	paths.iter().map(|path| (false, path.to_string())).collect()
 }
 
+/// What a reader on `version` sees once `paths` leave without a withdrawal it can
+/// certify: offline where the route layer carries it, ended where only an ANNOUNCE
+/// says it went.
+fn lost(version: Version, paths: &[&str]) -> Vec<(bool, String)> {
+	match version.to_string().as_str() {
+		"moq-lite-07-wip" => paths.iter().map(|path| (false, format!("offline {path}"))).collect(),
+		_ => ended(paths),
+	}
+}
+
 async fn mounted(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let source = produce_origin(1);
@@ -109,9 +129,10 @@ async fn mounted(version: &str) {
 	assert_eq!(drain(&mut routes).await, started(&["own", "shared/cam"]), "{version}");
 	assert_eq!(watch(&viewer, "shared/cam").await, "tenant-a/public/cam", "{version}");
 
-	// What leaves the target leaves the mount.
+	// What leaves the target leaves the mount. The route layer carries the mount's
+	// withdrawal without a floor certifying it, so it goes offline there.
 	drop(published.remove(0));
-	assert_eq!(drain(&mut routes).await, ended(&["shared/cam"]), "{version}");
+	assert_eq!(drain(&mut routes).await, lost(version, &["shared/cam"]), "{version}");
 }
 
 /// A session rooted inside the mount reads only the target.
@@ -146,7 +167,11 @@ async fn relayed(version: &str) {
 
 	drop(upstream);
 	kio::clock::sleep(Duration::from_millis(500)).await;
-	assert_eq!(drain(&mut routes).await, ended(&["own", "shared/cam"]), "{version}");
+	assert_eq!(
+		drain(&mut routes).await,
+		lost(version, &["own", "shared/cam"]),
+		"{version}"
+	);
 }
 
 macro_rules! mounted_tests {

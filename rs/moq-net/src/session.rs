@@ -1097,6 +1097,11 @@ impl Slots {
 		}
 	}
 
+	/// A count of its own under the same cap, starting empty and reported nowhere.
+	pub(crate) fn split(&self) -> Self {
+		Self::new(self.max)
+	}
+
 	/// Report how many are held to `stats`, as `cap`'s peak.
 	pub(crate) fn with_stats(mut self, stats: &crate::stats::Session, cap: crate::stats::Cap) -> Self {
 		stats.track_held(cap, &self.live);

@@ -1,4 +1,4 @@
-import { Micro, type Milli, Nano, now } from "@moq/clock";
+import { Instant, now } from "@moq/clock";
 import { hosted } from "../assets";
 import type { FromWorker, ToWorker } from "./capture-worker";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
@@ -88,7 +88,7 @@ function rewrite(source: ReadableStream<VideoFrame>): ReadableStream<VideoFrame>
 			async pull(controller) {
 				const { value } = await reader.read();
 				if (cancelled) value?.close();
-				else if (value) controller.enqueue(epoch.stamp(value, Nano.toMilli(Nano(now()))));
+				else if (value) controller.enqueue(epoch.stamp(value, now().since(Instant.ZERO).asMillis()));
 				else controller.close();
 			},
 			async cancel(reason) {
@@ -272,8 +272,8 @@ function videoProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 					handle = video.requestVideoFrameCallback((now, metadata) => {
 						// captureTime is the frame's capture instant; both it and now are DOM timestamps,
 						// which the host clock shares, so audio and video stay on one epoch.
-						const timestamp = (metadata.captureTime ?? now) as Milli;
-						controller.enqueue(new VideoFrame(video, { timestamp: Micro.fromMilli(timestamp) }));
+						const millis = metadata.captureTime ?? now;
+						controller.enqueue(new VideoFrame(video, { timestamp: millis * 1000 }));
 						resolve();
 					});
 				});

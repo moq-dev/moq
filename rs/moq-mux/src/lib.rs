@@ -49,10 +49,7 @@ pub mod codec;
 pub mod container;
 mod error;
 pub mod follow;
-// Not part of the public API: compiled only for the crate's own tests and for the `fuzz/`
-// harness.
 #[cfg(any(test, feature = "fuzz"))]
-#[doc(hidden)]
 pub mod fuzz;
 pub mod import;
 mod ingest;

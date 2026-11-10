@@ -54,7 +54,7 @@ async fn record(source: broadcast::Producer, tracks: Vec<track::Producer>) -> Du
 		while track.subscription().is_none() {
 			tokio::task::yield_now().await;
 		}
-		track.finish().unwrap();
+		drop(track.clone().finish().unwrap());
 	}
 	source.close();
 	run.await.unwrap().unwrap();

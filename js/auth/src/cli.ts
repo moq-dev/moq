@@ -90,7 +90,7 @@ program
 
 			const exp = options.unbounded
 				? undefined
-				: (options.expires ?? Math.floor(wall() / 1000) + (options.ttl ?? 3600));
+				: (options.expires ?? Math.floor(wall().asUnixMillis() / 1000) + (options.ttl ?? 3600));
 			const claims = ClaimsSchema.parse({
 				root: options.root,
 				...(options.publish && { publish: options.publish }),

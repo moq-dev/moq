@@ -67,11 +67,20 @@ async fn expect_restart(version: Version, announced: &mut origin::Routes, prefix
 /// place, so the path was never absent, or as an end then a start.
 async fn expect_replaced(version: Version, announced: &mut origin::Routes, prefix: &str, restarts: bool) {
 	match next_event(announced).await {
-		origin::RouteEvent::Restart(announce) if restarts => assert_eq!(announce.prefix.as_str(), prefix),
-		origin::RouteEvent::End(announce) if !restarts => {
+		origin::RouteEvent {
+			kind: origin::RouteKind::Restart,
+			announce,
+		} if restarts => assert_eq!(announce.prefix.as_str(), prefix),
+		origin::RouteEvent {
+			kind: origin::RouteKind::End,
+			announce,
+		} if !restarts => {
 			assert_eq!(announce.prefix.as_str(), prefix);
 			match next_event(announced).await {
-				origin::RouteEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), prefix),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Start,
+					announce,
+				} => assert_eq!(announce.prefix.as_str(), prefix),
 				other => panic!("{version}: expected the start, got {other:?}"),
 			}
 		}
@@ -125,7 +134,10 @@ async fn relay_chain(version: &str) {
 	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().routes();
 	match next_event(&mut announced).await {
-		origin::RouteEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			announce,
+		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the route, got {other:?}"),
 	}
 
@@ -173,7 +185,7 @@ relay_chain_tests! {
 
 /// A worker claiming `pool` under its own instance, `worker-<hop>`, answering each request
 /// with an output whose `video` track carries the worker's name. The claim is a peer's, landed through
-/// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
+/// the `fuzz` module as a session lands it, so its answers carry no exact route.
 struct Worker {
 	origin: origin::Producer,
 	_claim: Rc<origin::Claim>,
@@ -236,7 +248,10 @@ async fn prefix_pool(version: &str) {
 	};
 	let mut announced = downstream.consume().routes();
 	match next_event(&mut announced).await {
-		origin::RouteEvent::Start(announce) => advertised(announce),
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			announce,
+		} => advertised(announce),
 		other => panic!("{version}: expected the pool, got {other:?}"),
 	}
 
@@ -264,7 +279,10 @@ async fn prefix_pool(version: &str) {
 	settle().await;
 	while let Ok(Some(event)) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		match event {
-			origin::RouteEvent::Restart(announce) => advertised(announce),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Restart,
+				announce,
+			} => advertised(announce),
 			other => panic!("{version}: expected a restart at most, got {other:?}"),
 		}
 	}
@@ -287,7 +305,7 @@ async fn prefix_pool_lite07() {
 
 /// A claim at `live` whose handler answers each request with a fresh output, kept so
 /// the test can write into it: `outputs[n]` answered the `n`th request. Only a peer's
-/// claim moves to another instance or re-prices in place, so it lands through the hidden
+/// claim moves to another instance or re-prices in place, so it lands through the
 /// `fuzz` module as a session lands it.
 struct Claim {
 	dynamic: Rc<origin::Claim>,
@@ -356,7 +374,10 @@ async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 	let claim = Claim::new(&publisher, from.clone());
 	let mut announced = viewer.consume().routes();
 	match next_event(&mut announced).await {
-		origin::RouteEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			announce,
+		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the claim, got {other:?}"),
 	}
 
@@ -368,7 +389,13 @@ async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 	claim.update_cost(5);
 	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		assert!(
-			matches!(event, Some(origin::RouteEvent::Update(_))),
+			matches!(
+				event,
+				Some(origin::RouteEvent {
+					kind: origin::RouteKind::Update,
+					..
+				})
+			),
 			"{version}: a re-price delivered {event:?}"
 		);
 	}
@@ -459,7 +486,13 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	let old = publisher.route("live", old_route).unwrap();
 	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().routes();
-	assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::Start(_)));
+	assert!(matches!(
+		next_event(&mut announced).await,
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			..
+		}
+	));
 	let (held, mut subscription) = subscribe(&viewer, "live").await;
 	let track = held.track("video").unwrap();
 	write(&old_track, "old:0");
@@ -538,7 +571,13 @@ async fn unanswered_takeover(version: &str) {
 	// Quiet, so the publisher has nothing to answer the SUBSCRIBE with yet.
 	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().routes();
-	assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::Start(_)));
+	assert!(matches!(
+		next_event(&mut announced).await,
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			..
+		}
+	));
 	let (_held, mut subscription) = subscribe(&viewer, "live").await;
 	settle().await;
 	assert!(
@@ -597,13 +636,25 @@ async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 		let source = publisher.route("live", origin::RouteOptions::default()).unwrap();
 		let produced = source.broadcast().create_track("video", timed()).unwrap();
 		let mut announced = viewer.consume().routes();
-		assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::Start(_)));
+		assert!(matches!(
+			next_event(&mut announced).await,
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				..
+			}
+		));
 		let (held, mut subscription) = subscribe(&viewer, "live").await;
 		let track = held.track("video").unwrap();
 		write(&produced, "old:0");
 		assert_eq!(read(&mut subscription).await, "old:0");
 		source.withdraw();
-		assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::End(_)));
+		assert!(matches!(
+			next_event(&mut announced).await,
+			origin::RouteEvent {
+				kind: origin::RouteKind::End,
+				..
+			}
+		));
 		assert!(track.fetch_group(1, None).await.is_err(), "{version}");
 		write(&produced, "old:1");
 		assert_eq!(read(&mut subscription).await, "old:1");
@@ -619,7 +670,13 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 		let _session = link(version, &publisher, &viewer).await;
 		let old = Claim::new(&publisher, None);
 		let mut announced = viewer.consume().routes();
-		assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::Start(_)));
+		assert!(matches!(
+			next_event(&mut announced).await,
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				..
+			}
+		));
 		let (held, mut subscription) = subscribe(&viewer, "live/job").await;
 		let track = held.track("video").unwrap();
 		old.write(0, "old:0");
@@ -628,7 +685,13 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 		let replacement_track = replacement.broadcast().create_track("video", timed()).unwrap();
 		write(&replacement_track, "new:0");
 		write(&replacement_track, "new:1");
-		assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::Start(_)));
+		assert!(matches!(
+			next_event(&mut announced).await,
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				..
+			}
+		));
 		assert!(
 			track.fetch_group(1, None).await.is_err(),
 			"{version}: covering handle fetched replacement"
@@ -779,7 +842,13 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().routes();
 	assert!(
-		matches!(next_event(&mut announced).await, origin::RouteEvent::Start(_)),
+		matches!(
+			next_event(&mut announced).await,
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				..
+			}
+		),
 		"{case}"
 	);
 

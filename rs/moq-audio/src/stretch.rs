@@ -60,25 +60,18 @@ impl Stretch {
 		frames
 	}
 
-	/// Stretch the first `frames` of [`input`](Self::input) by at most `excess`
-	/// frames: removed while positive, added while negative. All input is new,
-	/// received PCM. Short blocks and finished sinks cannot stretch, so a finite
-	/// input never becomes concealment of an absent frame.
-	pub fn process(&mut self, frames: usize, excess: isize, enabled: bool) {
+	/// All input is new, received PCM. Short blocks and finished sinks cannot
+	/// stretch, so a finite input never becomes concealment of an absent frame.
+	pub fn process(&mut self, frames: usize, buffered: usize, target: usize, enabled: bool) {
 		let operation = if enabled && frames == self.window {
-			self.decide(excess)
+			self.decide(buffered, target)
 		} else {
 			Operation::Hold
 		};
-		let lag = match operation {
-			Operation::Hold => 0,
-			Operation::Fast => pitch(&self.input, self.channels, self.rate, true),
-			// An ordinary stretch takes one period, and only one that fits, so the
-			// ring never lands past its target.
-			Operation::Accelerate | Operation::Expand => {
-				let lag = pitch(&self.input, self.channels, self.rate, false);
-				if lag <= excess.unsigned_abs() { lag } else { 0 }
-			}
+		let lag = if operation == Operation::Hold {
+			0
+		} else {
+			pitch(&self.input, self.channels, self.rate, operation == Operation::Fast)
 		};
 		self.position = 0;
 		self.length = frames;
@@ -116,19 +109,18 @@ impl Stretch {
 		self.cooldown = self.rate as usize * 50 / 1000;
 	}
 
-	/// What a full window decides given `excess` frames above the target, as
-	/// the browser's ring decides, plus the expand it never takes. An excess past
-	/// NetEq's 20 ms granularity fast-accelerates even during cooldown; any other
-	/// excess accelerates, and any shortfall expands.
-	fn decide(&self, excess: isize) -> Operation {
-		if excess >= (self.rate as usize * 20 / 1000) as isize {
+	fn decide(&self, buffered: usize, target: usize) -> Operation {
+		let high = target + self.rate as usize * 20 / 1000;
+		if buffered >= high * 4 {
 			Operation::Fast
-		} else if self.cooldown > 0 || excess == 0 {
+		} else if self.cooldown > 0 {
 			Operation::Hold
-		} else if excess > 0 {
+		} else if buffered >= high {
 			Operation::Accelerate
-		} else {
+		} else if buffered < target {
 			Operation::Expand
+		} else {
+			Operation::Hold
 		}
 	}
 }
@@ -213,7 +205,8 @@ mod tests {
 		rate: u32,
 		channels: usize,
 		input: Vec<f32>,
-		excess: isize,
+		buffered: usize,
+		target: usize,
 		cooldown: usize,
 		decision: String,
 		lag: usize,
@@ -229,12 +222,12 @@ mod tests {
 			stretch.input.copy_from_slice(&vector.input);
 			stretch.cooldown = vector.cooldown;
 			assert_eq!(
-				format!("{:?}", stretch.decide(vector.excess)),
+				format!("{:?}", stretch.decide(vector.buffered, vector.target)),
 				vector.decision,
 				"{}",
 				vector.name
 			);
-			stretch.process(stretch.window, vector.excess, true);
+			stretch.process(stretch.window, vector.buffered, vector.target, true);
 			assert_eq!(stretch.length.abs_diff(stretch.window), vector.lag, "{}", vector.name);
 			assert_eq!(stretch.length * vector.channels, vector.output.len(), "{}", vector.name);
 			for (index, (&actual, &expected)) in stretch.output[..vector.output.len()]
@@ -257,7 +250,7 @@ mod tests {
 			let mut stretch = Stretch::new(rate, 2);
 			stretch.input.fill(0.25);
 			stretch.cooldown = 0;
-			stretch.process(stretch.window, -(rate as isize), true);
+			stretch.process(stretch.window, stretch.window, rate as usize, true);
 			assert!(stretch.length > stretch.window);
 			let mut output = vec![0.0; 2 * rate as usize];
 			let (_, allocations) = crate::allocation::measure(|| {
@@ -265,9 +258,9 @@ mod tests {
 				assert_eq!(stretch.read(&mut output), 0);
 			});
 			assert_eq!(allocations.operations, 0);
-			stretch.process(stretch.window, -(rate as isize), false);
+			stretch.process(stretch.window, stretch.window, rate as usize, false);
 			assert_eq!(stretch.length, stretch.window, "a finished sink drains unchanged");
-			stretch.process(stretch.window / 2, -(rate as isize), true);
+			stretch.process(stretch.window / 2, stretch.window, rate as usize, true);
 			assert_eq!(stretch.length, stretch.window / 2, "a short block drains unchanged");
 		}
 	}

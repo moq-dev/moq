@@ -219,7 +219,11 @@ async fn routes_when(
 			let mut changes = origin.consume().routes();
 			let mut routes = BTreeMap::new();
 			while let Some(event) = changes.try_next() {
-				let origin::RouteEvent::Start(announce) = event else {
+				let origin::RouteEvent {
+					kind: origin::RouteKind::Start,
+					announce,
+				} = event
+				else {
 					panic!("an initial set is only starts: got {event:?}");
 				};
 				let hops = moq_net::fuzz::route_hops(&announce.route);

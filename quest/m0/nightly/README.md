@@ -51,6 +51,5 @@ near the paired threshold (re-check if one repeats), a one-off
 ## Required
 
 - [Nightly's macOS platform job passes](/quest/m0/nightly/macos.md) - `moq-audio`'s tests compile on macOS again and the websocket version test's timeout is fixed if it recurs
-- [The qmux startup benchmark's fake peer sends transport parameters](/quest/m0/nightly/qmux-bench-peer.md) - Audio quality's WebSocket startup step stops timing out
-- [The moq-net session bench completes moq-transport-22 at 16 broadcasts](/quest/m0/nightly/session-bench-handshake.md) - the bench workload stops panicking on a handshake timeout
-- [Moxygen conformance cells pass again](/quest/m0/nightly/moxygen-conformance.md) - the first-object signal and integer extensions survive, or moxygen's divergence is skipped with an upstream link
+- [Nightly's WebSocket fallback benchmark connects again](/quest/m0/nightly/qmux-bench-handshake.md) - `just js qmux-bench` stops timing out on its handshake, a regression since 2026-11-07, so the Audio quality job fails only on audio results
+- [Nightly's Windows platform job passes](/quest/m0/nightly/windows.md) - `moq-vaapi` is gated to Linux and Windows-only unused items are fixed, so `platform.yml`'s Windows job builds and tests cleanly

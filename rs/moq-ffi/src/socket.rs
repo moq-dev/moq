@@ -353,6 +353,15 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn endpoint_close_resets_an_open_tcp_session_as_closed() {
+		let (a, b) = endpoints();
+		let (_client, server) = tcp(&a, &b).await;
+		a.close();
+		let error = server.consumer().read_frame().await.err().unwrap();
+		assert!(matches!(error, MoqError::Closed), "{error:?}");
+	}
+
+	#[tokio::test]
 	async fn dropping_an_unfinished_tcp_writer_resets_with_a_deliberate_cause() {
 		let (a, b) = endpoints();
 		let (client, server) = tcp(&a, &b).await;

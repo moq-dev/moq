@@ -27,10 +27,10 @@ internal constructor(
         session.publish().route(path, options)
 
     /**
-     * List the paths matching [config] as each becomes present or absent; prefixes stay relative to
-     * the origin. Collect `announced(config).updates()` for a [Flow] of [AnnounceEvent] that
-     * cancels the handle when collection ends. A new publisher instance keeps its path present, so
-     * use [follow] to see it.
+     * List the paths matching [config] as each becomes present, absent, or offline, or changes
+     * availability; prefixes stay relative to the origin. Collect `announced(config).updates()` for
+     * a [Flow] of [AnnounceEvent] that cancels the handle when collection ends. A new publisher
+     * instance keeps its path present, so use [follow] to see it.
      */
     fun announced(config: AnnounceConfig = AnnounceConfig()): AnnounceConsumer =
         session.consume().announced(config)
@@ -43,7 +43,7 @@ internal constructor(
      * the path goes offline. Pass an [instance] to follow only that stream; another one taking over
      * also returns null. Cancel the returned handle to stop waiting.
      */
-    fun follow(path: String, instance: String? = null): Following =
+    fun follow(path: String, instance: Instance? = null): Following =
         session.consume().follow(path, instance)
 
     /**
@@ -53,7 +53,7 @@ internal constructor(
      * Unlike [follow] this does not wait for a future announcement; it throws when neither can
      * serve the path. Pass an [instance] to refuse any other stream.
      */
-    suspend fun request(path: String, instance: String? = null): BroadcastConsumer =
+    suspend fun request(path: String, instance: Instance? = null): BroadcastConsumer =
         session.consume().request(path, instance)
 
     /**

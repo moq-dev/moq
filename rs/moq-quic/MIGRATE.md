@@ -102,9 +102,9 @@ Unused `Connection::local_ip`, `min_rtt`, `has_pending_retransmits`, `ping`, `fo
 To rotate TLS certificates on a running endpoint, give the `ServerConfig`'s rustls config a `ResolvesServerCert` that returns the current certificate, as moq-tokio's `tls::Serve` does.
 Use `Connection::stats` for RTT metrics and receive metadata for local addresses.
 
-### `mux` is an internal integration surface
+### `connection::mux` is the QMux connection
 
-The `mux` module is hidden from public API documentation; use the `qmux` crate for reliable-transport sessions. It remains public only so qmux can share the stream state machine.
+The `mux` feature adds `connection::mux`, the sans-IO QMux connection that shares the stream state machine; use the `qmux` crate for reliable-transport sessions.
 
 Each entry is a change from `quinn-proto`.
 
@@ -148,7 +148,7 @@ priority. Higher still goes first.
 ### `fuzzing` module and `arbitrary` feature removed
 
 The `cfg(fuzzing)` `fuzzing` module and the `arbitrary` feature are gone. The fuzz
-targets run through the hidden `fuzz` module behind the `fuzz` feature; see
+targets run through the `fuzz` module behind the `fuzz` feature; see
 [`fuzz/`](fuzz/README.md).
 
 ### `congestion::NewReno` removed

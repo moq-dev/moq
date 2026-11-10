@@ -32,7 +32,7 @@ impl Trigger {
 	/// Calling it again keeps the first deadline.
 	pub fn start(&self) {
 		let now = Instant::now();
-		let deadline = now + self.drain_timeout;
+		let deadline = now.saturating_add(self.drain_timeout);
 		let first = self.tx.send_if_modified(|started| {
 			let first = started.is_none();
 			if first {
@@ -380,7 +380,7 @@ impl Observer {
 
 	async fn drain(&self, session: &moq_net::Session, counted: bool) {
 		let now = Instant::now();
-		let deadline = self.deadline().unwrap_or(now + self.drain_timeout);
+		let deadline = self.deadline().unwrap_or(now.saturating_add(self.drain_timeout));
 		let remaining = deadline.saturating_duration_since(now);
 		// Dropped when this returns or is cancelled (a WebSocket driver ending
 		// first), so the count holds whichever way the session goes.
@@ -811,7 +811,7 @@ mod tests {
 		let window = Duration::from_secs(10);
 		let (trigger, shutdown) = Observer::new(window);
 		let mut established = shutdown.serve();
-		let draining = shutdown.draining(kio::clock::now() + window);
+		let draining = shutdown.draining(kio::clock::now().saturating_add(window));
 		trigger.start();
 		kio::clock::sleep(window / 2).await;
 		established.closed();

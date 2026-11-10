@@ -1,4 +1,4 @@
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -23,9 +23,9 @@ import {
 import { type Fill, fillChanged, type Requests, wantedRuns } from "../fill.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
-import * as Instance from "../instance.ts";
 import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
+import * as Mint from "../mint.ts";
 import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
@@ -396,7 +396,7 @@ export class Subscriber {
 		}
 		// moq-transport carries no instance, so each namespace the peer advertises anew is a
 		// stream of its own, even one it advertised before on this session.
-		route = this.#drained({ ...route, instance: Instance.minted(), epoch: 0n });
+		route = this.#drained({ ...route, instance: Mint.fresh(), epoch: 0n });
 		const entry: Announced = { adverts: [{ id, route }], route };
 		this.#announced.set(path, entry);
 		this.#consumes.announce(path, entry, route);
@@ -446,7 +446,7 @@ export class Subscriber {
 	/**
 	 * Drop advertisement `id` for a path, retracting it only once the last one goes.
 	 */
-	#detachAnnounce(path: Path.Valid, id: number) {
+	#detachAnnounce(path: Path.Valid, id: number, ended: boolean) {
 		const existing = this.#announced.get(path);
 		const index = existing?.adverts.findIndex((advert) => advert.id === id) ?? -1;
 		if (existing === undefined || index === -1) return;
@@ -468,7 +468,13 @@ export class Subscriber {
 			// A consumer that closed stays registered until its request is off the wire.
 			if (!sees(filter, path) || consumer.closed.peek() !== undefined) continue;
 			const scope = filter.scope;
-			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "end", route: existing.route });
+			// Only the peer's withdrawal ends the route; losing its stream or path lets it go.
+			consumer.append({
+				prefix: path,
+				captures: scopeCaptures(scope, path),
+				kind: ended ? "end" : "offline",
+				route: existing.route,
+			});
 		}
 	}
 
@@ -505,13 +511,14 @@ export class Subscriber {
 		let released = false;
 
 		// The stream owns every advertisement it carried, so give them back however it ends:
-		// as the request starts leaving, a decode error, or the peer resetting it. Without
+		// as the request starts leaving, a decode error, or the peer resetting it. Closing the
+		// stream withdraws nothing, which NAMESPACE_DONE is for, so they go offline. Without
 		// this each namespace keeps its count and the source never detaches, which would pin
 		// the path for the session even after the other source withdrew.
 		const release = () => {
 			released = true;
 			for (const [path, held] of live) {
-				if (held.id !== undefined) this.#detachAnnounce(path, held.id);
+				if (held.id !== undefined) this.#detachAnnounce(path, held.id, false);
 			}
 			live.clear();
 		};
@@ -633,7 +640,7 @@ export class Subscriber {
 							// over: the path is gone even though the message says active.
 							if (this.#reflected(params.cluster)) {
 								console.debug(`dropping reflected namespace: broadcast=${path}`);
-								if (held?.id !== undefined) this.#detachAnnounce(path, held.id);
+								if (held?.id !== undefined) this.#detachAnnounce(path, held.id, false);
 								live.set(path, {});
 								continue;
 							}
@@ -652,7 +659,7 @@ export class Subscriber {
 
 							const held = live.get(path);
 							live.delete(path);
-							if (held?.id !== undefined) this.#detachAnnounce(path, held.id);
+							if (held?.id !== undefined) this.#detachAnnounce(path, held.id, true);
 						} else {
 							throw new Error(
 								`unexpected message on subscribe_namespace stream: 0x${msgType.toString(16)}`,
@@ -1091,7 +1098,7 @@ export class Subscriber {
 				timescale: ok.properties.timescale,
 				priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 				// No MAX_CACHE_DURATION sets no publisher limit, not the authored default.
-				maxAge: cache === undefined ? null : Milli(Number(cache)),
+				maxAge: cache === undefined ? null : Duration.millis(Number(cache)),
 				ietf: this.#session.version,
 			});
 			producer = staged.producer;
@@ -1626,7 +1633,7 @@ export class Subscriber {
 					timescale: ok.properties.timescale,
 					priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 					// No MAX_CACHE_DURATION sets no publisher limit, not the authored default.
-					maxAge: maxCacheDuration === undefined ? null : Milli(Number(maxCacheDuration)),
+					maxAge: maxCacheDuration === undefined ? null : Duration.millis(Number(maxCacheDuration)),
 					// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
 					ietf: version,
 				});
@@ -1735,6 +1742,9 @@ export class Subscriber {
 		// stream ends.
 		this.#announceSlots.acquire();
 		let attached: number | undefined;
+		// Set once the peer ends the request, by FIN or reset, which withdraws the
+		// advertisement; a violation or a refused update here loses it instead.
+		let withdrawn = false;
 
 		try {
 			// Send OK first. This must complete before notifying consumers,
@@ -1755,6 +1765,7 @@ export class Subscriber {
 				if (framed === undefined) {
 					// FIN cancels only on some drafts; on the rest the request lasts until reset.
 					await request.ended;
+					withdrawn = true;
 					break;
 				}
 
@@ -1802,7 +1813,7 @@ export class Subscriber {
 				if (this.#reflected(held)) {
 					if (attached !== undefined) {
 						console.debug(`publish_namespace now loops back, detaching: broadcast=${path}`);
-						this.#detachAnnounce(path, attached);
+						this.#detachAnnounce(path, attached, false);
 						attached = undefined;
 					}
 				} else if (attached === undefined) {
@@ -1823,7 +1834,7 @@ export class Subscriber {
 			// Give back exactly what was taken: a request that never got its OK out never
 			// referenced the path, and retracting there would drop someone else's count.
 			if (attached !== undefined) {
-				this.#detachAnnounce(path, attached);
+				this.#detachAnnounce(path, attached, withdrawn);
 			}
 		}
 	}

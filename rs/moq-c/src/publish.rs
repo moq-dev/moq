@@ -189,6 +189,11 @@ impl Children {
 		}
 	}
 
+	/// Whether the broadcast closed, ending its children.
+	pub(crate) fn is_closed(&self) -> bool {
+		matches!(*self.lock(), Family::Closed)
+	}
+
 	/// Stop tracking `child`, which ended on its own.
 	pub(crate) fn forget(&self, child: Child) {
 		if let Family::Open { open, .. } = &mut *self.lock() {
@@ -419,11 +424,6 @@ impl Publish {
 			timebases: Default::default(),
 		})?;
 		Ok(id)
-	}
-
-	/// Whether `id` names a broadcast fill handle that has not been closed.
-	pub fn contains(&self, id: Id) -> bool {
-		self.broadcasts.get(id).is_some()
 	}
 
 	/// Drop a fill handle that never reached the caller.
@@ -1249,8 +1249,9 @@ impl Publish {
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let id = track;
 		let Kept { inner: track, children } = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
+		// The kept handle stays a producer, whose appends the end refuses.
 		if track.finished().is_none() {
-			track.finish()?;
+			drop(track.clone().finish()?);
 		}
 		Kept { inner: track, children }.keep(Child::Track(id));
 		Ok(())
@@ -1538,7 +1539,7 @@ impl Publish {
 
 	/// Finish a raw group. No more frames can be written.
 	pub fn group_finish(&mut self, group: Id) -> Result<(), Error> {
-		let mut group = self
+		let group = self
 			.groups
 			.remove(group)
 			.and_then(|group| group.inner.take())

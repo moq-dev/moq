@@ -432,24 +432,23 @@ async def test_following_restarts_on_a_new_instance():
     first = origin.route("instance")
     present = await next_route(announced)
     assert isinstance(present, moq.AnnounceEventPresent)
-    minted = present.announce.route.instance
-    assert minted == first.instance
+    fresh = present.announce.route.instance
+    assert fresh == first.instance
+    assert not fresh.is_minted()
     assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
 
     # Another route is another stream: followers restart onto it, while the path stays
     # present, so neither the re-price nor the restart is listed.
     first.set_cost(1)
-    second = origin.route("instance", instance="cam", epoch=1)
-    assert second.instance == "cam"
+    cam = moq.Instance.parse("cam")
+    second = origin.route("instance", instance=cam, epoch=1)
+    assert second.instance == cam
     assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
     first.withdraw()
     second.withdraw()
     absent = await next_route(announced)
     assert isinstance(absent, moq.AnnounceEventAbsent)
-    assert absent.announce.route.instance == "cam"
-
-    with pytest.raises(moq.Error.InvalidInstance):
-        origin.route("refused", instance="")
+    assert absent.announce.route.instance == cam
     following.cancel()
     first.broadcast.close()
     second.broadcast.close()
@@ -1559,6 +1558,35 @@ def test_audio_encoder_returns_namespaced_records():
     assert isinstance(finish, moq.audio.EncoderFinish)
 
 
+def test_video_encoder_submits_and_receives():
+    """The codec-only video encoder takes pictures and hands back access units one at a time."""
+    encoder = moq.video.Encoder(
+        moq.video.EncoderInput(
+            format=moq.video.PixelFormat.I420,
+            width=64,
+            height=48,
+            framerate=moq.video.FrameRate(numerator=30, denominator=1),
+        ),
+        moq.video.EncoderOutput(
+            codec=moq.video.Codec.H264,
+            kind=cast(moq.video.EncoderKind, moq.video.EncoderKind.SOFTWARE()),
+        ),
+    )
+    packets: list[moq.video.Packet] = []
+    picture = bytes([0x80]) * (64 * 48 * 3 // 2)
+    for i in range(3):
+        if i == 2:
+            encoder.cut()
+        encoder.encode(moq.video.Frame(timestamp=moq.Timestamp(i * 33_333, 1_000_000), data=picture))
+        while (packet := encoder.receive()) is not None:
+            packets.append(packet)
+    encoder.flush()
+    while (packet := encoder.receive()) is not None:
+        packets.append(packet)
+    assert [packet.keyframe for packet in packets] == [True, False, True]
+    assert all(packet.data for packet in packets)
+
+
 def test_audio_encoder_frame_init_and_bitrate():
     """A frame duration sets the frame size, the encoder reports its OpusHead, and the bitrate retunes live."""
     output = moq.audio.EncoderOutput(
@@ -1765,19 +1793,28 @@ async def test_broadcast_is_reachable_only_while_announced():
 async def test_an_instance_pins_request_and_follow():
     origin = moq.OriginProducer()
     consumer = origin.consume()
-    route = origin.route("live", instance="cam")
+    cam = moq.Instance.parse("cam")
+    other = moq.Instance.parse("other")
+    route = origin.route("live", instance=cam)
 
-    await asyncio.wait_for(consumer.request("live", instance="cam"), timeout=5.0)
-    with pytest.raises(moq.Error.Protocol):
-        await asyncio.wait_for(consumer.request("live", instance="other"), timeout=5.0)
+    # Only a session mints an instance: callers name one, and never an empty one.
+    assert str(cam) == cam.text() == "cam" and not cam.is_minted()
+    assert cam == moq.Instance.parse("cam") and hash(cam) == hash(moq.Instance.parse("cam"))
+    assert cam != other
+    with pytest.raises(ValueError):
+        moq.Instance()
     with pytest.raises(moq.Error.InvalidInstance):
-        consumer.follow("live", instance="")
-    async with consumer.follow("live", instance="cam") as following:
+        moq.Instance.parse("")
+
+    await asyncio.wait_for(consumer.request("live", instance=cam), timeout=5.0)
+    with pytest.raises(moq.Error.Protocol):
+        await asyncio.wait_for(consumer.request("live", instance=other), timeout=5.0)
+    async with consumer.follow("live", instance=cam) as following:
         assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
         # Another instance taking the path over ends the pinned stream.
-        other = origin.route("live", instance="other")
+        taken = origin.route("live", instance=other)
         assert await asyncio.wait_for(following.available(), timeout=5.0) is None
-    other.broadcast.close()
+    taken.broadcast.close()
     route.broadcast.close()
 
 

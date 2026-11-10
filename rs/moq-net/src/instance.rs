@@ -7,11 +7,14 @@ use std::sync::Arc;
 /// Within an instance, group sequences never restart and never name two different groups,
 /// so a reader continues across every route that shares it. Different instances are
 /// independent streams, never stitched together.
+///
+/// Two instances are equal only when both their text and whether they were
+/// [minted](Instance::is_minted) match, so a named instance never matches a minted one.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Instance(Arc<str>);
-
-/// What every [minted](Instance::is_minted) instance starts with.
-const MINTED: char = '~';
+pub struct Instance {
+	text: Arc<str>,
+	minted: bool,
+}
 
 /// The instance is empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -22,26 +25,42 @@ pub struct InvalidInstance;
 impl Instance {
 	/// A fresh random instance, for a new stream.
 	pub fn random() -> Self {
-		Self(random().into())
+		Self::named(random().into())
+	}
+
+	fn named(text: Arc<str>) -> Self {
+		Self { text, minted: false }
 	}
 
 	/// A fresh instance a session mints for a route its wire delivered without one.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn minted() -> Self {
-		Self(format!("{MINTED}{}", random()).into())
+		Self {
+			text: random().into(),
+			minted: true,
+		}
 	}
 
-	/// The instance's text.
+	/// An instance a lite-07 peer carried, keeping whether a session minted it.
+	pub(crate) fn decoded(text: &str, minted: bool) -> Result<Self, InvalidInstance> {
+		Ok(Self {
+			minted,
+			..text.parse()?
+		})
+	}
+
+	/// The instance's text, which alone does not tell a minted instance from a named one.
 	pub fn as_str(&self) -> &str {
-		&self.0
+		&self.text
 	}
 
-	/// Whether a relay minted this instance, for a route whose wire (an older moq-lite, or
-	/// moq-transport) carries none: its text starts with `~`. It names the announcement
-	/// rather than the publisher's stream, so it can neither match nor contradict an instance
-	/// the publisher named elsewhere, such as in a catalog. Hops that forward it keep the mark.
+	/// Whether a session minted this instance, for a route whose wire (an older moq-lite, or
+	/// moq-transport) carries none. It names the announcement rather than the publisher's
+	/// stream, so it can neither match nor contradict an instance the publisher named
+	/// elsewhere, such as in a catalog. Hops that forward it keep the flag, and only a
+	/// session sets it: parsing text never builds a minted instance.
 	pub fn is_minted(&self) -> bool {
-		self.0.starts_with(MINTED)
+		self.minted
 	}
 }
 
@@ -57,7 +76,7 @@ impl FromStr for Instance {
 	fn from_str(text: &str) -> Result<Self, Self::Err> {
 		match text.is_empty() {
 			true => Err(InvalidInstance),
-			false => Ok(Self(text.into())),
+			false => Ok(Self::named(text.into())),
 		}
 	}
 }
@@ -68,14 +87,19 @@ impl TryFrom<String> for Instance {
 	fn try_from(text: String) -> Result<Self, Self::Error> {
 		match text.is_empty() {
 			true => Err(InvalidInstance),
-			false => Ok(Self(text.into())),
+			false => Ok(Self::named(text.into())),
 		}
 	}
 }
 
 impl fmt::Debug for Instance {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_tuple("Instance").field(&self.as_str()).finish()
+		let mut debug = f.debug_tuple("Instance");
+		debug.field(&self.as_str());
+		if self.minted {
+			debug.field(&"minted");
+		}
+		debug.finish()
 	}
 }
 
@@ -102,12 +126,17 @@ mod tests {
 		assert_eq!(instance.as_str().parse::<Instance>().unwrap(), instance);
 		assert!("".parse::<Instance>().is_err());
 		assert!(!instance.is_minted());
+	}
+
+	#[test]
+	fn text_never_builds_a_minted_instance() {
 		let minted = Instance::minted();
 		assert!(minted.is_minted());
-		assert_eq!(
-			minted.as_str().parse::<Instance>().unwrap(),
-			minted,
-			"a forwarded mark survives"
-		);
+		let named: Instance = minted.as_str().parse().unwrap();
+		assert!(!named.is_minted());
+		assert_ne!(named, minted, "the same text, named, is another instance");
+		assert!(!"~tilde".parse::<Instance>().unwrap().is_minted());
+		assert_eq!(Instance::decoded(minted.as_str(), true).unwrap(), minted);
+		assert!(Instance::decoded("", true).is_err());
 	}
 }

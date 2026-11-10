@@ -121,6 +121,22 @@ async fn lite_07_opens_an_auth_stream_per_side() {
 	.expect("timed out");
 }
 
+/// Floors certify withdrawals only on lite-07.
+#[kio::test]
+async fn lite_07_a_scoped_withdrawal_ends() {
+	a_scoped_withdrawal_ends(LITE_07).await
+}
+
+#[kio::test]
+async fn lite_07_a_scope_change_reopens_without_letting_go() {
+	a_scope_change_reopens_without_letting_go(LITE_07).await
+}
+
+#[kio::test]
+async fn lite_07_a_scope_change_at_the_announce_cap_keeps_the_session() {
+	a_scope_change_at_the_announce_cap_keeps_the_session(LITE_07).await
+}
+
 #[kio::test]
 async fn lite_05_has_no_grant() {
 	older_versions_have_no_grant("moq-lite-05").await
@@ -408,12 +424,17 @@ async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 	let mut announced = origin.routes();
 	let mut live = std::collections::HashSet::new();
 	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::origin::RouteEvent| match event {
-		moq_net::origin::RouteEvent::Start(update)
-		| moq_net::origin::RouteEvent::Update(update)
-		| moq_net::origin::RouteEvent::Restart(update) => {
+		moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: update,
+		} => {
 			live.insert(update.prefix.to_string());
 		}
-		moq_net::origin::RouteEvent::End(update) => {
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+			announce: update,
+		} => {
 			live.remove(update.prefix.as_str());
 		}
 	};
@@ -446,6 +467,8 @@ struct Options {
 	client_token: Option<&'static [u8]>,
 	/// The handle the client builds its session on, when not its own.
 	client_auth: Option<auth::Handle>,
+	/// The server's session limits, when not the defaults.
+	server_limits: Option<moq_net::session::Limits>,
 }
 
 struct Pair {
@@ -495,6 +518,9 @@ async fn connect(opts: Options) -> Pair {
 	}
 	if let Some(subscribe) = opts.server_subscribe {
 		server = server.with_subscriber(subscribe);
+	}
+	if let Some(limits) = opts.server_limits {
+		server = server.with_limits(limits);
 	}
 
 	let observe = client_transport.clone();
@@ -800,6 +826,128 @@ async fn tokens_union_and_withdrawing_one_shrinks_it(version: &'static str) {
 		wait_for(pair.client.auth().grant(), |g| g == &Some(grant(&["a"], &[]))).await;
 		wait_announced(&served, "b/y", false).await;
 		wait_announced(&served, "a/x", true).await;
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// The route events `routes` delivered for `path` so far.
+fn kinds(routes: &mut origin::Routes, path: &str) -> Vec<origin::RouteKind> {
+	let mut kinds = Vec::new();
+	while let Some(event) = futures::FutureExt::now_or_never(routes.next()).flatten() {
+		if event.announce.prefix.as_str() == path {
+			kinds.push(event.kind);
+		}
+	}
+	kinds
+}
+
+/// A relay that limits its publisher to one prefix asks it for that prefix alone, not
+/// for everything, so the publisher's floors certify a withdrawal: it ends rather than
+/// going offline.
+async fn a_scoped_withdrawal_ends(version: &'static str) {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			..Default::default()
+		})
+		.await;
+		pair.server.auth().authorize(&grant(&["a"], &[]));
+
+		let mut routes = relay.consume().routes();
+		let route = publisher.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		route.announce().unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::Start]);
+
+		route.withdraw();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::End]);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// Widening the limit to a second prefix reopens the relay's request above both, and
+/// narrowing it reopens the request at the first again, each without letting go of what
+/// the limit kept: the old request serves until the new one is synced.
+async fn a_scope_change_reopens_without_letting_go(version: &'static str) {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			..Default::default()
+		})
+		.await;
+		pair.server.auth().authorize(&grant(&["a"], &[]));
+
+		let mut routes = relay.consume().routes();
+		let a = publisher.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		a.announce().unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::Start]);
+
+		// Widened past what the first request asked for: the new one carries `b`.
+		pair.server.auth().authorize(&grant(&["a", "b"], &[]));
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		let b = publisher.route("b/y", moq_net::origin::RouteOptions::hidden()).unwrap();
+		b.announce().unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "b/y"), [origin::RouteKind::Start]);
+		assert_eq!(kinds(&mut routes, "a/x"), [], "the widening let go of a/x");
+
+		// Narrowed back to `a`, where a withdrawal is certified again.
+		pair.server.auth().authorize(&grant(&["a"], &[]));
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [], "the narrowing let go of a/x");
+		a.withdraw();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::End]);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A session holding all the announce slots it may has no room to hear its peer's claims
+/// twice, so the old request gives its slots to the new one during a scope change,
+/// rather than the handover running the peer past its cap.
+async fn a_scope_change_at_the_announce_cap_keeps_the_session(version: &'static str) {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let mut limits = moq_net::session::Limits::default();
+		// One route and its two claims.
+		limits.announces = 3;
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			server_limits: Some(limits),
+			..Default::default()
+		})
+		.await;
+		pair.server.auth().authorize(&grant(&["a"], &[]));
+
+		let x = publisher.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		x.announce().unwrap();
+		let y = publisher.route("a/y", moq_net::origin::RouteOptions::hidden()).unwrap();
+		y.announce().unwrap();
+		wait_announced(&relay.consume(), "a/y", true).await;
+		let mut routes = relay.consume().routes();
+		kinds(&mut routes, "a/x");
+
+		pair.server.auth().authorize(&grant(&["a", "b"], &[]));
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [], "the handover let go of a/x");
+		assert_eq!(pair.server_transport.close_reason(), None);
 		assert_eq!(pair.client_transport.close_reason(), None);
 	})
 	.await

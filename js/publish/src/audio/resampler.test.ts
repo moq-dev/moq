@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { Micro } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type { AudioFrame } from "./capture";
 import { Resampler } from "./resampler";
 
-const micro = (value: number): Micro => value as Micro;
+const micro = (value: number): Duration => Duration.micros(value);
 
 // A chunk of `samples` frames of a sine at `freq` Hz, starting at input sample `offset`.
 function tone(samples: number, rate: number, freq: number, offset: number, channels = 1): AudioFrame {

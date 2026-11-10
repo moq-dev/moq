@@ -215,7 +215,7 @@ mod tests {
 		let mut g1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 		write_length_prefixed(&mut g1, 33_000, &[trail]);
 		g1.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let consumer = broadcast.consume();
 		// The whole track is written before the exporter runs, so it needs a budget
@@ -332,7 +332,7 @@ mod tests {
 			let nals: &[&[u8]] = &[&[0x40, 1, 0x0c], &[0x42, 1, 1], &[0x44, 1, 0xc0], &[0x26, 1, 0x88]];
 			write_length_prefixed(&mut group, 0, nals);
 			group.finish().unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			let consumer = broadcast.consume();
 			let mut exporter = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)));
 			let result = exporter.next().await;

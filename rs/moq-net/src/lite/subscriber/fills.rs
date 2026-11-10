@@ -560,10 +560,7 @@ impl Recovery {
 							);
 						}
 						Ok(Some(lite::SubscribeResponse::Drop(dropped))) => {
-							given_up(
-								dropped.start..dropped.end.saturating_add(1),
-								Refusal::dropped(dropped.error(version)),
-							);
+							given_up(dropped.groups.clone(), Refusal::dropped(dropped.error(version)));
 						}
 						// Nothing at or past the track's end will be produced.
 						Ok(Some(lite::SubscribeResponse::Finish(finish))) if !self.ended => {

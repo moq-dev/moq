@@ -32,7 +32,7 @@
 //! A claim's answer, and its retraction moving the claim to a fresh instance, is swept
 //! over the paths the claim already answered and the cursors watching it.
 //!
-//! Peer claims land through the hidden `fuzz` module, as a session lands them.
+//! Peer claims land through the `fuzz` module, as a session lands them.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench origin`.
 
@@ -586,7 +586,11 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 						for cursor in &mut cursors {
 							// The winner switches between unnamed routes, which is another instance.
 							let event = cursor.next().now_or_never().flatten().expect("winner changed");
-							let moq_net::origin::RouteEvent::Restart(update) = event else {
+							let moq_net::origin::RouteEvent {
+								kind: moq_net::origin::RouteKind::Restart,
+								announce: update,
+							} = event
+							else {
 								panic!("expected a restart: got {event:?}");
 							};
 							assert_eq!(
@@ -702,7 +706,16 @@ fn bench_lend(c: &mut Criterion) {
 					let (request, output) = ask(&format!("room/incoming{n}"));
 					for cursor in &mut cursors {
 						let event = cursor.next().now_or_never().flatten();
-						assert!(matches!(event, Some(origin::RouteEvent::Start(_))), "{event:?}");
+						assert!(
+							matches!(
+								event,
+								Some(origin::RouteEvent {
+									kind: origin::RouteKind::Start,
+									..
+								})
+							),
+							"{event:?}"
+						);
 					}
 					drop(request);
 					drop(output);
@@ -777,7 +790,11 @@ fn bench_subscribe(c: &mut Criterion) {
 			b.iter(|| {
 				let mut cursor = fleet.consumer.routes();
 				let mut replayed = 0;
-				while let Some(origin::RouteEvent::Start(_)) = cursor.next().now_or_never().flatten() {
+				while let Some(origin::RouteEvent {
+					kind: origin::RouteKind::Start,
+					..
+				}) = cursor.next().now_or_never().flatten()
+				{
 					replayed += 1;
 				}
 				assert_eq!(replayed, publishers);

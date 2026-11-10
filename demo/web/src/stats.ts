@@ -23,7 +23,7 @@
  */
 
 import "./highlight";
-import { Milli, Nano, wall } from "@moq/clock";
+import { Duration, wall } from "@moq/clock";
 import { Net, Signals } from "@moq/hang";
 import * as Json from "@moq/json";
 
@@ -33,7 +33,7 @@ const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? "http://localhost:4443";
 const STATS_PREFIX = ".stats/node";
 
 // Rolling history window for the charts.
-const SAMPLE = Nano.fromMilli(Milli(1000));
+const SAMPLE = Duration.millis(1000);
 const MAX_SAMPLES = 90;
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -354,7 +354,7 @@ sampler.run((effect) => {
 	effect.interval(() => {
 		const all = nodeStats.peek();
 		const nodes = Object.keys(all).sort();
-		const t = wall();
+		const t = wall().asUnixMillis();
 
 		const agg: Sample = {
 			t,

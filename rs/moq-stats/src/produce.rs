@@ -402,10 +402,7 @@ impl Drain {
 	}
 }
 
-/// Drives one producer tick for the benchmark. Not a public API: compiled only
-/// with the `bench` feature, which nothing enables by default.
 #[cfg(feature = "bench")]
-#[doc(hidden)]
 #[path = "produce_bench.rs"]
 pub mod bench;
 
@@ -537,7 +534,7 @@ impl<T: Serialize> Snapshot<T> {
 				true => self.largest.map_or(0, |largest| largest + 1),
 				false => stamp.group,
 			};
-			if let Some(mut group) = self.group.take() {
+			if let Some(group) = self.group.take() {
 				group.finish()?;
 			}
 			self.group = Some(self.track.create_group(moq_net::group::Info { sequence })?);
@@ -565,10 +562,11 @@ impl<T: Serialize> Snapshot<T> {
 	}
 
 	fn finish(&mut self) -> moq_json::Result<()> {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
-		Ok(self.track.finish()?)
+		// The output keeps its own clone, whose appends the end refuses.
+		Ok(self.track.clone().finish().map(drop)?)
 	}
 }
 
@@ -1693,10 +1691,17 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::origin::RouteEvent::Start(route)
-			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
-			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: route,
+			} => Some((route, true)),
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+				announce: route,
+			} => Some((route, false)),
 		}
 	}
 
@@ -1981,9 +1986,9 @@ mod tests {
 		.unwrap();
 		let start = kio::clock::now();
 		for phase in (0..1500).step_by(100) {
-			let at = start + Duration::from_micros(phase);
+			let at = start.saturating_add(Duration::from_micros(phase));
 			assert_eq!(
-				drain.stamp(at + interval).group,
+				drain.stamp(at.saturating_add(interval)).group,
 				drain.stamp(at).group + 1,
 				"phase {phase}us"
 			);
@@ -3108,7 +3113,7 @@ mod tests {
 
 		// Empty, acme lingers: still listed, its totals keeping the ended session.
 		drop(acme);
-		let lingering = start + Duration::from_secs(9);
+		let lingering = start.saturating_add(Duration::from_secs(9));
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
 		let mut acme = stats.bucket(moq_net::Path::from_static("acme")).await.unwrap();
 		let mut frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
@@ -3118,7 +3123,7 @@ mod tests {
 		assert_eq!(frame.tiers[""].sessions.sessions_ended, 1);
 
 		// Past the linger, acme alone is unlisted and its subscription ends.
-		let lingered = start + Duration::from_secs(20);
+		let lingered = start.saturating_add(Duration::from_secs(20));
 		assert_eq!(
 			next_listed(&mut drain, lingered, &mut tracks).await,
 			("acme".into(), false)

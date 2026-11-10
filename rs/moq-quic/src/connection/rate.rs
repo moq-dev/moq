@@ -75,7 +75,7 @@ impl Bucket {
 		self.earned = self.earned.saturating_add(earned).min(full);
 		self.refilled = match self.earned < full {
 			// Advance by exactly the time the whole bytes took, keeping the remainder.
-			true => Some(prev + nanos(u128::from(earned) * NANOS_PER_SEC / u128::from(self.rate.get()))),
+			true => Some(prev.saturating_add(nanos(u128::from(earned) * NANOS_PER_SEC / u128::from(self.rate.get())))),
 			false => Some(now),
 		};
 	}
@@ -101,7 +101,9 @@ impl Bucket {
 		// Not refilled yet means full, which holds every `want` up to the burst.
 		let refilled = self.refilled?;
 		// Round up, so the wait always earns the whole shortfall.
-		Some(refilled + nanos((u128::from(short) * NANOS_PER_SEC).div_ceil(u128::from(self.rate.get()))))
+		Some(refilled.saturating_add(nanos(
+			(u128::from(short) * NANOS_PER_SEC).div_ceil(u128::from(self.rate.get())),
+		)))
 	}
 
 	/// When `bytes` may be sent at `now`: `None` for now, or the instant to ask again.
@@ -139,9 +141,12 @@ mod tests {
 		bucket.refill(start);
 		bucket.charge(1000);
 		assert_eq!(bucket.available(), 0);
-		assert_eq!(bucket.ready_at(250), Some(start + Duration::from_millis(250)));
+		assert_eq!(
+			bucket.ready_at(250),
+			Some(start.saturating_add(Duration::from_millis(250)))
+		);
 
-		bucket.refill(start + Duration::from_millis(250));
+		bucket.refill(start.saturating_add(Duration::from_millis(250)));
 		assert_eq!(bucket.available(), 250);
 		assert_eq!(bucket.ready_at(250), None);
 	}
@@ -151,10 +156,10 @@ mod tests {
 		let start = Instant::now();
 		let mut bucket = Bucket::new(rate(1000));
 		bucket.refill(start);
-		bucket.refill(start + Duration::from_secs(60));
+		bucket.refill(start.saturating_add(Duration::from_secs(60)));
 		assert_eq!(bucket.available(), 1000);
 		bucket.charge(1000);
-		bucket.refill(start + Duration::from_secs(60));
+		bucket.refill(start.saturating_add(Duration::from_secs(60)));
 		assert_eq!(bucket.available(), 0, "time spent full earns nothing after the charge");
 	}
 
@@ -165,10 +170,13 @@ mod tests {
 		bucket.refill(start);
 		bucket.charge(1500);
 		assert_eq!(bucket.available(), 0);
-		assert_eq!(bucket.ready_at(1), Some(start + Duration::from_millis(501)));
-		bucket.refill(start + Duration::from_millis(500));
+		assert_eq!(
+			bucket.ready_at(1),
+			Some(start.saturating_add(Duration::from_millis(501)))
+		);
+		bucket.refill(start.saturating_add(Duration::from_millis(500)));
 		assert_eq!(bucket.available(), 0);
-		bucket.refill(start + Duration::from_millis(600));
+		bucket.refill(start.saturating_add(Duration::from_millis(600)));
 		assert_eq!(bucket.available(), 100);
 	}
 
@@ -179,7 +187,7 @@ mod tests {
 		bucket.refill(start);
 		bucket.charge(3);
 		for ms in (100..=1000).step_by(100) {
-			bucket.refill(start + Duration::from_millis(ms));
+			bucket.refill(start.saturating_add(Duration::from_millis(ms)));
 		}
 		assert_eq!(bucket.available(), 3);
 	}
@@ -201,7 +209,7 @@ mod tests {
 		assert_eq!(bucket.delay(start, 5000), None);
 		bucket.charge(5000);
 		let ready = bucket.delay(start, 5000).unwrap();
-		assert_eq!(ready, start + Duration::from_secs(5));
+		assert_eq!(ready, start.saturating_add(Duration::from_secs(5)));
 		assert_eq!(bucket.delay(ready, 5000), None);
 	}
 }

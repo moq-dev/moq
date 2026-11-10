@@ -6,6 +6,7 @@ use std::task::{Poll, ready};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
 use crate::ffi::{Background, OneShot, Polled};
+use crate::instance::MoqInstance;
 use crate::producer::MoqBroadcastProducer;
 
 /// Config used when creating an origin.
@@ -50,11 +51,12 @@ pub struct MoqRouteOptions {
 	/// A stable instance for the stream, or `None` to mint a fresh one.
 	///
 	/// Set one only for a publisher that continues its group sequences across restarts and
-	/// raises `epoch` on each: readers stitch every route of one instance together, so
-	/// restarting the sequences under an old instance splices unrelated groups into their
-	/// tracks. Naming an instance grants nothing: publishing still needs the path's grant.
+	/// raises `epoch` on each, or to forward an observed route's stream as is: readers stitch
+	/// every route of one instance together, so restarting the sequences under an old instance
+	/// splices unrelated groups into their tracks. Naming an instance grants nothing:
+	/// publishing still needs the path's grant.
 	#[uniffi(default = None)]
-	pub instance: Option<String>,
+	pub instance: Option<Arc<MoqInstance>>,
 	/// Which run of a stable `instance` this is: only its highest epoch is eligible, cheaper
 	/// or not. Ignored without one.
 	#[uniffi(default = 0)]
@@ -71,13 +73,14 @@ impl TryFrom<MoqRouteOptions> for moq_net::origin::RouteOptions {
 		}
 		.with_cost(options.cost);
 		if let Some(instance) = options.instance {
-			out = out.with_instance(instance.parse()?, options.epoch);
+			out = out.with_instance(instance.0.clone(), options.epoch);
 		}
 		Ok(out)
 	}
 }
 
-/// The read-only facts on a received route: a static cost and the stream's instance.
+/// The read-only facts on a received route: a static cost, the stream's instance, and
+/// whether a usable path reaches it.
 ///
 /// Carried by `MoqAnnounceConsumer` events. A route claims capability, not
 /// inventory: by convention a publisher creates each broadcast's exact route,
@@ -88,14 +91,17 @@ pub struct MoqRouteInfo {
 	/// Preference among routes covering the same prefix: lower wins.
 	pub cost: u64,
 	/// The stream the route serves: routes with one instance are one continuous stream.
-	pub instance: String,
+	pub instance: Arc<MoqInstance>,
+	/// Whether a usable path reaches the route's origin; requests may fail while it is not.
+	pub available: bool,
 }
 
 impl From<moq_net::origin::RouteInfo> for MoqRouteInfo {
 	fn from(route: moq_net::origin::RouteInfo) -> Self {
 		Self {
 			cost: route.cost().value(),
-			instance: route.instance().to_string(),
+			instance: MoqInstance::wrap(route.instance().clone()),
+			available: route.available(),
 		}
 	}
 }
@@ -144,7 +150,7 @@ pub struct MoqRoute {
 	/// The route's broadcast, wrapped once so every caller shares its catalog.
 	broadcast: Arc<MoqBroadcastProducer>,
 	/// The instance last read, reported once the route is cancelled.
-	instance: std::sync::Mutex<String>,
+	instance: std::sync::Mutex<Option<moq_net::Instance>>,
 	driver: Background,
 }
 
@@ -158,7 +164,7 @@ pub struct MoqClaim {
 	/// The claim itself, released on cancel.
 	reads: Polled<moq_net::origin::Claim>,
 	/// The instance last read, reported once the claim is cancelled.
-	instance: std::sync::Mutex<String>,
+	instance: std::sync::Mutex<moq_net::Instance>,
 	driver: Background,
 }
 
@@ -199,7 +205,8 @@ impl From<moq_net::announce::Announce> for MoqAnnounce {
 	}
 }
 
-/// What a [`MoqAnnounceConsumer`] yields: a path becoming present or absent.
+/// What a [`MoqAnnounceConsumer`] yields: a path becoming present, absent, or offline, or
+/// its availability changing.
 ///
 /// Another publisher instance taking a path over keeps it present: follow it with
 /// `MoqOriginConsumer::follow` to see the broadcast change.
@@ -210,8 +217,27 @@ pub enum MoqAnnounceEvent {
 		/// The announcement that made the path present.
 		announce: MoqAnnounce,
 	},
-	/// No route covers the path any more. Carries its last advertised route.
+	/// The present path lost every usable path to its origin but may recover one: it stays
+	/// present while requests for it may fail.
+	Unavailable {
+		/// The announcement, now unavailable.
+		announce: MoqAnnounce,
+	},
+	/// The present path recovered a usable path: request it again.
+	Available {
+		/// The announcement, available again.
+		announce: MoqAnnounce,
+	},
+	/// The origin withdrew the path: no route covers it any more. Carries its last
+	/// advertised route.
 	Absent {
+		/// The announcement that went.
+		announce: MoqAnnounce,
+	},
+	/// This origin let go of the path, and no route covers it any more: the session it
+	/// arrived on closed, or the network lost every path to it. Its origin may still serve
+	/// it. Carries its last advertised route.
+	Offline {
 		/// The announcement that went.
 		announce: MoqAnnounce,
 	},
@@ -224,7 +250,16 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 			Event::Present(announce) => Self::Present {
 				announce: announce.into(),
 			},
+			Event::Unavailable(announce) => Self::Unavailable {
+				announce: announce.into(),
+			},
+			Event::Available(announce) => Self::Available {
+				announce: announce.into(),
+			},
 			Event::Absent(announce) => Self::Absent {
+				announce: announce.into(),
+			},
+			Event::Offline(announce) => Self::Offline {
 				announce: announce.into(),
 			},
 		}
@@ -376,10 +411,10 @@ impl MoqOriginConsumer {
 	/// one. Pass an `instance` to follow only that stream: another one taking over ends it,
 	/// and the stream is handed out again if it returns.
 	#[uniffi::method(default(instance = None))]
-	pub fn follow(&self, path: String, instance: Option<String>) -> Result<Arc<MoqFollowing>, MoqError> {
+	pub fn follow(&self, path: String, instance: Option<Arc<MoqInstance>>) -> Result<Arc<MoqFollowing>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
-		let instance: Option<moq_net::Instance> = instance.as_deref().map(str::parse).transpose()?;
+		let instance = instance.map(|instance| instance.0.clone());
 		// Following checks the permission eagerly, so an unreachable path fails here rather
 		// than surfacing later as a `Closed` the caller can't tell from the origin ending.
 		let inner = self.inner.follow(path.as_str(), instance)?;
@@ -401,8 +436,12 @@ impl MoqOriginConsumer {
 	/// announcement stream is needed. Pass an `instance` to refuse any other stream. Drop the
 	/// returned future to cancel.
 	#[uniffi::method(default(instance = None))]
-	pub async fn request(&self, path: String, instance: Option<String>) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		let instance: Option<moq_net::Instance> = instance.as_deref().map(str::parse).transpose()?;
+	pub async fn request(
+		&self,
+		path: String,
+		instance: Option<Arc<MoqInstance>>,
+	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		let instance = instance.map(|instance| instance.0.clone());
 		let broadcast = self
 			.driver
 			.watch(async { Ok(self.inner.request(path.as_str(), instance).await?) })
@@ -439,10 +478,7 @@ impl MoqRoute {
 		}
 		// Reading a hidden job's instance binds it, so one is cached only once it announces or
 		// is read.
-		let instance = match route.is_announced() {
-			true => route.instance().to_string(),
-			false => String::new(),
-		};
+		let instance = route.is_announced().then(|| route.instance().clone());
 		Ok(Self {
 			instance: std::sync::Mutex::new(instance),
 			reads: Polled::new(route).supervised(driver.clone()),
@@ -469,7 +505,7 @@ impl MoqRoute {
 	}
 
 	/// The stream this route serves now, or once cancelled, the last one it reported or
-	/// announced under (empty for a hidden route that did neither).
+	/// announced under (`None` for a hidden route that did neither).
 	///
 	/// Named options keep one instance. A job's route takes its claim's current one when it
 	/// first announces or when this first reads it. Read first, the job announces under it,
@@ -479,12 +515,12 @@ impl MoqRoute {
 	/// Named `instance_id` rather than `instance` because the generated C and C++
 	/// objects keep their handle in a private field named `instance`; the wrappers
 	/// expose it as `instance`.
-	pub fn instance_id(&self) -> String {
+	pub fn instance_id(&self) -> Option<Arc<MoqInstance>> {
 		let mut last = self.instance.lock().unwrap();
-		if let Some(current) = self.reads.peek(|route| route.instance().to_string()) {
-			*last = current;
+		if let Some(current) = self.reads.peek(|route| route.instance().clone()) {
+			*last = Some(current);
 		}
-		last.clone()
+		last.clone().map(MoqInstance::wrap)
 	}
 
 	/// Make the route visible, or keep it so.
@@ -496,9 +532,9 @@ impl MoqRoute {
 	pub fn announce(&self) -> Result<(), MoqError> {
 		let instance = self.with(|route| {
 			route.announce()?;
-			Ok(route.instance().to_string())
+			Ok(route.instance().clone())
 		})?;
-		*self.instance.lock().unwrap() = instance;
+		*self.instance.lock().unwrap() = Some(instance);
 		Ok(())
 	}
 
@@ -532,7 +568,7 @@ impl MoqRoute {
 impl MoqClaim {
 	fn new(claim: moq_net::origin::Claim, driver: Background) -> Self {
 		Self {
-			instance: std::sync::Mutex::new(claim.instance().to_string()),
+			instance: std::sync::Mutex::new(claim.instance().clone()),
 			reads: Polled::new(claim).supervised(driver.clone()),
 			driver,
 		}
@@ -558,19 +594,19 @@ impl MoqClaim {
 	///
 	/// Named `instance_id` rather than `instance` for the reason [`MoqRoute::instance_id`]
 	/// gives.
-	pub fn instance_id(&self) -> String {
+	pub fn instance_id(&self) -> Arc<MoqInstance> {
 		let mut last = self.instance.lock().unwrap();
-		if let Some(current) = self.reads.peek(|claim| claim.instance().to_string()) {
+		if let Some(current) = self.reads.peek(|claim| claim.instance().clone()) {
 			*last = current;
 		}
-		last.clone()
+		MoqInstance::wrap(last.clone())
 	}
 
 	/// Make the claim visible, or keep it so.
 	pub fn announce(&self) -> Result<(), MoqError> {
 		let instance = self.with(|claim| {
 			claim.announce()?;
-			Ok(claim.instance().to_string())
+			Ok(claim.instance().clone())
 		})?;
 		*self.instance.lock().unwrap() = instance;
 		Ok(())

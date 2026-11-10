@@ -29,7 +29,7 @@ import { rescale } from "./rescale.ts";
 import type { Timestamp } from "./time.ts";
 import type { Info as TrackInfo } from "./track.ts";
 import { MAX_FRAME_BYTES } from "./util/limits.ts";
-import { checkSequence } from "./util/sequence.ts";
+import { checkSequence, RESERVED } from "./util/sequence.ts";
 
 // A live tail budget, including a conservative charge for each frame's object and queue slot.
 const TAIL_BYTES = 32 * 1024 * 1024;
@@ -211,6 +211,22 @@ export class Demand {
 }
 
 /**
+ * A group its producer finished: every frame is written, and it can still be read, but not
+ * written to. {@link Producer.finish} returns it, mirroring the Rust `group::Finished`; the
+ * producer itself still refuses a write after the finish.
+ *
+ * @public
+ */
+export interface Finished {
+	/** Sequence number of this group within its track. */
+	readonly sequence: bigint;
+	/** Settles once the group closes: `null` on a clean close, or the abort {@link Error}. */
+	readonly closed: GetPromise<Error | null>;
+	/** A read handle for this group. */
+	consume(): Consumer;
+}
+
+/**
  * The write side of an ordered stream of frames within a track.
  *
  * @public
@@ -243,7 +259,7 @@ export class Producer {
 	#admits?: ((start: Timestamp) => () => void)[];
 
 	constructor(sequence: bigint) {
-		checkSequence(sequence);
+		if (checkSequence(sequence) >= RESERVED) throw new RangeError(`group sequence out of range: ${sequence}`);
 		this.#state = new GroupState(sequence);
 		this.sequence = sequence;
 		this.#demand = makeDemand(sequence, this.#wanted, this.#state);
@@ -644,9 +660,13 @@ export class Producer {
 		return this.#state.closed.peek() !== undefined;
 	}
 
-	/** Marks the group complete: no more frames will be written. Idempotent. */
-	finish() {
+	/**
+	 * Marks the group complete, returning it as {@link Finished}: no more frames will be written.
+	 * Idempotent.
+	 */
+	finish(): Finished {
 		this.#end(null);
+		return this;
 	}
 
 	/**

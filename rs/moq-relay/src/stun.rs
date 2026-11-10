@@ -515,7 +515,7 @@ mod tests {
 				}
 				let started = std::time::Instant::now();
 				for request in 0..requests {
-					let now = now + Duration::from_millis(100 * u64::from(request + 1));
+					let now = now.saturating_add(Duration::from_millis(100 * u64::from(request + 1)));
 					for ip in 0..sources {
 						limits.source(std::hint::black_box(IpAddr::V4(ip.into())), now).unwrap();
 					}

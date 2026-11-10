@@ -129,10 +129,11 @@ just test push-to-talk
 ```
 
 This separate, roughly nine-minute run drives the shipped publish and watch elements in one Chromium
-page, and the native `moq play` as a second listener. A constant tone loops through the fake microphone, encoded as 128 kbit/s Opus with 60 ms
-frames. A release mutes the publisher, which sends nothing until the next press while its rendition
-stays enabled, so the listener keeps its subscription and plays comfort noise in between. The
-listener holds a fixed 300 ms delay. After warmup and a mute, it measures 22 presses,
+page, and the native `moq play` as a second listener. Both elements keep their defaults: Opus with
+20 ms frames, and `delay: "auto"`. A constant tone loops through the fake microphone. A release
+mutes the publisher, which sends nothing until the next press while its rendition stays enabled,
+so the listener keeps its subscription and plays comfort noise in between. After warmup and a
+mute, it measures 22 presses,
 alternating two and three seconds: the first after the warmup's five-second mute, seven with no
 intervening wait, seven after five seconds, and seven after sixty seconds. Both elements reach a
 local relay directly over WebTransport, with no shaping, loss, or queueing, so every millisecond
@@ -141,13 +142,13 @@ measured belongs to the media pipeline rather than the path.
 The native listener, `moq play --video off --delay 300ms --metrics native.ndjson`, joins on its own
 WebTransport session to the same relay while the publisher talks, plays into a private null sink
 ([`../lib/pulse.py`](../lib/pulse.py)) as the [native rows](#native-rows) do, and must exit cleanly
-on Ctrl-C. It is held to the epic's correctness checks, not its latency budget. Its metrics add what
+on Ctrl-C. It is held to the same correctness checks as the browser. Its metrics add what
 a mute needs: `utterances`, the media timestamp each resume after a declared silence starts from,
 and `comfort`, the device time filled with comfort noise. Each press must resume on its head frame's
 timestamp, so a lost head (which would resume one frame later) fails. The native clock is placed on
 the page's by those resumes, each less its head's container write. Each separated press's mute,
-from its release to the next press, must play comfort noise, and from the first press on the
-speaker must report no gap or stall. Each press in `summary.json` carries its `native` result
+from its release to the next press, must play comfort noise. Its gaps and stalls from the first
+press on are counted and reported. Each press in `summary.json` carries its `native` result
 beside the browser's, and `native` sums them.
 
 `presses.json` records captured chunks at each press, WebCodecs encoder and decoder inputs and
@@ -161,18 +162,18 @@ later onset can belong to the preceding utterance. Their audible latency is alwa
 separated presses have an identifiable onset.
 
 `summary.json` matches inputs, outputs, writes, and arrivals by media timestamp, so a late arrival
-is still attributed to its utterance. The command checks pipeline completeness, not the epic's
-latency verdict. It refuses missing encoder inputs, a head that never reaches the listener or never
-decodes, submitted frames that never encode or reach the container, written frames that never reach
+is still attributed to its utterance. The command checks pipeline completeness and reports latency,
+underruns, and stalls without gating them; the [audio grading](../../quest/m1/audio-jitter-target/grading.md)
+judges those. It refuses missing encoder inputs,
+a head that never reaches the listener or never decodes, submitted frames that never encode or reach the container, written frames that never reach
 the listener, reopened capture, a new encoder (a probe or a rebuilt codec) or subscription, a mute
-that disables or drops the rendition, any underrun or stall across the presses, and separated
+that disables or drops the rendition, and separated
 utterances with no audible output. It also fails on a broken driver or invalid capture.
 
-The latency goal is at most 300 ms of playout added on top of one-way delivery. For each separated
-press, `delivery` is the slowest of the utterance's frames that arrived before its onset, measured
+For each separated press, `delivery` is the slowest of the utterance's frames that arrived before its onset, measured
 from that frame's first sample (its media offset after the press). `playout` is what remains of the
 render onset after the press and that delivery, and `output` is the projected device output after
-that onset. `path` follows the head frame from the press to projected output in parts that sum to
+that onset. `onset` is the press to the render onset, everything but the device's own output. `path` follows the head frame from the press to projected output in parts that sum to
 it: `capture` (worklet delivery and framing, after the media the frame still needed),
 `packetization` (that media, placed on the media clock by the newest chunk captured before the
 press), `encode` (codec and container write), `network` (write to arrival, through the relay),

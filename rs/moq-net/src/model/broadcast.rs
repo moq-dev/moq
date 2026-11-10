@@ -1969,7 +1969,7 @@ mod test {
 
 		// Close the producer (simulating publisher disconnect).
 		producer1.append_group().unwrap().finish().unwrap();
-		producer1.finish().unwrap();
+		let producer1 = producer1.finish().unwrap();
 		drop(producer1);
 
 		// The consumer should see the track as closed.
@@ -2006,7 +2006,7 @@ mod test {
 		let mut group = first.create_group(crate::group::Info { sequence: 8 }).unwrap();
 		group.write_frame(at(1000), b"a".as_slice()).unwrap();
 		group.finish().unwrap();
-		first.finish().unwrap();
+		let first = first.finish().unwrap();
 		drop((first, track));
 
 		let track = consumer.track("media").unwrap().subscribe(None);
@@ -2306,7 +2306,7 @@ mod test {
 		let track = consumer.track("track1").unwrap();
 		let pending_fetch = track.fetch_group(0, None);
 		let fetch = dynamic.requested_fill_group().await.unwrap();
-		let mut group = fetch.accept(crate::track::Info::timed()).unwrap();
+		let group = fetch.accept(crate::track::Info::timed()).unwrap();
 		group.finish().unwrap();
 		pending_fetch.await.unwrap();
 
@@ -2385,7 +2385,7 @@ mod test {
 
 		track.append_group().unwrap().finish().unwrap();
 		subscriber.assert_group();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 	}
 
 	/// The publisher may still be holding the `track::Request` for a name the broadcast

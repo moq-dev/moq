@@ -1585,7 +1585,7 @@ int main()
 			// A different stream than the one the rendition pins, hidden until announced.
 			moq::RouteOptions options;
 			options.hidden = true;
-			options.instance = "obs-test-other";
+			options.instance = TestOk(moq::Instance::parse("obs-test-other"), "instance");
 			hidden = TestOk(relay.origin->route("obs/hidden", options), "unannounced sibling");
 			config.broadcast = "./hidden";
 			config.instance = "obs-test-pinned";
@@ -1803,10 +1803,15 @@ int main()
 		const int blanks = g_blank_calls;
 		g_info.update(source, settingsData());
 		CHECK(g_blank_calls == blanks + 1);
+		auto *ctx = static_cast<moq_source *>(source);
+		{
+			// No connection is left to subscribe with, so later frames have nowhere to land.
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			CHECK(!ctx->connection);
+		}
+		// A frame the dropped connection already queued finds it gone and outputs nothing.
 		const int frames = g_output_frames;
-		for (int i = 0; i < 10; i++)
-			publisher.Write();
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		Drain(ctx->worker);
 		CHECK(g_output_frames == frames);
 		destroySource(source);
 	}
@@ -1903,11 +1908,25 @@ int main()
 		TestRelay relay;
 		reset(relay.Url());
 		void *source = createSource();
+		auto *ctx = static_cast<moq_source *>(source);
+		std::promise<void> offline;
 		{
 			Publisher publisher(relay, "obs/test");
 			CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+			// The source waits for the next instance, and re-arms that wait once it sees
+			// this one go offline, replacing the call it holds now. Observe the replacement,
+			// keeping the real cancellation.
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			auto &call = ctx->connection->available_call;
+			CHECK(call.has_value());
+			auto pending = std::make_shared<moq::Continuation>(std::move(*call));
+			call.emplace([pending, &offline] {
+				pending->cancel();
+				offline.set_value();
+			});
 		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		CHECK(offline.get_future().wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+		// On a lost re-arm, the destroy runs the replacement, so `offline` outlives it.
 		destroySource(source);
 	}
 	report("broadcast ends");

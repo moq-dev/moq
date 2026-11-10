@@ -818,10 +818,15 @@ async fn next_route(routes: &mut moq_net::origin::Routes) -> (moq_net::announce:
 		.expect("announce timeout")
 		.expect("origin closed");
 	match event {
-		moq_net::origin::RouteEvent::End(announce) => (announce, false),
-		moq_net::origin::RouteEvent::Start(announce)
-		| moq_net::origin::RouteEvent::Update(announce)
-		| moq_net::origin::RouteEvent::Restart(announce) => (announce, true),
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+			announce,
+		} => (announce, false),
+		moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce,
+		} => (announce, true),
 	}
 }
 
@@ -1307,9 +1312,10 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"v0".as_ref())
 		.expect("write frame");
-	if !open {
-		group.finish().expect("finish group");
-	}
+	let (mut group, _finished) = match open {
+		true => (Some(group), None),
+		false => (None, Some(group.finish().expect("finish group"))),
+	};
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("[::]:0".parse().unwrap());
@@ -1381,6 +1387,8 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 				assert_eq!(read(&mut reading, &ctx).await, format!("v{frame}"), "{ctx}");
 			}
 			group
+				.as_mut()
+				.expect("open")
 				.write_frame(moq_net::Timestamp::ZERO, update.as_bytes())
 				.expect("write frame");
 		} else {
@@ -3507,8 +3515,11 @@ async fn abort_carries_its_code_to_the_peer() {
 
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	match announced.next().await? {
-		moq_net::announce::Event::Present(route) => Some((route, true)),
-		moq_net::announce::Event::Absent(route) => Some((route, false)),
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Present(route) => Some((route, true)),
+			moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => Some((route, false)),
+			moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
+		};
 	}
 }

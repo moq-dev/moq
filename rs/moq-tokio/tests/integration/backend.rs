@@ -668,7 +668,7 @@ async fn quic_client_close_drains_finished_track() {
 				.write_frame(moq_net::Timestamp::ZERO, payload)
 				.expect("failed to write frame");
 			group.finish().expect("failed to finish group");
-			track.finish().expect("failed to finish track");
+			let _track = track.finish().expect("failed to finish track");
 
 			let mut close = Box::pin(connection.close());
 			assert!(futures::FutureExt::now_or_never(close.as_mut()).is_none());
@@ -810,7 +810,7 @@ async fn quic_client_close_drains_migrated_predecessor() {
 				.write_frame(moq_net::Timestamp::ZERO, payload)
 				.expect("failed to write frame");
 			group.finish().expect("failed to finish group");
-			track.finish().expect("failed to finish track");
+			let _track = track.finish().expect("failed to finish track");
 
 			connection.close().await.expect("the close drains");
 			client.close().await;
@@ -1186,8 +1186,11 @@ async fn quic_windows() {
 
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	match announced.next().await? {
-		moq_net::announce::Event::Present(route) => Some((route, true)),
-		moq_net::announce::Event::Absent(route) => Some((route, false)),
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Present(route) => Some((route, true)),
+			moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => Some((route, false)),
+			moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
+		};
 	}
 }

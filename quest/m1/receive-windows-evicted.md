@@ -84,7 +84,7 @@ What remains:
   `Cell::fits` partition in `benchmark_receive_windows`), and run the full
   sweep through `quest gate`.
 - Retain the stream/frame/window axes and the actual offered workload
-  for [Receive pool](/quest/m5/receive-pool.md).
+  for a shared receive budget, if one is planned again.
 - Repro: `just rs test -p moq-tokio --test integration --release -E
   'test(benchmark_receive_windows)' --run-ignored only --success-output
   immediate`.

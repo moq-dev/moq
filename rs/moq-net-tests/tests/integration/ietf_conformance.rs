@@ -1,7 +1,7 @@
 //! Moxygen announces one prefix, then serves its sixteen-field test namespaces.
 //!
 //! It answers each namespace without announcing its exact path, as only a session's peer
-//! claim does, so the claim lands through the hidden `fuzz` module.
+//! claim does, so the claim lands through the `fuzz` module.
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 use moq_net::{Version, broadcast, origin};
@@ -74,7 +74,7 @@ async fn routing(version: &str, cluster: bool) {
 	let mut group = track.append_group().unwrap();
 	group.write_frame(None, &b"conformance"[..]).unwrap();
 	group.finish().unwrap();
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 	let mut received = subscription.recv_group().await.unwrap().unwrap();
 	assert_eq!(received.sequence, 0);
 	assert_eq!(

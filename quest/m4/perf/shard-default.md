@@ -63,5 +63,4 @@ Update `doc/bin/relay/` for the default change.
 
 ## Related
 
-- [kio channel contention](/quest/m4/perf/kio-channel-contention/README.md) - its per-thread spikes run on the workers
-- [Performance survey](/quest/m5/performance-survey/README.md) - paired benchmark evidence and memory/settings controls
+- [kio channel contention](/quest/m4/kio-channel-contention/README.md) - its per-thread spikes run on the workers

@@ -493,7 +493,8 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		);
 		tracing::info!(dir = %dir.display(), "writing qlog");
 	}
-	transport.idle_timeout = quic.idle_timeout;
+	// The uring transport spells "no idle timeout" as zero.
+	transport.idle_timeout = quic.idle_timeout.unwrap_or_default();
 	transport.keep_alive = quic.keep_alive;
 	transport.mtu_discovery = quic.mtu_discovery;
 	// `[quic]` resolves every limit, defaults included, so both runtimes run

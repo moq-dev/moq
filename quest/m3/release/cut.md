@@ -60,8 +60,8 @@ moved path is rewritten. A recurring cut-gate child that its last run
 re-created in m3, such as the [vendor
 sync](/quest/m3/vendor-sync/README.md), moves under the re-created
 gate instead. That PR also removes this path from every `Required`, which
-releases the audits waiting on it. It then re-creates the [cut
-gate](/quest/m2/cut-gate/README.md) in m2 as that gate's Plan describes, and
+releases the audits waiting on it. It then re-creates the cut gate at `quest/m2/cut-gate/README.md` from
+the template below, and
 this quest, the [API shape review](/quest/m3/release/api-review.md), the
 [feature review](/quest/m3/release/feature-review.md), and the [Cargo feature
 review](/quest/m3/release/feature-flags.md) at the same paths under a fresh
@@ -83,6 +83,27 @@ merged moq-e2ee and moq-sign into moq-crypto (decided 2026-11-02, no yank):
 - Nothing to publish for moq-e2ee: its final code-free release, 0.0.22,
   already points at moq-crypto, and `rs/moq-e2ee` is gone. Don't merge a
   `release` branch release-plz proposal that bumps it.
+
+Cut gate template (moved here 2026-11-09 from the gate's own Plan; see the
+decision below). The gate is an epic in m2 for the checks the cut needs that
+break nothing: `main` is no slower than `release`, vendored code has the
+upstream fixes it needs, and the hand-written `moq-c` is at parity with
+moq-ffi. It has no work of its own and completes when every child merges. It
+recurs once per release cycle, always in m2, and never re-creates itself: m2
+holds it and the cut requires m2, so a copy made before the cut would block
+that cut forever. Re-create its README with that Goal and this recurrence, a
+fresh "main is no slower than release" child with its Goal and no
+measurements yet, and the [vendor sync](/quest/m3/vendor-sync/README.md)
+questline that the last run re-created in m3. Only `/quest-delete` ends the
+recurrence.
+
+Decided 2026-11-09 (maintainer, /quest-unblock): the cut, not the gate,
+confirms on its candidate commit that the gate's children's results still
+hold, and records that commit here. ✅ Move the recheck into the cut, and
+delete the gate while it has no children (rejected: the gate requiring every
+other m2 entry by hand; a /quest-plan interview). The gate had no children
+left and nothing made it wait for the rest of m2, so it showed as ready, and
+a candidate commit recorded then would go stale before the cut.
 
 The [2026-10-22 release audit](https://github.com/moq-dev/moq/pull/7176)
 closed with its fixes rechecked together. At source candidate

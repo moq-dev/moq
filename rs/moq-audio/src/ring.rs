@@ -87,9 +87,6 @@ struct Shared {
 	/// correction. One publication avoids sampling the ring and staging buffer
 	/// on opposite sides of a window transfer.
 	consumed: AtomicUsize,
-	/// The writer's `written`, published after each push, so the reader sees
-	/// when audio arrives.
-	written: AtomicUsize,
 	target: AtomicUsize,
 	finished: AtomicBool,
 	stretch: AtomicBool,
@@ -137,7 +134,6 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 	prod.push_iter(std::iter::repeat_n(0.0, latency * channels));
 
 	let shared = Arc::new(Shared {
-		written: AtomicUsize::new(latency),
 		target: AtomicUsize::new(latency),
 		..Default::default()
 	});
@@ -267,12 +263,6 @@ impl Producer {
 	/// Input frames are admitted only while their output has room, so a full
 	/// queue drops the newest audio rather than overwriting what is queued.
 	pub(crate) fn push(&mut self, input: &[f32]) -> Push {
-		let push = self.admit(input);
-		self.shared.written.store(self.written, Ordering::Release);
-		push
-	}
-
-	fn admit(&mut self, input: &[f32]) -> Push {
 		self.shared.pushed.store(true, Ordering::Relaxed);
 		if !self.shared.read.load(Ordering::Relaxed) {
 			return Push::NotReady;
@@ -331,7 +321,6 @@ impl Producer {
 			}
 			_ => true,
 		};
-		self.shared.written.store(self.written, Ordering::Release);
 		self.shared.finished.store(true, Ordering::Relaxed);
 		flushed
 	}
@@ -494,7 +483,7 @@ impl Convert {
 pub(crate) struct Consumer {
 	ring: HeapCons<f32>,
 	channels: usize,
-	stretch: Option<Box<Native>>,
+	stretch: Option<Box<crate::stretch::Stretch>>,
 	/// Whether the window staged in the stretcher is startup cushion.
 	staged_prime: bool,
 	/// An actual underrun waits for received PCM, emitting emergency silence
@@ -527,20 +516,7 @@ pub(crate) struct Consumer {
 impl Consumer {
 	/// Allocate the native playout stretcher before handing this ring to a device.
 	pub(crate) fn stretch(&mut self, rate: u32) {
-		// Whatever the writer has pushed so far, the primed silence at least,
-		// arrived before the first window.
-		let written = self.shared.written.load(Ordering::Acquire);
-		self.stretch = Some(Box::new(Native {
-			stretch: crate::stretch::Stretch::new(rate, self.channels),
-			arrivals: Arrivals {
-				rendered: 0,
-				seen: written,
-				newest: written,
-				deepest: [written; 2],
-				second: rate as usize,
-				half: 0,
-			},
-		}));
+		self.stretch = Some(Box::new(crate::stretch::Stretch::new(rate, self.channels)));
 		self.shared.stretch.store(true, Ordering::Relaxed);
 	}
 
@@ -641,9 +617,8 @@ impl Consumer {
 		let channels = self.channels;
 		let mut done = 0;
 		while done < output.len() {
-			if let Some(native) = self.stretch.as_mut().filter(|native| native.stretch.available() > 0) {
-				let frames = native.stretch.read(&mut output[done..]);
-				native.arrivals.render(frames);
+			if let Some(stretch) = self.stretch.as_mut().filter(|stretch| stretch.available() > 0) {
+				let frames = stretch.read(&mut output[done..]);
 				if self.measure && !self.staged_prime {
 					self.comfort.played(&output[done..done + frames * channels]);
 				}
@@ -657,11 +632,7 @@ impl Consumer {
 			if let Some((ahead, _)) = self.resume() {
 				if ahead == 0 {
 					let room = (output.len() - done) / channels;
-					let frames = self.cushion(Some(&mut output[done..]), room);
-					if let Some(native) = &mut self.stretch {
-						native.arrivals.render(frames);
-					}
-					done += frames * channels;
+					done += self.cushion(Some(&mut output[done..]), room) * channels;
 					continue;
 				}
 				frames = frames.min(ahead);
@@ -669,7 +640,7 @@ impl Consumer {
 			// A declared end's tail drains as received: running dry after it is
 			// silence, not an underrun, so nothing should expand toward the target.
 			let declared = self.declared();
-			let Some(native) = self.stretch.as_mut() else {
+			let Some(stretch) = self.stretch.as_mut() else {
 				let frames = frames.min((output.len() - done) / channels);
 				if frames == 0 {
 					break;
@@ -686,12 +657,6 @@ impl Consumer {
 				done += read;
 				continue;
 			};
-			let excess = native.arrivals.excess(
-				self.shared.written.load(Ordering::Acquire),
-				self.consumed,
-				self.shared.target.load(Ordering::Relaxed),
-			);
-			let stretch = &mut native.stretch;
 			let frames = frames.min(stretch.window);
 			if frames == 0 {
 				break;
@@ -704,7 +669,7 @@ impl Consumer {
 			let read = self.ring.pop_slice(&mut stretch.input[..frames * channels]);
 			debug_assert_eq!(read, frames * channels);
 			self.position = self.position.wrapping_add(frames);
-			stretch.process(frames, excess, enabled);
+			stretch.process(frames, buffered, self.shared.target.load(Ordering::Relaxed), enabled);
 			self.accelerated += frames.saturating_sub(stretch.available()) as u64;
 			// The writer still counts the input while it is being analysed.
 			// Publish only the resulting duration change, then the rendered
@@ -749,13 +714,13 @@ impl Consumer {
 		}
 		let buffered = self.ring.occupied_len() / self.channels;
 		let cushion = self.resume().map_or(0, |(_, frames)| frames);
-		buffered + cushion + self.stretch.as_ref().map_or(0, |native| native.stretch.available())
+		buffered + cushion + self.stretch.as_ref().map_or(0, |stretch| stretch.available())
 	}
 
 	/// Drop up to `frames` queued frames unread, returning how many of them were
 	/// pushed rather than the startup silence or a resume's comfort noise.
 	pub(crate) fn discard(&mut self, frames: usize) -> usize {
-		let staged = self.stretch.as_mut().map_or(0, |native| native.stretch.discard(frames));
+		let staged = self.stretch.as_mut().map_or(0, |stretch| stretch.discard(frames));
 		self.consumed = self.consumed.wrapping_add(staged);
 		let mut pushed = if self.staged_prime { 0 } else { staged };
 		let mut left = frames - staged;
@@ -781,79 +746,6 @@ impl Consumer {
 		}
 		self.shared.consumed.store(self.consumed, Ordering::Relaxed);
 		pushed
-	}
-}
-
-/// Native playback's stretcher and the arrivals it decides on.
-struct Native {
-	stretch: crate::stretch::Stretch,
-	arrivals: Arrivals,
-}
-
-/// Where audio arrives in the queue, which native playback stretches toward
-/// its target.
-///
-/// The depth is read where audio has just arrived, as the browser's ring
-/// does. Between arrivals the queue drains toward the next one, which says
-/// nothing about how far the playhead trails the newest audio, so steering on
-/// the current depth would expand into every gap and settle audio a burst
-/// behind the shared clock. Any arrival deeper than the target accelerates.
-/// Only when every arrival over the last one to two seconds fell short does it
-/// expand: a publisher clock slower than the device's, or a raised target,
-/// rather than one late arrival.
-///
-/// The reader sees an arrival at its next callback, so the depth it reads
-/// includes up to one device period the device has since played.
-struct Arrivals {
-	/// Frames handed to the output, ever. The reader's `consumed` less this is
-	/// what the stretch removed (net of what it added) and what was discarded.
-	rendered: usize,
-	/// The writer's `written` when the reader last looked.
-	seen: usize,
-	/// The newest arrival, as `written - rendered` when the reader saw it, so
-	/// its depth is that plus `rendered - consumed`: the depth then, less what
-	/// the stretch removed or the reader discarded since.
-	newest: usize,
-	/// The deepest arrival of the previous second rendered and of this one, in
-	/// the same form.
-	deepest: [usize; 2],
-	/// A second at the reader's rate.
-	second: usize,
-	/// Frames rendered into the current second.
-	half: usize,
-}
-
-impl Arrivals {
-	/// Frames to stretch the next window by toward `target`: removed while
-	/// positive, added while negative. `written` is the writer's latest and
-	/// `consumed` the reader's.
-	fn excess(&mut self, written: usize, consumed: usize, target: usize) -> isize {
-		let rendered = self.rendered;
-		let depth = |anchor: usize| anchor.wrapping_add(rendered).wrapping_sub(consumed) as isize;
-		if written != self.seen {
-			self.seen = written;
-			self.newest = written.wrapping_sub(rendered);
-			if depth(self.newest) > depth(self.deepest[1]) {
-				self.deepest[1] = self.newest;
-			}
-		}
-		let target = target as isize;
-		let newest = depth(self.newest) - target;
-		if newest > 0 {
-			return newest;
-		}
-		(depth(self.deepest[0]).max(depth(self.deepest[1])) - target).min(0)
-	}
-
-	/// Count `frames` handed to the output, starting the next second's deepest
-	/// arrival at the newest once a second has rendered.
-	fn render(&mut self, frames: usize) {
-		self.rendered = self.rendered.wrapping_add(frames);
-		self.half += frames;
-		if self.second > 0 && self.half >= self.second {
-			self.half -= self.second;
-			self.deepest = [self.deepest[1], self.newest];
-		}
 	}
 }
 
@@ -1127,45 +1019,6 @@ mod tests {
 					}
 				}
 			}
-		}
-	}
-
-	/// Audio arriving in bursts rests on the target right after each burst
-	/// rather than expanding into the gaps between them, which would settle it a
-	/// burst behind the clock.
-	#[test]
-	fn bursts_settle_on_the_target_where_they_arrive() {
-		let rate = 48_000;
-		let (mut prod, mut cons) = channel(
-			2,
-			rate,
-			rate,
-			Config {
-				latency: Duration::from_millis(120),
-				capacity: Duration::from_secs(3),
-				pad: false,
-				trim: false,
-				comfort: true,
-			},
-		);
-		cons.stretch(rate);
-		cons.start();
-		let mut pcm = vec![0.0; rate as usize / 10 * 2];
-		for (i, frame) in pcm.as_chunks_mut::<2>().0.iter_mut().enumerate() {
-			frame.fill((i as f32 * std::f32::consts::TAU * 200.0 / rate as f32).sin() * 0.25);
-		}
-		let mut out = vec![0.0; rate as usize / 100 * 2];
-		// 100 ms of audio every 100 ms, read in 10 ms device periods, against a
-		// target that covers the gap.
-		for tick in 0..2000 {
-			if tick % 10 == 0 {
-				assert_eq!(prod.push(&pcm), Push::Ok);
-				if tick >= 500 {
-					let depth = prod.buffered().as_secs_f64() * 1000.0;
-					assert!((120.0..=150.0).contains(&depth), "tick {tick}: {depth} ms");
-				}
-			}
-			assert_eq!(cons.read(&mut out), Read::Ok, "tick {tick}");
 		}
 	}
 

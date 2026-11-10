@@ -196,7 +196,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	fn close(&mut self) -> crate::Result<()> {
 		self.estimator.cut(None);
 		self.publish_estimate()?;
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 		Ok(())
@@ -204,7 +204,8 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 
 	/// Close the open group and finish the track, or abort both with the cause when that fails.
 	fn finish(&mut self) -> crate::Result<()> {
-		if let Err(err) = self.close().and_then(|()| Ok(self.track.finish()?)) {
+		// The importer keeps its own clone, whose appends the end refuses.
+		if let Err(err) = self.close().and_then(|()| Ok(self.track.clone().finish().map(drop)?)) {
 			if let Some(group) = self.group.take() {
 				let _ = group.abort(err.reason());
 			}
@@ -1602,7 +1603,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			return Err(crate::container::TimestampRewind { timestamp, floor }.into());
 		}
 		let group = if start_group {
-			if let Some(mut prev) = self.group.take() {
+			if let Some(prev) = self.group.take() {
 				prev.finish()?;
 			}
 			match self.pending_sequence.take() {
