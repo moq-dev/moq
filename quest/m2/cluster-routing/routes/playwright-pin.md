@@ -15,9 +15,10 @@ The root flake's `pkgs.playwright-driver` supplies `PLAYWRIGHT_BROWSERS_PATH`
 and `PLAYWRIGHT_VERSION` (`flake.nix`), and the npm pins
 (`test/interop/clients/js/package.json`, `bun.lock`) must match it
 (`test/smoke/freshness.sh`). As of 2026-11-06 both are 1.64.1, bundling
-Chromium 156 and Firefox 157. npm's latest, 1.65.0, bundles Chromium
-158.0.8127.18 and Firefox 159.0; no release bundles Firefox 160 yet, and
-nixpkgs still carries 1.64.1.
+Chromium 156 and Firefox 157. Playwright 1.65.0 (npm, and playwright-python
+since 2026-11-09) bundles Chromium 158.0.8127.18 and Firefox 159.0; no
+release bundles Firefox 160 yet. As of 2026-11-09 nixpkgs still carries
+1.64.1, with its bump open.
 
 ## Plan
 
@@ -35,11 +36,8 @@ rebuild and pin browser binaries outside nixpkgs.
 
 ## Waiting
 
-- nixpkgs: `playwright-driver` at 1.65.0 or later on `nixpkgs-unstable`;
-  check `pkgs/development/web/playwright/driver.nix` there. nixpkgs'
-  `update.sh` takes the driver version from playwright-python's latest
-  release, and `python3Packages.playwright` is coupled to the driver, so the
-  bump waits on a playwright-python v1.65 release (none as of 2026-11-07).
-  Once one exists, an agent opens the nixpkgs bump PR with that script from
-  the kixelated/nixpkgs fork (approved by the maintainer 2026-11-07 in
-  /quest-unblock).
+- nixpkgs: [NixOS/nixpkgs#585789](https://github.com/NixOS/nixpkgs/pull/585789)
+  (`playwright-driver` 1.64.1 -> 1.65.0, from the kixelated/nixpkgs fork)
+  merges and reaches `nixpkgs-unstable`; check that
+  `pkgs/development/web/playwright/driver.nix` on `nixpkgs-unstable` reads
+  1.65.0 or later. Answer nixpkgs reviewers on that PR to advance it.
