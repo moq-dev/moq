@@ -86,6 +86,54 @@ Then, only where the profile shows a cost:
     last byte): p50 rose from 36 to 72 µs to 258 to 352 µs. On the small-object
     and audio points, p99 rose from 104 to 705 µs to 606 to 770 µs.
 
+  **End to end, through a QUIC reverse proxy.** The same prototype, measured as
+  one server shard behind a QUIC reverse proxy. Clients connect to the proxy,
+  and the proxy connects to the server over loopback with an 8,192-byte UDP
+  payload. Clients are moq-bench fan-out viewers: audio-rate, then 3 Mbit/s
+  video, 5 min each. The four runs ran in ABBA order (off, on, on, off), one
+  run per cell, so no load's comparison is counterbalanced. A near-repeat of
+  off-300 put CPU within about 1% and audio p99 about 8 ms apart. Server CPU is
+  in cores, as mean / max.
+  - Build: the server ran the prototype in a private downstream build, not
+    public, with batching switched on per run through an opt-in on its endpoint
+    (`Endpoint::batch_sends` in the linked port). The clients were moq-bench at
+    337f794 plus one local patch, with each run's first 30 s skipped.
+  - Proxy: it terminates QUIC and MoQ, and opens one upstream session per client
+    session to the server, each on its own UDP socket (602 upstream sessions for
+    600 viewers at 400/200). So the server's egress is still per-viewer fan-out,
+    the cost this lever targets. Only the server batched; the proxy was
+    unchanged.
+
+  | Load (audio / video viewers) | Batching | Audio p50 / p99, lost groups | Audio CPU | Video p99 |
+  |---|---|---|---|---|
+  | 300 / 150 | off | 11 / 38 ms, 6,090 | 0.492 / 0.596 | 21 ms |
+  | 300 / 150 | on | 13 / 54 ms, 9,781 | 0.490 / 0.560 | 26 ms |
+  | 400 / 200 | on | 27 / 110 ms, 150,424 | 0.596 / 0.695 | 79 ms |
+  | 400 / 200 | off | 27 / 212 ms, 325,694 | 0.688 / 0.779 | 31 ms |
+
+  - **At 300, batching saved no CPU and raised p99.** The
+    loopback harness's 8–22% saving did not carry over, and why hasn't been
+    measured. Both arms lost groups at this point, batching more (9,781 against
+    6,090), so the p99 rise is measured under unequal loss, not drop-free.
+  - **Only at 400 audio did it cut CPU, by 13%.** Lost groups fell too (150,424
+    against 325,694), but the proxy's listener dropped about 1.1 M datagrams in
+    both runs, so that difference can't be credited to batching. The server's own
+    socket also dropped 3,100 datagrams with batching off, against none with it
+    on, and its CPU peaked at 0.78 cores; both runs were measured under the
+    proxy's overflow too, so neither number isolates the server's ceiling. Audio
+    p99 fell from 212 to 110 ms, while video p99 rose from 31 to 79 ms.
+  - **At 300, both arms lost datagrams at the proxy's client-facing socket
+    buffer**, at its 208 KiB default: 242,019 with batching off and 232,662 with
+    it on. The server's socket dropped none. With a 1 MiB proxy buffer, batching
+    off loses nothing there (audio p50 / p99 11 / 29 ms, CPU 0.499 / 0.609, video
+    p99 22 ms), so its loss was the proxy's. Batching on was not re-run with it,
+    and what accounts for its extra lost groups on fewer proxy drops hasn't been
+    measured.
+
+  So on this path, at 300 p99 rose with no CPU saving; at 400 CPU fell and
+  audio p99 halved but video p99 rose. That leans toward keeping batching
+  opt-in and off by default, if it ships, on single runs.
+
   Its shape:
   - `UdpSocketState::try_send_many` on Linux sends up to 64 transmits, one
     `mmsghdr` each, in one `sendmmsg`, each with its own GSO segment size,
