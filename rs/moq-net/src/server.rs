@@ -900,6 +900,7 @@ impl PausedIetf {
 		// The client's SETUP was read at the pause; hand the stream back
 		// for GOAWAY. A server never advertises a path, hence `None`.
 		let (protocol, goaway, credential) = ietf::start(ietf::Config {
+			unsolicited: false,
 			runtime: runtime.clone(),
 			stats: server.stats.clone(),
 			limits: server.limits,

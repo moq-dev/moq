@@ -955,6 +955,8 @@ pub(super) struct Publisher {
 	pub(super) owed: Arc<AtomicUsize>,
 	// Subscriptions the peer holds, PUBLISHes for its listings included, counted for the peak.
 	pub(super) subscriptions: crate::session::Slots,
+	// Opt-in: advertise even when the peer asked for solicited advertisements only.
+	pub(super) unsolicited: bool,
 	// Ranks every subscription's group streams against each other for the transport.
 	priority: PriorityQueue,
 }
@@ -2761,8 +2763,19 @@ impl Publisher {
 			auth: crate::auth::Link::new(false),
 			owed: Default::default(),
 			subscriptions: Default::default(),
+			unsolicited: false,
 			priority: Default::default(),
 		}
+	}
+
+	/// Advertise even when the peer declared `SOLICIT=1`.
+	///
+	/// Meant for broken peers such as the Cloudflare MoQ relay, which sets the
+	/// option but never opens `SUBSCRIBE_NAMESPACE`; the default keeps the
+	/// draft's contract so moq-net-to-moq-net sessions stay valid.
+	pub(super) fn with_unsolicited(mut self, unsolicited: bool) -> Self {
+		self.unsolicited = unsolicited;
+		self
 	}
 
 	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
@@ -6152,7 +6165,7 @@ impl PublishNamespaces {
 
 	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if self.run.is_none() {
-			if ready!(self.publisher.poll_requires_solicitation(waiter)) {
+			if !self.publisher.unsolicited && ready!(self.publisher.poll_requires_solicitation(waiter)) {
 				return Poll::Ready(Ok(()));
 			}
 

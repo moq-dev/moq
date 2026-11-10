@@ -57,6 +57,10 @@ pub struct Config {
 
 	pub version: Version,
 
+	/// Advertise even when the peer declared `SOLICIT=1` (see
+	/// `Publisher::with_unsolicited`). Defaults to false.
+	pub unsolicited: bool,
+
 	/// The request path we advertise in our SETUP (clients on URL-less
 	/// transports). A server passes `None`.
 	pub path: Option<String>,
@@ -181,6 +185,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 		extensions,
 		implementation,
 		peer_implementation,
+		unsolicited,
 	} = config;
 
 	// GOAWAY wiring: the public Session holds one half (drain trigger, received
@@ -253,6 +258,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 		peer_grant,
 		discovery,
 		withdrawal: withdrawal.clone(),
+		unsolicited,
 		owed: owed.clone(),
 		peer_setup,
 		setup_read,
@@ -295,6 +301,7 @@ struct Launch {
 	owed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 	peer_setup: peer::PeerSetup,
 	setup_read: bool,
+	unsolicited: bool,
 }
 
 impl Launch {
@@ -322,6 +329,7 @@ impl Launch {
 			owed,
 			peer_setup,
 			setup_read,
+			unsolicited,
 		} = self;
 
 		// Released on any exit, so nothing waits on a token the session will never answer.
@@ -376,7 +384,8 @@ impl Launch {
 			peer_setup.clone(),
 			version,
 		)
-		.with_auth(auth.clone());
+		.with_auth(auth.clone())
+		.with_unsolicited(unsolicited);
 		let (tasks, task_set) = TaskSet::new();
 		publisher.withdrawal = withdrawal;
 		publisher.owed = owed;
@@ -1937,6 +1946,7 @@ mod tests {
 			let log = scripted.log.clone();
 			let session = crate::driver::Transport::new(scripted.clone());
 			let (driver, _goaway, _) = start(Config {
+				unsolicited: false,
 				runtime: crate::time::sim(),
 				stats: Default::default(),
 				session,
@@ -2021,6 +2031,7 @@ mod tests {
 						crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(incoming);
 					let log = session.log.clone();
 					let (driver, _, _) = start(Config {
+						unsolicited: false,
 						runtime: crate::time::sim(),
 						stats: Default::default(),
 						session: crate::driver::Transport::new(session.clone()),
@@ -2078,6 +2089,7 @@ mod tests {
 				let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]);
 				let log = session.log.clone();
 				let (driver, _, _) = start(Config {
+					unsolicited: false,
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session: crate::driver::Transport::new(session.clone()),
@@ -2130,6 +2142,7 @@ mod tests {
 		let log = session.log.clone();
 		let handle = crate::auth::Handle::new();
 		let (driver, _, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2184,6 +2197,7 @@ mod tests {
 		let log = session.log.clone();
 		let handle = crate::auth::Handle::new();
 		let (driver, _, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2231,6 +2245,7 @@ mod tests {
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
 				let log = session.log.clone();
 				let (driver, _, _) = start(Config {
+					unsolicited: false,
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session: crate::driver::Transport::new(session.clone()),
@@ -2335,6 +2350,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2401,6 +2417,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2495,6 +2512,7 @@ mod tests {
 		let session = crate::driver::Transport::new(session);
 
 		let (driver, _goaway, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session,
@@ -2654,6 +2672,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2759,6 +2778,7 @@ mod tests {
 
 		let handle = crate::auth::Link::ietf(true);
 		let (driver, goaway, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2845,6 +2865,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let log = session.log.clone();
 		let (driver, _goaway, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2943,6 +2964,7 @@ mod tests {
 			.with_incoming_bidis(vec![auth_request(VERSION).await]);
 		let log = session.log.clone();
 		let (driver, _goaway, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -3034,6 +3056,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -3081,6 +3104,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -3452,6 +3476,7 @@ mod tests {
 	/// Start a draft-22 session with SETUP already settled, so bidi requests run immediately.
 	fn bidi_driver(session: crate::lite::test_transport::ScriptedSession, publish: Option<origin::Consumer>) -> Driver {
 		start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -3580,6 +3605,7 @@ mod tests {
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
 				let (driver, _goaway, _) = start(Config {
+					unsolicited: false,
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session: crate::driver::Transport::new(session.clone()),
@@ -3650,6 +3676,7 @@ mod tests {
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
 				let (driver, _goaway, _) = start(Config {
+					unsolicited: false,
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session: crate::driver::Transport::new(session.clone()),
@@ -3736,6 +3763,7 @@ mod tests {
 				let session = crate::driver::Transport::new(session.clone());
 				let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 				let (driver, _goaway, _) = start(Config {
+					unsolicited: false,
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session,
@@ -3977,6 +4005,7 @@ mod tests {
 			.with_incoming_unis(vec![setup_stream(VERSION, params, &[])]);
 		let log = session.log.clone();
 		let (driver, _goaway, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -4086,6 +4115,7 @@ mod tests {
 		session.close(crate::lite::test_transport::Close::Fin);
 		let log = session.log.clone();
 		let (driver, _goaway, _) = start(Config {
+			unsolicited: false,
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),

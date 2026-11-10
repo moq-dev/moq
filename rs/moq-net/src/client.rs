@@ -28,6 +28,7 @@ pub struct Client {
 	allocator: Option<crate::bandwidth::Allocator>,
 	viewers: Option<crate::bandwidth::Viewers>,
 	implementation: Option<String>,
+	unsolicited: bool,
 }
 
 impl Client {
@@ -48,6 +49,16 @@ impl Client {
 	/// remote announces into this [`origin::Producer`]. Omit to subscribe to nothing.
 	pub fn with_subscriber(mut self, subscribe: origin::Producer) -> Self {
 		self.subscribe = Some(subscribe);
+		self
+	}
+
+	/// Advertise even when the peer declares `SOLICIT=1`.
+	///
+	/// Needed for relays that set the option but never solicit; leave off for
+	/// normal moq-net peers, which treat unsolicited advertisements as a
+	/// protocol violation.
+	pub fn with_unsolicited(mut self, unsolicited: bool) -> Self {
+		self.unsolicited = unsolicited;
 		self
 	}
 
@@ -443,6 +454,7 @@ impl Client {
 					peer_declared: None,
 					auth: auth.clone(),
 					early_unis: Vec::new(),
+					unsolicited: self.unsolicited,
 					extensions: self.extensions,
 					implementation: self.implementation(),
 					peer_implementation: peer_implementation.clone(),
