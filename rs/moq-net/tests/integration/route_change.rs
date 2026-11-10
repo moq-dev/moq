@@ -955,12 +955,7 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 			.unwrap();
 		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 		broadcast.announce().unwrap();
-		// moq-transport carries no cost, so a local preference keeps `P2` on standby there.
-		let to = match name {
-			"P2" => subscriber.clone().with_preference(origin::Preference::new(-1)),
-			_ => subscriber.clone(),
-		};
-		let link = link(version, &publisher, &to).await;
+		let link = link(version, &publisher, &subscriber).await;
 		replicas.push(Replica {
 			name,
 			origin: publisher,

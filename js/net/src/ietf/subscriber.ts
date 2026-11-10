@@ -42,6 +42,7 @@ import { Budget } from "../util/yield.ts";
 import { bounded, wireSpan } from "../window.ts";
 import { wireOf } from "../wire.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
+import * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { requestReason, SubscribeRefused } from "./error.ts";
 import { Fetch, FetchHeader, FetchOk } from "./fetch.ts";
@@ -61,7 +62,7 @@ import {
 import { Parameters } from "./parameters.ts";
 import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
-import { type PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
+import { type AdvertParams, type PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { RangeFetch } from "./range.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { type Framed, malformed, RequestStream, refuseReserved, refuseUpdate } from "./request_stream.ts";
@@ -163,6 +164,11 @@ export class Subscriber {
 	// error. Optional for tests that drive a bare session.
 	#quic?: WebTransport;
 
+	// The Hop IDs this session declared; see {@link Cluster}. What the peer declared is what
+	// says whether an advertisement carries a hop path, and ours is what a path looping back
+	// to us contains.
+	#cluster?: Cluster.Hops;
+
 	// Publisher-chosen aliases used by incoming group streams.
 	#aliases = new TrackAliases<Binding>();
 	#receiveYield?: Promise<void>;
@@ -186,7 +192,7 @@ export class Subscriber {
 	//
 	// A peer may advertise one namespace twice on a session: an unsolicited
 	// PUBLISH_NAMESPACE and an inline NAMESPACE answering our own SUBSCRIBE_NAMESPACE are
-	// two messages about one source.
+	// two messages about one source, which the MoQ Solicit draft requires us to tolerate.
 	// Tracking each is what keeps the second from duplicating the announce and the first
 	// to end from retracting what the other still holds. A publisher replacing its instance
 	// withdraws one advertisement and makes another, on separate streams that
@@ -203,11 +209,17 @@ export class Subscriber {
 	// their request is off the wire.
 	#announcedConsumers = new Map<announce.Producer, Asking>();
 
+	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
+	#hidden: boolean;
 	#maxAge: boolean;
+
+	// Whether a SUBSCRIBE_NAMESPACE's REQUEST_OK counts the NAMESPACEs that follow it (MoQ Active Count).
+	#activeCount: boolean;
 
 	// Settles when the peer sends GOAWAY, ranking this session's routes last.
 	#goaway?: GetPromise<Drain>;
-	// Our grant: a subscription it stops covering is cancelled. Undefined allows everything.
+	// Our grant: a subscription it stops covering is cancelled. Undefined until
+	// the peer answers, which allows everything.
 	#grant?: Getter<Grant | undefined>;
 	#auth?: AuthSession;
 
@@ -219,7 +231,10 @@ export class Subscriber {
 	constructor({
 		session,
 		quic,
+		cluster,
+		hidden = false,
 		maxAge = false,
+		activeCount = false,
 		goaway,
 		grant,
 		auth,
@@ -229,8 +244,14 @@ export class Subscriber {
 		session: Session;
 		/** The transport the session runs on. */
 		quic?: WebTransport;
+		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
+		cluster?: Cluster.Hops;
+		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
+		hidden?: boolean;
 		/** Whether the peer accepts subscriber max age. */
 		maxAge?: boolean;
+		/** Whether both SETUPs declared MoQ Active Count. */
+		activeCount?: boolean;
 		/** Settles when the peer sends GOAWAY. */
 		goaway?: GetPromise<Drain>;
 		/** The union of our tokens' grants, which bounds what we subscribe to. */
@@ -242,7 +263,10 @@ export class Subscriber {
 		this.#session = session;
 		this.#quic = quic;
 		this.#announceSlots = new Slots(limits.announces, { quic, reason: "too many announcements" });
+		this.#cluster = cluster;
+		this.#hidden = hidden;
 		this.#maxAge = maxAge;
+		this.#activeCount = activeCount;
 		this.#goaway = goaway;
 		this.#grant = grant;
 		this.#auth = auth;
@@ -278,11 +302,22 @@ export class Subscriber {
 	}
 
 	/**
-	 * The route an advertisement carries, before it is minted an instance. moq-transport
-	 * carries no hop path, so every one is anonymous and free.
+	 * Whether an advertisement is ours coming back: its hop path already ran through us, so
+	 * subscribing via it would route us back to ourselves.
+	 *
+	 * A conforming peer withholds these (it knows our Hop ID), so this is the backstop that
+	 * keeps a mesh working when one member does not. A session that negotiated nothing
+	 * carries no path, and there is nothing to check.
 	 */
-	#route(): WireRoute {
-		return { hops: [UNKNOWN_HOP], cost: Cost.zero };
+	#reflected(advert: Cluster.Advert | undefined): boolean {
+		return advert !== undefined && this.#cluster !== undefined && Cluster.loops(advert, this.#cluster.self);
+	}
+
+	/**
+	 * The route an advertisement carries, before it is minted an instance; one without a path is anonymous and free.
+	 */
+	#route({ cluster }: AdvertParams): WireRoute {
+		return cluster === undefined ? { hops: [UNKNOWN_HOP], cost: Cost.zero } : { ...cluster };
 	}
 
 	/**
@@ -294,9 +329,9 @@ export class Subscriber {
 	 * that only answers are both discovered.
 	 *
 	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
-	 * `options.hidden` opts in. moq-transport has no way to ask the peer for them, so the
-	 * opt-in only keeps what the peer sends anyway, such as an unsolicited
-	 * PUBLISH_NAMESPACE from a peer that hides nothing.
+	 * `options.hidden` opts in. The opt-in rides the SUBSCRIBE_NAMESPACE when the peer
+	 * understands it (MoQ Hidden); the rule is also applied here, since an unsolicited
+	 * PUBLISH_NAMESPACE or a peer that never heard of it hides nothing.
 	 *
 	 * Only routes whose literal name matches `scope` are reported, unless `options.covering`
 	 * also asks for those whose subtree overlaps it.
@@ -339,7 +374,7 @@ export class Subscriber {
 		// The last reader leaving ends the stream, which cancels the request.
 		closeUnwanted(announced);
 
-		filter.gone = this.#runAnnounced(announced, prefix, blockers).finally(() => {
+		filter.gone = this.#runAnnounced(announced, prefix, filter.hidden && this.#hidden, blockers).finally(() => {
 			this.#announcedConsumers.delete(announced);
 			announced.close();
 		});
@@ -454,7 +489,12 @@ export class Subscriber {
 		this.#session.close();
 	}
 
-	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, blockers: Promise<void>[]): Promise<void> {
+	async #runAnnounced(
+		announced: announce.Producer,
+		prefix: Path.Valid,
+		hidden: boolean,
+		blockers: Promise<void>[],
+	): Promise<void> {
 		const version = this.#session.version;
 
 		// Suffixes live on this stream, with the advertisement each holds,
@@ -509,7 +549,7 @@ export class Subscriber {
 			const request = await deadline.wait(RequestStream.open(this.#session, deadline, { quic: this.#quic }));
 
 			const run = async () => {
-				const msg = new SubscribeNamespace({ namespace: prefix, requestId });
+				const msg = new SubscribeNamespace({ namespace: prefix, requestId, hidden });
 				await Message.write(request.writer, SubscribeNamespace.id, msg, version);
 				console.debug(`subscribe_namespace written: requestId=${requestId}`);
 
@@ -529,12 +569,20 @@ export class Subscriber {
 					request.close();
 				};
 
+				// Resolves to how many NAMESPACEs make up the initial set (MoQ Active Count).
 				const response = (async () => {
 					const framed = await request.next();
 					if (framed === undefined) throw new Error("namespace stream ended before its response");
 					if (framed.type === RequestOk.id) {
-						await RequestOk.decode(framed.reader, version);
-						return true;
+						const ok = await RequestOk.decode(framed.reader, version);
+						// A count the negotiation did not promise, or a missing one it did, is
+						// the peer breaking the extension. Without it, the answer is the best
+						// boundary there is.
+						const count = ok.parameters.activeCount;
+						if (this.#activeCount !== (count !== undefined)) {
+							throw new ProtocolViolation("ACTIVE_COUNT does not match the negotiation");
+						}
+						return count ?? 0;
 					}
 					// A well-formed refusal already ended the request, so end ours cleanly before
 					// failing it. Anything else leaves the stream for the reset.
@@ -550,28 +598,55 @@ export class Subscriber {
 					await end(response);
 					return;
 				}
-
-				// moq-transport marks no end to the initial set, so the answer is the best
-				// boundary there is.
-				announced.synced();
+				let initial = answered;
 
 				// Loop reading Namespace/NamespaceDone entries
 				const readLoop = (async () => {
 					for (;;) {
+						if (initial === 0) announced.synced();
+
 						const framed = await request.next();
 						// Ending: `end` drains the rest.
-						if (released || framed === undefined) break;
+						if (released) break;
+						if (framed === undefined) {
+							if (initial > 0)
+								throw new ProtocolViolation("namespace stream ended inside the initial set");
+							break;
+						}
 						const msgType = framed.type;
 
+						// The counted initial set is NAMESPACEs only, so anything else cuts it short.
+						if (initial > 0 && msgType !== SubscribeNamespaceEntry.id) {
+							throw new ProtocolViolation(`message 0x${msgType.toString(16)} inside the initial set`);
+						}
 						if (msgType === SubscribeNamespaceEntry.id) {
-							const entry = await SubscribeNamespaceEntry.decode(framed.reader, version);
+							const entry = await SubscribeNamespaceEntry.decode(framed.reader, version, {
+								cluster: Cluster.negotiated(this.#cluster),
+							});
+							// Counted even when discarded below.
+							if (initial > 0) initial -= 1;
 							if (released) break;
 
 							const path = Path.join(prefix, entry.suffix);
+							const params = entry.params ?? {};
 							const held = live.get(path);
 
-							// A repeat updates the advertisement in place. Only the first is a new path.
-							const route = this.#route();
+							// The wire still holds a reflected advertisement until DONE, so charge
+							// it before deciding whether its route can be used. Repeats keep the slot.
+							if (held === undefined) live.set(path, {});
+
+							// A repeat updates the advertisement in place, so one that now
+							// loops back through us has taken a route we can't subscribe
+							// over: the path is gone even though the message says active.
+							if (this.#reflected(params.cluster)) {
+								console.debug(`dropping reflected namespace: broadcast=${path}`);
+								if (held?.id !== undefined) this.#detachAnnounce(path, held.id, false);
+								live.set(path, {});
+								continue;
+							}
+
+							// A repeat updates HOP_PATH and ROUTE_COST in place. Only the first is a new path.
+							const route = this.#route(params);
 							if (held?.id !== undefined) {
 								this.#updateAnnounce(path, held.id, route);
 							} else {
@@ -597,8 +672,9 @@ export class Subscriber {
 				// already arrived is still decoding, which leaves the loop with nothing
 				// awaiting it: a violation decoded after that still closes the session.
 				// An advertisement is decoded here rather than in the session dispatch, so
-				// this is the only place a malformed one surfaces, and closing the session over
-				// it keeps the peer from just repeating it on the next SUBSCRIBE_NAMESPACE.
+				// this is the only place a malformed one surfaces, and the cluster draft
+				// requires closing the session over it: the peer would just repeat it on the
+				// next SUBSCRIBE_NAMESPACE.
 				readLoop.catch((err: unknown) => request.abort(err));
 
 				// Wait for either the read loop or the announced to close
@@ -1648,6 +1724,18 @@ export class Subscriber {
 		const version = this.#session.version;
 		const path = msg.trackNamespace;
 
+		// A path that already ran through us looped back. Refuse it rather than holding an
+		// advertisement we could never subscribe through. The peer knows our Hop ID, so a
+		// conforming one never offers it; 0 as the retry interval says not to come back.
+		if (this.#reflected(msg.params.cluster)) {
+			console.debug(`dropping reflected publish_namespace: broadcast=${path}`);
+			await request.refuse("publish_namespace", {
+				condition: "uninterested",
+				reasonPhrase: "route loops back",
+			});
+			return;
+		}
+
 		// A path this session already knows is not refused: the same namespace can reach us
 		// twice, and each advertisement is tracked apart from news. This request owns exactly
 		// one of those references, named by its id while attached, and gives it back when the
@@ -1665,11 +1753,13 @@ export class Subscriber {
 
 			// Only now is the advertisement ours to announce, for the reason above: a
 			// consumer reacting with a SUBSCRIBE must not interleave with that OK.
-			attached = this.#attachAnnounce(path, this.#route());
+			attached = this.#attachAnnounce(path, this.#route(msg.params));
 
-			// An advertisement renews its token with REQUEST_UPDATE on the stream that
+			// An advertisement is updated in place with REQUEST_UPDATE on the stream that
 			// already carries it, so read until the stream ends rather than waiting on the
-			// close.
+			// close. Nothing else would deliver a re-parented route. What the peer holds
+			// is kept current, since an update carries only what changed.
+			let held = msg.params.cluster;
 			for (;;) {
 				const framed = await race([request.next(), request.ended.then(() => undefined)]);
 				if (framed === undefined) {
@@ -1705,7 +1795,37 @@ export class Subscriber {
 				}
 				this.#session.checkRequestId(update.requestId);
 
-				// Nothing here can fail to apply, so every update is acknowledged.
+				// The parameters exist only on a session that negotiated the extension;
+				// anywhere else they are the peer's violation.
+				if (held === undefined) {
+					if (update.update.hops !== undefined || update.update.cost !== undefined) {
+						throw new ProtocolViolation("cluster parameters on a session that negotiated none");
+					}
+				} else {
+					// A different original publisher applies in place too, as it does inline.
+					held = Cluster.apply(held, update.update);
+				}
+
+				// A path that now runs through us is unusable, so give it back. The update
+				// itself is accepted, and reading continues: this stream is the
+				// advertisement's only channel, so a later clean path arrives here or
+				// nowhere.
+				if (this.#reflected(held)) {
+					if (attached !== undefined) {
+						console.debug(`publish_namespace now loops back, detaching: broadcast=${path}`);
+						this.#detachAnnounce(path, attached, false);
+						attached = undefined;
+					}
+				} else if (attached === undefined) {
+					// Re-attach: a clean path replaced the reflected one we detached from.
+					attached = this.#attachAnnounce(path, this.#route({ cluster: held }));
+				} else {
+					this.#updateAnnounce(path, attached, this.#route({ cluster: held }));
+				}
+
+				// Nothing here can fail to apply, so every update is acknowledged. A leaf
+				// routes nothing, so a repricing changes nothing it holds; consumers still
+				// hear the new route so a forwarder can reprice.
 				await Message.write(request.writer, RequestOk.id, new RequestOk(), version);
 			}
 		} finally {

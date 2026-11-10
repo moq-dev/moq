@@ -1,9 +1,11 @@
 import { Duration } from "@moq/clock";
 import { closeReason, ProtocolViolation, SessionCode, StreamError } from "../error.ts";
+import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
 import * as Lite from "../lite/index.ts";
 import { acceptBudget, Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
+import * as Extensions from "./extensions.ts";
 
 /** Default bound on a connection attempt, including its SETUP exchange. @internal */
 export const DEFAULT_TIMEOUT = Duration.millis(30_000);
@@ -15,25 +17,42 @@ export const DEFAULT_TIMEOUT = Duration.millis(30_000);
  * (client) and `accept` (server) use this same function.
  *
  * Returns the control stream, the uni streams that arrived before it (see
- * {@link receiveSetup}), plus what the peer's SETUP declared: whether it accepts subscriber
- * max age, and the implementation it advertised.
+ * {@link receiveSetup}), plus what the peer's SETUP declared: whether it requires
+ * solicitation, which decides whether we announce namespaces unprompted (see the MoQ Solicit
+ * extension) and its Hop ID (see the MoQ Cluster extension), plus the implementation it
+ * advertised. We declare our Hop ID on every session, and Solicit unless `extensions`
+ * declines it: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
+ * can tell us nothing we won't have asked for, and a peer that knows our Hop ID can withhold
+ * the advertisements that already flowed through us.
  */
 export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-	{ client, token }: { client: boolean; token?: Uint8Array },
+	{ client, extensions, token }: { client: boolean; extensions: Extensions.Offered; token?: Uint8Array },
 ): Promise<{
 	control: Stream;
 	early: Reader[];
+	solicit: boolean | undefined;
+	hidden: boolean;
 	maxAge: boolean;
+	activeCount: boolean;
+	cluster: Ietf.Cluster.Hops;
 	peerImplementation: string | undefined;
 }> {
 	const params = new Ietf.SetupOptions();
 	Ietf.implementationIntoSetup(params, implementation);
+	Extensions.intoSetup(params, extensions);
+	Ietf.hiddenIntoSetup(params);
 	Ietf.maxAgeIntoSetup(params);
+	Ietf.activeCountIntoSetup(params);
 	// Only a client presents a connection credential.
 	if (client && token) Ietf.tokenIntoSetup(params, { kind: Ietf.TOKEN_OUT_OF_BAND, value: token });
+
+	// One id per session, like the moq-lite connection: nothing in this process forwards
+	// between sessions, so there is nothing for a shared id to detect.
+	const self = randomHop();
+	Ietf.Cluster.intoSetup(params, self);
 
 	const setupMsg = new Ietf.Setup({ parameters: params });
 
@@ -54,7 +73,11 @@ export async function exchangeSetup(
 	return {
 		control: new Stream({ writer, reader: received.reader }),
 		early: received.early,
+		solicit: received.solicit,
+		hidden: received.hidden,
 		maxAge: received.maxAge,
+		activeCount: received.activeCount,
+		cluster: { self, peer: received.cluster },
 		peerImplementation: received.implementation,
 	};
 }
@@ -80,7 +103,11 @@ async function receiveSetup(
 ): Promise<{
 	reader: Reader;
 	early: Reader[];
+	solicit: boolean | undefined;
+	hidden: boolean;
 	maxAge: boolean;
+	activeCount: boolean;
+	cluster: Hop | undefined;
 	implementation: string | undefined;
 }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
@@ -135,7 +162,11 @@ async function receiveSetup(
 	return {
 		reader,
 		early,
+		solicit: Ietf.solicitFromSetup(setup.parameters),
+		hidden: Ietf.hiddenFromSetup(setup.parameters),
 		maxAge: Ietf.maxAgeFromSetup(setup.parameters),
+		activeCount: Ietf.activeCountFromSetup(setup.parameters),
+		cluster: Ietf.Cluster.fromSetup(setup.parameters),
 		implementation: Ietf.implementationFromSetup(setup.parameters),
 	};
 }

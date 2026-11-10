@@ -14,6 +14,7 @@ import * as Hex from "../util/hex.ts";
 import { after } from "../util/timer.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import { parse, show } from "./endpoint.ts";
+import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
 import type { Session } from "./session.ts";
@@ -250,6 +251,13 @@ export interface ConnectProps {
 	consume?: OriginProducer;
 
 	/**
+	 * The moq-transport extensions to offer, each on unless set to `false`.
+	 *
+	 * @internal Tests only; nothing outside the package consumes it.
+	 */
+	extensions?: Extensions.Extensions;
+
+	/**
 	 * Credentials to present, kept apart from the URL.
 	 *
 	 * The first is the connection credential: it rides SETUP, and the URL's `jwt` query too
@@ -304,6 +312,8 @@ type SessionProps = {
 	handle?: Auth.Handle;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
+	/** The moq-transport extensions this side offers. */
+	extensions: Extensions.Offered;
 	/** The connection credential SETUP presents, on versions that carry one. */
 	token?: Uint8Array;
 	/** The implementation this side advertises in SETUP; empty sends nothing. */
@@ -464,6 +474,7 @@ async function connectInner(
 		publish: props.publish,
 		handle: props.auth,
 		client: true,
+		extensions: Extensions.offered(props.extensions),
 		token: presented.setup === undefined ? undefined : new TextEncoder().encode(presented.setup),
 		implementation: props.implementation ?? IMPLEMENTATION,
 		probeTarget: props.viewers?.target,

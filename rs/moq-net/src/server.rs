@@ -162,8 +162,8 @@ impl Server {
 		self
 	}
 
-	/// Choose which extensions to offer in SETUP. Defaults to none: only relays turn on
-	/// [`ietf`](setup::Extensions::ietf).
+	/// Choose which extensions to offer in SETUP. Defaults to every moq-transport one, and
+	/// not [`ietf`](setup::Extensions::ietf), which only relays turn on.
 	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
 		self.extensions = extensions;
 		self
@@ -449,8 +449,9 @@ impl Server {
 		Handshake {
 			path: options.path.clone(),
 			role: None,
-			// A moq-transport peer declares no identity.
-			origin: None,
+			// A moq-transport peer only has an identity if it negotiated the MoQ
+			// Cluster extension and declared a non-zero Hop ID.
+			origin: options.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
 			token: options.token.clone(),
 			peer_implementation: options.implementation.clone(),
 			assigned_hop: crate::Hop::random(),
@@ -917,6 +918,7 @@ impl PausedIetf {
 			peer_declared: Some(peer_setup.options.declared),
 			auth: auth.clone(),
 			early_unis: peer_setup.early,
+			extensions: server.extensions,
 			implementation: server.implementation(),
 			peer_implementation: peer_implementation.clone(),
 		})?;
@@ -1100,8 +1102,9 @@ impl Handshake {
 	/// The identity the peer declared for itself, when the negotiated protocol carries one.
 	///
 	/// A moq-lite-05+ endpoint declares this when it attaches a publish or subscribe
-	/// origin: its Hop ID, or from moq-lite-07 its Node ID. moq-transport, older versions,
-	/// and endpoints without one return `None`. [`origin::Producer::is_own`] tells whether it is ours.
+	/// origin: its Hop ID, or from moq-lite-07 its Node ID. A moq-transport endpoint
+	/// declares its Hop ID via the MoQ Cluster extension. Older versions and endpoints
+	/// without one return `None`. [`origin::Producer::is_own`] tells whether it is ours.
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
@@ -2281,27 +2284,10 @@ mod tests {
 		let other = Hop::new(778).unwrap();
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 
-		// The client asks for everything: a server only answers SUBSCRIBE_NAMESPACE.
-		let version = ietf::Version::Draft18;
-		let mut body = Vec::new();
-		let mut encoder = crate::coding::Encoder::new(&mut body, version.into());
-		ietf::Message::encode_msg(
-			&ietf::SubscribeNamespace {
-				authorization_token: None,
-				request_id: ietf::RequestId(0),
-				namespace: crate::Path::empty(),
-			},
-			&mut encoder,
-			version,
-		)
-		.unwrap();
-		let mut script = Vec::new();
-		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
-		encoder.varint(<ietf::SubscribeNamespace as ietf::Message>::ID).unwrap();
-		encoder.u16(body.len() as u16);
-		script.extend(body);
-		let transport = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
+		let gate = kio::Producer::new(true);
+		let transport = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = transport.log.clone();
+		let version = ietf::Version::Draft18;
 		let request = Handshake {
 			path: None,
 			role: None,

@@ -23,6 +23,7 @@ mod dial_split_horizon;
 mod drained_claim;
 mod empty_group;
 mod errored_end;
+mod extensions;
 mod fastest_reader;
 mod fetch_cancel;
 mod fetch_fanout;

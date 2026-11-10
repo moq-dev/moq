@@ -11,7 +11,12 @@ test("setup option keys match the registries", () => {
 		MaxAuthTokenCacheSize: 0x04n,
 		Authority: 0x05n,
 		Implementation: 0x07n,
+		HopId: 0x40b54n,
+		RelayCost: 0x40b56n,
+		Solicit: 0x40b5an,
+		Hidden: 0x40b5cn,
 		MaxAge: 0x915c4n,
+		ActiveCount: 0x40b64n,
 	});
 });
 

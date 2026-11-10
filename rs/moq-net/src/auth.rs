@@ -2263,6 +2263,12 @@ impl RequestGrant {
 		self.held().grant.clone()
 	}
 
+	/// The request's slot, for re-attaching what it authorized without taking another.
+	#[cfg(test)]
+	pub(crate) fn hold(&self) -> Option<Hold> {
+		self.held().hold.clone()
+	}
+
 	/// Start verifying a renewal's token, holding the request's slot while it runs.
 	pub(crate) fn verify_renewal(&self, handle: &Link, token: crate::setup::Token) -> RequestVerdict {
 		let hold = self.held().hold.clone();

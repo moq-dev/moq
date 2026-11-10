@@ -612,7 +612,7 @@ impl Shared {
 
 	/// Fail with [`Error::Unsupported`] while a session withholds this endpoint's broadcast
 	/// from its peer, so no peer beyond it can find it: a moq-lite client session before
-	/// 07 or a moq-transport one, whose peer can't ask for hidden broadcasts.
+	/// 07, whose peer can't ask for hidden broadcasts.
 	fn poll_reachable(&self, waiter: &kio::Waiter) -> Result<(), Error> {
 		match self.withheld.poll(waiter) {
 			Poll::Ready(()) => Err(Error::Unsupported),
@@ -697,8 +697,8 @@ impl Shared {
 /// its [`TrackStream::consumer`], which the application owns: drop the streams too, which
 /// releases the subscriptions.
 ///
-/// Every hop between two endpoints must carry hidden broadcasts: moq-lite-07. While the
-/// origin has a moq-lite client session before 07 or a moq-transport one, whose peer
+/// Every hop between two endpoints must carry hidden broadcasts: moq-lite-07 or
+/// moq-transport. While the origin has a moq-lite client session before 07, whose peer
 /// never hears the endpoint's broadcast, dials and accepts fail with
 /// [`Error::Unsupported`]; a session whose publish half opts into hidden broadcasts
 /// ([`origin::Consumer::with_hidden`]) carries it and doesn't count. Nothing tells a

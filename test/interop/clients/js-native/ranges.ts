@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as Moq from "@moq/net";
 import WebTransport from "@moq/web-transport";
+import { offered } from "../../../../js/net/src/connection/extensions.ts";
 import { exchangeSetup } from "../../../../js/net/src/connection/handshake.ts";
 import { Connection } from "../../../../js/net/src/ietf/connection.ts";
 import { Version } from "../../../../js/net/src/ietf/version.ts";
@@ -25,8 +26,9 @@ async function connect() {
 	await transport.ready;
 	// Moxygen's pinned HTTP/3 server predates subprotocol negotiation. This fixture's
 	// server offers draft 18 alone, so exchange that SETUP directly on its WebTransport.
-	const setup = await exchangeSetup(transport, Version.DRAFT_18, "interop-ranges", { client: true });
-	return new Connection({ url, quic: transport, version: Version.DRAFT_18, client: true, ...setup });
+	const extensions = offered({ solicit: false });
+	const setup = await exchangeSetup(transport, Version.DRAFT_18, "interop-ranges", { client: true, extensions });
+	return new Connection({ url, quic: transport, version: Version.DRAFT_18, client: true, extensions, ...setup });
 }
 
 function payload(bytes: Uint8Array, size: number) {

@@ -2,6 +2,8 @@ import { Duration, type Instant, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
+import type { AuthSession } from "../auth_session.ts";
+import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import type * as datagram from "../datagram.ts";
@@ -19,7 +21,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
-import type { WireRoute } from "../hop.ts";
+import type { Hop, WireRoute } from "../hop.ts";
 import {
 	datagramTrackInfo,
 	finalSequence,
@@ -53,6 +55,7 @@ import { max, min, saturatingSub } from "../util/sequence.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
+import * as Cluster from "./cluster.ts";
 import { encodeDatagram } from "./datagram.ts";
 import { type RequestCondition, requestReason, SubscribeRefused } from "./error.ts";
 import { type Fetch, FetchHeader, FetchOk, type FetchType } from "./fetch.ts";
@@ -65,7 +68,7 @@ import { Parameters } from "./parameters.ts";
 import { fromWire, toWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
 import { PublishDone, PublishDoneStatus } from "./publish.ts";
-import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
+import { type AdvertParams, PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import {
 	type Framed,
@@ -94,25 +97,54 @@ const RETRY_BASE = 100;
 /** Ceiling on that wait. The loop retries for the life of the session, so it must not spin. */
 const RETRY_MAX = 5000;
 
+/** Cluster parameters for one snapshot: the advertised hops, then our own id last. */
+function clusterFor(base: Cluster.Advert | undefined, route: WireRoute): Cluster.Advert | undefined {
+	if (!base) return undefined;
+	const self = base.hops.at(-1);
+	if (self === undefined) return undefined;
+	const hops = route.hops.at(-1) === self ? [...route.hops] : [...route.hops, self];
+	return { hops, cost: route.cost };
+}
+
 /**
  * What it takes to move the peer from `held` to `next`.
  *
- * - `"same"`: the peer would decode the same advertisement. The route never reaches the
- *   wire, so a change there sends nothing.
+ * - `"same"`: the peer would decode the same advertisement. The route without Cluster
+ *   never reaches the wire, so a change there sends nothing.
  * - `"restart"`: nothing is held, nothing is wanted, or a different broadcast, which is
  *   withdrawn and advertised again.
+ * - Otherwise the same broadcast at a new hop chain or static cost: the cluster parameters
+ *   the peer holds and the ones it should, for the target to update.
  */
-function change(held: Advertised | undefined, next: Advertised | undefined): "same" | "restart" {
+function change(
+	base: Cluster.Advert | undefined,
+	held: Advertised | undefined,
+	next: Advertised | undefined,
+): "same" | "restart" | Reprice {
 	// Another publisher instance: moq-transport has no restart, so the peer sees the namespace
 	// end and start again, and resubscribes.
 	if (held === undefined || next === undefined || !sameInstance(held, next)) return "restart";
-	return "same";
+	const from = clusterFor(base, held.route);
+	const to = clusterFor(base, next.route);
+	if (from === undefined || to === undefined) return from === to ? "same" : "restart";
+	if (from.cost === to.cost && sameHops(from.hops, to.hops)) return "same";
+	return { from, to };
 }
 
-/** What changed for a namespace the peer holds: the token its request carries. */
+/**
+ * What changed for a namespace the peer holds: its cluster parameters (from what it holds
+ * to what it should), its token, or both.
+ */
 interface Reprice {
-	/** The token the request should carry instead. */
-	token: Credential;
+	from?: Cluster.Advert;
+	to?: Cluster.Advert;
+	/** The token the request should carry instead, when it changed. */
+	token?: Credential;
+}
+
+/** Whether two hop paths list the same hops in the same order. */
+function sameHops(a: Hop[], b: Hop[]): boolean {
+	return a.length === b.length && a.every((hop, i) => hop === b[i]);
 }
 
 /**
@@ -184,7 +216,7 @@ interface Target {
 	/** Advertise a namespace the peer does not hold. */
 	advertise(key: Path.Valid, next: Advertised): Promise<Answer>;
 
-	/** Renew the token of a namespace the peer holds. */
+	/** Reprice a namespace the peer holds: the same broadcast at a new hop chain or cost. */
 	update(key: Path.Valid, next: Advertised, reprice: Reprice): Promise<Answer>;
 
 	/** Withdraw a namespace the peer holds. */
@@ -337,6 +369,7 @@ export class Publisher {
 	#quic: WebTransport;
 	#datagramWriter?: ReturnType<typeof DatagramStream.datagramWriter>;
 	#session: Session;
+	#requiresSolicitation: boolean;
 	// What a joining FETCH needs from each draft-18 SUBSCRIBE, by its request ID, while it lasts:
 	// pending from its arrival until it resolves. Request streams race, so a joining FETCH can
 	// arrive before the subscription it names has.
@@ -344,23 +377,35 @@ export class Publisher {
 	// Bumped on every change to #joins, which a waiting joining FETCH rechecks.
 	#joinsChanged = new Signal(0);
 
+	#hidden: boolean;
+	// Whether a SUBSCRIBE_NAMESPACE's REQUEST_OK counts the NAMESPACEs that follow it (MoQ Active Count).
+	#activeCount: boolean;
+
 	// The origin this session serves, borrowed: it outlives the session, and closing the
-	// session leaves its broadcasts alone. A client sends namespaces as an unsolicited
-	// PUBLISH_NAMESPACE (see {@link runPublishNamespaces}), and {@link runSubscribeNamespace}
-	// carries every match: a NAMESPACE is discovery, not a second route. Hidden namespaces
-	// are left out of both unless the prefix names them, since nothing on the wire can
-	// ask for them.
+	// session leaves its broadcasts alone. Namespaces go out as an unsolicited
+	// PUBLISH_NAMESPACE (see {@link runPublishNamespaces}) unless the peer asked to be
+	// told on request. On draft-16 and later {@link runSubscribeNamespace} also carries
+	// every match: a NAMESPACE is discovery, not a second route.
 	#advertised: Getter<Advertisements | undefined>;
 	// Bumped when an idle draft-18+ advertisement ends without an update, so the announce
 	// loop re-offers it instead of holding a request the peer dropped.
 	#lapsed = new Signal(0);
 	#publish?: OriginConsumer;
 
-	// Our grant: only what it lets us publish is advertised and served, and a shrink
-	// withdraws what it no longer covers. Undefined allows everything.
+	// What every advertisement carries on a session that negotiated the MoQ Cluster
+	// extension: a hop path holding our own id, so the peer can tell that what it hears
+	// back came from us. `undefined` when nothing negotiated it.
+	#advert?: Cluster.Advert;
+
+	// Our grant: only what it lets us publish is advertised and served, and a
+	// shrink withdraws what it no longer covers. Undefined until the peer answers, which
+	// allows everything.
 	#grant: Getter<Grant | undefined>;
 	// Holds every incoming request to that grant from dispatch to its end.
 	#gate: Gate;
+
+	// Resolves once the tokens this session presented at setup are answered, so nothing is
+	// advertised before the grant it would be checked against.
 
 	// The bytes a request carries for a route's token, for only the tokens this session issued.
 	#auth?: Carrier;
@@ -374,6 +419,10 @@ export class Publisher {
 		quic,
 		session,
 		publish,
+		requiresSolicitation,
+		hidden = false,
+		activeCount = false,
+		cluster,
 		grant = new Signal<Grant | undefined>(undefined),
 		auth,
 	}: {
@@ -383,6 +432,14 @@ export class Publisher {
 		session: Session;
 		/** The origin whose broadcasts this session serves; omit to publish nothing. */
 		publish?: OriginConsumer;
+		/** Whether the peer's SETUP asked to be told on request (MoQ Solicit). */
+		requiresSolicitation: boolean;
+		/** Whether the peer declared MoQ Hidden. */
+		hidden?: boolean;
+		/** Whether both SETUPs declared MoQ Active Count. */
+		activeCount?: boolean;
+		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
+		cluster?: Cluster.Hops;
 		/** The union of our tokens' grants, which bounds what we publish. */
 		grant?: Getter<Grant | undefined>;
 		/** This session's tokens, which a route names for its request to carry. */
@@ -397,6 +454,10 @@ export class Publisher {
 		const origin = publish && wireOf(publish);
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
+		this.#requiresSolicitation = requiresSolicitation;
+		this.#hidden = hidden;
+		this.#activeCount = activeCount;
+		this.#advert = Cluster.advertise(cluster);
 	}
 
 	/** The origin owns broadcasts; transport teardown ends this publisher's served requests. @internal */
@@ -1567,6 +1628,16 @@ export class Publisher {
 	}
 
 	/**
+	 * Close the session when our origin publishes a broadcast our grant does not cover;
+	 * see {@link enforceGrant}.
+	 *
+	 * @internal
+	 */
+	async runEnforce(setupAnswered: Promise<void>, auth?: AuthSession): Promise<void> {
+		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered, auth });
+	}
+
+	/**
 	 * Handles an incoming SUBSCRIBE_NAMESPACE on a bidi stream.
 	 *
 	 * On draft-16 and later every visible match is a NAMESPACE on this stream, whatever
@@ -1597,16 +1668,28 @@ export class Publisher {
 			})().catch((err: unknown) => ({ error: error(err) }));
 		let updating: ReturnType<typeof readUpdate> | undefined = readUpdate();
 		try {
-			await Message.write(request.writer, RequestOk.id, new RequestOk(), version);
+			const answer = async (activeCount?: number) => {
+				const parameters = new Parameters();
+				parameters.activeCount = activeCount;
+				await Message.write(request.writer, RequestOk.id, new RequestOk({ parameters }), version);
+			};
 
-			// Hidden namespaces are left out unless the prefix names them, as moq-lite does,
-			// since nothing on the wire can ask for them.
-			const carries = (covered: Path.Valid) => this.#visible(prefix, covered) && this.#gate.allows(covered);
+			// MoQ Active Count: the OK counts what the first pass below sends, so it waits for
+			// that pass. Otherwise answer now.
+			let answered = !this.#activeCount;
+			if (answered) await answer();
+
+			// Hidden namespaces are left out unless the peer opted in (MoQ Hidden).
+			const visible = (covered: Path.Valid) => !this.#hidden || msg.hidden || !hiddenBelow(prefix, covered);
+			const carries = (covered: Path.Valid) => visible(covered) && this.#gate.allows(covered);
 
 			// Inline entries always land, and the receiver treats a repeated NAMESPACE as a
-			// replacement, so a new original publisher is just sent again, as Rust does.
-			const namespace = async (suffix: Path.Valid): Promise<Answer> => {
-				const entry = new SubscribeNamespaceEntry({ suffix });
+			// replacement, so repricing one is just sending it again, a new original
+			// publisher included, as Rust does.
+			const namespace = async (suffix: Path.Valid, snap: Advertised): Promise<Answer> => {
+				// MoQ Cluster puts the Parameters field on NAMESPACE.
+				const params = this.#advert !== undefined ? this.#params(snap.route) : undefined;
+				const entry = new SubscribeNamespaceEntry({ suffix, params });
 				await Message.write(request.writer, SubscribeNamespaceEntry.id, entry, version);
 				return "held";
 			};
@@ -1636,6 +1719,11 @@ export class Publisher {
 
 				const advertised = this.#advertised.peek();
 				const updated = advertised ? presented(prefix, advertised, carries) : new Map<Path.Valid, Advertised>();
+				// A fresh pass sends a NAMESPACE for every entry, ahead of any change.
+				if (!answered) {
+					answered = true;
+					await answer(updated.size);
+				}
 				if (!advertised) {
 					dispose();
 					break;
@@ -1699,13 +1787,13 @@ export class Publisher {
 
 	/**
 	 * Advertise every published broadcast with an unsolicited PUBLISH_NAMESPACE, until
-	 * the publisher is closed. Only a client runs this.
+	 * the publisher is closed.
 	 *
 	 * The peers that never send SUBSCRIBE_NAMESPACE are exactly the ones expecting a
-	 * publisher to announce itself, so a client announces. A server only answers
-	 * SUBSCRIBE_NAMESPACE: moq-transport carries no hop path, so two relays announcing to
-	 * each other would loop. {@link runSubscribeNamespace} also carries every match, so a
-	 * peer that asked hears each namespace both ways. A NAMESPACE is discovery only, not a
+	 * publisher to announce itself, so announcing is the default. A peer that would
+	 * rather ask says so in its SETUP (MoQ Solicit) and this does nothing.
+	 * {@link runSubscribeNamespace} also carries every match, so a peer that
+	 * did not ask hears each namespace both ways. A NAMESPACE is discovery only, not a
 	 * second route.
 	 *
 	 * @internal
@@ -1716,6 +1804,10 @@ export class Publisher {
 
 	async #runPublishNamespaces() {
 		if (this.#withdrawal.closing.peek()) return;
+		if (this.#requiresSolicitation) {
+			// The peer asked to be told on request; runSubscribeNamespace answers it.
+			return;
+		}
 
 		// The open PUBLISH_NAMESPACE request per advertised path.
 		const requests: Requests = new Map();
@@ -1777,9 +1869,9 @@ export class Publisher {
 
 				const updated = new Map<Path.Valid, Advertised>();
 				for (const [covered, candidates] of advertised) {
-					// Hidden namespaces are left out, and nothing our grant does not cover
-					// reaches the peer at all.
-					if (!this.#visible(Path.empty(), covered) || !this.#gate.allows(covered)) continue;
+					// Only peers that declared MoQ Hidden filter unsolicited discovery, and
+					// nothing our grant does not cover reaches the peer at all.
+					if ((this.#hidden && hiddenBelow(Path.empty(), covered)) || !this.#gate.allows(covered)) continue;
 					const best = firstEligible(candidates);
 					if (best) updated.set(covered, best);
 				}
@@ -1884,11 +1976,6 @@ export class Publisher {
 		);
 	}
 
-	/** Whether the peer hears of `covered` under `prefix`: hidden only when the prefix names it. */
-	#visible(prefix: Path.Valid, covered: Path.Valid): boolean {
-		return !hiddenBelow(prefix, covered);
-	}
-
 	/**
 	 * What it takes to move the peer from `held` to `next` at `key`: {@link change}, plus
 	 * the token the request carries.
@@ -1902,13 +1989,13 @@ export class Publisher {
 		next: Advertised | undefined,
 		target: Target,
 	): "same" | "restart" | Reprice {
-		const diff = change(held, next);
-		if (diff === "restart" || next === undefined) return diff;
+		const diff = change(this.#advert, held, next);
+		if (diff === "restart" || held === undefined || next === undefined) return diff;
 		const from = target.held(key);
 		const to = target.carry(next.route.auth);
 		if (from === to) return diff;
 		if (from === undefined || to === undefined) return "restart";
-		return { token: to };
+		return { ...(diff === "same" ? {} : diff), token: to };
 	}
 
 	/** `auth` when a request of this session can carry it. */
@@ -1950,11 +2037,19 @@ export class Publisher {
 	}
 
 	/**
+	 * The extension parameters an advertisement of `route` carries.
+	 */
+	#params(route: WireRoute): AdvertParams {
+		return { cluster: clusterFor(this.#advert, route) };
+	}
+
+	/**
 	 * Advertise one namespace on its own PUBLISH_NAMESPACE request. A declined request
 	 * is logged and skipped: a peer that wants none of this rejects each one and stays
 	 * connected.
 	 */
 	async #advertise(path: Path.Valid, requests: Requests, route: WireRoute): Promise<Answer> {
+		const params = this.#params(route);
 		const auth = this.#carry(route.auth);
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) return "dropped";
@@ -1972,7 +2067,7 @@ export class Publisher {
 					request = opened;
 					const version = this.#session.version;
 					const token = this.#auth?.carried(auth);
-					const msg = new PublishNamespace({ requestId, trackNamespace: path, token });
+					const msg = new PublishNamespace({ requestId, trackNamespace: path, params, token });
 					await deadline.send(opened, async () => {
 						await Message.write(opened.writer, PublishNamespace.id, msg, version);
 					});
@@ -1995,7 +2090,8 @@ export class Publisher {
 					if (response.type !== RequestOk.id) {
 						throw new Error(`PublishNamespace rejected: typeId=0x${response.type.toString(16)}`);
 					}
-					await RequestOk.decode(response.reader, this.#session.version);
+					// Draft-14 sends PublishNamespaceOk (requestId only, no parameters)
+					this.#answered(await RequestOk.decode(response.reader, this.#session.version));
 					return "held";
 				})(),
 			);
@@ -2046,21 +2142,38 @@ export class Publisher {
 	}
 
 	/**
+	 * Check a REQUEST_OK answering a PUBLISH_NAMESPACE. ACTIVE_COUNT only answers
+	 * SUBSCRIBE_NAMESPACE (MoQ Active Count), and reading one too large to hold throws the
+	 * same violation.
+	 */
+	#answered(ok: RequestOk) {
+		if (ok.parameters.activeCount !== undefined)
+			throw new ProtocolViolation("ACTIVE_COUNT on a PUBLISH_NAMESPACE answer");
+	}
+
+	/**
 	 * Update a namespace the peer holds: REQUEST_UPDATE on the request that carries it,
-	 * renewing its token, then its answer.
+	 * with only the parameters that changed, then its answer.
 	 *
 	 * Waiting for the answer keeps one update outstanding per stream, which satisfies any
 	 * MAX_REQUEST_UPDATES the peer set without reading it; a change landing meanwhile waits
 	 * for the next turn. The answer decides whether the peer still holds the namespace: a
 	 * REQUEST_ERROR closes the peer's side and withdraws the advertisement, so ours is
 	 * finished too, and an unanswered update is dropped, since a peer that
-	 * ignored it cannot be assumed to hold either token. Either way the retry re-offers it fresh.
+	 * ignored it cannot be assumed to hold either price. Either way the retry re-offers it fresh.
+	 *
+	 * A different original publisher is an update like any other: the receiver drains what
+	 * it already serves from the old one and never splices the two.
 	 */
-	async #update(path: Path.Valid, requests: Requests, { token: auth }: Reprice): Promise<Answer> {
+	async #update(path: Path.Valid, requests: Requests, { from, to, token: auth }: Reprice): Promise<Answer> {
 		const request = requests.get(path);
 		if (!request) return "dropped";
 
-		const token = this.#auth?.carried(auth);
+		const update: Cluster.Update = {
+			hops: from && to && !sameHops(from.hops, to.hops) ? to.hops : undefined,
+			cost: from && to && from.cost !== to.cost ? to.cost : undefined,
+		};
+		const token = auth && this.#auth?.carried(auth);
 		const version = this.#session.version;
 		let answer: Answer;
 		try {
@@ -2071,7 +2184,7 @@ export class Publisher {
 				(async (): Promise<Answer> => {
 					const writer = request.stream.writer;
 					request.updating = true;
-					const msg = new PublishNamespaceUpdate({ requestId, token });
+					const msg = new PublishNamespaceUpdate({ requestId, update, token });
 					await Message.write(writer, PublishNamespaceUpdate.id, msg, version);
 
 					const response = await (request.reply ?? request.stream.next());
@@ -2085,7 +2198,7 @@ export class Publisher {
 					if (response.type !== RequestOk.id) {
 						throw new Error(`unexpected answer to the update: typeId=0x${response.type.toString(16)}`);
 					}
-					await RequestOk.decode(response.reader, version);
+					this.#answered(await RequestOk.decode(response.reader, version));
 					request.updating = false;
 					request.reply = this.#readAdvertisement(request, requests);
 					return "held";
@@ -2102,7 +2215,7 @@ export class Publisher {
 		}
 
 		if (answer === "held") {
-			request.auth = auth;
+			if (auth) request.auth = auth;
 			return answer;
 		}
 		// The peer already closed out a refused request, and its STOP_SENDING can

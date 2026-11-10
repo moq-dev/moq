@@ -18,13 +18,13 @@ ordinary broadcast.
 
 A socket is a convention over announcements, broadcasts, and track
 subscriptions, not a wire extension. It uses no instances and no track
-listings, and relays carry it unchanged. It needs moq-lite-07 on every hop: an
-endpoint's broadcasts are [hidden](/concept/moq-lite#hidden-broadcasts), and an
-older moq-lite hop or a moq-transport hop never carries hidden broadcasts, so a
-dial across one would never find its peer. Clustered relays carry hidden
-broadcasts to each other on every version, so the hop that decides is each
-endpoint's own session: while an endpoint's client session is moq-lite before
-07 or moq-transport, its dials and accepts fail with
+listings, and relays carry it unchanged. It needs moq-lite-07 or
+moq-transport on every hop: an endpoint's broadcasts are
+[hidden](/concept/moq-lite#hidden-broadcasts), and an older moq-lite hop
+never carries hidden broadcasts, so a dial across one would never find its
+peer. Clustered relays carry hidden broadcasts to each other on every version,
+so the hop that decides is each endpoint's own session: while an endpoint's
+client session is moq-lite before 07, its dials and accepts fail with
 `Unsupported` instead of waiting, unless that session's publish half opts into
 hidden broadcasts. A dialer can't tell a peer behind such a hop from one not
 online yet, so its dial waits as for any absent peer, while the peer's own
@@ -131,7 +131,8 @@ exactly like one direction of a TCP connection:
 - A frame is a write. The reader reads the frames in the order they were
   written, with nothing skipped.
 - The reader joins the live group, which is the half's only one, from its
-  first frame.
+  first frame. Over moq-transport, that is a `SUBSCRIBE` plus a joining `FETCH`
+  (or a fill) for the frames written before its answer.
 - Finishing the group is FIN: the reader reads to the end, then sees the end.
 - Resetting the group, or its track, is RST: the reader fails with the error.
 - A second group on a session track is a protocol error: the reader resets the
@@ -163,7 +164,10 @@ every message, but each
 hop's cache reclaims a message nobody read within its idle window (30 s by
 default), or under memory pressure, except the newest, so a reader that stalls
 longer can miss messages. Any message a hop reports it will never deliver is
-skipped the same way, rather than ending the session.
+skipped the same way, rather than ending the session. Over moq-transport, the
+reader starts at group 0: a `SUBSCRIBE` with no filter, plus one range `FETCH`
+for the groups below the answer's largest, so a publisher that refuses that
+`FETCH` leaves a burst written before the answer missed.
 
 The reader's subscription starts reliable and in order, like `tcp`. An
 application may make it lossy for messages that go stale, such as positions or

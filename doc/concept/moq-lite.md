@@ -46,9 +46,10 @@ each other.
 Once that first reply is read, the reader has **synced**: a broadcast not
 announced by then is absent rather than late, so a player can say "offline"
 instead of waiting. A relay replies from what it holds now and never waits on
-its own upstreams. moq-lite 05 and later mark exactly where the first reply
-ends. Older versions and moq-transport sync on the peer's answer, or as soon as
-the request is sent, as a best effort. Reading an origin fed by sessions, a reader
+its own upstreams. moq-lite 05 and later, and moq-transport with the
+[active-count](/draft/moq-active-count) extension, mark exactly where the first
+reply ends. Older versions sync on the peer's answer, or as soon as the
+request is sent, as a best effort. Reading an origin fed by sessions, a reader
 has synced once every current session's first reply is in, so a reconnect
 takes it back until the new reply lands.
 
@@ -182,10 +183,9 @@ listing the root skips `.stats/node`, but listing `.stats` shows `node`.
 
 Hiding narrows discovery and nothing else. Subscribing to a hidden path by name
 works, and tokens authorize it like any other path. Listing hidden routes is an
-explicit opt-in on the announce request. moq-transport has no such opt-in, so a
-hidden route never reaches a moq-transport peer under a prefix that doesn't name
-it, and a moq-transport client publishes none, so an endpoint behind it can't be
-reached as a [socket](/concept/socket).
+explicit opt-in on the announce request. On moq-transport that opt-in is the
+[hidden](/draft/moq-hidden) extension; a peer that never declares it receives
+every authorized namespace, dot-prefixed ones included.
 
 ## Path patterns
 
@@ -244,10 +244,10 @@ A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
 code and the session stays up. A client that publishes outside its grant closes
 the session with `UNAUTHORIZED`, naming the path. A session whose last
 credential expires closes with `EXPIRED_AUTH_TOKEN` instead: refresh the token
-and reconnect, rather than treating the credential as invalid. Older moq-lite
-versions and moq-transport have no grant; the URL token keeps working
-everywhere. On moq-transport an added token is kept for the announcements that
-name it: it rides that `PUBLISH_NAMESPACE` as its
+and reconnect, rather than treating the credential as invalid. Older versions
+and moq-transport have no grant; the URL token keeps working everywhere. On
+moq-transport an added token is kept for the requests that name it, so an
+announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
 authorization token. Naming a fresh token renews the announcement in place with
 `REQUEST_UPDATE`, so it can outlive the token it started with. A token added to a reconnecting
 connection's auth handle is presented on every session it makes, so the

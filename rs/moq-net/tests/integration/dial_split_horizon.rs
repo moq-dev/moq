@@ -130,9 +130,9 @@ fn hop(id: u64) -> NonZeroU64 {
 	NonZeroU64::new(id).unwrap()
 }
 
-/// moq-transport carries no hop either, so it is anonymous like moq-lite-01.
+/// Edges that declare their own hop over the MoQ Cluster extension.
 #[kio::test]
-async fn dialed_ietf_session_does_not_echo_or_route_subscribe_back() {
+async fn dialed_named_session_does_not_echo_or_route_subscribe_back() {
 	split_horizon("moq-transport-18", [hop(2), hop(3)]).await;
 }
 

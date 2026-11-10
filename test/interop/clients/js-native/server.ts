@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { createInterface } from "node:readline";
 import * as Moq from "@moq/net";
+import * as Extensions from "../../../../js/net/src/connection/extensions.ts";
 import { exchangeSetup } from "../../../../js/net/src/connection/handshake.ts";
 import { Connection } from "../../../../js/net/src/ietf/connection.ts";
 import { GoAway } from "../../../../js/net/src/ietf/goaway.ts";
@@ -14,6 +15,7 @@ const [mode, name] = process.argv.slice(2);
 assert(name && mode === "goaway", "usage: server.ts goaway VERSION");
 const version = (0xff000000 + Number(name.split("-").at(-1))) as Ietf.IetfVersion;
 const alpns = [`moqt-${Number(version) - 0xff000000}`];
+const extensions = Extensions.offered();
 const origin = new Moq.Origin.Producer();
 const broadcastRoute = origin.route(Moq.Path.from("handover"), { hidden: true });
 const broadcast = broadcastRoute.broadcast;
@@ -98,7 +100,7 @@ function listen(publish: Moq.Origin.Consumer) {
 }
 
 async function accept(quic: WebTransport, url: URL, publish: Moq.Origin.Consumer) {
-	const setup = await exchangeSetup(quic, version, "interop-js-server", { client: false });
+	const setup = await exchangeSetup(quic, version, "interop-js-server", { client: false, extensions });
 	return {
 		control: setup.control,
 		connection: new Connection({
@@ -107,6 +109,7 @@ async function accept(quic: WebTransport, url: URL, publish: Moq.Origin.Consumer
 			version,
 			client: false,
 			publish,
+			extensions,
 			...setup,
 		}),
 	};

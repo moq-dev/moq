@@ -1,13 +1,31 @@
 //! What the peer declared in its SETUP, and the slot the session tasks read it from.
 
+use super::cluster;
+
 /// The Setup Options the peer sent us.
 ///
-/// One value per session: the options ride the same SETUP, so they arrive together and
-/// are read together.
+/// One value per session: both extensions ride the same SETUP, so they arrive together
+/// and are read together.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Peer {
+	/// The MoQ Cluster options: the peer's Hop ID and what it charges to cross.
+	pub cluster: cluster::Peer,
+
+	/// MoQ Solicit: whether the peer requires advertisements to be solicited, so an
+	/// unsolicited PUBLISH_NAMESPACE is unwanted. `None` when it declared nothing, which
+	/// is the one case where sending us one anyway is not a protocol violation.
+	pub solicit: Option<bool>,
+
+	/// MoQ Hidden: whether the peer understands the HIDDEN parameter on
+	/// SUBSCRIBE_NAMESPACE, so we may send it.
+	pub hidden: bool,
+
 	/// Whether the peer understands subscriber max age (MoQ Timestamp).
 	pub max_age: bool,
+
+	/// MoQ Active Count: whether the REQUEST_OK answering SUBSCRIBE_NAMESPACE counts the
+	/// NAMESPACE messages before the subscription is synced, in both directions.
+	pub active_count: bool,
 
 	/// Whether this peer offered DEFLATE-compressed tracks.
 	pub flate: bool,
@@ -15,7 +33,10 @@ pub(crate) struct Peer {
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
 ///
-/// Cheap to clone; every handle shares the same slot.
+/// The publisher blocks on this before its first advertisement: the SETUP decides both
+/// what an advertisement carries (MoQ Cluster) and whether one may be sent unasked (MoQ
+/// Solicit), so nothing can go out until it arrives. Cheap to clone; every handle
+/// shares the same slot.
 #[derive(Clone, Default)]
 pub(crate) struct PeerSetup {
 	slot: kio::Shared<Option<Peer>>,
@@ -91,19 +112,33 @@ mod tests {
 	use super::*;
 
 	/// The announce loops read the peer's declaration once and hold it, while
-	/// subscription serving re-reads it. A second SETUP overwriting the declaration would
+	/// subscription serving re-reads it. A second SETUP overwriting the identity would
 	/// split those two apart, so the first write is the one that counts.
 	#[kio::test]
 	async fn first_write_wins() {
 		let first = Peer {
+			cluster: cluster::Peer {
+				hop: Some(crate::Hop::new(42).unwrap()),
+				cost: Some(3),
+			},
+			solicit: None,
+			hidden: false,
 			max_age: false,
+			active_count: false,
 			flate: false,
 		};
 
 		let slot = PeerSetup::default();
 		slot.set(first);
 		slot.set(Peer {
-			max_age: true,
+			cluster: cluster::Peer {
+				hop: Some(crate::Hop::new(99).unwrap()),
+				cost: Some(0),
+			},
+			solicit: Some(true),
+			hidden: true,
+			max_age: false,
+			active_count: true,
 			flate: true,
 		});
 

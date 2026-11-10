@@ -9,10 +9,6 @@
 //! session mints one per announcement and the re-announced routes are new streams:
 //! announce consumers get a `Restart` at once, and the old handle refuses new requests
 //! from then on, so its holder follows the `Restart` instead.
-//!
-//! moq-transport carries no hop path either, so nothing says the second session reaches
-//! the same publisher: it is another route, which takes new requests with a `Restart`,
-//! while the old handle keeps serving over its own session.
 
 use crate::support;
 
@@ -82,7 +78,6 @@ const PAST_HOLD: Duration = Duration::from_millis(500);
 
 async fn replace(version: &str, instance: Option<Instance>) {
 	let carries = version == "moq-lite-07-wip";
-	let anonymous = version.starts_with("moq-transport");
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(3);
@@ -147,17 +142,10 @@ async fn replace(version: &str, instance: Option<Instance>) {
 		}) => assert_eq!(announce.prefix.as_str(), "cam"),
 		other => panic!("{version}: expected the restart, got {other:?}"),
 	}
-	if anonymous {
-		// Its own route is still up, so the old handle still serves.
-		let mut later = subscribe(&old, "audio").await.unwrap();
-		write(&audio, "audio:0");
-		assert_eq!(read(&mut later).await, "audio:0", "{version}");
-	} else {
-		let Err(err) = subscribe(&old, "meta").await else {
-			panic!("{version}: a retired handle served a request");
-		};
-		assert!(matches!(err, Error::Unroutable), "{version}: {err}");
-	}
+	let Err(err) = subscribe(&old, "meta").await else {
+		panic!("{version}: a retired handle served a request");
+	};
+	assert!(matches!(err, Error::Unroutable), "{version}: {err}");
 	// The subscription already on it keeps flowing.
 	write(&video, "video:1");
 	assert_eq!(read(&mut sticky).await, "video:1", "{version}");
@@ -188,7 +176,7 @@ async fn carried_lite07() {
 }
 
 /// moq-transport carries no instance, even a stable one, so a replacement restarts as it
-/// does over older lite, and no hop path, so the old route stays up beside it.
+/// does over older lite.
 #[kio::test]
 async fn minted_ietf() {
 	for version in ["moq-transport-18", "moq-transport-22"] {

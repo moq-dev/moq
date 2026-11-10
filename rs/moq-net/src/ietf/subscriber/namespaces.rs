@@ -3,10 +3,12 @@
 //! A client asks only about the prefixes its origin's readers watch, as moq-lite does,
 //! and ends a request once nothing has watched it for a while.
 //!
-//! moq-transport refuses a SUBSCRIBE_NAMESPACE that shares a prefix with one still open,
-//! so discovery is exclusive: a broader request replaces the narrower ones beneath it,
-//! each of which leaves the wire before the broader one goes out. The routes a replaced
-//! request carried go with it, and come back once the broader request reports them.
+//! moq-transport refuses a SUBSCRIBE_NAMESPACE that shares a prefix with one still open.
+//! A peer that declared MoQ Solicit is ours and holds both, so it gets moq-lite's
+//! overlapping requests, which never take each other's routes over. Any other peer gets
+//! exclusive discovery: a broader request replaces the narrower ones beneath it, each of
+//! which leaves the wire before the broader one goes out. The routes a replaced request
+//! carried go with it, and come back once the broader request reports them.
 
 use std::collections::VecDeque;
 
@@ -36,7 +38,9 @@ struct Request {
 /// the protocol on.
 pub(in crate::ietf) struct Namespaces {
 	subscriber: Subscriber,
-	discovery: Discovery,
+	/// Until the peer's SETUP says whether it holds overlapping requests.
+	setup: Option<Discovery>,
+	discovery: Option<Discovery>,
 	requests: HashMap<u64, Request>,
 	/// The request discovery holds open for each prefix.
 	open_at: HashMap<Path, u64>,
@@ -50,7 +54,8 @@ impl Namespaces {
 	pub(in crate::ietf) fn new(subscriber: Subscriber, discovery: Discovery) -> Self {
 		Self {
 			subscriber,
-			discovery: discovery.exclusive(),
+			setup: Some(discovery),
+			discovery: None,
 			requests: HashMap::new(),
 			open_at: HashMap::new(),
 			running: kio::Tasks::new(),
@@ -61,14 +66,23 @@ impl Namespaces {
 
 	/// Ready with the error that ends them.
 	pub(in crate::ietf) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		let discovery = &mut self.discovery;
+		if self.setup.is_some() {
+			let declared = ready!(self.subscriber.peer_setup.poll_get(waiter));
+			let discovery = self.setup.take().expect("checked above");
+			self.discovery = Some(match declared.solicit {
+				Some(_) => discovery,
+				None => discovery.exclusive(),
+			});
+		}
+		let discovery = self.discovery.as_mut().expect("decided above");
 
 		loop {
 			if let Poll::Ready(change) = discovery.poll(waiter) {
 				match change {
 					Change::Open(prefix, snapshot) => {
 						// Wait out the overlapping requests on their way out, such as the narrower
-						// ones just closed for this one.
+						// ones an exclusive session just closed for this one. Those still open
+						// overlap it only where the peer holds both.
 						let blockers = self
 							.requests
 							.values()
@@ -153,6 +167,7 @@ struct Exchange {
 	state: ExchangeState,
 }
 
+#[expect(clippy::large_enum_variant, reason = "a machine's enum is its storage")]
 enum ExchangeState {
 	/// Waiting out the requests it overlaps, then for stream credit.
 	Opening {

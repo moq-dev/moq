@@ -197,8 +197,8 @@ impl Client {
 		self
 	}
 
-	/// Choose which extensions to offer in SETUP. Defaults to none: only relays turn on
-	/// [`ietf`](setup::Extensions::ietf).
+	/// Choose which extensions to offer in SETUP. Defaults to every moq-transport one, and
+	/// not [`ietf`](setup::Extensions::ietf), which only relays turn on.
 	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
 		self.extensions = extensions;
 		self
@@ -217,8 +217,8 @@ impl Client {
 		setup::implementation(self.implementation.as_deref().unwrap_or(crate::IMPLEMENTATION))
 	}
 
-	/// Price this link, in the units the rest of the mesh uses (moq-lite-06+). moq-transport
-	/// carries no cost, so there the price is applied locally.
+	/// Price this link, in the units the rest of the mesh uses (moq-lite-06+, and
+	/// moq-transport via the MoQ Cluster extension).
 	///
 	/// The dialer is the side that knows what a link costs, because it chose the peer:
 	/// use `1` for a sibling in the same datacenter and something large for another
@@ -442,6 +442,7 @@ impl Client {
 					peer_declared: None,
 					auth: auth.clone(),
 					early_unis: Vec::new(),
+					extensions: self.extensions,
 					implementation: self.implementation(),
 					peer_implementation: peer_implementation.clone(),
 				})?;

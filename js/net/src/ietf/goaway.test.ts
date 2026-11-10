@@ -183,8 +183,7 @@ for (const [version, alpn] of [
 			quic: pair.server,
 			control,
 			version,
-			// Only a client announces unasked.
-			client: true,
+			client: false,
 			publish: origin.consume(),
 		});
 		try {
@@ -215,7 +214,7 @@ for (const [version, alpn] of [
 				quic: pair.server,
 				control,
 				version,
-				client: true,
+				client: false,
 				publish: origin.consume(),
 			});
 			const offered = async () => {

@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
+import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -170,6 +171,7 @@ test("SUBSCRIBE_NAMESPACE gets the published namespaces", async () => {
 		version,
 		client: false,
 		publish: origin.consume(),
+		solicit: true,
 	});
 
 	try {
@@ -223,7 +225,10 @@ test("uni streams before SETUP are held until it lands", async () => {
 	parameters.setBytes(SetupOption.Implementation, new TextEncoder().encode("test"));
 	await new Setup({ parameters }).encode(setup, version);
 
-	const { control, early } = await exchangeSetup(pair.server, version, "test", { client: false });
+	const { control, early, solicit, hidden, cluster } = await exchangeSetup(pair.server, version, "test", {
+		client: false,
+		extensions: offered(),
+	});
 	expect(early.length).toBe(2);
 
 	let closed = false;
@@ -236,6 +241,9 @@ test("uni streams before SETUP are held until it lands", async () => {
 		quic: pair.server,
 		control,
 		early,
+		solicit,
+		hidden,
+		cluster,
 		version,
 		client: false,
 	});
@@ -267,7 +275,7 @@ test("truncated uni stream before SETUP is skipped", async () => {
 	parameters.setBytes(SetupOption.Implementation, new TextEncoder().encode("test"));
 	await new Setup({ parameters }).encode(setup, version);
 
-	const { early } = await exchangeSetup(pair.server, version, "test", { client: false });
+	const { early } = await exchangeSetup(pair.server, version, "test", { client: false, extensions: offered() });
 	expect(early.length).toBe(0);
 });
 

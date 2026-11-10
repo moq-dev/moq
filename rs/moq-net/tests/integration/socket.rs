@@ -1,8 +1,8 @@
 #![cfg(feature = "async")]
 
 //! Sockets through a relay: endpoints on their own origins, each with a session to a
-//! relay, dialing and accepting `tcp` and `track` sessions over moq-lite-07. moq-transport
-//! and older moq-lite carry no hidden broadcasts, so an endpoint behind one fails.
+//! relay, dialing and accepting `tcp` and `track` sessions over moq-lite-07 and
+//! moq-transport.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,6 +21,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const SETTLE: Duration = Duration::from_secs(1);
 
 const LITE: &str = "moq-lite-07-wip";
+const IETF: &str = "moq-transport-18";
 
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
@@ -142,31 +143,46 @@ async fn recv(reader: &mut track::Ordered) -> Result<Option<Vec<u8>>, Error> {
 	.expect("read timeout")
 }
 
-/// Writes flow both ways, in order, and finishing a half is FIN.
+/// Writes flow both ways, in order, over every pairing of moq-lite-07 and moq-transport,
+/// and finishing a half is FIN: the handshake uses neither instances nor track listings.
 #[kio::test]
 async fn tcp_sessions_carry_writes_both_ways() {
-	let mut fixture = Fixture::new();
-	let alice = fixture.endpoint(LITE, "alice").await;
-	let bob = fixture.endpoint(LITE, "bob").await;
-	let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
-	assert_eq!(dialed.peer(), "bob");
-	assert_eq!(accepted.peer(), "alice");
-	assert_eq!(dialed.session(), accepted.session());
+	for (dialer, acceptor) in [(LITE, LITE), (LITE, IETF), (IETF, LITE), (IETF, IETF)] {
+		let mut fixture = Fixture::new();
+		let alice = fixture.endpoint(dialer, "alice").await;
+		let bob = fixture.endpoint(acceptor, "bob").await;
+		let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
+		assert_eq!(dialed.peer(), "bob");
+		assert_eq!(accepted.peer(), "alice");
+		assert_eq!(dialed.session(), accepted.session());
 
-	for write in [b"one", b"two", b"six"] {
-		dialed.producer.write_frame(None, &write[..]).unwrap();
-	}
-	for write in [b"one", b"two", b"six"] {
-		assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), write);
-	}
-	accepted.producer.write_frame(None, &b"pong"[..]).unwrap();
-	assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), b"pong");
+		for write in [b"one", b"two", b"six"] {
+			dialed.producer.write_frame(None, &write[..]).unwrap();
+		}
+		for write in [b"one", b"two", b"six"] {
+			assert_eq!(
+				read(&mut accepted.consumer).await.unwrap().unwrap(),
+				write,
+				"{dialer} to {acceptor}"
+			);
+		}
+		accepted.producer.write_frame(None, &b"pong"[..]).unwrap();
+		assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), b"pong");
 
-	// FIN, each way.
-	dialed.producer.finish().unwrap();
-	assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
-	accepted.producer.finish().unwrap();
-	assert_eq!(read(&mut dialed.consumer).await.unwrap(), None);
+		// FIN, each way.
+		dialed.producer.finish().unwrap();
+		assert_eq!(
+			read(&mut accepted.consumer).await.unwrap(),
+			None,
+			"{dialer} to {acceptor}"
+		);
+		accepted.producer.finish().unwrap();
+		assert_eq!(
+			read(&mut dialed.consumer).await.unwrap(),
+			None,
+			"{dialer} to {acceptor}"
+		);
+	}
 }
 
 /// A long session is one group of many writes, read in order.
@@ -204,15 +220,20 @@ async fn a_long_tcp_session_stays_in_order() {
 /// Aborting a half is RST: the peer's read fails instead of ending.
 #[kio::test]
 async fn a_reset_tcp_half_fails_the_read() {
-	let mut fixture = Fixture::new();
-	let alice = fixture.endpoint(LITE, "alice").await;
-	let bob = fixture.endpoint(LITE, "bob").await;
-	let (dialed, mut accepted) = connect_tcp(&alice, &bob).await;
-	let mut producer = dialed.producer;
-	producer.write_frame(None, &b"partial"[..]).unwrap();
-	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"partial");
-	producer.abort(Error::Cancel).unwrap();
-	assert!(read(&mut accepted.consumer).await.is_err(), "a reset read as FIN");
+	for version in [LITE, IETF] {
+		let mut fixture = Fixture::new();
+		let alice = fixture.endpoint(version, "alice").await;
+		let bob = fixture.endpoint(version, "bob").await;
+		let (dialed, mut accepted) = connect_tcp(&alice, &bob).await;
+		let mut producer = dialed.producer;
+		producer.write_frame(None, &b"partial"[..]).unwrap();
+		assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"partial");
+		producer.abort(Error::Cancel).unwrap();
+		assert!(
+			read(&mut accepted.consumer).await.is_err(),
+			"{version}: a reset read as FIN"
+		);
+	}
 }
 
 /// A slow reader paces the writer through every hop, and a session longer than a group's
@@ -392,30 +413,37 @@ async fn a_peer_reset_after_fin_resets_the_session() {
 	}
 }
 
-/// Messages flow both ways, in order.
+/// Messages flow both ways, in order, over every pairing of moq-lite-07 and
+/// moq-transport.
 #[kio::test]
 async fn track_sessions_carry_messages_both_ways() {
-	let mut fixture = Fixture::new();
-	let alice = fixture.endpoint(LITE, "alice").await;
-	let bob = fixture.endpoint(LITE, "bob").await;
-	let (dialed, accepted) = connect_track(&alice, &bob).await;
-	assert_eq!(dialed.peer(), "bob");
-	assert_eq!(dialed.session(), accepted.session());
-	let mut reader = accepted.consumer.ordered();
-	let mut replies = dialed.consumer.ordered();
+	for (dialer, acceptor) in [(LITE, LITE), (LITE, IETF), (IETF, LITE), (IETF, IETF)] {
+		let mut fixture = Fixture::new();
+		let alice = fixture.endpoint(dialer, "alice").await;
+		let bob = fixture.endpoint(acceptor, "bob").await;
+		let (dialed, accepted) = connect_track(&alice, &bob).await;
+		assert_eq!(dialed.peer(), "bob");
+		assert_eq!(dialed.session(), accepted.session());
+		let mut reader = accepted.consumer.ordered();
+		let mut replies = dialed.consumer.ordered();
 
-	for message in [b"one", b"two", b"six"] {
-		send(&dialed.producer, message);
-	}
-	for message in [b"one", b"two", b"six"] {
-		assert_eq!(recv(&mut reader).await.unwrap().unwrap(), message);
-	}
-	send(&accepted.producer, b"pong");
-	assert_eq!(recv(&mut replies).await.unwrap().unwrap(), b"pong");
+		for message in [b"one", b"two", b"six"] {
+			send(&dialed.producer, message);
+		}
+		for message in [b"one", b"two", b"six"] {
+			assert_eq!(
+				recv(&mut reader).await.unwrap().unwrap(),
+				message,
+				"{dialer} to {acceptor}"
+			);
+		}
+		send(&accepted.producer, b"pong");
+		assert_eq!(recv(&mut replies).await.unwrap().unwrap(), b"pong");
 
-	// Finishing a half closes the pipe that way.
-	let _finished = dialed.producer.finish().unwrap();
-	assert_eq!(recv(&mut reader).await.unwrap(), None);
+		// Finishing a half closes the pipe that way.
+		let _finished = dialed.producer.finish().unwrap();
+		assert_eq!(recv(&mut reader).await.unwrap(), None);
+	}
 }
 
 /// Messages are read in sequence even when they are written, and so arrive, out of order.
@@ -909,32 +937,34 @@ async fn the_first_burst_survives_a_late_subscribe_answer() {
 /// TCP must also recover every frame when FIN overtakes the subscription answer.
 #[kio::test]
 async fn the_first_tcp_writes_survive_a_late_subscribe_answer() {
-	let mut fixture = Fixture::new();
-	let alice = fixture.endpoint(LITE, "alice").await;
-	let bob = fixture.endpoint(LITE, "bob").await;
-	let dial = alice.dial_tcp("bob").unwrap();
-	let accept = async {
-		let mut stream = bob.accept_tcp().await.unwrap().accept().await.unwrap();
+	for version in [LITE, IETF, "moq-transport-20", "moq-transport-22"] {
+		let mut fixture = Fixture::new();
+		let alice = fixture.endpoint(version, "alice").await;
+		let bob = fixture.endpoint(version, "bob").await;
+		let dial = alice.dial_tcp("bob").unwrap();
+		let accept = async {
+			let mut stream = bob.accept_tcp().await.unwrap().accept().await.unwrap();
+			for payload in [b"first".as_slice(), b"", b"last"] {
+				stream.producer.write_frame(None, payload).unwrap();
+			}
+			(stream.producer.finish().unwrap(), stream.consumer)
+		};
+		let (dialed, accepted) = futures::join!(dial, accept);
+		let mut dialed = dialed.unwrap();
+		let (_finished, mut accepted) = accepted;
 		for payload in [b"first".as_slice(), b"", b"last"] {
-			stream.producer.write_frame(None, payload).unwrap();
+			assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), payload, "{version}");
 		}
-		(stream.producer.finish().unwrap(), stream.consumer)
-	};
-	let (dialed, accepted) = futures::join!(dial, accept);
-	let mut dialed = dialed.unwrap();
-	let (_finished, mut accepted) = accepted;
-	for payload in [b"first".as_slice(), b"", b"last"] {
-		assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), payload);
+		assert_eq!(read(&mut dialed.consumer).await.unwrap(), None);
+		dialed.producer.finish().unwrap();
+		assert_eq!(read(&mut accepted).await.unwrap(), None);
 	}
-	assert_eq!(read(&mut dialed.consumer).await.unwrap(), None);
-	dialed.producer.finish().unwrap();
-	assert_eq!(read(&mut accepted).await.unwrap(), None);
 }
 
-/// The versions without hidden broadcasts: moq-lite before 07, and moq-transport.
-const OLDER: [&str; 3] = ["moq-lite-06", "moq-lite-03", "moq-transport-18"];
+/// The moq-lite versions before hidden broadcasts.
+const OLDER: [&str; 2] = ["moq-lite-06", "moq-lite-03"];
 
-/// An endpoint behind an older hop, which never carries its hidden broadcast,
+/// An endpoint behind an older moq-lite hop, which never carries its hidden broadcast,
 /// fails its dials and accepts at once, so its peer never hears a dial it can't answer.
 #[kio::test]
 async fn an_older_hop_fails_dials_and_accepts() {
@@ -960,7 +990,7 @@ async fn an_older_hop_fails_dials_and_accepts() {
 	}
 }
 
-/// A dial to a peer behind an older hop can't tell it from a peer not announced
+/// A dial to a peer behind an older moq-lite hop can't tell it from a peer not announced
 /// yet, so it waits, while the peer's own accepts fail.
 #[kio::test]
 async fn a_peer_behind_an_older_hop_fails_its_accepts() {
@@ -979,7 +1009,7 @@ async fn a_peer_behind_an_older_hop_fails_its_accepts() {
 	}
 }
 
-/// A dial already waiting fails once its origin gains an older session, as an
+/// A dial already waiting fails once its origin gains an older moq-lite session, as an
 /// endpoint whose client reconnects does.
 #[kio::test]
 async fn an_older_hop_fails_a_waiting_dial() {
@@ -998,7 +1028,7 @@ async fn an_older_hop_fails_a_waiting_dial() {
 }
 
 /// A client whose publish half opts into hidden broadcasts, as a relay's link to a
-/// cluster peer does, still carries its endpoint over an older hop.
+/// cluster peer does, still carries its endpoint over an older moq-lite hop.
 #[kio::test]
 async fn an_older_hop_opted_into_hidden_connects() {
 	let mut fixture = Fixture::new();

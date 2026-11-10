@@ -1,8 +1,9 @@
 /**
  * Endpoint identity within a hop chain, shared by both wire protocols.
  *
- * moq-lite carries these on every announcement; moq-transport carries none, so its
- * routes are anonymous. Mirrors `Hop` in `rs/moq-net`.
+ * moq-lite carries these natively on every announcement; moq-transport carries them
+ * via the MoQ Cluster extension (see `ietf/cluster.ts`). Mirrors `Hop` in
+ * `rs/moq-net`.
  *
  * @module
  */

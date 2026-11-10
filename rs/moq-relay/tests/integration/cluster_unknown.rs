@@ -295,6 +295,11 @@ fn unknown_publisher_does_not_flap_across_a_lite_cluster_triangle() {
 	memory::run(|| assert_unknown_publisher_stays_announced(None));
 }
 
+#[test]
+fn unknown_publisher_does_not_flap_across_an_ietf_cluster_triangle() {
+	memory::run(|| assert_unknown_publisher_stays_announced(Some("moq-transport-22".parse().unwrap())));
+}
+
 /// Same drill over Lite04 inter-relay sessions, which have no restart support.
 /// Pre-fix, `run_announce` only retained the broadcast consumer (whose
 /// ExclusionGuard is the exposure registration) when restarts were supported,

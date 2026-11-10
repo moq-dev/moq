@@ -24,6 +24,7 @@ const publisher = new Publisher({
 	quic: pair.server,
 	session: new NativeSession(pair.server, version, false),
 	publish: origin.consume(),
+	requiresSolicitation: false,
 });
 const incoming = pair.client.incomingUnidirectionalStreams.getReader();
 const client = await Stream.open(pair.client, { version });

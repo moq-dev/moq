@@ -317,19 +317,15 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 	]);
 
 	const watching = consume.routes();
-	let request: ReturnType<typeof consume.request> | undefined;
+	const request = consume.request(Path.from("room"));
 	let routes: ReturnType<typeof consume.routes> | undefined;
 	let replacement: Awaited<ReturnType<typeof connect>> | undefined;
 	let replacementServer: Awaited<ReturnType<typeof accept>> | undefined;
 
 	try {
 		expect((await watching.next())?.kind).toBe("start");
-		// Asked once the route is known: moq-transport syncs before its first NAMESPACE, so a
-		// request made earlier reports absence there.
-		const requested = consume.request(Path.from("room"));
-		request = requested;
-		await waitUntil(() => requested.active.peek() !== undefined);
-		const front = requested.active.peek();
+		await waitUntil(() => request.active.peek() !== undefined);
+		const front = request.active.peek();
 		if (!front) throw new Error("no route");
 		const video = front.track("video").subscribe().ordered();
 		expect(await video.readString()).toBe("one");
@@ -373,7 +369,7 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 	} finally {
 		watching.close();
 		routes?.close();
-		request?.close();
+		request.close();
 		replacement?.abort();
 		replacementServer?.abort();
 		client.abort();

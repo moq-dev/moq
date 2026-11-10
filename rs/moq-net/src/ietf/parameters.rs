@@ -17,6 +17,16 @@ pub enum ParameterVarInt {
 	MaxAuthTokenCacheSize = 4,
 	/// MAX_REQUEST_UPDATES, added in draft-22.
 	MaxRequestUpdates = super::request_update::OPTION,
+	/// HOP_ID, from the MoQ Cluster extension.
+	HopId = super::cluster::HOP_ID,
+	/// RELAY_COST, from the MoQ Cluster extension.
+	RelayCost = super::cluster::RELAY_COST,
+	/// SOLICIT, from the MoQ Solicit extension.
+	Solicit = super::solicit::SOLICIT,
+	/// HIDDEN, from the MoQ Hidden extension.
+	Hidden = super::hidden::HIDDEN,
+	/// ACTIVE_COUNT, from the MoQ Active Count extension.
+	ActiveCount = super::active_count::ACTIVE_COUNT,
 	/// Subscriber max age, from the MoQ Timestamp extension.
 	MaxAge = super::max_age::OPTION,
 	/// DEFLATE-compressed tracks, from the MoQ Flate extension.

@@ -324,6 +324,7 @@ for (const [version, alpn] of [
 						quic: pair.server,
 						session: new NativeSession(pair.server, version, false),
 						publish: origin.consume(),
+						requiresSolicitation: true,
 					});
 					const client = await Stream.open(pair.client, { version });
 					const server = await Stream.accept(pair.server, version);

@@ -238,8 +238,9 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 	.expect("timed out");
 }
 
-/// A moq-transport pair: every token the server sees rode a request, and the client
-/// announces with PUBLISH_NAMESPACE.
+/// A moq-transport pair: every token the server sees rode a request, and the server
+/// declines MoQ Solicit, so the client announces with PUBLISH_NAMESPACE rather than
+/// answering a SUBSCRIBE_NAMESPACE.
 async fn connect_route_auth(version: &'static str) -> (Pair, origin::Producer, origin::Producer) {
 	let client_origin = produce_origin(2);
 	let server_origin = produce_origin(1);
@@ -259,6 +260,11 @@ async fn connect_route_auth_on(
 		client_publish: Some(client_origin.clone()),
 		server_subscribe: Some(server_origin.clone()),
 		server_requests: true,
+		server_extensions: Some({
+			let mut extensions = moq_net::setup::Extensions::default();
+			extensions.solicit = false;
+			extensions
+		}),
 		client_auth,
 		..Default::default()
 	})
@@ -402,7 +408,8 @@ struct Options {
 	server_subscribe: Option<origin::Producer>,
 	/// Take the server's AUTH requests before its driver runs.
 	server_requests: bool,
-
+	/// The server's extensions, when not the defaults.
+	server_extensions: Option<moq_net::setup::Extensions>,
 	version: Option<&'static str>,
 	/// The connection credential the client's SETUP presents.
 	client_token: Option<&'static [u8]>,
@@ -437,7 +444,6 @@ async fn connect(opts: Options) -> Pair {
 			value: token.to_vec(),
 		});
 	}
-
 	if let Some(publish) = &opts.client_publish {
 		client = client.with_publisher(publish);
 	}
@@ -449,7 +455,9 @@ async fn connect(opts: Options) -> Pair {
 	}
 
 	let mut server = Server::new().with_versions(version.into());
-
+	if let Some(extensions) = opts.server_extensions {
+		server = server.with_extensions(extensions);
+	}
 	if let Some(publish) = &opts.server_publish {
 		server = server.with_publisher(publish);
 	}

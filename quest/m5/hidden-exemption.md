@@ -3,8 +3,9 @@
 ## Goal
 
 The relay stops treating authenticated cluster peers as opted in to hidden
-broadcasts. Every relay opts in on the wire (moq-lite-07's `Hidden` field), so
-the exemption only exists for peers that predate it.
+broadcasts. Every relay opts in on the wire (moq-lite-07's `Hidden` field or
+the MoQ Hidden `SUBSCRIBE_NAMESPACE` parameter), so the exemption only exists
+for peers that predate it.
 
 ## Plan
 

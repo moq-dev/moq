@@ -1046,9 +1046,9 @@ rust_connect() {
 }
 
 # The pattern a cell's token grants its publisher, or its subscribers, on <broadcast>. The `auto`
-# pass mints patterns no prefix could carry, so AUTH must deliver them as minted. moq-transport's
-# AUTH extension carries prefixes alone and refuses a narrower grant, closing the
-# session, so a pinned pass grants the broadcast's subtree.
+# pass mints patterns no prefix could carry, so AUTH must deliver them as minted. A pinned
+# pass may be moq-transport, whose requests name prefixes alone, so it grants the
+# broadcast's subtree.
 publish_grant() {
     if [[ "$VERSION" == auto ]]; then printf '%s' "$1"; else printf '%s/**' "$1"; fi
 }
@@ -1826,7 +1826,7 @@ run_finishes() {
     for pub in "${PUB_LIST[@]}"; do
         name="finish-$pub"
         # The fixture and its .health sibling share a parent, so one prefix grant covers both:
-        # moq-transport's AUTH extension carries prefixes alone.
+        # moq-transport requests name prefixes alone.
         broadcast="$name-$$-$RANDOM/fixture.hang"
         grant="${broadcast%/*}/**"
         ack="$LOGS/$name-ack"
@@ -2550,7 +2550,7 @@ run_catalog_fanout() {
     exec 9<>"$fifo"
     from=$(relay_next_line)
     before=$(relay_inflated) || why="relay metrics unavailable"
-    # Subtree grants, which moq-transport's AUTH extension can carry too.
+    # Subtree grants, which a moq-transport request can name too.
     harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_catalog_publisher "$fifo" "$(token_url --publish "$broadcast/**")" "$broadcast"
     pid="$HARNESS_PID"
     for version in "${CATALOG_VERSIONS[@]}"; do

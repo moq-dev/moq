@@ -77,16 +77,21 @@ fn both() -> BTreeSet<String> {
 /// Every version that marks the boundary syncs with the whole initial set.
 #[kio::test]
 async fn an_exact_boundary_catches_up_with_the_initial_set() {
-	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-22",
+	] {
 		assert_eq!(synced(version).await, both(), "{version}");
 	}
 }
 
-/// Versions without a boundary still sync, so nothing waiting on it hangs. moq-transport
-/// says how many namespaces REQUEST_OK covers only with an extension we don't send it.
+/// Versions without a boundary still sync, so nothing waiting on it hangs.
 #[kio::test]
 async fn a_best_effort_boundary_still_catches_up() {
-	for version in ["moq-lite-03", "moq-lite-04", "moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-lite-03", "moq-lite-04"] {
 		synced(version).await;
 	}
 }

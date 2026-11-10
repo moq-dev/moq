@@ -71,14 +71,29 @@ pub(crate) fn implementation(value: &str) -> Option<String> {
 	(!value.is_empty()).then(|| value.to_owned())
 }
 
-/// The SETUP extensions this side offers, none by default.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// The SETUP extensions this side offers.
+///
+/// Turning one off connects as a peer that does not speak that extension. moq-lite carries
+/// solicit in its core, so that one only changes moq-transport sessions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Extensions {
+	/// The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than
+	/// announcing unasked (moq-transport only).
+	pub solicit: bool,
 	/// The MoQ IETF extension, off by default: a moq-lite 07 hop between relays carries the
 	/// moq-transport object state a relay preserves, such as Object IDs and properties.
 	pub ietf: bool,
+}
+
+impl Default for Extensions {
+	fn default() -> Self {
+		Self {
+			solicit: true,
+			ietf: false,
+		}
+	}
 }
 
 /// A connection credential presented in SETUP: moq-transport's `AUTHORIZATION TOKEN`

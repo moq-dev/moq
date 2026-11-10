@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, type Manual } from "@moq/clock";
+import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair, manual } from "../mock.ts";
@@ -289,7 +290,7 @@ for (const [version, alpn] of DRAFTS) {
 			parameters.setBytes(key, new Uint8Array(value));
 			await new Setup({ parameters }).encode(setup, version);
 
-			const dialed = exchangeSetup(pair.client, version, "test", { client: true });
+			const dialed = exchangeSetup(pair.client, version, "test", { client: true, extensions: offered() });
 			if (code === undefined) {
 				await dialed;
 				pair.client.close();

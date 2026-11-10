@@ -34,6 +34,7 @@ const publisher = new Publisher({
 	quic: pair.server,
 	session: new NativeSession(pair.server, version, true),
 	publish: origin.consume(),
+	requiresSolicitation: false,
 });
 
 const responses: number[][] = [];
