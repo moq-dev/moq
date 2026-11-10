@@ -338,6 +338,51 @@ test("an arrival flood stays within the pool", () => {
 	reader.close();
 });
 
+// A frame write that folds an arrival gap to pay its debt wakes a reader parked on that gap, which
+// has no grace timer to wake it.
+test("folding an arrival gap wakes the reader parked on it", async () => {
+	const pool = new cache.Pool({ capacity: 1 });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const reader = producer.subscribe({
+		delay: { max: null },
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }],
+	});
+	// Group 0 is dropped rather than cached, so the protected live edge is the only group and the
+	// gap below it is the first thing a payment takes: no other signal moves.
+	hooks.dropTrackGroups(producer, 0n, 1n, old());
+	const live = producer.createGroup(2n);
+	live.writeFrame({ payload: new Uint8Array(8) });
+	for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup());
+	for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader));
+	let woken = 0;
+	const dispose = hooks.groupChanged(reader, () => woken++);
+	expect(hooks.arrivalRuns(producer)).toBe(2);
+	// Past the write threshold that settles debt.
+	live.writeFrame({ payload: new Uint8Array(512 * 1024) });
+	expect(hooks.arrivalRuns(producer)).toBe(1);
+	await yieldNow();
+	expect(woken).toBeGreaterThan(0);
+	dispose();
+	reader.close();
+});
+
+// A closed track bills none of its arrival gaps, so an account the pool's sweep keeps for its drops
+// holds no bytes for them.
+test("a closed track releases its arrival gaps from the pool", () => {
+	const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const reader = producer.subscribe({ delay: { max: null } });
+	producer.createGroup(0n).finish();
+	producer.createGroup(2n).finish();
+	expect(hooks.arrivalRuns(producer)).toBe(2);
+	const used = pool.used;
+	producer.close();
+	expect(pool.used).toBe(used - ARRIVAL_OVERHEAD);
+	reader.close();
+});
+
 // A run given up longer than the pool's idle window ago is forgotten by the sweep, even on a
 // track that caches nothing, and a run given up since stays. Mirrors Rust
 // `the_sweep_forgets_runs_past_the_expiry_window`.

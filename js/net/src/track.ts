@@ -713,6 +713,9 @@ class TrackState {
 	// Bumped when a wire subscription declares or resolves where its live feed starts, so a
 	// publisher holding its first group for that answer wakes.
 	startChanged = new Signal(0);
+	// Bumped when paying eviction debt folds an arrival gap before its grace passes, so a reader
+	// parked on a missing group there, with no timer to wake it, judges it again.
+	folded = new Signal(0);
 	latest?: bigint;
 	// One past the highest group received, including evicted content.
 	received = new Signal(0n);
@@ -1193,9 +1196,11 @@ export class Producer {
 	}
 
 	// Bill the arrivals' gaps to the account as they now stand. The run they split is the track's
-	// own, so an in-order feed bills nothing.
+	// own, so an in-order feed bills nothing. A closed track bills none: nothing arrives to add a
+	// gap, and its account may outlive it in the pool's sweep, which would keep them billed.
 	#billArrivals(): void {
-		const billed = Math.max(0, this.#arrivals.size - 1) * ARRIVAL_OVERHEAD;
+		const closed = this.#state.closed.peek() !== undefined;
+		const billed = closed ? 0 : Math.max(0, this.#arrivals.size - 1) * ARRIVAL_OVERHEAD;
 		if (billed > this.#arrivalsBilled) this.#account.bill(billed - this.#arrivalsBilled);
 		else this.#account.unbill(this.#arrivalsBilled - billed);
 		this.#arrivalsBilled = billed;
@@ -1213,7 +1218,10 @@ export class Producer {
 			paid += billed - this.#arrivalsBilled;
 			folded = true;
 		}
-		if (folded) this.#owe();
+		if (folded) {
+			for (const state of [this.#state, ...this.#sinks]) state.folded.update((revision) => revision + 1);
+			this.#owe();
+		}
 		return paid;
 	}
 
@@ -2360,6 +2368,7 @@ export class Producer {
 		const open = [...this.#cache].filter((entry) => entry.group.closed.peek() === undefined);
 		const kept = this.#keptDrops();
 		closeTrackState(this.#state, abort);
+		this.#billArrivals();
 		if (this.#keptDrops() > kept) this.#rearmDrops(kept);
 		if (this.#state.outcome.peek() === undefined)
 			this.#state.outcome.set(abort ?? this.#state.end.peek()?.error ?? null);
@@ -4109,6 +4118,7 @@ export class Subscriber {
 			// A handler opening takes a miss nobody could ask before.
 			...(producer ? [fillsOf(producer).opened.changed(fn)] : []),
 			this.#state.startChanged.changed(fn),
+			this.#state.folded.changed(fn),
 			// A group starting may settle a time end, or move the cap it holds reads back with.
 			...(this.#window.settled ? [] : [this.#state.timelineChanged.changed(fn)]),
 			// Accepting the track may refuse a time anchor, with no group arriving to say so.
