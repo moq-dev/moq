@@ -33,4 +33,20 @@ Reproduce it first, under load as the epic describes, with the interop logs
 kept, and check whether the two unquarantined lanes fail the same way. Fix the
 cause, never with a longer limit, then remove the quarantine.
 
+Tried 2026-11-10, without a run: with the quarantine lifted,
+`quest gate just test interop --finish --all` waited about three hours for the
+load average (25 to 75 on 24 cores) and never started. Reading the harness
+suggests one shared suspect to check first: each publisher runs under
+`timeout 4*TIMEOUT` from its own start. That covers its setup, the ffmpeg
+encode, the 10 s linger, and every reader's read phase (up to `2*TIMEOUT`,
+plus a late GStreamer reader). It does not cover a read phase that starts late,
+so under load the publisher can be killed before the FIFO's `complete` arrives.
+That fits Rust's missing `finish acknowledged` while every reader ended clean.
+
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: run `just test interop --finish --all` with the quarantine in
+  `run_finishes` removed, on a host where `quest gate` admits it, and keep the
+  logs. An agent cannot start the gate while the shared host stays loaded.
