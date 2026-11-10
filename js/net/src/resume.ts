@@ -1707,7 +1707,7 @@ class Recover implements GroupRecover {
 				if (given.error && !routeFailed(given.error) && !copyFailed(serving)) {
 					throw given.error;
 				}
-				waits.push(given.changed);
+				waits.push(...given.changed);
 				// A newer copy's track caches it: continue from there.
 				if (!failed && generation !== current.generation) {
 					const cached = hooks.cachedGroup(serving.sub, this.sequence, index);

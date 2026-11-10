@@ -462,7 +462,7 @@ struct Message {
 
 /// When something a writer sent `latency` ago reaches the reader: `None` at once.
 fn landing(latency: Duration) -> Option<kio::clock::Instant> {
-	(!latency.is_zero()).then(|| kio::clock::now() + latency)
+	(!latency.is_zero()).then(|| kio::clock::now().saturating_add(latency))
 }
 
 #[derive(Clone, Copy)]

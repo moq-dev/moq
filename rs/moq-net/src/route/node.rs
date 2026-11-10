@@ -44,6 +44,11 @@ pub(crate) struct Claim {
 	/// older version: sent only to a peer this node proxies for, so a node that does
 	/// not proxy is never transit. Always unset on a claim off the wire.
 	pub learned: bool,
+	/// The hop chain of a claim learned over moq-lite-06 or moq-transport, which
+	/// lite-07 carries as the Lite-06 Chain; empty for a native claim. A relay
+	/// translating the claim back to lite-06 extends it, so a node the claim reaches
+	/// again recognizes its own hop and drops it. Deleted with lite-06 compatibility.
+	pub chain: crate::Hops,
 }
 
 /// A shown claim as the origin serves it through the selected route.
@@ -860,6 +865,7 @@ mod tests {
 			cost,
 			upstream: false,
 			learned: false,
+			chain: crate::Hops::new(),
 		}
 	}
 

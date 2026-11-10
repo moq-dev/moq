@@ -247,6 +247,36 @@ async def test_server_close_releases_port():
         assert rebound.local_addr == addr
 
 
+async def test_nested_enter_is_refused():
+    """Entering a server or client that is already entered raises, leaving the outer context live."""
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+        with pytest.raises(RuntimeError, match="already entered"):
+            async with server:
+                pass
+        assert server.cert_fingerprints()
+
+        async def accept_one() -> moq.Session:
+            async for request in server:
+                return await request.accept()
+            raise AssertionError("server closed before a request")
+
+        accept = asyncio.create_task(accept_one())
+        async with moq.Client(
+            f"https://{server.local_addr}",
+            tls=moq.ClientTls(insecure=True),
+            bind="127.0.0.1:0",
+            once=True,
+        ) as client:
+            peer = await asyncio.wait_for(accept, timeout=10)
+            session = client.session
+            with pytest.raises(RuntimeError, match="already entered"):
+                async with client:
+                    pass
+            assert client.session is session
+        assert client.session is None
+        peer.cancel(0)
+
+
 async def test_server_request_close():
     """A session reports when the server rejects its request."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:

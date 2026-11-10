@@ -465,7 +465,7 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
 			if let Some(extra) = &mut extra {
 				extra.receive(&mut pair)?;
 			}
-			next_read = pair.time + case.read_interval;
+			next_read = pair.time.saturating_add(case.read_interval);
 		}
 		client.check_alive(&mut pair)?;
 		server.check_alive(&mut pair)?;

@@ -2649,7 +2649,7 @@ test("a group wins over its stale drop on lite-07", async () => {
 			await drainReactions();
 		};
 		const old = (sequence: bigint): SubscribeResponse => ({
-			drop: new SubscribeDrop({ start: sequence, end: sequence, error: StreamCode.Old }),
+			drop: new SubscribeDrop({ start: sequence, end: sequence + 1n, error: StreamCode.Old }),
 		});
 		// A group stream's header: the tail accounts for it, and the track holds the group.
 		const arrive = (sequence: bigint) => {
@@ -2735,7 +2735,7 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 			await drainReactions();
 		};
 		const old = (sequence: bigint, update: bigint): SubscribeResponse => ({
-			drop: new SubscribeDrop({ start: sequence, end: sequence, error: StreamCode.Old, update }),
+			drop: new SubscribeDrop({ start: sequence, end: sequence + 1n, error: StreamCode.Old, update }),
 		});
 		// A group stream that arrives whole, through the path that records it.
 		const arrive = (sequence: bigint) =>
@@ -2810,13 +2810,13 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 		});
 		for (const resp of [
 			{ start: new SubscribeStart([0n]) },
-			old(1n, 2n),
-			old(4n, 4n),
-			{ skip: new SubscribeSkip({ start: 1n, end: 2n }) },
-			{ drop: new SubscribeDrop({ start: 4n, end: 4n, error: StreamCode.NotFound }) },
+			old(1n, 3n),
+			old(4n, 5n),
+			{ skip: new SubscribeSkip({ start: 1n, end: 3n }) },
+			{ drop: new SubscribeDrop({ start: 4n, end: 5n, error: StreamCode.NotFound }) },
 			// Empty ranges.
-			old(6n, 5n),
-			{ skip: new SubscribeSkip({ start: 6n, end: 5n }) },
+			old(6n, 6n),
+			{ skip: new SubscribeSkip({ start: 6n, end: 6n }) },
 		] satisfies SubscribeResponse[]) {
 			await encodeSubscribeResponse(writer, resp, version);
 		}
@@ -2875,17 +2875,17 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 		};
 		await send([
 			{ start: new SubscribeStart([0n]) },
-			{ drop: new SubscribeDrop({ start: 1n, end: 2n, error: StreamCode.NotFound }) },
+			{ drop: new SubscribeDrop({ start: 1n, end: 3n, error: StreamCode.NotFound }) },
 		]);
 		if (!entry) throw new Error("no subscription");
 		entry.track.createGroup(5n).finish();
 
 		await send([
-			{ skip: new SubscribeSkip({ start: 1n, end: 2n }) },
+			{ skip: new SubscribeSkip({ start: 1n, end: 3n }) },
 			// A later drop leaves the skip in place.
-			{ drop: new SubscribeDrop({ start: 2n, end: 2n, error: StreamCode.NotFound }) },
+			{ drop: new SubscribeDrop({ start: 2n, end: 3n, error: StreamCode.NotFound }) },
 			// Group 5 arrived, so the skip names only 4 and 6.
-			{ skip: new SubscribeSkip({ start: 4n, end: 6n }) },
+			{ skip: new SubscribeSkip({ start: 4n, end: 7n }) },
 		]);
 		expect(() => entry?.track.createGroup(1n)).toThrow(Skipped);
 		expect(() => entry?.track.createGroup(2n)).toThrow(Skipped);
@@ -3099,7 +3099,7 @@ test("a lite-07 drop naming an unsent update closes the session", async () => {
 		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
 		await encodeSubscribeResponse(
 			writer,
-			{ drop: new SubscribeDrop({ start: 1n, end: 1n, error: StreamCode.Old, update: 1n }) },
+			{ drop: new SubscribeDrop({ start: 1n, end: 2n, error: StreamCode.Old, update: 1n }) },
 			version,
 		);
 		for (const chunk of chunks) stream.inbound.enqueue(chunk);

@@ -1733,8 +1733,9 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		}
 		let route = self.selected(id);
 		let starved = route.is_none() && self.infeasible(id).next().is_some();
-		if starved {
-			let want = self.fd[&id].0 + 1;
+		// Nothing follows the last seqno: its origin rotates to a new identity instead, so
+		// there is nothing to ask for.
+		if starved && let Some(want) = self.fd[&id].0.checked_add(1) {
 			let pending = self.pending.entry(id).or_insert(Pending {
 				seqno: want,
 				from: BTreeSet::new(),

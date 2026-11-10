@@ -298,6 +298,15 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and `Group Count`.
+	/// Added in lite-07; earlier versions carry an inclusive `Group Start` and `Group End`.
+	pub(crate) fn has_group_count(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether holes split into SUBSCRIBE_SKIP, for sequences declared never produced, and
 	/// SUBSCRIBE_DROP, for groups that existed, which names the `Update` in effect when it was
 	/// given up; SUBSCRIBE and SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07;
