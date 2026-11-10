@@ -325,7 +325,7 @@ export class Connection {
 			}
 
 			const loop = new Reload({
-			unsolicited: props.unsolicited,
+				unsolicited: props.unsolicited,
 				url: this.url,
 				enabled: this.enabled,
 				publish,
