@@ -45,27 +45,27 @@ pub struct Config {
 	/// it is the timescale of every track's group numbers, so a track opens at
 	/// most one group per interval.
 	pub interval: Duration,
-	/// How many leading broadcast-path segments to use as a grouping key, each
-	/// group a [`group_track`](crate::group_track) on the node's broadcast.
+	/// How many leading broadcast-path segments to use as a bucket key, each
+	/// bucket a [`bucket_track`](crate::bucket_track) on the node's broadcast.
 	///
-	/// Default `0` publishes one `group.json` track carrying every path, for
-	/// the producer's life. `1` publishes one `<group>/group.json` track per
+	/// Default `0` publishes one `bucket.<epoch>.json` track carrying every path, for
+	/// the producer's life. `1` publishes one `<bucket>/bucket.<epoch>.json` track per
 	/// first segment, and larger values include more leading segments. A
-	/// group's track is listed while its group has live traffic, plus the
-	/// [`Self::linger`], and a group returning after that is a new track
-	/// run with a new [`GroupFrame::epoch`](crate::GroupFrame::epoch),
+	/// bucket's track is listed while its bucket has live traffic, plus the
+	/// [`Self::linger`], and a bucket returning after that is a new track
+	/// run with a new [`BucketFrame::epoch`](crate::BucketFrame::epoch),
 	/// counted from zero.
 	pub depth: usize,
-	/// How long a group's track stays listed after its group's last entry
+	/// How long a bucket's track stays listed after its bucket's last entry
 	/// leaves. Default 5 minutes.
 	///
-	/// A group that returns within the linger keeps its track and counters.
-	/// Zero ends the track on the first drain the group is empty. Holding the
+	/// A bucket that returns within the linger keeps its track and counters.
+	/// Zero ends the track on the first drain the bucket is empty. Holding the
 	/// track doesn't count as an entry: ending it ends every subscription to
 	/// it. Unused at depth `0`.
 	///
 	/// A return after the linger is a new epoch, which an aggregating reader
-	/// keeps apart for its grace, so a short linger on a flapping group
+	/// keeps apart for its grace, so a short linger on a flapping bucket
 	/// multiplies that reader's state.
 	pub linger: Duration,
 }
@@ -110,13 +110,13 @@ impl Config {
 		self
 	}
 
-	/// Set the grouping depth (default 0, a single group). See [`Self::depth`].
+	/// Set the bucket depth (default 0, a single bucket). See [`Self::depth`].
 	pub fn with_depth(mut self, depth: usize) -> Self {
 		self.depth = depth;
 		self
 	}
 
-	/// Set how long an empty group's track stays listed (default 5 minutes).
+	/// Set how long an empty bucket's track stays listed (default 5 minutes).
 	/// See [`Self::linger`].
 	pub fn with_linger(mut self, linger: Duration) -> Self {
 		self.linger = linger;
@@ -125,7 +125,7 @@ impl Config {
 }
 
 /// The default [`Config::linger`]. Sized from a live fleet, where an idle
-/// group's viewers returned 46 to 112 seconds after the last one left.
+/// bucket's viewers returned 46 to 112 seconds after the last one left.
 const DEFAULT_LINGER: Duration = Duration::from_secs(300);
 
 impl Default for Config {
@@ -370,7 +370,7 @@ impl Drain {
 	}
 
 	/// Drain the registry and sort each entry into its pending frames,
-	/// creating group tracks on first sight.
+	/// creating bucket tracks on first sight.
 	fn collect(&mut self) {
 		self.task
 			.registry
@@ -379,7 +379,7 @@ impl Drain {
 		self.node.collect(&self.report, self.tick, self.task.depth);
 	}
 
-	/// Write every pending frame, end group tracks that have lingered empty,
+	/// Write every pending frame, end bucket tracks that have lingered empty,
 	/// and serve consumer track requests.
 	fn publish(&mut self, now: Instant) {
 		let stamp = self.stamp(now);
@@ -389,12 +389,12 @@ impl Drain {
 		self.node.serve_requests(&self.report, self.tick, stamp);
 	}
 
-	/// The largest group snapshot still held, and the largest group frame this
+	/// The largest bucket snapshot still held, and the largest bucket frame this
 	/// tick wrote.
 	#[cfg(feature = "bench")]
-	fn group_frame_bytes(&self) -> bench::FrameBytes {
+	fn bucket_frame_bytes(&self) -> bench::FrameBytes {
 		let mut bytes = bench::FrameBytes::default();
-		for track in self.node.groups.values() {
+		for track in self.node.buckets.values() {
 			bytes.held = bytes.held.max(track.snapshot.held);
 			bytes.wrote = bytes.wrote.max(track.snapshot.wrote);
 		}
@@ -432,11 +432,14 @@ impl<V: Serialize> Serialize for Frame<V> {
 
 /// Writes encoded snapshots, numbering each group by the publish interval it
 /// opens in (see [`Stamp`]). A recreated track (an
-/// on-demand track asked for again, or a group returning after its linger)
+/// on-demand track asked for again)
 /// opens in a later interval than its predecessor's last group, so it resumes
 /// past any group a subscriber has cached, with nothing kept for names that
 /// left. A track opens at most one group per interval: a snapshot due in an
 /// interval that already has one waits for the next.
+///
+/// A bucket track's name is never reused, so it numbers its groups from 0
+/// instead ([`Self::counted`]): group 0 is where the run's counters start.
 ///
 /// The numbering is why this wraps the encoder rather than a
 /// `moq_json::snapshot::Producer`, which numbers its own groups.
@@ -446,6 +449,10 @@ struct Snapshot<T> {
 	group: Option<moq_net::group::Producer>,
 	/// The sequence of the newest group written, which a refresh has to pass.
 	largest: Option<u64>,
+	/// The interval the newest group opened in, which the next group has to pass.
+	opened: Option<u64>,
+	/// Number groups from 0 rather than by interval.
+	counted: bool,
 	deltas: bool,
 	/// The newest snapshot payload written, and what the last update wrote
 	/// (zero when nothing). Bench builds only.
@@ -463,11 +470,19 @@ impl<T: Serialize> Snapshot<T> {
 			encoder: moq_json::snapshot::Encoder::new(config),
 			group: None,
 			largest: None,
+			opened: None,
+			counted: false,
 			#[cfg(feature = "bench")]
 			held: 0,
 			#[cfg(feature = "bench")]
 			wrote: 0,
 		}
+	}
+
+	/// Number groups from 0, for a track whose name no earlier run used.
+	fn counted(mut self) -> Self {
+		self.counted = true;
+		self
 	}
 
 	fn demand(&self) -> moq_net::track::Demand {
@@ -514,16 +529,20 @@ impl<T: Serialize> Snapshot<T> {
 		let len = frame.payload.len();
 		let timestamp = moq_net::Timestamp::from(stamp.at);
 		if frame.keyframe {
-			let sequence = stamp.group;
 			// The interval already has its group: the uncommitted frame is encoded again next tick.
-			if self.largest.is_some_and(|largest| sequence <= largest) {
+			if self.opened.is_some_and(|opened| stamp.group <= opened) {
 				return Ok(None);
 			}
-			if let Some(mut group) = self.group.take() {
+			let sequence = match self.counted {
+				true => self.largest.map_or(0, |largest| largest + 1),
+				false => stamp.group,
+			};
+			if let Some(group) = self.group.take() {
 				group.finish()?;
 			}
 			self.group = Some(self.track.create_group(moq_net::group::Info { sequence })?);
 			self.largest = Some(sequence);
+			self.opened = Some(stamp.group);
 			#[cfg(feature = "bench")]
 			{
 				self.held = len;
@@ -546,10 +565,11 @@ impl<T: Serialize> Snapshot<T> {
 	}
 
 	fn finish(&mut self) -> moq_json::Result<()> {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
-		Ok(self.track.finish()?)
+		// The output keeps its own clone, whose appends the end refuses.
+		Ok(self.track.clone().finish().map(drop)?)
 	}
 }
 
@@ -642,8 +662,8 @@ struct NodePublisher {
 	/// Held prefix tracks, keyed by broadcast prefix. A `String` key, so a
 	/// drain looks each row's ancestors up by `&str` without allocating.
 	prefixes: HashMap<String, PrefixTrack>,
-	/// Each live group's track, keyed by group.
-	groups: HashMap<String, GroupTrack>,
+	/// Each live bucket's track, keyed by bucket.
+	buckets: HashMap<String, BucketTrack>,
 }
 
 /// One cumulative value per tier: the readouts of entries that ended, plus
@@ -829,32 +849,32 @@ impl PrefixTrack {
 	}
 }
 
-/// One group's track: listed from the group's first entry until it lingers
+/// One bucket's track: listed from the bucket's first entry until it lingers
 /// empty, then finished. A return after that is a new run under a new
-/// epoch, counted from zero, so it holds no state for groups that left.
-struct GroupTrack {
+/// epoch, counted from zero, so it holds no state for buckets that left.
+struct BucketTrack {
 	/// The track name, for logs.
 	name: String,
-	snapshot: Snapshot<GroupBody>,
+	snapshot: Snapshot<BucketBody>,
 	/// This drain's frame, refilled in place every drain.
-	body: GroupBody,
-	/// Whether this drain carried a row for the group.
+	body: BucketBody,
+	/// Whether this drain carried a row for the bucket.
 	live: bool,
-	/// When the group's last entry left; `None` while it has entries.
+	/// When the bucket's last entry left; `None` while it has entries.
 	empty_since: Option<Instant>,
 }
 
-/// A group track's frame, byte-identical to a [`GroupFrame`](crate::GroupFrame)
+/// A bucket track's frame, byte-identical to a [`BucketFrame`](crate::BucketFrame)
 /// once sorted.
 #[derive(Serialize)]
-struct GroupBody {
+struct BucketBody {
 	epoch: Epoch,
-	tiers: Frame<GroupTier>,
+	tiers: Frame<BucketTier>,
 }
 
-/// One tier's entry on a group track; serializes as a [`Group`](crate::Group).
+/// One tier's entry on a bucket track; serializes as a [`Bucket`](crate::Bucket).
 #[derive(Default, Serialize)]
-struct GroupTier {
+struct BucketTier {
 	/// The closing readouts of entries that ended this epoch.
 	#[serde(skip)]
 	folded: Totals,
@@ -865,7 +885,7 @@ struct GroupTier {
 	labels: Frame<Presence>,
 }
 
-/// One path's entry on a group track; serializes as a [`Usage`](crate::Usage)
+/// One path's entry on a bucket track; serializes as a [`Usage`](crate::Usage)
 /// without the sides that never moved, which a reader fills with zeros. A
 /// relay path usually moves one way, so this halves the snapshot.
 #[derive(Serialize)]
@@ -876,16 +896,18 @@ struct PathUsage {
 	subscriber: Option<Traffic>,
 }
 
-impl GroupTrack {
-	fn create(broadcast: &broadcast::Producer, group: &Path) -> Result<Self, moq_net::Error> {
-		let name = crate::group_track(group);
+impl BucketTrack {
+	fn create(broadcast: &broadcast::Producer, bucket: &Path) -> Result<Self, moq_net::Error> {
+		// A new counter run under its own name: readers keep its counters apart from
+		// an earlier epoch's, and its MoQ group 0 is where they start.
+		let epoch = Epoch::mint();
+		let name = crate::bucket_track(bucket, &epoch);
 		let track = broadcast.create_track(name.as_str(), info())?;
 		Ok(Self {
 			name,
-			snapshot: Snapshot::new(track, config()),
-			body: GroupBody {
-				// A new counter run: readers keep its counters apart from an earlier epoch's.
-				epoch: Epoch::mint(),
+			snapshot: Snapshot::new(track, config()).counted(),
+			body: BucketBody {
+				epoch,
 				tiers: Frame::default(),
 			},
 			live: false,
@@ -903,14 +925,14 @@ impl GroupTrack {
 		}
 	}
 
-	/// `tier`'s entry, inserted on first sight, marking the group live.
-	fn tier(&mut self, tier: &Tier) -> &mut GroupTier {
+	/// `tier`'s entry, inserted on first sight, marking the bucket live.
+	fn tier(&mut self, tier: &Tier) -> &mut BucketTier {
 		self.live = true;
 		let entries = &mut self.body.tiers.entries;
 		let index = match entries.iter().position(|(label, _)| label == tier.label()) {
 			Some(index) => index,
 			None => {
-				entries.push((tier.label().clone(), GroupTier::default()));
+				entries.push((tier.label().clone(), BucketTier::default()));
 				entries.len() - 1
 			}
 		};
@@ -952,7 +974,7 @@ impl GroupTrack {
 		tier.labels.entries.push((label.clone(), presence));
 	}
 
-	/// Whether this drain left the group empty for at least `linger`.
+	/// Whether this drain left the bucket empty for at least `linger`.
 	fn lingered(&mut self, now: Instant, linger: Duration) -> bool {
 		if self.live {
 			self.empty_since = None;
@@ -963,7 +985,7 @@ impl GroupTrack {
 	}
 
 	/// Write this drain's frame; moq-json skips an unchanged one. A frame too
-	/// large to cache ends this group's track alone.
+	/// large to cache ends this bucket's track alone.
 	fn publish(&mut self, stamp: Stamp) {
 		let tiers = &mut self.body.tiers.entries;
 		tiers.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -972,7 +994,7 @@ impl GroupTrack {
 			tier.labels.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 		}
 		if let Err(err) = self.snapshot.update(&self.body, stamp) {
-			tracing::warn!(?err, name = self.name, "stats: failed to write group frame");
+			tracing::warn!(?err, name = self.name, "stats: failed to write bucket frame");
 		}
 	}
 
@@ -1001,7 +1023,7 @@ fn ancestors(path: &str) -> impl Iterator<Item = (&str, Option<&str>)> {
 
 impl NodePublisher {
 	/// Announce the node's broadcast with its totals track and, at depth 0, the
-	/// one group's track, which both live for the producer's life.
+	/// one bucket's track, which both live for the producer's life.
 	fn create(task: &Task) -> Option<Self> {
 		let advertised = advertised_path(&task.prefix, task.node.as_ref())
 			.inspect_err(|err| tracing::warn!(%err, "stats: node path too long"))
@@ -1029,14 +1051,14 @@ impl NodePublisher {
 			}
 		};
 
-		let mut groups = HashMap::new();
+		let mut buckets = HashMap::new();
 		if task.depth == 0 {
-			match GroupTrack::create(route.broadcast(), &Path::empty()) {
+			match BucketTrack::create(route.broadcast(), &Path::empty()) {
 				Ok(track) => {
-					groups.insert(String::new(), track);
+					buckets.insert(String::new(), track);
 				}
 				Err(err) => {
-					tracing::warn!(?err, "stats: failed to create group track");
+					tracing::warn!(?err, "stats: failed to create bucket track");
 					return None;
 				}
 			}
@@ -1051,7 +1073,7 @@ impl NodePublisher {
 			totals,
 			presence: HashMap::new(),
 			prefixes: HashMap::new(),
-			groups,
+			buckets,
 		})
 	}
 
@@ -1064,7 +1086,7 @@ impl NodePublisher {
 			totals,
 			presence,
 			prefixes,
-			groups,
+			buckets,
 			..
 		} = self;
 
@@ -1102,7 +1124,7 @@ impl NodePublisher {
 			}
 		}
 
-		for track in groups.values_mut() {
+		for track in buckets.values_mut() {
 			track.reset();
 		}
 		for entry in &report.traffic {
@@ -1114,51 +1136,51 @@ impl NodePublisher {
 			slots.seen = tick;
 			let publisher = slots.publisher.observe(entry.publisher);
 			let subscriber = slots.subscriber.observe(entry.subscriber);
-			let key = group_key(&entry.path, depth);
-			if let Some(track) = Self::group(route.broadcast(), groups, &key) {
+			let key = bucket_key(&entry.path, depth);
+			if let Some(track) = Self::bucket(route.broadcast(), buckets, &key) {
 				track.add_traffic(entry, publisher, subscriber);
 			}
 		}
 		for entry in &report.sessions {
-			let key = group_key(&entry.label, depth);
-			if let Some(track) = Self::group(route.broadcast(), groups, &key) {
+			let key = bucket_key(&entry.label, depth);
+			if let Some(track) = Self::bucket(route.broadcast(), buckets, &key) {
 				track.add_sessions(&entry.label, &entry.tier, entry.presence, entry.closed);
 			}
 		}
 	}
 
-	/// Get or create the track for group `key`, `None` if the broadcast refused it.
-	fn group<'a>(
+	/// Get or create the track for bucket `key`, `None` if the broadcast refused it.
+	fn bucket<'a>(
 		broadcast: &broadcast::Producer,
-		groups: &'a mut HashMap<String, GroupTrack>,
+		buckets: &'a mut HashMap<String, BucketTrack>,
 		key: &Path,
-	) -> Option<&'a mut GroupTrack> {
-		if !groups.contains_key(key.as_str()) {
-			match GroupTrack::create(broadcast, key) {
+	) -> Option<&'a mut BucketTrack> {
+		if !buckets.contains_key(key.as_str()) {
+			match BucketTrack::create(broadcast, key) {
 				Ok(track) => {
-					groups.insert(key.to_string(), track);
+					buckets.insert(key.to_string(), track);
 				}
 				Err(err) => {
-					tracing::warn!(?err, group = %key, "stats: failed to create group track");
+					tracing::warn!(?err, bucket = %key, "stats: failed to create bucket track");
 					return None;
 				}
 			}
 		}
-		groups.get_mut(key.as_str())
+		buckets.get_mut(key.as_str())
 	}
 
-	/// End group tracks that lingered empty, publish the pending frames, then
+	/// End bucket tracks that lingered empty, publish the pending frames, then
 	/// drop change-detection state for entries this drain did not carry (the
 	/// registry pruned them).
 	fn flush(&mut self, tick: u64, stamp: Stamp, depth: usize, linger: Duration) {
-		// At depth 0 the one group's track lives for the producer's life.
+		// At depth 0 the one bucket's track lives for the producer's life.
 		for (_, track) in self
-			.groups
+			.buckets
 			.extract_if(|_, track| depth > 0 && track.lingered(stamp.at, linger))
 		{
 			track.finish();
 		}
-		for track in self.groups.values_mut() {
+		for track in self.buckets.values_mut() {
 			track.publish(stamp);
 		}
 
@@ -1183,7 +1205,7 @@ impl NodePublisher {
 	/// answered at once with the label's current counters from `report`. It is
 	/// reclaimed once its last consumer leaves, so the held set follows live
 	/// readers. A prefix track follows the same rules for a broadcast prefix.
-	/// Any other name is rejected: a group's track is served only while it is
+	/// Any other name is rejected: a bucket's track is served only while it is
 	/// listed.
 	fn serve_requests(&mut self, report: &Report, tick: u64, stamp: Stamp) {
 		// Reclaim before adopting, so a request for a track just reclaimed is
@@ -1314,7 +1336,7 @@ impl Drop for NodePublisher {
 		for track in self.prefixes.values_mut() {
 			track.output.finish();
 		}
-		for (_, track) in self.groups.drain() {
+		for (_, track) in self.buckets.drain() {
 			track.finish();
 		}
 		self.route.broadcast().close();
@@ -1356,9 +1378,9 @@ struct SideSlots {
 	seen: u64,
 }
 
-/// The leading `depth` segments of `path`, the group it publishes under, or the whole path
+/// The leading `depth` segments of `path`, the bucket it publishes under, or the whole path
 /// when it has no such head: it is shallower, or its `depth`th `/` is escaped.
-fn group_key(path: &Path, depth: usize) -> Path {
+fn bucket_key(path: &Path, depth: usize) -> Path {
 	path.head(depth).unwrap_or_else(|| path.clone())
 }
 
@@ -1672,12 +1694,17 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::origin::RouteEvent::Start(route)
-			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
-			moq_net::origin::RouteEvent::End(route) | moq_net::origin::RouteEvent::Offline(route) => {
-				Some((route, false))
-			}
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: route,
+			} => Some((route, true)),
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+				announce: route,
+			} => Some((route, false)),
 		}
 	}
 
@@ -1793,20 +1820,20 @@ mod tests {
 		}
 	}
 
-	/// The latest buffered frame on group `group`'s track.
-	async fn read_group(broadcast: &moq_net::broadcast::Consumer, group: &str) -> crate::GroupFrame {
+	/// The latest buffered frame on bucket `bucket`'s track.
+	async fn read_bucket(broadcast: &moq_net::broadcast::Consumer, bucket: &str) -> crate::BucketFrame {
 		let track = broadcast
-			.track(&crate::group_track(moq_net::Path::new(group).unwrap()))
+			.track(&crate::listed_bucket_track(broadcast, &moq_net::Path::new(bucket).unwrap()).await)
 			.expect("track");
-		let mut reader = moq_json::snapshot::Consumer::<crate::GroupFrame>::new(track, Default::default());
+		let mut reader = moq_json::snapshot::Consumer::<crate::BucketFrame>::new(track, Default::default());
 		reader.latest().await.expect("read").expect("frame").value
 	}
 
-	/// The default tier's egress per path on the depth-0 group's latest frame.
+	/// The default tier's egress per path on the depth-0 bucket's latest frame.
 	async fn read_egress(broadcast: &moq_net::broadcast::Consumer) -> BTreeMap<String, Traffic> {
-		let mut frame = read_group(broadcast, "").await;
-		let group = frame.tiers.remove("").unwrap_or_default();
-		group
+		let mut frame = read_bucket(broadcast, "").await;
+		let bucket = frame.tiers.remove("").unwrap_or_default();
+		bucket
 			.paths
 			.into_iter()
 			.map(|(path, usage)| (path, usage.publisher))
@@ -2023,7 +2050,11 @@ mod tests {
 			panic!("expected one announce");
 		};
 		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
-		let mut old = subscribe(&stats, &crate::group_track(moq_net::Path::from_static(""))).await;
+		let mut old = subscribe(
+			&stats,
+			&crate::listed_bucket_track(&stats, &moq_net::Path::from_static("")).await,
+		)
+		.await;
 		while try_next_frame(&mut old).is_some() {}
 
 		let second = node_producer(&origin);
@@ -2250,9 +2281,9 @@ mod tests {
 		assert_eq!(totals.sessions.active(), 1, "the publisher's session left with it");
 	}
 
-	/// A producer publishing each first path segment as a group track of
+	/// A producer publishing each first path segment as a bucket track of
 	/// `.stats/node/sjc`.
-	fn grouped_producer(linger: Duration) -> (Producer, origin::Producer) {
+	fn bucketed_producer(linger: Duration) -> (Producer, origin::Producer) {
 		let origin = produce_origin();
 		let producer = crate::produce::spawned(Producer::new(
 			Config::new()
@@ -2295,7 +2326,7 @@ mod tests {
 		drive_tick().await;
 
 		let (_, broadcast) = announced(&origin).await;
-		let frame = read_group(&broadcast, "").await;
+		let frame = read_bucket(&broadcast, "").await;
 		let labels = &frame.tiers[""].labels;
 		let snap = labels.get("acme").expect("label entry");
 		assert_eq!(snap.sessions_started, 2);
@@ -2322,16 +2353,16 @@ mod tests {
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;
 		let handle = broadcast
-			.track(&crate::group_track(moq_net::Path::from_static("")))
+			.track(&crate::listed_bucket_track(&broadcast, &moq_net::Path::from_static("")).await)
 			.expect("track");
-		let mut track = moq_json::snapshot::Consumer::<crate::GroupFrame>::new(handle.clone(), Default::default());
+		let mut track = moq_json::snapshot::Consumer::<crate::BucketFrame>::new(handle.clone(), Default::default());
 		handle.info().await.expect("subscribe");
-		let drain = |track: &mut moq_json::snapshot::Consumer<crate::GroupFrame>| {
+		let drain = |track: &mut moq_json::snapshot::Consumer<crate::BucketFrame>| {
 			use futures::FutureExt;
 			let mut frames = Vec::new();
 			while let Some(frame) = track.next().now_or_never() {
 				let frame = frame.expect("read").expect("frame").value;
-				let labels = frame.tiers.get("").map(|group| &group.labels);
+				let labels = frame.tiers.get("").map(|bucket| &bucket.labels);
 				frames.push(
 					labels
 						.and_then(|labels| labels.get("acme"))
@@ -2522,10 +2553,10 @@ mod tests {
 		assert_eq!(tick(), 0, "reclaimed");
 	}
 
-	/// Every label is held, whichever group it falls in.
+	/// Every label is held, whichever bucket it falls in.
 	#[tokio::test(start_paused = true)]
 	async fn presence_requests_hold_any_label() {
-		let (producer, origin) = grouped_producer(DEFAULT_LINGER);
+		let (producer, origin) = bucketed_producer(DEFAULT_LINGER);
 		let _f = feed(producer.registry(), Tier::default(), "acme/live", true, 1, 42).await;
 		drive_tick().await;
 		let (_, acme) = announced(&origin).await;
@@ -2582,7 +2613,7 @@ mod tests {
 	/// and one level of children, each summing everything beneath it.
 	#[tokio::test(start_paused = true)]
 	async fn prefix_track_rolls_up_self_and_children() {
-		let (producer, origin) = grouped_producer(DEFAULT_LINGER);
+		let (producer, origin) = bucketed_producer(DEFAULT_LINGER);
 		let registry = producer.registry();
 		let _own = feed(registry, Tier::default(), "acme", true, 1, 1).await;
 		let _live = feed(registry, Tier::default(), "acme/live", true, 1, 10).await;
@@ -2619,7 +2650,7 @@ mod tests {
 		assert_eq!(frame[""].own.publisher.bytes, 100);
 		assert!(frame[""].children.is_empty());
 
-		// Any group's prefix is held, but one deeper than any path is refused.
+		// Any bucket's prefix is held, but one deeper than any path is refused.
 		let mut track = hold_prefix(&acme, "beta").await;
 		let frame = last_prefix(&mut track).expect("answered at once");
 		assert_eq!(frame[""].publisher.bytes, 5);
@@ -2776,7 +2807,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn unused_slots_dont_surface() {
 		// A broadcast that only sees default-tier egress carries zero ingress,
-		// and a tier with no traffic is absent from the group frame.
+		// and a tier with no traffic is absent from the bucket frame.
 		let (producer, origin) = test_producer(Some("sjc"));
 		// Only the egress (publisher) side is tagged, so `foo/bar` gets publisher
 		// traffic and no subscriber traffic.
@@ -2786,7 +2817,7 @@ mod tests {
 		drive_tick().await;
 
 		let (_, broadcast) = announced(&origin).await;
-		let frame = read_group(&broadcast, "").await;
+		let frame = read_bucket(&broadcast, "").await;
 		let usage = frame.tiers[""].paths.get("foo/bar").expect("the active foo/bar entry");
 		assert_eq!(usage.publisher.bytes, 8);
 		assert_eq!(usage.subscriber, Traffic::default(), "no ingress moved");
@@ -2824,8 +2855,8 @@ mod tests {
 	}
 
 	#[test]
-	fn group_key_uses_leading_segments() {
-		let key = |path, depth| group_key(&Path::from_static(path), depth);
+	fn bucket_key_uses_leading_segments() {
+		let key = |path, depth| bucket_key(&Path::from_static(path), depth);
 		assert_eq!(key("acme/room/cam", 0), Path::empty());
 		assert_eq!(key("acme/room/cam", 1), Path::from_static("acme"));
 		assert_eq!(key("acme/room/cam", 2), Path::from_static("acme/room"));
@@ -2866,12 +2897,12 @@ mod tests {
 	}
 
 	#[test]
-	fn group_body_serializes_like_a_group_frame() {
+	fn bucket_body_serializes_like_a_bucket_frame() {
 		let mut usage = Usage::default();
 		usage.subscriber.bytes = 5;
 		let mut presence = Presence::default();
 		presence.sessions_started = 2;
-		let mut tier = GroupTier::default();
+		let mut tier = BucketTier::default();
 		tier.folded.publisher.bytes = 99;
 		tier.totals.publisher.bytes = 7;
 		tier.totals.sessions.sessions_started = 2;
@@ -2881,22 +2912,22 @@ mod tests {
 		};
 		tier.paths.entries.push((Path::from_static("acme/live"), side));
 		tier.labels.entries.push((Path::from_static("acme"), presence));
-		let body = GroupBody {
+		let body = BucketBody {
 			epoch: Epoch::mint(),
 			tiers: Frame {
 				entries: vec![(Path::from_static(""), tier)],
 			},
 		};
 
-		let mut group = crate::Group::default();
-		group.publisher.bytes = 7;
-		group.sessions.sessions_started = 2;
-		group.paths.insert("acme/live".into(), usage);
-		group.labels.insert("acme".into(), presence);
+		let mut bucket = crate::Bucket::default();
+		bucket.publisher.bytes = 7;
+		bucket.sessions.sessions_started = 2;
+		bucket.paths.insert("acme/live".into(), usage);
+		bucket.labels.insert("acme".into(), presence);
 		let json: serde_json::Value = serde_json::to_value(&body).unwrap();
-		let frame: crate::GroupFrame = serde_json::from_value(json.clone()).unwrap();
+		let frame: crate::BucketFrame = serde_json::from_value(json.clone()).unwrap();
 		assert_eq!(frame.epoch, body.epoch);
-		assert_eq!(frame.tiers, BTreeMap::from([(String::new(), group)]));
+		assert_eq!(frame.tiers, BTreeMap::from([(String::new(), bucket)]));
 		let tier = &json["tiers"][""];
 		assert!(tier.get("folded").is_none(), "folded totals are left out");
 		assert!(
@@ -3008,7 +3039,9 @@ mod tests {
 
 	/// Read `reader` until its track ends, returning how it ended and the last
 	/// frame before that.
-	async fn drain_group(reader: &mut crate::consume::GroupConsumer) -> (crate::Result<()>, Option<crate::GroupFrame>) {
+	async fn drain_bucket(
+		reader: &mut crate::consume::BucketConsumer,
+	) -> (crate::Result<()>, Option<crate::BucketFrame>) {
 		let mut last = None;
 		loop {
 			match reader.next().await {
@@ -3019,7 +3052,7 @@ mod tests {
 		}
 	}
 
-	/// The next listing change to a group track, as `(group, listed)`, skipping
+	/// The next listing change to a bucket track, as `(bucket, listed)`, skipping
 	/// every other track.
 	async fn next_listed(drain: &mut Drain, now: Instant, tracks: &mut broadcast::Tracks) -> (String, bool) {
 		loop {
@@ -3032,17 +3065,17 @@ mod tests {
 				broadcast::TracksEvent::Removed { name } | broadcast::TracksEvent::Finished { name } => (name, false),
 				broadcast::TracksEvent::Synced => continue,
 			};
-			if let Some(group) = crate::parse_group_track(&name) {
-				return (group.as_str().to_string(), listed);
+			if let Some((bucket, _)) = crate::parse_bucket_track(&name) {
+				return (bucket.as_str().to_string(), listed);
 			}
 		}
 	}
 
-	/// Groups are listed through a relay as they gain entries, stay listed for
+	/// Buckets are listed through a relay as they gain entries, stay listed for
 	/// the linger once empty, and are unlisted after it, all on one broadcast
 	/// whose announcement never changes.
 	#[tokio::test(start_paused = true)]
-	async fn group_tracks_list_and_unlist_through_a_relay() {
+	async fn bucket_tracks_list_and_unlist_through_a_relay() {
 		let registry = Registry::new(moq_net::stats::Config::new());
 		let origin = produce_origin();
 		let mut drain = Drain::new(Task {
@@ -3085,7 +3118,7 @@ mod tests {
 		drop(acme);
 		let lingering = start + Duration::from_secs(9);
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
-		let mut acme = stats.group(moq_net::Path::from_static("acme")).unwrap();
+		let mut acme = stats.bucket(moq_net::Path::from_static("acme")).await.unwrap();
 		let mut frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
 		while !frame.tiers[""].labels.is_empty() {
 			frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
@@ -3099,7 +3132,7 @@ mod tests {
 			("acme".into(), false)
 		);
 		assert!(pumping_at(&mut drain, lingered, acme.next()).await.unwrap().is_none());
-		let mut beta_reader = stats.group(moq_net::Path::from_static("beta")).unwrap();
+		let mut beta_reader = stats.bucket(moq_net::Path::from_static("beta")).await.unwrap();
 		let frame = pumping_at(&mut drain, lingered, beta_reader.next())
 			.await
 			.unwrap()
@@ -3120,22 +3153,30 @@ mod tests {
 		drop(beta);
 		assert!(
 			futures::FutureExt::now_or_never(next_update(&mut announced)).is_none(),
-			"group churn costs no announce"
+			"bucket churn costs no announce"
 		);
 	}
 
-	/// A group that returns after its linger starts a new counter run: a new
-	/// epoch counted from zero, so a reader summing each epoch never counts the
-	/// old one twice, and group numbers that continue past the old run's.
+	/// A bucket that returns after its linger starts a new counter run: a new
+	/// epoch counted from zero under its own track name, so a reader summing each
+	/// epoch never counts the old one twice, and its MoQ group 0 is where its
+	/// counters start.
 	#[tokio::test(start_paused = true)]
-	async fn a_relisted_group_starts_a_new_epoch_from_zero() {
-		let (producer, origin) = grouped_producer(Duration::ZERO);
+	async fn a_relisted_bucket_starts_a_new_epoch_from_zero() {
+		let (producer, origin) = bucketed_producer(Duration::ZERO);
 		let registry = producer.registry();
 		let (_, broadcast) = announced(&origin).await;
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
-		let sequence = async |broadcast: &moq_net::broadcast::Consumer| {
-			let mut track = subscribe(broadcast, "acme/group.json").await;
-			track.next_group().await.unwrap().unwrap().sequence
+		// The listed run's name, and the sequence of its first group.
+		let run = async |broadcast: &moq_net::broadcast::Consumer| {
+			let name = crate::listed_bucket_track(broadcast, &moq_net::Path::from_static("acme")).await;
+			let mut track = subscribe(broadcast, &name).await;
+			let mut first = None;
+			while let Some(group) = futures::FutureExt::now_or_never(track.next_group()) {
+				let sequence = group.unwrap().unwrap().sequence;
+				first = Some(first.map_or(sequence, |first: u64| first.min(sequence)));
+			}
+			(name, first)
 		};
 
 		let session =
@@ -3145,17 +3186,18 @@ mod tests {
 					"acme/live",
 				)));
 		drive_tick().await;
-		let mut reader = stats.group(moq_net::Path::from_static("acme")).expect("listed");
+		let mut reader = stats.bucket(moq_net::Path::from_static("acme")).await.expect("listed");
 		let first = reader.next().await.unwrap().unwrap();
 		assert_eq!(first.tiers[""].sessions.sessions_started, 1);
-		let old_sequence = sequence(&broadcast).await;
+		let (old_name, old_first) = run(&broadcast).await;
+		assert_eq!(old_first, Some(0), "a run's first group is group 0");
 
 		drop(session);
 		for _ in 0..3 {
 			drive_tick().await;
 		}
-		let (end, last) = drain_group(&mut reader).await;
-		end.expect("the group's track finishes cleanly");
+		let (end, last) = drain_bucket(&mut reader).await;
+		end.expect("the bucket's track finishes cleanly");
 		let last = last.unwrap_or(first.clone());
 		assert_eq!(last.epoch, first.epoch);
 		assert_eq!(last.tiers[""].sessions.sessions_ended, 1);
@@ -3168,7 +3210,8 @@ mod tests {
 				)));
 		drive_tick().await;
 		let second = stats
-			.group(moq_net::Path::from_static("acme"))
+			.bucket(moq_net::Path::from_static("acme"))
+			.await
 			.expect("listed again")
 			.next()
 			.await
@@ -3176,16 +3219,15 @@ mod tests {
 			.unwrap();
 		assert!(
 			second.epoch.as_str() > first.epoch.as_str(),
-			"a returning group mints a newer UUIDv7"
+			"a returning bucket mints a newer UUIDv7"
 		);
 		assert_eq!(
 			second.tiers[""].sessions.sessions_started, 1,
 			"a new epoch counts from zero"
 		);
-		assert!(
-			sequence(&broadcast).await > old_sequence,
-			"group numbers continue past the old run"
-		);
+		let (new_name, new_first) = run(&broadcast).await;
+		assert_ne!(new_name, old_name, "a run never reuses a track name");
+		assert_eq!(new_first, Some(0), "the new run starts at group 0 too");
 		assert_eq!(
 			default_totals(&broadcast).await.sessions.sessions_started,
 			2,
@@ -3193,12 +3235,12 @@ mod tests {
 		);
 	}
 
-	/// One group's frame outgrowing the cache ends that group's track alone.
+	/// One bucket's frame outgrowing the cache ends that bucket's track alone.
 	///
 	/// Read off the broadcast itself: through an origin, the subscriber's resume
 	/// re-requests the ended track and reads the refusal instead of the cause.
 	#[tokio::test(start_paused = true)]
-	async fn an_oversize_group_leaves_other_groups_readable() {
+	async fn an_oversize_bucket_leaves_other_buckets_readable() {
 		let registry = Registry::new(moq_net::stats::Config::new());
 		let mut drain = Drain::new(Task {
 			registry: registry.clone(),
@@ -3218,8 +3260,12 @@ mod tests {
 		let _big = registry
 			.tier(Tier::default())
 			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("big")));
-		let mut acme = stats.group(moq_net::Path::from_static("acme")).unwrap();
-		let mut big = stats.group(moq_net::Path::from_static("big")).unwrap();
+		let mut acme = pumping(&mut drain, stats.bucket(moq_net::Path::from_static("acme")))
+			.await
+			.unwrap();
+		let mut big = pumping(&mut drain, stats.bucket(moq_net::Path::from_static("big")))
+			.await
+			.unwrap();
 		assert!(pumping(&mut drain, acme.next()).await.unwrap().is_some());
 		assert!(pumping(&mut drain, big.next()).await.unwrap().is_some());
 
@@ -3231,7 +3277,7 @@ mod tests {
 					.session(moq_net::stats::SessionInfo::new(path))
 			})
 			.collect();
-		let (end, _) = pumping(&mut drain, drain_group(&mut big)).await;
+		let (end, _) = pumping(&mut drain, drain_bucket(&mut big)).await;
 		assert!(
 			matches!(
 				end,
@@ -3253,22 +3299,23 @@ mod tests {
 		assert_eq!(frame.tiers[""].labels.keys().collect::<Vec<_>>(), ["acme", "acme/more"]);
 	}
 
-	/// A group's track carries only its own paths and labels, and there are no
+	/// A bucket's track carries only its own paths and labels, and there are no
 	/// per-tier tracks.
 	#[tokio::test(start_paused = true)]
-	async fn a_group_track_carries_only_its_own_entries() {
-		let (producer, origin) = grouped_producer(DEFAULT_LINGER);
+	async fn a_bucket_track_carries_only_its_own_entries() {
+		let (producer, origin) = bucketed_producer(DEFAULT_LINGER);
 		let registry = producer.registry();
 		let (_, broadcast) = announced(&origin).await;
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
 
-		// Each feed holds a session labelled `feed`, its own group.
+		// Each feed holds a session labelled `feed`, its own bucket.
 		let _acme = feed(registry, Tier::default(), "acme/live", true, 1, 100).await;
 		let _beta = feed(registry, Tier::default(), "beta/live", true, 1, 50).await;
 		drive_tick().await;
 
 		let frame = stats
-			.group(moq_net::Path::from_static("acme"))
+			.bucket(moq_net::Path::from_static("acme"))
+			.await
 			.unwrap()
 			.next()
 			.await
@@ -3277,11 +3324,12 @@ mod tests {
 		let acme = &frame.tiers[""];
 		assert_eq!(acme.paths.keys().collect::<Vec<_>>(), ["acme/live"]);
 		assert_eq!(acme.paths["acme/live"].publisher.bytes, 100);
-		assert_eq!(acme.publisher.bytes, 100, "the totals are the group's alone");
+		assert_eq!(acme.publisher.bytes, 100, "the totals are the bucket's alone");
 		assert!(acme.labels.is_empty());
 
 		let frame = stats
-			.group(moq_net::Path::from_static("beta"))
+			.bucket(moq_net::Path::from_static("beta"))
+			.await
 			.unwrap()
 			.next()
 			.await
@@ -3291,7 +3339,8 @@ mod tests {
 		assert_eq!(frame.tiers[""].publisher.bytes, 50);
 
 		let frame = stats
-			.group(moq_net::Path::from_static("feed"))
+			.bucket(moq_net::Path::from_static("feed"))
+			.await
 			.unwrap()
 			.next()
 			.await
@@ -3303,7 +3352,7 @@ mod tests {
 		assert_eq!(
 			default_totals(&broadcast).await.publisher.bytes,
 			150,
-			"the node totals sum every group"
+			"the node totals sum every bucket"
 		);
 		let refused = broadcast.track("publisher.json").unwrap().subscribe(None);
 		let (refused, ()) = tokio::join!(refused, drive_tick());

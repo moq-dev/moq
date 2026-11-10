@@ -37,11 +37,10 @@ pub async fn announced(consumer: &origin::Consumer, path: &str) -> origin::Route
 	let mut announced = consumer.routes();
 	loop {
 		match announced.next().await.expect("the origin closed") {
-			origin::RouteEvent::Start(announce)
-			| origin::RouteEvent::Update(announce)
-			| origin::RouteEvent::Restart(announce)
-				if announce.prefix.as_str() == path =>
-			{
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
+				announce,
+			} if announce.prefix.as_str() == path => {
 				return announce.route;
 			}
 			_ => {}
@@ -80,11 +79,26 @@ pub fn watch(mut announced: origin::Routes) -> mpsc::UnboundedReceiver<(String, 
 	kio::clock::sim::spawn(async move {
 		while let Some(event) = announced.next().await {
 			let (kind, announce) = match event {
-				origin::RouteEvent::Start(announce) => (Kind::Start, announce),
-				origin::RouteEvent::Update(announce) => (Kind::Update, announce),
-				origin::RouteEvent::Restart(announce) => (Kind::Restart, announce),
-				origin::RouteEvent::End(announce) => (Kind::End, announce),
-				origin::RouteEvent::Offline(announce) => (Kind::Offline, announce),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Start,
+					announce,
+				} => (Kind::Start, announce),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Update,
+					announce,
+				} => (Kind::Update, announce),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Restart,
+					announce,
+				} => (Kind::Restart, announce),
+				origin::RouteEvent {
+					kind: origin::RouteKind::End,
+					announce,
+				} => (Kind::End, announce),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Offline,
+					announce,
+				} => (Kind::Offline, announce),
 			};
 			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
 				break;

@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer, type Tracks } from "../broadcast.ts";
@@ -250,7 +250,8 @@ test("a listing past the announces cap is reset, and the session stays", async (
 	again.close();
 });
 
-test("a flood of a peer's listing churn yields to the host's tasks", async () => {
+// Quarantined: timed out at 5 s in 2 of 30 full js/net runs under 48 CPU burners; see moq-dev/moq#8355.
+test.skip("a flood of a peer's listing churn yields to the host's tasks", async () => {
 	const { subscriber, listed } = handPlayed();
 	const tracks = subscriber.consume(Path.from("room")).tracks();
 	const peer = await listed();
@@ -465,7 +466,7 @@ test("a listing over a session carries each track's info, end to end", async () 
 	const broadcast = broadcastRoute.broadcast;
 	broadcast.createTrack("a", {
 		timescale: Timescale.MILLI,
-		maxAge: Milli(3000),
+		maxAge: Duration.millis(3000),
 		priority: 9,
 		refresh: 4,
 		compression: "deflate",
@@ -475,7 +476,13 @@ test("a listing over a session carries each track's info, end to end", async () 
 	expect(await tracks.next()).toEqual({
 		kind: "added",
 		name: "a",
-		info: { timescale: Timescale.MILLI, maxAge: Milli(3000), priority: 9, refresh: 4, compression: "deflate" },
+		info: {
+			timescale: Timescale.MILLI,
+			maxAge: Duration.millis(3000),
+			priority: 9,
+			refresh: 4,
+			compression: "deflate",
+		},
 	});
 	expect(await next(tracks)).toBe("synced");
 	broadcast.createTrack("b");

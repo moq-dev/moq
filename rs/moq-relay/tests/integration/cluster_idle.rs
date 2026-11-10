@@ -115,8 +115,10 @@ async fn silent_peer_detected() {
 	kio::clock::timeout(DETECT, async {
 		loop {
 			let event = announced.next().await.expect("origin closed");
-			if let moq_net::origin::RouteEvent::Start(update) | moq_net::origin::RouteEvent::Update(update) = event
-				&& update.prefix.as_str() == "peer"
+			if let moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update,
+				announce: update,
+			} = event && update.prefix.as_str() == "peer"
 			{
 				break;
 			}
@@ -134,8 +136,10 @@ async fn silent_peer_detected() {
 		loop {
 			let event = announced.next().await.expect("origin closed");
 			// A silent peer is lost, not withdrawn: its route goes offline.
-			if let moq_net::origin::RouteEvent::Offline(update) = event
-				&& update.prefix.as_str() == "peer"
+			if let moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::Offline,
+				announce: update,
+			} = event && update.prefix.as_str() == "peer"
 			{
 				break;
 			}

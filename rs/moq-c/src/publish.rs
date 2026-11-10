@@ -1249,8 +1249,9 @@ impl Publish {
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let id = track;
 		let Kept { inner: track, children } = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
+		// The kept handle stays a producer, whose appends the end refuses.
 		if track.finished().is_none() {
-			track.finish()?;
+			drop(track.clone().finish()?);
 		}
 		Kept { inner: track, children }.keep(Child::Track(id));
 		Ok(())
@@ -1538,7 +1539,7 @@ impl Publish {
 
 	/// Finish a raw group. No more frames can be written.
 	pub fn group_finish(&mut self, group: Id) -> Result<(), Error> {
-		let mut group = self
+		let group = self
 			.groups
 			.remove(group)
 			.and_then(|group| group.inner.take())

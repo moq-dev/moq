@@ -169,17 +169,26 @@ fn encoder_thread(
 				continue;
 			}
 		};
-		match enc.encode(&moq_video::Frame::new(surface, ts)) {
-			Ok(encoded) => {
-				if let Err(e) = producer.publish(&encoded) {
-					// Publish only fails once the track/broadcast is gone, which
-					// is terminal -- stop rather than flooding logs every frame.
-					tracing::error!(error = %e, "video publish failed; stopping encoder");
-					return;
+		// A single bad frame is tolerable; keep going.
+		if let Err(e) = enc.encode(&moq_video::Frame::new(surface, ts)) {
+			tracing::error!(error = %e, "H.264 encode error");
+		}
+		loop {
+			match enc.receive() {
+				Ok(Some(encoded)) => {
+					if let Err(e) = producer.publish(&encoded) {
+						// Publish only fails once the track/broadcast is gone, which
+						// is terminal -- stop rather than flooding logs every frame.
+						tracing::error!(error = %e, "video publish failed; stopping encoder");
+						return;
+					}
+				}
+				Ok(None) => break,
+				Err(e) => {
+					tracing::error!(error = %e, "H.264 encode error");
+					break;
 				}
 			}
-			// A single bad frame is tolerable; keep going.
-			Err(e) => tracing::error!(error = %e, "H.264 encode error"),
 		}
 		encode_duration.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
 	}

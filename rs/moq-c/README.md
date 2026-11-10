@@ -209,11 +209,10 @@ int32_t moq_audio_encoder_packet(uint32_t encoder, uint32_t index, moq_frame *ds
 int32_t moq_audio_encoder_free(uint32_t encoder);
 int32_t moq_video_encoder_create(const moq_video_encoder_input *input, const moq_video_encoder_output *output);
 int32_t moq_video_encoder_encode(uint32_t encoder, const moq_video_encoder_frame *frame);
+int32_t moq_video_encoder_receive(uint32_t encoder, moq_frame *dst);
 int32_t moq_video_encoder_cut(uint32_t encoder);
 int32_t moq_video_encoder_bitrate(uint32_t encoder, uint64_t bitrate);
 int32_t moq_video_encoder_flush(uint32_t encoder);
-int32_t moq_video_encoder_finish(uint32_t encoder);
-int32_t moq_video_encoder_packet(uint32_t encoder, uint32_t index, moq_frame *dst);
 int32_t moq_video_encoder_free(uint32_t encoder);
 ```
 

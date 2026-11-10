@@ -106,12 +106,27 @@ fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Publish
 async fn changed(follow: &mut origin::Routes) -> bool {
 	loop {
 		match follow.next().await.unwrap() {
-			origin::RouteEvent::Restart(_) => return true,
-			origin::RouteEvent::End(_) | origin::RouteEvent::Offline(_) => {
-				assert!(matches!(follow.next().await, Some(origin::RouteEvent::Start(_))));
+			origin::RouteEvent {
+				kind: origin::RouteKind::Restart,
+				..
+			} => return true,
+			origin::RouteEvent {
+				kind: origin::RouteKind::End | origin::RouteKind::Offline,
+				..
+			} => {
+				assert!(matches!(
+					follow.next().await,
+					Some(origin::RouteEvent {
+						kind: origin::RouteKind::Start,
+						..
+					})
+				));
 				return false;
 			}
-			origin::RouteEvent::Update(_) => {}
+			origin::RouteEvent {
+				kind: origin::RouteKind::Update,
+				..
+			} => {}
 			other => panic!("expected replacement, got {other:?}"),
 		}
 	}
@@ -146,9 +161,18 @@ async fn replacement(version: &str) {
 		.unwrap();
 	assert!(matches!(
 		catalog_follow.next().await,
-		Some(origin::RouteEvent::Start(_))
+		Some(origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			..
+		})
 	));
-	assert!(matches!(media_follow.next().await, Some(origin::RouteEvent::Start(_))));
+	assert!(matches!(
+		media_follow.next().await,
+		Some(origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			..
+		})
+	));
 
 	let held = viewer.request("live/catalog.hang", None).await.unwrap();
 	let old = moq_mux::Source::new(viewer.clone(), held);
@@ -380,7 +404,13 @@ async fn a_player_reads_through_a_claim_on_its_first_request() {
 		.established()
 		.await
 		.unwrap();
-	assert!(matches!(routes.next().await, Some(origin::RouteEvent::Start(_))));
+	assert!(matches!(
+		routes.next().await,
+		Some(origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			..
+		})
+	));
 
 	let held = viewer.request("live/catalog.hang", None).await.unwrap();
 	let source = moq_mux::Source::new(viewer.clone(), held);
@@ -414,7 +444,10 @@ async fn a_player_reads_through_a_claim_on_its_first_request() {
 	assert_ne!(worker.claim.instance(), lent);
 	loop {
 		match routes.next().await.unwrap() {
-			origin::RouteEvent::End(end) if end.prefix.as_str() == "live/media" => break,
+			origin::RouteEvent {
+				kind: origin::RouteKind::End | origin::RouteKind::Offline,
+				announce: end,
+			} if end.prefix.as_str() == "live/media" => break,
 			_ => {}
 		}
 	}

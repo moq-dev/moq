@@ -539,9 +539,11 @@ async fn route_at(
 	ready: impl Fn(&moq_net::origin::RouteInfo) -> bool,
 ) -> moq_net::origin::RouteInfo {
 	loop {
-		let (moq_net::origin::RouteEvent::Start(update)
-		| moq_net::origin::RouteEvent::Update(update)
-		| moq_net::origin::RouteEvent::Restart(update)) = announced.next().await.expect("update")
+		let moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: update,
+		} = announced.next().await.expect("update")
 		else {
 			continue;
 		};

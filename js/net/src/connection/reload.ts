@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
+import { Duration, type Instant, now, sleep } from "@moq/clock";
 import { Derived, Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { Handle as AuthHandle } from "../auth.ts";
@@ -31,10 +31,10 @@ import { heldOf } from "./tokens.ts";
  * The wait before a session on the WebSocket fallback first probes WebTransport, before jitter.
  * Each failed probe doubles it, up to {@link PROBE_MAX}, matching moq-tokio.
  */
-const PROBE_INITIAL = Milli(10_000);
+const PROBE_INITIAL = Duration.secs(10);
 
 /** The longest wait between WebTransport probes, before jitter. */
-const PROBE_MAX = Milli(300_000);
+const PROBE_MAX = Duration.secs(300);
 
 function sameTokens(a: readonly string[], b: readonly string[]): boolean {
 	return a.length === b.length && a.every((token, i) => token === b[i]);
@@ -57,7 +57,7 @@ function sameTokens(a: readonly string[], b: readonly string[]): boolean {
  */
 export type ReloadDelay = {
 	/** The delay before reconnecting (default: 1000ms; zero retries at once). */
-	initial?: Milli;
+	initial?: Duration;
 
 	/** The multiplier for the delay after each failure (default: 2; below 1 keeps it constant). */
 	multiplier?: number;
@@ -66,7 +66,7 @@ export type ReloadDelay = {
 	 * The maximum delay (default: 5000ms; `null` leaves it uncapped; zero retries at once). A cap
 	 * below `initial` caps the first delay too.
 	 */
-	max?: Milli | null;
+	max?: Duration | null;
 
 	/**
 	 * How long a session must stay up to count as healthy (default: 1000ms; must be positive).
@@ -75,7 +75,7 @@ export type ReloadDelay = {
 	 * failed attempt, so a peer that accepts and then drops every session still escalates the
 	 * delay and exhausts the timeout.
 	 */
-	healthy?: Milli;
+	healthy?: Duration;
 
 	/**
 	 * Maximum total time to spend retrying the current URL before giving up
@@ -85,7 +85,7 @@ export type ReloadDelay = {
 	 * longer than the window; {@link ConnectProps.timeout} bounds each attempt. A peer that
 	 * restarts, draining each session with a GOAWAY naming no URI, restarts it too.
 	 */
-	timeout?: Milli | null;
+	timeout?: Duration | null;
 };
 
 /**
@@ -137,10 +137,10 @@ export type ReloadProps = Omit<
  * dispose the loop, and a new URL or a disable/re-enable starts another sequence.
  */
 const DEFAULT_DELAY: Required<ReloadDelay> = {
-	initial: Milli(1000),
+	initial: Duration.millis(1000),
 	multiplier: 2,
-	max: Milli(5000),
-	healthy: Milli(1000),
+	max: Duration.millis(5000),
+	healthy: Duration.millis(1000),
 	timeout: null,
 };
 
@@ -152,23 +152,21 @@ const DEFAULT_DELAY: Required<ReloadDelay> = {
  * optional value passes an explicit undefined, which a spread would take as the answer.
  */
 function pacing(delay: ReloadDelay) {
-	const initial = Milli(delay.initial ?? DEFAULT_DELAY.initial);
+	const initial = delay.initial ?? DEFAULT_DELAY.initial;
 	// `null` means no bound, so only `undefined` takes the default.
-	const max = delay.max === undefined ? DEFAULT_DELAY.max : delay.max;
-	const cap = max === null ? null : Milli(max);
+	const cap = delay.max === undefined ? DEFAULT_DELAY.max : delay.max;
 	const multiplier = delay.multiplier ?? DEFAULT_DELAY.multiplier;
 	if (!Number.isFinite(multiplier)) throw new RangeError(`invalid delay.multiplier: ${multiplier}`);
 	// Zero would count every session as healthy, resetting the retry window forever under a
 	// peer that drops each one on sight.
-	const healthy = Milli(delay.healthy ?? DEFAULT_DELAY.healthy);
-	if (healthy === 0) throw new RangeError("delay.healthy must be positive");
-	const window = delay.timeout === undefined ? DEFAULT_DELAY.timeout : delay.timeout;
-	const timeout = window === null ? null : Milli(window);
+	const healthy = delay.healthy ?? DEFAULT_DELAY.healthy;
+	if (healthy.isZero()) throw new RangeError("delay.healthy must be positive");
+	const timeout = delay.timeout === undefined ? DEFAULT_DELAY.timeout : delay.timeout;
 	// A multiplier below 1 means no growth, not a delay that shrinks to nothing.
 	const growth = Math.max(multiplier, 1);
 
 	return {
-		initial: cap === null ? initial : Milli(Math.min(initial, cap)),
+		initial: cap === null ? initial : initial.min(cap),
 		healthy,
 		timeout,
 		// How long a session must last to start a new run of redirects. One that outlived the
@@ -176,16 +174,16 @@ function pacing(delay: ReloadDelay) {
 		// healthy bar is the only rate the config names.
 		settled: cap ?? healthy,
 		/** The delay after one that waited `delay`. */
-		next(delay: Milli): Milli {
-			const next = Math.min(delay * growth, cap ?? Number.POSITIVE_INFINITY);
-			// Saturates, as Rust's Duration does, rather than overflowing the wait in nanoseconds.
-			return Number.isFinite(next * 1_000_000) ? Milli(next) : delay;
+		next(delay: Duration): Duration {
+			const next = Math.min(delay.asNanos() * growth, cap?.asNanos() ?? Number.POSITIVE_INFINITY);
+			// Saturates, as Rust's Duration does, rather than overflowing the wait.
+			return Number.isFinite(next) ? Duration.nanos(next) : delay;
 		},
 	};
 }
 
 /** How often the send-rate estimate is sampled from the live transport while a reservation reads it. */
-const BANDWIDTH_POLL = Nano.fromMilli(Milli(100));
+const BANDWIDTH_POLL = Duration.millis(100);
 
 /** Current state of a reconnecting connection. */
 export type ReloadStatus = "connecting" | "connected" | "disconnected";
@@ -279,7 +277,7 @@ export class Reload {
 	websocket: WebSocketProps | undefined;
 
 	/** The bound on each connection attempt. See {@link ConnectProps.timeout}. */
-	readonly timeout?: Milli;
+	readonly timeout?: Duration;
 
 	/**
 	 * The origin whose broadcasts are served, spanning reconnects (not reactive).
@@ -351,8 +349,9 @@ export class Reload {
 
 	// The current wait between attempts, doubling per failure, and when the retry window expires.
 	// Both are undefined between sequences, so a later edit to `delay` applies to the next one.
-	#delay: Milli | undefined;
-	#deadline: number | undefined;
+	#delay: Duration | undefined;
+	// When the retry window expires, or null when it never does.
+	#deadline: Instant | null | undefined;
 
 	// The URL the current retry sequence is for. Cleared when disabled, URL-less, or given
 	// up, so the next attempt starts a fresh backoff window.
@@ -393,7 +392,7 @@ export class Reload {
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 		// Validated here, like the versions, rather than by every attempt.
-		this.timeout = props?.timeout === undefined ? undefined : Milli(props.timeout);
+		this.timeout = props?.timeout;
 		this.publish = props?.publish;
 		this.consume = props?.consume;
 
@@ -667,7 +666,7 @@ export class Reload {
 					// backoff already paces it, so its replacement dials at once. A fallback that
 					// served past the healthy bar still earns the healthy reset.
 					if (reached) {
-						if (Instant.durationSince(now(), connected) >= Nano.fromMilli(this.#pacing().healthy)) {
+						if (now().since(connected).ge(this.#pacing().healthy)) {
 							this.#delay = undefined;
 							this.#deadline = undefined;
 						}
@@ -684,8 +683,8 @@ export class Reload {
 					// backoff would allow, so it starts a new run: rolling restarts days apart
 					// never add up to a loop.
 					const { settled, healthy } = this.#pacing();
-					const lived = Instant.durationSince(now(), connected);
-					if (lived >= Nano.fromMilli(settled)) this.#redirects.reset();
+					const lived = now().since(connected);
+					if (lived.ge(settled)) this.#redirects.reset();
 					// Only a redirect this GOAWAY named is a move. An empty or ignored one reconnects
 					// in place, even when that reruns the race a WebSocket fallback won.
 					const from = destination(at);
@@ -699,7 +698,7 @@ export class Reload {
 					// migrates, but through the backoff, so two peers bouncing us between them
 					// escalate to the capped delay. An empty URI is a peer restarting, which drains
 					// each new session until it goes; every one serves, so that is no failure either.
-					if (lived < Nano.fromMilli(healthy)) {
+					if (lived.lt(healthy)) {
 						if (ended.uri === "") this.#restart(effect);
 						else this.#retry(effect, connected, new Error("peer redirected immediately"));
 						return;
@@ -734,8 +733,8 @@ export class Reload {
 		const never = new Promise<never>(() => {});
 		if (connection.transport !== "websocket" || !isWebTransportSupported()) return never;
 		try {
-			for (let delay = PROBE_INITIAL; ; delay = Milli(Math.min(delay * 2, PROBE_MAX))) {
-				await sleep(Nano.fromMilli(Milli(delay * (0.5 + Math.random() / 2))), { signal });
+			for (let delay = PROBE_INITIAL; ; delay = delay.mul(2).min(PROBE_MAX)) {
+				await sleep(delay.mul(0.5 + Math.random() / 2), { signal });
 				const props = {
 					tokens: this.tokens.peek(),
 					versions: this.versions,
@@ -841,9 +840,9 @@ export class Reload {
 	}
 
 	// When a retry window starting `at` expires.
-	#window(at: Instant): number {
+	#window(at: Instant): Instant | null {
 		const { timeout } = this.#pacing();
-		return timeout === null ? Number.POSITIVE_INFINITY : Instant.add(at, Nano.fromMilli(timeout));
+		return timeout === null ? null : at.add(timeout);
 	}
 
 	/**
@@ -857,15 +856,15 @@ export class Reload {
 		effect.timer(() => {
 			this.#deadline = undefined;
 			this.#tick.update((prev) => Math.max(prev, tick));
-		}, Nano(wait));
+		}, wait);
 	}
 
 	// The jittered wait before the next attempt, escalating the delay for the one after.
 	// Equal jitter, so a fleet of tabs knocked offline together doesn't reconnect on the same tick.
-	#backoff(): number {
+	#backoff(): Duration {
 		const pacing = this.#pacing();
 		this.#delay ??= pacing.initial;
-		const wait = Nano.fromMilli(this.#delay) * (0.5 + Math.random() / 2);
+		const wait = this.#delay.mul(0.5 + Math.random() / 2);
 		this.#delay = pacing.next(this.#delay);
 		return wait;
 	}
@@ -879,10 +878,7 @@ export class Reload {
 		// A healthy session's end clears the backoff and starts a fresh retry window: a one-off
 		// drop should reconnect promptly. Anything shorter is a peer that accepts and soon
 		// severs, which has to keep escalating or we hammer it forever at the initial delay.
-		if (
-			connected !== undefined &&
-			Instant.durationSince(now(), connected) >= Nano.fromMilli(this.#pacing().healthy)
-		) {
+		if (connected !== undefined && now().since(connected).ge(this.#pacing().healthy)) {
 			this.#delay = undefined;
 			this.#deadline = undefined;
 		}
@@ -920,15 +916,15 @@ export class Reload {
 		// No attempt starts once the window has passed: a wait that reaches the deadline gives up
 		// there instead of dialing.
 		const deadline = this.#deadline;
-		const left = deadline - at;
 		// A graceful close has no error, so report the timeout itself.
 		const failure = cause === undefined ? new Error("reconnect timed out") : error(cause);
 		const giveUp = () => {
 			console.warn("reconnect timed out");
 			this.#giveUp(failure);
 		};
-		if (wait >= left) {
-			if (left > 0) effect.timer(giveUp, Nano(left));
+		const left = deadline === null ? undefined : deadline.since(at);
+		if (left !== undefined && wait.ge(left)) {
+			if (!left.isZero()) effect.timer(giveUp, left);
 			else giveUp();
 			return;
 		}
@@ -937,9 +933,9 @@ export class Reload {
 		effect.timer(() => {
 			// Checked again when the wait ends: a timer that fires late, as after the device
 			// slept, must not dial past the window.
-			if (now() >= deadline) return giveUp();
+			if (deadline !== null && now().ge(deadline)) return giveUp();
 			this.#tick.update((prev) => Math.max(prev, tick));
-		}, Nano(wait));
+		}, wait);
 	}
 
 	#giveUp(cause: Error): void {
@@ -1041,10 +1037,10 @@ class Draining {
 	#onRetire: () => void;
 	#retired = false;
 
-	constructor(connection: Session, handover: Milli, onRetire: () => void) {
+	constructor(connection: Session, handover: Duration, onRetire: () => void) {
 		this.#connection = connection;
 		this.#onRetire = onRetire;
-		void sleep(Nano.fromMilli(handover), { signal: this.#timer.signal }).then(
+		void sleep(handover, { signal: this.#timer.signal }).then(
 			() => {
 				if (this.retire()) console.warn("old session did not drain in time; closing");
 				connection.abort();

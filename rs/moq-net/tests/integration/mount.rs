@@ -67,9 +67,18 @@ async fn drain(routes: &mut origin::Routes) -> Vec<(bool, String)> {
 	let mut events = Vec::new();
 	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), routes.next()).await {
 		match event.expect("announce ended") {
-			origin::RouteEvent::Start(announce) => events.push((true, announce.prefix.to_string())),
-			origin::RouteEvent::End(announce) => events.push((false, announce.prefix.to_string())),
-			origin::RouteEvent::Offline(announce) => events.push((false, format!("offline {}", announce.prefix))),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				announce,
+			} => events.push((true, announce.prefix.to_string())),
+			origin::RouteEvent {
+				kind: origin::RouteKind::End,
+				announce,
+			} => events.push((false, announce.prefix.to_string())),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Offline,
+				announce,
+			} => events.push((false, format!("offline {}", announce.prefix))),
 			_ => {}
 		}
 	}

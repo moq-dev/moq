@@ -1,4 +1,4 @@
-import { now as clockNow, sleepUntil as clockSleepUntil, Instant, Micro, Nano, Second } from "@moq/clock";
+import { sleepUntil as clockSleepUntil, Duration, Instant, now } from "@moq/clock";
 import type { Timeline } from "./timeline";
 
 // Not exported from `source/index.ts`: this is an implementation detail of the file source.
@@ -6,7 +6,7 @@ import type { Timeline } from "./timeline";
 // A sample further behind the clock than this means nothing read the stream for a while, such as a
 // capture parked while unwatched, rather than a briefly slow reader. Seeking to the present decodes
 // at most a keyframe interval, while draining would decode and publish the whole gap.
-export const SEEK_BEHIND = Micro.fromSecond(Second(1));
+export const SEEK_BEHIND = Duration.secs(1);
 
 // The bits of a mediabunny sample the pacing loop touches. Video and audio samples only differ in
 // what they convert to, which the caller supplies.
@@ -86,10 +86,10 @@ export function pace<S extends Sample, T extends { close(): void }>(
 
 					const sample = next.value;
 					yielded = true;
-					const timestamp = timeline.at(sample.microsecondTimestamp as Micro, loop);
+					const timestamp = timeline.at(sample.microsecondTimestamp, loop);
 
 					const present = now();
-					if (!sought && present - timestamp > SEEK_BEHIND) {
+					if (!sought && present.since(timestamp).gt(SEEK_BEHIND)) {
 						sample.close();
 						sought = true;
 
@@ -97,7 +97,7 @@ export function pace<S extends Sample, T extends { close(): void }>(
 						const position = timeline.position(present);
 						await samples.return();
 						loop = position.loop;
-						samples = sink.samples(Second.fromMicro(position.timestamp));
+						samples = sink.samples(position.timestamp.asSecs());
 						continue;
 					}
 
@@ -113,7 +113,7 @@ export function pace<S extends Sample, T extends { close(): void }>(
 					// mixes sources keeps one timeline.
 					let value: T;
 					try {
-						sample.setTimestamp(Second.fromMicro(timestamp));
+						sample.setTimestamp(timestamp.since(Instant.ZERO).asSecs());
 						value = convert(sample);
 					} finally {
 						sample.close();
@@ -139,15 +139,10 @@ export function pace<S extends Sample, T extends { close(): void }>(
 	);
 }
 
-// The installed clock in microseconds, the epoch capture stamps frames against (see video/processor.ts).
-export function now(): Micro {
-	return Nano.toMicro(Nano(clockNow()));
-}
-
 // Wait until the given clock time, or until the effect tears down.
 //
 // A plain sleep rather than effect.timer because this runs once per sample: effect.timer registers a
 // cleanup that only releases on teardown, which would pile up for as long as the file publishes.
-export function sleepUntil(timestamp: Micro, signal: AbortSignal): Promise<void> {
-	return clockSleepUntil(Instant(Micro.toNano(timestamp)), { signal }).catch(() => {});
+export function sleepUntil(at: Instant, signal: AbortSignal): Promise<void> {
+	return clockSleepUntil(at, { signal }).catch(() => {});
 }

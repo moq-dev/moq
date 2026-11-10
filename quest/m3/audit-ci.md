@@ -51,6 +51,9 @@ verdicts:
 
 ### Check first (off-cycle m1 audit, 2026-11-01)
 
+- The [benchmark history](https://git.moq.dev/bench/)'s `bench-gate-cost` rows: `module/*` is each `just ci` module's
+  wall and CPU seconds, run one at a time, in a cold gate without the Rust
+  cache and in the gate after a moq-net edit, flagged on the nights they moved.
 - The latest scheduled [Nightly](https://github.com/moq-dev/moq/actions/runs/41313466339)
   is still red: 152 jobs executed, 19 failed and one was cancelled; 28 tag-only
   publishers or reused builders were skipped. Read failures by cause, not job count.

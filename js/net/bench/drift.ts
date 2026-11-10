@@ -1,5 +1,5 @@
 /** Sweep publishers, readers, and retained history for a parked frame read's drift check. */
-import { Manual, Milli } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { type Group, Time, Track } from "@moq/net";
 import { hooks } from "../src/internal.ts";
 
@@ -15,7 +15,7 @@ export async function run(): Promise<void> {
 		// The same reordered-PTS verdict runs here in Chromium before timing any work.
 		// No publisher limit, so the reader's own 80 ms budget alone judges the reordered tail.
 		const check = new Track.Producer("reordered").accept({ timescale: Time.Timescale.MILLI, maxAge: null });
-		const reader = check.subscribe({ delay: { max: Milli(80) } });
+		const reader = check.subscribe({ delay: { max: Duration.millis(80) } });
 		try {
 			for (const timestamps of [[0], [100], [150, 200, 160]]) {
 				const group = check.appendGroup();
@@ -62,7 +62,7 @@ export async function run(): Promise<void> {
 								const subscribers = Array.from({ length: readers }, () =>
 									track.subscribe({
 										delay: {
-											max: Milli(
+											max: Duration.millis(
 												(retained + Math.ceil((iterations + warmup) / offsets.length) + 1) *
 													100,
 											),

@@ -1,4 +1,3 @@
-import { Milli } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
@@ -395,13 +394,13 @@ export class Parameters {
 	/**
 	 * FILL_TIMEOUT: the total wait in safe numeric milliseconds for objects not yet available.
 	 */
-	get fillTimeout(): Milli | undefined {
+	get fillTimeout(): number | undefined {
 		const v = this.vars.get(MSG_PARAM_FILL_TIMEOUT);
 		if (v === undefined) return undefined;
-		return Milli(toNumber(v));
+		return toNumber(v);
 	}
 
-	set fillTimeout(v: Milli | undefined) {
+	set fillTimeout(v: number | undefined) {
 		if (v === undefined) this.vars.delete(MSG_PARAM_FILL_TIMEOUT);
 		else this.vars.set(MSG_PARAM_FILL_TIMEOUT, BigInt(v));
 	}

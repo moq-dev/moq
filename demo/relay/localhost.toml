@@ -44,7 +44,7 @@ public = "**"
 #
 #   .stats/node/local/host
 #
-# carrying totals.json and group.json tracks. See
+# carrying totals.json and bucket.<epoch>.json tracks. See
 # doc/bin/relay/config.md for the field semantics.
 [stats]
 enabled = true

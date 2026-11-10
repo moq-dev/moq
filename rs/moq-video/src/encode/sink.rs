@@ -11,8 +11,8 @@
 //! same reason: an FFI object shared between threads opens the apartment on
 //! whichever thread built it and closes it on whichever thread drops it.
 //! Confining the whole encoder lifetime to one thread fixes both; frames are
-//! `Send` there (Windows D3D11 textures and CPU I420 both are) and packets come
-//! back over a channel.
+//! `Send` there (Windows D3D11 textures and CPU I420 both are), and the thread
+//! moves the packets each call readies into a queue the caller pops.
 //!
 //! macOS and iOS keep encoding inline: VideoToolbox has no COM apartment to balance and
 //! doesn't block on an event loop, so a thread would only add a hop, and its
@@ -32,8 +32,10 @@ use threaded::Inner;
 /// An [`Encoder`](super::Encoder) confined to one thread, driven from anywhere.
 ///
 /// Same shape as [`Encoder`](super::Encoder), one method at a time, except that
-/// the calls are `async` and [`encode`](Self::encode) takes the frame by value
-/// (it may cross a thread). Reach for this instead of an `Encoder` whenever the
+/// the calls that reach the codec are `async` and [`encode`](Self::encode) takes
+/// the frame by value (it may cross a thread). [`receive`](Self::receive) stays
+/// synchronous: each `encode` and `flush` has already moved what the codec
+/// readied to this side. Reach for this instead of an `Encoder` whenever the
 /// encoder outlives a single thread's stack: an object shared across threads, an
 /// FFI handle, a task that migrates between executor workers. An `Encoder` you
 /// build, drive, and drop inside one function needs none of it.
@@ -49,7 +51,7 @@ use threaded::Inner;
 /// it slide. The codec runs on its own thread, so a request that has been queued
 /// runs whether or not anyone is still waiting: dropping the future (racing it in
 /// a `select!`, giving it a timeout) leaves the codec a step ahead of the stream,
-/// holding output nobody received. Rather than let the next call carry on and
+/// holding output nobody collected. Rather than let the next call carry on and
 /// publish a track quietly missing those frames, the sink refuses every call
 /// after a cancelled one. Drop it and open another.
 ///
@@ -94,10 +96,10 @@ impl Sink {
 		self.0.cut().await
 	}
 
-	/// Encode one frame, waiting for its access units.
+	/// Submit one frame, waiting until the codec has taken it.
 	///
-	/// Otherwise [`Encoder::encode`](super::Encoder::encode): zero or more access
-	/// units, each stamped with the frame it came from.
+	/// Otherwise [`Encoder::encode`](super::Encoder::encode): its access units come
+	/// out of [`receive`](Self::receive), each stamped with the frame it came from.
 	///
 	/// One call at a time, so the sink never queues raw frames of its own: the
 	/// only pictures in flight are the one being encoded and whatever the codec
@@ -110,8 +112,16 @@ impl Sink {
 	/// frame out to several encoders (a transcode ladder) hands over a clone of
 	/// the handle rather than a copy of the pixels. Pass a [`Frame`] and it is
 	/// wrapped for you.
-	pub async fn encode(&mut self, frame: impl Into<Arc<Frame>>) -> Result<Vec<Encoded>, Error> {
+	pub async fn encode(&mut self, frame: impl Into<Arc<Frame>>) -> Result<(), Error> {
 		self.0.encode(frame.into()).await
+	}
+
+	/// Pop the oldest ready access unit, or `None` while the codec holds the rest.
+	///
+	/// Call until it returns `None` after each [`encode`](Self::encode) and
+	/// [`flush`](Self::flush).
+	pub fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		self.0.receive()
 	}
 
 	/// Retune the encoder, waiting for the backend's verdict. See
@@ -121,27 +131,20 @@ impl Sink {
 		self.0.set_bitrate(bitrate).await
 	}
 
-	/// Empty the codec at a boundary the output has to respect, leaving it ready
-	/// for the frames that follow. See [`Encoder::flush`](super::Encoder::flush).
+	/// Mark the end of input, so [`receive`](Self::receive) returns every access
+	/// unit the codec still holds, leaving it ready for the frames that follow.
+	/// See [`Encoder::flush`](super::Encoder::flush).
 	///
 	/// A live track needs this at every group boundary: a backend that pipelines
 	/// is still holding the last frames of a group when it ends, and they would
 	/// otherwise surface in the next group ahead of its keyframe, where a
 	/// subscriber joining there cannot decode them. Publishing frame by frame
 	/// with no group structure needs none of it.
-	pub async fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-		self.0.flush().await
-	}
-
-	/// Drain the codec, returning every access unit it was still holding, and
-	/// shut the encoder down.
 	///
-	/// Consumes the sink, like [`Encoder::finish`](super::Encoder::finish).
-	/// Dropping a sink without this is fine and tears down just as cleanly, it
-	/// just discards the tail: publish the returned frames before ending a track,
-	/// or its last pictures never reach a subscriber.
-	pub async fn finish(self) -> Result<Vec<Encoded>, Error> {
-		self.0.finish().await
+	/// Flush and receive before dropping the sink, or its last pictures never
+	/// reach a subscriber.
+	pub async fn flush(&mut self) -> Result<(), Error> {
+		self.0.flush().await
 	}
 }
 
@@ -153,18 +156,18 @@ mod threaded {
 
 	use super::super::Encoded;
 	use super::super::encoder::{Applied, Config, Encoder};
-	use crate::worker::{Ready, Worker};
+	use crate::worker::{Queue, Ready, Worker};
 	use crate::{Error, Frame};
 
 	/// Work for the encode thread. Every variant goes down the same channel so a
 	/// cut or a bitrate change lands in order with the frames around it, rather
 	/// than racing them.
 	enum Request {
-		/// A frame to encode, plus a oneshot to return the resulting access units
-		/// (or an error) in order.
+		/// A frame to encode, plus a oneshot to report, in order, whether the codec
+		/// took it.
 		Encode {
 			frame: Arc<Frame>,
-			resp: oneshot::Sender<Result<Vec<Encoded>, Error>>,
+			resp: oneshot::Sender<Result<(), Error>>,
 		},
 		/// Cut a group at the next frame, reporting whether the backend can: a
 		/// refusal has to reach the caller, since the alternative is a group
@@ -178,18 +181,8 @@ mod threaded {
 			bitrate: moq_net::bandwidth::Rate,
 			resp: oneshot::Sender<Result<(), Error>>,
 		},
-		/// Empty the codec at a group boundary, leaving it running. Unlike
-		/// `Finish` the encoder survives, so this is served like any other
-		/// request.
-		Flush {
-			resp: oneshot::Sender<Result<Vec<Encoded>, Error>>,
-		},
-		/// Drain the codec and shut down, returning the tail. Last request the
-		/// thread serves: `Encoder::finish` consumes the encoder, so the loop has
-		/// to break out rather than come back round for another frame.
-		Finish {
-			resp: oneshot::Sender<Result<Vec<Encoded>, Error>>,
-		},
+		/// Mark the end of input at a group boundary, leaving the codec running.
+		Flush { resp: oneshot::Sender<Result<(), Error>> },
 	}
 
 	/// What the encode thread reports once its encoder is open.
@@ -198,9 +191,23 @@ mod threaded {
 		applied: Applied,
 	}
 
+	/// Move everything the encoder has ready into `queue`.
+	fn collect(encoder: &mut Encoder, queue: &Queue<Encoded>) -> Result<(), Error> {
+		let mut queue = queue.lock();
+		while let Some(encoded) = encoder.receive()? {
+			queue.push_back(encoded);
+		}
+		Ok(())
+	}
+
 	/// Build an encoder for `config` and serve requests until the channel closes.
 	/// Runs entirely on the encode thread; see [`crate::worker`].
-	fn run(config: Config, ready: Ready<Opened>, mut requests: mpsc::UnboundedReceiver<Request>) {
+	fn run(
+		config: Config,
+		queue: Queue<Encoded>,
+		ready: Ready<Opened>,
+		mut requests: mpsc::UnboundedReceiver<Request>,
+	) {
 		let mut encoder = match Encoder::new(&config) {
 			Ok(encoder) => encoder,
 			Err(err) => return ready.err(err),
@@ -215,14 +222,13 @@ mod threaded {
 		}
 
 		// Serve each request in arrival order. The encoder and its COM / MFT
-		// handles are created, used, and dropped only on this thread. `finish`
-		// consumes the encoder, so it breaks out and drains below rather than
-		// serving another request.
-		let mut draining = None;
+		// handles are created, used, and dropped only on this thread, which the
+		// encoder drops on once the channel closes.
 		while let Some(req) = requests.blocking_recv() {
 			match req {
 				Request::Encode { frame, resp } => {
-					let _ = resp.send(encoder.encode(&frame));
+					let encoded = encoder.encode(&frame).and_then(|()| collect(&mut encoder, &queue));
+					let _ = resp.send(encoded);
 				}
 				Request::Cut { resp } => {
 					let _ = resp.send(encoder.cut());
@@ -231,60 +237,57 @@ mod threaded {
 					let _ = resp.send(encoder.set_bitrate(bitrate));
 				}
 				Request::Flush { resp } => {
-					let _ = resp.send(encoder.flush());
-				}
-				Request::Finish { resp } => {
-					draining = Some(resp);
-					break;
+					let flushed = encoder.flush().and_then(|()| collect(&mut encoder, &queue));
+					let _ = resp.send(flushed);
 				}
 			}
-		}
-		// The drain runs here, on this thread, and consumes the encoder; otherwise
-		// `encoder` drops here. Either way the COM apartment it opened closes on
-		// the thread that opened it.
-		if let Some(resp) = draining {
-			let _ = resp.send(encoder.finish());
 		}
 	}
 
 	/// An [`Encoder`] running on its own thread. See the module docs.
-	pub struct Inner(Worker<Request, Opened>);
+	pub struct Inner {
+		worker: Worker<Request, Opened>,
+		queue: Queue<Encoded>,
+	}
 
 	impl Inner {
 		pub async fn open(config: &Config) -> Result<Self, Error> {
 			let config = config.clone();
-			let worker = Worker::open("moq-video-encode", move |ready, requests| run(config, ready, requests)).await?;
-			Ok(Self(worker))
+			let queue = Queue::default();
+			let filled = queue.clone();
+			let worker = Worker::open("moq-video-encode", move |ready, requests| {
+				run(config, filled, ready, requests)
+			})
+			.await?;
+			Ok(Self { worker, queue })
 		}
 
 		pub fn name(&self) -> &str {
-			&self.0.info().name
+			&self.worker.info().name
 		}
 
 		pub fn applied(&self) -> Applied {
-			self.0.info().applied.clone()
+			self.worker.info().applied.clone()
 		}
 
 		pub async fn cut(&mut self) -> Result<(), Error> {
-			self.0.request(|resp| Request::Cut { resp }).await
+			self.worker.request(|resp| Request::Cut { resp }).await
 		}
 
-		pub async fn encode(&mut self, frame: Arc<Frame>) -> Result<Vec<Encoded>, Error> {
-			self.0.request(|resp| Request::Encode { frame, resp }).await
+		pub async fn encode(&mut self, frame: Arc<Frame>) -> Result<(), Error> {
+			self.worker.request(|resp| Request::Encode { frame, resp }).await
+		}
+
+		pub fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+			Ok(self.queue.pop())
 		}
 
 		pub async fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
-			self.0.request(|resp| Request::SetBitrate { bitrate, resp }).await
+			self.worker.request(|resp| Request::SetBitrate { bitrate, resp }).await
 		}
 
-		pub async fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-			self.0.request(|resp| Request::Flush { resp }).await
-		}
-
-		pub async fn finish(mut self) -> Result<Vec<Encoded>, Error> {
-			// `self` drops on the way out, which drops the sender and joins the
-			// thread that just drained and released the encoder.
-			self.0.request(|resp| Request::Finish { resp }).await
+		pub async fn flush(&mut self) -> Result<(), Error> {
+			self.worker.request(|resp| Request::Flush { resp }).await
 		}
 	}
 }
@@ -324,20 +327,20 @@ mod inline {
 			self.0.cut()
 		}
 
-		pub async fn encode(&mut self, frame: Arc<Frame>) -> Result<Vec<Encoded>, Error> {
+		pub async fn encode(&mut self, frame: Arc<Frame>) -> Result<(), Error> {
 			self.0.encode(&frame)
+		}
+
+		pub fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+			self.0.receive()
 		}
 
 		pub async fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 			self.0.set_bitrate(bitrate)
 		}
 
-		pub async fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+		pub async fn flush(&mut self) -> Result<(), Error> {
 			self.0.flush()
-		}
-
-		pub async fn finish(self) -> Result<Vec<Encoded>, Error> {
-			self.0.finish()
 		}
 	}
 }
@@ -490,7 +493,7 @@ mod tests {
 		// Drive it the way an FFI handle gets driven: a fresh caller thread every
 		// time, none of them the thread that opened it.
 		let mut callers = vec![std::thread::current().id()];
-		let mut flushed = Vec::new();
+		let mut received = Vec::new();
 		for index in 0..3u64 {
 			let sink = sink.clone();
 			let caller = std::thread::spawn(move || {
@@ -501,27 +504,35 @@ mod tests {
 				pollster::block_on(sink.set_bitrate(moq_net::bandwidth::Rate::from_bps(500_000 + index))).unwrap();
 				// Only the first frame closes a group, so the two after it stay in
 				// the codec and leave the drain below something to find.
-				let flushed = match index {
-					0 => pollster::block_on(sink.flush()).unwrap(),
-					_ => Vec::new(),
-				};
-				(std::thread::current().id(), flushed)
+				if index == 0 {
+					pollster::block_on(sink.flush()).unwrap();
+				}
+				let mut received = Vec::new();
+				while let Some(frame) = sink.receive().unwrap() {
+					received.push(frame.timestamp.as_micros());
+				}
+				(std::thread::current().id(), received)
 			});
-			let (caller, drained) = caller.join().unwrap();
+			let (caller, frames) = caller.join().unwrap();
 			callers.push(caller);
-			flushed.extend(drained);
+			received.extend(frames);
 		}
 
 		// The probe holds each frame back by one, so a flush that reached the codec
-		// hands back the frame the group ended on. An inherited no-op would return
-		// nothing here and silently drop it into the next group.
-		let flushed: Vec<_> = flushed.iter().map(|frame| frame.timestamp.as_micros()).collect();
-		assert_eq!(flushed, vec![0], "the group boundary did not empty the codec");
+		// hands back the frame the group ended on, ahead of frame 1, which frame 2
+		// pushed out. An inherited no-op would leave frame 0 to surface after the
+		// boundary, in the next group.
+		assert_eq!(received, vec![0, 33_333], "the group boundary did not empty the codec");
 
-		// ...and finished, so dropped, from yet another.
+		// ...and drained, then dropped, from yet another.
 		let closer = std::thread::spawn(move || {
-			let sink = sink.lock().unwrap().take().unwrap();
-			let tail = pollster::block_on(sink.finish()).unwrap();
+			let mut sink = sink.lock().unwrap().take().unwrap();
+			pollster::block_on(sink.flush()).unwrap();
+			let mut tail = Vec::new();
+			while let Some(frame) = sink.receive().unwrap() {
+				tail.push(frame.timestamp.as_micros());
+			}
+			drop(sink);
 			(std::thread::current().id(), tail)
 		});
 		let (closer, tail) = closer.join().unwrap();
@@ -529,11 +540,10 @@ mod tests {
 
 		// Frame 2 never came back from an encode call and no flush claimed it, so
 		// the drain has to. Dropping the sink instead would lose it silently.
-		let tail: Vec<_> = tail.iter().map(|frame| frame.timestamp.as_micros()).collect();
 		assert_eq!(tail, vec![2 * 33_333], "the drain lost the codec's tail");
 
 		let log = probe::take();
-		for what in ["open", "encode", "set_bitrate", "flush", "finish", "drop"] {
+		for what in ["open", "encode", "set_bitrate", "flush", "drop"] {
 			assert!(log.iter().any(|(event, _)| *event == what), "no {what} in {log:?}");
 		}
 

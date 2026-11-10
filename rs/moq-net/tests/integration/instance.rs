@@ -30,7 +30,10 @@ async fn started(announced: &mut origin::Routes) -> Instance {
 		.expect("announce hung")
 		.expect("announce ended")
 	{
-		origin::RouteEvent::Start(announce) => announce.route.instance().clone(),
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			announce,
+		} => announce.route.instance().clone(),
 		other => panic!("expected a start, got {other:?}"),
 	}
 }
@@ -41,7 +44,10 @@ async fn ended(announced: &mut origin::Routes) {
 		.expect("announce hung")
 		.expect("announce ended")
 	{
-		origin::RouteEvent::End(_) | origin::RouteEvent::Offline(_) => {}
+		origin::RouteEvent {
+			kind: origin::RouteKind::End | origin::RouteKind::Offline,
+			..
+		} => {}
 		other => panic!("expected an end, got {other:?}"),
 	}
 }
@@ -146,7 +152,10 @@ async fn next_hop_lost(version: &str) {
 				.expect("the standby serves the claim");
 		}
 		_ => match event.expect("announce hung").expect("announce ended") {
-			origin::RouteEvent::Restart(announce) => {
+			origin::RouteEvent {
+				kind: origin::RouteKind::Restart,
+				announce,
+			} => {
 				assert_ne!(
 					announce.route.instance(),
 					&first,

@@ -358,7 +358,8 @@ mod tests {
 		.unwrap();
 		encoder.cut().unwrap();
 		let gray = vec![0x80u8; 320 * 240 * 4];
-		for encoded in encoder.encode(&gray_frame(&gray, 0)).unwrap() {
+		encoder.encode(&gray_frame(&gray, 0)).unwrap();
+		while let Some(encoded) = encoder.receive().unwrap() {
 			hang::container::Frame {
 				timestamp: encoded.timestamp,
 				payload: encoded.payload,
@@ -410,7 +411,8 @@ mod tests {
 				if index == 0 {
 					encoder.cut().unwrap();
 				}
-				for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+				encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
+				while let Some(encoded) = encoder.receive().unwrap() {
 					let frame = hang::container::Frame {
 						timestamp: encoded.timestamp,
 						payload: encoded.payload,
@@ -479,7 +481,8 @@ mod tests {
 			encoder.cut().unwrap();
 			let timestamps: Vec<_> = (0..5).map(|index| (sequence * 5 + index) * 33_333).collect();
 			for &timestamp in &timestamps {
-				for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+				encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
+				while let Some(encoded) = encoder.receive().unwrap() {
 					hang::container::Frame {
 						timestamp: encoded.timestamp,
 						payload: encoded.payload,
@@ -1457,7 +1460,8 @@ mod tests {
 		encoder.cut().unwrap();
 		let gray = vec![0x80u8; 320 * 240 * 4];
 		for timestamp in [0, 33_333] {
-			for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+			encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
+			while let Some(encoded) = encoder.receive().unwrap() {
 				hang::container::Frame {
 					timestamp: encoded.timestamp,
 					payload: encoded.payload,
@@ -1548,7 +1552,8 @@ mod tests {
 			let mut write = |group: &mut moq_net::group::Producer, timestamps: &[u64]| {
 				encoder.cut().unwrap();
 				for &timestamp in timestamps {
-					for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+					encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
+					while let Some(encoded) = encoder.receive().unwrap() {
 						hang::container::Frame {
 							timestamp: encoded.timestamp,
 							payload: encoded.payload,
@@ -1646,7 +1651,8 @@ mod tests {
 		let mut write = |group: &mut moq_net::group::Producer, timestamps: &[u64]| {
 			encoder.cut().unwrap();
 			for &timestamp in timestamps {
-				for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+				encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
+				while let Some(encoded) = encoder.receive().unwrap() {
 					hang::container::Frame {
 						timestamp: encoded.timestamp,
 						payload: encoded.payload,
@@ -2047,7 +2053,7 @@ mod tests {
 			write_keyframe(&mut group);
 			group.finish().unwrap();
 			match finish {
-				true => source._track.finish().unwrap(),
+				true => drop(source._track.clone().finish().unwrap()),
 				false => source._track.clone().abort(moq_net::Error::Cancel).unwrap(),
 			}
 

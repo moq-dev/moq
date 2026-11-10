@@ -408,12 +408,17 @@ async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 	let mut announced = origin.routes();
 	let mut live = std::collections::HashSet::new();
 	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::origin::RouteEvent| match event {
-		moq_net::origin::RouteEvent::Start(update)
-		| moq_net::origin::RouteEvent::Update(update)
-		| moq_net::origin::RouteEvent::Restart(update) => {
+		moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: update,
+		} => {
 			live.insert(update.prefix.to_string());
 		}
-		moq_net::origin::RouteEvent::End(update) | moq_net::origin::RouteEvent::Offline(update) => {
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+			announce: update,
+		} => {
 			live.remove(update.prefix.as_str());
 		}
 	};

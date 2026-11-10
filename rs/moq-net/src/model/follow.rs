@@ -1,7 +1,7 @@
 use std::task::{Poll, ready};
 
 use super::WeakEntry;
-use super::origin_impl::{Announce, Consumer, Moved, Requesting, RouteEvent, Routes};
+use super::origin_impl::{Announce, Consumer, Moved, Requesting, RouteEvent, RouteKind, Routes};
 use crate::{Error, Instance, Path, broadcast};
 
 /// The announcements covering one path, as one broadcast coming online, being replaced, and
@@ -9,9 +9,9 @@ use crate::{Error, Instance, Path, broadcast};
 ///
 /// Several routes can cover the path at once, such as the path itself and a prefix above it,
 /// and a request resolves through the most specific one, so only that route's events come
-/// through. Another route taking over is a [`Restart`](RouteEvent::Restart), unless both
+/// through. Another route taking over is a [`Restart`](RouteKind::Restart), unless both
 /// carry the same instance: those serve one continuous stream, so it is an
-/// [`Update`](RouteEvent::Update), as for a job's route continuing the prefix route it
+/// [`Update`](RouteKind::Update), as for a job's route continuing the prefix route it
 /// answered. Routes beneath the path serve other broadcasts and are ignored.
 pub(crate) struct Follow {
 	announced: Routes,
@@ -81,7 +81,10 @@ impl Follow {
 			return match (self.serving().map(|standing| standing.announce.clone()), ended) {
 				(Some(serving), _) => {
 					self.idle = false;
-					Poll::Ready(Some(RouteEvent::Start(serving)))
+					Poll::Ready(Some(RouteEvent {
+						kind: RouteKind::Start,
+						announce: serving,
+					}))
 				}
 				(None, true) => Poll::Ready(None),
 				(None, false) => Poll::Pending,
@@ -93,7 +96,13 @@ impl Follow {
 				return Poll::Ready(None);
 			};
 			if let Some(event) = self.fold(event) {
-				self.idle = matches!(event, RouteEvent::End(_) | RouteEvent::Offline(_));
+				self.idle = matches!(
+					event,
+					RouteEvent {
+						kind: RouteKind::End | RouteKind::Offline,
+						..
+					}
+				);
 				return Poll::Ready(Some(event));
 			}
 		}
@@ -126,14 +135,14 @@ impl Follow {
 
 	/// Apply one route's event, returning what it means for the path, if anything.
 	fn fold(&mut self, event: RouteEvent) -> Option<RouteEvent> {
-		let prefix = event.announce().prefix.clone();
+		let prefix = event.announce.prefix.clone();
 		if !self.path.has_prefix(&prefix) {
 			return None;
 		}
 		// A route that went reports its own way of going: ended by its origin, or let go.
-		let gone = match event {
-			RouteEvent::Offline(_) => RouteEvent::Offline,
-			_ => RouteEvent::End,
+		let gone = match event.kind {
+			RouteKind::Offline => RouteKind::Offline,
+			_ => RouteKind::End,
 		};
 		let before = self
 			.serving()
@@ -145,10 +154,22 @@ impl Follow {
 			.position(|standing| standing.announce.prefix == prefix)
 			.map(|index| self.covering.swap_remove(index).since);
 		let (announce, since, restart) = match event {
-			RouteEvent::End(_) | RouteEvent::Offline(_) => (None, None, false),
-			RouteEvent::Start(announce) => (Some(announce), None, false),
-			RouteEvent::Update(announce) => (Some(announce), standing, false),
-			RouteEvent::Restart(announce) => (Some(announce), standing, true),
+			RouteEvent {
+				kind: RouteKind::End | RouteKind::Offline,
+				..
+			} => (None, None, false),
+			RouteEvent {
+				kind: RouteKind::Start,
+				announce,
+			} => (Some(announce), None, false),
+			RouteEvent {
+				kind: RouteKind::Update,
+				announce,
+			} => (Some(announce), standing, false),
+			RouteEvent {
+				kind: RouteKind::Restart,
+				announce,
+			} => (Some(announce), standing, true),
 		};
 		if let Some(announce) = announce {
 			self.covering.push(Standing {
@@ -163,25 +184,46 @@ impl Follow {
 			.map(|standing| (standing.announce.clone(), standing.since));
 		match (before, after) {
 			(None, None) => None,
-			(None, Some((after, _))) => Some(RouteEvent::Start(after)),
-			(Some((before, _)), None) => Some(gone(before)),
+			(None, Some((after, _))) => Some(RouteEvent {
+				kind: RouteKind::Start,
+				announce: after,
+			}),
+			(Some((before, _)), None) => Some(RouteEvent {
+				kind: gone,
+				announce: before,
+			}),
 			// The serving route ended, and the one left may have started after it did.
 			(Some((before, seen)), Some((after, since)))
 				if before.prefix == prefix && before.prefix != after.prefix && since > self.dry.max(seen) =>
 			{
-				Some(gone(before))
+				Some(RouteEvent {
+					kind: gone,
+					announce: before,
+				})
 			}
 			(Some((before, _)), Some((after, _))) if before.prefix != after.prefix => {
 				let same = before.route.instance == after.route.instance;
 				Some(match same {
-					true => RouteEvent::Update(after),
-					false => RouteEvent::Restart(after),
+					true => RouteEvent {
+						kind: RouteKind::Update,
+						announce: after,
+					},
+					false => RouteEvent {
+						kind: RouteKind::Restart,
+						announce: after,
+					},
 				})
 			}
 			// A route less specific than the serving one changed, which no request sees.
 			(Some(_), Some((after, _))) if after.prefix != prefix => None,
-			(Some(_), Some((after, _))) if restart => Some(RouteEvent::Restart(after)),
-			(Some(_), Some((after, _))) => Some(RouteEvent::Update(after)),
+			(Some(_), Some((after, _))) if restart => Some(RouteEvent {
+				kind: RouteKind::Restart,
+				announce: after,
+			}),
+			(Some(_), Some((after, _))) => Some(RouteEvent {
+				kind: RouteKind::Update,
+				announce: after,
+			}),
 		}
 	}
 }
@@ -365,27 +407,41 @@ impl Following {
 		match event {
 			// Another instance taking over ends a pinned follower's own stream, which is handed
 			// out again once it serves the path again.
-			RouteEvent::Restart(announce)
-				if self
-					.instance
-					.as_ref()
-					.is_some_and(|pin| announce.route.instance.as_ref() != Some(pin)) =>
+			RouteEvent {
+				kind: RouteKind::Restart,
+				announce,
+			} if self
+				.instance
+				.as_ref()
+				.is_some_and(|pin| announce.route.instance.as_ref() != Some(pin)) =>
 			{
 				self.end();
 				return false;
 			}
 			// A pinned resolution refuses any other instance, waiting until its own serves again.
-			RouteEvent::Start(_) | RouteEvent::Restart(_) => self.unseen = true,
+			RouteEvent {
+				kind: RouteKind::Start | RouteKind::Restart,
+				..
+			} => self.unseen = true,
 			// An end is a gap that ended every request on the old route, so whatever serves the
 			// path next is handed out, even the same instance coming back.
-			RouteEvent::End(_) | RouteEvent::Offline(_) => {
+			RouteEvent {
+				kind: RouteKind::End | RouteKind::Offline,
+				..
+			} => {
 				self.unseen = false;
 				self.end();
 			}
 			// After a refusal, another route may answer what the last one refused.
-			RouteEvent::Update(_) if self.refused => self.unseen = true,
+			RouteEvent {
+				kind: RouteKind::Update,
+				..
+			} if self.refused => self.unseen = true,
 			// The same instance over another route, which its subscriptions ride out.
-			RouteEvent::Update(_) => return false,
+			RouteEvent {
+				kind: RouteKind::Update,
+				..
+			} => return false,
 		}
 		true
 	}
@@ -409,11 +465,26 @@ mod tests {
 			.expect("no event")
 			.expect("the origin closed");
 		match event {
-			RouteEvent::Start(announce) => ("start", announce.prefix.to_string()),
-			RouteEvent::Update(announce) => ("update", announce.prefix.to_string()),
-			RouteEvent::Restart(announce) => ("restart", announce.prefix.to_string()),
-			RouteEvent::End(announce) => ("end", announce.prefix.to_string()),
-			RouteEvent::Offline(announce) => ("offline", announce.prefix.to_string()),
+			RouteEvent {
+				kind: RouteKind::Start,
+				announce,
+			} => ("start", announce.prefix.to_string()),
+			RouteEvent {
+				kind: RouteKind::Update,
+				announce,
+			} => ("update", announce.prefix.to_string()),
+			RouteEvent {
+				kind: RouteKind::Restart,
+				announce,
+			} => ("restart", announce.prefix.to_string()),
+			RouteEvent {
+				kind: RouteKind::End,
+				announce,
+			} => ("end", announce.prefix.to_string()),
+			RouteEvent {
+				kind: RouteKind::Offline,
+				announce,
+			} => ("offline", announce.prefix.to_string()),
 		}
 	}
 
@@ -558,7 +629,7 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		assert!(
-			matches!(&event, RouteEvent::Start(announce) if announce.route.cost == Cost::new(5)),
+			matches!(&event, RouteEvent { kind: RouteKind::Start, announce } if announce.route.cost == Cost::new(5)),
 			"{event:?}"
 		);
 
@@ -572,7 +643,7 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		assert!(
-			matches!(&event, RouteEvent::Restart(announce) if announce.route.cost == Cost::new(5)),
+			matches!(&event, RouteEvent { kind: RouteKind::Restart, announce } if announce.route.cost == Cost::new(5)),
 			"{event:?}"
 		);
 	}

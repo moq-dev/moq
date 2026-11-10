@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::task::Poll;
 
-use super::origin_impl::{Announce, RouteEvent, Routes};
+use super::origin_impl::{Announce, RouteEvent, RouteKind, Routes};
 use crate::{Error, Path};
 
 /// What an announcement listing reports for a path.
@@ -49,13 +49,19 @@ impl AnnounceConsumer {
 	/// What a route change means for the listing, if anything.
 	fn list(&mut self, event: RouteEvent) -> Option<AnnounceEvent> {
 		match event {
-			RouteEvent::Start(announce) => {
+			RouteEvent {
+				kind: RouteKind::Start,
+				announce,
+			} => {
 				if !announce.route.available() {
 					self.unavailable.insert(announce.prefix.clone());
 				}
 				Some(AnnounceEvent::Present(announce))
 			}
-			RouteEvent::Update(announce) | RouteEvent::Restart(announce) => {
+			RouteEvent {
+				kind: RouteKind::Update | RouteKind::Restart,
+				announce,
+			} => {
 				let was = !self.unavailable.contains(&announce.prefix);
 				match (was, announce.route.available()) {
 					(true, false) => {
@@ -69,11 +75,17 @@ impl AnnounceConsumer {
 					_ => None,
 				}
 			}
-			RouteEvent::End(announce) => {
+			RouteEvent {
+				kind: RouteKind::End,
+				announce,
+			} => {
 				self.unavailable.remove(&announce.prefix);
 				Some(AnnounceEvent::Absent(announce))
 			}
-			RouteEvent::Offline(announce) => {
+			RouteEvent {
+				kind: RouteKind::Offline,
+				announce,
+			} => {
 				self.unavailable.remove(&announce.prefix);
 				Some(AnnounceEvent::Offline(announce))
 			}
@@ -210,7 +222,13 @@ mod tests {
 
 		let first = origin.route("live", route(&Instance::random())).unwrap();
 		assert_eq!(listed(&mut announced).await, "present live");
-		assert!(matches!(routes.next().await, Some(RouteEvent::Start(_))));
+		assert!(matches!(
+			routes.next().await,
+			Some(RouteEvent {
+				kind: RouteKind::Start,
+				..
+			})
+		));
 
 		first
 			.announce_info(
@@ -221,7 +239,13 @@ mod tests {
 			.unwrap();
 		quiet(&mut announced).await;
 		// The relay-level stream still reports the replacement.
-		assert!(matches!(routes.next().await, Some(RouteEvent::Restart(_))));
+		assert!(matches!(
+			routes.next().await,
+			Some(RouteEvent {
+				kind: RouteKind::Restart,
+				..
+			})
+		));
 
 		let second = origin.route("live", route(&Instance::random())).unwrap();
 		drop(first);

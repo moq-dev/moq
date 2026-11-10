@@ -18,6 +18,7 @@
  * @module
  */
 
+import type { Wall } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import type { SessionCode } from "./error.ts";
 import type * as Path from "./path.ts";
@@ -34,8 +35,8 @@ export interface Grant {
 	publish: Path.Patterns;
 	/** The broadcasts this side may subscribe to from the peer. */
 	subscribe: Path.Patterns;
-	/** When the grant lapses, as `@moq/clock` wall time in Unix milliseconds, or undefined for never. */
-	expires?: number;
+	/** When the grant lapses on the `@moq/clock` wall clock, or undefined for never. */
+	expires?: Wall;
 }
 
 /**

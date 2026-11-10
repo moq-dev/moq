@@ -322,7 +322,7 @@ mod tests {
 		let actual = center(&frame);
 		assert!(near(actual, [255, 0, 0, 255]), "{actual:?}");
 
-		let mut encoded = encoder.encode(&frame).unwrap();
+		let mut encoded = encoder.encode_all(&frame).unwrap();
 		drop(frame);
 		drop(held);
 		for index in 1..12u64 {
@@ -333,9 +333,9 @@ mod tests {
 				.expect("a free buffer")
 				.wait()
 				.unwrap();
-			encoded.extend(encoder.encode(&frame).unwrap());
+			encoded.extend(encoder.encode_all(&frame).unwrap());
 		}
-		encoded.extend(encoder.finish().unwrap());
+		encoded.extend(encoder.flush_all().unwrap());
 		assert!(encoded.first().is_some_and(|encoded| encoded.keyframe));
 	}
 }

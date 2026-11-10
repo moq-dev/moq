@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { Duration, type Instant, Manual, now, yieldNow } from "@moq/clock";
 import { Session as Qmux, type WebSocketStreamLike } from "@moq/qmux";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
@@ -154,7 +154,12 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Milli(1000), multiplier: 2, max: Milli(1000), timeout: Milli(1) },
+		delay: {
+			initial: Duration.millis(1000),
+			multiplier: 2,
+			max: Duration.millis(1000),
+			timeout: Duration.millis(1),
+		},
 	});
 	try {
 		await clock.drive(waitFor(reload.error, (error) => error !== undefined));
@@ -199,7 +204,7 @@ test("an explicitly undefined delay field falls back to its default", async () =
 		delay: { initial: undefined, multiplier: undefined, max: undefined, timeout: null },
 	});
 	try {
-		await clock.advance(Nano.fromMilli(Milli(100)));
+		await clock.advance(Duration.millis(100));
 		// The default initial delay is 1000ms, so the first retry is still pending.
 		expect(dials).toBe(1);
 	} finally {
@@ -226,8 +231,8 @@ function present(routes: Announce.Routes): Getter<ReadonlySet<Path.Valid>> {
 
 // Polls until `pred` holds, so a regression fails the test instead of hanging it.
 async function waitUntil(pred: () => boolean): Promise<void> {
-	const deadline = Instant.add(now(), Nano.fromMilli(Milli(1000)));
-	while (now() <= deadline) {
+	const deadline = now().add(Duration.millis(1000));
+	while (now().le(deadline)) {
 		if (pred()) return;
 		await settle();
 	}
@@ -259,7 +264,7 @@ test("a follower follows the reconnect on the same handle", async () => {
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
+		delay: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
 		consume: clientOrigin,
 	});
 	const watched = clientOrigin.follow(Path.from("late"));
@@ -298,7 +303,7 @@ test("an ended auth handle gives up instead of retrying", async () => {
 	const until = async (done: () => boolean) => {
 		for (let i = 0; i < 100 && !done(); i++) {
 			await yieldNow();
-			await clock.advance(Nano.fromMilli(Milli(1)));
+			await clock.advance(Duration.millis(1));
 		}
 		expect(done()).toBe(true);
 	};
@@ -308,7 +313,7 @@ test("an ended auth handle gives up instead of retrying", async () => {
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: null },
+		delay: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
 	});
 	const warned = spyOn(console, "warn").mockImplementation(() => {});
 	try {
@@ -352,7 +357,7 @@ test("a page hide after give-up does not retry the refused URL", async () => {
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: null },
+		delay: { initial: Duration.millis(1), multiplier: 1, max: Duration.millis(1), timeout: null },
 	});
 
 	try {
@@ -397,7 +402,7 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 			enabled: true,
 			url,
 			websocket: { enabled: false },
-			delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: null },
+			delay: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
 		});
 		const watch = new Effect();
 		watch.run((effect) => {
@@ -466,7 +471,7 @@ test("a refused credential replaced since its dial redials with the new one", as
 		versions: ["moq-lite-06"],
 		websocket: { enabled: false },
 		tokens,
-		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: null },
+		delay: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
 	});
 	try {
 		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
@@ -494,7 +499,7 @@ test("new tokens redial a URL that stopped on refusing the old ones", async () =
 		versions: ["moq-lite-06"],
 		websocket: { enabled: false },
 		tokens,
-		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: null },
+		delay: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
 	});
 	try {
 		await clock.drive(waitFor(reload.error, (error) => error !== undefined));
@@ -537,7 +542,7 @@ test("an unauthorized session close during setup stops retrying", async () => {
 		url,
 		websocket: { enabled: false },
 		// Unlimited retries prove that `closed` settles only because the rejection is terminal.
-		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: null },
+		delay: { initial: Duration.millis(1), multiplier: 1, max: Duration.millis(1), timeout: null },
 	});
 
 	try {
@@ -588,7 +593,7 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 		websocket: { enabled: false },
 		// Unlimited retries, so a second attempt can only happen because the first failure
 		// was treated as retryable rather than terminal.
-		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: null },
+		delay: { initial: Duration.millis(1), multiplier: 1, max: Duration.millis(1), timeout: null },
 	});
 
 	try {
@@ -632,7 +637,7 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
+		delay: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
 		publish: publishOrigin.consume(),
 		consume: subscribeOrigin,
 	});
@@ -704,35 +709,35 @@ const teardowns = {
 	"release of the last handle": {
 		drains: true,
 		goaway: false,
-		linger: Milli(2000),
+		linger: Duration.millis(2000),
 		hide: false,
 		end: (handle: Connection) => handle.close(),
 	},
 	disable: {
 		drains: true,
 		goaway: false,
-		linger: Milli(2000),
+		linger: Duration.millis(2000),
 		hide: false,
 		end: (handle: Connection) => handle.enabled.set(false),
 	},
 	"release after a GOAWAY": {
 		drains: true,
 		goaway: true,
-		linger: Milli(0),
+		linger: Duration.millis(0),
 		hide: false,
 		end: (handle: Connection) => handle.close(),
 	},
 	pagehide: {
 		drains: false,
 		goaway: false,
-		linger: Milli(0),
+		linger: Duration.millis(0),
 		hide: false,
 		end: (_: Connection, win: EventTarget) => win.dispatchEvent(new Event("pagehide")),
 	},
 	"pagehide during a release's drain": {
 		drains: false,
 		goaway: false,
-		linger: Milli(2000),
+		linger: Duration.millis(2000),
 		hide: true,
 		end: (handle: Connection) => handle.close(),
 	},
@@ -770,7 +775,9 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 
 		// GOAWAY tuning takes a private loop; the rest share the pool, closing when the linger ends.
 		const handle = new Connection(
-			teardown.goaway ? { url, delay: { initial: Milli(0) }, goaway: { handover: Milli(60_000) } } : { url },
+			teardown.goaway
+				? { url, delay: { initial: Duration.millis(0) }, goaway: { handover: Duration.millis(60_000) } }
+				: { url },
 		);
 		await waitUntil(() => handle.origin.peek() !== undefined);
 		const origin = handle.origin.peek();
@@ -803,14 +810,14 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 			producer.finish();
 			producer.close();
 			teardown.end(handle, win);
-			await clock.advance(Nano.fromMilli(teardown.linger));
+			await clock.advance(teardown.linger);
 			if (teardown.hide) win.dispatchEvent(new Event("pagehide"));
 
 			if (teardown.drains) {
 				expect(await (await track.nextGroup())?.readString()).toBe("last");
 				await fin.hold?.reached;
 				// Just short of the close deadline, the session still waits for the FIN.
-				await clock.advance(Nano.fromMilli(Milli(999)));
+				await clock.advance(Duration.millis(999));
 				expect(fin.closed).toBe(false);
 				fin.hold?.release();
 			}
@@ -834,7 +841,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 // active session at a time, so the closing one must give it up for the replacement to dial.
 // The page going away mid-drain aborts it too, since nothing would run to finish it.
 const drainEnds = {
-	"the close deadline": (clock: Manual, _: EventTarget) => clock.advance(Nano.fromMilli(Milli(1000))),
+	"the close deadline": (clock: Manual, _: EventTarget) => clock.advance(Duration.millis(1000)),
 	pagehide: async (_: Manual, win: EventTarget) => {
 		win.dispatchEvent(new Event("pagehide"));
 	},
@@ -929,8 +936,8 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 		url: new URL("https://example.com/"),
 		websocket: { enabled: false },
 		publish: origin.consume(),
-		delay: { initial: Milli(0) },
-		goaway: { handover: Milli(100) },
+		delay: { initial: Duration.millis(0) },
+		goaway: { handover: Duration.millis(100) },
 	});
 
 	await waitUntil(() => dials.length > 0);
@@ -948,11 +955,11 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 		await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_06);
 		await waitUntil(() => dials.length === 2 && reload.status.peek() === "connected");
 
-		await clock.advance(Nano.fromMilli(Milli(90)));
+		await clock.advance(Duration.millis(90));
 		reload.close();
-		await clock.advance(Nano.fromMilli(Milli(9)));
+		await clock.advance(Duration.millis(9));
 		expect(first.closed).toBe(false);
-		await clock.advance(Nano.fromMilli(Milli(1)));
+		await clock.advance(Duration.millis(1));
 		await waitUntil(() => first.closed);
 	} finally {
 		track.close();
@@ -1026,7 +1033,7 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 
 		expect(await (await track.nextGroup())?.readString()).toBe("last");
 		await fin.hold?.reached;
-		await clock.advance(Nano.fromMilli(Milli(999)));
+		await clock.advance(Duration.millis(999));
 		expect(fin.closed).toBe(false);
 		fin.hold?.release();
 		await waitUntil(() => fin.closed);
@@ -1120,7 +1127,7 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 			enabled: true,
 			url,
 			websocket: { enabled: false },
-			delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
+			delay: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
 		};
 		const reload = viaOrigin ? new Reload({ ...props, consume: clientOrigin }) : undefined;
 		const connection = viaOrigin ? undefined : new Connection({ ...props, share: false });
@@ -1218,7 +1225,7 @@ async function elapse(clock: Manual, pred: () => boolean): Promise<number> {
 	const start = clock.now();
 	for (;;) {
 		for (let i = 0; i < 3 && !pred(); i++) await settle();
-		if (pred()) return Nano.toMilli(Instant.durationSince(clock.now(), start));
+		if (pred()) return clock.now().since(start).asMillis();
 		await clock.fire();
 	}
 }
@@ -1264,8 +1271,8 @@ test("an attempt that outlives the connect timeout is retried after the backoff"
 	const reload = new Reload({
 		url,
 		websocket: { enabled: false },
-		timeout: Milli(50),
-		delay: { initial: Milli(20) },
+		timeout: Duration.millis(50),
+		delay: { initial: Duration.millis(20) },
 	});
 	const unsubscribe = reload.status.subscribe((status) => statuses.push(status));
 	try {
@@ -1291,11 +1298,26 @@ test("an attempt that outlives the connect timeout is retried after the backoff"
 // moq-tokio's does, and no attempt starts once it has passed.
 const windows: [string, ReloadDelay, number, number][] = [
 	// Dials at 0, 40, and 80; the last runs past the window and gives up when it fails.
-	["an attempt under way finishes past the window", { initial: Milli(10), timeout: Milli(100) }, 110, 3],
+	[
+		"an attempt under way finishes past the window",
+		{ initial: Duration.millis(10), timeout: Duration.millis(100) },
+		110,
+		3,
+	],
 	// The first failure at 30 ms leaves 30 ms, less than the 50 ms wait, so it gives up at the deadline.
-	["a wait that reaches the deadline gives up there", { initial: Milli(50), timeout: Milli(60) }, 60, 1],
+	[
+		"a wait that reaches the deadline gives up there",
+		{ initial: Duration.millis(50), timeout: Duration.millis(60) },
+		60,
+		1,
+	],
 	// Zero is a real bound, not "unlimited": the first failure at 30 ms gives up.
-	["a zero window gives up when the first attempt fails", { initial: Milli(10), timeout: Milli(0) }, 30, 1],
+	[
+		"a zero window gives up when the first attempt fails",
+		{ initial: Duration.millis(10), timeout: Duration.ZERO },
+		30,
+		1,
+	],
 ];
 for (const [name, delay, gaveUp, dials] of windows) {
 	test(`retry window: ${name}`, async () => {
@@ -1309,8 +1331,8 @@ for (const [name, delay, gaveUp, dials] of windows) {
 		const reload = new Reload({
 			url,
 			websocket: { enabled: false },
-			timeout: Milli(30),
-			delay: { multiplier: 1, max: Milli(1000), ...delay },
+			timeout: Duration.millis(30),
+			delay: { multiplier: 1, max: Duration.millis(1000), ...delay },
 		});
 		try {
 			await waitUntil(() => plan.dials() === 1);
@@ -1340,16 +1362,21 @@ test("retry window: a backoff that fires past the window gives up", async () => 
 	const reload = new Reload({
 		url,
 		websocket: { enabled: false },
-		timeout: Milli(30),
-		delay: { initial: Milli(10), multiplier: 1, max: Milli(1000), timeout: Milli(100) },
+		timeout: Duration.millis(30),
+		delay: {
+			initial: Duration.millis(10),
+			multiplier: 1,
+			max: Duration.millis(1000),
+			timeout: Duration.millis(100),
+		},
 	});
 	try {
 		await waitUntil(() => plan.dials() === 1);
 		// The first attempt times out at 30 ms and schedules the next dial for 40 ms.
-		await clock.advance(Nano.fromMilli(Milli(30)));
+		await clock.advance(Duration.millis(30));
 		for (let i = 0; i < 3; i++) await settle();
 		expect(reload.error.peek()).toBeUndefined();
-		clock.jump(Nano.fromMilli(Milli(200)));
+		clock.jump(Duration.millis(200));
 		for (let i = 0; i < 3; i++) await settle();
 		expect(reload.error.peek()).toBeInstanceOf(ConnectTimeout);
 		expect(plan.dials()).toBe(1);
@@ -1362,24 +1389,20 @@ test("retry window: a backoff that fires past the window gives up", async () => 
 	}
 });
 
-test("an invalid timeout is refused when the loop is built, not by every attempt", () => {
-	for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
-		expect(() => new Reload({ url: new URL("https://example.com/"), timeout: timeout as Milli })).toThrow(
-			RangeError,
-		);
-	}
-});
-
 // Each session lives 100 ms, so the backoff between them shows how `healthy` scores its end and
 // how `max` caps the delay, matching moq-tokio's `connect.backoff`.
 const backoffs: [string, ReloadDelay, number[]][] = [
 	// Past `initial` but short of the default bar, so each end is a failed attempt.
 	["a session short of the default healthy bar escalates", {}, [10, 20, 40]],
-	["a session past the healthy bar resets", { healthy: Milli(50) }, [10, 10, 10]],
-	["a null max leaves the delay uncapped", { initial: Milli(1000), multiplier: 4, max: null }, [1000, 4000, 16000]],
-	["a max below initial caps the first delay too", { max: Milli(5) }, [5, 5, 5]],
+	["a session past the healthy bar resets", { healthy: Duration.millis(50) }, [10, 10, 10]],
+	[
+		"a null max leaves the delay uncapped",
+		{ initial: Duration.millis(1000), multiplier: 4, max: null },
+		[1000, 4000, 16000],
+	],
+	["a max below initial caps the first delay too", { max: Duration.millis(5) }, [5, 5, 5]],
 	// Zero is a real cap, not "uncapped".
-	["a zero max retries at once", { max: Milli(0) }, [0, 0, 0]],
+	["a zero max retries at once", { max: Duration.ZERO }, [0, 0, 0]],
 	["a zero multiplier keeps the delay constant", { multiplier: 0 }, [10, 10, 10]],
 	["a fractional multiplier below 1 keeps the delay constant", { multiplier: 0.5 }, [10, 10, 10]],
 ];
@@ -1401,13 +1424,13 @@ for (const [name, delay, gaps] of backoffs) {
 		const reload = new Reload({
 			url,
 			websocket: { enabled: false },
-			delay: { initial: Milli(10), multiplier: 2, max: Milli(1000), ...delay },
+			delay: { initial: Duration.millis(10), multiplier: 2, max: Duration.millis(1000), ...delay },
 		});
 		try {
 			const waited: number[] = [];
 			for (let session = 0; session < gaps.length; session++) {
 				await waitUntil(() => reload.status.peek() === "connected");
-				await clock.advance(Nano.fromMilli(Milli(100)));
+				await clock.advance(Duration.millis(100));
 				(await servers[session])?.abort();
 				waited.push(await elapse(clock, () => servers.length === session + 2));
 			}
@@ -1441,7 +1464,7 @@ test("backoff: an uncapped delay saturates instead of overflowing", async () => 
 	const reload = new Reload({
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Milli(10), multiplier: 1e300, max: null },
+		delay: { initial: Duration.millis(10), multiplier: 1e300, max: null },
 	});
 	try {
 		for (let session = 0; session < 2; session++) {
@@ -1463,17 +1486,14 @@ test("backoff: an uncapped delay saturates instead of overflowing", async () => 
 });
 
 test("a delay field with no meaning is refused when the loop is built", () => {
-	const bad = [-1, Number.NaN, Number.POSITIVE_INFINITY] as Milli[];
 	const invalid: ReloadDelay[] = [
 		// Zero would count every session as healthy.
-		{ healthy: Milli(0) },
-		// `null` spells an uncapped `max` and an unlimited `timeout`, so infinity has no meaning here.
-		...bad.flatMap((value) => [{ initial: value }, { max: value }, { healthy: value }, { timeout: value }]),
+		{ healthy: Duration.ZERO },
 		{ multiplier: Number.NaN },
 		{ multiplier: Number.POSITIVE_INFINITY },
 	];
 	for (const delay of invalid) {
-		expect(() => new Reload({ url: new URL("https://example.com/"), delay }), JSON.stringify(delay)).toThrow(
+		expect(() => new Reload({ url: new URL("https://example.com/"), delay }), String(Object.keys(delay))).toThrow(
 			RangeError,
 		);
 	}
@@ -1546,26 +1566,26 @@ test("a WebSocket fallback returns to WebTransport once it is reachable", async 
 	});
 
 	const statuses: string[] = [];
-	const reload = new Reload({ url, versions: [Lite.ALPN_06], delay: { initial: Milli(0) } });
+	const reload = new Reload({ url, versions: [Lite.ALPN_06], delay: { initial: Duration.ZERO } });
 	const watch = new Effect();
 	watch.subscribe(reload.status, (status) => statuses.push(status));
 	try {
 		// The fallback joins the race after WebTransport's head start.
 		for (let i = 0; i < 10 && reload.established.peek()?.transport !== "websocket"; i++) {
-			await clock.advance(Nano.fromMilli(Milli(100)));
+			await clock.advance(Duration.millis(100));
 		}
 		expect(reload.established.peek()?.transport).toBe("websocket");
 		const fallback = sessions[0];
 		if (!fallback) throw new Error("no fallback session");
 
 		// Every probe fails while WebTransport is unreachable; the fallback keeps serving.
-		await clock.advance(Nano.fromMilli(Milli(70_000)));
+		await clock.advance(Duration.millis(70_000));
 		expect(reload.established.peek()?.transport).toBe("websocket");
 
 		blocked = false;
 		// Past the fourth probe's longest wait after the third.
 		for (let i = 0; i < 80 && reload.established.peek()?.transport !== "webtransport"; i++) {
-			await clock.advance(Nano.fromMilli(Milli(1_000)));
+			await clock.advance(Duration.millis(1_000));
 		}
 		expect(reload.established.peek()?.transport).toBe("webtransport");
 		// The probe's session carries the replacement: one WebTransport dial, never another race.
@@ -1603,23 +1623,23 @@ test("a WebSocket session ending restores WebTransport's head start", async () =
 		servers.push(transport.ready.then(() => accept(transport, url)));
 	});
 
-	const reload = new Reload({ url, versions: [Lite.ALPN_06], delay: { initial: Milli(0) } });
+	const reload = new Reload({ url, versions: [Lite.ALPN_06], delay: { initial: Duration.ZERO } });
 	try {
 		for (let i = 0; i < 10 && reload.established.peek()?.transport !== "websocket"; i++) {
-			await clock.advance(Nano.fromMilli(Milli(100)));
+			await clock.advance(Duration.millis(100));
 		}
 		const first = servers[0];
 		if (!first) throw new Error("no fallback session");
 		// Let the server's half of the handshake finish before ending it.
-		await clock.advance(Nano.fromMilli(Milli(100)));
+		await clock.advance(Duration.millis(100));
 		(await first).abort();
 		const ended = now();
 		for (let i = 0; i < 20 && dials.length < 2; i++) {
-			await clock.advance(Nano.fromMilli(Milli(100)));
+			await clock.advance(Duration.millis(100));
 		}
 		const redial = dials[1];
 		if (redial === undefined) throw new Error("never redialed the fallback");
-		expect(Instant.durationSince(redial, ended)).toBeGreaterThanOrEqual(Nano.fromMilli(Milli(500)));
+		expect(redial.since(ended).ge(Duration.millis(500))).toBe(true);
 	} finally {
 		reload.close();
 		for (const server of servers) (await server.catch(() => undefined))?.abort();
