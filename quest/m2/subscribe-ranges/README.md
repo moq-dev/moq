@@ -100,6 +100,12 @@ This line owns the end-to-end test: a relay with a sparse cache answers a
 wide past range plus live in both orders, over lite-07 and moq-transport, with
 every sequence delivered or dropped.
 
+## Required
+
+- [JS head fills and time lookups](/quest/m2/subscribe-ranges/js-fills.md) - JS readers fill a cached group's missing head before handing it out, and look a time start up through `Fill.time`
+- [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups, in Rust, JS, and the draft, with JS multi-group fills moving onto the subscription
+- [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - what each lite cursor is owed and dropped lives in the model, and `TrackRun` only translates it per version
+
 ## Related
 
 - [Rust groups by start](/quest/m2/time-addressing/model.md) - the cut reworks `Absolute(group)` ends and sequence-range drops onto times

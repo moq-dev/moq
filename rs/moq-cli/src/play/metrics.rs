@@ -5,7 +5,8 @@
 //! and meanings, so its analyzer reduces a native run exactly as it does a
 //! browser one. Durations are milliseconds as floats. `at` is this process's
 //! monotonic clock from the first sample, `render` the device's clock, and
-//! `timestamp` the media clock; fields this player cannot read are left out
+//! `timestamp` the media clock, with `clock` where the presentation clock video
+//! plays from stands on it at the same instant; fields this player cannot read are left out
 //! rather than written as zero. `comfort` and `utterances` have no browser
 //! counterpart: they show how a declared silence played, for push-to-talk.
 
@@ -38,6 +39,8 @@ struct Sample {
 	render: Option<f64>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	timestamp: Option<f64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	clock: Option<f64>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	stalled: Option<bool>,
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -241,11 +244,13 @@ impl Metrics {
 		// Read straight after the device clock, so the two pair up.
 		let now = Instant::now();
 		let (playhead, delay) = (self.playhead.at(now), self.presentation.delay());
+		let clock = self.presentation.position(now);
 
 		let sample = Sample {
 			at: ms(now.duration_since(self.start)),
 			render: observation.as_ref().map(|_| ms(totals.clock)),
 			timestamp: playhead.map(ms),
+			clock: clock.map(ms),
 			stalled: observation.as_ref().map(|(o, _)| o.stalled),
 			delay: Some(ms(delay)),
 			output_latency: observation.as_ref().and_then(|(o, _)| o.latency).map(ms),

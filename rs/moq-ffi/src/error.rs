@@ -39,8 +39,6 @@ pub enum MoqProtocolKind {
 	Version,
 	/// The content missed its delivery deadline.
 	DeliveryTimeout,
-	/// The session ended, taking this stream with it.
-	SessionClosed,
 	/// The session is going away (a GOAWAY was received).
 	GoingAway,
 	/// The reader fell too far behind and content was dropped to catch up.
@@ -156,7 +154,6 @@ fn session_kind(err: &moq_net::SessionError) -> MoqProtocolKind {
 
 fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 	match err {
-		moq_net::StreamError::Session(_) => MoqProtocolKind::SessionClosed,
 		moq_net::StreamError::Internal => MoqProtocolKind::Internal,
 		moq_net::StreamError::Cancel => MoqProtocolKind::Cancel,
 		moq_net::StreamError::DeliveryTimeout => MoqProtocolKind::DeliveryTimeout,
@@ -280,7 +277,7 @@ pub enum MoqError {
 	#[error("cancelled")]
 	Cancelled,
 
-	/// The handle or connection is closed.
+	/// The handle or connection is closed, or the session behind it ended, here or at a peer.
 	#[error("closed")]
 	Closed,
 
@@ -425,11 +422,12 @@ impl From<moq_net::Error> for MoqError {
 				reason: "transport idle timeout".into(),
 			},
 			moq_net::Error::NotFound => Self::NotFound,
-			// A track whose own session closed aborts its open groups with this; a remote
-			// SESSION_CLOSED decodes as `Internal`, so only the local close lands here.
+			// The session behind a track or group ended, here or at a peer: a clean session
+			// close, or a SESSION_CLOSED reset, which carries no reason to report.
 			moq_net::Error::Closed
 			| moq_net::Error::GoingAway
-			| moq_net::Error::Stream(moq_net::StreamError::Session(moq_net::SessionError::Cancel)) => Self::Closed,
+			| moq_net::Error::Session(moq_net::SessionError::Cancel)
+			| moq_net::Error::Stream(moq_net::StreamError::Session(_)) => Self::Closed,
 			moq_net::Error::Cancel => Self::Cancelled,
 			moq_net::Error::Unauthorized => Self::Unauthorized,
 			moq_net::Error::Expired => Self::Expired,
@@ -624,7 +622,8 @@ mod tests {
 
 	#[test]
 	fn received_known_codes_keep_their_registry() {
-		for code in [0, 1, 2, 3, 6, 0x10, 0x11, 0x15, 0x20, 468, u32::MAX] {
+		// A clean session close and SESSION_CLOSED read as `Closed` instead.
+		for code in [1, 2, 3, 6, 0x10, 0x11, 0x15, 0x20, 468, u32::MAX] {
 			let MoqError::Protocol { details } =
 				MoqError::from(moq_net::Error::from(moq_net::SessionError::from_code(code)))
 			else {
@@ -633,7 +632,7 @@ mod tests {
 			assert_eq!(details.scope, MoqErrorScope::Session);
 			assert_eq!(details.code, code);
 		}
-		for code in [0, 1, 2, 3, 4, 5, 0x12, 0x20, 468, u32::MAX] {
+		for code in [0, 1, 2, 4, 5, 0x12, 0x20, 468, u32::MAX] {
 			let MoqError::Protocol { details } =
 				MoqError::from(moq_net::Error::from(moq_net::StreamError::from_code(code)))
 			else {
@@ -753,17 +752,25 @@ mod tests {
 		}
 	}
 
-	/// A group cut by its own session closing is a shutdown; one reset by a peer is not.
+	/// A session ending reads as a shutdown whichever side closed it, while a session that
+	/// failed keeps its reason.
 	#[test]
-	fn local_session_close_is_closed() {
-		let local = moq_net::StreamError::Session(moq_net::SessionError::Cancel);
-		assert!(matches!(MoqError::from(moq_net::Error::from(local)), MoqError::Closed));
+	fn a_closed_session_is_closed_on_either_side() {
+		for ended in [
+			moq_net::Error::from(moq_net::StreamError::Session(moq_net::SessionError::Cancel)),
+			moq_net::Error::from(moq_net::StreamError::from_code(0x3)),
+			moq_net::Error::from(moq_net::SessionError::Cancel),
+			moq_net::Error::from(moq_net::SessionError::from_code(0x0)),
+		] {
+			assert!(matches!(MoqError::from(ended.clone()), MoqError::Closed), "{ended:?}");
+		}
 
-		let received = moq_net::StreamError::from_code(0x3);
-		let MoqError::Protocol { details } = MoqError::from(moq_net::Error::from(received)) else {
-			panic!("a peer's SESSION_CLOSED lost its code");
+		let failed = moq_net::Error::from(moq_net::SessionError::Unauthorized);
+		let MoqError::Protocol { details } = MoqError::from(failed) else {
+			panic!("a failed session lost its code");
 		};
-		assert_eq!(details.kind, MoqProtocolKind::SessionClosed);
+		assert_eq!(details.scope, MoqErrorScope::Session);
+		assert_eq!(details.kind, MoqProtocolKind::Unauthorized);
 	}
 
 	#[test]

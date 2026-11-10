@@ -105,6 +105,15 @@ the third, and survives a relay restart.
 
 - [Outbound federation](/quest/m2/cluster-routing/federation.md) - a local relay dials its relays and prefers LAN peers
 - [Byte streams](/quest/m3/stream/README.md) - lossless TCP-level streams over MoQ
+- [Endpoint API](/quest/m3/mesh/endpoint.md) - an iroh-shaped `Endpoint` that connects to an endpoint ID and service and accepts byte streams
+- [Mesh relay node](/quest/m3/mesh/node.md) - a relay node enrolls into a mesh, dials its relays, and admits only enrolled LAN peers
+- [Mesh enrollment is bounded and revocation takes effect](/quest/m3/mesh/device-bounds.md) - a reusable key enrolls at most its own use budget and a revoked device loses access within a bounded time
+- [Certificate credentials](/quest/m3/mesh/cert-credentials.md) - a certificate chain and a proof signature stand in for a JWT, checked against a trust store the application swaps live
+- [Address hints](/quest/m3/mesh/addr.md) - nodes publish their addresses on mesh tracks and dial each other directly where mDNS cannot find them
+- [Sparse overlay](/quest/m3/mesh/overlay.md) - each node keeps about log N deterministic direct links, forwards for the rest, and falls back to relays across a partition
+- [JS mesh enrollment client](/quest/m3/mesh/js-enroll.md) - `@moq/auth` enrolls and refreshes from JS like `moq_auth::mesh::Client`
+- [Status track](/quest/m3/mesh/status.md) - a signed `.status` track per node with its links and per-link RTTs
+- [Mesh library guide](/quest/m3/mesh/guide.md) - the doc.moq.dev page for the libraries, the contract, and porting from iroh
 
 ## Related
 

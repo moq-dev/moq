@@ -39,6 +39,10 @@ Previous run, with its per-crate and per-package baselines:
 - Sample `fix` commits for regression tests, counting `#[kio::test]`.
 - Whether [interop bindings](/quest/m4/interop-bindings.md) and
   [GPU CI](/quest/m3/gpu-ci.md) landed, before re-auditing the tests they own.
+- Each TLA+ model's `verify-*` skill against the code it covers: run
+  `/maintain-formal-verification-skill` on every one whose Coverage files
+  changed since its sync commit, so a change that skipped review is resynced
+  (decided 2026-11-10, [nightly models](/quest/m1/model-checks-nightly.md)).
 
 ## Required
 
