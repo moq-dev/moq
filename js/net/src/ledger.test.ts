@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { Duration, Instant } from "@moq/clock";
 import { Ledger } from "./ledger.ts";
 
-const at = (ms: number) => Instant.ZERO.add(Duration.millis(ms));
+const at = (ms: number) => Instant.ZERO.saturatingAdd(Duration.millis(ms));
 
 test("overlapping and adjacent ranges merge without changing surviving gap ages", () => {
 	const ledger = new Ledger();

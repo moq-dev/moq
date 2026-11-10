@@ -39,6 +39,8 @@ const NANOS_PER_SEC = 1_000_000_000;
 export class Duration {
 	/** No time at all. */
 	static readonly ZERO: Duration = new Duration(0, 0);
+	// The longest representable duration, which a saturating sum stops at.
+	static readonly #MAX: Duration = new Duration(Number.MAX_VALUE, NANOS_PER_SEC - 1);
 
 	/** @internal Whole seconds. */
 	readonly [VALUE]: number;
@@ -75,6 +77,13 @@ export class Duration {
 	// Whole seconds plus any nanoseconds, possibly out of range or fractional seconds, rounded to
 	// whole nanoseconds as Rust's are, so a value's conversions agree with its ordering.
 	static #carry(secs: number, nanos: number): Duration {
+		const out = Duration.#tryCarry(secs, nanos);
+		if (out === undefined) throw new RangeError(`invalid duration: ${secs}s + ${nanos}ns`);
+		return out;
+	}
+
+	// `#carry`, or `undefined` when the result is negative or past the longest duration.
+	static #tryCarry(secs: number, nanos: number): Duration | undefined {
 		let whole = Math.floor(secs);
 		let rest = Math.round((secs - whole) * NANOS_PER_SEC + nanos);
 		const carry = Math.floor(rest / NANOS_PER_SEC);
@@ -87,9 +96,7 @@ export class Duration {
 			whole -= 1;
 			rest += NANOS_PER_SEC;
 		}
-		if (!Number.isFinite(whole) || !Number.isFinite(rest) || whole < 0) {
-			throw new RangeError(`invalid duration: ${secs}s + ${nanos}ns`);
-		}
+		if (!Number.isFinite(whole) || !Number.isFinite(rest) || whole < 0) return undefined;
 		return new Duration(whole, rest);
 	}
 
@@ -140,7 +147,22 @@ export class Duration {
 
 	/** The sum of both durations. */
 	add(other: Duration): Duration {
-		return Duration.#carry(this[VALUE] + other[VALUE], this[NANOS] + other[NANOS]);
+		const sum = this.checkedAdd(other);
+		if (sum === undefined) throw new RangeError("duration overflow");
+		return sum;
+	}
+
+	/** The sum of both durations, or `undefined` past the longest representable duration. */
+	checkedAdd(other: Duration): Duration | undefined {
+		const sum = Duration.#tryCarry(this[VALUE] + other[VALUE], this[NANOS] + other[NANOS]);
+		// Near the ceiling a carried second rounds away, which would shrink the sum below an operand.
+		if (sum === undefined || sum.lt(this) || sum.lt(other)) return undefined;
+		return sum;
+	}
+
+	/** The sum of both durations, stopping at the longest representable duration. */
+	saturatingAdd(other: Duration): Duration {
+		return this.checkedAdd(other) ?? Duration.#MAX;
 	}
 
 	/** This duration minus `other`; throws a `RangeError` if `other` is longer. */
@@ -248,11 +270,16 @@ export class Duration {
  * A point on the installed clock's monotonic timeline, mirroring `kio::clock::Instant`.
  *
  * Instants are only comparable within one clock. The host clock's origin is the realm's
- * performance time origin, so a DOM timestamp `t` is `Instant.ZERO.add(Duration.millis(t))`.
+ * performance time origin, so a DOM timestamp `t` is `Instant.ZERO.saturatingAdd(Duration.millis(t))`.
+ *
+ * Moving one by a `Duration` has no throwing form: each caller picks `checked` or `saturating`,
+ * so a duration past the clock's range is handled rather than thrown.
  */
 export class Instant {
 	/** The clock's origin. */
 	static readonly ZERO: Instant = new Instant(0);
+	// The last instant the clock can represent, which a deadline past its range saturates to.
+	static readonly #MAX: Instant = new Instant(Number.MAX_VALUE);
 
 	/** @internal Nanoseconds since the origin. */
 	readonly [VALUE]: number;
@@ -267,14 +294,26 @@ export class Instant {
 		instantNanos = (at) => at[VALUE];
 	}
 
-	/** This instant moved forward by `duration`. */
-	add(duration: Duration): Instant {
-		return new Instant(checked(this[VALUE] + duration.asNanos(), "instant"));
+	/** This instant moved forward by `duration`, or `undefined` past the clock's range. */
+	checkedAdd(duration: Duration): Instant | undefined {
+		const nanos = this[VALUE] + duration.asNanos();
+		return Number.isFinite(nanos) ? new Instant(nanos) : undefined;
 	}
 
-	/** This instant moved back by `duration`; throws a `RangeError` before the clock's origin. */
-	sub(duration: Duration): Instant {
-		return new Instant(checked(this[VALUE] - duration.asNanos(), "instant"));
+	/** This instant moved back by `duration`, or `undefined` before the clock's origin. */
+	checkedSub(duration: Duration): Instant | undefined {
+		const nanos = this[VALUE] - duration.asNanos();
+		return nanos >= 0 ? new Instant(nanos) : undefined;
+	}
+
+	/** This instant moved forward by `duration`, stopping at the clock's last instant. */
+	saturatingAdd(duration: Duration): Instant {
+		return this.checkedAdd(duration) ?? Instant.#MAX;
+	}
+
+	/** This instant moved back by `duration`, stopping at the clock's origin. */
+	saturatingSub(duration: Duration): Instant {
+		return this.checkedSub(duration) ?? Instant.ZERO;
 	}
 
 	/** The time from `earlier` to this instant, zero if `earlier` is later. */
