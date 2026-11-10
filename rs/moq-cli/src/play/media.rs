@@ -760,10 +760,12 @@ async fn play_audio<O: Output>(
 				}
 				_ => None,
 			};
-			received
-				.lock()
-				.unwrap()
-				.push_back((event, delay, crossing, Instant::now()));
+			received.lock().unwrap().push_back((
+				event,
+				delay,
+				crossing,
+				consumer.arrival().unwrap_or_else(Instant::now),
+			));
 			arrived.notify_one();
 			if ended {
 				return Ok::<_, anyhow::Error>(());
@@ -1188,8 +1190,8 @@ mod tests {
 		);
 	}
 
-	/// How long after it arrives the first packet sounds, holding `min` as the
-	/// jitter target within a `max` budget, plus a catalog and a video delay.
+	/// How long after it arrives the first packet of a live track sounds, holding
+	/// `min` as the jitter target within a `max` budget, plus a catalog and a video delay.
 	async fn first_sound(min: Duration, max: Duration, catalog: Option<Duration>, video: Option<Duration>) -> Duration {
 		tokio::time::pause();
 		let broadcast = moq_net::broadcast::Info::new().produce();
@@ -1239,7 +1241,12 @@ mod tests {
 				.await;
 		});
 		let start = Instant::now();
-		for index in 0..5 {
+		// Live, then a burst the track's end releases at once.
+		for index in 0..60 {
+			producer.write(packet(index, 0.25)).unwrap();
+			kio::clock::sleep(PACKET_DURATION).await;
+		}
+		for index in 60..65 {
 			producer.write(packet(index, 0.25)).unwrap();
 		}
 		producer.finish().unwrap();

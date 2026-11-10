@@ -165,8 +165,12 @@ pub struct Consumer {
 	target: Target,
 	/// Where arrival times are measured from.
 	origin: Instant,
-	/// Packets read and observed but not yet decoded, held by the [`Backpressure`] gate.
-	pending: VecDeque<Encoded>,
+	/// Packets read and observed but not yet decoded, held by the [`Backpressure`] gate,
+	/// each with when it arrived, and how many of them are gaps or ends.
+	pending: VecDeque<(Encoded, kio::clock::Instant)>,
+	breaks: usize,
+	/// When the latest packet decoded arrived.
+	arrived: Option<kio::clock::Instant>,
 	/// The track ended, or failed with this error, behind whatever is pending.
 	ended: Option<Option<Error>>,
 	/// The gate, while its [`Backpressure`] handle lives.
@@ -177,13 +181,6 @@ pub struct Consumer {
 	frame: Duration,
 	/// The group of the latest end read, until a later group or a loss arrives.
 	declared: Option<u64>,
-}
-
-/// Whether a pending packet may decode.
-enum Admit {
-	Now,
-	At(kio::clock::Instant),
-	Wait,
 }
 
 struct ActivitySpan {
@@ -294,6 +291,8 @@ impl Consumer {
 			terminal_start: None,
 			origin: now(),
 			pending: VecDeque::new(),
+			breaks: 0,
+			arrived: None,
 			ended: None,
 			gate: None,
 			boundary: None,
@@ -348,6 +347,12 @@ impl Consumer {
 		let (backpressure, gate) = Backpressure::new();
 		self.gate = Some(gate);
 		backpressure
+	}
+
+	/// When the packet behind the latest decoded frame arrived, which a gate held
+	/// encoded may have kept well before [`read`](Self::read) handed the frame over.
+	pub fn arrival(&self) -> Option<kio::clock::Instant> {
+		self.arrived
 	}
 
 	/// Read decoded PCM or a track boundary, or `None` when the track ends.
@@ -570,12 +575,11 @@ impl Consumer {
 			// Read before judging the head, so any update after that wakes the wait.
 			let seen = self.gate.as_ref().map_or(0, |gate| gate.read().version);
 			let deadline = match self.pending.front() {
-				Some(Encoded::Frame { frame, .. }) => match self.admit(frame.timestamp.into()) {
-					Admit::Now => return Ok(self.pending.pop_front()),
-					Admit::At(at) => Some(at),
-					Admit::Wait => None,
+				Some((Encoded::Frame { frame, .. }, arrived)) => match self.admit(frame.timestamp.into(), *arrived) {
+					None => return Ok(self.pop()),
+					due => due,
 				},
-				Some(_) => return Ok(self.pending.pop_front()),
+				Some(_) => return Ok(self.pop()),
 				None => match self.ended.as_mut() {
 					Some(failed) => return failed.take().map_or(Ok(None), Err),
 					None => None,
@@ -628,12 +632,16 @@ impl Consumer {
 					}
 					// Every packet the container hands over is an arrival, including one the
 					// decoder will refuse, so it is observed before anything can fail.
-					if let Encoded::Frame { frame, .. } = &read {
-						let arrival = jitter::millis(now().duration_since(self.origin));
-						let media = frame.timestamp.value() as f64 * 1000.0 / frame.timestamp.scale().as_u64() as f64;
-						self.target.observe(arrival, media);
+					match &read {
+						Encoded::Frame { frame, .. } => {
+							let arrival = jitter::millis(now().duration_since(self.origin));
+							let media =
+								frame.timestamp.value() as f64 * 1000.0 / frame.timestamp.scale().as_u64() as f64;
+							self.target.observe(arrival, media);
+						}
+						_ => self.breaks += 1,
 					}
-					self.pending.push_back(read);
+					self.pending.push_back((read, kio::clock::Instant::now()));
 				}
 				Some(Ok(None)) => self.ended = Some(None),
 				Some(Err(err)) => self.ended = Some(Some(err.into())),
@@ -642,52 +650,52 @@ impl Consumer {
 		}
 	}
 
-	/// Whether the pending packet at `timestamp` may decode now, and if not, when it may.
-	fn admit(&self, timestamp: Duration) -> Admit {
-		let Some(gate) = self.gate.as_ref().filter(|gate| !gate.is_closed()) else {
-			return Admit::Now;
-		};
+	/// Take the oldest pending packet or boundary.
+	fn pop(&mut self) -> Option<Encoded> {
+		let (read, arrived) = self.pending.pop_front()?;
+		match read {
+			Encoded::Frame { .. } => self.arrived = Some(arrived),
+			_ => self.breaks -= 1,
+		}
+		Some(read)
+	}
+
+	/// When the pending packet at `timestamp`, which arrived at `arrived`, may decode, or
+	/// `None` if it may now.
+	fn admit(&self, timestamp: Duration, arrived: kio::clock::Instant) -> Option<kio::clock::Instant> {
+		let gate = self.gate.as_ref().filter(|gate| !gate.is_closed())?;
 		let state = gate.read();
 		if state.hold.is_zero() || self.ended.is_some() {
-			return Admit::Now;
+			return None;
 		}
 		// Media queued behind the packet covers the hold, or nothing more continues it.
-		let mut queued = self.pending.iter().skip(1).rev();
-		let covered = match queued.next() {
-			Some(Encoded::Frame { frame, .. }) => {
-				Duration::from(frame.timestamp) >= timestamp + state.hold
-					|| queued.any(|read| !matches!(read, Encoded::Frame { .. }))
-			}
-			Some(_) => true,
-			None => false,
-		};
+		let covered = self.breaks > 0
+			|| matches!(self.pending.back(), Some((Encoded::Frame { frame, .. }, _))
+				if Duration::from(frame.timestamp) >= timestamp + state.hold);
 		if covered {
-			return Admit::Now;
+			return None;
 		}
 
+		// A packet waits at most the hold, which bounds what the gate keeps by arrival time,
+		// whatever the timestamps say.
+		let mut due = arrived.checked_add(state.hold);
 		let boundary = self.boundary;
-		let Some((playhead, at)) = state
+		if let Some((playhead, at)) = state
 			.playhead
 			.filter(|(playhead, _)| boundary.is_none_or(|boundary| *playhead > boundary))
-		else {
-			return Admit::Wait;
-		};
-		// Due once the playhead is within the floor of where this packet's output ends.
-		let end = timestamp + self.frame;
-		let reach = playhead + state.floor;
-		let due = match end.checked_sub(reach) {
-			Some(ahead) => at.checked_add(ahead),
-			// Before the clock's origin is long past.
-			None => match at.checked_sub(reach - end) {
-				Some(due) => Some(due),
-				None => return Admit::Now,
-			},
-		};
-		match due {
-			Some(due) if due > kio::clock::Instant::now() => Admit::At(due),
-			Some(_) => Admit::Now,
-			None => Admit::Wait,
+		{
+			// Due once the playhead is within the floor of where this packet's output ends.
+			let end = timestamp + self.frame;
+			let reach = playhead + state.floor;
+			let played = match end.checked_sub(reach) {
+				Some(ahead) => at.checked_add(ahead),
+				// Before the clock's origin is long past, so it decodes now.
+				None => Some(at.checked_sub(reach - end)?),
+			};
+			due = due.into_iter().chain(played).min();
 		}
+		// Past the clock's range never comes, so decode now rather than hold it forever.
+		due.filter(|due| *due > kio::clock::Instant::now())
 	}
 
 	/// Start a new timeline after a gap or past a declared end. The decoder is not reset:
@@ -2094,8 +2102,9 @@ mod tests {
 	}
 
 	/// Backpressure holds packets encoded while still reading and timing every one:
-	/// stalled, a packet decodes once the media behind it covers the hold, and with
-	/// a playhead, once that is within the floor of where the packet ends.
+	/// stalled, a packet decodes once the media behind it covers the hold, with a
+	/// playhead, once that is within the floor of where the packet ends, and either
+	/// way once it has waited the hold, whatever its timestamp says.
 	#[tokio::test(start_paused = true)]
 	async fn backpressure_holds_packets_encoded_until_the_ring_has_room() {
 		const PACKET: Duration = Duration::from_millis(20);
@@ -2123,7 +2132,7 @@ mod tests {
 		.await
 		.unwrap();
 		let backpressure = consumer.backpressure();
-		backpressure.set_latency(Duration::from_millis(100), Duration::from_millis(200));
+		backpressure.set_latency(Duration::from_millis(100), Duration::from_secs(2));
 
 		let payload: Bytes = vec![0u8; 960 * size_of::<f32>()].into();
 		let mut write = |index: u32| {
@@ -2149,7 +2158,7 @@ mod tests {
 		}
 		assert_eq!(read(&mut consumer, Duration::from_secs(1)).await, None);
 		assert_eq!(consumer.pending.len(), 10, "every packet is read and held encoded");
-		write(10);
+		write(100);
 		assert_eq!(read(&mut consumer, Duration::ZERO).await, Some(Duration::ZERO));
 
 		// The first packet ends sounding in half a second, so the next one, ending
@@ -2161,13 +2170,19 @@ mod tests {
 		assert_eq!(read(&mut consumer, Duration::from_millis(419)).await, None);
 		assert_eq!(read(&mut consumer, Duration::from_millis(1)).await, Some(PACKET));
 
+		// With the playhead far off, the next packet waits out the hold from its arrival.
+		let far = kio::clock::Instant::now().checked_add(Duration::from_secs(10)).unwrap();
+		backpressure.observe(Timestamp::try_from(PACKET * 2).unwrap(), far);
+		assert_eq!(read(&mut consumer, Duration::from_millis(579)).await, None);
+		assert_eq!(read(&mut consumer, Duration::from_millis(1)).await, Some(PACKET * 2));
+
 		// The track's end leaves nothing to wait for.
 		producer.finish().unwrap();
 		let mut rest = 0;
 		while next_frame(&mut consumer).await.unwrap().is_some() {
 			rest += 1;
 		}
-		assert_eq!(rest, 9);
+		assert_eq!(rest, 8);
 	}
 
 	/// A packet that doesn't continue the last one is a hole, not a splice: the
