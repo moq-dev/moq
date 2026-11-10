@@ -34,17 +34,21 @@ Reproduction attempts, all on 2026-11-09, all passing:
 - The root JS set (`api`, `constructors`, `deps`, `worklet`, `release`, which
   bun runs in one process) with 48 burners and `--rerun-each 20`: 640 of 640.
 
-Suspected, not confirmed: the dev server's setup or `close()` waits on I/O under
-load past the 5 s budget; or state from an earlier file in the same bun process
-(the root set shares one process) delays this test's timers. Temporarily remove
-the candidate's `test.skip` locally first, since a skipped test cannot fail.
-Reproduce the failure: run the root `bun test` set under a loaded `just check`,
-and keep the log with the failing test's name. Then fix the step that outruns the
-budget: wait on an event the test can observe, not a longer deadline or a
-retry. If the failure is in the shared process rather than the test, fix it
-there.
+Reproduced 2026-11-10 on a 24-core host with 64 `yes` burners and the skip
+removed, `--rerun-each 150`: both tests in the file time out at 5 s, the
+enabled lazy-blob test as often as the dev-server one, so the dev-server test is
+not uniquely fragile. Per-step timing with 48 burners put the time in real CPU
+work, not a hung wait: one run spent 2.5 s in the final `fetch` (the middleware's
+first `rolldown` compile of the worklet), another 1.4 s in `server.listen()`.
+`server.close()` took under 50 ms every time. No step waits on an event the
+test could observe instead; the budget is lost to starved compute, which the
+lazy-blob test (two compiles) pays too.
 
 The earlier round already fixed other `worklet.test.ts` flakes, so this is a new
 cause, not a regression of those.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: choose how to treat a test whose 5 s budget only fails when the host is CPU-starved, since no event-based fix exists and the goal rules out a longer timeout. Options: (1) remove the `test.skip` as-is, since the enabled sibling carries the same exposure and both passed 640 of 640 in the root set under 48 burners on 2026-11-09; (2) move both tests to the nightly `test/worklet` matrix; (3) keep the quarantine. Recommended: (1). Done when this quest is rewritten to the chosen option.
