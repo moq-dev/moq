@@ -941,9 +941,11 @@ async fn play_audio<O: Output>(
 				presentation.due(mapped).and_then(|due| due.checked_sub(cap))
 			})
 			.await;
+			// A frame starting an utterance is instead placed one target out by the
+			// sink itself, and `hold` below sizes that target to the due time.
 			let short = presentation
 				.due(mapped)
-				.filter(|_| held_back)
+				.filter(|_| held_back && !utterance)
 				.map(|due| {
 					due.saturating_duration_since(Instant::now())
 						.saturating_sub(sink.buffered())
