@@ -9,7 +9,7 @@ broadcast.
 
 | Rule | Holds when | Today |
 | --- | --- | --- |
-| `LiveMeansWatchable` | The badge says LIVE only while viewers can find the broadcast. | Breaks: the badge reads the connection and the captured sources, not the announce gate, so it says LIVE while the gate waits for the encoders to settle. `src/ui/components/status-badge.test.ts` replays it. |
+| `LiveMeansWatchable` | The badge says LIVE only while viewers can find the broadcast. | Breaks: the badge reads the connection and the captured sources, not the announce gate, so it says LIVE while the gate waits for the encoders to settle. Accepted 2026-11-10 (maintainer): the window is usually milliseconds. |
 | `StopStopsPublishing` | A publisher who stopped the camera publishes nothing. | Holds. |
 | `DenialIsShown` | A publisher who refused the camera is told so. | Holds. |
 

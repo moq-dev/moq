@@ -105,3 +105,4 @@ deleted.
 - [The dev shell builds Kotlin with Gradle 9](/quest/m4/kt-gradle-9.md) - `gradle_9` in the dev shell, so the Android target builds there
 - [A hung Python test fails instead of hanging the suite](/quest/m4/py-test-timeouts.md) - one pytest-timeout bound covers every `py/` test
 - [Chromium's Opus encoder stamps chunks from their input](/quest/m4/chromium-opus-timestamps.md) - waiting on Chromium; unlocks native `usedtx` for push-to-talk
+- [Route sweeps are checked against the TLA+ model](/quest/m4/route-trace-validation.md) - each `sweep_handoff` run is a behaviour of `RouteHandoff.tla`
