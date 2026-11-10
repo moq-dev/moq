@@ -47,12 +47,39 @@ If the field is taken, it holds to these:
 - The draft, the Rust and JS codecs, and where the application reads it land
   together, with `just test interop --all`.
 
-Size the field against the lite-07 draft first, then bring the maintainer the
-choice below with that size and the update count.
+Sized 2026-11-10 against the lite-07 draft, by a bufferbloat simulation
+whose script and tables are in
+[moq-dev/moq#8458](https://github.com/moq-dev/moq/pull/8458):
+
+- Wire: `Down Only (8)` becomes `Flags (8)`, bit 0 down-only and bit 1
+  latency present, followed by `Latency (i)` in milliseconds, PROBE's RTT
+  unit, only when bit 1 is set. Unknown costs 0 bytes, a sum up to 127 ms 1
+  byte, up to 16.4 s 2 bytes: ROUTE_UPDATE grows from 6-9 bytes to 7-11,
+  ROUTE_START from 14-16 to 15-18.
+- Filter: a node reads its link's smoothed RTT once a second and reports the
+  minimum of the last 30 reads, re-advertising only when that leaves
+  max(5 ms, a quarter) of what it last advertised. Under bufferbloat, reading
+  every ACK sent 292 updates per link-hour, an EWMA of 1 Hz reads 37, a 20 s
+  median 1.3, and the 30 s minimum 0. A rise shows after 30 s, a drop at
+  once, and a standing queue shorter than 30 s sends nothing.
+- Updates: a relay adds its upstream link's value to the sum it received,
+  so one real shift sends one ROUTE_UPDATE per origin on each stream
+  downstream of the link: R for the first link of a chain of R relays, 1 for
+  the last, measured at 1.0 to 1.4 per downstream relay for R = 1 to 8.
+  Jitter alone sent 0 per origin-hour up to R = 2, and 2.2 on average (9 at
+  most) at R = 8.
+- Cost: the fan-out of a Cost change today, every route selected over the
+  link, but triggered by measurement: a link carrying 10,000 origins sends
+  about 80 KB per downstream stream per shift.
+- Accuracy: each hop is within max(5 ms, 25%) of its link's RTT floor, so
+  the sum is within the sum of those bounds.
+- An endpoint whose transport reports no RTT can still learn its first hop
+  from PROBE, whose replies carry the relay's smoothed RTT; only one without
+  a Probe Stream reads the sum as excluding the first hop.
 
 ## Waiting
 
-- Maintainer: decide whether lite-07's ROUTE carries the latency sum. An agent cannot take it, since it adds a field to a wire about to freeze. Options: a quantized, informational sum on ROUTE_START and ROUTE_UPDATE as above, or no wire change, leaving applications to measure with a track of their own. Recommendation: the field, if the sizing shows a shift costs a ROUTE_UPDATE per origin at most; check that the choice is recorded in this Plan.
+- Maintainer: decide whether lite-07's ROUTE carries the latency sum. An agent cannot take it, since it adds a field to a wire about to freeze. Options: the sum as sized above, costing 0 to 2 bytes on ROUTE_START and ROUTE_UPDATE and one ROUTE_UPDATE per origin per downstream stream for each real shift, none for jitter; or no wire change, leaving applications to measure with a track of their own. Recommendation: the field, since the sizing meets the bar of at most one ROUTE_UPDATE per origin per shift; check that the choice is recorded in this Plan.
 
 ## Related
 
