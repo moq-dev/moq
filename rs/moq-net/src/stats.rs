@@ -1233,7 +1233,7 @@ impl Registry {
 		}
 	}
 
-	/// Add `n` publisher-side payload bytes on `(path, tier)`. The hidden `fuzz`
+	/// Add `n` publisher-side payload bytes on `(path, tier)`. The `fuzz`
 	/// module exposes this to the stats producer bench. A report drops the entry
 	/// unless a guard still holds it.
 	#[cfg(any(test, feature = "fuzz"))]

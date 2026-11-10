@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use moq_quic::{Limits, VarInt, mux};
+use moq_quic::{Limits, VarInt, connection::mux};
 
 use crate::Version;
 

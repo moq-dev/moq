@@ -402,10 +402,7 @@ impl Drain {
 	}
 }
 
-/// Drives one producer tick for the benchmark. Not a public API: compiled only
-/// with the `bench` feature, which nothing enables by default.
 #[cfg(feature = "bench")]
-#[doc(hidden)]
 #[path = "produce_bench.rs"]
 pub mod bench;
 

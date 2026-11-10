@@ -185,7 +185,7 @@ relay_chain_tests! {
 
 /// A worker claiming `pool` under its own instance, `worker-<hop>`, answering each request
 /// with an output whose `video` track carries the worker's name. The claim is a peer's, landed through
-/// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
+/// the `fuzz` module as a session lands it, so its answers carry no exact route.
 struct Worker {
 	origin: origin::Producer,
 	_claim: Rc<origin::Claim>,
@@ -305,7 +305,7 @@ async fn prefix_pool_lite07() {
 
 /// A claim at `live` whose handler answers each request with a fresh output, kept so
 /// the test can write into it: `outputs[n]` answered the `n`th request. Only a peer's
-/// claim moves to another instance or re-prices in place, so it lands through the hidden
+/// claim moves to another instance or re-prices in place, so it lands through the
 /// `fuzz` module as a session lands it.
 struct Claim {
 	dynamic: Rc<origin::Claim>,

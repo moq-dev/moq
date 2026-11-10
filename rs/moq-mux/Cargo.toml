@@ -21,7 +21,7 @@ default = []
 # poll of their own. Enable where you `.await` them.
 async = ["kio/async", "moq-net/async"]
 # Exposes the media parsers' fuzz target bodies and seeds to the `fuzz/` harness through the
-# hidden `fuzz` module. Off by default and hidden from the docs.
+# `fuzz` module. Off by default.
 fuzz = []
 
 [dependencies]

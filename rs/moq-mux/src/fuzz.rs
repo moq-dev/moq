@@ -1,4 +1,5 @@
-//! Fuzz target bodies for the media parsers an untrusted publisher reaches, plus their seeds.
+//! Test support, enabled by the `fuzz` feature: fuzz target bodies for the media parsers an
+//! untrusted publisher reaches, plus their seeds.
 //!
 //! Each target takes raw fuzzer bytes, drives one parser through its public entry point the way
 //! ingest or a subscriber does, and returns whether the input was accepted. [`run`] wraps a target
@@ -7,8 +8,7 @@
 //! them on stable, which is what turns a crash the fuzzer found into a regression `just check`
 //! runs.
 //!
-//! Compiled only under `cfg(test)` or the `fuzz` feature, so none of this is part of the published
-//! API. See `fuzz/README.md` for the workflow.
+//! It tracks the crate's internals, so it can change in any release. See `fuzz/README.md` for the workflow.
 
 use std::task::Poll;
 
