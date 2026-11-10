@@ -40,6 +40,7 @@ pub(crate) use node::Node;
 pub(crate) use proof::EXPORTER_LABEL;
 pub use proof::RouteKey;
 pub(crate) use proof::{Proof, Transcript};
+#[cfg(feature = "async")]
 pub(crate) use rtt::LinkRtt;
 pub(crate) use view::{View, within};
 use view::{ancestors, below, covering, narrow};

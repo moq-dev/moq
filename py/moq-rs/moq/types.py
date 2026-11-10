@@ -33,6 +33,9 @@ from moq_ffi import (
     MoqInstance as Instance,
 )
 from moq_ffi import (
+    MoqMinRtt as MinRtt,
+)
+from moq_ffi import (
     MoqOrder as Order,
 )
 from moq_ffi import (
@@ -46,9 +49,6 @@ from moq_ffi import (
 )
 from moq_ffi import (
     MoqRateTarget as RateTarget,
-)
-from moq_ffi import (
-    MoqMinRtt as MinRtt,
 )
 from moq_ffi import (
     MoqRouteInfo as RouteInfo,

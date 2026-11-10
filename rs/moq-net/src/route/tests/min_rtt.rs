@@ -49,7 +49,10 @@ fn each_relay_adds_its_link_to_the_sum() {
 		panic!("one route: {routes:?}");
 	};
 	assert_eq!(next, b);
-	assert_eq!((min_rtt.upstream, min_rtt.link, min_rtt.total()), (ms(30), ms(30), ms(60)));
+	assert_eq!(
+		(min_rtt.upstream, min_rtt.link, min_rtt.total()),
+		(ms(30), ms(30), ms(60))
+	);
 }
 
 /// A shift on one link sends one ROUTE_UPDATE on each stream carrying the route from

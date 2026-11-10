@@ -967,7 +967,10 @@ async fn broadcast_moq_lite_07_route_min_rtt() {
 	config.withhold_min_rtt = true;
 	let withheld = first_route(config).await;
 	assert_eq!(withheld.min_rtt().upstream, None);
-	assert!(withheld.min_rtt().link.is_some(), "the subscriber still measures its link");
+	assert!(
+		withheld.min_rtt().link.is_some(),
+		"the subscriber still measures its link"
+	);
 	assert_eq!(withheld.min_rtt().total(), None);
 }
 
