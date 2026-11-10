@@ -61,8 +61,8 @@ Shipped code, each call and what it becomes:
 
 - `rs/moq-crypto/src/provider.rs:24` (rind-rustls):
   `rind_rustls::default_provider().expect(..)` becomes
-  `rind_rustls::default_provider()`. `crate::cpu::check()?` on line 22 stays
-  until rind 0.4.
+  `rind_rustls::default_provider()`. `crate::cpu::check()?` on line 22 goes
+  with the CPU check below.
 - `rs/moq-auth/src/crypto.rs:7` (rind-jsonwebtoken):
   `rind_jsonwebtoken::default_provider().expect(..)` becomes
   `&rind_jsonwebtoken::DEFAULT_PROVIDER`; its test at line 37 likewise.
@@ -106,13 +106,30 @@ rind 0.4 itself changes three things, of which MoQ uses two:
 - No runtime CPU check: `rind::cpu::check` and `rind::cpu::MissingFeature` are
   gone, since a backend now requires only its target's compile-time features.
   `rs/moq-crypto/src/cpu.rs` wraps both (`UnsupportedCpu` at line 6, `check()`
-  at line 18), and its callers are `rs/moq-crypto/src/provider.rs:22` and
-  `:48`, `rs/moq-crypto/src/e2ee/credential.rs:60`,
-  `rs/moq-auth/src/crypto.rs:6`, `rs/moq-hls/src/server/mod.rs:188`,
-  `rs/moq-quic/src/config/endpoint.rs:122`, and `rs/moq-rtmp/src/dial.rs:84`.
-  Recommended: delete `moq_crypto::cpu::check` and `UnsupportedCpu` and every
-  call, keeping the `Dit` re-export, rather than leave a check that cannot
-  fail. That removes public items from moq-crypto, so say so in the PR.
+  at line 17). Recommended: delete `moq_crypto::cpu::check` and
+  `UnsupportedCpu`, keeping the `Dit` re-export, rather than leave a check that
+  cannot fail. That removes public items from moq-crypto, so say so in the PR.
+  `rg 'cpu::check|MissingFeature|UnsupportedCpu' rs` finds every site; at
+  `985e8897` they are:
+  - `moq_crypto::cpu::check()` callers: `rs/moq-crypto/src/provider.rs:22`
+    and `:48`, `rs/moq-crypto/src/e2ee/credential.rs:60`,
+    `rs/moq-auth/src/crypto.rs:6`, `rs/moq-hls/src/server/mod.rs:188`,
+    `rs/moq-hls/src/export/mod.rs:147`,
+    `rs/moq-quic/src/config/endpoint.rs:122`, `rs/moq-rtmp/src/dial.rs:84`
+    and `:104`, `rs/moq-rtmp/src/server.rs:269` and `:499`,
+    `rs/moq-uring/src/quic/driver/mod.rs:126`,
+    `rs/moq-webrtc/src/session.rs:674`, and `rs/qmux/src/tls.rs:76`.
+  - The `UnsupportedCpu` error variants and re-export that wrap it, in
+    moq-auth, moq-crypto's e2ee, moq-hls, moq-quic, moq-rtmp, moq-tokio
+    (`rs/moq-tokio/src/crypto.rs:7`), moq-uring, moq-webrtc, and qmux, with
+    the doc comments that name it.
+  - The vendored providers, which call rind directly:
+    `rs/moq-webrtc/src/vendor/dimpl/crypto/rind/mod.rs:24-25` and
+    `rs/moq-webrtc/src/vendor/str0m_rind/lib.rs:19-20` return
+    `rind::cpu::MissingFeature` after `rind::cpu::check()`, so their
+    `default_provider()` becomes infallible, and
+    `rs/moq-webrtc/src/vendor/dimpl/error.rs:363` drops
+    `UnsupportedCpu(rind::cpu::MissingFeature)`.
 - Agreement keys keep their public key
   ([moq-dev/rind#529](https://github.com/moq-dev/rind/pull/529)):
   `agreement::PrivateKey::public_key()` returns a borrow. The vendored dimpl
@@ -128,9 +145,9 @@ since the new calls do not compile against the old ones.
 
 Until those releases exist, check the branch with an uncommitted
 `[patch.crates-io]` that points `rind` and the four adapters at moq-dev/rind's
-`main` once the three PRs merge. The rind-rcgen PR and the one for
-rind-jsonwebtoken and rind-object-store are still drafts, so re-read each
-PR's Public API section when it merges; a signature may have moved.
+`main` once the three PRs merge. #521 and #515 have merged; #519 is open and
+ready for review, so re-read its Public API section when it merges; a
+signature may have moved.
 
 Public API: `moq_crypto::provider` keeps its signatures; `moq_crypto::cpu::check` and `UnsupportedCpu` go if the recommendation above is taken. Wire: none.
 
@@ -138,7 +155,8 @@ Public API: `moq_crypto::provider` keeps its signatures; `moq_crypto::cpu::check
 
 - moq-dev/rind: publishes rind 0.4.0 and the adapter patch releases in one
   release, once its CPU-check removal has landed and this PR is ready. Check
-  that `cargo search rind` shows 0.4.0 and that `cargo search rind-rustls`,
-  `rind-jsonwebtoken`, `rind-object-store`, and `rind-rcgen` each show a
-  release that requires it; then set the requirements, update `Cargo.lock`,
-  and merge.
+  that `cargo search rind` shows 0.4.0, and that each of rind-rustls,
+  rind-jsonwebtoken, rind-object-store, and rind-rcgen has a release whose
+  `rind` requirement is 0.4, read from crates.io's
+  `https://crates.io/api/v1/crates/<crate>/<version>/dependencies`; then set
+  the requirements, update `Cargo.lock`, and merge.
