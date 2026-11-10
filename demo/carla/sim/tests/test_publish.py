@@ -274,9 +274,11 @@ async def serving(scenario, monkeypatch: pytest.MonkeyPatch) -> None:
         play.result()
     finally:
         play.cancel()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        # A pump that already ended has its own failure to report.
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
     assert endpoint.opened == [("carla", "truck1")]
     assert endpoint.closed
 

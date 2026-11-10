@@ -8,7 +8,7 @@ from moq_carla_sim import runtime
 from moq_carla_sim.drive import Command, Drive, DriveState, Gear, TimestampEntry, handle
 from moq_carla_sim.publish import Pose
 from moq_carla_sim.runtime import MAX_STAGE_MS, StuckDetector, latency_breakdown
-from moq_carla_sim.world import Truck
+from moq_carla_sim.world import Truck, drive_hold
 
 
 class FakeClock:
@@ -566,6 +566,8 @@ def test_a_held_truck_stopped_for_the_timeout_respawns_and_revokes_its_driver(
         session._truck.respawn = respawn
         session._publish = lambda _telemetry: None
         hold(session._drive)
+        # Whatever the lease held, the respawn must let go of it.
+        session._clock.hold(drive_hold("truck1"))
 
         with pytest.raises(asyncio.CancelledError):
             await session._publish_telemetry()
