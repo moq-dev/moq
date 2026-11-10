@@ -101,4 +101,3 @@ This README's own work, once its children land:
 
 - [Cluster routing](/quest/m2/cluster-routing/README.md) - the node routes and feasibility distances this ranks on
 - [Relays split horizon per session](/quest/m3/route-split-horizon.md) - per-session suppression of node routes, beside warm routes' per-neighbor rule
-- [Route health](/quest/m5/route-health/README.md) - stalled-delivery failover, separate from choosing where a copy is pulled

@@ -35,8 +35,8 @@ Decided 2026-10-26 (maintainer, on #6791), each with its reason:
   acknowledged frame end through [poll_acked](/quest/m3/quic-ack-hook.md), so
   the sampler reads a frontier at most one frame stale. `dropped` counts only
   the frames written after the newest acknowledged one. This folds in the
-  frontier half of the former starvation-frames quest; the delivery-delay
-  histogram stays in [its own quest](/quest/m5/delivery-delay.md). Its sketch,
+  frontier half of the former starvation-frames quest; a delivery-delay
+  histogram is not planned. Its sketch,
   to adjust as the code dictates: the group stream's writer counts the bytes
   it writes, each frame end records its offset and timestamp, and one waiter
   per stream polls the oldest pending offset, interleaved with later writes so

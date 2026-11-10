@@ -20,7 +20,6 @@ deleted.
 - [Wire fuzz coverage](/quest/m4/wire-fuzz-coverage.md) - the cmsg walks in moq-sock and moq-uring have invariant fuzz targets, and the unsafe peer input reaches runs under Miri
 - [VA-API renderer tests](/quest/m4/vaapi-render-tests.md) - the VA-API renderer, decode, and transcode tests run in `just rs gpu` on AMD and Intel and fail instead of skipping, and hosted CI reports them ignored
 - [One Ruff pin and Swift formatting on aarch64-linux](/quest/m4/format-gate-followups.md) - only the dev shell pins Ruff, and aarch64-linux checks Swift formatting once nixpkgs builds `swiftc` there
-- [Weekly mutation testing on critical modules](/quest/m4/mutants.md) - cargo-mutants runs weekly on moq-auth and moq-net's permission, resume, and expiry code
 - [P2P](/quest/m4/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [Challenge proof for certificate credentials](/quest/m4/cert-challenge.md) - a relay can require a signed nonce, so a certificate credential replayed within its time window admits nothing
 - [Benchmark sources](/quest/m4/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run

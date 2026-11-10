@@ -38,7 +38,3 @@ Keep random loss for recovery correctness. Any acceptance or performance
 consumer uses a rate below its media bitrate behind a deep but finite queue,
 and checks that the queue overflowed. A stalled sender that never filled the
 queue is not evidence about congestion loss.
-
-## Related
-
-- [Per-stream and per-datagram deadlines](/quest/m5/quic-deadline.md) - a consumer

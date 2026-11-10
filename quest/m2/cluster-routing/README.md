@@ -9,9 +9,8 @@ Known advertisements remain distinct from current reachability, and stale
 copies cannot revive a claim after its withdrawal is known.
 
 Reliability, federation, and P2P are independently shippable milestones of
-this architecture. Active/passive delivery health is a separate
-[route-health line](/quest/m5/route-health/README.md), shared by endpoints
-and relays, and applies only to broadcasts with epochs.
+this architecture. Active/passive delivery health is out of scope; its
+plan was deleted 2026-11-09 for want of a consumer.
 
 ## Plan
 
@@ -122,7 +121,7 @@ reduces origin count when every application publishes one broadcast.
 Non-goals: measured RTT/loss pricing by default, TURN, browser transit, full
 link-state topology, or cross-operator economic exchange rates. Basic
 federation does not wait for
-[routing cost domains](/quest/m5/routing-cost-domains.md). Node routes here
+administrative routing cost domains, which nobody plans. Node routes here
 are the cold cost that [cache-aware routing](/quest/m3/cache-routing/README.md)'s
 per-broadcast warm routes rank against (decided 2026-11-08, maintainer).
 
@@ -137,7 +136,6 @@ setup after the capabilities land.
 
 ## Related
 
-- [Route health](/quest/m5/route-health/README.md) - epoch-only active/passive delivery monitoring and automatic recovery
 - [P2P](/quest/m4/p2p/README.md) - application-selected peer sessions feed the shared routing model
 - [Routing guide](/quest/m1/routing-guide.md) - concept page and federation setup; P2P extends it in m4
 - [Route wakes](/quest/m4/route-wakes.md) - local work follows affected fronts rather than the whole covered table
