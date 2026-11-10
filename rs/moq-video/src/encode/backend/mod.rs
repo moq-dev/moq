@@ -80,7 +80,15 @@ pub(crate) trait Backend {
 	fn flush(&mut self) -> Result<(), Error>;
 
 	/// Submit one frame and collect everything it readied.
-	#[cfg(test)]
+	#[cfg(all(
+		test,
+		any(
+			feature = "openh264",
+			apple,
+			all(target_os = "android", feature = "mediacodec"),
+			all(target_os = "linux", feature = "vaapi"),
+		)
+	))]
 	fn encode_all(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		self.encode(frame, cut)?;
 		self.receive_all()

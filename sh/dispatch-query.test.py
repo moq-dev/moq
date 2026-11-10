@@ -292,7 +292,7 @@ class QueryTests(unittest.TestCase):
         quest.write_text('#!/usr/bin/env bash\nprintf "pinned quest %s\\n" "$*" >>"$CALLS"\n')
         self.env.update(IN_MOQ_DEV_SHELL="1", DEV_SHELL_QUEST=str(quest), CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
-        for script in ("markdown.sh", "shell.sh", "large-files.sh", "text.sh"):
+        for script in ("markdown.sh", "shell.sh", "large-files.sh", "migrate.sh", "text.sh"):
             path = self.repo / "sh" / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)

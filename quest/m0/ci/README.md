@@ -180,4 +180,3 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Release tags push to nix.moq.dev, and Cachix stops taking writes](/quest/m0/ci/cachix-retire.md) - backport `release-nix.yml` and its Just module to `release`, drop `cachix.yml`, prove a tag substitutes from nix.moq.dev, then revoke the Cachix token (the cache stays for old tags)
 - [Measure the Linux cache effect of native media exclusions](/quest/m0/ci/hakari-followups.md) - scheduled Linux jobs measure cache reuse after unrelated tests stop compiling PipeWire and libclang
-- [Only the release cut edits MIGRATE.md](/quest/m0/ci/migrate-guard.md) - `just check` fails any other PR that edits one, so breaking PRs stop conflicting on it in the queue
