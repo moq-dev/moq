@@ -129,11 +129,6 @@ Each implementation updates the docs it makes stale. The separate
 [routing guide](/quest/m1/routing-guide.md) explains the combined design and
 setup after the capabilities land.
 
-## Required
-
-- [Outbound federation](/quest/m2/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
-
 ## Related
 
 - [P2P](/quest/m4/p2p/README.md) - application-selected peer sessions feed the shared routing model

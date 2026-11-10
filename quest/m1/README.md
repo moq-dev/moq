@@ -29,27 +29,6 @@ breaking epics and quests stay in m1 for now and are listed in m2's
 stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
 moves what remains of them once their claims merge.
 
-## Required
-
-- [Drop set](/quest/m1/drop-set.md) - each cursor's disposition record is billed to the cache pool, as the track's drop runs are, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind`
-- [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
-- [A reader on a failed copy continues on the held re-offer](/quest/m1/copy-recover.md) - a live reader keeps a group whose copy fails by continuing on the same track's re-offer at the same frame
-- [Group errors are cached by kind](/quest/m1/group-error-cache.md) - permanent group errors bind every reader, retryable ones are kept only for a bounded time, and a live SUBSCRIBE_DROP or FETCH answered `Old` no longer caches it for good
-- [The overcommitted receive-window cells run again](/quest/m1/receive-windows-evicted.md) - `benchmark_receive_windows` measures its 256-stream and 4 MiB-frame cells again, reporting delivered frames and evictions instead of stalling
-- [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out
-- [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; audio that slows down and catches up around it in every player, graded in that direction, and a native trace replay remain
-- [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
-- [Lifecycles are explicit state](/quest/m1/explicit-state/README.md) - every lifecycle the 2026-11-07 audit found implicit is one enum or union, fixing the bugs in the 11 lifecycles it redesigns, with review and agent rules against new ones
-- [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
-- [A padded TS export sheds when its sink falls behind](/quest/m1/ts-padded-shed.md) - a `--mux-rate` export skips stale slots with a flagged PCR jump instead of back-filling them or blaming the source
-- [A resumed QUIC client gives up on its own idle timer](/quest/m1/quic-resume-idle.md) - a client stopped past its idle timeout closes within about one timeout of resuming, without waiting on a stateless reset
-- [A reused moq-transport alias delivers a group that beats its SUBSCRIBE_OK](/quest/m1/ietf-alias-reuse.md) - a new SUBSCRIBE clears its track's alias tombstone, so moqxr's alias-0 catalog refetch no longer hangs
-- [Unused crates, scripts, and files are deleted](/quest/m1/unused-code.md) - moq-room, the moq-native tombstone, demo/throttle, sh/dart/publish.sh, demo/web's Solid deps, and unpublished packages' release notes go
-- [The recurring audits are fewer and carry plans, not results](/quest/m1/audit-merge.md) - m3's 13 audits become about five, each a Goal plus a short check-first list
-- [.github/ffi.md holds rules, not evidence](/quest/m1/ffi-doc-trim.md) - the FFI release doc drops one-off measurements for links to their PRs
-- [Draft publishing keeps the upload and drops changelog rewriting](/quest/m1/drafts-publish-trim.md) - `sh/drafts/publish.sh` and its test shrink to the datatracker upload
-- [rs/AGENTS.md's time-test rule matches the tree](/quest/m1/test-time-rule.md) - the rule names `#[kio::test]`, which about 4,900 tests use, and is stated once
-
 ## Related
 
 - [A busy js/net serve yields](https://github.com/moq-dev/moq/pull/5289) - js/net's serve loop leaves the browser its event loop under a fast publisher, if it does not already

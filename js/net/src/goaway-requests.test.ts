@@ -26,7 +26,7 @@ async function settle() {
 }
 
 async function waitUntil(pred: () => boolean): Promise<void> {
-	const deadline = now().add(Duration.millis(2000));
+	const deadline = now().saturatingAdd(Duration.millis(2000));
 	for (;;) {
 		if (pred()) return;
 		if (now().gt(deadline)) throw new Error("timed out waiting for condition");

@@ -1,7 +1,7 @@
 import { Duration } from "@moq/clock";
-import { createAccessor } from "@moq/signals/solid";
 import { For, Show } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
+import { createAccessor } from "../solid.ts";
 
 /** Right-side panel showing location, encoding stats, buffer slider, and per-viewer latency. */
 export default function StatsPanel() {

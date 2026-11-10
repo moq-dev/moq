@@ -643,7 +643,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.outputs).toEqual(stage === "queued" ? [] : [picture]);
 			const before = playback.decoder.out.frame.peek();
 
-			playback.audio.received(Duration.millis(skipTo), Instant.ZERO.add(Duration.millis(5000)));
+			playback.audio.received(Duration.millis(skipTo), Instant.ZERO.saturatingAdd(Duration.millis(5000)));
 			playback.release();
 			await microtasks();
 			const due = playback.decoder.out.frame.peek();
