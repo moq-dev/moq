@@ -67,7 +67,10 @@ export class BroadcastCache {
 			entries = new Map();
 			this.#announced.set(path, entries);
 		}
-		const identity = (!restart && entries.get(owner)?.identity) || {};
+		const previous = entries.get(owner);
+		const identity = (!restart && previous?.identity) || {};
+		// A new stream ranks as the newest, which wins a tie at its own prefix.
+		if (!previous || restart) entries.delete(owner);
 		entries.set(owner, { identity, route });
 		this.#update(path);
 	}
@@ -87,9 +90,10 @@ export class BroadcastCache {
 			if (!entries) continue;
 			let best: { identity: object; route: WireRoute } | undefined;
 			const epochs = new Epochs([...entries.values()].map((entry) => entry.route));
+			// Newest last, so it wins a tie.
 			for (const entry of entries.values()) {
 				if (epochs.supersedes(entry.route)) continue;
-				if (!best || compareRouteCandidates(path, prefix, entry.route, best.route) < 0) best = entry;
+				if (!best || compareRouteCandidates(path, prefix, entry.route, best.route) <= 0) best = entry;
 			}
 			if (best) {
 				const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
@@ -106,6 +110,26 @@ export class BroadcastCache {
 			}
 		}
 		return this.#blind.get(path) ?? new Blind();
+	}
+
+	/**
+	 * The origin node of the best route now serving `instance` at `path` (lite-07), whichever
+	 * instance wins the path, or undefined when no route names one.
+	 */
+	node(path: Path.Valid, instance: Instance.Valid): bigint | undefined {
+		for (const prefix of coveringPrefixes(path)) {
+			const routes = [...(this.#announced.get(prefix)?.values() ?? [])]
+				.map((entry) => entry.route)
+				.filter((route) => route.instance === instance);
+			const epochs = new Epochs(routes);
+			let best: WireRoute | undefined;
+			for (const route of routes) {
+				if (epochs.supersedes(route)) continue;
+				if (!best || compareRouteCandidates(path, prefix, route, best) <= 0) best = route;
+			}
+			if (best) return best.node;
+		}
+		return undefined;
 	}
 
 	/** Clone the live cached consumer only when it serves the selected instance. */

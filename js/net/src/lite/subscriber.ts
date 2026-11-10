@@ -1145,11 +1145,10 @@ export class Subscriber {
 		const pinned = instance.route.node;
 		const consumed = {
 			instance: instance.route.instance,
-			// The node of the route now serving the instance, which moves with failover; the one it
-			// first resolved through once another instance wins the path.
+			// The node of the best route now serving the instance, which moves with failover even
+			// once another instance wins the path; the one it first resolved through once none does.
 			get node() {
-				const now = consumes.instance(path).route;
-				return now.instance !== undefined && now.instance === this.instance ? now.node : pinned;
+				return (this.instance !== undefined ? consumes.node(path, this.instance) : undefined) ?? pinned;
 			},
 			id: this.#consumeNext++,
 			get valid() {

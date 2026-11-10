@@ -149,12 +149,13 @@ test("request validity follows the selected interest and ignores unrelated withd
 	const instance = cache.instance(path);
 	const held = cache.insert(path, instance, source.consume());
 	const signal = instance.validity?.signal;
+	// The newest of a tie at its own prefix is selected: `second`.
 	cache.withdraw(Path.from("pool"), broad);
-	cache.withdraw(path, second);
-	cache.announce(path, first, { ...WireRoute.default, cost: 1n });
+	cache.withdraw(path, first);
+	cache.announce(path, second, { ...WireRoute.default, cost: 1n });
 	expect(instance.validity?.signal).toBe(signal);
 	expect(signal?.aborted).toBe(false);
-	cache.withdraw(path, first);
+	cache.withdraw(path, second);
 	expect(signal?.aborted).toBe(true);
 	held.close();
 	source.close();
@@ -175,4 +176,41 @@ test("a blind selection retires on discovery while explicit instances need no pa
 	expect(cache.instance(path).identity).not.toBe(blind.identity);
 	held.close();
 	source.close();
+});
+
+// A tie at a path's own prefix goes to the newest stream, as the origin and Rust rank it, and a
+// restart makes a stream the newest again; a re-price keeps its place.
+test("the newest stream wins a tie at its own prefix", () => {
+	const cache = new BroadcastCache();
+	const path = Path.from("room");
+	const older = {};
+	const newer = {};
+	const x = { ...WireRoute.default, instance: Instance.random() };
+	const y = { ...WireRoute.default, instance: Instance.random() };
+	cache.announce(path, older, x);
+	cache.announce(path, newer, y);
+	expect(cache.instance(path).route.instance).toBe(y.instance);
+	cache.announce(path, older, { ...x, cost: 0n });
+	expect(cache.instance(path).route.instance).toBe(y.instance);
+	const z = { ...WireRoute.default, instance: Instance.random() };
+	cache.announce(path, older, z, true);
+	expect(cache.instance(path).route.instance).toBe(z.instance);
+});
+
+test("the node serving an instance follows its routes even when another instance wins", () => {
+	const cache = new BroadcastCache();
+	const path = Path.from("room");
+	const x = Instance.random();
+	const a = {};
+	const b = {};
+	const c = {};
+	cache.announce(path, a, { ...WireRoute.default, instance: x, node: 1n });
+	cache.announce(path, b, { ...WireRoute.default, instance: x, node: 2n, cost: 5n });
+	expect(cache.node(path, x)).toBe(1n);
+	cache.withdraw(path, a);
+	cache.announce(path, c, { ...WireRoute.default, instance: Instance.random(), node: 3n });
+	expect(cache.instance(path).route.node).toBe(3n);
+	expect(cache.node(path, x)).toBe(2n);
+	cache.withdraw(path, b);
+	expect(cache.node(path, x)).toBeUndefined();
 });
