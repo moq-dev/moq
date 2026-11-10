@@ -278,16 +278,18 @@ decides which relays receive the cluster token.
 
 ## Identity
 
-Each relay has a Hop ID: the value it adds to a route's hop list for loop
-detection and shortest-path routing. It is random on every start, so a
+Each relay has an identity that it uses for loop detection and routing, and
+declares in SETUP on moq-lite-05 and later: a Hop ID added to each route's hop
+list, or on the opt-in `moq-lite-07-wip` a Node ID naming the route's origin. It is random on every start, so a
 restarted relay is a new node to the rest of the mesh, and there is no setting
 to pin it.
 
 A relay never dials its own `cluster.node`, so every relay can share one
 `cluster.connect` list or API response. Peer URLs that differ only in query,
 userinfo, fragment, or slashes name one peer and get one link. A relay
-refuses a session that declares its own Hop ID, which means a peer URL
-reaches the relay itself under another name, such as an IP for its hostname.
+refuses a session that declares its own identity (its Hop ID, or on
+`moq-lite-07-wip` its Node ID), which means a peer URL reaches the relay itself
+under another name, such as an IP for its hostname.
 
 ## Failure detection
 

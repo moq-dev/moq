@@ -1822,9 +1822,10 @@ impl Request {
 		self.handshake.requests()
 	}
 
-	/// The Hop ID the peer declared in its SETUP (moq-lite-05+).
+	/// The identity the peer declared in its SETUP (moq-lite-05+).
 	///
-	/// A peer declares this when it attaches a publish or subscribe origin.
+	/// A peer declares this when it attaches a publish or subscribe origin:
+	/// its Hop ID, or from moq-lite-07 its Node ID.
 	/// Older versions and peers without one return `None`.
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an

@@ -2284,6 +2284,12 @@ impl Producer {
 		self.hop
 	}
 
+	/// Whether `id`, as a peer declared it, names this origin: its hop id, or the Node ID
+	/// its moq-lite-07 sessions declare.
+	pub fn is_own(&self, id: NonZeroU64) -> bool {
+		id == self.hop || self.consume().node_id() == Some(id)
+	}
+
 	/// The key sessions prove for this origin.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn route_key(&self) -> Option<super::origin::RouteKey> {
@@ -7166,6 +7172,18 @@ impl Consumer {
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.horizon.exclude = Some(peer);
 		self
+	}
+
+	/// The Node ID this origin's moq-lite-07 sessions declare, without creating the route
+	/// node: its identity once created, or the one it will declare. `None` only before a
+	/// node whose hop leaves nothing to derive draws a random one.
+	pub(crate) fn node_id(&self) -> Option<NonZeroU64> {
+		let node = self.shared.lock().route_node.clone();
+		let id = match node {
+			Some((node, _)) => Some(node.declared()),
+			None => crate::route::node::declared_for(self.hop),
+		};
+		id.and_then(NonZeroU64::new)
 	}
 
 	/// The route layer node every lite-07 session on this origin shares, created on

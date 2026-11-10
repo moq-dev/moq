@@ -416,10 +416,7 @@ impl Node {
 	/// loses it, or is replaced by a random one if nothing is left.
 	pub fn origin(hop: std::num::NonZeroU64) -> Self {
 		let mut rng = kio::clock::rng();
-		let id = match hop.get() & !QUALIFIED {
-			0 => rng.random_range(1..=GENERATED),
-			id => id,
-		};
+		let id = declared_for(hop).unwrap_or_else(|| rng.random_range(1..=GENERATED));
 		Self::new(id, rng.random())
 	}
 
@@ -817,6 +814,15 @@ impl State {
 				.collect();
 			assert_eq!(got, want, "{claim:?} served through every route carrying it");
 		}
+	}
+}
+
+/// The identity a node created for the origin hop `hop` declares, or `None` when nothing
+/// is left once the qualified marker is cleared, and it draws a random one instead.
+pub(crate) fn declared_for(hop: std::num::NonZeroU64) -> Option<Id> {
+	match hop.get() & !QUALIFIED {
+		0 => None,
+		id => Some(id),
 	}
 }
 
