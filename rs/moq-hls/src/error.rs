@@ -186,7 +186,6 @@ pub enum Error {
 		/// The segment whose media cannot be recorded.
 		segment: u64,
 	},
-
 }
 
 impl Error {

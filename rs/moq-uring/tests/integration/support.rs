@@ -23,10 +23,7 @@ pub fn certs() -> anyhow::Result<Certs> {
 	std::fs::write(&cert, signed.cert.pem())?;
 	std::fs::write(
 		&key,
-		pem::encode(&pem::Pem::new(
-			"PRIVATE KEY",
-			signed.signing_key.serialized_der(),
-		)),
+		pem::encode(&pem::Pem::new("PRIVATE KEY", signed.signing_key.serialized_der())),
 	)?;
 	Ok(Certs { dir, cert, key })
 }

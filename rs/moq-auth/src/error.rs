@@ -203,7 +203,6 @@ pub enum Error {
 	/// The mesh coordinator's state file could not be read, parsed, or written.
 	#[error("mesh state: {0}")]
 	MeshState(String),
-
 }
 
 // Dependency errors are flattened to their message so their crates stay out of this crate's

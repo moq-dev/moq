@@ -285,10 +285,7 @@ mod tests {
 		config.cert = Some(write("client.pem", identity.pem()));
 		config.key = Some(write(
 			"client-key.pem",
-			pem::encode(&pem::Pem::new(
-				"PRIVATE KEY",
-				identity_key.serialized_der(),
-			)),
+			pem::encode(&pem::Pem::new("PRIVATE KEY", identity_key.serialized_der())),
 		));
 		let mesh_tls = config.build().unwrap();
 		let api_root = write("api.pem", api.cert.pem());

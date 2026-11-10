@@ -70,7 +70,6 @@ pub enum Error {
 	/// An internal video bridge could not be initialized.
 	#[error("video bridge initialization failed")]
 	BridgeFailed,
-
 }
 
 impl From<reqwest::Error> for Error {

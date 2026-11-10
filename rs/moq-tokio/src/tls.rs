@@ -176,7 +176,6 @@ pub enum Error {
 	#[error("the client certificate chain is too complex to trace: {0}")]
 	Lineage(String),
 
-
 	/// The section was parsed from released spellings that no longer work. The
 	/// payload is the migration to print.
 	#[error("{0}")]

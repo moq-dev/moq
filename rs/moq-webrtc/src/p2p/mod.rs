@@ -88,7 +88,6 @@ pub enum Error {
 	#[error("rtc error: {0}")]
 	Rtc(String),
 
-
 	/// A session description failed to parse or apply.
 	#[error("invalid session description: {0}")]
 	Sdp(String),

@@ -24,7 +24,6 @@ pub enum Error {
 	#[error("authentication")]
 	Authentication,
 
-
 	/// The underlying MoQ track failed.
 	#[error(transparent)]
 	Net(#[from] moq_net::Error),

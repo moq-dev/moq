@@ -98,7 +98,6 @@ pub enum Error {
 	#[error(transparent)]
 	Io(Arc<std::io::Error>),
 
-
 	/// The WebSocket failed.
 	#[cfg(feature = "ws")]
 	#[error(transparent)]

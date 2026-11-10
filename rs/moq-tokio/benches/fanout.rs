@@ -61,9 +61,7 @@ impl Pair {
 			Ok(rcgen::CertifiedKey { cert, signing_key })
 		})()
 		.expect("certificate");
-		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-			cert.signing_key.serialize_der(),
-		));
+		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
 		let mut server_config =
 			server::Config::with_single_cert(vec![cert.cert.der().clone()], key).expect("server config");
 		server_config.transport = transport.clone();

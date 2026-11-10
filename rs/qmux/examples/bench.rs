@@ -138,9 +138,7 @@ impl Tls {
 			Ok(rcgen::CertifiedKey { cert, signing_key })
 		})()?;
 		let cert = CertificateDer::from(identity.cert.der().to_vec());
-		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-			identity.signing_key.serialize_der(),
-		));
+		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der()));
 		// The relay's provider, so the TLS share matches what it pays.
 		let provider = moq_crypto::provider::provider();
 

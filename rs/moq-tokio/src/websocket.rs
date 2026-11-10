@@ -974,9 +974,7 @@ mod tests {
 		})()
 		.unwrap();
 		let cert = CertificateDer::from(cert);
-		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-			signing_key.serialize_der(),
-		));
+		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
 		let provider = crate::crypto::provider();
 		let server_tls = rustls::ServerConfig::builder_with_provider(provider.clone())
 			.with_safe_default_protocol_versions()

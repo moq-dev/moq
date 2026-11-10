@@ -18,7 +18,6 @@ pub enum Error {
 	#[error("io: {0}")]
 	Io(Arc<std::io::Error>),
 
-
 	/// The RTMP handshake or session state machine failed.
 	#[error("rtmp session: {0}")]
 	Session(String),

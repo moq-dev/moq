@@ -97,7 +97,6 @@ pub enum Error {
 	#[error("invalid quic config: {0}")]
 	Config(#[from] driver::ConfigError),
 
-
 	/// The qlog trace file couldn't be created, usually a missing directory.
 	#[cfg(feature = "qlog")]
 	#[error("failed to create qlog file")]

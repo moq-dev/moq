@@ -1160,9 +1160,7 @@ mod tests {
 			Ok(rcgen::CertifiedKey { cert, signing_key })
 		})()
 		.unwrap();
-		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-			signing_key.serialize_der(),
-		));
+		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
 
 		let mut server_config =
 			crate::quic::driver::server::Config::with_single_cert(vec![cert.der().clone()], key).unwrap();
