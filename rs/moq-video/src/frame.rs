@@ -660,7 +660,6 @@ impl Surface {
 		crate::convert::rgba(self, config)
 	}
 
-
 	/// The pixels as a CoreVideo pixel buffer, the mirror of
 	/// [`into_i420`](Self::into_i420) pointing the other way.
 	///

@@ -96,15 +96,21 @@ pub(crate) fn rgba(surface: &Surface, config: &Config) -> Result<Rgba, Error> {
 	let i420 = surface.to_i420()?;
 	let luma = usize::try_from(size.pixels())
 		.map_err(|_| Error::codec(anyhow::anyhow!("RGBA frame {size}: dimensions too large to represent")))?;
-	let stride = size
-		.width
-		.checked_mul(4)
-		.ok_or_else(|| Error::codec(anyhow::anyhow!("RGBA frame {size}: row stride is too large to represent")))?;
-	let stride_usize = usize::try_from(stride)
-		.map_err(|_| Error::codec(anyhow::anyhow!("RGBA frame {size}: row stride is too large to represent")))?;
-	let len = stride_usize
-		.checked_mul(size.height as usize)
-		.ok_or_else(|| Error::codec(anyhow::anyhow!("RGBA frame {size}: byte length is too large to represent")))?;
+	let stride = size.width.checked_mul(4).ok_or_else(|| {
+		Error::codec(anyhow::anyhow!(
+			"RGBA frame {size}: row stride is too large to represent"
+		))
+	})?;
+	let stride_usize = usize::try_from(stride).map_err(|_| {
+		Error::codec(anyhow::anyhow!(
+			"RGBA frame {size}: row stride is too large to represent"
+		))
+	})?;
+	let len = stride_usize.checked_mul(size.height as usize).ok_or_else(|| {
+		Error::codec(anyhow::anyhow!(
+			"RGBA frame {size}: byte length is too large to represent"
+		))
+	})?;
 	let chroma = luma / 4;
 	let planar = YuvPlanarImage {
 		y_plane: &i420.data[..luma],

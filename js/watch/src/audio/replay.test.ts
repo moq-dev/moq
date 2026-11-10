@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
-import { Duration, Instant } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
-import { type Arrival, type Options, QUANTUM, type Quantum, replay } from "./replay";
+import { type Arrival, type Options, QUANTUM, replay } from "./replay";
 
 const RATE = 48000;
 const CONFIG = { codec: "opus", sampleRate: RATE, numberOfChannels: 1 } as Catalog.AudioConfig;

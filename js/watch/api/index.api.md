@@ -1,27 +1,9 @@
 # `@moq/watch`
 
 ```ts
-export type Arrival = {
-	arrival: Clock.Instant;
-	kind: "frame";
-	late: boolean;
-	timestamp: Clock.Duration;
-} | {
-	duration: Clock.Duration;
-	kind: "gap";
-	timestamp: Clock.Duration;
-};
-
-export interface Arrivals {
-	[Symbol.asyncIterator](): AsyncIterator<Arrival>;
-	close(): void;
-	next(): Promise<Arrival | undefined>;
-}
-
 export namespace Audio {
 	export class Decoder {
 		constructor(props: Audio.DecoderProps);
-		arrivals(): Arrivals;
 		close(): void;
 		readonly in: Signals.Readonlys<Audio.DecoderInput>;
 		readonly out: Signals.Readonlys<Audio.DecoderOutput>;

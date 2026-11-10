@@ -167,7 +167,6 @@ case "$1" in
         javascript qmux-record just js qmux-record-bench
         javascript qmux-datagrams just js qmux-datagrams-bench
         javascript cmaf just js cmaf-bench
-        javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench
         javascript e2ee just js e2ee-bench
         javascript json-stream just js json-stream-bench

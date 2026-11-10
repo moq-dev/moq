@@ -22,11 +22,6 @@ export interface Config {
 	streamReceiveWindow?: bigint;
 }
 
-export interface InstallOptions {
-	requireProtocol?: boolean;
-	versions?: Record<string, Version | Version[] | null>;
-}
-
 export interface SendStream extends WritableStream<Uint8Array> {
 	getStats(): Promise<SendStreamStats>;
 	sendOrder: number;
@@ -135,8 +130,6 @@ export interface WebSocketStreamOpenEvent {
 	readable: ReadableStream<WebSocketStreamData>;
 	writable: WritableStream<WebSocketStreamData>;
 }
-
-export function install(options?: InstallOptions): boolean;
 
 export function selectSubprotocol(offered: string | readonly string[] | null | undefined, options?: Pick<SessionOptions, "protocols" | "versions" | "requireProtocol">): string | undefined;
 ```

@@ -662,7 +662,7 @@ export class Decoder {
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = frame.timestamp;
-				this.#track.received(timestamp, frame.arrival);
+				const late = this.#track.received(timestamp, frame.arrival);
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -746,7 +746,7 @@ export class Decoder {
 				const { frame } = next;
 
 				const timestamp = frame.timestamp;
-				this.#track.received(timestamp, frame.arrival);
+				const late = this.#track.received(timestamp, frame.arrival);
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);

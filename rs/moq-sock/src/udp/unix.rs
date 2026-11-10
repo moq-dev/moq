@@ -837,11 +837,7 @@ mod gso {
 		1
 	}
 
-		pub(super) fn set_segment_size(
-		_encoder: &mut cmsg::Encoder<'_, libc::msghdr>,
-		_segment_size: u16,
-	) {
-	}
+	pub(super) fn set_segment_size(_encoder: &mut cmsg::Encoder<'_, libc::msghdr>, _segment_size: u16) {}
 }
 
 #[cfg(target_os = "freebsd")]
