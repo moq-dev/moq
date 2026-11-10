@@ -31,7 +31,7 @@ hot-path survey, so quests don't re-litigate them:
   one `origin::Producer` spans all workers, so a subscriber on worker B reads
   `kio::Lock` state written on worker A. These quests shrink that cost
   in place; they do not attempt per-worker model sharding, unless the
-  [kio channel contention](/quest/m4/perf/kio-channel-contention/README.md)
+  [kio channel contention](/quest/m4/kio-channel-contention/README.md)
   spikes measure a win (decided 2026-10-14).
 - The batched write/read machinery (`frame::Buffer`, `write_frames`,
   the egress `Prefetch`) already exists in moq-net; egress is amortized,
@@ -70,7 +70,7 @@ recipe it needs has shipped. It stays in later work (m4), since the release defe
 optimization.
 
 Decided 2026-10-22: the WebSocket and TCP stream transports join this line
-as the [Stream transports](/quest/m4/perf/stream/README.md) epic, ranked
+as the [Stream transports](/quest/m4/stream-transports/README.md) epic, ranked
 second, and the io_uring TCP line moves in from m3. io_uring pays far more
 for TCP than for UDP, so it no longer waits on fleet demand.
 
@@ -81,8 +81,8 @@ revisions on the same host and worker count, and profiles with
 
 ## Required
 
-- [kio channel contention](/quest/m4/perf/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter, per-thread spikes, and an append-only log
-- [Stream transports](/quest/m4/perf/stream/README.md) - qmux drives its own WebSocket and TCP sockets in one task, measured end to end, then serves them from the io_uring workers
+- [kio channel contention](/quest/m4/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter, per-thread spikes, and an append-only log
+- [Stream transports](/quest/m4/stream-transports/README.md) - qmux drives its own WebSocket and TCP sockets in one task, measured end to end, then serves them from the io_uring workers
 - [Relay allocations](/quest/m4/perf/relay-allocs.md) - fewer allocations per delivered frame, starting with per-stream session clones
 - [QUIC lock contention](/quest/m4/perf/quic-lock-contention.md) - a measured verdict on the tokio driver's connection-wide mutex and per-packet endpoint-to-connection hop, with levers built only on evidence
 - [Ingest batch](/quest/m4/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame

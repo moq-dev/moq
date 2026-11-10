@@ -1856,7 +1856,7 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 			announce: route,
 		} => Some((route, true)),
 		moq_net::origin::RouteEvent {
-			kind: moq_net::origin::RouteKind::End,
+			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: route,
 		} => Some((route, false)),
 	}

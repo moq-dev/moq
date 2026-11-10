@@ -33,4 +33,4 @@ existing suite does.
 
 ## Required
 
-- [Ring TCP ablation](/quest/m4/perf/stream/ablation.md) - picks the mechanisms before the worker implementation starts
+- [Ring TCP ablation](/quest/m4/stream-transports/ablation.md) - picks the mechanisms before the worker implementation starts

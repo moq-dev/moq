@@ -35,6 +35,36 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: o.inner.Consume()}
 }
 
+// RouteOptions is how a [Route] or [Claim] advertises itself. The zero value is visible at
+// once, at cost 0, under a fresh instance the route keeps for its lifetime, so a restarted
+// publisher is a new stream viewers restart onto.
+type RouteOptions struct {
+	// Hidden creates the route invisible and unroutable until [Route.Announce].
+	Hidden bool
+	// Cost is the static production cost: lower wins among routes covering the same prefix.
+	Cost uint64
+	// Instance is a stable stream to serve, or nil to mint a fresh one. Set it only for a
+	// publisher that continues its group sequences across restarts and raises Epoch on each,
+	// or to forward an announced route's stream as is: readers stitch every route of one
+	// instance together, so restarting the sequences under an old instance splices unrelated
+	// groups into their tracks.
+	Instance *Instance
+	// Epoch is which run of a stable Instance this is: only the highest is eligible. Ignored without one.
+	Epoch uint64
+}
+
+func (o RouteOptions) ffi() ffi.MoqRouteOptions {
+	return ffi.MoqRouteOptions{Hidden: o.Hidden, Cost: o.Cost, Instance: optional(o.Instance), Epoch: o.Epoch}
+}
+
+// optional lowers a nil instance to the ffi's None.
+func optional(instance *Instance) **ffi.MoqInstance {
+	if instance == nil {
+		return nil
+	}
+	return &instance
+}
+
 // Route creates a route at exactly path, owning a new broadcast to fill.
 //
 // The route is visible at once unless options.Hidden: a hidden route is
@@ -44,7 +74,7 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 // options names one. Keep the route reachable: [Route.Cancel], or the collector
 // reclaiming it, retracts it, and [BroadcastProducer.Close] ends both.
 func (o *OriginProducer) Route(path string, options RouteOptions) (*Route, error) {
-	inner, err := o.inner.Route(path, options)
+	inner, err := o.inner.Route(path, options.ffi())
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +88,7 @@ func (o *OriginProducer) Route(path string, options RouteOptions) (*Route, error
 // Answer each [Claim.Requested] request, and keep the claim reachable while it
 // should stay advertised.
 func (o *OriginProducer) Claim(prefix string, options RouteOptions) (*Claim, error) {
-	inner, err := o.inner.Claim(prefix, options)
+	inner, err := o.inner.Claim(prefix, options.ffi())
 	if err != nil {
 		return nil, err
 	}
@@ -88,9 +118,13 @@ func (r *Route) Broadcast() *BroadcastProducer {
 // changes. A job's route takes its claim's current one when it first announces
 // or when this first reads it. Read first, the job announces under it, and
 // [Route.Announce] fails with Unroutable once the claim has moved past it, so a
-// signer built from it stays valid.
-func (r *Route) Instance() string {
-	return r.inner.InstanceId()
+// signer built from it stays valid. Once cancelled, it is the last one read or
+// announced, or nil for a hidden route that did neither.
+func (r *Route) Instance() *Instance {
+	if instance := r.inner.InstanceId(); instance != nil {
+		return *instance
+	}
+	return nil
 }
 
 // Announce makes the route visible, or keeps it so. A route from
@@ -132,7 +166,7 @@ type Claim struct {
 // Instance returns the stream this claim serves now. A named instance never
 // changes. Unnamed, the claim moves to a fresh one each time a job holding its
 // current one ends.
-func (c *Claim) Instance() string {
+func (c *Claim) Instance() *Instance {
 	return c.inner.InstanceId()
 }
 
@@ -202,7 +236,7 @@ func (r *BroadcastRequest) Path() (string, error) {
 // the waiting requesters; created hidden, they wait
 // until [Route.Announce], so the job can fill its catalog first.
 func (r *BroadcastRequest) Route(options RouteOptions) (*Route, error) {
-	inner, err := r.inner.Route(options)
+	inner, err := r.inner.Route(options.ffi())
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +270,7 @@ type AnnounceOptions struct {
 }
 
 // Announced lists the paths under a literal prefix matching an optional pattern filter, as each
-// becomes present or absent. To see another publisher instance take a path over, use Follow.
+// becomes present, absent, or offline, or changes availability. To see another publisher instance take a path over, use Follow.
 func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	inner, err := o.inner.Announced(ffi.MoqAnnounceConfig{
 		Prefix: options.Prefix,
@@ -252,8 +286,8 @@ func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, 
 // Follow follows an exact path, resolving each stream that serves it and reporting
 // when it goes offline. A non-nil instance follows only that stream: another one
 // taking over reads as offline, and the stream is handed out again if it returns.
-func (o *OriginConsumer) Follow(path string, instance *string) (*Following, error) {
-	inner, err := o.inner.Follow(path, instance)
+func (o *OriginConsumer) Follow(path string, instance *Instance) (*Following, error) {
+	inner, err := o.inner.Follow(path, optional(instance))
 	if err != nil {
 		return nil, err
 	}
@@ -267,20 +301,20 @@ func (o *OriginConsumer) Follow(path string, instance *string) (*Following, erro
 // serve it, including a broadcast created but not announced. Unlike Follow, it
 // does not wait for a future announcement. A non-nil instance refuses any
 // other stream. Blocks until resolved.
-func (o *OriginConsumer) Request(ctx context.Context, path string, instance *string) (*BroadcastConsumer, error) {
-	inner, err := o.inner.Request(ctx, path, instance)
+func (o *OriginConsumer) Request(ctx context.Context, path string, instance *Instance) (*BroadcastConsumer, error) {
+	inner, err := o.inner.Request(ctx, path, optional(instance))
 	if err != nil {
 		return nil, err
 	}
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
-// AnnounceConsumer is a listing of paths, each present or absent.
+// AnnounceConsumer is a listing of paths, each present, absent, or offline.
 type AnnounceConsumer struct {
 	inner *ffi.MoqAnnounceConsumer
 }
 
-// Next returns the next path becoming present or absent, or (nil, nil) when the stream ends.
+// Next returns the next change to a path, or (nil, nil) when the stream ends.
 func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
 	res, err := bridge.Call(ctx, nil, a.inner.Next)
 	if err != nil || res == nil {

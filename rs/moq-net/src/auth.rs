@@ -626,6 +626,35 @@ impl Permit {
 		Some(crate::model::interest_prefixes(limit))
 	}
 
+	/// The one prefix the grant and the limit together confine this direction to, or
+	/// `None` when they confine it to several or to none. A request for it, rather than
+	/// one above it, is one the peer's floors can certify.
+	#[cfg(feature = "async")]
+	pub(crate) fn region(&self) -> Option<crate::Path> {
+		let heads = |patterns: &Option<Patterns>| patterns.as_ref().map(crate::model::interest_prefixes);
+		let regions = match (heads(&self.granted), heads(&self.limit)) {
+			(None, None) => return None,
+			(Some(regions), None) | (None, Some(regions)) => regions,
+			(Some(granted), Some(limit)) => {
+				let mut meet: Vec<crate::Path> = (granted.iter())
+					.flat_map(|a| limit.iter().map(move |b| (a, b)))
+					.filter_map(|(a, b)| match () {
+						_ if a.has_prefix(b) => Some(a.clone()),
+						_ if b.has_prefix(a) => Some(b.clone()),
+						_ => None,
+					})
+					.collect();
+				meet.sort();
+				meet.dedup();
+				meet
+			}
+		};
+		match regions.as_slice() {
+			[region] => Some(region.clone()),
+			_ => None,
+		}
+	}
+
 	/// Whether both set the same limit on the peer, whatever either was granted.
 	#[cfg(feature = "async")]
 	pub(crate) fn same_limit(&self, other: &Self) -> bool {
@@ -2825,7 +2854,7 @@ impl Enforce {
 					self.live.insert(gate.path);
 				}
 				crate::origin::RouteEvent {
-					kind: crate::origin::RouteKind::End,
+					kind: crate::origin::RouteKind::End | crate::origin::RouteKind::Offline,
 					announce: update,
 				} => {
 					self.live.remove(&update.prefix);
@@ -3097,6 +3126,24 @@ mod tests {
 			limit: Some(patterns(&[""])),
 		};
 		assert_eq!(everything.regions(), None, "a root grant confines nothing");
+	}
+
+	/// The region is where the grant and the limit meet, and only when that is one prefix.
+	#[cfg(feature = "async")]
+	#[test]
+	fn the_region_is_where_grant_and_limit_meet() {
+		let permit = |granted: Option<&[&str]>, limit: Option<&[&str]>| Permit {
+			granted: granted.map(patterns),
+			limit: limit.map(patterns),
+		};
+		let path = crate::Path::from_static;
+		assert_eq!(permit(None, None).region(), None);
+		assert_eq!(permit(Some(&["a"]), None).region(), Some(path("a")));
+		assert_eq!(permit(None, Some(&["a/b"])).region(), Some(path("a/b")));
+		assert_eq!(permit(Some(&["a"]), Some(&["a/b", "c"])).region(), Some(path("a/b")));
+		assert_eq!(permit(Some(&[""]), Some(&["a"])).region(), Some(path("a")));
+		assert_eq!(permit(Some(&["a", "b"]), None).region(), None, "two regions");
+		assert_eq!(permit(Some(&["a"]), Some(&["b"])).region(), None, "they never meet");
 	}
 
 	/// A limit replaces the last one, narrower or wider, and applies to a version

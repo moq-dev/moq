@@ -40,6 +40,7 @@ import {
 	staleHole,
 } from "../internal.ts";
 import type { Lister } from "../listing.ts";
+import * as Mint from "../mint.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
@@ -232,7 +233,7 @@ export class Minted {
 	acquire(path: Path.Valid): Instance.Valid {
 		let entry = this.#paths.get(path);
 		if (!entry) {
-			entry = { instance: Instance.minted(), holders: 0 };
+			entry = { instance: Mint.fresh(), holders: 0 };
 			this.#paths.set(path, entry);
 		}
 		entry.holders += 1;
@@ -1746,14 +1747,9 @@ export class Subscriber {
 		// Different freshness budgets use independent streams: once a FETCH is on the
 		// wire its limit cannot be widened for a later, more tolerant caller. Equal
 		// budgets still coalesce and each caller keeps an independent mirror.
-		const key = JSON.stringify([
-			consumed.id,
-			broadcast,
-			instance,
-			track,
-			String(sequence),
-			options.maxDelay?.asNanos(),
-		]);
+		// A minted instance is an object, which JSON prints as {}, so key on its text and flag.
+		const pin = instance === undefined ? null : [Instance.text(instance), Instance.isMinted(instance)];
+		const key = JSON.stringify([consumed.id, broadcast, pin, track, String(sequence), options.maxDelay?.asNanos()]);
 		let entry = this.#fetches.get(key);
 		let consumer: netGroup.Consumer;
 		if (entry && !entry.group.isClosed) {

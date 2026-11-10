@@ -9,6 +9,7 @@ use crate::consumer::MoqTrackConsumer;
 use crate::consumer::{MoqAnchor, MoqDelay, MoqOrder, MoqRange, MoqSubscription, moq_subscription_defaults};
 use crate::datagram::*;
 use crate::error::{MoqError, MoqProtocolError, MoqProtocolKind};
+use crate::instance::MoqInstance;
 use crate::json::{
 	MoqJsonSnapshotConfig, MoqJsonSnapshotConsumer, MoqJsonSnapshotProducer, MoqJsonStreamConsumer,
 	MoqJsonStreamProducer, MoqJsonWindowConfig, MoqJsonWindowConsumer, MoqJsonWindowEvent, MoqJsonWindowProducer,
@@ -426,7 +427,7 @@ async fn route_options_reach_the_announced_route() {
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let info = next_announced(&announced).await.route;
 	assert_eq!(info.cost, 9);
-	assert_eq!(info.instance, route.instance_id());
+	assert_eq!(Some(info.instance), route.instance_id());
 
 	// Re-pricing changes the route in place: the listing never reports it, but a fresh
 	// listing reads the new price under the same instance.
@@ -434,7 +435,7 @@ async fn route_options_reach_the_announced_route() {
 	let repriced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let info = next_announced(&repriced).await.route;
 	assert_eq!(info.cost, 4);
-	assert_eq!(info.instance, route.instance_id());
+	assert_eq!(Some(info.instance), route.instance_id());
 
 	route.broadcast().close().unwrap();
 }
@@ -450,28 +451,23 @@ async fn route_options_name_an_instance_or_refuse() {
 		.route(
 			"instance-route".into(),
 			MoqRouteOptions {
-				instance: Some("cam".into()),
+				instance: Some(MoqInstance::parse("cam".into()).unwrap()),
 				epoch: 3,
 				..Default::default()
 			},
 		)
 		.unwrap();
-	assert_eq!(route.instance_id(), "cam");
-	assert_eq!(next_announced(&announced).await.route.instance, "cam");
+	let served = route.instance_id().unwrap();
+	assert_eq!(served.text(), "cam");
+	assert!(!served.is_minted());
+	assert_eq!(next_announced(&announced).await.route.instance, served);
 
-	// An instance is never empty, and the refusal creates nothing.
-	let empty = MoqRouteOptions {
-		instance: Some(String::new()),
-		..Default::default()
-	};
+	// An instance is never empty, and text never names a minted one.
 	assert!(matches!(
-		origin.route("refused".into(), empty.clone()),
+		MoqInstance::parse(String::new()),
 		Err(MoqError::InvalidInstance { .. })
 	));
-	assert!(matches!(
-		origin.claim("refused".into(), empty),
-		Err(MoqError::InvalidInstance { .. })
-	));
+	assert!(!MoqInstance::parse("~cam".into()).unwrap().is_minted());
 
 	route.cancel();
 }
@@ -484,7 +480,7 @@ async fn a_new_route_at_a_path_restarts_its_followers() {
 	let following = consumer.follow("instance-route".into(), None).unwrap();
 	let first = origin.route("instance-route".into(), Default::default()).unwrap();
 	let announce = next_announced(&announced).await;
-	assert_eq!(announce.route.instance, first.instance_id());
+	assert_eq!(Some(announce.route.instance), first.instance_id());
 	following.available().await.unwrap().unwrap();
 
 	// A new run of the same publisher is a new route with its own instance: followers
@@ -502,7 +498,7 @@ async fn a_new_route_at_a_path_restarts_its_followers() {
 	first.withdraw().unwrap();
 	second.withdraw().unwrap();
 	match next_event(&announced).await {
-		MoqAnnounceEvent::Absent { announce } => assert_eq!(announce.route.instance, second.instance_id()),
+		MoqAnnounceEvent::Absent { announce } => assert_eq!(Some(announce.route.instance), second.instance_id()),
 		other => panic!("expected an absence, got {other:?}"),
 	}
 
@@ -3706,7 +3702,7 @@ async fn resolve_honors_the_reference_instance() {
 	let served = moq_net::Instance::random().to_string();
 	let other = moq_net::Instance::random().to_string();
 	let options = MoqRouteOptions {
-		instance: Some(served.clone()),
+		instance: Some(MoqInstance::parse(served.clone()).unwrap()),
 		..Default::default()
 	};
 
@@ -3778,7 +3774,10 @@ async fn announce_and_withdraw_toggle_discovery() {
 			}
 		}
 	}
-	assert_eq!(wait_live(&announced, true).await.route.instance, route.instance_id());
+	assert_eq!(
+		Some(wait_live(&announced, true).await.route.instance),
+		route.instance_id()
+	);
 
 	route.withdraw().unwrap();
 	wait_live(&announced, false).await;
@@ -3791,7 +3790,10 @@ async fn announce_and_withdraw_toggle_discovery() {
 
 	// Announcing again brings the same stream back.
 	route.announce().unwrap();
-	assert_eq!(wait_live(&announced, true).await.route.instance, route.instance_id());
+	assert_eq!(
+		Some(wait_live(&announced, true).await.route.instance),
+		route.instance_id()
+	);
 	kio::clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("timed out requesting the reannounced broadcast")
@@ -5055,11 +5057,11 @@ async fn dynamic_broadcast_request() {
 	let served = job.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
 	// Only announce answers the requester, under the claim's instance and after admission.
-	let instance = job.instance_id();
+	let instance = job.instance_id().unwrap();
 	job.announce().unwrap();
 	// A re-price keeps the instance the answer was announced under.
 	job.set_cost(7).unwrap();
-	assert_eq!(job.instance_id(), instance);
+	assert_eq!(job.instance_id(), Some(instance.clone()));
 	assert!(matches!(request.path(), Err(MoqError::AlreadyResponded)));
 
 	let broadcast = kio::clock::timeout(TIMEOUT, requesting)
@@ -6273,7 +6275,7 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let followed = origin.consume().follow("live".into(), None).unwrap();
 	let options = MoqRouteOptions {
-		instance: Some(moq_net::Instance::random().to_string()),
+		instance: Some(MoqInstance::wrap(moq_net::Instance::random())),
 		..Default::default()
 	};
 	let first_route = origin.route("live".into(), options.clone()).unwrap();
@@ -6317,7 +6319,7 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 async fn an_instance_pins_request_and_follow() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let instance = moq_net::Instance::random().to_string();
+	let instance = MoqInstance::wrap(moq_net::Instance::random());
 	let first = origin
 		.route(
 			"live".into(),
@@ -6332,13 +6334,10 @@ async fn an_instance_pins_request_and_follow() {
 		.await
 		.expect("timed out requesting the pinned instance")
 		.unwrap();
-	assert_eq!(
-		pinned.inner().info().instance.as_ref().map(ToString::to_string),
-		Some(instance.clone())
-	);
+	assert_eq!(pinned.inner().info().instance.as_ref(), Some(&instance.0));
 	let err = kio::clock::timeout(
 		TIMEOUT,
-		consumer.request("live".into(), Some(moq_net::Instance::random().to_string())),
+		consumer.request("live".into(), Some(MoqInstance::wrap(moq_net::Instance::random()))),
 	)
 	.await
 	.expect("timed out requesting another instance")
@@ -6349,11 +6348,6 @@ async fn an_instance_pins_request_and_follow() {
 		crate::error::MoqErrorScope::Stream,
 		crate::error::MoqProtocolKind::Unroutable,
 	);
-	assert!(matches!(
-		consumer.follow("live".into(), Some(String::new())),
-		Err(MoqError::InvalidInstance { .. })
-	));
-
 	let followed = consumer.follow("live".into(), Some(instance.clone())).unwrap();
 	kio::clock::timeout(TIMEOUT, followed.available())
 		.await
@@ -6367,10 +6361,7 @@ async fn an_instance_pins_request_and_follow() {
 		.await
 		.expect("timed out requesting the takeover")
 		.unwrap();
-	assert_ne!(
-		takeover.inner().info().instance.as_ref().map(ToString::to_string),
-		Some(instance)
-	);
+	assert_ne!(takeover.inner().info().instance.as_ref(), Some(&instance.0));
 	// Another instance taking over ends the pinned follow, which hands out nothing else.
 	let ended = kio::clock::timeout(TIMEOUT, followed.available())
 		.await
@@ -6386,6 +6377,80 @@ async fn an_instance_pins_request_and_follow() {
 	drop(takeover);
 	first.broadcast().close().unwrap();
 	second.broadcast().close().unwrap();
+}
+
+/// A route that crossed lite-06 carries an instance its session minted. The announcement
+/// reports it minted, and passing that instance back pins request and follow to its stream,
+/// while its text names another, named instance that nothing serves.
+#[tokio::test]
+async fn a_minted_instance_pins_request_and_follow() {
+	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let versions = vec!["moq-lite-06".to_string()];
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		versions: versions.clone(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	let addr = kio::clock::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let accepting = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accepting.accept().await.unwrap().expect("a session");
+		request.accept(None, None).await.expect("handshake failed")
+	});
+	let broadcast = create_announced(&server_origin, "live");
+
+	let viewer = MoqOriginProducer::new(MoqOriginConfig::default());
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		versions,
+		bind: Some("127.0.0.1:0".into()),
+		consume: Some(viewer.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	let _session = kio::clock::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+	let _server_session = kio::clock::timeout(TIMEOUT, accept).await.unwrap().unwrap();
+
+	let consumer = viewer.consume();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let minted = next_announced(&announced).await.route.instance;
+	assert!(minted.is_minted());
+
+	let pinned = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), Some(minted.clone())))
+		.await
+		.expect("timed out requesting the minted instance")
+		.unwrap();
+	assert_eq!(pinned.inner().info().instance.as_ref(), Some(&minted.0));
+	let followed = consumer.follow("live".into(), Some(minted.clone())).unwrap();
+	let resolved = kio::clock::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("timed out following the minted instance")
+		.unwrap()
+		.expect("the minted instance");
+	assert_eq!(resolved.inner().info().instance.as_ref(), Some(&minted.0));
+
+	let named = MoqInstance::parse(minted.text()).unwrap();
+	assert_ne!(named, minted);
+	let err = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), Some(named)))
+		.await
+		.expect("timed out requesting the named text")
+		.err()
+		.expect("the same text, named, is another instance");
+	assert_protocol(
+		&err,
+		crate::error::MoqErrorScope::Stream,
+		crate::error::MoqProtocolKind::Unroutable,
+	);
+	drop(broadcast);
 }
 
 /// Dropping a handed-out handle changes nothing about the path, so the follower hands out

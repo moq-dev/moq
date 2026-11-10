@@ -4148,7 +4148,7 @@ impl Publisher {
 					initial.insert(update.prefix.clone(), update);
 				}
 				crate::origin::RouteEvent {
-					kind: crate::origin::RouteKind::End,
+					kind: crate::origin::RouteKind::End | crate::origin::RouteKind::Offline,
 					announce: update,
 				} => {
 					initial.remove(&update.prefix);
@@ -5921,7 +5921,7 @@ impl ForwardNamespaces {
 					announce: update,
 				} => (update, true, true),
 				crate::origin::RouteEvent {
-					kind: crate::origin::RouteKind::End,
+					kind: crate::origin::RouteKind::End | crate::origin::RouteKind::Offline,
 					announce: update,
 				} => (update, false, false),
 			})));

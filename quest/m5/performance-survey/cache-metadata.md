@@ -23,7 +23,7 @@ Correct the accounting explanation with the chosen implementation.
 Front eviction ([moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993))
 kept the group's `kio::log` representation and sheds by advancing its base. Land the benchmark now, but any shrink of the
 `arrival`/`evict` deques waits on
-[log adoption](/quest/m4/perf/kio-channel-contention/log-adoption.md)'s verdict,
+[log adoption](/quest/m4/kio-channel-contention/log-adoption.md)'s verdict,
 since that quest may move `TrackState` arrival order onto the kio log.
 Idle GC clock and lock work was settled by
 [moq-dev/moq#6291](https://github.com/moq-dev/moq/pull/6291); this owns
@@ -35,4 +35,4 @@ measured no-win is valid. No API or wire change is expected; report actual impac
 
 ## Related
 
-- [Log adoption](/quest/m4/perf/kio-channel-contention/log-adoption.md) - may replace the `arrival` deque this quest would shrink
+- [Log adoption](/quest/m4/kio-channel-contention/log-adoption.md) - may replace the `arrival` deque this quest would shrink

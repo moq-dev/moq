@@ -1238,7 +1238,7 @@ impl AnnounceRun {
 					current.insert(update.prefix, update.route);
 				}
 				origin::RouteEvent {
-					kind: origin::RouteKind::End,
+					kind: origin::RouteKind::End | origin::RouteKind::Offline,
 					announce: update,
 				} => {
 					current.remove(&update.prefix);
@@ -1612,7 +1612,7 @@ impl AnnounceRun {
 					announce: update,
 				}) => (update, true, true),
 				Some(origin::RouteEvent {
-					kind: origin::RouteKind::End,
+					kind: origin::RouteKind::End | origin::RouteKind::Offline,
 					announce: update,
 				}) => (update, false, false),
 				None => {

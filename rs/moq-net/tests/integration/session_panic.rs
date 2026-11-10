@@ -86,7 +86,7 @@ async fn until(announced: &mut origin::Routes, path: &str, active: bool) {
 					announce,
 				} => (announce, true),
 				origin::RouteEvent {
-					kind: origin::RouteKind::End,
+					kind: origin::RouteKind::End | origin::RouteKind::Offline,
 					announce,
 				} => (announce, false),
 			};

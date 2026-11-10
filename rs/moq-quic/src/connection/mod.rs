@@ -58,7 +58,6 @@ pub use datagrams::Datagrams;
 
 mod mtud;
 #[cfg(feature = "mux")]
-#[doc(hidden)]
 pub mod mux;
 
 mod packet_builder;
@@ -81,7 +80,6 @@ mod receive_timestamps;
 
 mod sent_packets;
 #[cfg(feature = "fuzz")]
-#[doc(hidden)]
 pub use sent_packets::Bench as BenchSentPackets;
 mod slots;
 mod spaces;

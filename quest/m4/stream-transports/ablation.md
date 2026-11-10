@@ -4,7 +4,7 @@
 
 A written-down number comparing ring TCP against tokio TCP under the relay's
 actual stream workload, on the same hardware. It picks which ring mechanisms
-the [port](/quest/m4/perf/stream/ring.md) uses and records the expected win.
+the [port](/quest/m4/stream-transports/ring.md) uses and records the expected win.
 
 ## Plan
 
@@ -29,4 +29,4 @@ Vary at least:
 Record CPU per message, CPU per Gbps, syscalls per message, ring submissions
 and completions, and latency, in the same machine-readable form the UDP matrix
 uses. Attribute the gain (or its absence) to specific mechanisms, and record
-the result in the [epic](/quest/m4/perf/stream/README.md) README.
+the result in the [epic](/quest/m4/stream-transports/README.md) README.

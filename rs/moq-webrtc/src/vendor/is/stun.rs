@@ -1151,12 +1151,10 @@ mod builder {
 	use std::net::SocketAddr;
 
 	/// Type state representing a builder where the STUN method has not yet been set.
-	#[doc(hidden)]
 	#[derive(Default, Debug, Clone)]
 	pub struct NoMethod;
 
 	/// Type state representing a builder where the STUN method has been set, but the class has not.
-	#[doc(hidden)]
 	#[derive(Debug, Clone)]
 	pub struct HasMethod {
 		method: Method,
@@ -1164,7 +1162,6 @@ mod builder {
 
 	/// Type state representing a builder where both the STUN method and class have been set.
 	/// Attributes can now be added.
-	#[doc(hidden)]
 	#[derive(Debug, Clone)]
 	pub struct HasClass {
 		method: Method,

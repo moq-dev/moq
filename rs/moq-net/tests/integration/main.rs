@@ -1,6 +1,6 @@
 //! Integration tests without feature-enabling dependencies, linked into one binary.
 //!
-//! Tests needing JSON consumers or the hidden `fuzz` module live in `moq-net-tests`.
+//! Tests needing JSON consumers or the `fuzz` module live in `moq-net-tests`.
 //! Each `tests/*.rs` file is its own crate that links this package and its
 //! dependencies again, so add new integration tests here as a module.
 //! `send.rs` stays apart because it builds on another toolchain.

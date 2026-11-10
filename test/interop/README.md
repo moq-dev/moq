@@ -239,14 +239,14 @@ implementation unique to the run, the relay records it when it admits the
 session, and its `moq_net::lite::setup` debug line on that connection shows the
 proof verified. The lane prints each browser build.
 
-Chromium 158 and later must prove. Firefox's exporter writes the session ID as
-a varint rather than the draft's 64 bits, so `@moq/net` sends no proof from
-Firefox, and the tab must connect unproven. A build that cannot prove yet skips,
-or fails under `CI_STRICT`, which release PRs set, so the lite-07 cut waits for
-both browsers to prove. A build the table says cannot prove but that does fails,
-so the table follows the browsers. Until
-[routes/js.md](../../quest/m2/cluster-routing/routes/js.md) ports `js/net` to the
-route layer, the lane records a skip naming it.
+Chromium 158 and later must prove; an older Chromium skips, or fails under
+`CI_STRICT`, which release PRs set, so the lite-07 cut waits for it to prove.
+Firefox's exporter writes the session ID as a varint rather than the draft's 64
+bits, so `@moq/net` sends no proof from Firefox, and the tab passes when it
+connects unproven, a supported state the cut does not wait on. A build the
+table says cannot prove but that does fails, so the table follows the browsers.
+Until [routes/js.md](../../quest/m2/cluster-routing/routes/js.md) ports `js/net`
+to the route layer, the lane records a skip naming it.
 
 ## moq-transport
 

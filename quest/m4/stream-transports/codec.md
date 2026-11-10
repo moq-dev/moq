@@ -4,7 +4,7 @@
 
 qmux implements the RFC 6455 subset it uses, and tungstenite and
 tokio-tungstenite leave the dependency tree, but only if the stream
-transport bench (see the [epic](/quest/m4/perf/stream/README.md)) attributes a
+transport bench (see the [epic](/quest/m4/stream-transports/README.md)) attributes a
 material share of WebSocket CPU to tungstenite now that qmux's `Driver`
 owns the socket. If the bench shows no such share, delete this quest.
 

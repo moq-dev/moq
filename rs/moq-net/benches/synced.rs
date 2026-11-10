@@ -9,7 +9,7 @@
 //! - land: a snapshot starts and lands under one prefix, releasing its one consumer.
 //! - register: a consumer of one prefix registers, counting the snapshots it waits on.
 //!
-//! The snapshot is crate-private, so this reaches it through the hidden `fuzz` module.
+//! The snapshot is crate-private, so this reaches it through the `fuzz` module.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench synced`.
 

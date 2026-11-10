@@ -402,10 +402,7 @@ impl Drain {
 	}
 }
 
-/// Drives one producer tick for the benchmark. Not a public API: compiled only
-/// with the `bench` feature, which nothing enables by default.
 #[cfg(feature = "bench")]
-#[doc(hidden)]
 #[path = "produce_bench.rs"]
 pub mod bench;
 
@@ -1702,7 +1699,7 @@ mod tests {
 				announce: route,
 			} => Some((route, true)),
 			moq_net::origin::RouteEvent {
-				kind: moq_net::origin::RouteKind::End,
+				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: route,
 			} => Some((route, false)),
 		}
