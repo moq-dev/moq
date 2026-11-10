@@ -208,3 +208,4 @@ quests that require them.
 - [Finish the milestone re-cut](/quest/m2/recut-held.md) - claim-held epics move to the milestone their kind and priority give them once their claims merge
 - [A watcher reads connecting, not offline, while its connection is down](/quest/m2/watch-connecting-status.md) - `@moq/watch` status says OFFLINE only when connected and unannounced
 - [moq-transport is a compatibility layer again](/quest/m2/ietf-scope/README.md) - our extensions, JS FETCH serving, and track listing leave moq-transport; live media and joining FETCH stay
+- [The reconnect loop stops judging errors by kind](/quest/m2/reconnect-no-error-kinds.md) - after a first session every failure retries with backoff; `Verdict::Refused`, `Verdict::Fatal`, and `From<&Error> for Verdict` go
