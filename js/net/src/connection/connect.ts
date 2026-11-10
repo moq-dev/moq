@@ -181,7 +181,6 @@ export function checkVersions(versions: readonly string[]): string[] {
 /** Validate the transport options and snapshot an ordered version list before acquiring a connection. @internal */
 export function normalizeVersions(props?: {
 	versions?: readonly string[];
-	unsolicited?: boolean;
 	webtransport?: WebTransportProps;
 	websocket?: WebSocketProps;
 }): string[] | undefined {
@@ -210,6 +209,7 @@ export interface ConnectProps {
 	 * SETUP instead, which moq-transport cannot do.
 	 */
 	versions?: readonly string[];
+    unsolicited?: boolean;
 
 	/** WebTransport options. */
 	webtransport?: WebTransportProps;
