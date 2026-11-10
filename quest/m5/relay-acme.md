@@ -23,9 +23,19 @@ its cache because nobody used ACME yet (maintainer, 2026-11-03), so the cache
 needs no compatibility with the rustls-acme layout. Test against a local ACME
 server such as Pebble.
 
+The adapter is planned when this starts (maintainer, 2026-11-09, in rind's
+quest audit): ✅ this quest begins by planning `rind-instant-acme` in rind's
+quest tree (rejected: re-plan the adapter in rind now, ahead of its consumer;
+leave the stale wait). rind deleted the adapter in
+[moq-dev/rind#510](https://github.com/moq-dev/rind/pull/510) because nothing
+used it yet, and carries none until this does. The wait-only quest that
+pointed at rind's deleted one is gone.
+
 Public API: moq-relay regains the `acme` feature and an ACME config section.
 Wire: none.
 
-## Required
+## Waiting
 
-- [rind-instant-acme is on crates.io](/quest/m5/rind-instant-acme.md) - the adapter this uses, waiting on instant-acme 0.9
+- instant-acme: publishes 0.9, which carries the pluggable `CryptoProvider`.
+  Checked 2026-11-09: its latest is 0.8.5. Check with `cargo search
+  instant-acme`.
