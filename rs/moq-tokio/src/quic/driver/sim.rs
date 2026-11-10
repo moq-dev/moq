@@ -8,6 +8,8 @@
 //! seed replays a run exactly. A destination nobody bound drops the datagram, as UDP does.
 //!
 //! It runs only inside `kio::clock::sim::run`, where every arrival is a simulated timer.
+//!
+//! It tracks the crate's internals, so it can change in any release.
 
 use std::{
 	collections::{HashMap, VecDeque},

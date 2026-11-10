@@ -35,6 +35,6 @@ forbid "em dashes are forbidden; replace them with plain punctuation (UI placeho
 
 # A public Rust item is documented or not public.
 forbid "#[doc(hidden)] is forbidden; make the item private, delete it, or document it." \
-    -E 'doc[[:space:]]*\([[:space:]]*hidden' -- '*.rs'
+    -E 'doc[[:space:]]*\([^)]*hidden' -- '*.rs'
 
 exit "$failed"

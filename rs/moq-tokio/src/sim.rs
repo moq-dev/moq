@@ -5,6 +5,8 @@
 //! [`Dial`] on its [`Dials`], and whoever routes those answers it with an in-memory link.
 //! Everything else a dial does, the handshake, redials, and GOAWAY handling, runs as it
 //! would over a socket.
+//!
+//! It tracks the crate's internals, so it can change in any release.
 
 use futures::{
 	StreamExt,

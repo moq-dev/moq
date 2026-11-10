@@ -87,7 +87,7 @@ class TextTests(unittest.TestCase):
         self.write("notes.md", "#[doc(hidden)]\n")
         self.git("add", ".")
         self.assertEqual(self.check().returncode, 0)
-        for text in ("#[doc(hidden)]", "#[cfg_attr(test, doc( hidden ))]"):
+        for text in ("#[doc(hidden)]", "#[cfg_attr(test, doc( hidden ))]", '#[doc(alias = "Old", hidden)]'):
             with self.subTest(text=text):
                 self.write("src/vendor/lib.rs", f"pub mod a;\n{text}\n")
                 self.git("add", ".")
