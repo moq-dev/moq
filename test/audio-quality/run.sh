@@ -21,7 +21,7 @@ source "$AQ_DIR/../lib/harness.sh"
 # Captured before the parse consumes it, so the rerun command carries every flag.
 RERUN="$(harness_env AQ_PROFILE RELAY_BIN)just test audio-quality$(harness_argv "$@")"
 
-ALL_PROFILES=(near-zero mild wide bursty step fixed-250)
+ALL_PROFILES=(near-zero mild wide bursty step congestion fixed-250)
 ALL_RUNTIMES=(chromium native)
 ALL_CODECS=(opus aac)
 
@@ -141,8 +141,8 @@ valid() {
 }
 for p in "${PROFILES[@]}"; do
     valid "$p" profile "${ALL_PROFILES[@]}" "${ALL_TRACES[@]}"
-    if [[ "$p" == step ]] && ((DURATION <= 30)); then
-        echo "error: --duration must exceed the step at 30s" >&2
+    if [[ "$p" == step || "$p" == congestion ]] && ((DURATION <= 30)); then
+        echo "error: --duration must exceed $p's change, which ends by 30s" >&2
         exit 2
     fi
 done
@@ -170,14 +170,16 @@ delay_of() {
     esac
 }
 
-# The path treatment, as moq-shaper flags. Loss, reorder, and rate limits stay off: the buffer's job
-# is absorbing arrival spread, and congestion response would make a failure hard to attribute.
+# The path treatment, as moq-shaper flags. Loss, reorder, and rate limits stay off but for
+# `congestion`: the buffer's job is absorbing arrival spread, and congestion response would make a
+# failure hard to attribute, so one profile holds the stall a congested queue causes on its own.
 shaper_of() {
     case "$1" in
         near-zero | fixed-250) ;;
         mild) echo "--delay 5ms --jitter 5ms --jitter-model gaussian --shared" ;;
         wide) echo "--delay 40ms --jitter 40ms --jitter-model gaussian --shared" ;;
         bursty | step) echo "--profile $1" ;;
+        congestion) echo "--profile $AQ_DIR/congestion.toml" ;;
     esac
 }
 

@@ -70,9 +70,9 @@ reach zero underruns, and some underruns during congestion are expected.
 - Bound: ✅ configurable, as
   [the `stretch` setting](/quest/m1/audio-jitter-target/stretch-setting.md)
   records.
-- Tests: no gate may reward moving away from the rule, so
-  [the grading quest](/quest/m1/audio-jitter-target/grading.md) lands before
-  [the model](/quest/m1/audio-jitter-target/stretch.md).
+- Tests: no gate may reward moving away from the rule, so the audio harness
+  grades steady-state lag, the player's own trims, and recovery from a stall
+  before [the model](/quest/m1/audio-jitter-target/stretch.md) lands.
 - Milestone: ✅ every new child in m1, here (rejected: the model and grading
   in m0; the setting in m2).
 
