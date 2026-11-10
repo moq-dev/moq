@@ -77,6 +77,13 @@ export class Duration {
 	// Whole seconds plus any nanoseconds, possibly out of range or fractional seconds, rounded to
 	// whole nanoseconds as Rust's are, so a value's conversions agree with its ordering.
 	static #carry(secs: number, nanos: number): Duration {
+		const out = Duration.#tryCarry(secs, nanos);
+		if (out === undefined) throw new RangeError(`invalid duration: ${secs}s + ${nanos}ns`);
+		return out;
+	}
+
+	// `#carry`, or `undefined` when the result is negative or past the longest duration.
+	static #tryCarry(secs: number, nanos: number): Duration | undefined {
 		let whole = Math.floor(secs);
 		let rest = Math.round((secs - whole) * NANOS_PER_SEC + nanos);
 		const carry = Math.floor(rest / NANOS_PER_SEC);
@@ -89,9 +96,7 @@ export class Duration {
 			whole -= 1;
 			rest += NANOS_PER_SEC;
 		}
-		if (!Number.isFinite(whole) || !Number.isFinite(rest) || whole < 0) {
-			throw new RangeError(`invalid duration: ${secs}s + ${nanos}ns`);
-		}
+		if (!Number.isFinite(whole) || !Number.isFinite(rest) || whole < 0) return undefined;
 		return new Duration(whole, rest);
 	}
 
@@ -142,13 +147,17 @@ export class Duration {
 
 	/** The sum of both durations. */
 	add(other: Duration): Duration {
-		return Duration.#carry(this[VALUE] + other[VALUE], this[NANOS] + other[NANOS]);
+		const sum = this.checkedAdd(other);
+		if (sum === undefined) throw new RangeError("duration overflow");
+		return sum;
 	}
 
 	/** The sum of both durations, or `undefined` past the longest representable duration. */
 	checkedAdd(other: Duration): Duration | undefined {
-		const secs = this[VALUE] + other[VALUE] + Math.floor((this[NANOS] + other[NANOS]) / NANOS_PER_SEC);
-		return Number.isFinite(secs) ? this.add(other) : undefined;
+		const sum = Duration.#tryCarry(this[VALUE] + other[VALUE], this[NANOS] + other[NANOS]);
+		// Near the ceiling a carried second rounds away, which would shrink the sum below an operand.
+		if (sum === undefined || sum.lt(this) || sum.lt(other)) return undefined;
+		return sum;
 	}
 
 	/** The sum of both durations, stopping at the longest representable duration. */

@@ -79,7 +79,10 @@ test("moving past either end of a range is checked or saturates", () => {
 	expect(last.gt(instant(Number.MAX_SAFE_INTEGER))).toBe(true);
 	expect(last.saturatingAdd(Duration.nanos(1))).toEqual(last);
 	expect(longest.checkedAdd(longest)).toBeUndefined();
-	expect(longest.saturatingAdd(longest).ge(longest)).toBe(true);
+	expect(longest.saturatingAdd(longest).gt(longest)).toBe(true);
+	const max = longest.saturatingAdd(longest);
+	expect(max.checkedAdd(Duration.nanos(1))).toBeUndefined();
+	expect(max.saturatingAdd(Duration.nanos(1))).toEqual(max);
 	expect(Duration.secs(1).checkedAdd(Duration.millis(1))).toEqual(Duration.millis(1001));
 	expect(Duration.secs(1).saturatingAdd(Duration.millis(1))).toEqual(Duration.millis(1001));
 });
