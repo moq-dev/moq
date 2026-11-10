@@ -73,6 +73,25 @@ Before `@moq/crypto` is first published, add its entrypoints to the API
 Extractor declaration checks, which analyze only published packages since
 [moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794).
 
+## Required
+
+- [JS undeclared track names](/quest/m5/e2ee/js-undeclared-names.md) -
+  `@moq/net` exposes a broadcast request handler and `@moq/crypto` serves
+  undeclared names through it
+- [Rust protected publisher seams](/quest/m5/e2ee/rust-publish.md) - Rust
+  publishers emit encrypted catalogs and no plaintext semantic catalog in
+  E2EE mode, through the moq-net traits
+- [Encrypted consumer shape](/quest/m5/e2ee/consumer.md) - one consumer shape, the producer's mirror, shared by browser and CLI (moq-ffi is out of scope for this epic)
+- [Encrypted browser components](/quest/m5/e2ee/browser.md) - browser publish
+  and watch components handle encrypted audio and video without leaking
+  credentials into browser-owned surfaces
+- [Encrypted native CLI](/quest/m5/e2ee/cli.md) - the native CLI publishes and
+  plays encrypted media without exposing credentials through process metadata
+  or logs
+- [Cross-language encrypted proof](/quest/m5/e2ee/interop.md) - browser
+  TypeScript and native Rust exchange encrypted media both ways, with relays
+  forwarding and metering blind
+
 ## Closes
 
 - [#3023](https://github.com/moq-dev/moq/issues/3023) - close this issue when the quest finishes

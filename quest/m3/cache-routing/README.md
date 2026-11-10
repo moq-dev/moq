@@ -99,6 +99,7 @@ This README's own work, once its children land:
 ## Required
 
 - [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - warm routes and the eligibility rule hold in route-layer sweeps, and the wire placement is chosen
+- [Warm routes and per-broadcast parent selection](/quest/m3/cache-routing/select.md) - relays advertise warm routes and pull each broadcast through the cheapest eligible neighbor
 
 ## Related
 

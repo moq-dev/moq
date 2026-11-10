@@ -47,3 +47,7 @@ more children for the causes nothing owned. Dropped: one-night bench moves
 near the paired threshold (re-check if one repeats), a one-off
 `remote error: 52` in the browser bench smoke, and failures main or
 [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) already fixes.
+
+## Required
+
+- [Nightly's macOS platform job passes](/quest/m0/nightly/macos.md) - `moq-audio`'s tests compile on macOS again and the websocket version test's timeout is fixed if it recurs

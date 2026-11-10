@@ -18,9 +18,13 @@ class FakePipeline {
 	}
 	close() {}
 }
+const broadcasts: { enabled: Signal<boolean> }[] = [];
 class FakeBroadcast {
 	net = new Signal(undefined);
 	catalog = { mutate: (fn: (value: object) => void) => fn({}) };
+	constructor(props: { enabled: Signal<boolean> }) {
+		broadcasts.push(props);
+	}
 	close() {}
 }
 // Exercise room lifecycle wiring independently of camera drivers and browser workers.
@@ -39,13 +43,38 @@ function setup() {
 	// Each test counts only its own Local's sources and encoders.
 	sources.length = 0;
 	encoders.length = 0;
+	broadcasts.length = 0;
 	const bandwidth = new Signal(undefined);
 	const local = new Local({
 		connection: { origin: new Signal(undefined), allocator: bandwidth } as never,
 		identity: Path.from("alice"),
 	});
-	return { local, bandwidth, screen: sources.at(-1) as FakeSource };
+	const [camera, screenBroadcast] = broadcasts;
+	if (!camera || !screenBroadcast) throw new Error("expected the camera and screen broadcasts");
+	return { local, bandwidth, screen: sources.at(-1) as FakeSource, broadcasts: { camera, screen: screenBroadcast } };
 }
+
+// Replays LeavingStopsPublishing in `verify/Room.tla`: the screen broadcast is enabled by a live
+// share alone, so a participant who never joined, or who left, still publishes their screen.
+test("residual: a screen share publishes while not joined and after leaving", async () => {
+	const { local, screen, broadcasts } = setup();
+	try {
+		local.screenEnabled.set(true);
+		screen.out.state.set({ kind: "live", media: { video: {} } });
+		await flush();
+		expect(broadcasts.camera.enabled.peek()).toBe(false);
+		expect(broadcasts.screen.enabled.peek()).toBe(true);
+
+		local.enabled.set(true);
+		await flush();
+		local.enabled.set(false);
+		await flush();
+		expect(broadcasts.camera.enabled.peek()).toBe(false);
+		expect(broadcasts.screen.enabled.peek()).toBe(true);
+	} finally {
+		local.close();
+	}
+});
 
 test("screen capture stays enabled while prompting and resets after a live share ends", async () => {
 	const { local, bandwidth, screen } = setup();
