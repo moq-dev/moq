@@ -1,16 +1,16 @@
-# [S] MoQ builds against rind's corrected adapters
+# [S] MoQ builds against rind 0.4 and its corrected adapters
 
 ## Goal
 
-`main` builds and passes its checks against the patch releases of rind-rustls,
-rind-jsonwebtoken, rind-object-store, and rind-rcgen that make each adapter's
-API its upstream's, on the day they publish: the PR is ready before they
-publish and merges when they do.
+`main` builds and passes its checks against rind 0.4 and the patch releases of
+rind-rustls, rind-jsonwebtoken, rind-object-store, and rind-rcgen that make
+each adapter's API its upstream's, on the day they publish: the PR is ready
+before they publish and merges when they do.
 
-Non-goals: rind 0.4, which removes `rind::cpu::check()` and is a later,
-separate move; and the dimpl and str0m providers vendored under
+Non-goal: replacing the dimpl and str0m providers vendored under
 `rs/moq-webrtc/src/vendor`, which are MoQ's own code and depend on neither
-rind-dimpl nor rind-str0m.
+rind-dimpl nor rind-str0m. They call rind directly, so rind 0.4 still reaches
+them.
 
 ## Plan
 
@@ -20,6 +20,15 @@ releases publish ✅ (rejected: the 0.4 quest alone, accepting that MoQ's build
 breaks until fixed; leaving both to release-plz). rind holds those releases
 until this PR is ready
 ([its epic](https://github.com/moq-dev/rind/blob/main/quest/m0/adapters/README.md)).
+
+The same day the plan changed: two of rind 0.4's breaking changes merged while
+rind's 0.3.3 was unpublished, so the maintainer chose ✅ to set rind to 0.4.0
+and hold the release until the last one, the CPU-check removal, lands
+(rejected: ship 0.4.0 now and take the CPU-check removal in 0.5; revert both
+and release 0.3.3). So the adapter fixes and rind 0.4 publish in one release
+([moq-dev/rind#548](https://github.com/moq-dev/rind/pull/548)), each adapter
+requires rind 0.4, and this PR moves MoQ to both at once. Moving to the
+adapters alone would leave two copies of rind in the graph.
 
 rind treats an adapter API that differs from its upstream's as a bug and fixes
 it in a patch release, so the fixes arrive inside MoQ's caret requirements
@@ -92,8 +101,30 @@ MoQ calls none of the other items those PRs remove (rind-rustls's
 `kx_group::SECP521R1`; rind-rcgen's `check()`, `serial_number()`, and
 `key_identifier()`), by grep at that commit.
 
-Raise the four requirements in `Cargo.toml:218-221` to the releases that carry
-the fixes, since the new calls do not compile against the old ones.
+rind 0.4 itself changes three things, of which MoQ uses two:
+
+- No runtime CPU check: `rind::cpu::check` and `rind::cpu::MissingFeature` are
+  gone, since a backend now requires only its target's compile-time features.
+  `rs/moq-crypto/src/cpu.rs` wraps both (`UnsupportedCpu` at line 6, `check()`
+  at line 18), and its callers are `rs/moq-crypto/src/provider.rs:22` and
+  `:48`, `rs/moq-crypto/src/e2ee/credential.rs:60`,
+  `rs/moq-auth/src/crypto.rs:6`, `rs/moq-hls/src/server/mod.rs:188`,
+  `rs/moq-quic/src/config/endpoint.rs:122`, and `rs/moq-rtmp/src/dial.rs:84`.
+  Recommended: delete `moq_crypto::cpu::check` and `UnsupportedCpu` and every
+  call, keeping the `Dit` re-export, rather than leave a check that cannot
+  fail. That removes public items from moq-crypto, so say so in the PR.
+- Agreement keys keep their public key
+  ([moq-dev/rind#529](https://github.com/moq-dev/rind/pull/529)):
+  `agreement::PrivateKey::public_key()` returns a borrow. The vendored dimpl
+  provider calls it at `rs/moq-webrtc/src/vendor/dimpl/crypto/rind/kx.rs:38`;
+  check that line and the rest of that file against #529's Public API section.
+- AES-CBC encryption takes a typed `CbcIv`
+  ([moq-dev/rind#530](https://github.com/moq-dev/rind/pull/530)): MoQ calls no
+  AES-CBC encryption, by grep at that commit.
+
+Raise `rind` to 0.4 (`Cargo.toml:217`, keeping `wipe`) and the four adapter
+requirements in `Cargo.toml:218-221` to the releases that carry the fixes,
+since the new calls do not compile against the old ones.
 
 Until those releases exist, check the branch with an uncommitted
 `[patch.crates-io]` that points `rind` and the four adapters at moq-dev/rind's
@@ -101,12 +132,13 @@ Until those releases exist, check the branch with an uncommitted
 rind-jsonwebtoken and rind-object-store are still drafts, so re-read each
 PR's Public API section when it merges; a signature may have moved.
 
-Public API: none; `moq_crypto::provider` keeps its signatures. Wire: none.
+Public API: `moq_crypto::provider` keeps its signatures; `moq_crypto::cpu::check` and `UnsupportedCpu` go if the recommendation above is taken. Wire: none.
 
 ## Waiting
 
-- moq-dev/rind: publishes the adapter patch releases that carry the three PRs
-  above, which it does once this PR is ready. Check that the three PRs are
-  merged and that `cargo search rind-rustls`, `rind-jsonwebtoken`,
-  `rind-object-store`, and `rind-rcgen` each show a release newer than its
-  merge; then set the requirements, update `Cargo.lock`, and merge.
+- moq-dev/rind: publishes rind 0.4.0 and the adapter patch releases in one
+  release, once its CPU-check removal has landed and this PR is ready. Check
+  that `cargo search rind` shows 0.4.0 and that `cargo search rind-rustls`,
+  `rind-jsonwebtoken`, `rind-object-store`, and `rind-rcgen` each show a
+  release that requires it; then set the requirements, update `Cargo.lock`,
+  and merge.
