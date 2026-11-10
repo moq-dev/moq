@@ -26,7 +26,6 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 ## Required
 
-- [The C bindings accept MoqInstance again](/quest/m0/check-c-moqinstance.md) - `check c` passes on main once the C generator stops refusing `MoqInstance`'s exported `Debug`
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
 - [@moq/clock's Instant has no throwing Duration arithmetic, mirroring kio](/quest/m0/peer-arithmetic.md) - JS `Instant` drops `add`/`sub` for checked and saturating forms, so each call site states what overflow means, as kio's do
