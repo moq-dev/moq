@@ -955,14 +955,22 @@ async fn play_audio<O: Output>(
 			// clock holds both while the sink keeps sizing for jitter alone.
 			*jitter.lock().unwrap() = Some(input.latency);
 			moved |= role.set_target(input.latency + stated.borrow().unwrap_or_default());
+			// The consumer releases media due further out than the sink holds only
+			// when its timeline ends before the media behind it covers the hold, so
+			// that little waits here instead of overflowing the sink.
+			let held_back = wait(&mut catalog, &|| {
+				presentation.due(mapped).and_then(|due| due.checked_sub(cap))
+			})
+			.await;
 			// A fresh sink plays its first write behind an opening cushion sized before
-			// the delay was known, so the rest of the lead goes in as silence ahead of
-			// the frame, which already covers any hole before it. A frame starting an
-			// utterance is instead placed one target out by the sink itself, and `hold`
-			// below sizes that target to the due time.
+			// the delay was known, and a held frame behind only what was already
+			// written, so the rest of the lead goes in as silence ahead of the frame,
+			// which already covers any hole before it. A frame starting an utterance is
+			// instead placed one target out by the sink itself, and `hold` below sizes
+			// that target to the due time.
 			let short = presentation
 				.due(mapped)
-				.filter(|_| fresh && !utterance)
+				.filter(|_| (fresh || held_back) && !utterance)
 				.map(|due| {
 					due.saturating_duration_since(Instant::now())
 						.saturating_sub(sink.buffered())
@@ -1205,9 +1213,12 @@ mod tests {
 		.await
 		.unwrap();
 		let presentation = Presentation::new(min);
-		if let Some(video) = video {
-			presentation.track(moq_mux::container::Kind::Video).set_target(video);
-		}
+		// Held for the whole test: a dropped track stops asking for its delay.
+		let _video = video.map(|video| {
+			let track = presentation.track(moq_mux::container::Kind::Video);
+			track.set_target(video);
+			track
+		});
 		let (_catalog, stated) = tokio::sync::watch::channel(catalog);
 		let recorder = Recorder::default();
 		let playback = AudioPlayback {

@@ -169,9 +169,8 @@ pub struct Consumer {
 	pending: VecDeque<Encoded>,
 	/// The track ended, or failed with this error, behind whatever is pending.
 	ended: Option<Option<Error>>,
-	/// The gate, while its [`Backpressure`] handle lives, and the version last judged.
+	/// The gate, while its [`Backpressure`] handle lives.
 	gate: Option<kio::Consumer<backpressure::State>>,
-	seen: u64,
 	/// The latest gap or end handed over: a playhead at or before it is from the timeline it ended.
 	boundary: Option<Duration>,
 	/// The duration of the latest decoded packet, which the next one is taken to match.
@@ -297,7 +296,6 @@ impl Consumer {
 			pending: VecDeque::new(),
 			ended: None,
 			gate: None,
-			seen: 0,
 			boundary: None,
 			frame: Duration::ZERO,
 			declared: None,
@@ -349,7 +347,6 @@ impl Consumer {
 	pub fn backpressure(&mut self) -> Backpressure {
 		let (backpressure, gate) = Backpressure::new();
 		self.gate = Some(gate);
-		self.seen = 0;
 		backpressure
 	}
 
@@ -570,6 +567,8 @@ impl Consumer {
 	/// that arrives meanwhile, or `None` once the track ends.
 	async fn next(&mut self) -> Result<Option<Encoded>, Error> {
 		loop {
+			// Read before judging the head, so any update after that wakes the wait.
+			let seen = self.gate.as_ref().map_or(0, |gate| gate.read().version);
 			let deadline = match self.pending.front() {
 				Some(Encoded::Frame { frame, .. }) => match self.admit(frame.timestamp.into()) {
 					Admit::Now => return Ok(self.pending.pop_front()),
@@ -584,7 +583,6 @@ impl Consumer {
 			};
 
 			let gate = self.gate.as_ref().filter(|gate| !gate.is_closed());
-			let seen = self.seen;
 			let mut sleep = std::pin::pin!(deadline.map(kio::clock::sleep_until));
 			let track = &mut self.track;
 			let ended = self.ended.is_some();
@@ -645,12 +643,11 @@ impl Consumer {
 	}
 
 	/// Whether the pending packet at `timestamp` may decode now, and if not, when it may.
-	fn admit(&mut self, timestamp: Duration) -> Admit {
+	fn admit(&self, timestamp: Duration) -> Admit {
 		let Some(gate) = self.gate.as_ref().filter(|gate| !gate.is_closed()) else {
 			return Admit::Now;
 		};
 		let state = gate.read();
-		self.seen = state.version;
 		if state.hold.is_zero() || self.ended.is_some() {
 			return Admit::Now;
 		}
