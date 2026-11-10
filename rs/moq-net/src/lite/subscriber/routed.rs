@@ -302,9 +302,12 @@ impl Routed {
 		Ok(())
 	}
 
-	/// How many of the session's announce slots the stream holds.
-	pub(super) fn held(&self) -> usize {
-		self.held.len() + self.echoing.len()
+	/// Give back the session's announce slots for what the stream holds, while a request
+	/// replacing it takes the same claims over. What it holds stays as bounded as the cap
+	/// it took it under; what it takes from now on is counted again.
+	pub(super) fn release_slots(&mut self) {
+		self.held.clear();
+		self.echoing.clear();
 	}
 
 	/// The peer sent a GOAWAY: its routes rank below every other. Idempotent.

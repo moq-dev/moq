@@ -917,7 +917,7 @@ async fn a_scope_change_reopens_without_letting_go(version: &'static str) {
 }
 
 /// A session holding all the announce slots it may has no room to hear its peer's claims
-/// twice, so a scope change lets the old request go before the new one takes over,
+/// twice, so the old request gives its slots to the new one during a scope change,
 /// rather than the handover running the peer past its cap.
 async fn a_scope_change_at_the_announce_cap_keeps_the_session(version: &'static str) {
 	within(async {
@@ -941,11 +941,12 @@ async fn a_scope_change_at_the_announce_cap_keeps_the_session(version: &'static 
 		let y = publisher.route("a/y", moq_net::origin::RouteOptions::hidden()).unwrap();
 		y.announce().unwrap();
 		wait_announced(&relay.consume(), "a/y", true).await;
+		let mut routes = relay.consume().routes();
+		kinds(&mut routes, "a/x");
 
 		pair.server.auth().authorize(&grant(&["a", "b"], &[]));
 		kio::clock::sleep(Duration::from_secs(1)).await;
-		wait_announced(&relay.consume(), "a/x", true).await;
-		wait_announced(&relay.consume(), "a/y", true).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [], "the handover let go of a/x");
 		assert_eq!(pair.server_transport.close_reason(), None);
 		assert_eq!(pair.client_transport.close_reason(), None);
 	})

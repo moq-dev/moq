@@ -2217,15 +2217,19 @@ impl AnnouncePrefix {
 		// A replacement never waits on another: the one before is let go at once.
 		self.replacing = None;
 		let (subscriber, prefix, snapshot) = (self.subscriber.clone(), self.prefix.clone(), self.snapshot.take());
-		// One that never reached its loop has fed the node nothing to hand over. The
-		// replacement takes slots for the same claims the old one holds, so without room
-		// for both, the old one is let go first rather than the peer running past its cap.
-		let held = match &self.state {
-			PrefixState::Run(step) => step.run.routed.as_ref().map(routed::Routed::held),
+		// One that never reached its loop has fed the node nothing to hand over. One that
+		// did gives back its announce slots, since the replacement takes slots for the same
+		// claims: the replacement gets the whole cap, and what the old one keeps was bounded
+		// by the cap it took it under.
+		let replacing = match &mut self.state {
+			PrefixState::Run(step) => {
+				if let Some(routed) = &mut step.run.routed {
+					routed.release_slots();
+				}
+				Some(Box::new(self))
+			}
 			_ => None,
 		};
-		let room = held.is_some_and(|held| self.subscriber.announces.available() >= held);
-		let replacing = room.then(|| Box::new(self));
 		Self {
 			open: Default::default(),
 			subscriber,
