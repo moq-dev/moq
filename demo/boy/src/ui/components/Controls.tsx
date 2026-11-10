@@ -1,6 +1,6 @@
-import { createPair } from "../solid.ts";
 import { For } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
+import { createPair } from "../solid.ts";
 
 /** All game controls: D-pad, A/B, Start/Select, Mute, Volume, Reset, Key hints. */
 export default function Controls() {

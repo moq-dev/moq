@@ -1,10 +1,10 @@
 import { Signals } from "@moq/net";
-import { createAccessor } from "./solid.ts";
 import type { JSX } from "solid-js";
 import { createContext, onCleanup } from "solid-js";
 import type MoqBoy from "../element";
 import type { Game } from "../game.ts";
 import type { GameStatus, LatencyEntry } from "../schemas.ts";
+import { createAccessor } from "./solid.ts";
 
 export type BoyUIContextValues = {
 	boy: MoqBoy;
