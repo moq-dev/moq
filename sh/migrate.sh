@@ -15,7 +15,7 @@ base=$(sh/changed.sh --merge-base "${1:-}")
 
 edited=()
 while IFS= read -r -d '' path; do
-    if ! git diff --no-renames -U0 "$base" -- "$path" | grep -qE '^\+## .+ -> .+'; then
+    if ! grep -qE '^\+## .+ -> .+' < <(git diff --no-renames -U0 "$base" -- "$path"); then
         edited+=("$path")
     fi
 done < <(git diff --name-only --no-renames -z "$base" -- ':(glob)**/MIGRATE.md')
