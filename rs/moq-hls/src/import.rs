@@ -780,6 +780,19 @@ impl TrackState {
 	}
 }
 
+/// An [`Import`] whose tracks and catalog finished, keeping them servable while held.
+#[must_use = "dropping it releases the finished tracks and catalog"]
+pub struct Finished {
+	import: Import,
+}
+
+impl Finished {
+	/// Abort every finished track and the catalog with `err`.
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
+	}
+}
+
 /// HLS import that pulls an HLS master or media playlist and feeds the bytes into the
 /// fMP4 importer.
 ///
@@ -922,14 +935,25 @@ impl Import {
 	///
 	/// The finished tracks stay servable while the import is held, so hand it and the
 	/// broadcast to a [`moq_mux::Linger`] to keep them up for late subscribers.
-	pub fn finish(&mut self) -> Result<()> {
-		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
-			if let Some(generation) = track.generation.take() {
-				track.finished = Some(generation.importer.finish()?);
+	///
+	/// A rendition that fails to finish fails the whole import: every other track and the catalog
+	/// end with that error instead of a clean finish.
+	pub fn finish(mut self) -> Result<Finished> {
+		let result = (|| {
+			for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
+				if let Some(generation) = track.generation.take() {
+					track.finished = Some(generation.importer.finish()?);
+				}
+			}
+			self.sink.catalog.finish()
+		})();
+		match result {
+			Ok(()) => Ok(Finished { import: self }),
+			Err(err) => {
+				self.abort(moq_net::Error::Transport(format!("{err:#}")));
+				Err(err.into())
 			}
 		}
-		self.sink.catalog.finish()?;
-		Ok(())
 	}
 
 	/// Abort every rendition's importer and the catalog with `err` so subscribers see the real
@@ -2149,7 +2173,7 @@ mod tests {
 			.expect("an ended playlist ends the import")
 			.unwrap();
 		assert_eq!(import.video[0].next_sequence, Some(4), "the final segment was imported");
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let mut listed = consumer.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			listed.recv_group().await.unwrap().is_some(),
@@ -2227,7 +2251,7 @@ mod tests {
 			let snapshot = catalog.snapshot();
 			assert_eq!(snapshot.video.renditions.len(), 1);
 			assert_ne!(*snapshot.video.renditions.keys().next().unwrap(), previous);
-			import.finish().unwrap();
+			drop(import.finish().unwrap());
 			std::fs::remove_dir_all(dir).unwrap();
 		}
 	}
@@ -2275,7 +2299,7 @@ mod tests {
 		let step = import.step(OnError::Warn).await.unwrap();
 		assert!(step.failed.is_none());
 		assert!(import.video[0].generation.is_some());
-		import.finish().unwrap();
+		drop(import.finish().unwrap());
 		std::fs::remove_dir_all(dir).unwrap();
 	}
 
