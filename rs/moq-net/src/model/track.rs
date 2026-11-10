@@ -2524,7 +2524,7 @@ impl TrackState {
 		let before = self.arrivals_bill.size();
 		if billed > before {
 			self.arrivals_bill.add(billed - before);
-		} else {
+		} else if billed < before {
 			self.arrivals_bill.sub(before - billed);
 		}
 	}
