@@ -548,5 +548,3 @@ benchmarks.
 ## Related
 
 - [Route wakes](/quest/m4/route-wakes.md) - index work follows the settled source-selection model
-- [Route health](/quest/m5/route-health/README.md) - epoch-only progress observation and local delivery failover
-- [A route stream's interest is a set of prefixes](/quest/m5/route-interest-prefixes.md) - m5: one stream's interest covers several prefixes

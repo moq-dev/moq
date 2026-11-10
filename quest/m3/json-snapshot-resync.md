@@ -43,7 +43,3 @@ state. The maintainer approved planning the fix from #7693's iterate.
   delta fails instead of applying to stale state.
 
 Public API: at most a `skipped()` counter in `@moq/json` and `moq-json`. Wire: none.
-
-## Related
-
-- [Benchmark a Value merge-patch diff for moq-json](/quest/m5/json-value-diff.md) - may replace the Rust diff this consumer applies
