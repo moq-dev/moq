@@ -1,4 +1,4 @@
-import { Micro, Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
@@ -69,11 +69,11 @@ window.runRecovery = async (packets) => {
 			group?.finish();
 			group = track.createGroup(BigInt(packet.group));
 		}
-		const timestamp = Micro(packet.timestamp);
+		const timestamp = Duration.micros(packet.timestamp);
 		const payload = Uint8Array.from(atob(packet.data), (c) => c.charCodeAt(0));
 		group.writeFrame({
 			payload: Container.Legacy.encodeFrame(payload, timestamp),
-			timestamp: Moq.Time.Timestamp.fromMicros(timestamp),
+			timestamp: Moq.Time.Timestamp.fromMicros(packet.timestamp),
 		});
 	}
 	group?.finish();
@@ -92,7 +92,7 @@ window.runRecovery = async (packets) => {
 		catalog: { video: { renditions: { video: config } } },
 	});
 	const source = new Source({ broadcast, supported: async () => true });
-	const sync = new Sync({ delay: Milli(0), lookahead: Milli(10_000) });
+	const sync = new Sync({ delay: Duration.millis(0), lookahead: Duration.millis(10_000) });
 	const decoder = new Decoder({ source, sync });
 	try {
 		await inputDone;

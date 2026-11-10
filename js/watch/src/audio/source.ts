@@ -1,4 +1,4 @@
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
@@ -47,7 +47,7 @@ export type SourceOutput = {
 	 *
 	 * @internal Feeds the decoder.
 	 */
-	jitter: Signal<Milli | undefined>;
+	jitter: Signal<Duration | undefined>;
 };
 
 /**
@@ -66,7 +66,7 @@ export class Source {
 		error: this.#probe.error,
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.AudioConfig | undefined>(undefined),
-		jitter: new Signal<Milli | undefined>(undefined),
+		jitter: new Signal<Duration | undefined>(undefined),
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
@@ -119,7 +119,7 @@ export class Source {
 		const config = available[track];
 		effect.set(this.#out.track, track);
 		effect.set(this.#out.config, config);
-		effect.set(this.#out.jitter, config.jitter !== undefined ? Milli(config.jitter) : undefined);
+		effect.set(this.#out.jitter, config.jitter !== undefined ? Duration.millis(config.jitter) : undefined);
 	}
 
 	/**

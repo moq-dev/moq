@@ -52,7 +52,8 @@ int main()
 	auto server = TestOk(moq::Server::init(config), "server init");
 	TestOk(server->listen().get(), "listen");
 	auto pending = server->accept();
-	if (pending.wait_for(std::chrono::milliseconds(50)) != std::future_status::timeout) {
+	// Nothing dials, so only the unload below can end it; read without waiting.
+	if (pending.wait_for(std::chrono::seconds(0)) != std::future_status::timeout) {
 		fprintf(stderr, "FAIL: accept resolved with no peer\n");
 		return 1;
 	}

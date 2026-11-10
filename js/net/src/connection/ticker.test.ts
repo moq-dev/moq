@@ -1,18 +1,18 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { tick } from "./ticker.ts";
 
 test("subscribers share one tick and the loop stops with the last", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
-		const period = Nano.fromMilli(Milli(100));
+		const period = Duration.millis(100);
 		const ticks: string[] = [];
 		const a = tick(period, () => ticks.push("a"));
-		await clock.advance(Nano.fromMilli(Milli(50)));
+		await clock.advance(Duration.millis(50));
 		// Joins the running loop rather than starting its own out of phase.
 		const b = tick(period, () => ticks.push("b"));
-		await clock.advance(Nano.fromMilli(Milli(50)));
+		await clock.advance(Duration.millis(50));
 		expect(ticks).toEqual(["a", "b"]);
 
 		a();
@@ -21,7 +21,7 @@ test("subscribers share one tick and the loop stops with the last", async () => 
 
 		b();
 		b();
-		await clock.advance(Nano.fromMilli(Milli(500)));
+		await clock.advance(Duration.millis(500));
 		expect(ticks).toEqual(["a", "b", "b"]);
 
 		// A stopped loop restarts for a later subscriber, rather than leaving the page unsampled.

@@ -53,6 +53,13 @@ fn certificates() -> moq_tokio::tls::Certificates {
 	moq_tokio::tls::Certificates::from_pem(cert.pem().as_bytes()).expect("certificates")
 }
 
+/// Make the test runtime's clock one that only the test moves, wall time included, so
+/// the relay's timers fire only on `advance` while its sockets stay real. Call it before
+/// anything reads the clock.
+fn manual() -> kio::clock::Installed {
+	kio::clock::Manual::new().install(&tokio::runtime::Handle::current())
+}
+
 /// Build a cluster and spawn its driver, the way an embedding edge runs one. A
 /// failed driver panics its task.
 fn spawn_cluster(options: moq_relay::cluster::Options) -> moq_relay::cluster::Cluster {

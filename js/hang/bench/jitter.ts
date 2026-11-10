@@ -1,7 +1,6 @@
 // Sweep the jitter estimator's held history against in-order and reordered frames, the per-frame
 // cost a publisher controls through its timestamp rate.
 
-import type { Milli } from "@moq/clock";
 import { Jitter } from "../src/container/jitter.ts";
 
 const FRAMES = 100_000;
@@ -13,16 +12,16 @@ for (const held of [64, 512, 4096, 8192]) {
 		// Spaced so `held` frames fit inside the two-second window.
 		const step = 2000 / held;
 		let media = 0;
-		for (let i = 0; i < held; i++, media += step) jitter.observe(media as Milli, media as Milli);
+		for (let i = 0; i < held; i++, media += step) jitter.observe(media, media);
 
 		const started = performance.now();
 		for (let i = 0; i < FRAMES; i++) {
 			if (order === "in") {
-				jitter.observe(media as Milli, media as Milli);
+				jitter.observe(media, media);
 				media += step;
 			} else {
 				// Just behind the newest, so the reference covers almost the whole history.
-				jitter.observe(media as Milli, (media - 2 * step) as Milli);
+				jitter.observe(media, media - 2 * step);
 			}
 		}
 		const ns = ((performance.now() - started) * 1e6) / FRAMES;

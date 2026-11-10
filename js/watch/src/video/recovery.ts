@@ -1,10 +1,10 @@
-import type { Micro } from "@moq/clock";
+import type { Duration } from "@moq/clock";
 import type { Container } from "@moq/hang";
 
 /** Refuse leading pictures whose previous GOP was not delivered to this decoder. @internal */
 export class Recovery {
 	#needed = true;
-	#floor?: Micro;
+	#floor?: Duration;
 
 	/** Arm recovery after media was lost, preserving continuous groups and declared ends. */
 	gap(): void {
@@ -17,6 +17,6 @@ export class Recovery {
 			this.#floor = this.#needed ? frame.timestamp : undefined;
 			this.#needed = false;
 		}
-		return this.#floor === undefined || frame.timestamp >= this.#floor;
+		return this.#floor === undefined || frame.timestamp.ge(this.#floor);
 	}
 }

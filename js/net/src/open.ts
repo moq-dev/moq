@@ -1,4 +1,4 @@
-import { Milli, Nano, sleep } from "@moq/clock";
+import { Duration, sleep } from "@moq/clock";
 import { type Getter, race } from "@moq/signals";
 import type { Probe } from "./connection/stats.ts";
 import { transportStats } from "./connection/stats.ts";
@@ -46,7 +46,7 @@ interface Waiting<T> {
 interface Room {
 	streams: OpenStreams;
 	/** About one round trip: how long an open waits for credit before making room. */
-	patience: () => Promise<Milli>;
+	patience: () => Promise<Duration>;
 }
 
 /** An admitted stream, with the send order it was created at. */
@@ -162,7 +162,7 @@ class Line<T> {
 		try {
 			const patience = await room.patience();
 			if (waiting.left.signal.aborted) return;
-			await sleep(Nano.fromMilli(patience), { signal: waiting.left.signal, ref: false });
+			await sleep(patience, { signal: waiting.left.signal, ref: false });
 		} catch {
 			// Left the line first.
 			return;
@@ -299,7 +299,10 @@ export function lines(quic: WebTransport): Lines {
 		sendOrder === 0 ? { waitUntilAvailable: true } : { sendOrder, waitUntilAvailable: true };
 	const streams = new OpenStreams(transportOf(quic) === "websocket");
 	// Before any RTT sample, wait 100 ms. A transport may report 0 until its first sample.
-	const patience = async () => (await transportStats(quic)).rtt || session.probe?.peek().rtt || Milli(100);
+	// A zero RTT is a transport that has not sampled yet.
+	const sampled = (rtt?: Duration) => (rtt?.isZero() ? undefined : rtt);
+	const patience = async () =>
+		sampled((await transportStats(quic)).rtt) ?? sampled(session.probe?.peek().rtt) ?? Duration.millis(100);
 	const session: Lines = {
 		uni: new Line(
 			(sendOrder) => quic.createUnidirectionalStream(options(sendOrder)) as Promise<SendStream>,

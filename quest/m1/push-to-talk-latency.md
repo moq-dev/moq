@@ -37,6 +37,13 @@ fails on the defaults by design?
   on.
 - (c) Run both rows, roughly doubling the nine-minute nightly step.
 
+Decided 2026-11-09 (maintainer, /quest-plan of the
+[audio jitter target](/quest/m1/audio-jitter-target/README.md)'s model): zero
+underruns is not a goal of that epic either, so the run gates underruns and
+stalls on a measured ceiling for good, not until the epic reaches zero.
+[moq-dev/moq#8364](https://github.com/moq-dev/moq/pull/8364)'s wording
+"leaving zero to the epic" goes.
+
 [moq-dev/moq#8009](https://github.com/moq-dev/moq/pull/8009) landed the
 analyzer's delay timeline: the page records the resolved delay over time, so
 each press's `jitter_buffer` ends at the first PCM that reaches the target the
@@ -122,5 +129,5 @@ watch AudioContext's `latencyHint` (`"interactive"` in
 
 ## Related
 
-- [Browser ceilings](/quest/m1/audio-jitter-target/browser-ceilings.md) - `"auto"` underruns less by time-stretching the ring, so the run can hold the default delay; the stretch landed in [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058), and its nightly ceilings are re-measured there
+- [Stretch model](/quest/m1/audio-jitter-target/stretch.md) - `"auto"` underruns less once the ring slows down near empty and resumes on a cushion, which moves this run's measured ceiling
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the `"auto"` target this latency feeds

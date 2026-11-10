@@ -4,7 +4,7 @@
  * @module
  */
 
-import type { Milli } from "@moq/clock";
+import type { Duration } from "@moq/clock";
 import type * as Moq from "@moq/net";
 import { Effect, type Getter, type Readonlys, readonlys, Signal } from "@moq/signals";
 import * as Watch from "@moq/watch";
@@ -27,12 +27,12 @@ export class Member {
 
 	/** The painted video's media timestamp and the video received so far. */
 	readonly video: Readonlys<{
-		timestamp: Getter<Milli | undefined>;
+		timestamp: Getter<Duration | undefined>;
 		stats: Getter<Watch.Video.Stats | undefined>;
 	}>;
 	/** The playing audio's media timestamp and the audio received so far. */
 	readonly audio: Readonlys<{
-		timestamp: Getter<Milli | undefined>;
+		timestamp: Getter<Duration | undefined>;
 		stats: Getter<Watch.Audio.Stats | undefined>;
 	}>;
 

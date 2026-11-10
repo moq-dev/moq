@@ -54,7 +54,9 @@ const lite: Protocol = {
 			const producer = new Producer(0n);
 			const done = readFrames(new Reader(stream, undefined, LiteVersion.DRAFT_06), producer, {
 				scale: 1_000_000,
-			}).then(() => producer.finish());
+			}).then(() => {
+				producer.finish();
+			});
 			return { group: Promise.resolve(producer.consume()), done };
 		};
 		return { open, close: () => {} };
