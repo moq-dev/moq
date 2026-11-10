@@ -73,30 +73,14 @@ pub(crate) fn implementation(value: &str) -> Option<String> {
 
 /// The SETUP extensions this side offers.
 ///
-/// Turning one off connects as a peer that does not speak that extension. moq-lite carries
-/// auth and solicit in its core, so those only change moq-transport sessions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Turning one off connects as a peer that does not speak that extension.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Extensions {
-	/// The MoQ Auth extension: tokens presented and granted on their own stream.
-	pub auth: bool,
-	/// The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than
-	/// announcing unasked (moq-transport only).
-	pub solicit: bool,
 	/// The MoQ IETF extension, off by default: a moq-lite 07 hop between relays carries the
 	/// moq-transport object state a relay preserves, such as Object IDs and properties.
 	pub ietf: bool,
-}
-
-impl Default for Extensions {
-	fn default() -> Self {
-		Self {
-			auth: true,
-			solicit: true,
-			ietf: false,
-		}
-	}
 }
 
 /// A connection credential presented in SETUP: moq-transport's `AUTHORIZATION TOKEN`
@@ -343,12 +327,6 @@ mod tests {
 			assert_eq!(lite::Auth::decode_slice(&wire, lite::Version::Lite07).unwrap().0, auth);
 
 			let version = crate::ietf::Version::Draft22;
-			let auth = crate::ietf::auth::Auth {
-				request_id: crate::ietf::RequestId(0),
-				token: Bytes::copy_from_slice(secret.as_bytes()),
-			};
-			let wire = auth.encode_bytes(version).unwrap();
-			assert_eq!(crate::ietf::auth::Auth::decode_slice(&wire, version).unwrap().0, auth);
 			let mut params = crate::ietf::Parameters::default();
 			crate::ietf::token::into_setup(&mut params, &token, version).unwrap();
 			params.set_bytes(

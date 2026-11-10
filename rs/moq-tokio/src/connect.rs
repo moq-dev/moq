@@ -371,14 +371,13 @@ impl ConnectError {
 mod tests {
 	use super::*;
 
-	/// The dial config offers every extension unless told otherwise, and leaves the
-	/// default out when serialized.
+	/// The dial config offers no extension unless told to, and leaves the default out when
+	/// serialized.
 	#[test]
-	fn extensions_default_on_and_parse_off() {
-		let config: Config = toml::from_str("[extensions]\nsolicit = false\n").expect("parse");
-		assert!(!config.extensions.solicit);
-		assert!(config.extensions.auth);
-		assert!(toml::to_string(&config).expect("serialize").contains("solicit = false"));
+	fn extensions_default_off_and_parse_on() {
+		let config: Config = toml::from_str("[extensions]\nietf = true\n").expect("parse");
+		assert!(config.extensions.ietf);
+		assert!(toml::to_string(&config).expect("serialize").contains("ietf = true"));
 		assert!(
 			!toml::to_string(&Config::default())
 				.expect("serialize")
@@ -490,7 +489,7 @@ failover_delay = "1s"
 }
 
 /// Whether `extensions` is the default a config leaves out.
-pub(crate) fn all_extensions(extensions: &moq_net::setup::Extensions) -> bool {
+pub(crate) fn default_extensions(extensions: &moq_net::setup::Extensions) -> bool {
 	*extensions == moq_net::setup::Extensions::default()
 }
 
@@ -640,8 +639,8 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// The extensions to offer in SETUP, every moq-transport one by default.
-	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
+	/// The extensions to offer in SETUP, none by default.
+	#[serde(default, skip_serializing_if = "crate::connect::default_extensions")]
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,
 

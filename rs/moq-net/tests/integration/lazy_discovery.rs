@@ -501,10 +501,11 @@ async fn ietf_lingers_after_the_last_watcher() {
 	}
 }
 
-/// A broader watch after a narrower one discovers everything, and retracts nothing the
-/// narrower one holds.
+/// A broader watch after a narrower one discovers everything. moq-transport refuses
+/// overlapping requests, so the broader one replaces the narrower: what the narrower held
+/// goes with it, and comes back once the broader one reports it.
 #[kio::test]
-async fn ietf_a_broader_watch_retracts_nothing() {
+async fn ietf_a_broader_watch_keeps_what_the_narrower_holds() {
 	for version in IETF {
 		let lazy = Lazy::new(version).await;
 		let mut narrower = lazy.watch("a");
@@ -516,18 +517,14 @@ async fn ietf_a_broader_watch_retracts_nothing() {
 		let mut all = Vec::new();
 		settled(&mut root, &mut all).await;
 		assert_eq!(all, ["a/x", "b/y"], "{version}");
-		assert!(
-			!settled(&mut narrower, &mut held).await,
-			"{version}: retracted {held:?}"
-		);
+		settled(&mut narrower, &mut held).await;
+		assert_eq!(held, ["x"], "{version}: reported again");
 
 		drop(root);
 		kio::clock::sleep(LINGERED).await;
 		assert!(lazy.routes("a/x").await, "{version}: the narrower watch still holds it");
-		assert!(
-			!settled(&mut narrower, &mut held).await,
-			"{version}: retracted {held:?}"
-		);
+		settled(&mut narrower, &mut held).await;
+		assert_eq!(held, ["x"], "{version}: reported again");
 
 		drop(narrower);
 		kio::clock::sleep(LINGERED * 2).await;
@@ -560,5 +557,59 @@ async fn ietf_a_relay_link_asks_for_everything() {
 		for path in ["a/x", "b/y"] {
 			relay.consume().request(path, None).await.unwrap();
 		}
+	}
+}
+
+/// A publisher holding `room/cam` and the hidden `room/.stats/node`, and a client on
+/// `version` asking only about what its readers watch.
+async fn hidden(version: &str) -> Lazy {
+	let publisher = produce_origin(1);
+	let broadcasts = ["room/cam", "room/.stats/node"]
+		.into_iter()
+		.map(|path| {
+			let broadcast = publisher.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
+			broadcast.announce().unwrap();
+			broadcast
+		})
+		.collect();
+	let subscriber = produce_origin(2);
+	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(subscriber.clone());
+	options.client_discovers_all = false;
+	Lazy {
+		subscriber,
+		pair: connect_mock(options).await,
+		_broadcasts: broadcasts,
+	}
+}
+
+/// moq-transport has no way to ask for hidden broadcasts, so one is never advertised to a
+/// moq-transport peer under a prefix that doesn't name it: a lite publisher's `.stats`
+/// stays off its discovery.
+#[kio::test]
+async fn ietf_leaves_hidden_broadcasts_out() {
+	for version in IETF {
+		let lazy = hidden(version).await;
+		let mut room = lazy.watch("room");
+		let mut held = Vec::new();
+		settled(&mut room, &mut held).await;
+		assert_eq!(held, ["cam"], "{version}");
+		assert!(
+			!lazy.routes("room/.stats/node").await,
+			"{version}: advertised a hidden broadcast"
+		);
+	}
+}
+
+/// A prefix naming the dot segment still lists what is hidden beneath it, as on moq-lite.
+#[kio::test]
+async fn ietf_lists_hidden_broadcasts_a_prefix_names() {
+	for version in IETF {
+		let lazy = hidden(version).await;
+		let mut stats = lazy.watch("room/.stats");
+		let mut held = Vec::new();
+		settled(&mut stats, &mut held).await;
+		assert_eq!(held, ["node"], "{version}");
 	}
 }

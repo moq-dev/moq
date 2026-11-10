@@ -86,7 +86,7 @@ pub use origin_impl::Consume;
 
 // Hop chains are transit facts the origin and sessions fill in; applications see
 // plain ids.
-pub(crate) use origin_impl::{Hop, Hops, InvalidHop};
+pub(crate) use origin_impl::{Hop, Hops};
 
 // The announce-interest prefixes a scope needs on a prefix-shaped wire.
 #[cfg(feature = "async")]

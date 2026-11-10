@@ -23,7 +23,7 @@ use crate::{
 	track::{Order, Subscription},
 };
 
-use super::{Message, Version, cluster, error::request, peer, request_update};
+use super::{Message, Version, error::request, peer, request_update};
 
 /// The REQUEST_ERROR refusing a SUBSCRIBE with `err`. Its Retry Interval is `retry` when an
 /// upstream refusal asked for one, and derived from `err` otherwise.
@@ -604,27 +604,19 @@ impl Watched {
 }
 
 /// What to advertise to this peer for one broadcast.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Advert {
 	/// Nothing: every route loops through the peer or us, or none is announced.
 	#[default]
 	None,
-	/// The namespace, with its hop path and accumulated cost when MoQ Cluster is negotiated.
-	Some(ietf::AdvertParams),
+	/// The namespace.
+	Some,
 }
 
 impl Advert {
 	/// Whether the peer should hold this namespace at all.
 	fn wanted(&self) -> bool {
 		!matches!(self, Self::None)
-	}
-
-	/// The parameters to put on the wire, as the message structs carry them.
-	fn params(&self) -> ietf::AdvertParams {
-		match self {
-			Self::Some(params) => params.clone(),
-			Self::None => Default::default(),
-		}
 	}
 }
 
@@ -699,8 +691,6 @@ impl Target {
 
 /// One announce loop's state: where its advertisements go, and what the peer holds.
 struct Namespaces {
-	/// What the peer declared in its SETUP, which decides what an advertisement carries.
-	peer: cluster::Peer,
 	target: Target,
 	/// Every announced broadcast under this loop's prefix.
 	watched: HashMap<crate::Path, Watched>,
@@ -730,14 +720,11 @@ struct Namespaces {
 	abandoned: Option<kio::Producer<()>>,
 	/// The auth epoch last applied to `permit`.
 	epoch: u64,
-	/// Whether this discovery cursor includes hidden namespaces.
-	hidden: bool,
 }
 
 impl Namespaces {
-	fn new(peer: cluster::Peer, target: Target) -> Self {
+	fn new(target: Target) -> Self {
 		Self {
-			peer,
 			target,
 			watched: HashMap::new(),
 			requests: HashMap::new(),
@@ -749,16 +736,9 @@ impl Namespaces {
 			verifying: None,
 			abandoned: None,
 			epoch: 0,
-			hidden: false,
 		}
 	}
 
-	/// What the peer negotiated for an advertisement's parameters.
-	fn negotiated(&self) -> ietf::Negotiated {
-		ietf::Negotiated {
-			cluster: self.peer.negotiated(),
-		}
-	}
 
 	/// Whether we may advertise `path`. An unknown grant allows everything.
 	fn permitted(&self, path: &crate::Path) -> bool {
@@ -939,9 +919,7 @@ pub(super) struct Publisher {
 	// which is what makes cross-session loop detection work.
 	self_origin: crate::Hop,
 	// The identity assigned to the peer (a fresh per-session id, or one the caller
-	// pinned with `with_peer_hop`), used when the peer declares
-	// none itself. A peer that negotiates the MoQ Cluster extension declares its own,
-	// which wins unless it withheld it as the reserved 0.
+	// pinned with `with_peer_hop`), since moq-transport carries none of its own.
 	peer_hop: Option<crate::Hop>,
 	// What the peer declared in its SETUP, filled when that stream is read.
 	peer_setup: peer::PeerSetup,
@@ -2779,33 +2757,14 @@ impl Publisher {
 		self
 	}
 
-	/// What the peer declared in its SETUP.
-	///
-	/// Resolves only once the peer's SETUP arrives, because the extension changes the
-	/// NAMESPACE encoding: nothing can be advertised until we know whether the peer speaks it.
-	#[cfg_attr(feature = "async", kio::wrapper)]
-	fn poll_peer(&self, waiter: &kio::Waiter) -> Poll<cluster::Peer> {
-		self.peer_setup.poll_get(waiter).map(|peer| peer.cluster)
-	}
-
-	/// Whether the peer requires advertisements to be solicited, from the same SETUP.
-	///
-	/// Blocks on it for the same reason [`Self::peer`] does: this decides whether the
-	/// first advertisement is sent unasked, so it cannot be guessed and corrected later.
-	fn poll_requires_solicitation(&self, waiter: &kio::Waiter) -> Poll<bool> {
-		self.peer_setup
-			.poll_get(waiter)
-			.map(|peer| peer.solicit.unwrap_or(false))
-	}
-
 	/// The origin to serve this peer's subscriptions from: sources whose hop chain flows
 	/// through the peer are excluded, so a subscription is never handed data that already
 	/// flowed through the subscriber.
 	///
-	/// The same exclusion the announce path applies (see [`Self::select`]), which is what
-	/// keeps advertised paths truthful and prevents subscription cycles of any length.
-	pub(super) fn poll_serving_origin(&self, waiter: &kio::Waiter) -> Poll<origin::Consumer> {
-		self.poll_peer(waiter).map(|peer| self.excluding(&peer))
+	/// The same exclusion the announce path applies (see [`Self::advertising`]), which is
+	/// what keeps advertised paths truthful and prevents subscription cycles of any length.
+	pub(super) fn serving_origin(&self) -> origin::Consumer {
+		self.origin.clone().excluding(self.exclude())
 	}
 
 	/// Resolve a request's broadcast while the peer still wants the answer, a FIN withdrawing it
@@ -2821,56 +2780,32 @@ impl Publisher {
 		kio::wait(|waiter| resolve.poll(waiter, self, stream)).await
 	}
 
-	/// Our origin handle with [`Self::exclude`] applied, the view both the data plane
-	/// and the announce loops read this peer's routes through.
-	fn excluding(&self, peer: &cluster::Peer) -> origin::Consumer {
-		self.origin.clone().excluding(self.exclude(peer))
+	/// `origin` as advertised to this peer: never its own routes back (split horizon), and
+	/// no hidden namespaces unless the publish origin opted in (the caller's choice for this
+	/// peer), since moq-transport has no way to ask for them.
+	fn advertising(&self, origin: origin::Consumer) -> origin::Consumer {
+		let hidden = self.origin.includes_hidden();
+		origin.excluding(self.exclude()).discovery(hidden)
 	}
 
-	/// `origin` as advertised to this peer: never its own routes back (split horizon),
-	/// and under MoQ Cluster only the routes with room for our hop under the origin's
-	/// cap, so selection falls back to a shorter route instead of withdrawing.
-	fn advertising(&self, origin: origin::Consumer, peer: &cluster::Peer) -> origin::Consumer {
-		let origin = origin.excluding(self.exclude(peer));
-		match peer.negotiated() {
-			true => origin.forwardable(),
-			false => origin,
-		}
-	}
-
-	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
-	///
-	/// A peer that declared an identity supplies its own; otherwise fall back to the one
-	/// we assigned it (a fresh per-session id, or one pinned with `Client::with_peer_hop`
-	/// or `Request::with_peer_hop`), since moq-transport carries no identity
-	/// of its own. A peer that declared the reserved 0 declared no identity, so it takes
-	/// the fallback like any other anonymous peer.
-	fn exclude(&self, peer: &cluster::Peer) -> crate::Hop {
-		peer.identity().or(self.peer_hop).unwrap_or(crate::Hop::UNKNOWN)
+	/// The Hop ID whose paths must not be advertised (or served) back to this peer: the one
+	/// we assigned it (a fresh per-session id, or one pinned with `Client::with_peer_hop` or
+	/// `Request::with_peer_hop`), since moq-transport carries no identity of its own.
+	fn exclude(&self) -> crate::Hop {
+		self.peer_hop.unwrap_or(crate::Hop::UNKNOWN)
 	}
 
 	/// Pick what to advertise to this peer for one route.
 	///
 	/// The origin's announce cursor already filters routes through the peer
-	/// (control-plane split horizon); this only shapes what the wire can carry.
-	fn select(&self, route: &crate::origin::RouteInfo, peer: &cluster::Peer) -> Advert {
+	/// (control-plane split horizon).
+	fn select(&self, route: &crate::origin::RouteInfo) -> Advert {
 		// A route that already passed through us is a reflection. The origin
 		// filters these on receive, so this is defensive.
 		if self.self_origin != crate::Hop::UNKNOWN && route.hops.contains(&self.self_origin) {
 			return Advert::None;
 		}
-
-		if !peer.negotiated() {
-			return Advert::Some(ietf::AdvertParams { cluster: None });
-		}
-
-		let cost = route.cost.value();
-		// Our own Hop ID is always the last entry, so the peer reconstructs the full
-		// path. A chain with no room left is a loop in all but name.
-		match cluster::Advert::forward(&route.hops, cost, self.self_origin) {
-			Ok(advert) => Advert::Some(ietf::AdvertParams { cluster: Some(advert) }),
-			Err(_) => Advert::None,
-		}
+		Advert::Some
 	}
 
 	/// The task serving an incoming bidi stream dispatched by the session.
@@ -3326,7 +3261,7 @@ impl Publisher {
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		largest: Option<Location>,
 	) -> Result<(), Error> {
-		writer.buffer_message(ietf::RequestOk::ID, &ietf::RequestOk { largest, active: None })
+		writer.buffer_message(ietf::RequestOk::ID, &ietf::RequestOk { largest })
 	}
 
 	/// Refuse a SUBSCRIBE, returning the delivery that ends its request stream.
@@ -3537,7 +3472,6 @@ impl Publisher {
 		let Some((advert, auth)) = self.offer(ns, suffix, path) else {
 			return Ok(None);
 		};
-		let negotiated = ns.negotiated();
 		let Some(watch) = ns.watched.get(suffix) else {
 			return Ok(None);
 		};
@@ -3626,10 +3560,7 @@ impl Publisher {
 						tracing::debug!(broadcast = %absolute, "namespace");
 						stream.writer.buffer_message(
 							ietf::Namespace::ID,
-							&ietf::Namespace {
-								suffix: suffix.clone(),
-								params: negotiated.extended().then(|| advert.params()),
-							},
+							&ietf::Namespace { suffix: suffix.clone() },
 						)?;
 					}
 					(false, true) => {
@@ -3662,7 +3593,7 @@ impl Publisher {
 			auth,
 			wanted,
 		} = advertise;
-		let refused = self.advertise_namespace(ns, &path, suffix.clone(), advert.params(), auth, stream)?;
+		let refused = self.advertise_namespace(ns, &path, suffix.clone(), auth, stream)?;
 		let sent = Self::requested(ns, &suffix, advert);
 		Self::record(ns, &suffix, wanted, refused, sent);
 		Ok(())
@@ -3701,7 +3632,6 @@ impl Publisher {
 		ns: &mut Namespaces,
 		path: &crate::Path,
 		suffix: crate::Path,
-		params: ietf::AdvertParams,
 		auth: Option<crate::auth::Credential>,
 		stream: Option<Stream<Transport, Version>>,
 	) -> Result<Refused, Error> {
@@ -3715,7 +3645,6 @@ impl Publisher {
 			&ietf::PublishNamespace {
 				request_id,
 				track_namespace: path.clone(),
-				params,
 				authorization_token: auth.as_ref().and_then(|auth| self.request_token(auth)),
 			},
 		) {
@@ -3753,7 +3682,7 @@ impl Publisher {
 	) -> Option<(Advert, Option<crate::auth::Credential>)> {
 		let watch = ns.watched.get(suffix)?;
 		let advert = match ns.permitted(path) {
-			true => self.select(&watch.route, &ns.peer),
+			true => self.select(&watch.route),
 			false => Advert::None,
 		};
 		let auth = match (&ns.target, advert.wanted()) {
@@ -3802,13 +3731,11 @@ impl Publisher {
 	}
 
 	/// Send the update waiting at the front of the queue with `request_id`: REQUEST_UPDATE
-	/// on the request that carries the namespace, with only what changed since the peer's
-	/// copy. Its answer arrives through [`Self::poll_answer`] while the loop carries on.
+	/// on the request that carries the namespace, renaming its token. Its answer arrives
+	/// through [`Self::poll_answer`] while the loop carries on.
 	///
 	/// One update is outstanding per request, which satisfies any MAX_REQUEST_UPDATES the
-	/// peer set without reading it. A different original publisher is an update like any
-	/// other: the receiver drains what it already serves from the old one and never splices
-	/// the two.
+	/// peer set without reading it.
 	fn send_update(&self, ns: &mut Namespaces, prefix: &crate::Path, request_id: RequestId) -> Result<(), Error> {
 		let suffix = ns.updates.pop_front().expect("allocated for a queued update");
 		let Some((advert, auth)) = self.offer(ns, &suffix, &prefix.rejoin(&suffix)) else {
@@ -3818,26 +3745,17 @@ impl Publisher {
 			return Ok(());
 		};
 		request.queued = false;
-		let mut update = match (advert.params().cluster, watch.sent.params().cluster) {
-			(Some(next), Some(held)) => ietf::PublishNamespaceUpdate::between(request_id, &held, &next),
-			_ => ietf::PublishNamespaceUpdate {
-				request_id,
-				hops: None,
-				cost: None,
-				authorization_token: None,
-			},
+		let update = ietf::PublishNamespaceUpdate {
+			request_id,
+			authorization_token: auth.as_ref().and_then(|auth| self.request_token(auth)),
 		};
-		if auth != request.auth {
-			update.authorization_token = auth.as_ref().and_then(|auth| self.request_token(auth));
-		}
 		tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), &request.path), "publish_namespace update");
 		let written = request
 			.stream
 			.writer
 			.buffer_message(ietf::PublishNamespaceUpdate::ID, &update);
 		if let Err(err) = written {
-			// An unencodable update ends only this advertisement; the retry re-offers it
-			// fresh, carrying the complete parameters.
+			// An unencodable update ends only this advertisement; the retry re-offers it fresh.
 			tracing::debug!(%err, "publish_namespace update not sent");
 			self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())?;
 			if let Some(watch) = ns.watched.get_mut(&suffix) {
@@ -3989,14 +3907,6 @@ impl Publisher {
 						let msg: ietf::RequestOk = body
 							.message(self.version)
 							.map_err(|err| request.messages.failed(err.into()))?;
-						// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count).
-						if msg.active.is_some() {
-							self.session.clone().close(
-								super::error::to_session_code(&crate::SessionError::ProtocolViolation),
-								"ACTIVE_COUNT on a PUBLISH_NAMESPACE answer",
-							);
-							return Err(Error::ProtocolViolation);
-						}
 						tracing::debug!(message = ?msg, "publish_namespace ok");
 						request.accepted = true;
 						// Whatever changed while it was in flight goes out next.
@@ -4203,19 +4113,15 @@ impl Publisher {
 					.origin
 					.scope(&*prefix, &scope)
 					.unwrap_or_else(|_| self.origin.empty());
-				*announced = self.advertising(origin, &ns.peer).discovery(ns.hidden).routes();
+				*announced = self.advertising(origin).routes();
 				true
 			}
 			None => false,
 		};
 		let stream = ns.target.stream().expect("update has a stream");
-		stream.writer.buffer_message(
-			ietf::RequestOk::ID,
-			&ietf::RequestOk {
-				largest: None,
-				active: None,
-			},
-		)?;
+		stream
+			.writer
+			.buffer_message(ietf::RequestOk::ID, &ietf::RequestOk { largest: None })?;
 		Ok(moved)
 	}
 
@@ -4345,7 +4251,7 @@ impl Resolve {
 	) -> Poll<Result<Option<crate::broadcast::Consumer>, Error>> {
 		let origin = wait!(Origin => match publisher.poll_withdrawn(&mut self.session, stream, self.fin_cancels, waiter) {
 			Poll::Ready(()) => Poll::Ready(None),
-			Poll::Pending => publisher.poll_serving_origin(waiter).map(Some),
+			Poll::Pending => Poll::Ready(Some(publisher.serving_origin())),
 		});
 		let Some(origin) = origin else {
 			return Poll::Ready(Ok(None));
@@ -5645,8 +5551,6 @@ enum NamespaceWork {
 struct ForwardNamespaces {
 	announced: crate::origin::Routes,
 	prefix: crate::Path,
-	/// The routes counted before the loop started, applied ahead of any change.
-	initial: Vec<crate::announce::Announce>,
 	finished: bool,
 	goaways: super::request_stream::Messages,
 	/// Registered on the first poll, as the loop starts.
@@ -5673,10 +5577,6 @@ struct ForwardNamespaces {
 
 enum ForwardState {
 	Start,
-	/// Waiting on the peer's SETUP, and with MoQ Auth on the answer to the credential we
-	/// presented at setup, so the first advertisement, the initial set included, is already
-	/// checked against our grant.
-	Setup,
 	/// Streaming updates (origin route (un)announces), until the peer closes its side.
 	Run,
 	/// The origin is gone and everything is withdrawn: finish the stream and wait for
@@ -5694,12 +5594,10 @@ impl ForwardNamespaces {
 		publisher: &Publisher,
 		announced: crate::origin::Routes,
 		prefix: crate::Path,
-		initial: Vec<crate::announce::Announce>,
 	) -> Self {
 		Self {
 			announced,
 			prefix,
-			initial,
 			finished: false,
 			goaways: super::request_stream::Messages::new(publisher.session.clone(), publisher.control.client()),
 			withdrawing: None,
@@ -5724,17 +5622,7 @@ impl ForwardNamespaces {
 					if publisher.withdrawal.poll(&kio::Waiter::noop()).is_ready() {
 						return Poll::Ready(Ok(()));
 					}
-					self.state = ForwardState::Setup;
-				}
-				ForwardState::Setup => {
-					if ready!(publisher.peer_setup.poll_get(waiter)).auth {
-						ready!(publisher.auth.poll_setup_answered(waiter));
-					}
 					(ns.permit, ns.epoch) = publisher.permit_now(ns.gate.as_ref());
-					self.work = std::mem::take(&mut self.initial)
-						.into_iter()
-						.map(|update| NamespaceWork::Apply(update, true))
-						.collect();
 					self.state = ForwardState::Run;
 				}
 				ForwardState::Run => {
@@ -6097,12 +5985,11 @@ impl NamespaceLoop {
 		announced: crate::origin::Routes,
 		prefix: crate::Path,
 		ns: Namespaces,
-		initial: Vec<crate::announce::Announce>,
 	) -> Self {
 		Self {
 			token: ns.gate.as_ref().and_then(|gate| gate.token_guard()),
 			ns,
-			forward: Some(ForwardNamespaces::new(publisher, announced, prefix, initial)),
+			forward: Some(ForwardNamespaces::new(publisher, announced, prefix)),
 			ended: None,
 		}
 	}
@@ -6132,47 +6019,26 @@ impl NamespaceLoop {
 ///
 /// moq-transport itself says nothing about which of the two discovery messages a peer
 /// expects, and the peers that never send SUBSCRIBE_NAMESPACE are exactly the ones
-/// expecting a publisher to announce itself, so the default has to be to announce. A
-/// peer that would rather ask says so with the MoQ Solicit extension
-/// ([`solicit`](super::solicit)),
-/// and then this loop does nothing.
-/// [`Publisher::serve_subscribe_namespace_stream`] also carries every
-/// match, so a peer that did not ask hears each namespace both ways. A NAMESPACE is
-/// discovery only, not a second route.
+/// expecting a publisher to announce itself, so the default has to be to announce.
+/// [`Publisher::serve_subscribe_namespace_stream`] also carries every match, so a peer
+/// that asked hears each namespace both ways. A NAMESPACE is discovery only, not a second
+/// route. Hidden namespaces are left out, since nothing on the wire can ask for them.
 pub(super) struct PublishNamespaces {
 	publisher: Publisher,
-	/// Started once the peer's SETUP says to advertise unasked.
-	run: Option<NamespaceLoop>,
+	run: NamespaceLoop,
 }
 
 impl PublishNamespaces {
 	pub(super) fn new(publisher: Publisher) -> Self {
-		Self { publisher, run: None }
+		// Split horizon, as the solicited loop applies it: never advertise a route back to
+		// the peer it came from.
+		let origin = publisher.advertising(publisher.origin.clone());
+		let run = NamespaceLoop::new(&publisher, origin.routes(), crate::Path::empty(), Namespaces::new(Target::Requests));
+		Self { publisher, run }
 	}
 
 	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if self.run.is_none() {
-			if ready!(self.publisher.poll_requires_solicitation(waiter)) {
-				return Poll::Ready(Ok(()));
-			}
-
-			// The cluster extension changes what an advertisement carries, so nothing can be
-			// sent until the peer's SETUP says whether it speaks it.
-			let peer = ready!(self.publisher.poll_peer(waiter));
-			let hidden = ready!(self.publisher.peer_setup.poll_get(waiter)).hidden;
-
-			// Split horizon, as the solicited loop applies it: never advertise a route back
-			// to the peer it came from.
-			let origin = self
-				.publisher
-				.advertising(self.publisher.origin.clone(), &peer)
-				.discovery(!hidden || self.publisher.origin.includes_hidden());
-
-			let ns = Namespaces::new(peer, Target::Requests);
-			let run = NamespaceLoop::new(&self.publisher, origin.routes(), crate::Path::empty(), ns, Vec::new());
-			self.run = Some(run);
-		}
-		self.run.as_mut().expect("started").poll(waiter, &self.publisher)
+		self.run.poll(waiter, &self.publisher)
 	}
 }
 
@@ -6186,8 +6052,6 @@ struct NamespaceServe {
 	/// The request stream, until the loop's [`Target`] carries it.
 	stream: Option<Stream<Transport, Version>>,
 	prefix: crate::Path,
-	/// Whether the requester asked for hidden namespaces too.
-	wants_hidden: bool,
 	/// The request's gate, until the loop holds it.
 	gate: Option<crate::auth::Gate>,
 	state: NamespaceServeState,
@@ -6196,22 +6060,9 @@ struct NamespaceServe {
 enum NamespaceServeState {
 	Start(Option<super::token::RequestToken>),
 	Admit(Admit),
-	/// The extension changes what an advertisement carries, so nothing can be sent until the
-	/// peer's SETUP says whether it speaks it. The same SETUP says whether the OK counts what
-	/// it sends first (MoQ Active Count).
-	Setup,
-	/// With MoQ Auth, the count waits for our grant and leaves out what it does not cover.
-	Count {
-		peer: cluster::Peer,
-		hidden: bool,
-		announced: crate::origin::Routes,
-	},
 	/// The acknowledgement, sent only while the token is live, even behind stream credit.
 	Ok {
-		peer: cluster::Peer,
-		hidden: bool,
 		announced: crate::origin::Routes,
-		initial: Vec<crate::announce::Announce>,
 		/// Taken once buffered.
 		ok: Option<ietf::RequestOk>,
 	},
@@ -6231,33 +6082,9 @@ impl NamespaceServe {
 			publisher,
 			stream: Some(stream),
 			prefix: msg.namespace,
-			wants_hidden: msg.hidden,
 			gate: Some(gate),
 			state: NamespaceServeState::Start(msg.authorization_token),
 		}
-	}
-
-	/// MoQ Active Count: take what is advertised now, so the OK can say how many NAMESPACE
-	/// messages carry it. They go out first, ahead of any change.
-	fn count(&mut self, peer: cluster::Peer, hidden: bool, mut announced: crate::origin::Routes) {
-		let gate = self.gate.as_ref().expect("held until the loop starts");
-		let (permit, _) = self.publisher.permit_now(Some(gate));
-		let initial = Publisher::snapshot(&mut announced);
-		let count = initial
-			.iter()
-			.filter(|update| permit.matches(self.prefix.rejoin(&update.prefix).as_str()))
-			.filter(|update| self.publisher.select(&update.route, &peer).wanted())
-			.count();
-		self.state = NamespaceServeState::Ok {
-			peer,
-			hidden,
-			announced,
-			initial,
-			ok: Some(ietf::RequestOk {
-				largest: None,
-				active: Some(count as u64),
-			}),
-		};
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -6297,11 +6124,6 @@ impl NamespaceServe {
 						}
 					}
 					tracing::debug!(prefix = %crate::path::Rooted(self.publisher.origin.root(), &self.prefix), "subscribe_namespace stream");
-					self.state = NamespaceServeState::Setup;
-				}
-				NamespaceServeState::Setup => {
-					let peer = ready!(self.publisher.poll_peer(waiter));
-					let declared = ready!(self.publisher.peer_setup.poll_get(waiter));
 					let publisher = &self.publisher;
 					let prefix = &self.prefix;
 
@@ -6324,52 +6146,14 @@ impl NamespaceServe {
 					// Register the split-horizon peer on the announce cursor too. The origin
 					// model uses this exposure to park a reflected copy before it can replace
 					// the source we are currently advertising to that peer.
-					let origin = publisher.advertising(origin, &peer);
-
-					// Peers that declared MoQ Hidden filter namespaces unless they opted in. A
-					// publish origin that already opted in (the caller's choice for this peer)
-					// keeps them.
-					let hidden = !declared.hidden || self.wants_hidden || publisher.origin.includes_hidden();
-					let origin = origin.discovery(hidden);
-
+					//
 					// A NAMESPACE is discovery, not a route, so a peer that also hears the
 					// unsolicited PUBLISH_NAMESPACE still gets the match here.
-					let announced = origin.routes();
-
-					match declared.active_count {
-						true if declared.auth => {
-							self.state = NamespaceServeState::Count {
-								peer,
-								hidden,
-								announced,
-							}
-						}
-						true => self.count(peer, hidden, announced),
-						false => {
-							self.state = NamespaceServeState::Ok {
-								peer,
-								hidden,
-								announced,
-								initial: Vec::new(),
-								ok: Some(ietf::RequestOk {
-									largest: None,
-									active: None,
-								}),
-							}
-						}
-					}
-				}
-				NamespaceServeState::Count { .. } => {
-					ready!(gate.poll_setup_answered(waiter));
-					let NamespaceServeState::Count {
-						peer,
-						hidden,
+					let announced = publisher.advertising(origin).routes();
+					self.state = NamespaceServeState::Ok {
 						announced,
-					} = std::mem::replace(&mut self.state, NamespaceServeState::Done)
-					else {
-						unreachable!("counting");
+						ok: Some(ietf::RequestOk { largest: None }),
 					};
-					self.count(peer, hidden, announced);
 				}
 				NamespaceServeState::Ok { ok, .. } => {
 					if let Poll::Ready(refusal) = gate.poll_token_ended(waiter) {
@@ -6379,22 +6163,16 @@ impl NamespaceServe {
 						stream.writer.buffer_message(ietf::RequestOk::ID, &ok)?;
 					}
 					ready!(stream.writer.poll_flush(waiter))?;
-					let NamespaceServeState::Ok {
-						peer,
-						hidden,
-						announced,
-						initial,
-						..
-					} = std::mem::replace(&mut self.state, NamespaceServeState::Done)
+					let NamespaceServeState::Ok { announced, .. } =
+						std::mem::replace(&mut self.state, NamespaceServeState::Done)
 					else {
 						unreachable!("acknowledging");
 					};
 					let target = Target::Inline(self.stream.take().expect("acknowledged once"));
-					let mut ns = Namespaces::new(peer, target);
+					let mut ns = Namespaces::new(target);
 					ns.gate = self.gate.take();
-					ns.hidden = hidden;
 					let prefix = self.prefix.clone();
-					let run = NamespaceLoop::new(&self.publisher, announced, prefix, ns, initial);
+					let run = NamespaceLoop::new(&self.publisher, announced, prefix, ns);
 					self.state = NamespaceServeState::Run(Box::new(run));
 				}
 				NamespaceServeState::Run(_) => unreachable!("run above"),
@@ -10828,7 +10606,6 @@ mod serve_tests {
 					authorization_token: None,
 					request_id: RequestId(0),
 					namespace: crate::Path::empty(),
-					hidden: false
 				}
 			));
 			assert!(futures::poll!(running.as_mut()).is_pending());
@@ -10869,7 +10646,6 @@ mod serve_tests {
 			authorization_token: None,
 			request_id: RequestId(0),
 			namespace: crate::Path::from_static("room"),
-			hidden: false,
 		};
 		let mut running = std::pin::pin!(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
 		assert!(futures::poll!(running.as_mut()).is_pending());
@@ -10914,7 +10690,6 @@ mod serve_tests {
 				authorization_token: None,
 				request_id: RequestId(0),
 				namespace: crate::Path::from_static("old"),
-				hidden: false,
 			};
 			let mut running = std::pin::pin!(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
 			assert!(futures::poll!(running.as_mut()).is_pending());
@@ -10975,7 +10750,6 @@ mod serve_tests {
 			authorization_token: Some(request_token()),
 			request_id: RequestId(0),
 			namespace: crate::Path::empty(),
-			hidden: false,
 		};
 		let mut running: Running = Box::pin(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
 		let request = taken_token(&mut running, &mut requests).await;
@@ -11166,7 +10940,6 @@ mod serve_tests {
 				authorization_token: None,
 				request_id: RequestId(0),
 				namespace: crate::Path::empty(),
-				hidden: false,
 			};
 			let mut running: Running = Box::pin(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
 			assert!(futures::poll!(running.as_mut()).is_pending());
@@ -11316,7 +11089,6 @@ mod serve_tests {
 				authorization_token: None,
 				request_id: RequestId(0),
 				namespace: crate::Path::from_static(""),
-				hidden: false,
 			};
 			let mut run = std::pin::pin!(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
 			assert_eq!(
@@ -12028,7 +11800,6 @@ mod serve_tests {
 			authorization_token: None,
 			request_id: RequestId(REQUEST_ID),
 			namespace: crate::Path::from_static(""),
-			hidden: false,
 		}
 		.encode_msg(&mut w, version)
 		.unwrap();
@@ -16788,7 +16559,6 @@ mod serve_tests {
 		writer
 			.encode(&ietf::RequestOk {
 				largest: None,
-				active: None,
 			})
 			.await
 			.unwrap();
@@ -17298,7 +17068,6 @@ mod serve_tests {
 			writer
 				.encode(&ietf::RequestOk {
 					largest: None,
-					active: None,
 				})
 				.await
 				.unwrap();
@@ -18237,14 +18006,10 @@ mod tests {
 		out
 	}
 
-	/// A SETUP slot already filled with what the peer declared. The announce loops block
-	/// on it, so a test that leaves it empty is a test that never advertises.
-	fn declared(solicit: Option<bool>) -> peer::PeerSetup {
+	/// A SETUP slot already filled with a peer that declared nothing.
+	fn declared() -> peer::PeerSetup {
 		let slot = peer::PeerSetup::default();
-		slot.set(peer::Peer {
-			solicit,
-			..Default::default()
-		});
+		slot.set(peer::Peer::default());
 		slot
 	}
 
@@ -18280,12 +18045,6 @@ mod tests {
 				.expect("track should remain open");
 			assert_eq!(group.sequence, sequence);
 		}
-	}
-
-	/// A peer that requires solicitation, which is what hands the advertisements to the
-	/// SUBSCRIBE_NAMESPACE stream.
-	fn requires_solicitation() -> peer::PeerSetup {
-		declared(Some(true))
 	}
 
 	/// A publisher for a peer assigned `assigned`, over an origin holding two
@@ -18337,92 +18096,19 @@ mod tests {
 		let assigned = crate::Hop::new(777).unwrap();
 		let (publisher, consumer, _routes) = echo_harness(assigned).await;
 
-		let peer = cluster::Peer::default();
-
 		// The cursor is what filters: an excluded consumer never sees the echoed route.
-		let mut announced = consumer.excluding(assigned).routes();
+		let mut announced = consumer.excluding(publisher.exclude()).routes();
 		let local = announced.assert_next_active("from/us");
 		announced.assert_next_wait();
 
-		assert_eq!(publisher.select(&local, &peer), Advert::Some(Default::default()));
+		assert_eq!(publisher.select(&local), Advert::Some);
 	}
 
-	/// An anonymous chain received from an identified peer keeps the 0 on the wire
-	/// and is never advertised back to that session: split-horizon matches `via`
-	/// as well as the chain.
+	/// A moq-transport peer's routes carry 0 on their chain, since it names no hop; the
+	/// assigned identity stays on `via` and split-horizon matches it, so the peer is not
+	/// advertised its own route back.
 	#[kio::test]
-	async fn anonymous_chain_is_forwarded_with_zero_and_not_echoed() {
-		let assigned = crate::Hop::new(777).unwrap();
-		let r1 = crate::Hop::new(9).unwrap();
-		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let consumer = origin.consume();
-		let publisher = Publisher::new(
-			crate::time::sim(),
-			crate::driver::Transport::new(crate::lite::test_transport::SinkSession::new(Default::default())),
-			origin.consume(),
-			Control::new(false),
-			Some(assigned),
-			peer::PeerSetup::default(),
-			Version::Draft18,
-		);
-
-		let mut hops = crate::Hops::new();
-		hops.push(crate::Hop::UNKNOWN).unwrap();
-		hops.push(r1).unwrap();
-		let _echoed = origin
-			.announce(
-				"from/peer",
-				crate::origin::RouteInfo::new().with_hops(hops.clone()).with_via(r1),
-			)
-			.unwrap();
-
-		let peer = cluster::Peer {
-			hop: Some(r1),
-			cost: None,
-		};
-		let mut announced = consumer.excluding(publisher.exclude(&peer)).routes();
-		announced.assert_next_wait();
-
-		let forwarded = cluster::Advert::forward(&hops, 0, crate::Hop::new(1).unwrap()).unwrap();
-		let ids: Vec<_> = forwarded.hops.hops().iter().map(|h| h.id()).collect();
-		assert_eq!(ids, vec![0, 9, 1]);
-	}
-
-	/// Declaring the reserved 0 turns the extension on while naming nobody, so the
-	/// identity we assigned stands in, exactly as for a peer that never negotiated.
-	/// Asserted on the resolution itself rather than through an advertisement: a
-	/// negotiated peer always sends its own HOP_PATH, so a route attributed to the
-	/// assigned identity is a state this peer class cannot reach; see
-	/// [`a_declared_zero_chain_is_not_advertised_back`] for what it gets instead.
-	#[kio::test]
-	async fn withheld_peer_hop_falls_back_to_assigned() {
-		let assigned = crate::Hop::new(777).unwrap();
-		let declared = crate::Hop::new(9).unwrap();
-		let (publisher, _consumer, _routes) = echo_harness(assigned).await;
-
-		let withheld = cluster::Peer {
-			hop: Some(crate::Hop::UNKNOWN),
-			cost: None,
-		};
-		assert!(withheld.negotiated(), "the extension is on");
-		assert_eq!(publisher.exclude(&withheld), assigned, "0 names nobody, so we do");
-
-		let absent = cluster::Peer::default();
-		assert_eq!(publisher.exclude(&absent), assigned, "so does declaring nothing");
-
-		let named = cluster::Peer {
-			hop: Some(declared),
-			cost: None,
-		};
-		assert_eq!(publisher.exclude(&named), declared, "a declared identity wins");
-	}
-
-	/// A peer that negotiated the extension MUST send a HOP_PATH on every advertisement,
-	/// and one that declared 0 names itself 0 there. An arriving chain is not rewritten,
-	/// so the route carries 0; the assigned identity stays on `via` and split-horizon
-	/// matches it, so the peer is not advertised its own route back.
-	#[kio::test]
-	async fn a_declared_zero_chain_is_not_advertised_back() {
+	async fn an_anonymous_chain_is_not_advertised_back() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
@@ -18437,8 +18123,8 @@ mod tests {
 			Version::Draft18,
 		);
 
-		// The chain as ingress stores it: the peer named itself 0, and `via` is the
-		// identity we assigned that session.
+		// The chain as ingress stores it: 0 for the peer, and `via` is the identity we
+		// assigned that session.
 		let mut hops = crate::Hops::new();
 		hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _echoed = origin
@@ -18448,89 +18134,8 @@ mod tests {
 			)
 			.unwrap();
 
-		let peer = cluster::Peer {
-			hop: Some(crate::Hop::UNKNOWN),
-			cost: None,
-		};
-		let mut announced = consumer.excluding(publisher.exclude(&peer)).routes();
+		let mut announced = consumer.excluding(publisher.exclude()).routes();
 		announced.assert_next_wait();
-	}
-
-	/// MoQ Active Count: the OK counts exactly the NAMESPACE messages that follow it,
-	/// so a route this peer is never told about is not counted either. Counting one would
-	/// leave the peer waiting on a message that never comes.
-	#[kio::test]
-	async fn the_ok_counts_only_what_is_advertised() {
-		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-
-		let session = SinkSession::gated_bi(kio::Producer::new(true).consume());
-		let log = session.log.clone();
-		let setup = peer::PeerSetup::default();
-		setup.set(peer::Peer {
-			cluster: cluster::Peer {
-				hop: Some(crate::Hop::new(9).unwrap()),
-				cost: None,
-			},
-			solicit: Some(true),
-			active_count: true,
-			..Default::default()
-		});
-		let publisher = Publisher::new(
-			crate::time::sim(),
-			crate::driver::Transport::new(session.clone()),
-			origin.consume(),
-			Control::new(false),
-			None,
-			setup,
-			Version::Draft18,
-		);
-
-		let mut clean = crate::Hops::new();
-		clean.push(crate::Hop::new(778).unwrap()).unwrap();
-		let _clean = origin
-			.announce("cam-clean", crate::origin::RouteInfo::new().with_hops(clean))
-			.unwrap();
-		// A chain with no room left for our own hop cannot be forwarded.
-		let mut full = crate::Hops::new();
-		while full.push(crate::Hop::new(100 + full.len() as u64).unwrap()).is_ok() {}
-		let _full = origin
-			.announce("cam-full", crate::origin::RouteInfo::new().with_hops(full))
-			.unwrap();
-		settle().await;
-
-		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Draft18)
-			.await
-			.unwrap();
-		let msg = ietf::SubscribeNamespace {
-			authorization_token: None,
-			request_id: RequestId(1),
-			namespace: crate::Path::from_static(""),
-			hidden: false,
-		};
-		let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
-		assert!(futures::poll!(run.as_mut()).is_pending());
-
-		assert_eq!(occurrences(&log, b"cam-clean"), 1);
-		assert_eq!(occurrences(&log, b"cam-full"), 0);
-
-		let expected = crate::lite::test_transport::Log::default();
-		let mut writer = crate::coding::Writer::new(
-			crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(expected.clone())),
-			Version::Draft18,
-		);
-		writer.varint(ietf::RequestOk::ID).await.unwrap();
-		writer
-			.encode(&ietf::RequestOk {
-				largest: None,
-				active: Some(1),
-			})
-			.await
-			.unwrap();
-		let expected = expected.writes.lock().unwrap().clone();
-		assert!(
-			log.writes.lock().unwrap().starts_with(&expected),
-			"the OK counts one NAMESPACE"
-		);
 	}
 
 	/// A same-path source can splice into (or detach from) an existing broadcast
@@ -18552,7 +18157,7 @@ mod tests {
 			origin.consume(),
 			Control::new(false),
 			Some(assigned),
-			requires_solicitation(),
+			declared(),
 			Version::Draft18,
 		);
 
@@ -18577,7 +18182,6 @@ mod tests {
 			authorization_token: None,
 			request_id: RequestId(1),
 			namespace: crate::Path::from_static(""),
-			hidden: false,
 		};
 		let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
 
@@ -18674,7 +18278,7 @@ mod tests {
 			origin.consume(),
 			Control::new(false),
 			None,
-			declared(Some(false)),
+			declared(),
 			VERSION,
 		);
 
@@ -18713,7 +18317,6 @@ mod tests {
 		writer
 			.encode(&ietf::RequestOk {
 				largest: None,
-				active: None,
 			})
 			.await
 			.unwrap();
@@ -18831,78 +18434,20 @@ mod tests {
 		}
 	}
 
-	/// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count), so one on the OK
-	/// to a PUBLISH_NAMESPACE is the peer breaking the extension, negotiated or not.
-	#[kio::test]
-	async fn a_counted_publish_namespace_ok_is_a_violation() {
-		const VERSION: Version = Version::Draft18;
-
-		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let _local = origin.announce("local-cam", crate::origin::RouteInfo::new()).unwrap();
-		settle().await;
-
-		let ok = crate::lite::test_transport::Log::default();
-		let mut writer = crate::coding::Writer::new(
-			crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(ok.clone())),
-			VERSION,
-		);
-		writer.varint(ietf::RequestOk::ID).await.unwrap();
-		writer
-			.encode(&ietf::RequestOk {
-				largest: None,
-				active: Some(0),
-			})
-			.await
-			.unwrap();
-		let ok = ok.writes.lock().unwrap().clone();
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![ok]);
-		let log = session.log.clone();
-
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer {
-			active_count: true,
-			..Default::default()
-		});
-		let publisher = Publisher::new(
-			crate::time::sim(),
-			crate::driver::Transport::new(session.clone()),
-			origin.consume(),
-			Control::new(false),
-			None,
-			peer_setup,
-			VERSION,
-		);
-
-		let res = kio::clock::timeout(Duration::from_secs(5), publisher.run_publish_namespaces())
-			.await
-			.expect("the violation ends the loop");
-		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
-		// Closed at the source, since the solicited path's request task only logs errors.
-		let code = crate::SessionError::ProtocolViolation.to_code();
-		assert!(log.closes().iter().any(|(c, _)| *c == code), "{:?}", log.closes());
-	}
-
-	/// Drive both announce loops at once against a peer that declared `solicit`,
-	/// returning how many times the namespace hit the wire and how many bidi streams
-	/// were opened. One stream means the entry rode the subscription inline; two means
-	/// it went out as its own PUBLISH_NAMESPACE request.
-	async fn advertise_both_ways(solicit: Option<bool>) -> (usize, usize) {
-		let log = advertise_with_hidden(Discovery {
-			solicit,
-			..Discovery::default()
-		})
-		.await;
+	/// Drive both announce loops at once, returning how many times the namespace hit the
+	/// wire and how many bidi streams were opened. One stream means the entry rode the
+	/// subscription inline; two means it also went out as its own PUBLISH_NAMESPACE request.
+	async fn advertise_both_ways() -> (usize, usize) {
+		let log = advertise_with_hidden(Discovery::default()).await;
 		(occurrences(&log, b"cam"), log.bi_opens())
 	}
 
 	/// [`advertise_both_ways`] with a hidden `.stats/node` beside `cam`, and the peer's
-	/// SUBSCRIBE_NAMESPACE for `prefix` opting in to hidden namespaces or not.
+	/// SUBSCRIBE_NAMESPACE for `prefix`.
 	struct Discovery<'a> {
 		version: Version,
-		declared: bool,
-		solicit: Option<bool>,
 		prefix: &'a str,
-		hidden: bool,
+		/// Publish an origin scoped to the hidden subtree alone.
 		scoped: bool,
 	}
 
@@ -18910,24 +18455,14 @@ mod tests {
 		fn default() -> Self {
 			Self {
 				version: Version::Draft18,
-				declared: true,
-				solicit: Some(true),
 				prefix: "",
-				hidden: false,
 				scoped: false,
 			}
 		}
 	}
 
 	async fn advertise_with_hidden(case: Discovery<'_>) -> crate::lite::test_transport::Log {
-		let Discovery {
-			version,
-			declared: hidden_declared,
-			solicit,
-			prefix,
-			hidden,
-			scoped,
-		} = case;
+		let Discovery { version, prefix, scoped } = case;
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _cam = origin.announce("cam", crate::origin::RouteInfo::new()).unwrap();
 		let _stats = origin.announce(".stats/node", crate::origin::RouteInfo::new()).unwrap();
@@ -18941,12 +18476,6 @@ mod tests {
 		]);
 		let log = session.log.clone();
 
-		let setup = peer::PeerSetup::default();
-		setup.set(peer::Peer {
-			solicit,
-			hidden: hidden_declared,
-			..Default::default()
-		});
 		let consume = match scoped {
 			true => origin
 				.consume()
@@ -18960,7 +18489,7 @@ mod tests {
 			consume,
 			Control::new(false),
 			None,
-			setup,
+			declared(),
 			version,
 		);
 
@@ -18971,109 +18500,72 @@ mod tests {
 			authorization_token: None,
 			request_id: RequestId(1),
 			namespace: crate::Path::new(prefix).unwrap(),
-			hidden,
 		};
 		let mut solicited = std::pin::pin!(publisher.clone().run_subscribe_namespace_stream(stream, msg));
 		let mut unsolicited = std::pin::pin!(publisher.run_publish_namespaces());
 
 		// Poll well past the first advertisement, so a second one from the other loop
-		// would show up rather than being missed by an early break. The unsolicited loop
-		// finishes immediately when the peer requires solicitation, and a completed
-		// future must not be polled again.
-		let mut quiet = false;
+		// would show up rather than being missed by an early break.
 		for _ in 0..100 {
 			assert!(futures::poll!(solicited.as_mut()).is_pending());
-			if !quiet {
-				quiet = futures::poll!(unsolicited.as_mut()).is_ready();
-			}
+			assert!(futures::poll!(unsolicited.as_mut()).is_pending());
 			settle().await;
 		}
 
 		log
 	}
 
-	/// A hidden namespace reaches only a subscription that opted in or named its dot
-	/// segment. The subscription also repeats every visible
-	/// namespace the unsolicited loop already sent. A NAMESPACE is discovery, not
-	/// a second route.
+	/// moq-transport has no way to ask for hidden namespaces, so a hidden namespace reaches
+	/// only a subscription whose prefix names its dot segment, and never an unsolicited
+	/// PUBLISH_NAMESPACE. The subscription also repeats every visible namespace the
+	/// unsolicited loop already sent: a NAMESPACE is discovery, not a second route.
 	#[kio::test]
-	async fn hidden_namespaces_need_an_opt_in() {
-		for (solicit, prefix, hidden, cam, stats) in [
-			(Some(false), "", false, 2, 0),
-			(Some(false), "", true, 2, 1),
-			(Some(false), ".stats", false, 1, 1),
-			(Some(true), "", false, 1, 0),
-			(Some(true), "", true, 1, 1),
-			(Some(true), ".stats", false, 0, 1),
-		] {
-			let log = advertise_with_hidden(Discovery {
-				solicit,
-				prefix,
-				hidden,
-				..Discovery::default()
-			})
-			.await;
-			let case = format!("solicit {solicit:?}, prefix {prefix:?}, hidden {hidden}");
-			assert_eq!(occurrences(&log, b"cam"), cam, "{case}");
-			// An inline entry names its suffix, so count the leaf.
-			assert_eq!(occurrences(&log, b"node"), stats, "{case}");
-		}
-	}
-
-	#[kio::test]
-	async fn hidden_discovery_obeys_peer_setup_and_requested_prefix() {
+	async fn hidden_namespaces_need_the_prefix_to_name_them() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
-			for declared in [false, true] {
-				for solicit in [Some(false), Some(true)] {
-					for scoped in [false, true] {
-						for (prefix, hidden) in [("", false), ("", true), (".stats", false)] {
-							let log = advertise_with_hidden(Discovery {
-								version,
-								declared,
-								solicit,
-								prefix,
-								hidden,
-								scoped,
-							})
-							.await;
-							// Visible on the subscription: not filtered, opted in, or the prefix
-							// names the dot segment. The unsolicited loop sends a dot namespace
-							// only when the peer did not declare MoQ Hidden.
-							let on_stream = !declared || hidden || prefix == ".stats";
-							let unsolicited = solicit != Some(true) && !declared;
-							let expected = usize::from(on_stream) + usize::from(unsolicited);
-							assert_eq!(
-								occurrences(&log, b"node"),
-								expected,
-								"{version:?}: declared={declared}, solicit={solicit:?}, scoped={scoped}, prefix={prefix}, hidden={hidden}"
-							);
-						}
-					}
-				}
+			for (prefix, cam, stats) in [("", 2, 0), (".stats", 1, 1)] {
+				let log = advertise_with_hidden(Discovery {
+					version,
+					prefix,
+					..Discovery::default()
+				})
+				.await;
+				let case = format!("{version:?}: prefix {prefix:?}");
+				assert_eq!(occurrences(&log, b"cam"), cam, "{case}");
+				// An inline entry names its suffix, so count the leaf.
+				assert_eq!(occurrences(&log, b"node"), stats, "{case}");
 			}
 		}
 	}
 
-	/// A peer that did not ask to be solicited hears each namespace twice: an
-	/// unsolicited PUBLISH_NAMESPACE and a NAMESPACE on the SUBSCRIBE_NAMESPACE stream.
-	/// Those are two discoveries of one namespace, not two routes. A peer that asked to
-	/// be solicited hears it only on the stream.
+	/// An origin scoped to the hidden subtree alone does not opt this peer in to it: only a
+	/// prefix naming the dot segment lists it.
 	#[kio::test]
-	async fn a_non_solicit_peer_hears_a_namespace_both_ways() {
-		let (times, streams) = advertise_both_ways(Some(false)).await;
-		assert_eq!(times, 2, "PUBLISH_NAMESPACE and NAMESPACE");
-		assert_eq!(streams, 2, "the subscription plus one PUBLISH_NAMESPACE request");
-
-		let (once, streams) = advertise_both_ways(Some(true)).await;
-		assert_eq!(once, 1, "a peer that asked to be told on request is told once");
-		assert_eq!(streams, 1, "inline on the SUBSCRIBE_NAMESPACE stream it asked on");
+	async fn a_scope_naming_a_hidden_subtree_is_not_an_opt_in() {
+		for (prefix, stats) in [("", 0), (".stats", 1)] {
+			let log = advertise_with_hidden(Discovery {
+				prefix,
+				scoped: true,
+				..Discovery::default()
+			})
+			.await;
+			assert_eq!(occurrences(&log, b"node"), stats, "prefix {prefix:?}");
+		}
 	}
 
-	/// A peer that did not send SOLICIT still gets NAMESPACE on its SUBSCRIBE_NAMESPACE
-	/// stream: one for a match that already exists, one announced
-	/// after, then NAMESPACE_DONE when that announcement ends.
+	/// A peer hears each namespace twice: an unsolicited PUBLISH_NAMESPACE and a NAMESPACE
+	/// on the SUBSCRIBE_NAMESPACE stream. Those are two discoveries of one namespace, not two
+	/// routes.
 	#[kio::test]
-	async fn a_non_solicit_subscribe_namespace_carries_namespace() {
+	async fn a_peer_hears_a_namespace_both_ways() {
+		let (times, streams) = advertise_both_ways().await;
+		assert_eq!(times, 2, "PUBLISH_NAMESPACE and NAMESPACE");
+		assert_eq!(streams, 2, "the subscription plus one PUBLISH_NAMESPACE request");
+	}
+
+	/// A SUBSCRIBE_NAMESPACE stream carries NAMESPACE: one for a match that already
+	/// exists, one announced after, then NAMESPACE_DONE when that announcement ends.
+	#[kio::test]
+	async fn a_subscribe_namespace_carries_namespace() {
 		for version in [Version::Draft18] {
 			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let early = origin.announce("early-cam", crate::origin::RouteInfo::new()).unwrap();
@@ -19102,7 +18594,6 @@ mod tests {
 				authorization_token: None,
 				request_id: RequestId(1),
 				namespace: crate::Path::from_static(""),
-				hidden: false,
 			};
 			let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
 
@@ -19182,7 +18673,7 @@ mod tests {
 			origin.consume(),
 			Control::new(false),
 			None,
-			declared(Some(false)),
+			declared(),
 			VERSION,
 		);
 
@@ -19261,7 +18752,7 @@ mod tests {
 			origin.consume(),
 			Control::new(false),
 			Some(assigned),
-			declared(Some(false)),
+			declared(),
 			Version::Draft18,
 		);
 
@@ -19271,7 +18762,7 @@ mod tests {
 		let mut watch = Watched::new(crate::origin::RouteInfo::new().with_hops(hops));
 		watch.deferred = true;
 
-		let mut ns = Namespaces::new(cluster::Peer::default(), Target::Requests);
+		let mut ns = Namespaces::new(Target::Requests);
 		ns.watched.insert(suffix.clone(), watch);
 
 		publisher.sync_namespace(&mut ns, &suffix, &suffix).unwrap();
@@ -19312,7 +18803,7 @@ mod tests {
 			origin.consume(),
 			Control::new(false),
 			None,
-			declared(Some(false)),
+			declared(),
 			VERSION,
 		);
 
@@ -19349,25 +18840,6 @@ mod tests {
 		drop(cam);
 	}
 
-	/// A SETUP slot for a peer that negotiated the cluster extension, so an
-	/// advertisement carries a path and a cost worth repricing.
-	fn clustered(solicit: Option<bool>) -> peer::PeerSetup {
-		let slot = peer::PeerSetup::default();
-		slot.set(peer::Peer {
-			cluster: cluster::Peer {
-				hop: Some(crate::Hop::new(9).unwrap()),
-				cost: None,
-			},
-			solicit,
-			hidden: false,
-			max_age: false,
-			auth: false,
-			active_count: false,
-			flate: false,
-		});
-		slot
-	}
-
 	/// The bytes of one REQUEST_UPDATE, framed as the publisher writes it.
 	async fn request_update(version: Version, msg: &ietf::PublishNamespaceUpdate) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
@@ -19380,175 +18852,12 @@ mod tests {
 		log.writes.lock().unwrap().clone()
 	}
 
-	/// A relay that starts carrying a namespace reprices it with REQUEST_UPDATE on the
-	/// request that already carries it, sending the changed parameter only. The new cost
-	/// is 0, which has to be explicit: REQUEST_UPDATE keeps an omitted parameter, so
-	/// leaving it out would keep the old price.
-	#[kio::test]
-	async fn a_repricing_is_a_request_update() {
-		const VERSION: Version = Version::Draft18;
-
-		// Forward the update at once: the hold is not what this checks.
-		let origin = crate::origin::Config {
-			update_hold: Duration::ZERO,
-			..crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
-		}
-		.produce();
-		// One instance, so the warm route re-prices the instance rather than restart it.
-		let instance = crate::Instance::random();
-		let _cold = origin
-			.announce(
-				"cam",
-				crate::origin::RouteInfo::new()
-					.with_instance(instance.clone(), 0)
-					.with_cost(4),
-			)
-			.unwrap();
-		settle().await;
-
-		// One stream, answering the PUBLISH_NAMESPACE. The update goes unanswered: an answer
-		// scripted ahead of it would arrive while the request is idle, which is a violation.
-		let ok = publish_namespace_ok(VERSION).await;
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![ok]);
-		let log = session.log.clone();
-
-		let publisher = Publisher::new(
-			crate::time::sim(),
-			crate::driver::Transport::new(session.clone()),
-			origin.consume(),
-			Control::new(false),
-			None,
-			clustered(Some(false)),
-			VERSION,
-		);
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, b"cam") >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
-
-		// We start carrying it: a free route outranks the cold one.
-		let _warm = origin
-			.announce(
-				"cam",
-				crate::origin::RouteInfo::new().with_instance(instance, 0).with_cost(0),
-			)
-			.unwrap();
-
-		// The request consumed id 1, so the update takes the next of our parity. The
-		// path is unchanged and omitted; the cost is an explicit 0.
-		let expected = request_update(
-			VERSION,
-			&ietf::PublishNamespaceUpdate {
-				request_id: RequestId(3),
-				hops: None,
-				cost: Some(0),
-				authorization_token: None,
-			},
-		)
-		.await;
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &expected) >= 1 {
-				break;
-			}
-			settle().await;
-		}
-
-		assert_eq!(occurrences(&log, &expected), 1, "REQUEST_UPDATE with an explicit 0");
-		assert_eq!(occurrences(&log, b"cam"), 1, "PUBLISH_NAMESPACE was not repeated");
-		assert_eq!(log.bi_opens(), 1, "the update rode the request's own stream");
-	}
-
-	/// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count), so one on the OK
-	/// to a REQUEST_UPDATE is the peer breaking the extension too.
-	#[kio::test]
-	async fn a_counted_update_ok_is_a_violation() {
-		const VERSION: Version = Version::Draft18;
-
-		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let instance = crate::Instance::random();
-		let _cold = origin
-			.announce(
-				"cam",
-				crate::origin::RouteInfo::new()
-					.with_instance(instance.clone(), 0)
-					.with_cost(4),
-			)
-			.unwrap();
-		settle().await;
-
-		// The PUBLISH_NAMESPACE is answered cleanly; its update's OK carries a count.
-		let counted = crate::lite::test_transport::Log::default();
-		let mut writer = crate::coding::Writer::new(
-			crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(counted.clone())),
-			VERSION,
-		);
-		writer.varint(ietf::RequestOk::ID).await.unwrap();
-		writer
-			.encode(&ietf::RequestOk {
-				largest: None,
-				active: Some(0),
-			})
-			.await
-			.unwrap();
-		let counted = counted.writes.lock().unwrap().clone();
-		let ok = publish_namespace_ok(VERSION).await;
-		let session = crate::lite::test_transport::ScriptedSession::new(ok);
-		let log = session.log.clone();
-		let peer = session.clone();
-
-		let publisher = Publisher::new(
-			crate::time::sim(),
-			crate::driver::Transport::new(session.clone()),
-			origin.consume(),
-			Control::new(false),
-			None,
-			clustered(Some(false)),
-			VERSION,
-		);
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, b"cam") >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
-
-		// Queued behind the OK the idle request already read, so it answers the update:
-		// nothing wakes the reader until the update goes out.
-		peer.push(&counted);
-		// Repricing sends the REQUEST_UPDATE whose OK is counted.
-		let _warm = origin
-			.announce(
-				"cam",
-				crate::origin::RouteInfo::new().with_instance(instance, 0).with_cost(0),
-			)
-			.unwrap();
-
-		let res = kio::clock::timeout(Duration::from_secs(5), run)
-			.await
-			.expect("the violation ends the loop");
-		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
-		// Closed at the source, since the solicited path's request task only logs errors.
-		let code = crate::SessionError::ProtocolViolation.to_code();
-		assert!(log.closes().iter().any(|(c, _)| *c == code), "{:?}", log.closes());
-	}
-
 	/// A route from a different original publisher under the same instance (a replica)
-	/// updates the advertisement in place, like any other change within an instance:
-	/// withdrawing it would make the namespace briefly vanish downstream just because
-	/// its replica moved.
+	/// leaves the advertisement alone, like any other change within an instance: moq-transport
+	/// carries no path or cost to update, and withdrawing it would make the namespace briefly
+	/// vanish downstream just because its replica moved.
 	#[kio::test]
-	async fn a_replica_change_is_a_request_update() {
+	async fn a_replica_change_sends_nothing() {
 		const VERSION: Version = Version::Draft18;
 
 		// Forward the update at once: the hold is not what this checks.
@@ -19571,8 +18880,7 @@ mod tests {
 			.unwrap();
 		settle().await;
 
-		// One stream, answering the advertisement from A. Its update to B goes unanswered: an
-		// answer scripted ahead of it would arrive while the request is idle.
+		// One stream, answering the advertisement from A.
 		let ok = publish_namespace_ok(VERSION).await;
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![ok]);
 		let log = session.log.clone();
@@ -19583,7 +18891,7 @@ mod tests {
 			origin.consume(),
 			Control::new(false),
 			None,
-			clustered(Some(false)),
+			declared(),
 			VERSION,
 		);
 
@@ -19607,28 +18915,13 @@ mod tests {
 					.with_cost(0),
 			)
 			.unwrap();
-		let update = request_update(
-			VERSION,
-			&ietf::PublishNamespaceUpdate {
-				request_id: RequestId(3),
-				hops: Some(cluster::HopPath::new(
-					crate::Hops::try_from(vec![crate::Hop::new(8).unwrap(), crate::Hop::new(1).unwrap()]).unwrap(),
-				)),
-				cost: Some(0),
-				authorization_token: None,
-			},
-		)
-		.await;
+		let sent = log.writes.lock().unwrap().len();
 		for _ in 0..100 {
 			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &update) >= 1 {
-				break;
-			}
 			settle().await;
 		}
 
-		assert_eq!(occurrences(&log, &update), 1, "REQUEST_UPDATE carrying B's path");
-		assert_eq!(occurrences(&log, b"cam"), 1, "PUBLISH_NAMESPACE was not repeated");
+		assert_eq!(log.writes.lock().unwrap().len(), sent, "nothing more on the wire");
 		assert_eq!(log.bi_opens(), 1, "no withdrawal and no second stream");
 	}
 
@@ -19656,7 +18949,7 @@ mod tests {
 			origin.consume(),
 			Control::new(false),
 			None,
-			declared(Some(false)),
+			declared(),
 			version,
 		)
 		.with_auth(auth.clone());
@@ -19698,7 +18991,7 @@ mod tests {
 
 	async fn swaps_a_route_auth(version: Version) {
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
 		let second = auth
 			.present(bytes::Bytes::from_static(b"second-secret"), false)
@@ -19731,8 +19024,6 @@ mod tests {
 			version,
 			&ietf::PublishNamespaceUpdate {
 				request_id: RequestId(3),
-				hops: None,
-				cost: None,
 				authorization_token: Some(auth_token(b"second-secret")),
 			},
 		)
@@ -19764,7 +19055,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let other = crate::auth::Link::ietf(false);
+		let other = crate::auth::Link::ietf();
 		let foreign = other
 			.present(bytes::Bytes::from_static(b"foreign-secret"), false)
 			.unwrap();
@@ -19774,7 +19065,7 @@ mod tests {
 		settle().await;
 
 		let ok = publish_namespace_ok(VERSION).await;
-		let (publisher, log) = auth_publisher(&origin, &crate::auth::Link::ietf(false), vec![ok], VERSION);
+		let (publisher, log) = auth_publisher(&origin, &crate::auth::Link::ietf(), vec![ok], VERSION);
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"cam", 1).await;
 
@@ -19793,7 +19084,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let token = auth.present(bytes::Bytes::from_static(b"late-secret"), false).unwrap();
 		let cam = origin.announce("cam", crate::origin::RouteInfo::new()).unwrap();
 		settle().await;
@@ -19819,7 +19110,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let a = origin
 			.announce("cam-a", crate::origin::RouteInfo::new().with_auth(present(b"a-first")))
@@ -19878,7 +19169,7 @@ mod tests {
 				origin.consume(),
 				Control::new(false),
 				None,
-				declared(Some(false)),
+				declared(),
 				VERSION,
 			);
 			let run = kio::clock::sim::spawn(publisher.run_publish_namespaces());
@@ -19947,7 +19238,7 @@ mod tests {
 			origin.consume(),
 			Control::new(false),
 			None,
-			declared(Some(false)),
+			declared(),
 			version,
 		);
 		let run = kio::clock::sim::spawn(publisher.run_publish_namespaces());
@@ -20018,7 +19309,7 @@ mod tests {
 			// A token too big for the header's u16 length, so the header fails after its stream
 			// opened and its request ID was spent. A message goes out whole, so this is the one
 			// failure a fresh in-memory stream can be made to show.
-			let auth = crate::auth::Link::ietf(false);
+			let auth = crate::auth::Link::ietf();
 			let token = auth.present(bytes::Bytes::from(vec![0; 70_000]), false).unwrap();
 			let _cam = origin
 				.announce("cam", crate::origin::RouteInfo::new().with_auth(token))
@@ -20032,7 +19323,7 @@ mod tests {
 				origin.consume(),
 				Control::new(false),
 				None,
-				declared(Some(false)),
+				declared(),
 				version,
 			)
 			.with_auth(auth.clone());
@@ -20065,7 +19356,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let cam = origin
 			.announce("cam", crate::origin::RouteInfo::new().with_auth(present(b"first")))
@@ -20082,7 +19373,7 @@ mod tests {
 			origin.consume(),
 			Control::new(false),
 			None,
-			declared(Some(false)),
+			declared(),
 			VERSION,
 		)
 		.with_auth(auth.clone());
@@ -20118,7 +19409,7 @@ mod tests {
 
 	async fn advertises_again_unanswered(version: Version) {
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let cam = origin
 			.announce("cam", crate::origin::RouteInfo::new().with_auth(present(b"first")))
@@ -20175,7 +19466,7 @@ mod tests {
 			origin.consume(),
 			Control::new(false),
 			None,
-			clustered(Some(false)),
+			declared(),
 			VERSION,
 		);
 
@@ -20204,86 +19495,6 @@ mod tests {
 		assert_eq!(log.bi_opens(), 2, "on a fresh request stream");
 	}
 
-	/// A peer that refuses an update closes the stream, which withdraws the
-	/// advertisement. The namespace is then not held at all, so it comes back as a fresh
-	/// PUBLISH_NAMESPACE once the refusal's wait is out, not as another update on a
-	/// stream the peer already ended.
-	#[kio::test]
-	async fn a_refused_update_is_re_advertised_fresh() {
-		const VERSION: Version = Version::Draft18;
-
-		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let instance = crate::Instance::random();
-		let _cold = origin
-			.announce(
-				"cam",
-				crate::origin::RouteInfo::new()
-					.with_instance(instance.clone(), 0)
-					.with_cost(4),
-			)
-			.unwrap();
-		settle().await;
-
-		// Stream 1 accepts the advertisement and refuses its update, with a wait shorter
-		// than the retry sweep. The streams share one script, so the refusal is queued once
-		// the idle request has read its OK.
-		let ok = publish_namespace_ok(VERSION).await;
-		let refusal = publish_namespace_error(VERSION, 50).await;
-		let session = crate::lite::test_transport::ScriptedSession::new(ok);
-		let log = session.log.clone();
-		let peer = session.clone();
-
-		let publisher = Publisher::new(
-			crate::time::sim(),
-			crate::driver::Transport::new(session.clone()),
-			origin.consume(),
-			Control::new(false),
-			None,
-			clustered(Some(false)),
-			VERSION,
-		);
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, b"cam") >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
-
-		peer.push(&refusal);
-		let _warm = origin
-			.announce(
-				"cam",
-				crate::origin::RouteInfo::new().with_instance(instance, 0).with_cost(0),
-			)
-			.unwrap();
-
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, b"cam") >= 2 {
-				break;
-			}
-			tick().await;
-		}
-
-		assert_eq!(occurrences(&log, b"cam"), 2, "re-advertised after the refusal");
-		assert_eq!(log.bi_opens(), 2, "on a fresh request stream");
-		let update = request_update(
-			VERSION,
-			&ietf::PublishNamespaceUpdate {
-				request_id: RequestId(3),
-				hops: None,
-				cost: Some(0),
-				authorization_token: None,
-			},
-		)
-		.await;
-		assert_eq!(occurrences(&log, &update), 1, "only the one update was attempted");
-	}
-
 	/// A peer that never answers one advertisement must not hold the next namespace back.
 	#[kio::test]
 	async fn a_silent_answer_still_lets_the_next_namespace_be_advertised() {
@@ -20305,7 +19516,7 @@ mod tests {
 			origin.consume(),
 			Control::new(false),
 			None,
-			declared(Some(false)),
+			declared(),
 			VERSION,
 		);
 
@@ -20351,7 +19562,7 @@ mod tests {
 					}
 					for end in [End::Local, End::Fin, End::Reset, End::Refused] {
 						let origin = unheld_origin();
-						let auth = crate::auth::Link::ietf(false);
+						let auth = crate::auth::Link::ietf();
 						let first = auth.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 						let mut first_grant = first.grant();
 						let cam = origin
@@ -20365,7 +19576,6 @@ mod tests {
 							.encode_message(&ietf::PublishNamespace {
 								request_id: RequestId(1),
 								track_namespace: crate::Path::from_static("cam"),
-								params: Default::default(),
 								authorization_token: Some(auth_token(b"first")),
 							})
 							.await
@@ -20388,7 +19598,7 @@ mod tests {
 							origin.consume(),
 							Control::new(false),
 							None,
-							declared(Some(false)),
+							declared(),
 							version,
 						)
 						.with_auth(auth.clone());
@@ -20460,7 +19670,7 @@ mod tests {
 				origin.consume(),
 				Control::new(false),
 				None,
-				declared(Some(false)),
+				declared(),
 				version,
 			);
 			let mut run = std::pin::pin!(publisher.run_publish_namespaces());
@@ -20500,7 +19710,7 @@ mod tests {
 				origin.consume(),
 				control.clone(),
 				None,
-				declared(Some(false)),
+				declared(),
 				version,
 			);
 			let mut run = std::pin::pin!(publisher.run_publish_namespaces());
@@ -20553,7 +19763,7 @@ mod tests {
 			origin.consume(),
 			Control::new(false),
 			None,
-			declared(Some(false)),
+			declared(),
 			VERSION,
 		);
 

@@ -1842,7 +1842,6 @@ mod tests {
 			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
-			crate::Hop::new(1).unwrap(),
 			None,
 			version,
 			tasks,
@@ -1908,7 +1907,6 @@ mod tests {
 			assert_eq!(msg.prefix.as_str(), "bcast");
 			assert!(!msg.forward, "the listing asks for every track's objects");
 			let ok = ietf::RequestOk {
-				active: None,
 				largest: None,
 			};
 			write(&mut stream, ietf::RequestOk::ID, &ok).await;
@@ -1963,7 +1961,6 @@ mod tests {
 			let resume: ietf::SubscribeUpdate = body.message(self.version).unwrap();
 			assert_eq!(resume.forward, Some(true));
 			let ok = ietf::RequestOk {
-				active: None,
 				largest: None,
 			};
 			write(video, ietf::RequestOk::ID, &ok).await;
@@ -2363,7 +2360,6 @@ mod tests {
 			},
 		};
 		let answer = ietf::RequestOk {
-			active: None,
 			largest: None,
 		};
 

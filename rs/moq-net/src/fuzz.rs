@@ -890,10 +890,7 @@ pub fn encode_namespaces(paths: &[Path]) -> Vec<u8> {
 	let mut data = Vec::new();
 	let w = &mut Encoder::new(&mut data, BENCH_IETF.into());
 	for path in paths {
-		let msg = ietf::Namespace {
-			suffix: path.clone(),
-			params: None,
-		};
+		let msg = ietf::Namespace { suffix: path.clone() };
 		msg.encode(w, BENCH_IETF).expect("a namespace that fits");
 	}
 	data

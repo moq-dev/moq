@@ -140,8 +140,8 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// The extensions to offer in SETUP, every moq-transport one by default.
-	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
+	/// The extensions to offer in SETUP, none by default.
+	#[serde(default, skip_serializing_if = "crate::connect::default_extensions")]
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,
 
@@ -606,14 +606,13 @@ impl Config {
 mod tests {
 	use super::*;
 
-	/// The listen config offers every extension unless told otherwise, and leaves the
-	/// default out when serialized.
+	/// The listen config offers no extension unless told to, and leaves the default out when
+	/// serialized.
 	#[test]
-	fn extensions_default_on_and_parse_off() {
-		let config: Config = toml::from_str("[extensions]\nauth = false\n").expect("parse");
-		assert!(!config.extensions.auth);
-		assert!(config.extensions.solicit);
-		assert!(toml::to_string(&config).expect("serialize").contains("auth = false"));
+	fn extensions_default_off_and_parse_on() {
+		let config: Config = toml::from_str("[extensions]\nietf = true\n").expect("parse");
+		assert!(config.extensions.ietf);
+		assert!(toml::to_string(&config).expect("serialize").contains("ietf = true"));
 		assert!(
 			!toml::to_string(&Config::default())
 				.expect("serialize")

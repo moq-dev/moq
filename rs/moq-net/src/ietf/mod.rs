@@ -15,9 +15,6 @@
 
 #[macro_use]
 mod parameters;
-pub mod active_count;
-pub(crate) mod auth;
-pub mod cluster;
 #[cfg(feature = "async")]
 mod control;
 mod datagram;
@@ -27,7 +24,6 @@ mod filter;
 pub(crate) mod flate;
 mod goaway;
 mod group;
-pub mod hidden;
 mod location;
 pub(crate) mod max_age;
 pub mod message;
@@ -46,7 +42,6 @@ mod request_stream;
 mod request_update;
 #[cfg(feature = "async")]
 mod session;
-pub mod solicit;
 mod subscribe;
 mod subscribe_namespace;
 mod subscribe_tracks;
@@ -87,37 +82,3 @@ pub(crate) use {
 	request_stream::{Framed, NamespaceUpdate, Next, Update},
 	subscriber::GroupIngest,
 };
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	/// Our Setup Options, pinned to the values the extension drafts register. A renumber
-	/// still round trips against ourselves but breaks every other implementation.
-	#[test]
-	fn setup_option_code_points() {
-		for (name, key, spec) in [
-			("HOP_ID", cluster::HOP_ID, 0x40B54),
-			("RELAY_COST", cluster::RELAY_COST, 0x40B56),
-			("SOLICIT", solicit::SOLICIT, 0x40B5A),
-			("HIDDEN", hidden::HIDDEN, 0x40B5C),
-			("AUTH", auth::AUTH, 0x40B70),
-			("ACTIVE_COUNT", active_count::ACTIVE_COUNT, 0x40B64),
-		] {
-			assert_eq!(key, spec, "{name}");
-		}
-	}
-
-	/// Our message parameters, pinned to the values the extension drafts register.
-	#[test]
-	fn message_parameter_code_points() {
-		for (name, key, spec) in [
-			("HOP_PATH", cluster::HOP_PATH, 0x40B57),
-			("ROUTE_COST", cluster::ROUTE_COST, 0x40B58),
-			("HIDDEN", hidden::HIDDEN_PARAM, 0x40B5E),
-			("ACTIVE_COUNT", active_count::ACTIVE_COUNT_PARAM, 0x40B66),
-		] {
-			assert_eq!(key, spec, "{name}");
-		}
-	}
-}

@@ -162,8 +162,8 @@ impl Server {
 		self
 	}
 
-	/// Choose which extensions to offer in SETUP. Defaults to every moq-transport one, and
-	/// not [`ietf`](setup::Extensions::ietf), which only relays turn on.
+	/// Choose which extensions to offer in SETUP. Defaults to none: only relays turn on
+	/// [`ietf`](setup::Extensions::ietf).
 	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
 		self.extensions = extensions;
 		self
@@ -449,16 +449,14 @@ impl Server {
 		Handshake {
 			path: options.path.clone(),
 			role: None,
-			// A moq-transport peer only has an identity if it negotiated the MoQ
-			// Cluster extension and declared a non-zero Hop ID.
-			origin: options.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
+			// A moq-transport peer declares no identity.
+			origin: None,
 			token: options.token.clone(),
 			peer_implementation: options.implementation.clone(),
 			assigned_hop: crate::Hop::random(),
 			timer: Timer::new(None),
-			// The client's SETUP already settled whether it offered MoQ Auth, so it is
-			// negotiated exactly when we offer it too.
-			auth: crate::auth::Link::ietf(options.declared.auth && self.extensions.auth),
+			// moq-transport carries no AUTH: a token rides the requests that name it.
+			auth: crate::auth::Link::ietf(),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -899,7 +897,7 @@ impl PausedIetf {
 
 		// The client's SETUP was read at the pause; hand the stream back
 		// for GOAWAY. A server never advertises a path, hence `None`.
-		let (protocol, goaway, credential) = ietf::start(ietf::Config {
+		let (protocol, goaway) = ietf::start(ietf::Config {
 			runtime: runtime.clone(),
 			stats: server.stats.clone(),
 			limits: server.limits,
@@ -919,7 +917,6 @@ impl PausedIetf {
 			peer_declared: Some(peer_setup.options.declared),
 			auth: auth.clone(),
 			early_unis: peer_setup.early,
-			extensions: server.extensions,
 			implementation: server.implementation(),
 			peer_implementation: peer_implementation.clone(),
 		})?;
@@ -934,7 +931,7 @@ impl PausedIetf {
 				stats: server.stats.clone(),
 				goaway,
 				auth,
-				credential,
+				credential: None,
 				estimate: None,
 				peer_target: None,
 				bandwidth: crate::bandwidth::Allocator::default(),
@@ -2285,10 +2282,27 @@ mod tests {
 		let other = Hop::new(778).unwrap();
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 
-		let gate = kio::Producer::new(true);
-		let transport = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
-		let log = transport.log.clone();
+		// The client asks for everything: a server only answers SUBSCRIBE_NAMESPACE.
 		let version = ietf::Version::Draft18;
+		let mut body = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut body, version.into());
+		ietf::Message::encode_msg(
+			&ietf::SubscribeNamespace {
+				authorization_token: None,
+				request_id: ietf::RequestId(0),
+				namespace: crate::Path::empty(),
+			},
+			&mut encoder,
+			version,
+		)
+		.unwrap();
+		let mut script = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+		encoder.varint(<ietf::SubscribeNamespace as ietf::Message>::ID).unwrap();
+		encoder.u16(body.len() as u16);
+		script.extend(body);
+		let transport = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
+		let log = transport.log.clone();
 		let request = Handshake {
 			path: None,
 			role: None,
@@ -2296,7 +2310,7 @@ mod tests {
 			token: None,
 			peer_implementation: None,
 			assigned_hop: Hop::random(),
-			auth: crate::auth::Link::ietf(false),
+			auth: crate::auth::Link::ietf(),
 			timer: Timer::new(None),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),

@@ -21,8 +21,21 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, 
 	connect_mock(options).await
 }
 
-/// `carries_instance`: the wire carries the publisher's instance, as only lite-07 does.
-async fn acquisition(version: &str, carries_instance: bool) {
+/// What a second session from the same publisher is to the subscriber.
+#[derive(Clone, Copy, PartialEq)]
+enum Replacement {
+	/// The wire carries the publisher's instance, as only lite-07 does: the route updates.
+	Carried,
+	/// The wire carries the hop path but no instance: the route restarts, and the old one
+	/// is superseded.
+	Minted,
+	/// moq-transport carries neither: the new session is another route, which restarts the
+	/// advertisement while the old one stays up.
+	Anonymous,
+}
+
+async fn acquisition(version: &str, replacement: Replacement) {
+	let carries_instance = replacement == Replacement::Carried;
 	let version: Version = version.parse().unwrap();
 	let publisher = origin(1);
 	let subscriber = origin(2);
@@ -75,8 +88,8 @@ async fn acquisition(version: &str, carries_instance: bool) {
 	group.write_frame(None, b"catalog".to_vec()).unwrap();
 	group.finish().unwrap();
 	let result = pending.await;
-	if carries_instance {
-		let mut subscription = result.expect("the same instance must acquire");
+	if replacement != Replacement::Minted {
+		let mut subscription = result.expect("the same instance, or a route still up, must acquire");
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"catalog");
 	} else {
@@ -90,12 +103,16 @@ async fn acquisition(version: &str, carries_instance: bool) {
 
 #[kio::test]
 async fn minted_replacement_refuses_pending_catalog() {
-	acquisition("moq-lite-06", false).await;
-	acquisition("moq-transport-18", false).await;
-	acquisition("moq-transport-22", false).await;
+	acquisition("moq-lite-06", Replacement::Minted).await;
+}
+
+#[kio::test]
+async fn anonymous_replacement_acquires_pending_catalog() {
+	acquisition("moq-transport-18", Replacement::Anonymous).await;
+	acquisition("moq-transport-22", Replacement::Anonymous).await;
 }
 
 #[kio::test]
 async fn carried_replacement_acquires_pending_catalog() {
-	acquisition("moq-lite-07-wip", true).await;
+	acquisition("moq-lite-07-wip", Replacement::Carried).await;
 }
