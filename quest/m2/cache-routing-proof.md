@@ -13,6 +13,20 @@ and recorded in the epic's Plan.
 
 ## Plan
 
+Decided 2026-11-09 (maintainer, /quest-plan from Kixel's audit of its fleet
+plan): ✅ pull the proof into m2, ahead of the lite-07 cut, so a warm
+message that ships in lite-07 is the proven one (rejected: a design-only
+quest in m2 that sizes the message with no proof; leaving this in m3 and
+taking an additive SETUP extension if it lands after the cut). This reverses
+the 2026-11-08 choice of m3 for the proof alone;
+[the implementation](/quest/m3/cache-routing/select.md) stays in m3. If the
+proof places the message in lite-07, this quest also lands its draft section
+and its codec in Rust and JS, parsed and ignored until m3, so the cut carries
+it; a SETUP extension needs neither before the cut, and
+[Finalize moq-lite-07](/quest/m2/lite07-finalize.md) then drops this quest
+from its list. Either placement is now this quest's to record, with no
+second trip to the maintainer for choosing lite-07.
+
 Build on the sans-IO `Router` in `rs/moq-net/src/route/`, which each
 origin's `route::Node` drives, and the harness behind its handoff sweeps,
 not the reference model in
@@ -54,9 +68,7 @@ broadcast sends none.
 Wire: design the warm message, which names at least the path, the origin's
 Route ID, and the instance, and say which stream carries it and how a peer
 that never sends one behaves. Size it against lite-07 and an additive SETUP
-extension and record the choice and its reason in the epic's Plan. Choosing
-lite-07 goes back to the maintainer, since it moves
-[the implementation](/quest/m3/cache-routing/select.md) into m2.
+extension and record the choice and its reason in the epic's Plan.
 
 ## Related
 

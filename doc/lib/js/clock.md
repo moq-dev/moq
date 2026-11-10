@@ -40,11 +40,13 @@ and `JSON.stringify` throw a `TypeError`, so a unit mistake can't hide behind a
 cast. A template string prints one with its unit.
 
 `Instant` counts from its clock's origin: the realm's performance time origin
-on the host, so a DOM timestamp `t` is `Instant.ZERO.add(Duration.millis(t))`,
+on the host, so a DOM timestamp `t` is `Instant.ZERO.saturatingAdd(Duration.millis(t))`,
 or zero for a `Manual` clock. Its nanoseconds are exact for roughly 104
-days, then gradually lose sub-microsecond precision. Compare instants only
-from the same clock. Rust and JS each own their origin: no instant may cross
-that boundary until the backend explicitly shares one.
+days, then gradually lose sub-microsecond precision. Like kio, moving an instant
+by a duration has no throwing form: `checkedAdd`/`checkedSub` return `undefined`
+past the clock's range, and `saturatingAdd`/`saturatingSub` stop at its ends.
+Compare instants only from the same clock. Rust and JS each own their origin:
+no instant may cross that boundary until the backend explicitly shares one.
 
 `Wall` is wall-clock time, separate from monotonic time: `Wall.unixMillis(ms)`
 builds one from Unix milliseconds and `asUnixMillis()` reads them back exactly. Use it for dates, rather than

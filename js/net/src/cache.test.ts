@@ -3,6 +3,7 @@ import { Duration, Manual, yieldNow } from "@moq/clock";
 import * as cache from "./cache.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
+import { RUN_OVERHEAD as ARRIVAL_OVERHEAD } from "./ledger.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 // Run `fn` on a manual clock, stepped in milliseconds.
@@ -309,12 +310,79 @@ test("a drop flood stays within the pool", () => {
 		}
 	}
 	const held = dropsHeld(producer);
-	expect(pool.used).toBe(held.length * cache.RUN_OVERHEAD);
+	// Each drop is accounted in the arrivals too, whose gaps are folded before any run is shed.
+	expect(hooks.arrivalRuns(producer)).toBeLessThanOrEqual(2);
+	expect(pool.used).toBe(held.length * cache.RUN_OVERHEAD + (hooks.arrivalRuns(producer) - 1) * ARRIVAL_OVERHEAD);
 	expect(held[0]).toBeGreaterThan(0n);
 	expect(held.every((start, i) => i === 0 || start === held[i - 1] + 2n)).toBe(true);
 	expect(held[held.length - 1]).toBe(2n * (runs - 1n));
 	for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader)) reported.push(run.start);
 	expect(reported.slice(1)).toEqual(held);
+});
+
+// A peer fragmenting its arrivals under a grace that never folds a gap bills each run to the pool,
+// which folds the oldest gaps early to stay within it. Mirrors Rust `an_arrival_flood_stays_within_the_pool`.
+test("an arrival flood stays within the pool", () => {
+	const groups = 1000n;
+	const capacity = 64 * ARRIVAL_OVERHEAD;
+	const pool = new cache.Pool({ capacity });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	// A reader that waits for a late group indefinitely, so no gap folds by its grace.
+	const reader = producer.subscribe({ delay: { max: null } });
+	for (let group = 0n; group < groups; group++) producer.createGroup(2n * group).finish();
+	const runs = hooks.arrivalRuns(producer);
+	expect(runs).toBeGreaterThan(1);
+	expect(runs).toBeLessThan(Number(groups));
+	expect(pool.used).toBeLessThanOrEqual(capacity + 2 * cache.ENTRY_OVERHEAD);
+	reader.close();
+});
+
+// A frame write that folds an arrival gap to pay its debt wakes a reader parked on that gap, which
+// has no grace timer to wake it.
+test("folding an arrival gap wakes the reader parked on it", async () => {
+	const pool = new cache.Pool({ capacity: 1 });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const reader = producer.subscribe({
+		delay: { max: null },
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }],
+	});
+	// Group 0 is dropped rather than cached, so the protected live edge is the only group and the
+	// gap below it is the first thing a payment takes: no other signal moves.
+	hooks.dropTrackGroups(producer, 0n, 1n, old());
+	const live = producer.createGroup(2n);
+	live.writeFrame({ payload: new Uint8Array(8) });
+	for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup());
+	for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader));
+	let woken = 0;
+	const dispose = hooks.groupChanged(reader, () => woken++);
+	expect(hooks.arrivalRuns(producer)).toBe(2);
+	// Past the write threshold that settles debt.
+	live.writeFrame({ payload: new Uint8Array(512 * 1024) });
+	expect(hooks.arrivalRuns(producer)).toBe(1);
+	await yieldNow();
+	expect(woken).toBeGreaterThan(0);
+	dispose();
+	reader.close();
+});
+
+// A closed track bills none of its arrival gaps, so an account the pool's sweep keeps for its drops
+// holds no bytes for them.
+test("a closed track releases its arrival gaps from the pool", async () => {
+	await withClock(() => {
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
+		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		const reader = producer.subscribe({ delay: { max: null } });
+		producer.createGroup(0n).finish();
+		producer.createGroup(2n).finish();
+		expect(hooks.arrivalRuns(producer)).toBe(2);
+		const used = pool.used;
+		producer.close();
+		expect(pool.used).toBe(used - ARRIVAL_OVERHEAD);
+		reader.close();
+	});
 });
 
 // A run given up longer than the pool's idle window ago is forgotten by the sweep, even on a
@@ -332,8 +400,9 @@ test("the sweep forgets runs past the idle window", async () => {
 		hooks.dropTrackGroups(producer, 2n, 3n, old());
 		await clock.advance(500);
 		hooks.dropTrackGroups(producer, 4n, 5n, old());
-		// Each run and its expiry are billed.
-		expect(pool.used).toBe(4 * (cache.RUN_OVERHEAD + cache.BORN_OVERHEAD));
+		// Each run and its expiry are billed, and so are the two gaps between the drops the
+		// arrivals account.
+		expect(pool.used).toBe(4 * (cache.RUN_OVERHEAD + cache.BORN_OVERHEAD) + 2 * ARRIVAL_OVERHEAD);
 
 		// The sweep at 1.5 s forgets the first two, given up at 0 s.
 		await clock.advance(1_000);

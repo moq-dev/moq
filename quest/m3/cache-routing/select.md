@@ -12,7 +12,7 @@ and how many moves warm routes caused.
 
 ## Plan
 
-- Implement what [Prove cache-aware routing](/quest/m3/cache-routing/proof.md)
+- Implement what [Prove cache-aware routing](/quest/m2/cache-routing-proof.md)
   settles and pass its fixtures: the warm message where it placed it, warm
   state per neighbor derived from each front's demand, and eligibility over
   the router's feasibility distances.
@@ -38,7 +38,7 @@ warm message as the proof placed it, with its draft section in the same PR.
 
 ## Required
 
-- [Prove cache-aware routing](/quest/m3/cache-routing/proof.md) - the fixtures and wire placement this implements
+- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - the fixtures and wire placement this implements
 
 ## Related
 

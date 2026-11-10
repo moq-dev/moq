@@ -27,6 +27,13 @@ pub(crate) fn grace(max_delay: Duration) -> Duration {
 	}
 }
 
+/// Heap a ledger keeps per run: the run, its age entry, and its two entries in [`Changes`].
+/// Doubled for half-full `BTreeMap` nodes, as the cache's own overheads are. A track bills
+/// its arrivals at this per run, so a peer fragmenting them costs what the cache would hold.
+pub(crate) const RUN_OVERHEAD: u64 = 2
+	* (size_of::<(u64, Run)>() + size_of::<(Instant, u64)>() + size_of::<(u64, (u64, u64))>() + size_of::<(u64, u64)>())
+		as u64;
+
 /// A run of accounted sequences, keyed by its inclusive start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Run {
@@ -232,9 +239,27 @@ impl Ledger {
 		}
 	}
 
+	/// Fold the oldest gap into the runs around it however young, giving up on it early,
+	/// and return the sequences it held; `None` when no gap is left to fold.
+	pub fn fold_oldest(&mut self) -> Option<Range<u64>> {
+		let first = self.first()?;
+		let &(_, start) = self.ages.iter().find(|(_, start)| *start != first)?;
+		let run = self.remove(start);
+		let (&lower, previous) = self.runs.range_mut(..start).next_back().expect("not the first run");
+		let gap = previous.end..start;
+		previous.end = run.end;
+		self.changes.insert(lower..run.end);
+		Some(gap)
+	}
+
 	/// Whether a gap separates two runs, so [`Self::expire`] has anything to fold.
 	pub fn has_gaps(&self) -> bool {
 		self.runs.len() > 1
+	}
+
+	/// How many runs it holds: one more than its gaps.
+	pub fn len(&self) -> usize {
+		self.runs.len()
 	}
 
 	/// The lowest sequence accounted for.
@@ -453,6 +478,26 @@ mod tests {
 		ledger.expire(start.saturating_add(GRACE * 2));
 		assert_eq!(groups(&ledger), vec![0..9]);
 		assert!(ledger.covers(0..9));
+	}
+
+	/// A reclaim folds the oldest gap first however young, never the leading one, which
+	/// has no run below to fold into.
+	#[test]
+	fn fold_oldest_gives_up_the_oldest_gap_first() {
+		let start = Instant::ZERO;
+		let mut ledger = Ledger::new(Duration::MAX);
+		ledger.account(2..3, start);
+		ledger.account(4..5, start.saturating_add(GRACE));
+		ledger.account(6..7, start.saturating_add(GRACE * 2));
+		// Demand restarts the gap below 4, so the one above it is now the older.
+		ledger.demand(3..4, start.saturating_add(GRACE * 3));
+		assert_eq!(groups(&ledger), vec![2..3, 4..5, 6..7]);
+		assert_eq!(ledger.len(), 3);
+		assert_eq!(ledger.fold_oldest(), Some(5..6));
+		assert_eq!(ledger.fold_oldest(), Some(3..4));
+		assert_eq!(groups(&ledger), vec![2..7]);
+		assert_eq!(ledger.fold_oldest(), None, "the leading gap stays");
+		assert_eq!(ledger.changes().since(0).collect::<Vec<_>>(), vec![2..7]);
 	}
 
 	/// A missing group is given up on a grace after a later one opened its gap, and not
