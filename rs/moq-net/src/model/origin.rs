@@ -10554,15 +10554,14 @@ mod tests {
 
 	/// A route node already fed by its driver still answers a new stream with the table as
 	/// it stands, including a claim announced since the driver last ran, whichever handle
-	/// created it: one scoped away from the claim, upstream, and excluding its publisher
-	/// sees the whole table all the same.
+	/// created it: one scoped away from the claim, upstream, proxying, and hiding hidden
+	/// routes sees the whole table all the same.
 	#[test]
 	fn the_route_node_answers_with_the_table_as_it_stands() {
 		let producer = origin(1).produce();
-		(producer.clone().with_link(Link::Upstream).with_proxy(false).consume())
+		(producer.clone().with_link(Link::Upstream).with_proxy(true).consume())
 			.scope("elsewhere", &Patterns::from(Pattern::all()))
 			.unwrap()
-			.excluding(Hop::from(NonZeroU64::new(2).unwrap()))
 			.with_hidden(false)
 			.route_node();
 		// Nothing polls this test's driver.
