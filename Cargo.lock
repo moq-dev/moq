@@ -4597,13 +4597,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-native"
-version = "0.20.0"
-dependencies = [
- "workspace-hack",
-]
-
-[[package]]
 name = "moq-net"
 version = "0.3.10"
 dependencies = [
