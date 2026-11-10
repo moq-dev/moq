@@ -32,6 +32,7 @@ const MOVED = {
 	"/lib/js/env/web": "/lib/js/",
 	"/lib/js/env/native": "/lib/js/",
 	"/lib/js/@moq/boy": "/bin/demo",
+	"/lib/js/api/boy": "/bin/demo",
 	"/lib/js/@moq/demo": "/bin/demo",
 	"/lib/py/moq-rs": "/lib/py/",
 	"/lib/kt/moq": "/lib/kt/",

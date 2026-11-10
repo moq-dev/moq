@@ -11,7 +11,7 @@ import {
 	type Setter as SolidSetter,
 	type Signal as SolidSignal,
 } from "solid-js";
-import type { Getter, Signal } from "./index";
+import type { Getter, Signal } from "@moq/signals";
 
 /** Creates a Solid accessor that tracks the given signal, unsubscribing on cleanup. */
 export function createAccessor<T>(signal: Getter<T>): SolidAccessor<T> {

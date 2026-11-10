@@ -1,4 +1,4 @@
-import { createPair } from "@moq/signals/solid";
+import { createPair } from "../solid.ts";
 import { For } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
 

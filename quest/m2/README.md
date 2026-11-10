@@ -205,4 +205,3 @@ quests that require them.
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; browser padding is parked in m3 (held in m2 by open claims; moves to m3)
 - [Finish the milestone re-cut](/quest/m2/recut-held.md) - claim-held epics move to the milestone their kind and priority give them once their claims merge
 - [moq-transport is a compatibility layer again](/quest/m2/ietf-scope/README.md) - our extensions, JS FETCH serving, and track listing leave moq-transport; live media and joining FETCH stay
-- [MoQ Boy is a demo, not a published package](/quest/m2/boy-unpublish.md) - `moq-boy` and `@moq/boy` stop publishing, and `@moq/signals/solid` goes with them

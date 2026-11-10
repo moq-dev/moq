@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createRoot } from "solid-js";
-import { Signal } from "./index.ts";
+import { Signal } from "@moq/signals";
 import { createPair } from "./solid.ts";
 
 // Signal notifications are coalesced onto a microtask.

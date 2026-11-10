@@ -1,5 +1,5 @@
 import { Duration } from "@moq/clock";
-import { createAccessor } from "@moq/signals/solid";
+import { createAccessor } from "../solid.ts";
 import { For, Show } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
 
