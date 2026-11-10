@@ -419,17 +419,16 @@ struct Recovery {
 	state: RecoveryState,
 	/// The groups this subscription said it will not deliver, and why.
 	refused: RangeMap<u64, Refusal>,
-	/// Whether SUBSCRIBE_START arrived.
-	started: bool,
-	/// Whether SUBSCRIBE_FINISH arrived.
-	ended: bool,
-	/// Whether our FIN went out.
-	finished: bool,
 }
 
 enum RecoveryState {
 	Establish(Box<Establish>),
-	Active(Box<SubStream>),
+	/// Open, recording its SUBSCRIBE_START and SUBSCRIBE_FINISH as a subscription does.
+	Active {
+		sub: Box<SubStream>,
+		/// Whether our FIN went out.
+		finished: bool,
+	},
 	/// The subscription failed to open or was reset: everything left is refused.
 	Done,
 }
@@ -457,16 +456,13 @@ impl Recovery {
 			groups,
 			state: RecoveryState::Establish(Box::new(establish)),
 			refused: Default::default(),
-			started: false,
-			ended: false,
-			finished: false,
 		}
 	}
 
 	/// Whether a stream of the subscription is still being read, which cancelling would cut.
 	fn reading(&self) -> bool {
 		match &self.state {
-			RecoveryState::Active(active) => active.tail.read().is_reading(),
+			RecoveryState::Active { sub, .. } => sub.tail.read().is_reading(),
 			_ => false,
 		}
 	}
@@ -477,8 +473,8 @@ impl Recovery {
 		let state = std::mem::replace(&mut self.state, RecoveryState::Done);
 		let mut owed = RangeSet::new();
 		owed.insert(self.groups.clone());
-		if let RecoveryState::Active(active) = &state {
-			for arrived in active.tail.read().accounted(self.groups.clone()) {
+		if let RecoveryState::Active { sub, .. } = &state {
+			for arrived in sub.tail.read().accounted(self.groups.clone()) {
 				owed.remove(arrived);
 			}
 		}
@@ -491,7 +487,7 @@ impl Recovery {
 		self.serve.subscriber.remove_subscribe(self.id);
 		match state {
 			RecoveryState::Establish(est) => est.abort(&Error::Cancel),
-			RecoveryState::Active(active) if !self.finished => active.stream.writer.abort(&Error::Cancel),
+			RecoveryState::Active { sub, finished: false } => sub.stream.writer.abort(&Error::Cancel),
 			_ => {}
 		}
 	}
@@ -502,16 +498,21 @@ impl Recovery {
 		loop {
 			match &mut self.state {
 				RecoveryState::Establish(est) => match ready!(est.poll(waiter)) {
-					Ok(active) => self.state = RecoveryState::Active(Box::new(active)),
+					Ok(active) => {
+						self.state = RecoveryState::Active {
+							sub: Box::new(active),
+							finished: false,
+						}
+					}
 					Err(err) => {
 						tracing::debug!(%err, "recovery subscribe failed");
 						self.end(StreamError::from(&err));
 					}
 				},
-				RecoveryState::Active(active) => {
+				RecoveryState::Active { sub: active, finished } => {
 					// FIN once every group is accounted for and read, as a subscriber does once
 					// its tail settles, and the publisher FINs in reply.
-					if !self.finished {
+					if !*finished {
 						let groups = self.groups.clone();
 						let settled = active
 							.tail
@@ -523,7 +524,7 @@ impl Recovery {
 							.is_ready();
 						if settled {
 							let _ = active.stream.writer.finish();
-							self.finished = true;
+							*finished = true;
 						}
 					}
 					if let Poll::Ready(Err(err)) = active.stream.writer.poll_flush(waiter) {
@@ -550,25 +551,27 @@ impl Recovery {
 					};
 					match res {
 						// One start, for its one range.
-						Ok(Some(lite::SubscribeResponse::Start(start))) if !self.started && start.starts.len() == 1 => {
-							self.started = true;
+						Ok(Some(lite::SubscribeResponse::Start(start)))
+							if active.started.is_none() && start.starts.len() == 1 =>
+						{
 							// Below its start the publisher delivers nothing.
 							let from = start.starts[0].unwrap_or(groups.end);
 							given_up(
 								groups.start..from.clamp(groups.start, groups.end),
 								Refusal::passing(StreamError::NotFound),
 							);
+							active.started = Some(start.starts[0]);
 						}
 						Ok(Some(lite::SubscribeResponse::Drop(dropped))) => {
 							given_up(dropped.groups.clone(), Refusal::dropped(dropped.error(version)));
 						}
 						// Nothing at or past the track's end will be produced.
-						Ok(Some(lite::SubscribeResponse::Finish(finish))) if !self.ended => {
-							self.ended = true;
+						Ok(Some(lite::SubscribeResponse::Finish(finish))) if active.end.is_none() => {
 							given_up(
 								finish.group.max(groups.start)..groups.end,
 								Refusal::dropped(StreamError::NotFound),
 							);
+							active.end = Some(finish);
 						}
 						Ok(Some(lite::SubscribeResponse::Ok(_))) => {}
 						// A second START or FINISH, or a STARTED for a range no update added.
@@ -577,7 +580,8 @@ impl Recovery {
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
 						// The publisher FINs in reply to ours, or once it finished the track.
-						Ok(None) if self.finished || self.ended => self.end(StreamError::NotFound),
+						Ok(None) if *finished || active.end.is_some() => self.end(StreamError::NotFound),
+
 						Ok(None) => {
 							tracing::warn!("recovery subscribe ended without SUBSCRIBE_FINISH");
 							return Poll::Ready(Err(Error::ProtocolViolation));

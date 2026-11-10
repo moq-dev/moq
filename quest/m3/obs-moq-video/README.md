@@ -29,3 +29,4 @@ Decided in the 2026-09-30 audit: the Windows and Linux GPU decode paths and the 
 
 - [Video hardware validation](/quest/m5/video-hardware.md) - physical hardware evidence is required for each claimed GPU path
 - [AudioToolbox decode](/quest/m3/audio-decode-audiotoolbox.md) - HE-AAC and multichannel AAC reach the OBS source on macOS through moq-ffi
+- [AudioToolbox encode](/quest/m3/audio-encode-audiotoolbox.md) - native AAC encode reaches the OBS encoder adapter on macOS through moq-ffi
