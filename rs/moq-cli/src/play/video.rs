@@ -54,10 +54,9 @@ pub(super) struct Video<O> {
 	pub changed: Arc<tokio::sync::Notify>,
 	pub output: O,
 	pub max_delay: Duration,
-	/// The subscription's playout delay before any catalog `delay`.
+	/// The playout delay the subscription was opened for; a shared delay past it grows every budget by the excess.
 	pub min_delay: Duration,
-	/// The rendition's catalog `delay`, held as this track's playout target and
-	/// added to every budget above.
+	/// The rendition's catalog `delay`, held as this track's playout target.
 	pub delay: tokio::sync::watch::Receiver<Option<Duration>>,
 }
 
@@ -136,11 +135,17 @@ fn soonest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 }
 
 impl<O: Output> Video<O> {
-	/// A subscription's budget once it holds the catalog `delay`, plus `warmup`.
-	fn budget(&self, delay: Duration, warmup: Duration) -> moq_net::track::Delay {
+	/// How much longer than its own budgets video retains media once playback
+	/// trails the reference by `shared`, whichever track's target set it.
+	fn held(&self, shared: Duration) -> Duration {
+		shared.saturating_sub(self.min_delay)
+	}
+
+	/// A subscription's budget with `held` and `warmup` on top of its own.
+	fn budget(&self, held: Duration, warmup: Duration) -> moq_net::track::Delay {
 		moq_net::track::Delay {
-			min: Some(self.min_delay + delay + warmup),
-			max: Some(self.max_delay + delay + warmup),
+			min: Some(self.min_delay + held + warmup),
+			max: Some(self.max_delay + held + warmup),
 		}
 	}
 
@@ -171,19 +176,30 @@ impl<O: Output> Video<O> {
 		let role = self.presentation.track(moq_mux::container::Kind::Video);
 		let receive = async {
 			// Video has no jitter estimate, so its target is the encoder delay alone,
-			// which holds audio back with it. Every budget grows with it, or media the
-			// later schedule still waits for would be evicted first.
+			// which holds audio back with it.
 			let mut encoder = self.delay.clone();
-			let hold = |track: &mut Track, delay: Option<Duration>| {
-				let Some(delay) = delay else { return Duration::ZERO };
-				track.set_delay(self.budget(delay, Duration::ZERO));
-				if role.set_target(delay) {
+			let target = |delay: Option<Duration>| {
+				if let Some(delay) = delay
+					&& role.set_target(delay)
+				{
 					self.changed.notify_one();
 					self.output.send(Event::Wake);
 				}
-				delay
 			};
-			let mut held = hold(&mut track, *encoder.borrow_and_update());
+			target(*encoder.borrow_and_update());
+			// Every budget follows the shared delay, whichever track set it, or media
+			// the later schedule still waits for would be evicted first.
+			let schedule = self.presentation.consume();
+			let mut shared = schedule.delay();
+			let mut held = Duration::ZERO;
+			let follow = |track: &mut Track, held: &mut Duration, shared: Duration| {
+				let next = self.held(shared);
+				if next != *held {
+					*held = next;
+					track.set_delay(self.budget(next, Duration::ZERO));
+				}
+			};
+			follow(&mut track, &mut held, shared);
 			// The group of a declared end whose restart waits for a later group, so the
 			// media buffered before the end still plays out, and the transition that
 			// later group resumes.
@@ -205,13 +221,22 @@ impl<O: Output> Video<O> {
 				{
 					tokio::select! {
 						() = advanced.notified() => {}
-						Ok(()) = encoder.changed() => held = hold(&mut track, *encoder.borrow_and_update()),
+						Ok(()) = encoder.changed() => target(*encoder.borrow_and_update()),
+						delay = role.delay_changed(shared) => {
+							shared = delay;
+							follow(&mut track, &mut held, shared);
+						}
 					}
 				}
 				let read = tokio::select! {
 					read = track.read() => read?,
 					Ok(()) = encoder.changed() => {
-						held = hold(&mut track, *encoder.borrow_and_update());
+						target(*encoder.borrow_and_update());
+						continue;
+					}
+					delay = role.delay_changed(shared) => {
+						shared = delay;
+						follow(&mut track, &mut held, shared);
 						continue;
 					}
 				};
@@ -580,17 +605,23 @@ impl<O: Output> Video<O> {
 			// The group of the last end this decoder read. Its own subscription may
 			// deliver the replacement before the min-delay decoder reads that end.
 			let mut fence = None;
-			let mut encoder = self.delay.clone();
-			if let Some(delay) = *encoder.borrow_and_update() {
-				refresh.set_delay(self.budget(delay, warmup));
-			}
+			let schedule = self.presentation.consume();
+			let mut shared = schedule.delay();
+			let mut held = Duration::ZERO;
+			let follow = |refresh: &mut Track, held: &mut Duration, shared: Duration| {
+				let next = self.held(shared);
+				if next != *held {
+					*held = next;
+					refresh.set_delay(self.budget(next, warmup));
+				}
+			};
+			follow(&mut refresh, &mut held, shared);
 			loop {
 				let read = tokio::select! {
 					read = refresh.read() => read?,
-					Ok(()) = encoder.changed() => {
-						if let Some(delay) = *encoder.borrow_and_update() {
-							refresh.set_delay(self.budget(delay, warmup));
-						}
+					delay = role.delay_changed(shared) => {
+						shared = delay;
+						follow(&mut refresh, &mut held, shared);
 						continue;
 					}
 				};
@@ -679,10 +710,9 @@ impl<O: Output> Video<O> {
 					tokio::select! {
 						_ = woken => {},
 						_ = sleep => {},
-						Ok(()) = encoder.changed() => {
-							if let Some(delay) = *encoder.borrow_and_update() {
-								refresh.set_delay(self.budget(delay, warmup));
-							}
+						delay = role.delay_changed(shared) => {
+							shared = delay;
+							follow(&mut refresh, &mut held, shared);
 						}
 					}
 				};
@@ -953,6 +983,70 @@ mod tests {
 		producer.finish().unwrap();
 		task.await.unwrap().unwrap();
 		assert_eq!(clock.delay(), jitter, "released with its track");
+	}
+
+	/// Audio's 5 s catalog delay sets the shared schedule while video states none,
+	/// so video keeps every picture that schedule still waits for, well past its own
+	/// 2 s budget, rather than evicting them and freezing.
+	#[tokio::test]
+	async fn an_audio_encoder_delay_grows_video_retention() {
+		tokio::time::pause();
+		let (min, max) = (Duration::from_millis(100), Duration::from_secs(2));
+		let shared = Duration::from_secs(5);
+		let media = media(min);
+		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
+		audio.set_target(shared);
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = source
+			.consume()
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay {
+					min: Some(min),
+					max: Some(max),
+				}),
+			)
+			.await
+			.unwrap();
+		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let mut producer = moq_mux::container::Producer::new(source.clone(), format());
+		let track = moq_mux::container::Consumer::new(subscriber, format());
+		let video = Video {
+			min_delay: min,
+			..playback(&media, max)
+		};
+		let task = tokio::spawn(video.run(track, Buffered::new(0), None));
+
+		let mut first = None;
+		for at in 0..=5_500u64 {
+			if at % 100 == 0 {
+				producer.write(frame(at, true)).unwrap();
+			}
+			tokio::task::yield_now().await;
+			if let Some(picture) = media.output.present(&media)
+				&& first.is_none()
+			{
+				first = Some((picture.as_millis(), at));
+			}
+			tokio::time::advance(Duration::from_millis(1)).await;
+		}
+		let (picture, at) = first.expect("video froze: its pictures were evicted before they were due");
+		assert_eq!(picture, 0, "the first picture was kept until it was due");
+		assert!((5_000..5_100).contains(&at), "played in sync with audio: {at}");
+		let held = shared - min;
+		assert_eq!(
+			source.subscription().map(|subscription| subscription.delay),
+			Some(moq_net::track::Delay {
+				min: Some(min + held),
+				max: Some(max + held),
+			}),
+			"the subscription's budgets grow with the shared delay"
+		);
+		producer.finish().unwrap();
+		task.await.unwrap().unwrap();
 	}
 
 	async fn burst(speaker: bool, paused_window: bool) {
