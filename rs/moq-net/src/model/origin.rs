@@ -9759,6 +9759,39 @@ mod tests {
 		assert_eq!(chain_key("pool/job-0", &hops(&[11])), 0x0eb0a91370ff6653);
 	}
 
+	/// Pinned so `js/net` breaks a tie between lite-07 claims as this does: by the
+	/// rendezvous hash of each origin node under a claim, and at a claim's own path by the
+	/// newest claim, which a re-price leaves in place.
+	#[kio::test]
+	async fn lite07_ties_match_js() {
+		assert_eq!(fnv_key("pool/job", 0x7au64.to_le_bytes()), 0xc376be7bf47aebbf);
+		assert_eq!(fnv_key("pool/job", 0x8bu64.to_le_bytes()), 0x5813213b6508aaee);
+
+		let producer = origin(1).produce();
+		let claim = |node: u64, name: &str, cost: u64| {
+			RouteInfo::new()
+				.with_instance(name.parse().unwrap(), 0)
+				.with_cost(cost)
+				.with_node(Some(node))
+		};
+		let older = producer.forward("pool", claim(0x7a, "a", 5)).unwrap();
+		let _newer = producer.forward("pool", claim(0x8b, "b", 1)).unwrap();
+		older.update(older.route().unwrap().with_cost(1)).unwrap();
+
+		let best = |path: &str| {
+			let table = producer.shared.read();
+			table
+				.best_route(&Path::new(path).unwrap(), Horizon::default(), &HashSet::new(), |_| true)
+				.and_then(|entry| entry.node)
+		};
+		assert_eq!(best("pool"), Some(0x8b), "the newer claim keeps a tie a re-price made");
+		assert_eq!(
+			best("pool/job"),
+			Some(0x8b),
+			"the lower node hash wins under the claims"
+		);
+	}
+
 	/// Equal-cost advertisers of one prefix share its paths: a set of requested
 	/// paths spreads across the pool, and one path always resolves to the same
 	/// advertiser, whatever order the routes arrived in. The split is a rendezvous

@@ -1276,6 +1276,31 @@ export function chainHash(path: string, hops: readonly bigint[]): bigint {
 	return fnv(path, bytes);
 }
 
+/**
+ * The best of `candidates`, oldest first, at `prefix` for resolving `path`: `best_route` in
+ * rs/moq-net. Only an instance's highest epoch is eligible, ranked by
+ * {@link compareRouteCandidates} (`route_order`), and a full tie goes to the newest, as Rust's
+ * final `Reverse(entry.id)`: a claim is new when it starts or restarts (another instance or
+ * epoch), and keeps its place through a re-price. Every selector ranks through this, so the
+ * announcements and the consumes of one session never pick apart.
+ */
+export function bestCandidate<T>(
+	path: Path.Valid,
+	prefix: Path.Valid,
+	candidates: Iterable<T>,
+	route: (candidate: T) => WireRoute,
+): T | undefined {
+	const list = [...candidates];
+	const epochs = new Epochs(list.map(route));
+	let best: T | undefined;
+	for (const candidate of list) {
+		const next = route(candidate);
+		if (epochs.supersedes(next)) continue;
+		if (best === undefined || compareRouteCandidates(path, prefix, next, route(best)) <= 0) best = candidate;
+	}
+	return best;
+}
+
 /** Covering prefixes, most specific first, including the empty root. */
 export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
 	for (;;) {
@@ -1336,10 +1361,10 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
  * Order eligible routes at `prefix` resolving `path` by preference, hop count, then the spread
  * hash of each instance, then, within one instance, the hash of its chain. A lite-07 route counts
  * as the one hop to its origin node, and ranks by the rendezvous hash of that node instead. The
- * hashes only spread a prefix's paths: at the prefix itself a tie is left for the newest to win,
- * so a publisher that restarts under a new instance takes over from its lingering session at
- * once, matching `route_order` in rs/moq-net for routes a node did not get from a cluster peer,
- * which is every route here.
+ * hashes only spread a prefix's paths: at the prefix itself a tie is left for the newest to win
+ * (see {@link bestCandidate}), so a publisher that restarts under a new instance takes over from
+ * its lingering session at once, matching `route_order` in rs/moq-net for routes a node did not
+ * get from a cluster peer, which is every route here.
  */
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
 	const hops = (route: WireRoute) => (route.node !== undefined ? 1 : route.hops.length);

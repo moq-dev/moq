@@ -3663,13 +3663,62 @@ test("lite-07 children of a prefix two origins claim spread by node", async () =
 			await announced.next();
 		}
 		const job = Path.from("pool/job");
-		const want = rendezvousHash(job, NODE_A) < rendezvousHash(job, NODE_B) ? NODE_A : NODE_B;
+		// Pinned to `lite07_ties_match_js` in rs/moq-net, which picks NODE_B too.
+		expect(rendezvousHash(job, NODE_A)).toBe(0xc376be7bf47aebbfn);
+		expect(rendezvousHash(job, NODE_B)).toBe(0x5813213b6508aaeen);
 		const { request, consumed, info } = await trackRequest(job, 1);
-		expect(request.node).toBe(want);
+		expect(request.node).toBe(NODE_B);
 		consumed.close();
 		subscriber.close();
 		await info;
 	}
+});
+
+// A full tie at a claim's own path goes to the newest claim, as `lite07_ties_match_js` in
+// rs/moq-net pins: a re-price into the tie leaves it in place, a restart makes it the newest.
+// The announcements and the consumes pick alike.
+test("a lite-07 tie at a claim's path goes to the newest claim, a re-price keeping its place", async () => {
+	const { subscriber, announced, send, trackRequest } = await routedStream();
+	const room = Path.from("room");
+	const other = Path.from("other");
+	const a = Instance.parse("a");
+	const b = Instance.parse("b");
+	const c = Instance.parse("c");
+
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: room, route: 0n, instance: a, cost: 4n });
+	await send({ status: "floor", id: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { node: NODE_A } });
+	await send({ status: "routeStart", node: NODE_B, advert: ADVERT });
+	await send({ status: "active", suffix: room, route: 1n, instance: b });
+	await send({ status: "floor", id: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { node: NODE_B } });
+
+	// The older claim re-prices into a tie: the newer keeps the path, so nothing is reported.
+	await send({ status: "update", id: 0n, cost: 0n });
+	await send({ status: "floor", id: 0n });
+	await send({ status: "active", suffix: other, route: 1n, instance: b });
+	await send({ status: "floor", id: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: other, kind: "start" });
+	const kept = await trackRequest(room, 1);
+	expect(kept.request).toMatchObject({ instance: b, node: NODE_B });
+
+	// A restart at the tie is the newest claim: both pick it.
+	await send({ status: "restart", id: 0n, instance: c });
+	await send({ status: "floor", id: 0n });
+	expect(await announced.next()).toMatchObject({
+		prefix: room,
+		kind: "restart",
+		route: { instance: c, node: NODE_A },
+	});
+	const restarted = await trackRequest(room, 2);
+	expect(restarted.request).toMatchObject({ instance: c, node: NODE_A });
+
+	kept.consumed.close();
+	restarted.consumed.close();
+	announced.close();
+	subscriber.close();
+	await Promise.all([kept.info, restarted.info]);
 });
 
 test("a lite-07 batch applies at its floor, and a held route turns unavailable", async () => {

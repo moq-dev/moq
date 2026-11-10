@@ -25,9 +25,8 @@ import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import {
-	compareRouteCandidates,
+	bestCandidate,
 	type DropRun,
-	Epochs,
 	hiddenBelow,
 	hooks,
 	insertDrop,
@@ -937,13 +936,8 @@ export class Subscriber {
 					const claim = wire.committed.get(path);
 					if (claim) candidates.push(candidate(wire, claim));
 				}
-				// Only an instance's highest epoch is eligible, however cheap an older one is.
-				const epochs = new Epochs(candidates);
-				for (const next of candidates) {
-					if (epochs.supersedes(next)) continue;
-					// The newest wins a tie.
-					if (!best || compareRouteCandidates(path, path, next, best) <= 0) best = next;
-				}
+				// The same pick a consume of `path` makes from the cache.
+				best = bestCandidate(path, path, candidates, (next) => next);
 			}
 
 			const captures = scopeCaptures(scope, path);
@@ -1046,9 +1040,12 @@ export class Subscriber {
 									ids = new Set();
 									byPath.set(path, ids);
 								}
-								// Re-added, so the newest claim at a path iterates last.
-								ids.delete(msg.id);
-								ids.add(msg.id);
+								// A new or restarted claim iterates last, as the newest; a re-price keeps its
+								// place, as the consume cache does. See bestCandidate.
+								if (!was || restart) {
+									ids.delete(msg.id);
+									ids.add(msg.id);
+								}
 							} else {
 								wire.committed.delete(path);
 								const ids = byPath.get(path);

@@ -2,7 +2,7 @@ import type * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import type { WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import { compareRouteCandidates, coveringPrefixes, Epochs } from "./internal.ts";
+import { bestCandidate, coveringPrefixes } from "./internal.ts";
 import type * as Path from "./path.ts";
 import { type Served, sameInstance } from "./wire.ts";
 
@@ -69,7 +69,7 @@ export class BroadcastCache {
 		}
 		const previous = entries.get(owner);
 		const identity = (!restart && previous?.identity) || {};
-		// A new stream ranks as the newest, which wins a tie at its own prefix.
+		// A new or restarted stream ranks as the newest, which wins a full tie; see bestCandidate.
 		if (!previous || restart) entries.delete(owner);
 		entries.set(owner, { identity, route });
 		this.#update(path);
@@ -88,13 +88,7 @@ export class BroadcastCache {
 		for (const prefix of coveringPrefixes(path)) {
 			const entries = this.#announced.get(prefix);
 			if (!entries) continue;
-			let best: { identity: object; route: WireRoute } | undefined;
-			const epochs = new Epochs([...entries.values()].map((entry) => entry.route));
-			// Newest last, so it wins a tie.
-			for (const entry of entries.values()) {
-				if (epochs.supersedes(entry.route)) continue;
-				if (!best || compareRouteCandidates(path, prefix, entry.route, best.route) <= 0) best = entry;
-			}
+			const best = bestCandidate(path, prefix, entries.values(), (entry) => entry.route);
 			if (best) {
 				const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
 				// A minted instance names the announcement, not the publisher's stream, so a
@@ -121,12 +115,7 @@ export class BroadcastCache {
 			const routes = [...(this.#announced.get(prefix)?.values() ?? [])]
 				.map((entry) => entry.route)
 				.filter((route) => route.instance === instance);
-			const epochs = new Epochs(routes);
-			let best: WireRoute | undefined;
-			for (const route of routes) {
-				if (epochs.supersedes(route)) continue;
-				if (!best || compareRouteCandidates(path, prefix, route, best) <= 0) best = route;
-			}
+			const best = bestCandidate(path, prefix, routes, (route) => route);
 			if (best) return best.node;
 		}
 		return undefined;
