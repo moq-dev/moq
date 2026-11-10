@@ -29,8 +29,10 @@ use threaded::Inner;
 /// A [`Decoder`](super::Decoder) confined to one thread, driven from anywhere.
 ///
 /// Same shape as [`Decoder`](super::Decoder), except that
-/// [`decode`](Self::decode) is `async` and takes its payload by value (it may
-/// cross a thread). Reach for this instead of a `Decoder` whenever the decoder
+/// [`decode`](Self::decode) and [`flush`](Self::flush) are `async` and `decode`
+/// takes its payload by value (it may cross a thread). [`receive`](Self::receive)
+/// stays synchronous: each `decode` and `flush` has already moved what the codec
+/// readied to this side. Reach for this instead of a `Decoder` whenever the decoder
 /// outlives a single thread's stack: a spawned task, an object shared across
 /// threads, an FFI handle. A `Decoder` you build, drive, and drop inside one
 /// function needs none of it.
@@ -66,20 +68,30 @@ impl Sink {
 		self.0.name()
 	}
 
-	/// Decode one access unit, waiting for whatever pictures it yields.
+	/// Submit one access unit, waiting until the codec has taken it.
 	///
-	/// Otherwise [`Decoder::decode`](super::Decoder::decode): zero or more frames,
-	/// since a backend that reorders holds pictures back. `payload` is a [`Bytes`],
-	/// so handing it over is a refcount rather than a copy.
-	pub async fn decode(&mut self, payload: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error> {
+	/// Otherwise [`Decoder::decode`](super::Decoder::decode): its pictures come out
+	/// of [`receive`](Self::receive), zero or more of them, since a backend that
+	/// reorders holds pictures back. `payload` is a [`Bytes`], so handing it over
+	/// is a refcount rather than a copy.
+	pub async fn decode(&mut self, payload: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<(), Error> {
 		self.0.decode(payload, timestamp, keyframe).await
 	}
 
-	/// Drain the frames the decoder still holds once the stream has ended.
+	/// Pop the oldest ready frame, or `None` while the decoder holds the rest.
+	///
+	/// Call until it returns `None` after each [`decode`](Self::decode) and
+	/// [`flush`](Self::flush).
+	pub fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		self.0.receive()
+	}
+
+	/// Mark the end of input, so [`receive`](Self::receive) returns the frames the
+	/// decoder still holds once the stream has ended.
 	///
 	/// Otherwise [`Decoder::flush`](super::Decoder::flush), confined to the codec
 	/// thread like [`decode`](Self::decode).
-	pub async fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+	pub async fn flush(&mut self) -> Result<(), Error> {
 		self.0.flush().await
 	}
 }
@@ -92,27 +104,40 @@ mod threaded {
 	use tokio::sync::{mpsc, oneshot};
 
 	use super::super::decoder::{Config, Decoder};
-	use crate::worker::{Ready, Worker};
+	use crate::worker::{Queue, Ready, Worker};
 	use crate::{Error, Frame};
 
-	/// Work for the decode thread. One variant today; the enum is here so a
-	/// future request (a flush, a reset) lands in order with the frames around it
-	/// rather than racing them.
+	/// Work for the decode thread, in order with the frames around it.
 	enum Request {
 		Decode {
 			payload: Bytes,
 			timestamp: Timestamp,
 			keyframe: bool,
-			resp: oneshot::Sender<Result<Vec<Frame>, Error>>,
+			resp: oneshot::Sender<Result<(), Error>>,
 		},
 		Flush {
-			resp: oneshot::Sender<Result<Vec<Frame>, Error>>,
+			resp: oneshot::Sender<Result<(), Error>>,
 		},
+	}
+
+	/// Move everything the decoder has ready into `queue`.
+	fn collect(decoder: &mut Decoder, queue: &Queue<Frame>) -> Result<(), Error> {
+		let mut queue = queue.lock();
+		while let Some(frame) = decoder.receive()? {
+			queue.push_back(frame);
+		}
+		Ok(())
 	}
 
 	/// Build a decoder and serve requests until the channel closes. Runs entirely
 	/// on the decode thread; see [`crate::worker`].
-	fn run(catalog: VideoConfig, config: Config, ready: Ready<String>, mut requests: mpsc::UnboundedReceiver<Request>) {
+	fn run(
+		catalog: VideoConfig,
+		config: Config,
+		queue: Queue<Frame>,
+		ready: Ready<String>,
+		mut requests: mpsc::UnboundedReceiver<Request>,
+	) {
 		let mut decoder = match Decoder::new(&catalog, &config) {
 			Ok(decoder) => decoder,
 			Err(err) => return ready.err(err),
@@ -132,10 +157,14 @@ mod threaded {
 					keyframe,
 					resp,
 				} => {
-					let _ = resp.send(decoder.decode(&payload, timestamp, keyframe));
+					let decoded = decoder
+						.decode(&payload, timestamp, keyframe)
+						.and_then(|()| collect(&mut decoder, &queue));
+					let _ = resp.send(decoded);
 				}
 				Request::Flush { resp } => {
-					let _ = resp.send(decoder.flush());
+					let flushed = decoder.flush().and_then(|()| collect(&mut decoder, &queue));
+					let _ = resp.send(flushed);
 				}
 			}
 		}
@@ -143,30 +172,30 @@ mod threaded {
 	}
 
 	/// A [`Decoder`] running on its own thread. See the module docs.
-	pub struct Inner(Worker<Request, String>);
+	pub struct Inner {
+		worker: Worker<Request, String>,
+		queue: Queue<Frame>,
+	}
 
 	impl Inner {
 		pub async fn open(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {
 			let catalog = catalog.clone();
 			let config = config.clone();
+			let queue = Queue::default();
+			let filled = queue.clone();
 			let worker = Worker::open("moq-video-decode", move |ready, requests| {
-				run(catalog, config, ready, requests)
+				run(catalog, config, filled, ready, requests)
 			})
 			.await?;
-			Ok(Self(worker))
+			Ok(Self { worker, queue })
 		}
 
 		pub fn name(&self) -> &str {
-			self.0.info()
+			self.worker.info()
 		}
 
-		pub async fn decode(
-			&mut self,
-			payload: Bytes,
-			timestamp: Timestamp,
-			keyframe: bool,
-		) -> Result<Vec<Frame>, Error> {
-			self.0
+		pub async fn decode(&mut self, payload: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<(), Error> {
+			self.worker
 				.request(|resp| Request::Decode {
 					payload,
 					timestamp,
@@ -176,8 +205,12 @@ mod threaded {
 				.await
 		}
 
-		pub async fn flush(&mut self) -> Result<Vec<Frame>, Error> {
-			self.0.request(|resp| Request::Flush { resp }).await
+		pub fn receive(&mut self) -> Result<Option<Frame>, Error> {
+			Ok(self.queue.pop())
+		}
+
+		pub async fn flush(&mut self) -> Result<(), Error> {
+			self.worker.request(|resp| Request::Flush { resp }).await
 		}
 	}
 }
@@ -210,16 +243,15 @@ mod inline {
 
 		/// Async only to match the threaded `Inner`; there's no thread to hand
 		/// this to, so it decodes inline.
-		pub async fn decode(
-			&mut self,
-			payload: Bytes,
-			timestamp: Timestamp,
-			keyframe: bool,
-		) -> Result<Vec<Frame>, Error> {
+		pub async fn decode(&mut self, payload: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<(), Error> {
 			self.0.decode(&payload, timestamp, keyframe)
 		}
 
-		pub async fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		pub fn receive(&mut self) -> Result<Option<Frame>, Error> {
+			self.0.receive()
+		}
+
+		pub async fn flush(&mut self) -> Result<(), Error> {
 			self.0.flush()
 		}
 	}
@@ -281,11 +313,12 @@ mod tests {
 			let caller = std::thread::spawn(move || {
 				let mut guard = sink.lock().unwrap();
 				let sink = guard.as_mut().unwrap();
-				let frames = pollster::block_on(sink.decode(Bytes::from_static(b"au"), at(index), index == 0)).unwrap();
+				pollster::block_on(sink.decode(Bytes::from_static(b"au"), at(index), index == 0)).unwrap();
 				// The frame really came back, so the assertions below are about a
 				// decoder that ran rather than one that no-opped.
-				assert_eq!(frames.len(), 1);
-				assert_eq!(frames[0].timestamp, at(index));
+				let frame = sink.receive().unwrap().expect("one frame per access unit");
+				assert!(sink.receive().unwrap().is_none());
+				assert_eq!(frame.timestamp, at(index));
 				std::thread::current().id()
 			});
 			callers.push(caller.join().unwrap());

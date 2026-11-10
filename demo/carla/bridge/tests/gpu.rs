@@ -152,10 +152,10 @@ impl Worker {
 		let timestamp = moq_net::Timestamp::from_micros(frame.timestamp_us).unwrap();
 		// The decoder may hold a picture back; match pictures to
 		// packets in order rather than one for one.
-		for picture in decoder
+		decoder
 			.decode(&frame.payload, timestamp, frame.keyframe)
-			.expect("decode the packet")
-		{
+			.expect("decode the packet");
+		while let Some(picture) = decoder.receive().expect("decode the packet") {
 			let (number, rgb) = expected.pop_front().expect("more pictures than packets");
 			let i420 = picture.surface.to_i420().expect("CPU picture");
 			let size = SIZES[usize::from(frame.rendition)];

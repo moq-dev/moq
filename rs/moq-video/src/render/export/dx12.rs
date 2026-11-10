@@ -365,9 +365,9 @@ mod tests {
 				.expect("a free slot")
 				.wait()
 				.unwrap();
-			encoded.extend(encoder.encode(&frame).unwrap());
+			encoded.extend(encoder.encode_all(&frame).unwrap());
 		}
-		encoded.extend(encoder.finish().unwrap());
+		encoded.extend(encoder.flush_all().unwrap());
 		assert!(encoded.first().is_some_and(|encoded| encoded.keyframe));
 	}
 }

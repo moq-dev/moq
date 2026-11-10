@@ -576,8 +576,8 @@ pub(crate) mod tests {
 
 		let red = texture(&device, &queue, size, [255, 0, 0, 255]);
 		let frame = exporter.copy(&red, Timestamp::ZERO).unwrap().unwrap().wait().unwrap();
-		let mut encoded = encoder.encode(&frame).unwrap();
-		encoded.extend(encoder.finish().unwrap());
+		let mut encoded = encoder.encode_all(&frame).unwrap();
+		encoded.extend(encoder.flush_all().unwrap());
 		assert!(encoded.first().is_some_and(|encoded| encoded.keyframe));
 	}
 

@@ -93,6 +93,8 @@ pub(crate) struct MediaFoundation {
 	last_timestamp: Option<Timestamp>,
 	/// Mark the first accepted sample after a drain as a new stream epoch.
 	discontinuity: bool,
+	/// Pictures the MFT handed back, waiting for `receive`.
+	ready: VecDeque<Frame>,
 	/// Kept alive for the MFT's lifetime; the MFT holds its own ref but we own the
 	/// pairing. Drops before `_com`.
 	_manager: IMFDXGIDeviceManager,
@@ -146,6 +148,7 @@ impl MediaFoundation {
 			pending: VecDeque::new(),
 			last_timestamp: None,
 			discontinuity: false,
+			ready: VecDeque::new(),
 			_manager: manager,
 			_com: com,
 		};
@@ -308,12 +311,12 @@ impl MediaFoundation {
 	/// Reports whether the decoder got anywhere, which is not the same as whether
 	/// it handed back a picture: renegotiating the output type is progress too, and
 	/// it produces no frame.
-	fn drain_output(&mut self, out: &mut Vec<Frame>) -> Result<bool, Error> {
+	fn drain_output(&mut self) -> Result<bool, Error> {
 		if !self.output_configured {
 			return Ok(false);
 		}
 		let mut progressed = false;
-		while self.process_output(out)? {
+		while self.process_output()? {
 			progressed = true;
 		}
 		Ok(progressed)
@@ -322,7 +325,7 @@ impl MediaFoundation {
 	/// One `ProcessOutput`. Returns `true` if it produced a frame or handled a
 	/// stream change (so the caller keeps draining), `false` on
 	/// `MF_E_TRANSFORM_NEED_MORE_INPUT` (the decoder wants the next access unit).
-	fn process_output(&mut self, out: &mut Vec<Frame>) -> Result<bool, Error> {
+	fn process_output(&mut self) -> Result<bool, Error> {
 		// In DXVA mode the MFT provides its own texture-backed sample, so we pass a
 		// null slot; otherwise we hand it a system-memory buffer to fill.
 		let provided = if self.provides_samples {
@@ -351,7 +354,8 @@ impl MediaFoundation {
 				if let Some(sample) = sample {
 					let sample_time = unsafe { sample.GetSampleTime() }.ok();
 					let surface = self.sample_to_surface(&sample)?;
-					out.push(Frame::new(surface, self.take_timestamp(sample_time)));
+					let timestamp = self.take_timestamp(sample_time);
+					self.ready.push_back(Frame::new(surface, timestamp));
 				}
 				Ok(true)
 			}
@@ -425,9 +429,7 @@ impl MediaFoundation {
 }
 
 impl Backend for MediaFoundation {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
-		let mut out = Vec::new();
-
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
 		let sample = self.build_sample(&access_unit)?;
 		if self.discontinuity {
 			unsafe { sample.SetUINT32(&MFSampleExtension_Discontinuity, 1) }
@@ -447,7 +449,7 @@ impl Backend for MediaFoundation {
 					// renegotiates the output type here and produces no picture doing
 					// it, and that is exactly the case where feeding the same access
 					// unit again is the right move.
-					if !self.drain_output(&mut out)? {
+					if !self.drain_output()? {
 						return Err(Error::codec(anyhow::anyhow!(
 							"decoder rejected the access unit with no output to drain"
 						)));
@@ -471,22 +473,25 @@ impl Backend for MediaFoundation {
 			self.configure_output()?;
 		}
 
-		self.drain_output(&mut out)?;
-		Ok(out)
+		self.drain_output()?;
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
 		// Whatever the drain does, the next access unit opens a new stream.
 		self.discontinuity = true;
 		if !self.output_configured {
 			self.pending.clear();
-			return Ok(Vec::new());
+			return Ok(());
 		}
 
-		let mut out = Vec::new();
 		let drained = unsafe { self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0) }
 			.map_err(|e| mf_err("drain", e))
-			.and_then(|()| self.drain_output(&mut out));
+			.and_then(|()| self.drain_output());
 		// Only after the drain, which pairs the delayed pictures with these.
 		self.pending.clear();
 		if let Err(err) = drained {
@@ -503,7 +508,7 @@ impl Backend for MediaFoundation {
 		unsafe {
 			let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 		}
-		Ok(out)
+		Ok(())
 	}
 
 	fn name(&self) -> &str {

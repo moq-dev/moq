@@ -51,4 +51,3 @@ near the paired threshold (re-check if one repeats), a one-off
 ## Required
 
 - [Nightly's macOS platform job passes](/quest/m0/nightly/macos.md) - `moq-audio`'s tests compile on macOS again and the websocket version test's timeout is fixed if it recurs
-- [Moxygen conformance cells pass again](/quest/m0/nightly/moxygen-conformance.md) - the first-object signal and integer extensions survive, or moxygen's divergence is skipped with an upstream link
