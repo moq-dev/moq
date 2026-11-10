@@ -97,15 +97,13 @@ mod discovery;
 #[cfg(feature = "async")]
 mod driver;
 mod error;
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub mod fuzz;
 #[cfg(feature = "async")]
 pub mod goaway;
 #[cfg(not(feature = "async"))]
 #[allow(dead_code, unused_imports, reason = "async-only")]
 mod goaway;
-#[cfg(test)]
-mod test_tracing;
-#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
-pub mod fuzz;
 mod ietf;
 mod instance;
 mod ledger;
@@ -126,6 +124,8 @@ mod setup;
 mod tail;
 #[cfg(all(test, feature = "async"))]
 mod test_interop;
+#[cfg(test)]
+mod test_tracing;
 mod util;
 mod version;
 
