@@ -52,7 +52,8 @@ async fn run(relay: bool, js_publishes: bool) {
 	let serve = {
 		let local = local.clone();
 		tokio::spawn(async move {
-			let relayed = moq_tokio::origin::spawn();
+			// A relay carries what it learned on to its other peers (moq-lite-07).
+			let relayed = moq_tokio::origin::spawn().with_proxy(true);
 			let mut sessions = Vec::new();
 			for _ in 0..if relay { 2 } else { 1 } {
 				let request = server.accept().await.unwrap();
