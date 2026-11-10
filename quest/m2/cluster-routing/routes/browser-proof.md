@@ -63,8 +63,9 @@ does for Chromium. Verify the fixed build against the relay the way the
 
 ## Waiting
 
-- mozilla/neqo: the exporter context writes the session ID as 64 bits, as
-  asked in [mozilla/neqo#4319](https://github.com/mozilla/neqo/issues/4319);
-  check `webtransport_export_keying_material` in
-  `neqo-http3/src/webtransport.rs`, then the first Firefox release vendoring
-  it.
+- Firefox: a release vendors the neqo fix for
+  [mozilla/neqo#4319](https://github.com/mozilla/neqo/issues/4319), which
+  writes the exporter context's session ID as 64 bits. neqo merged it on
+  2026-11-09 in [mozilla/neqo#4323](https://github.com/mozilla/neqo/pull/4323),
+  after neqo v0.34.0; Firefox main still vendored v0.34.0 that day. Check the
+  neqo version in Firefox's `Cargo.lock` for each release.
