@@ -67,8 +67,13 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// Follows a specific broadcast path across the publisher instances that serve it.
 typedef Following = MoqFollowing;
 
-/// The read-only facts on a received route: a static cost and the stream's instance.
+/// The read-only facts on a received route: a static cost, the stream's instance, and
+/// its [MinRtt].
 typedef RouteInfo = MoqRouteInfo;
+
+/// The minimum round trip to a route's origin node over moq-lite-07: `upstream` past the
+/// session's peer, `link` to the peer, and their `total`. Informational; it never ranks a route.
+typedef MinRtt = MoqMinRtt;
 
 /// One continuous stream at a path: `Instance.parse` names one, and only a session mints one.
 ///

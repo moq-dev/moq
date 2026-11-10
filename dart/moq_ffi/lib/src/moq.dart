@@ -2962,6 +2962,77 @@ class FfiConverterMoqAnnounceConfig {
   }
 }
 
+class MoqMinRtt {
+  final Duration? upstream;
+  final Duration? link;
+  final Duration? total;
+  MoqMinRtt({this.upstream, this.link, this.total});
+}
+
+class FfiConverterMoqMinRtt {
+  static MoqMinRtt lift(RustBuffer buf) {
+    return FfiConverterMoqMinRtt.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqMinRtt> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final upstream_lifted = FfiConverterOptionalDuration.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final upstream = upstream_lifted.value;
+    new_offset += upstream_lifted.bytesRead;
+    final link_lifted = FfiConverterOptionalDuration.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final link = link_lifted.value;
+    new_offset += link_lifted.bytesRead;
+    final total_lifted = FfiConverterOptionalDuration.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final total = total_lifted.value;
+    new_offset += total_lifted.bytesRead;
+    return LiftRetVal(
+      MoqMinRtt(upstream: upstream, link: link, total: total),
+      new_offset - buf.offsetInBytes,
+    );
+  }
+
+  static RustBuffer lower(MoqMinRtt value) {
+    final total_length =
+        FfiConverterOptionalDuration.allocationSize(value.upstream) +
+        FfiConverterOptionalDuration.allocationSize(value.link) +
+        FfiConverterOptionalDuration.allocationSize(value.total) +
+        0;
+    final buf = Uint8List(total_length);
+    write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqMinRtt value, Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    new_offset += FfiConverterOptionalDuration.write(
+      value.upstream,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalDuration.write(
+      value.link,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalDuration.write(
+      value.total,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset - buf.offsetInBytes;
+  }
+
+  static int allocationSize(MoqMinRtt value) {
+    return FfiConverterOptionalDuration.allocationSize(value.upstream) +
+        FfiConverterOptionalDuration.allocationSize(value.link) +
+        FfiConverterOptionalDuration.allocationSize(value.total) +
+        0;
+  }
+}
+
 class MoqOriginConfig {
   final int? cacheCapacityBytes;
   MoqOriginConfig({this.cacheCapacityBytes = null});
@@ -3012,10 +3083,12 @@ class MoqRouteInfo {
   final int cost;
   final MoqInstance instance;
   final bool available;
+  final MoqMinRtt minRtt;
   MoqRouteInfo({
     required this.cost,
     required this.instance,
     required this.available,
+    required this.minRtt,
   });
 }
 
@@ -3041,8 +3114,18 @@ class FfiConverterMoqRouteInfo {
     );
     final available = available_lifted.value;
     new_offset += available_lifted.bytesRead;
+    final minRtt_lifted = FfiConverterMoqMinRtt.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final minRtt = minRtt_lifted.value;
+    new_offset += minRtt_lifted.bytesRead;
     return LiftRetVal(
-      MoqRouteInfo(cost: cost, instance: instance, available: available),
+      MoqRouteInfo(
+        cost: cost,
+        instance: instance,
+        available: available,
+        minRtt: minRtt,
+      ),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -3052,6 +3135,7 @@ class FfiConverterMoqRouteInfo {
         FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterMoqInstance.allocationSize(value.instance) +
         FfiConverterBool.allocationSize(value.available) +
+        FfiConverterMoqMinRtt.allocationSize(value.minRtt) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -3072,6 +3156,10 @@ class FfiConverterMoqRouteInfo {
       value.available,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterMoqMinRtt.write(
+      value.minRtt,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -3079,6 +3167,7 @@ class FfiConverterMoqRouteInfo {
     return FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterMoqInstance.allocationSize(value.instance) +
         FfiConverterBool.allocationSize(value.available) +
+        FfiConverterMoqMinRtt.allocationSize(value.minRtt) +
         0;
   }
 }

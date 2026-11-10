@@ -25,6 +25,7 @@ use crate::{Instance, Path};
 use rand::RngExt;
 
 use super::{Error, GENERATED, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno};
+use crate::origin::MinRtt;
 
 /// One announce stream in one direction.
 pub(crate) type Key = u64;
@@ -58,6 +59,8 @@ pub(crate) struct Served {
 	/// The selected route's metric: a path through the claim costs the Announce
 	/// Cost plus this.
 	pub metric: Metric,
+	/// The route's min RTT, informational.
+	pub min_rtt: MinRtt,
 	/// Whether a usable route serves it; a held one leaves it shown but unavailable.
 	pub available: bool,
 }
@@ -356,8 +359,9 @@ struct State {
 	routes: HashMap<Id, Routes>,
 }
 
-/// An identity's usable feasible routes: each stream, its metric, and the peer's name.
-type Routes = Vec<(Key, Metric, Id)>;
+/// An identity's usable feasible routes: each stream, its metric and min RTT, and
+/// the peer's name.
+type Routes = Vec<(Key, Metric, MinRtt, Id)>;
 
 /// Where one shown claim is served: each stream, what it was last sent, and
 /// whether it confirmed serving it.
@@ -420,11 +424,16 @@ impl Node {
 
 	/// A node declaring the origin's hop id, so the origin has one identity on every
 	/// wire. A declared identity is never qualified, so an id carrying that marker
-	/// loses it, or is replaced by a random one if nothing is left.
-	pub fn origin(hop: std::num::NonZeroU64) -> Self {
+	/// loses it, or is replaced by a random one if nothing is left. One that
+	/// `withholds` advertises no min RTT.
+	pub fn origin(hop: std::num::NonZeroU64, withhold: bool) -> Self {
 		let mut rng = kio::clock::rng();
 		let id = declared_for(hop).unwrap_or_else(|| rng.random_range(1..=GENERATED));
-		Self::new(id, rng.random())
+		let node = Self::new(id, rng.random());
+		if withhold {
+			node.lock().router.withhold();
+		}
+		node
 	}
 
 	fn lock(&self) -> Locked<'_> {
@@ -588,6 +597,11 @@ impl Stream {
 		self.with(|router, key| router.goaway(key));
 	}
 
+	/// The link to the peer has `min_rtt`, or `None` unmeasured.
+	pub fn min_rtt(&self, min_rtt: Option<std::time::Duration>) {
+		self.with(|router, key| router.min_rtt(key, min_rtt));
+	}
+
 	/// This stream's session now serves `claim` of `id`, so a stream that no longer
 	/// carries a route to it lets go.
 	pub fn serving(&self, id: Id, claim: &Path) {
@@ -679,7 +693,7 @@ impl State {
 	/// the routes changed too.
 	fn home(&mut self, id: Id, claims: BTreeSet<Path>, ended: &BTreeMap<(Id, Path), bool>) {
 		let routes: Routes = (self.router.routes(id).into_iter())
-			.map(|(key, metric)| (key, metric, self.router.name(key, id)))
+			.map(|(key, metric, min_rtt)| (key, metric, min_rtt, self.router.name(key, id)))
 			.collect();
 		let last = self.routes.get(&id).map_or(&[][..], Vec::as_slice);
 		let claims = match last == routes.as_slice() {
@@ -704,28 +718,29 @@ impl State {
 		for claim in shown.into_iter().rev() {
 			let shown = &self.router.shown()[&(id, claim.clone())];
 			let (item, available) = (shown.item.clone(), shown.available);
-			let carrying: Vec<(Key, Metric, Id)> = (routes.iter())
-				.filter(|(key, _, _)| self.router.carries(*key, &claim))
+			let carrying: Vec<(Key, Metric, MinRtt, Id)> = (routes.iter())
+				.filter(|(key, ..)| self.router.carries(*key, &claim))
 				.copied()
 				.collect();
 			let home = self.homes.entry((id, claim.clone())).or_default();
 			// With no route left, the router no longer knows the name a stream's peer
 			// gave the identity, so it keeps the one it was served under.
-			let wanted: Vec<(Key, Metric, bool, Id)> = match carrying.is_empty() {
+			let wanted: Vec<(Key, Metric, MinRtt, bool, Id)> = match carrying.is_empty() {
 				true => (home.keys.iter())
-					.map(|(key, slot)| (*key, slot.served.metric, false, slot.named))
+					.map(|(key, slot)| (*key, slot.served.metric, slot.served.min_rtt, false, slot.named))
 					.collect(),
 				false => (carrying.into_iter())
-					.map(|(key, metric, named)| (key, metric, available, named))
+					.map(|(key, metric, min_rtt, named)| (key, metric, min_rtt, available, named))
 					.collect(),
 			};
 			for slot in home.keys.values_mut() {
 				slot.leaving = true;
 			}
-			for (key, metric, available, named) in wanted {
+			for (key, metric, min_rtt, available, named) in wanted {
 				let served = Served {
 					claim: item.clone(),
 					metric,
+					min_rtt,
 					available,
 				};
 				match home.keys.get_mut(&key) {
@@ -802,7 +817,7 @@ impl State {
 			let home = self.homes.get(&(id, claim.clone()));
 			let slots = home.into_iter().flat_map(|home| home.keys.iter());
 			let carrying: Vec<_> = (routes.iter())
-				.filter(|(key, _, _)| self.router.carries(*key, claim))
+				.filter(|(key, ..)| self.router.carries(*key, claim))
 				.collect();
 			if carrying.is_empty() {
 				for (_, slot) in slots {
@@ -813,10 +828,11 @@ impl State {
 			}
 			let slots: BTreeMap<Key, &Slot> = slots.filter(|(_, slot)| !slot.leaving).map(|(k, s)| (*k, s)).collect();
 			let want: BTreeMap<Key, (Served, Id)> = (carrying.iter())
-				.map(|&&(key, metric, named)| {
+				.map(|&&(key, metric, min_rtt, named)| {
 					let served = Served {
 						claim: shown.item.clone(),
 						metric,
+						min_rtt,
 						available: shown.available,
 					};
 					(key, (served, named))
@@ -919,6 +935,10 @@ mod tests {
 				served: Served {
 					claim: claim(&instance, 5),
 					metric: 1,
+					min_rtt: MinRtt {
+						upstream: Some(std::time::Duration::ZERO),
+						link: None,
+					},
 					available: true,
 				},
 			}]
@@ -1203,6 +1223,7 @@ mod tests {
 				seqno,
 				metric: 0,
 				down_only: false,
+				min_rtt: None,
 			}))
 		};
 		for origin in 10..110 {
@@ -1326,6 +1347,7 @@ mod tests {
 			seqno: 0,
 			metric: 0,
 			down_only: false,
+			min_rtt: None,
 		};
 		receive.route(1, Some(Reach::Finite(advert)));
 		receive.batch(1, vec![(p("live/x"), Some(claim(&instance, 0)))], Some(1));

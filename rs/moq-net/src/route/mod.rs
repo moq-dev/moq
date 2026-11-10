@@ -18,6 +18,7 @@
 
 pub(crate) mod node;
 mod proof;
+mod rtt;
 mod view;
 
 #[cfg(test)]
@@ -29,15 +30,17 @@ use std::{
 	collections::{BTreeMap, BTreeSet},
 	fmt,
 	sync::Arc,
+	time::Duration,
 };
 
-use crate::Path;
+use crate::{Path, origin::MinRtt};
 
 pub(crate) use node::Node;
 #[cfg(feature = "async")]
 pub(crate) use proof::EXPORTER_LABEL;
 pub use proof::RouteKey;
 pub(crate) use proof::{Proof, Transcript};
+pub(crate) use rtt::LinkRtt;
 pub(crate) use view::{View, within};
 use view::{ancestors, below, covering, narrow};
 
@@ -156,6 +159,10 @@ pub(crate) struct Advert {
 	pub seqno: Seqno,
 	pub metric: Metric,
 	pub down_only: bool,
+	/// The sum of each link's min RTT to the identity: informational, never read to
+	/// rank or select a route. `None` once a node on the path withheld it or could not
+	/// measure its link.
+	pub min_rtt: Option<Duration>,
 }
 
 /// A ROUTE's state on a stream.
@@ -323,6 +330,8 @@ impl<A: Clone + Eq> Heard<A> {
 
 struct Peer {
 	link: Link,
+	/// The link's min RTT, which routes learned here add; `None` while unmeasured.
+	min_rtt: Option<Duration>,
 	/// The neighbor sent GOAWAY: rank it below every other eligible route.
 	draining: bool,
 	/// The prefix the neighbor asked this node for, once it opened a stream.
@@ -424,6 +433,8 @@ pub(crate) struct Router<N, A> {
 	changed: BTreeMap<Id, BTreeSet<Path>>,
 	/// Mints a fresh identity on rotation.
 	rng: u64,
+	/// Advertise every route without a min RTT.
+	withhold: bool,
 	/// Per claim this node has shown, how many times it forgot that claim.
 	#[cfg(test)]
 	forgot: BTreeMap<(Id, Path), u32>,
@@ -468,6 +479,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			ctxs: BTreeMap::new(),
 			changed: BTreeMap::new(),
 			rng: seed | 1,
+			withhold: false,
 			#[cfg(test)]
 			forgot: BTreeMap::new(),
 			#[cfg(test)]
@@ -475,6 +487,12 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			out: Vec::new(),
 			events: Vec::new(),
 		}
+	}
+
+	/// Advertise every route without a min RTT, so none crossing this node carries one.
+	pub fn withhold(&mut self) {
+		self.withhold = true;
+		self.update_all();
 	}
 
 	/// Take the identities recomputed since the last call, whose selection may have
@@ -504,6 +522,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			neighbor,
 			Peer {
 				link,
+				min_rtt: None,
 				draining: false,
 				watch: None,
 				asked: None,
@@ -570,13 +589,28 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		if let Some(peer) = self.neighbors.get_mut(&neighbor) {
 			peer.draining = true;
 		}
-		let ids: Vec<Id> = self
-			.rx
-			.iter()
+		self.update(self.through(neighbor));
+	}
+
+	/// The link to `neighbor` has `min_rtt`, or `None` unmeasured: every route learned
+	/// there adds it.
+	pub fn min_rtt(&mut self, neighbor: N, min_rtt: Option<Duration>) {
+		let Some(peer) = self.neighbors.get_mut(&neighbor) else {
+			return;
+		};
+		if peer.min_rtt == min_rtt {
+			return;
+		}
+		peer.min_rtt = min_rtt;
+		self.update(self.through(neighbor));
+	}
+
+	/// The identities `neighbor` sent a route for.
+	fn through(&self, neighbor: N) -> Vec<Id> {
+		(self.rx.iter())
 			.filter(|(_, routes)| routes.contains_key(&neighbor))
 			.map(|(id, _)| *id)
-			.collect();
-		self.update(ids);
+			.collect()
 	}
 
 	#[cfg(test)]
@@ -1032,16 +1066,37 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		best.map(|(_, selected)| selected)
 	}
 
-	/// Every usable feasible route to `id`, with this node's metric through each. Any
-	/// of them forwards without a loop, if it [carries](Self::carries) the claim.
-	pub fn routes(&self, id: Id) -> Vec<(N, Metric)> {
+	/// Every usable feasible route to `id`, with this node's metric and min RTT
+	/// through each. Any of them forwards without a loop, if it
+	/// [carries](Self::carries) the claim.
+	pub fn routes(&self, id: Id) -> Vec<(N, Metric, MinRtt)> {
 		if self.origins.contains_key(&id) {
 			return Vec::new();
 		}
 		(self.rx.get(&id).into_iter().flatten())
 			.filter(|(_, entry)| !entry.held && self.feasible(id, entry.advert))
-			.filter_map(|(&next, entry)| Some((next, add(entry.advert.metric, self.neighbors[&next].link.cost)?)))
+			.filter_map(|(&next, entry)| {
+				let peer = &self.neighbors[&next];
+				let min_rtt = MinRtt {
+					upstream: entry.advert.min_rtt,
+					link: peer.min_rtt,
+				};
+				Some((next, add(entry.advert.metric, peer.link.cost)?, min_rtt))
+			})
 			.collect()
+	}
+
+	/// This node's min RTT to `id` along `route`: 0 at the identity's own node.
+	fn route_min_rtt(&self, id: Id, route: &Selected<N>) -> Option<Duration> {
+		let Some(next) = route.next else {
+			return Some(Duration::ZERO);
+		};
+		let entry = self.rx.get(&id)?.get(&next)?;
+		MinRtt {
+			upstream: entry.advert.min_rtt,
+			link: self.neighbors[&next].min_rtt,
+		}
+		.total()
 	}
 
 	/// Whether a request for a claim at `claim` may go through `next`.
@@ -1621,6 +1676,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 					seqno: route.seqno,
 					metric: route.metric,
 					down_only: route.down_only,
+					min_rtt: self.route_min_rtt(id, &route).filter(|_| !self.withhold),
 				})),
 				None if serves && ctx.live && was.is_some() => Some(Reach::Held),
 				_ => None,

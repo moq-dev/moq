@@ -193,6 +193,12 @@ typealias RouteOptions = uniffi.moq.MoqRouteOptions
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo
 
+/**
+ * The minimum round trip to a route's origin node over moq-lite-07: `upstream` past the session's
+ * peer, `link` to the peer, and their `total`. Informational; it never ranks a route.
+ */
+typealias MinRtt = uniffi.moq.MoqMinRtt
+
 /** Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering. */
 typealias Subscription = uniffi.moq.MoqSubscription
 

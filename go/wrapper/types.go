@@ -29,8 +29,10 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream) and its static production and link cost (lower wins).
+	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream), its static production and link cost (lower wins), and its MinRtt.
 	RouteInfo = ffi.MoqRouteInfo
+	// MinRtt is the minimum round trip to a route's origin node over moq-lite-07: Upstream past the session's peer, Link to the peer, and their Total. Informational; it never ranks a route.
+	MinRtt = ffi.MoqMinRtt
 	// Instance names one continuous stream at a path. Compare two with Eq: a session mints one
 	// for a route whose wire carries none, and it differs from a named instance with the same Text.
 	Instance = ffi.MoqInstance

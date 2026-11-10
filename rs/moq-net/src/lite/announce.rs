@@ -114,15 +114,30 @@ pub enum AnnounceBroadcast {
 	Floor { id: u64, revision: Option<route::Rev> },
 }
 
-/// Encode a seqno, metric, and down-only bit. No origin advertises the last seqno,
-/// which would leave no room for the successor a ROUTE_REQUEST names.
+/// ROUTE_START and ROUTE_UPDATE flag: the route is down-only.
+const DOWN_ONLY: u8 = 0x1;
+/// ROUTE_START and ROUTE_UPDATE flag: a Min RTT follows.
+const MIN_RTT: u8 = 0x2;
+
+/// Encode a seqno, metric, flags, and min RTT in milliseconds. No origin advertises the
+/// last seqno, which would leave no room for the successor a ROUTE_REQUEST names.
 fn encode_advert(w: &mut Encoder<'_>, advert: &Advert) -> Result<(), EncodeError> {
 	if advert.seqno == route::MAX {
 		return Err(EncodeError::InvalidState);
 	}
 	w.varint(advert.seqno)?;
 	w.varint(advert.metric)?;
-	w.bool(advert.down_only);
+	let mut flags = 0;
+	if advert.down_only {
+		flags |= DOWN_ONLY;
+	}
+	if advert.min_rtt.is_some() {
+		flags |= MIN_RTT;
+	}
+	w.u8(flags);
+	if let Some(min_rtt) = advert.min_rtt {
+		w.varint(u64::try_from(min_rtt.as_millis()).map_err(|_| EncodeError::InvalidState)?)?;
+	}
 	Ok(())
 }
 
@@ -131,10 +146,20 @@ fn decode_advert(r: &mut Decoder<'_>) -> Result<Advert, DecodeError> {
 	if seqno == route::MAX {
 		return Err(DecodeError::InvalidValue);
 	}
+	let metric = r.varint()?;
+	let flags = r.u8()?;
+	if flags & !(DOWN_ONLY | MIN_RTT) != 0 {
+		return Err(DecodeError::InvalidValue);
+	}
+	let min_rtt = match flags & MIN_RTT {
+		0 => None,
+		_ => Some(std::time::Duration::from_millis(r.varint()?)),
+	};
 	Ok(Advert {
 		seqno,
-		metric: r.varint()?,
-		down_only: r.bool()?,
+		metric,
+		down_only: flags & DOWN_ONLY != 0,
+		min_rtt,
 	})
 }
 
@@ -1541,6 +1566,7 @@ mod tests {
 			seqno,
 			metric,
 			down_only,
+			min_rtt: None,
 		}
 	}
 
@@ -1581,6 +1607,20 @@ mod tests {
 			AnnounceBroadcast::RouteUpdate {
 				id: 0,
 				advert: advert(42, 0, true),
+			},
+			AnnounceBroadcast::RouteStart {
+				node: 0x7a40,
+				advert: Advert {
+					min_rtt: Some(std::time::Duration::ZERO),
+					..advert(1, 0, false)
+				},
+			},
+			AnnounceBroadcast::RouteUpdate {
+				id: 1,
+				advert: Advert {
+					min_rtt: Some(std::time::Duration::from_millis(u64::MAX)),
+					..advert(2, 3, true)
+				},
 			},
 			AnnounceBroadcast::RouteHold { id: 3 },
 			AnnounceBroadcast::RouteEnd { id: 0 },
@@ -1696,6 +1736,8 @@ mod tests {
 		let malformed = [
 			forge(ROUTE_START, advert(0, 0, 1, 0)),
 			forge(ROUTE_START, advert(1, route::MAX, 1, 0)),
+			// A flag no version defines, and a Min RTT flag without its field.
+			forge(ROUTE_START, advert(1, 0, 1, 4)),
 			forge(ROUTE_START, advert(1, 0, 1, 2)),
 			// ROUTE_UPDATE's leading field is the Route ID, so 0 is a valid id here.
 			forge(ROUTE_UPDATE, advert(0, route::MAX, 1, 0)),

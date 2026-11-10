@@ -14,6 +14,7 @@ use crate::{
 	Error, Path,
 	lite::{self, AnnounceReply},
 	route::{self, node},
+	transport::{Metrics as _, poll::Session as _},
 };
 
 use super::{AnnouncedRoute, Subscriber};
@@ -96,6 +97,10 @@ pub(super) struct Routed {
 	ready: kio::Queue<(route::Id, Path)>,
 	/// The peer sent a GOAWAY: every claim served here ranks last.
 	drained: bool,
+	/// The link's min RTT, which the peer's routes add.
+	rtt: route::LinkRtt,
+	/// When to read the link's RTT next.
+	read_rtt: crate::time::Deadline,
 }
 
 impl Routed {
@@ -128,6 +133,8 @@ impl Routed {
 		let stream = node
 			.receive(scoped(&link, &regions, key), prefix.clone())
 			.map_err(refused)?;
+		let mut rtt = route::LinkRtt::default();
+		stream.min_rtt(rtt.read(subscriber.session.metrics().rtt()));
 		Ok(Self {
 			node,
 			stream,
@@ -150,6 +157,8 @@ impl Routed {
 			previous: HashMap::new(),
 			ready: Default::default(),
 			drained: false,
+			rtt,
+			read_rtt: crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL),
 		})
 	}
 
@@ -340,6 +349,7 @@ impl Routed {
 			.node
 			.receive(scoped(&self.link, &self.regions, key), self.prefix.clone())
 			.map_err(refused)?;
+		stream.min_rtt(self.rtt.reported());
 		// What the old stream served stays in the origin until the new one serves it
 		// again, or lets go after.
 		let previous = std::mem::take(&mut self.served);
@@ -458,7 +468,8 @@ impl Routed {
 			.with_via(subscriber.via(None))
 			.with_node(Some(id))
 			.with_draining(self.drained)
-			.with_available(served.available);
+			.with_available(served.available)
+			.with_min_rtt(served.min_rtt);
 		if let Some(entry) = self.previous.remove(&key) {
 			self.served.insert(key.clone(), entry);
 		}
@@ -495,6 +506,16 @@ impl Routed {
 		writer: &mut crate::coding::Writer<impl crate::transport::poll::SendStream, lite::Version>,
 		waiter: &kio::Waiter,
 	) -> Result<(), Error> {
+		// Only a route the peer sent adds the link's min RTT, so a peer sending none
+		// costs no timer.
+		while !self.routes.is_empty() && self.read_rtt.poll(waiter).is_ready() {
+			let last = self.rtt.reported();
+			let now = self.rtt.read(subscriber.session.metrics().rtt());
+			if now != last {
+				self.stream.min_rtt(now);
+			}
+			self.read_rtt = crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL);
+		}
 		while let Poll::Ready(output) = self.stream.poll_output(waiter) {
 			self.output(subscriber, output);
 		}
@@ -589,6 +610,7 @@ mod tests {
 		seqno: 0,
 		metric: 0,
 		down_only: false,
+		min_rtt: None,
 	};
 
 	fn start(path: &'static str) -> Msg {

@@ -48,6 +48,9 @@ from moq_ffi import (
     MoqRateTarget as RateTarget,
 )
 from moq_ffi import (
+    MoqMinRtt as MinRtt,
+)
+from moq_ffi import (
     MoqRouteInfo as RouteInfo,
 )
 from moq_ffi import (
@@ -106,6 +109,7 @@ __all__ = [
     "FetchGroupOptions",
     "Grant",
     "Instance",
+    "MinRtt",
     "Order",
     "Position",
     "ProtocolError",

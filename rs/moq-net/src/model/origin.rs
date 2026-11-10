@@ -108,6 +108,10 @@ pub struct Config {
 	/// proves nothing, so such a peer files them under a key of its session alone.
 	pub route_key: Option<super::origin::RouteKey>,
 
+	/// Advertise no min RTT to lite-07 peers, so no route crossing this origin carries
+	/// one past it (default false). Its own readers still see the [`MinRtt`] it measures.
+	pub withhold_min_rtt: bool,
+
 	/// Longest hop path a session using this origin accepts or forwards (default 32).
 	///
 	/// Applies to moq-lite-03+ hop paths and the negotiated MoQ Cluster extension on
@@ -166,6 +170,7 @@ impl Default for Config {
 		Self {
 			hop: random_id(),
 			route_key: None,
+			withhold_min_rtt: false,
 			max_hops: MAX_HOP_LIMIT,
 			pool,
 			cache_duration: None,
@@ -376,6 +381,28 @@ impl<'a, V: Copy> Decode<'a, V> for Hops {
 	}
 }
 
+/// The minimum round trip to a route's origin node over moq-lite-07, in two parts.
+/// Informational: it never ranks or selects a route.
+///
+/// Each node on the path adds its link's min RTT, the lowest smoothed RTT the link
+/// measured over the last 30 seconds, to the sum it received. The sum is unknown past
+/// a node that withholds it or cannot measure its link, and on any other wire.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct MinRtt {
+	/// Past the session's peer: the sum the peer advertised, `None` when unknown.
+	pub upstream: Option<Duration>,
+	/// The session's own link to the peer, `None` when its transport reports no RTT.
+	pub link: Option<Duration>,
+}
+
+impl MinRtt {
+	/// The whole path to the origin node, when both parts are known.
+	pub fn total(&self) -> Option<Duration> {
+		self.upstream?.checked_add(self.link?)
+	}
+}
+
 /// The highest route cost, shared by every wire version.
 const MAX_COST: u64 = (1 << 62) - 1;
 
@@ -512,6 +539,10 @@ pub struct RouteInfo {
 
 	/// Whether a usable path reaches the route's origin; see [`Self::available`].
 	pub(crate) available: bool,
+
+	/// The round trip to the route's origin node; see [`Self::min_rtt`]. Never forwarded:
+	/// each node measures its own link.
+	pub(crate) min_rtt: MinRtt,
 }
 
 impl RouteInfo {
@@ -529,6 +560,7 @@ impl RouteInfo {
 			node: None,
 			draining: false,
 			available: true,
+			min_rtt: MinRtt::default(),
 		}
 	}
 }
@@ -564,6 +596,12 @@ impl RouteInfo {
 	/// and finally the most recently announced route. See [`Cost`].
 	pub fn cost(&self) -> Cost {
 		self.cost
+	}
+
+	/// The minimum round trip to the route's origin node, as far as it is known; see
+	/// [`MinRtt`]. Unknown on a route this origin serves itself.
+	pub fn min_rtt(&self) -> MinRtt {
+		self.min_rtt
 	}
 
 	/// Whether a usable path reaches the route's origin. An unavailable route is held:
@@ -632,6 +670,13 @@ impl RouteInfo {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_available(mut self, available: bool) -> Self {
 		self.available = available;
+		self
+	}
+
+	/// Set the round trip to the route's origin node; see [`Self::min_rtt`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn with_min_rtt(mut self, min_rtt: MinRtt) -> Self {
+		self.min_rtt = min_rtt;
 		self
 	}
 
@@ -847,8 +892,8 @@ type RouteOrder = (
 	Reverse<u64>,
 );
 
-/// The `(hops, cost, source, instance, epoch, auth, node, available)` metadata an announce
-/// cursor delivers alongside a prefix.
+/// The `(hops, cost, source, instance, epoch, auth, node, available, min_rtt)` metadata
+/// an announce cursor delivers alongside a prefix.
 type RouteMeta = (
 	Hops,
 	Cost,
@@ -858,6 +903,7 @@ type RouteMeta = (
 	Option<crate::auth::Credential>,
 	Option<u64>,
 	bool,
+	MinRtt,
 );
 
 /// The earlier of two optional deadlines.
@@ -1256,6 +1302,7 @@ impl OriginConsumerState {
 				node: meta.6,
 				draining: false,
 				available: meta.7,
+				min_rtt: meta.8,
 			},
 		};
 		(RouteEvent { kind, announce }, owed)
@@ -1298,6 +1345,8 @@ struct RouteEntry {
 	draining: bool,
 	/// Whether a usable path reaches the route's origin; see [`RouteInfo::available`].
 	available: bool,
+	/// The round trip to the route's origin node; see [`RouteInfo::min_rtt`].
+	min_rtt: MinRtt,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a [`Claim`]). `None` for an advertise-only
 	/// announcement ([`Producer::announce`]) and for a local broadcast.
@@ -1366,12 +1415,13 @@ impl RouteEntry {
 			self.auth.clone(),
 			self.node,
 			self.available,
+			self.min_rtt,
 		)
 	}
 
 	/// Whether [`Self::meta`] would equal `meta`, without building it.
 	fn delivers(&self, meta: &RouteMeta) -> bool {
-		let (hops, cost, source, instance, epoch, auth, node, available) = meta;
+		let (hops, cost, source, instance, epoch, auth, node, available, min_rtt) = meta;
 		*hops == self.hops
 			&& *cost == self.cost
 			&& *source == self.entered()
@@ -1380,6 +1430,7 @@ impl RouteEntry {
 			&& *auth == self.auth
 			&& *node == self.node
 			&& *available == self.available
+			&& *min_rtt == self.min_rtt
 	}
 
 	/// Whether a request for `path` can be served through this entry. A served
@@ -2208,7 +2259,11 @@ impl Producer {
 		let (tasks, set) = TaskSet::new();
 		let scope = OriginScope::default();
 		let timers = Deadlines::new(Instant::ZERO);
-		let shared = SendCell::new(kio::Shared::new(OriginState::new(config.update_hold, config.route_key)));
+		let shared = SendCell::new(kio::Shared::new(OriginState::new(
+			config.update_hold,
+			config.route_key,
+			config.withhold_min_rtt,
+		)));
 		let pool = config.pool.clone();
 		let producer = Self {
 			hop: config.hop,
@@ -2340,6 +2395,7 @@ impl Producer {
 			cache_duration: self.cache_duration,
 			update_hold: shared.update_hold,
 			route_key: shared.route_key.clone(),
+			withhold_min_rtt: shared.withhold_min_rtt,
 		}
 	}
 
@@ -2380,7 +2436,7 @@ impl Producer {
 			scope: OriginScope::empty(),
 			max_hops: MAX_HOP_LIMIT,
 			root: Path::default(),
-			shared: SendCell::new(kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD, None))),
+			shared: SendCell::new(kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD, None, false))),
 			pool: cache::Pool::default(),
 			cache_duration: None,
 			stats: stats::Session::default(),
@@ -2973,6 +3029,7 @@ impl Announcing {
 				node: route.node,
 				draining: route.draining,
 				available: route.available,
+				min_rtt: route.min_rtt,
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
@@ -3589,6 +3646,7 @@ impl AnnounceProducer {
 			entry.node = route.node;
 			entry.draining = route.draining;
 			entry.available = route.available;
+			entry.min_rtt = route.min_rtt;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim, Gone::End);
@@ -3650,6 +3708,7 @@ impl AnnounceProducer {
 			node: entry.node,
 			draining: entry.draining,
 			available: entry.available,
+			min_rtt: entry.min_rtt,
 		})
 	}
 
@@ -6091,6 +6150,8 @@ struct OriginState {
 	update_hold: Duration,
 	// See [`Config::route_key`].
 	route_key: Option<super::origin::RouteKey>,
+	// See [`Config::withhold_min_rtt`].
+	withhold_min_rtt: bool,
 
 	// The announced routes, keyed by prefix. The table holds one entry per live
 	// advertisement, not one per broadcast consumer.
@@ -6134,10 +6195,11 @@ struct OriginState {
 }
 
 impl OriginState {
-	fn new(update_hold: Duration, route_key: Option<super::origin::RouteKey>) -> Self {
+	fn new(update_hold: Duration, route_key: Option<super::origin::RouteKey>, withhold_min_rtt: bool) -> Self {
 		Self {
 			update_hold,
 			route_key,
+			withhold_min_rtt,
 			routes: RouteTable::default(),
 			next_route: 0,
 			next_watch: 0,
@@ -7346,7 +7408,8 @@ impl Consumer {
 			.serving()
 		};
 		// Built before taking the lock, since opening a cursor takes it.
-		let node = crate::route::Node::origin(self.hop());
+		let withhold = self.shared.lock().withhold_min_rtt;
+		let node = crate::route::Node::origin(self.hop(), withhold);
 		let claims = OwnClaims {
 			routes: own(false).routes(),
 			downstream: own(true).routes(),

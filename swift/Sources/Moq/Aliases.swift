@@ -57,6 +57,9 @@ public typealias Instance = MoqFFI.MoqInstance
 /// The read-only facts on a received route: the `Instance` of the stream it serves,
 /// relay hop ids (oldest first), and its static production and link cost, lower wins.
 public typealias RouteInfo = MoqFFI.MoqRouteInfo
+/// The minimum round trip to a route's origin node over moq-lite-07: `upstream` past the
+/// session's peer, `link` to the peer, and their `total`. Informational; it never ranks a route.
+public typealias MinRtt = MoqFFI.MoqMinRtt
 /// A route over a prefix: the origin-relative `prefix`, what each filter
 /// wildcard matched (`captures`, a required list, empty without wildcards), and the `route` serving it.
 /// Resolve a path with `OriginConsumer.request`.

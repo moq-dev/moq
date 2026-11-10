@@ -767,6 +767,18 @@ pub struct Config {
 	)]
 	pub max_hops: Option<usize>,
 
+	/// Advertise no min RTT on the routes this relay sends moq-lite-07 peers, so a
+	/// route crossing it reports none from here on. Boolean flag: pass
+	/// `--cluster-withhold-min-rtt` (or `=true` / `=false`).
+	#[usage(
+		name = "cluster-withhold-min-rtt",
+		long = "cluster-withhold-min-rtt",
+		env = "MOQ_CLUSTER_WITHHOLD_MIN_RTT",
+		setting = "cluster.withhold_min_rtt",
+		bool_value
+	)]
+	pub withhold_min_rtt: bool,
+
 	/// Connect to one or more other cluster nodes. Each entry is a full URL, e.g.
 	/// `https://host/?jwt=TOKEN`, or an object with `url`, `cost`, `egress`,
 	/// `token`, and `upstream`. A bare host or `host:port` is refused; pass the
@@ -1466,6 +1478,7 @@ impl Cluster {
 				.into(),
 			None => origin::RouteKey::generate(),
 		});
+		origin_config.withhold_min_rtt = config.withhold_min_rtt;
 		if let Some(max) = config.max_hops {
 			origin_config.max_hops = NonZeroUsize::new(max)
 				.filter(|max| max.get() <= 32)
