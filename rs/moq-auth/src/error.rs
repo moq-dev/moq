@@ -204,9 +204,6 @@ pub enum Error {
 	#[error("mesh state: {0}")]
 	MeshState(String),
 
-	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
-	#[error(transparent)]
-	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 }
 
 // Dependency errors are flattened to their message so their crates stay out of this crate's

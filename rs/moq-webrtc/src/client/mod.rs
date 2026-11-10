@@ -36,13 +36,10 @@ impl Client {
 	/// [`reqwest::Client`] (with its connection pool and rustls config) is created
 	/// once here and reused across every [`subscribe`](Self::subscribe) /
 	/// [`publish`](Self::publish) call.
-	///
-	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU
-	/// rind can't run on.
 	pub fn new(config: Config) -> crate::Result<Self> {
 		// reqwest reads rustls's process default and panics without one, so install rind's
 		// unless the host already chose a provider.
-		moq_crypto::provider::install_default()?;
+		moq_crypto::provider::install_default();
 		Ok(Self {
 			config,
 			http: reqwest::Client::builder().build()?,

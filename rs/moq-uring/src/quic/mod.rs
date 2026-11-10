@@ -110,9 +110,6 @@ pub enum Error {
 	/// A lease wanted more than the connection receive window can hold.
 	#[error("want exceeds the receive window")]
 	TooLarge,
-	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
-	#[error(transparent)]
-	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 	/// The socket died underneath the connection.
 	#[error("socket error: {0}")]
 	Io(String),

@@ -1200,7 +1200,7 @@ mod tests {
 	fn acceptor_state() -> Arc<WebState> {
 		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let cert = (|| -> std::result::Result<_, rcgen::Error> {
-			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 			params.serial_number = Some(1u64.into());
 			let cert = params.self_signed(&signing_key)?;
@@ -1690,9 +1690,9 @@ mod tests {
 	/// Generate a CA + server cert/key on disk and return the temp paths.
 	/// Modeled after `auth.rs::mtls_fixture`.
 	fn make_named_certs(dir: &TempDir, name: &str, hostname: &str) -> (PathBuf, PathBuf, PathBuf) {
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 
-		let ca_kp = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let ca_kp = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut ca_params = CertificateParams::new(vec![])
 			.map(|mut params| {
 				params.serial_number = Some(1u64.into());
@@ -1704,7 +1704,7 @@ mod tests {
 		let ca_cert = ca_params.self_signed(&ca_kp).unwrap();
 		let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_kp);
 
-		let server_kp = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let server_kp = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut server_params = CertificateParams::new(vec![hostname.to_string()])
 			.map(|mut params| {
 				params.serial_number = Some(1u64.into());
@@ -1723,7 +1723,7 @@ mod tests {
 		std::fs::write(&cert_path, server_cert.pem()).unwrap();
 		std::fs::write(
 			&key_path,
-			pem::encode(&pem::Pem::new("PRIVATE KEY", server_kp.to_pkcs8().secret_pkcs8_der())),
+			pem::encode(&pem::Pem::new("PRIVATE KEY", server_kp.serialized_der())),
 		)
 		.unwrap();
 

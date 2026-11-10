@@ -1150,10 +1150,10 @@ mod tests {
 		[crate::quic::driver::endpoint::Endpoint; 2],
 		Arc<Gate>,
 	) {
-		crate::crypto::install_default().unwrap();
+		crate::crypto::install_default();
 
 		let CertifiedKey { cert, signing_key } = (|| -> std::result::Result<_, rcgen::Error> {
-			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 			params.serial_number = Some(1u64.into());
 			let cert = params.self_signed(&signing_key)?;
@@ -1161,7 +1161,7 @@ mod tests {
 		})()
 		.unwrap();
 		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-			signing_key.to_pkcs8().secret_pkcs8_der().to_vec(),
+			signing_key.serialize_der(),
 		));
 
 		let mut server_config =

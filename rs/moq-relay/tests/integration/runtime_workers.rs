@@ -21,7 +21,7 @@ const WORKERS: u16 = 4;
 /// A self-signed certificate on disk. Workers refuse `listen.tls.generate`,
 /// since each would generate one of its own and serve a different identity.
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -34,7 +34,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
 	std::fs::write(
 		&key_path,
-		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 	)
 	.expect("write key");
 	(cert_path, key_path)
@@ -81,7 +81,7 @@ async fn connect(client: moq_tokio::Client, url: url::Url) -> moq_tokio::Connect
 /// it is what this asserts, whichever way the placement lands.
 #[tokio::test]
 async fn workers_serve_quic_and_share_one_origin() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());

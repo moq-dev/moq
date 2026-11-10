@@ -6,7 +6,7 @@ use moq_relay::{Config, Relay};
 
 async fn load_and_run() {
 	// Process-wide: another test in this binary may have installed it first.
-	moq_tokio::crypto::install_default().unwrap();
+	moq_tokio::crypto::install_default();
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];

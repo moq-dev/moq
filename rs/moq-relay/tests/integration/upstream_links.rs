@@ -83,7 +83,7 @@ fn grant(path: &str) -> Grant {
 const LITE_07: &str = "moq-lite-07-wip";
 
 async fn node(connect: Vec<Peer>) -> Node {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	let mut tasks = tokio::task::JoinSet::new();
 
 	let mut listen = moq_tokio::listen::Config::default();

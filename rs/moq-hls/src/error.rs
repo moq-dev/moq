@@ -187,9 +187,6 @@ pub enum Error {
 		segment: u64,
 	},
 
-	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
-	#[error(transparent)]
-	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 }
 
 impl Error {
@@ -291,7 +288,7 @@ mod tests {
 		drop(listener);
 
 		// reqwest reads rustls's process default, as the importer installs it.
-		moq_crypto::provider::install_default().expect("supported CPU");
+		moq_crypto::provider::install_default();
 		let err: Error = reqwest::get(format!("http://user:pass@{address}/media.m3u8?jwt=secret"))
 			.await
 			.expect_err("dial a closed port")

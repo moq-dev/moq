@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
 
 /// Drive the configured load until the duration elapses or the process is interrupted.
 async fn generate(config: Config) -> anyhow::Result<()> {
-	moq_tokio::crypto::install_default()?;
+	moq_tokio::crypto::install_default();
 
 	anyhow::ensure!(
 		config.client.url.is_some(),

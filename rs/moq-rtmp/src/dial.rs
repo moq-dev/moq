@@ -81,7 +81,6 @@ impl Client<TcpStream> {
 	/// For `rtmps://` or any other transport, establish the stream yourself and use
 	/// [`with_stream`](Self::with_stream) instead.
 	pub async fn connect(addr: SocketAddr, app: &str) -> Result<Self> {
-		moq_crypto::cpu::check()?;
 		kio::clock::timeout(crate::server::REQUEST_TIMEOUT, async {
 			let stream = TcpStream::connect(addr).await?;
 			crate::server::configure_socket(&stream, addr);
@@ -101,7 +100,6 @@ impl<S: Stream> Client<S> {
 	/// The bring-your-own-transport entry point: establish the connection (and, for
 	/// `rtmps://`, the TLS handshake) yourself, then hand the stream here.
 	pub async fn with_stream(stream: S, app: &str) -> Result<Self> {
-		moq_crypto::cpu::check()?;
 		kio::clock::timeout(
 			crate::server::REQUEST_TIMEOUT,
 			Self::with_stream_config(stream, app, None),

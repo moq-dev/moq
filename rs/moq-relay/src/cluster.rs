@@ -3971,7 +3971,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn remote_plaintext_api_refuses_startup() {
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		for url in ["http://api.example.com/", "http://192.0.2.1/", "http://[2001:db8::1]/"] {
 			let mut config = Config::default();
 			config.api.url = Some(url.into());
@@ -4004,7 +4004,7 @@ mod tests {
 	#[tokio::test]
 	async fn cluster_api_rejects_redirect_bodies() {
 		use tokio::io::{AsyncReadExt, AsyncWriteExt};
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 		let server = async move {
@@ -4033,7 +4033,7 @@ mod tests {
 	#[tokio::test]
 	async fn lan_cluster_path_carries_broadcasts_both_ways() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 
 		let node = new_cluster(Config::default()).expect("node cluster");
 		let fingerprint = new_cluster(Config::default()).expect("fingerprint cluster");
@@ -4234,7 +4234,7 @@ mod tests {
 	/// dropping it releases its client rather than leaving it to `close`.
 	#[tokio::test]
 	async fn a_failed_start_leaves_the_dial_bind_free() {
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		let dir = tempfile::tempdir().expect("tempdir");
 		let token = dir.path().join("token");
 		let config = Config {
@@ -4273,7 +4273,7 @@ mod tests {
 		idle: std::time::Duration,
 	) -> moq_tokio::quic::driver::endpoint::Endpoint {
 		use moq_tokio::quic::driver;
-		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+		let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 			.map(|mut params| {
 				params.serial_number = Some(1u64.into());
@@ -4286,7 +4286,7 @@ mod tests {
 			.with_no_client_auth()
 			.with_single_cert(
 				vec![cert.der().clone()],
-				rustls::pki_types::PrivateKeyDer::Pkcs8(key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
+				rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
 			)
 			.expect("server tls");
 		tls.alpn_protocols = connect
@@ -4313,7 +4313,7 @@ mod tests {
 	async fn cancelling_run_stops_its_dynamic_dials() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 
 		let mut connect = moq_tokio::connect::Config::default();
 		connect.tls.insecure = Some(true);
@@ -4362,7 +4362,7 @@ mod tests {
 		use moq_tokio::quic::driver;
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 
 		let mut connect = moq_tokio::connect::Config::default();
 		connect.tls.insecure = Some(true);
@@ -4456,7 +4456,7 @@ mod tests {
 	async fn closing_a_cluster_closes_its_lan_dials() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		let mut quic = moq_tokio::quic::Config::default();
 		quic.idle_timeout = Some((IDLE).into());
 

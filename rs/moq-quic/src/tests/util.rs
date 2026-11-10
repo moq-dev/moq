@@ -757,7 +757,7 @@ fn server_crypto_inner(
 	let (cert, key) = identity.unwrap_or_else(|| {
 		(
 			CERTIFIED_KEY.cert.der().clone(),
-			PrivateKeyDer::Pkcs8(CERTIFIED_KEY.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
+			PrivateKeyDer::Pkcs8(CERTIFIED_KEY.signing_key.serialize_der().into()),
 		)
 	});
 
@@ -819,7 +819,7 @@ fn client_crypto_inner(
 
 	// Packet-layout tests depend on a ClientHello that fits in one Initial.
 	// Integration tests exercise rind's default hybrid key share.
-	let mut provider = rind_rustls::default_provider().unwrap();
+	let mut provider = rind_rustls::default_provider();
 	provider.kx_groups = vec![rind_rustls::kx_group::X25519];
 	let mut inner = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
 		.with_protocol_versions(&[&rustls::version::TLS13])
@@ -889,7 +889,7 @@ fn set_congestion_experienced(x: Option<EcnCodepoint>, congestion_experienced: b
 
 pub(crate) static CERTIFIED_KEY: LazyLock<rcgen::CertifiedKey<rind_rcgen::KeyPair>> = LazyLock::new(|| {
 	(|| -> std::result::Result<_, rcgen::Error> {
-		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
 		params.serial_number = Some(1u64.into());
 		let cert = params.self_signed(&signing_key)?;

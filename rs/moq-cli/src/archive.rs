@@ -330,7 +330,7 @@ fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
 		ObjectStoreScheme::AmazonS3 => Arc::new(
 			object_store::aws::AmazonS3Builder::from_env()
 				.with_url(url.as_str())
-				.with_crypto_provider(rind_object_store::default_provider()?)
+				.with_crypto_provider(rind_object_store::default_provider())
 				.build()
 				.with_context(unsupported)?,
 		),
@@ -338,7 +338,7 @@ fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
 		ObjectStoreScheme::GoogleCloudStorage => Arc::new(
 			object_store::gcp::GoogleCloudStorageBuilder::from_env()
 				.with_url(url.as_str())
-				.with_crypto_provider(rind_object_store::default_provider()?)
+				.with_crypto_provider(rind_object_store::default_provider())
 				.build()
 				.with_context(unsupported)?,
 		),
@@ -346,7 +346,7 @@ fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
 		ObjectStoreScheme::MicrosoftAzure => Arc::new(
 			object_store::azure::MicrosoftAzureBuilder::from_env()
 				.with_url(url.as_str())
-				.with_crypto_provider(rind_object_store::default_provider()?)
+				.with_crypto_provider(rind_object_store::default_provider())
 				.build()
 				.with_context(unsupported)?,
 		),

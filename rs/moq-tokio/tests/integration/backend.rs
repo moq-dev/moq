@@ -229,7 +229,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 fn write_self_signed(dir: &std::path::Path, stem: &str, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 	use std::io::Write;
 
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
+	let key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
 	let params = rcgen::CertificateParams::new(vec![name.to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -249,7 +249,7 @@ fn write_self_signed(dir: &std::path::Path, stem: &str, name: &str) -> (std::pat
 		write(format!("{stem}.pem"), cert.pem()),
 		write(
 			format!("{stem}.key"),
-			pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+			pem::encode(&pem::Pem::new("PRIVATE KEY", key.serialized_der())),
 		),
 	)
 }
@@ -398,7 +398,7 @@ fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
 	let dir = tempfile::tempdir().expect("failed to create tempdir");
 
 	// Self-signed CA that signs both the server and client leaf certs.
-	let ca_key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca key");
+	let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca key");
 	let mut ca_params = CertificateParams::new(Vec::new())
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -412,7 +412,7 @@ fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
 	let issuer = Issuer::from_params(&ca_params, &ca_key);
 
 	// Server leaf with a localhost SAN so the client can verify the name.
-	let server_key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("server key");
+	let server_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("server key");
 	let mut server_params = CertificateParams::new(vec!["localhost".to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -424,7 +424,7 @@ fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
 	let server_cert = server_params.signed_by(&server_key, &issuer).expect("server cert");
 
 	// Client leaf presented during the handshake for mTLS.
-	let client_key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("client key");
+	let client_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("client key");
 	let mut client_params = CertificateParams::new(vec!["client.example".to_string()])
 		.map(|mut params| {
 			params.serial_number = Some(1u64.into());
@@ -449,12 +449,12 @@ fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
 		server_cert: write("server.pem", server_cert.pem()),
 		server_key: write(
 			"server.key",
-			pem::encode(&pem::Pem::new("PRIVATE KEY", server_key.to_pkcs8().secret_pkcs8_der())),
+			pem::encode(&pem::Pem::new("PRIVATE KEY", server_key.serialized_der())),
 		),
 		client_cert: write("client.pem", client_cert.pem()),
 		client_key: write(
 			"client.key",
-			pem::encode(&pem::Pem::new("PRIVATE KEY", client_key.to_pkcs8().secret_pkcs8_der())),
+			pem::encode(&pem::Pem::new("PRIVATE KEY", client_key.serialized_der())),
 		),
 	};
 

@@ -4,8 +4,7 @@
 //! forging it. [`e2ee`] encrypts groups, datagrams, and track names so a relay forwards
 //! ciphertext it cannot read. Both wrap `moq-net` and check a frame's timestamp with
 //! `moq_net::track::Info::rescale`, so neither accepts a frame the net track would refuse.
-//! [`provider`] is rind's rustls provider; [`cpu`] holds the CPU check and [`cpu::UnsupportedCpu`]
-//! error that moq-quic, moq-tokio, and the other transport crates report.
+//! [`provider`] is rind's rustls provider; [`cpu`] re-exports rind's DIT guard.
 //!
 //! The `sign` and `e2ee` features, both default, gate those halves; `provider`, off by default,
 //! gates the rustls provider and enables `cpu`, which needs only rind. Without any of these

@@ -447,7 +447,7 @@ pub fn init_crypto_default() {
 /// Create a crypto provider from a string name. Only "rind" is vendored.
 fn get_crypto_provider_by_name(name: &str) -> CryptoProvider {
 	match name {
-		"rind" => crate::vendor::str0m_rind::default_provider().unwrap(),
+		"rind" => crate::vendor::str0m_rind::default_provider(),
 		_ => panic!("Unknown or unavailable crypto provider '{name}'. Available providers: [rind]"),
 	}
 }

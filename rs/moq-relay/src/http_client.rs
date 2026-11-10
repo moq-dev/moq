@@ -70,7 +70,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn cluster_api_refuses_redirects() {
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let addr = listener.local_addr().unwrap();
 		let server = async move {
@@ -94,7 +94,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn auth_trust_is_independent_from_mesh_verification() {
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		let dir = tempfile::tempdir().unwrap();
 		let ca = Authority::new("mesh");
 		let (cert, key) = ca.leaf("127.0.0.1");
@@ -104,7 +104,7 @@ mod tests {
 			.with_no_client_auth()
 			.with_single_cert(
 				vec![cert.der().clone()],
-				PrivateKeyDer::Pkcs8(key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
+				PrivateKeyDer::Pkcs8(key.serialize_der().into()),
 			)
 			.unwrap();
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -200,7 +200,7 @@ mod tests {
 
 	impl Authority {
 		fn new(name: &str) -> Self {
-			let key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+			let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 			let mut params = CertificateParams::new(Vec::<String>::new())
 				.map(|mut params| {
 					params.serial_number = Some(1u64.into());
@@ -214,7 +214,7 @@ mod tests {
 		}
 
 		fn leaf(&self, name: &str) -> (rcgen::Certificate, KeyPair) {
-			let key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+			let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 			let params = CertificateParams::new(vec![name.to_string()])
 				.map(|mut params| {
 					params.serial_number = Some(1u64.into());
@@ -269,7 +269,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn peer_api_trust_is_independent_and_keeps_cluster_identity() {
-		moq_tokio::crypto::install_default().unwrap();
+		moq_tokio::crypto::install_default();
 		let dir = tempfile::tempdir().unwrap();
 		let mesh = Authority::new("mesh");
 		let api = Authority::new("API");
@@ -287,7 +287,7 @@ mod tests {
 			"client-key.pem",
 			pem::encode(&pem::Pem::new(
 				"PRIVATE KEY",
-				identity_key.to_pkcs8().secret_pkcs8_der(),
+				identity_key.serialized_der(),
 			)),
 		));
 		let mesh_tls = config.build().unwrap();
@@ -301,7 +301,7 @@ mod tests {
 			.with_client_cert_verifier(verifier)
 			.with_single_cert(
 				vec![server_cert.der().clone()],
-				PrivateKeyDer::Pkcs8(server_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
+				PrivateKeyDer::Pkcs8(server_key.serialize_der().into()),
 			)
 			.unwrap();
 
@@ -335,7 +335,7 @@ mod tests {
 			.with_client_cert_verifier(verifier)
 			.with_single_cert(
 				vec![mesh_server_cert.der().clone()],
-				PrivateKeyDer::Pkcs8(mesh_server_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
+				PrivateKeyDer::Pkcs8(mesh_server_key.serialize_der().into()),
 			)
 			.unwrap();
 		assert!(

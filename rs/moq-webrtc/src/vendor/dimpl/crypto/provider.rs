@@ -40,7 +40,7 @@
 //! // Or explicitly set the provider
 //! let config = Arc::new(
 //!     Config::builder()
-//!         .with_crypto_provider(rind::default_provider().unwrap())
+//!         .with_crypto_provider(rind::default_provider())
 //!         .build()
 //!         .unwrap()
 //! );
@@ -391,7 +391,7 @@ pub trait HmacProvider: CryptoSafe {
 /// use crate::vendor::dimpl::crypto::{CryptoProvider, rind};
 ///
 /// // Use the default provider
-/// let provider = rind::default_provider().unwrap();
+/// let provider = rind::default_provider();
 ///
 /// // Or build a custom one (using defaults for demonstration)
 /// let custom_provider = CryptoProvider {
@@ -469,7 +469,7 @@ impl CryptoProvider {
 	/// use crate::vendor::dimpl::crypto::{CryptoProvider, rind};
 	///
 	/// // Install a default provider (can only be called once per process)
-	/// CryptoProvider::install_default(rind::default_provider().unwrap());
+	/// CryptoProvider::install_default(rind::default_provider());
 	/// # }
 	/// # #[cfg(not(all()))]
 	/// # fn main() {}

@@ -6,7 +6,7 @@ use rind::signature::{EcdsaKeyPair, EcdsaSigningAlgorithm, Ed25519KeyPair, RsaKe
 
 /// Generate a key pair for the given algorithm, returning the private and public keys.
 pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result<Key> {
-	crate::crypto::init()?;
+	crate::crypto::init();
 
 	let key = match algorithm {
 		Algorithm::HS256 => generate_hmac_key::<32>(),

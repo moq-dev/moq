@@ -966,7 +966,7 @@ mod tests {
 		let expected_sni = name.parse::<net::IpAddr>().is_err().then_some(name);
 
 		let rcgen::CertifiedKey { cert, signing_key } = (|| -> std::result::Result<_, rcgen::Error> {
-			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 			let mut params = rcgen::CertificateParams::new([name.to_string()])?;
 			params.serial_number = Some(1u64.into());
 			let cert = params.self_signed(&signing_key)?;
@@ -975,9 +975,9 @@ mod tests {
 		.unwrap();
 		let cert = CertificateDer::from(cert);
 		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-			signing_key.to_pkcs8().secret_pkcs8_der().to_vec(),
+			signing_key.serialize_der(),
 		));
-		let provider = crate::crypto::provider().unwrap();
+		let provider = crate::crypto::provider();
 		let server_tls = rustls::ServerConfig::builder_with_provider(provider.clone())
 			.with_safe_default_protocol_versions()
 			.unwrap()

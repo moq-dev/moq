@@ -172,7 +172,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// fulfil; set the mux's known ICE credentials on the same config.
 	let mux = server.mux().await?;
 	let (creds, inbound, registration) = mux.register();
-	let mut rtc = session::rtc_config_with_codecs(&codecs)?
+	let mut rtc = session::rtc_config_with_codecs(&codecs)
 		.set_local_ice_credentials(creds)
 		.build(kio::clock::now().into_std());
 	for addr in mux.candidates() {

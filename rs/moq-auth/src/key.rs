@@ -270,7 +270,7 @@ impl Jwk {
 	/// is discoverable from here, and `import`/`export` rather than `validate` because the
 	/// `validate` methods elsewhere in this crate check without converting.
 	pub fn import(self) -> crate::Result<Key> {
-		crate::crypto::init()?;
+		crate::crypto::init();
 
 		if let Some(scope) = &self.scope {
 			scope.validate()?;

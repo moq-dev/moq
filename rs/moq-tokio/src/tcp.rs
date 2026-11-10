@@ -474,7 +474,7 @@ mod tests {
 	/// that does not trust the certificate is refused.
 	#[tokio::test]
 	async fn tls_carries_qmux_and_refuses_an_untrusted_certificate() {
-		crate::crypto::install_default().unwrap();
+		crate::crypto::install_default();
 		let mut listen = crate::listen::Config::default();
 		listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		listen.tcp.tls = Some(true);
@@ -491,7 +491,7 @@ mod tests {
 		use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer};
 		use rind_rcgen::KeyPair;
 
-		crate::crypto::install_default().unwrap();
+		crate::crypto::install_default();
 		let dir = tempfile::tempdir().unwrap();
 		let write = |name: &str, contents: String| {
 			let path = dir.path().join(name);
@@ -499,7 +499,7 @@ mod tests {
 			path
 		};
 
-		let ca_key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut ca_params = CertificateParams::new(Vec::new())
 			.map(|mut params| {
 				params.serial_number = Some(1u64.into());
@@ -509,7 +509,7 @@ mod tests {
 		ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
 		let ca_cert = ca_params.self_signed(&ca_key).unwrap();
 		let issuer = Issuer::from_params(&ca_params, &ca_key);
-		let client_key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let client_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut client_params = CertificateParams::new(vec!["client.example".to_string()])
 			.map(|mut params| {
 				params.serial_number = Some(1u64.into());
@@ -529,7 +529,7 @@ mod tests {
 			write("client.pem", client_cert.pem()),
 			write(
 				"client.key",
-				pem::encode(&pem::Pem::new("PRIVATE KEY", client_key.to_pkcs8().secret_pkcs8_der())),
+				pem::encode(&pem::Pem::new("PRIVATE KEY", client_key.serialized_der())),
 			),
 		);
 

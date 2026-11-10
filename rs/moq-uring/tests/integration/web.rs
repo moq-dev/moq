@@ -54,7 +54,7 @@ fn tokio_client(
 ) -> std::thread::JoinHandle<()> {
 	std::thread::spawn(move || {
 		// May already be installed by a sibling test; either way one exists.
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		let _ = rind_rustls::default_provider().install_default();
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()
@@ -298,7 +298,7 @@ fn an_open_waits_only_for_stream_credit() {
 	let url = format!("https://{}/window", endpoint.local_addr());
 	let expected = payload.clone();
 	let client = std::thread::spawn(move || {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		let _ = rind_rustls::default_provider().install_default();
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()
@@ -614,7 +614,7 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 /// A client whose CONNECT is expected to fail, reporting how it failed.
 fn tokio_client_err(url: String) -> std::thread::JoinHandle<moq_tokio::quic::web::Error> {
 	std::thread::spawn(move || {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		let _ = rind_rustls::default_provider().install_default();
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()
@@ -949,7 +949,7 @@ fn a_stream_reset_before_its_header_fits_never_reaches_the_session() {
 	let addr = endpoint.local_addr();
 
 	let client = std::thread::spawn(move || {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		let _ = rind_rustls::default_provider().install_default();
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()

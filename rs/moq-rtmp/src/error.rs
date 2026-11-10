@@ -18,9 +18,6 @@ pub enum Error {
 	#[error("io: {0}")]
 	Io(Arc<std::io::Error>),
 
-	/// This CPU lacks a feature that rind requires.
-	#[error(transparent)]
-	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 
 	/// The RTMP handshake or session state machine failed.
 	#[error("rtmp session: {0}")]

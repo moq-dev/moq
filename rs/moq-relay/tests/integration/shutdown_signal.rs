@@ -154,7 +154,7 @@ fn a_reconnecting_client_rides_out_a_restart() {
 }
 
 async fn sigint_drains_sessions_before_exiting_inner() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 
 	// Install tokio's SIGINT handler before anything raises one: the default
 	// disposition would kill the test process instead. Held for the whole test so
@@ -203,7 +203,7 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 }
 
 async fn a_signal_right_after_ready_drains_inner() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 
 	let relay = Relay::load(relay_config()).await.expect("load relay");
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
@@ -230,7 +230,7 @@ async fn a_signal_right_after_ready_drains_inner() {
 }
 
 async fn a_failed_startup_leaves_the_signals_alone_inner() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 
 	// The cluster starts last before the relay serves, and an unreadable token
 	// fails it.
@@ -252,7 +252,7 @@ async fn a_failed_startup_leaves_the_signals_alone_inner() {
 }
 
 async fn a_relay_without_signals_leaves_sigint_alone_inner() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 	// A process started with SIGINT ignored, such as a background job of a script,
 	// passes that on: restore the default action, which the relay must then leave alone.
 	// SAFETY: nothing else in this fresh process watches SIGINT yet.
@@ -278,7 +278,7 @@ async fn a_relay_without_signals_leaves_sigint_alone_inner() {
 }
 
 async fn an_embedder_drains_on_its_trigger_inner() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 
 	let relay = Relay::load(relay_config())
 		.await
@@ -315,7 +315,7 @@ async fn an_embedder_drains_on_its_trigger_inner() {
 }
 
 async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 
 	let relay = Relay::load(relay_config())
 		.await
@@ -374,7 +374,7 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 }
 
 async fn a_drain_ends_once_every_session_leaves_inner() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 
 	// A window the test would time out long before, so only an early exit passes.
 	let mut config = relay_config();
@@ -407,7 +407,7 @@ async fn a_drain_ends_once_every_session_leaves_inner() {
 }
 
 async fn a_trigger_before_run_keeps_the_deadline_inner() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 
 	let relay = Relay::load(relay_config())
 		.await
@@ -440,7 +440,7 @@ async fn a_trigger_before_run_keeps_the_deadline_inner() {
 /// Every one of those sessions served, so none counts against the retry window, and the
 /// publisher is still there to land on the relay that takes the address over.
 async fn a_reconnecting_client_rides_out_a_restart_inner() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let _ = rind_rustls::default_provider().install_default();
 
 	let relay = Relay::load(relay_config())
 		.await
