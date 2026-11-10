@@ -162,15 +162,15 @@ later onset can belong to the preceding utterance. Their audible latency is alwa
 separated presses have an identifiable onset.
 
 `summary.json` matches inputs, outputs, writes, and arrivals by media timestamp, so a late arrival
-is still attributed to its utterance. The command checks pipeline completeness, not the epic's
-latency verdict. It refuses missing encoder inputs, a head that never reaches the listener or never
-decodes, submitted frames that never encode or reach the container, written frames that never reach
+is still attributed to its utterance. The command checks pipeline completeness and one latency
+budget: every separated press's `onset` stays within 140 ms, the worst measured on a MacBook Air
+with macOS 26 times 1.25, rounded up to two significant figures. It refuses missing encoder inputs,
+a head that never reaches the listener or never decodes, submitted frames that never encode or reach the container, written frames that never reach
 the listener, reopened capture, a new encoder (a probe or a rebuilt codec) or subscription, a mute
 that disables or drops the rendition, any underrun or stall across the presses, and separated
 utterances with no audible output. It also fails on a broken driver or invalid capture.
 
-The latency goal is at most 300 ms of playout added on top of one-way delivery. For each separated
-press, `delivery` is the slowest of the utterance's frames that arrived before its onset, measured
+For each separated press, `delivery` is the slowest of the utterance's frames that arrived before its onset, measured
 from that frame's first sample (its media offset after the press). `playout` is what remains of the
 render onset after the press and that delivery, and `output` is the projected device output after
 that onset. `onset` is the press to the render onset, everything but the device's own output. `path` follows the head frame from the press to projected output in parts that sum to

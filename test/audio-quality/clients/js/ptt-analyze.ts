@@ -206,7 +206,15 @@ console.log(
 	JSON.stringify({ latency, path, delay, unencoded, unsent, unreceived, playback, native: summary.native }, null, 2),
 );
 
+// Press to render onset, the slowest separated press: kixtop's worst (106 ms on 2026-11-09, macOS
+// 26, headless Chromium 156) times 1.25, rounded up to two significant figures, as budgets.json sizes
+// its ceilings.
+const ONSET_BUDGET_MS = 140;
+
 const failures: string[] = [];
+if (!latency.onset || latency.onset.max > ONSET_BUDGET_MS) {
+	failures.push(`press to render onset exceeded its ${ONSET_BUDGET_MS} ms budget`);
+}
 if (presses.some((press, i) => (i === 0 || i >= 8) && press.audible === null)) {
 	failures.push("a separated utterance never reached the output");
 }

@@ -57,8 +57,32 @@ timestamp jump as proof the head was too late to wait for;
 20 ms runs after the fix kept all 44 heads.
 [moq-dev/moq#8364](https://github.com/moq-dev/moq/pull/8364) switches the page
 to the defaults and reports `latency.onset`, the press to the render onset,
-which the budget will gate. What remains is to measure on `kixtop` and set and
-enforce the budget.
+and gates its max at 140 ms, set from the `kixtop` run below. What remains is
+the underrun and stall ceiling that replaces `ptt-analyze.ts`'s zero gate.
+
+Measured 2026-11-09 on `kixtop` on the defaults with Watch's stretch, the
+browser half only (macOS has no PulseAudio for the native listener, so the
+driver ran without it), headless Chromium 156, load average 10 to 12 from
+other agents' work. Every browser completeness check passed. Medians and maxes
+in ms over the separated presses:
+
+| Part | `kixtop` |
+| --- | --- |
+| capture | 2.3 / 11 |
+| packetization | 15 / 20 |
+| encode | 0.7 / 0.9 |
+| network | 2.9 / 4.1 |
+| decode | 0.6 / 2.1 |
+| jitter buffer | 40 / 60 |
+| render | 15 / 30 |
+| press to render onset | 78 / 106 |
+| device | 261 / 262 |
+| `"auto"` target | 60 (40 to 80) |
+| underruns / stalls | 17 / 8 |
+
+The budget is that 106 ms max times 1.25, rounded up to two significant
+figures, as `budgets.json` sizes its ceilings. `device` is Bluetooth
+headphones, the laptop's default output that day, and the budget excludes it.
 
 Validated 2026-11-09 on the defaults with Watch's stretch, one run on the Linux
 agent host (load average 3 to 5): every completeness check passed and all 44
@@ -112,20 +136,13 @@ watch AudioContext's `latencyHint` (`"interactive"` in
 
 ## Waiting
 
-- Maintainer: free about 30 GB on `kixtop`, which had 193 MiB free on
-  2026-11-09, too little for the relay build and Chromium. An agent does not
-  delete files on a personal laptop unasked. Check with `ssh kixtop df -h /`.
-  The harness's native listener needs PulseAudio, so the agent then runs the
-  browser half ad hoc there, as on 2026-11-05.
-- Maintainer: decide how `just test push-to-talk` treats browser underruns on
-  the defaults, since the stretch does not bring them to zero: (a) gate on a
-  ceiling measured on `kixtop` and the nightly runner, as `budgets.json` does
-  for the browser rows, leaving zero to
-  [Audio jitter target](/quest/m1/audio-jitter-target/README.md)
-  (recommended: it keeps the latency budget enforceable now and records
-  today's player honestly); (b) keep the zero check, so the nightly step fails
-  until the jitter target covers push-to-talk's spread; (c) hold the fixed
-  300 ms delay and budget latency only on the defaults' onset in a second row.
+- moq-dev/moq: the browser half of the
+  [stretch model](/quest/m1/audio-jitter-target/stretch.md) lands (decided
+  2026-11-09, maintainer, /quest-complete on
+  [moq-dev/moq#8364](https://github.com/moq-dev/moq/pull/8364)). Then measure
+  browser underruns and stalls on `kixtop` and the nightly runner, and replace
+  `ptt-analyze.ts`'s zero gate with that ceiling. Check with
+  `quest unblocked quest/m1/audio-jitter-target/stretch.md` and its PR.
 
 ## Related
 

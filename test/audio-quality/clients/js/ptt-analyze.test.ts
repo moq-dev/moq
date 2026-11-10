@@ -5,13 +5,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Sample } from "./src/schema";
 
-const FRAME = 60;
+const FRAME = 20;
+/** The playout delay `"auto"` holds through the run. */
+const DELAY = 60;
 /** How far the native clock runs ahead of the page's, delivery included. */
 const NATIVE = 5000;
 
-// 22 complete presses on an ideal path: the media clock is the page clock, every 60 ms frame is
+// 22 complete presses on an ideal path: the media clock is the page clock, every 20 ms frame is
 // encoded, written, received and decoded a millisecond apart, and each separated press renders
-// once the 300 ms delay is decoded, with 100 ms of projected device output after it.
+// once the 60 ms delay is decoded, with 100 ms of projected device output after it.
 function trace() {
 	const result = {
 		submitted: [] as { at: number; timestamp: number; duration: number }[],
@@ -28,14 +30,14 @@ function trace() {
 		playback: { underruns: 0, stalls: 0 },
 		errors: [] as string[],
 		arrivals: [] as [number, number, number, number][],
-		delays: [{ at: 0, delay: 300 }],
+		delays: [{ at: 0, delay: DELAY }],
 	};
 	for (let i = 0; i < 22; i++) {
 		const press = 10_000 + i * 10_000;
 		const release = press + 2000;
-		// The press lands 20 ms into a frame, so the head frame still needs 40 ms of media.
+		// The press lands 10 ms into a frame, so the head frame still needs 10 ms of media.
 		result.presses.push({ at: press, on: true, capture: { at: press, end: press * 1000 } });
-		const start = press - 20;
+		const start = press - 10;
 		for (let media = start; media + FRAME <= release; media += FRAME) {
 			const at = media + FRAME + 25;
 			if (at >= release) break;
@@ -48,8 +50,8 @@ function trace() {
 			result.decoded.push({ at: at + 3, timestamp, duration: FRAME * 1000 });
 		}
 		if (i === 0 || i >= 8) {
-			// The fifth frame completes the delay; the render onset follows its PCM by 10 ms.
-			const rendered = start + 5 * FRAME + 25 + 3 + 10;
+			// The third frame completes the delay; the render onset follows its PCM by 10 ms.
+			const rendered = start + DELAY + 25 + 3 + 10;
 			result.audible.push({ at: rendered + 100, rendered, received: rendered + 5 });
 		}
 		result.presses.push({ at: release, on: false });
@@ -106,29 +108,29 @@ test("a complete run passes, reports its latency, and splits each press exactly"
 	const press = summary.presses[0];
 	expect(press.path).toEqual({
 		capture: 25,
-		packetization: 40,
+		packetization: 10,
 		encode: 1,
 		network: 1,
 		decode: 1,
-		jitter_buffer: 4 * FRAME,
+		jitter_buffer: DELAY - FRAME,
 		render: 10,
 		device: 100,
 	});
 	const parts = Object.values(press.path as Record<string, number>).reduce((sum, part) => sum + part, 0);
 	expect(parts).toBe(press.audible);
-	expect(summary.delay).toEqual({ min: 300, median: 300, max: 300 });
+	expect(summary.delay).toEqual({ min: DELAY, median: DELAY, max: DELAY });
 });
 
 test("a target that rises before the delay fills is filled by the frame that reaches it", async () => {
-	// "auto" raises the target a frame as the press starts, so the sixth frame fills it.
+	// "auto" raises the target a frame as the press starts, so the fourth frame fills it.
 	const result = trace();
-	result.delays.push({ at: result.presses[0].at, delay: 300 + FRAME });
+	result.delays.push({ at: result.presses[0].at, delay: DELAY + FRAME });
 	result.audible[0].rendered += FRAME;
 	result.audible[0].at += FRAME;
 	const { exitCode, summary } = await analyze(result);
 	expect(exitCode).toBe(0);
-	expect(summary.presses[0].delay).toBe(300 + FRAME);
-	expect(summary.presses[0].path.jitter_buffer).toBe(5 * FRAME);
+	expect(summary.presses[0].delay).toBe(DELAY + FRAME);
+	expect(summary.presses[0].path.jitter_buffer).toBe(DELAY);
 	expect(summary.presses[0].path.render).toBe(10);
 });
 
@@ -145,15 +147,15 @@ test("a frame held back by a capture burst widens its press's spread", async () 
 });
 
 test("the delay is filled by the first frame to reach it, not the newest before the onset", async () => {
-	// The sixth frame decodes just before the onset, adding to a ring already leaving its stall.
+	// The fourth frame decodes just before the onset, adding to a ring already leaving its stall.
 	const result = trace();
-	const sixth = (result.presses[0].at - 20 + 5 * FRAME) * 1000;
-	const late = result.decoded.find((frame) => frame.timestamp === sixth);
-	if (!late) throw new Error("no sixth frame");
+	const fourth = (result.presses[0].at - 10 + DELAY) * 1000;
+	const late = result.decoded.find((frame) => frame.timestamp === fourth);
+	if (!late) throw new Error("no fourth frame");
 	late.at = result.audible[0].rendered - 1;
 	const { exitCode, summary } = await analyze(result);
 	expect(exitCode).toBe(0);
-	expect(summary.presses[0].path.jitter_buffer).toBe(4 * FRAME);
+	expect(summary.presses[0].path.jitter_buffer).toBe(DELAY - FRAME);
 	expect(summary.presses[0].path.render).toBe(10);
 });
 
@@ -191,6 +193,16 @@ test("a mute that disables the rendition fails the run", async () => {
 	const { exitCode, stderr } = await analyze(result);
 	expect(exitCode).toBe(1);
 	expect(stderr).toContain("a mute disabled or dropped the rendition");
+});
+
+test("a press past the onset budget fails the run", async () => {
+	const result = trace();
+	// The first press renders at 88 ms; this one renders a millisecond past the budget.
+	result.audible[0].rendered += 53;
+	result.audible[0].at += 53;
+	const { exitCode, stderr } = await analyze(result);
+	expect(exitCode).toBe(1);
+	expect(stderr).toContain("press to render onset exceeded its 140 ms budget");
 });
 
 // The silence between presses is declared, so playback must cross it without counting it.
