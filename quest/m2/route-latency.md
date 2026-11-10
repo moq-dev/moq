@@ -39,6 +39,9 @@ If the field is taken, it holds to these:
 - A node may withhold it, and a sum that crosses such a node is unknown from
   there on, marked without a sentinel value. An operator decides whether its
   relays report.
+- The endpoint's own first hop can be unknown too, such as a browser whose
+  WebTransport reports no RTT. The application then reads the sum from the
+  first relay alone, marked as excluding the first hop, never a guess.
 - It is unverified, like the metric: a peer can misstate only what crosses
   it, and nothing acts on the value.
 - The draft, the Rust and JS codecs, and where the application reads it land
