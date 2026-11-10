@@ -31,7 +31,7 @@ moves what remains of them once their claims merge.
 
 ## Required
 
-- [Drop set](/quest/m1/drop-set.md) - the drop set's track and cursor runs are billed to the cache pool, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind`
+- [Drop set](/quest/m1/drop-set.md) - each cursor's disposition record is billed to the cache pool, as the track's drop runs are, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind`
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [A reader on a failed copy continues on the held re-offer](/quest/m1/copy-recover.md) - a live reader keeps a group whose copy fails by continuing on the same track's re-offer at the same frame
 - [Group errors are cached by kind](/quest/m1/group-error-cache.md) - permanent group errors bind every reader, retryable ones are kept only for a bounded time, and a live SUBSCRIBE_DROP or FETCH answered `Old` no longer caches it for good
