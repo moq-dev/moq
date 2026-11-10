@@ -19,13 +19,13 @@ stays on its mutex.
   per-thread sessions every consumer of a replica is on one thread, so its
   mutex is uncontended and a lock-free multi-reader log only pays off if the
   shared model survives. The replica spike (2026-11-01, in the
-  [epic](/quest/m4/perf/kio-channel-contention/README.md)) does not settle
+  [epic](/quest/m4/kio-channel-contention/README.md)) does not settle
   it: replicas lose on low fan-out, so shared tracks would stay, and the
   shared track it keeps is still the most contended channel, with one reader
   per worker. Nor does the cluster spike (2026-11-01, same epic): a relay
   per thread took every channel's lock wait to zero, but its win is
   conditional on a worker mesh that never re-announces peer routes, which
-  [its plan](/quest/m4/perf/kio-channel-contention/relay-per-thread.md)
+  [its plan](/quest/m4/kio-channel-contention/relay-per-thread.md)
   weighs, deciding whether adoption waits on it. If relay-per-thread lands, adoption is likely abandoned;
   until then the shared model stays.
 - Audit moq-net (and moq-relay's `critical.rs`) for other state that is

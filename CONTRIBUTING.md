@@ -25,7 +25,7 @@ Have at least these sections:
 
 - **Problem**: a summary of the problem and why this PR is needed.
 - **Approach**: a summary of the approach taken to solve the problem.
-- **Impact**: a bullet point for every public API/wire change made. A breaking one says how to migrate, and the PR title marks it with `!` (`feat(net)!: ...`).
+- **Impact**: a bullet point for every public API/wire change made. A breaking one says how to migrate, and the PR title marks it with `!` (`feat(net)!: ...`). A behavior change alone takes no `!`.
 - **Alternatives**: any alternative approaches considered.
 - **Follow-ups**: any issues encountered or quests created.
 

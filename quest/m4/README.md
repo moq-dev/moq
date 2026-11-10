@@ -35,6 +35,8 @@ deleted.
 - [Upstream reports](/quest/m4/upstream-reports.md) - report the faad, retina, and mr-boxington bugs found before the cut
 - [moq-net's library tests pass under cargo test](/quest/m4/net-test-subscriber.md) - two moq-net tests stop each installing a global tracing subscriber, so plain `cargo test -p moq-net --lib` passes
 - [Perf](/quest/m4/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
+- [kio channel contention](/quest/m4/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes, promoted out of Perf
+- [Stream transports](/quest/m4/stream-transports/README.md) - qmux drives its own WebSocket and TCP sockets in one task, then serves them from the io_uring workers, promoted out of Perf
 - [Transport x version benches](/quest/m4/bench-transport-sweep.md) - the session benches sweep transports as well as versions
 - [Shared group serving and ingest](/quest/m4/shared-serve.md) - Rust's moq-lite and moq-transport sessions serve and ingest groups through one poll machine each, with only wire encoding per protocol
 - [Shared group serving and ingest in JS](/quest/m4/shared-serve-js.md) - the same split in js/net, following the Rust seam

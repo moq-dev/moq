@@ -96,7 +96,7 @@ Against the base, every case runs fewer: tcp 13-18%, tls 6-14%, ws 17-21%, and w
 1-13%, the smaller numbers at 16000 B where TLS dominates. Syscalls per message
 (strace, 16 sessions, 1024 B) stayed at about 2.55 on every transport.
 Instructions undercount tungstenite's zero-fill (`rep stos` is one instruction),
-so the [codec](/quest/m4/perf/stream/codec.md) gate must re-profile CPU time. Two
+so the [codec](/quest/m4/stream-transports/codec.md) gate must re-profile CPU time. Two
 paired relay runs (`chat` and `fanout` on `ws`, `wss`, `tcp`, `tls`) were
 inconclusive: the QUIC control, untouched by the driver, moved -8% to +25%, and
 most cases changed sign between runs. Only `tls` `fanout` rose in all six pairs
@@ -145,10 +145,10 @@ Decided 2026-10-31 (maintainer), in
 
 ## Required
 
-- [Ring TCP ablation](/quest/m4/perf/stream/ablation.md) - measured ring TCP against tokio TCP under the qmux workload picks the mechanisms the port uses
-- [Ring TCP](/quest/m4/perf/stream/ring.md) - moq-uring serves TCP, and hyper (therefore axum) runs on it
-- [Relay listeners on the workers](/quest/m4/perf/stream/relay.md) - the relay's WebSocket, qmux TCP, and HTTP listeners run on the io_uring workers
-- [Codec](/quest/m4/perf/stream/codec.md) - qmux frames WebSocket itself and tungstenite leaves the tree, if the bench says it pays
+- [Ring TCP ablation](/quest/m4/stream-transports/ablation.md) - measured ring TCP against tokio TCP under the qmux workload picks the mechanisms the port uses
+- [Ring TCP](/quest/m4/stream-transports/ring.md) - moq-uring serves TCP, and hyper (therefore axum) runs on it
+- [Relay listeners on the workers](/quest/m4/stream-transports/relay.md) - the relay's WebSocket, qmux TCP, and HTTP listeners run on the io_uring workers
+- [Codec](/quest/m4/stream-transports/codec.md) - qmux frames WebSocket itself and tungstenite leaves the tree, if the bench says it pays
 
 ## Related
 
