@@ -7205,23 +7205,33 @@ impl Consumer {
 	}
 
 	fn create_route_node(&self) -> (crate::route::Node, std::sync::Weak<std::sync::Mutex<OwnClaims>>) {
-		// The whole table, whatever this handle's scope, counted against no session.
-		let own = |upstream| {
-			Self {
-				scope: OriginScope::default(),
-				root: Path::default(),
-				horizon: Horizon {
-					node: NodeFilter::Own,
-					upstream,
-					..Horizon::default()
-				},
-				covering: false,
-				stats: stats::Session::default(),
-				..self.clone()
-			}
-			.with_hidden(true)
-			// Feeding the node is no reason to ask any peer about anything.
-			.serving()
+		// The whole table, counted against no session: only origin-wide state, so the node
+		// is the same whichever handle creates it. No `..self` here, so a new per-handle
+		// field cannot leak in.
+		let own = |upstream| Self {
+			hop: self.hop,
+			max_hops: self.max_hops,
+			scope: OriginScope::default(),
+			root: Path::default(),
+			shared: self.shared.clone(),
+			stats: stats::Session::default(),
+			horizon: Horizon {
+				node: NodeFilter::Own,
+				upstream,
+				..Horizon::default()
+			},
+			hidden: Hidden {
+				include: true,
+				from: None,
+			},
+			// Feeding the node is no reason to ask any peer about anything, as when serving.
+			covering: true,
+			interested: false,
+			proxy: false,
+			pool: self.pool.clone(),
+			cache_duration: self.cache_duration,
+			tasks: self.tasks.clone(),
+			timers: self.timers.clone(),
 		};
 		// Built before taking the lock, since opening a cursor takes it.
 		let node = crate::route::Node::origin(self.hop());
@@ -10543,11 +10553,18 @@ mod tests {
 	}
 
 	/// A route node already fed by its driver still answers a new stream with the table as
-	/// it stands, including a claim announced since the driver last ran.
+	/// it stands, including a claim announced since the driver last ran, whichever handle
+	/// created it: one scoped away from the claim, upstream, and excluding its publisher
+	/// sees the whole table all the same.
 	#[test]
 	fn the_route_node_answers_with_the_table_as_it_stands() {
 		let producer = origin(1).produce();
-		producer.route_node();
+		(producer.clone().with_link(Link::Upstream).with_proxy(false).consume())
+			.scope("elsewhere", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.excluding(Hop::from(NonZeroU64::new(2).unwrap()))
+			.with_hidden(false)
+			.route_node();
 		// Nothing polls this test's driver.
 		let _shown = producer.announce("room/alice", RouteInfo::new()).unwrap();
 		let link = crate::route::Link {
