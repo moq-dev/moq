@@ -58,6 +58,7 @@ type SessionProps = {
 	client: boolean;
 	/** The moq-transport extensions this side offers. */
 	extensions: Extensions.Offered;
+	unsolicited?: boolean;
 	/** The implementation this side advertises in SETUP; empty sends nothing. */
 	implementation: string;
 };

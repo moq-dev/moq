@@ -370,6 +370,7 @@ export class Publisher {
 	#datagramWriter?: ReturnType<typeof DatagramStream.datagramWriter>;
 	#session: Session;
 	#requiresSolicitation: boolean;
+	#unsolicited: boolean;
 	// What a joining FETCH needs from each draft-18 SUBSCRIBE, by its request ID, while it lasts:
 	// pending from its arrival until it resolves. Request streams race, so a joining FETCH can
 	// arrive before the subscription it names has.
@@ -421,6 +422,7 @@ export class Publisher {
 		session,
 		publish,
 		requiresSolicitation,
+		unsolicited = false,
 		hidden = false,
 		activeCount = false,
 		cluster,
@@ -436,6 +438,7 @@ export class Publisher {
 		publish?: OriginConsumer;
 		/** Whether the peer's SETUP asked to be told on request (MoQ Solicit). */
 		requiresSolicitation: boolean;
+		unsolicited?: boolean;
 		/** Whether the peer declared MoQ Hidden. */
 		hidden?: boolean;
 		/** Whether both SETUPs declared MoQ Active Count. */
@@ -460,6 +463,7 @@ export class Publisher {
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
 		this.#requiresSolicitation = requiresSolicitation;
+		this.#unsolicited = unsolicited;
 		this.#hidden = hidden;
 		this.#activeCount = activeCount;
 		this.#advert = Cluster.advertise(cluster);
@@ -1812,7 +1816,7 @@ export class Publisher {
 
 	async #runPublishNamespaces() {
 		if (this.#withdrawal.closing.peek()) return;
-		if (this.#requiresSolicitation) {
+		if (this.#requiresSolicitation && !this.#unsolicited) {
 			// The peer asked to be told on request; runSubscribeNamespace answers it.
 			return;
 		}

@@ -143,6 +143,7 @@ function publisher(
 	transport: WebTransport,
 	{
 		requiresSolicitation = false,
+		unsolicited = false,
 		session,
 		cluster,
 		grant,
@@ -150,6 +151,7 @@ function publisher(
 		auth,
 	}: {
 		requiresSolicitation?: boolean;
+		unsolicited?: boolean;
 		session?: Session;
 		cluster?: Cluster.Hops;
 		grant?: Signal<Grant | undefined>;
@@ -165,6 +167,7 @@ function publisher(
 			session: inner,
 			publish: origin.consume(),
 			requiresSolicitation,
+			unsolicited,
 			cluster,
 			grant,
 			activeCount,

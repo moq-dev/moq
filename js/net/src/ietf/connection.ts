@@ -122,6 +122,7 @@ export class Connection implements Session {
 		client,
 		publish,
 		solicit,
+		unsolicited = false,
 		hidden = false,
 		maxAge = false,
 		activeCount = false,
@@ -145,6 +146,7 @@ export class Connection implements Session {
 		 * nothing, which is the one case where announcing at us unasked is not a bug.
 		 */
 		solicit?: boolean;
+		unsolicited?: boolean;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
 		/** Whether the peer accepts subscriber max age. */
@@ -207,6 +209,7 @@ export class Connection implements Session {
 			session: this.#session,
 			publish,
 			requiresSolicitation: solicit ?? false,
+			unsolicited,
 			hidden,
 			activeCount,
 			cluster,

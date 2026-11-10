@@ -181,6 +181,7 @@ export function checkVersions(versions: readonly string[]): string[] {
 /** Validate the transport options and snapshot an ordered version list before acquiring a connection. @internal */
 export function normalizeVersions(props?: {
 	versions?: readonly string[];
+	unsolicited?: boolean;
 	webtransport?: WebTransportProps;
 	websocket?: WebSocketProps;
 }): string[] | undefined {
@@ -314,6 +315,7 @@ type SessionProps = {
 	client: boolean;
 	/** The moq-transport extensions this side offers. */
 	extensions: Extensions.Offered;
+	unsolicited?: boolean;
 	/** The connection credential SETUP presents, on versions that carry one. */
 	token?: Uint8Array;
 	/** The implementation this side advertises in SETUP; empty sends nothing. */
@@ -475,6 +477,7 @@ async function connectInner(
 		handle: props.auth,
 		client: true,
 		extensions: Extensions.offered(props.extensions),
+		unsolicited: props.unsolicited,
 		token: presented.setup === undefined ? undefined : new TextEncoder().encode(presented.setup),
 		implementation: props.implementation ?? IMPLEMENTATION,
 		probeTarget: props.viewers?.target,

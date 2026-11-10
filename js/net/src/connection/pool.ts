@@ -59,6 +59,8 @@ export interface ConnectionProps {
 	versions?: readonly string[] | Signal<readonly string[] | undefined>;
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
+	unsolicited?: boolean;
+
 	webtransport?: WebTransportPropsType;
 
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
