@@ -77,28 +77,27 @@
         "quest-pinned": "quest-pinned"
       },
       "locked": {
-        "lastModified": 1794089039,
-        "narHash": "sha256-HZVGUPSw4xRsHgI1xxuZhUbRTdnPlz6OHx/hdUew668=",
+        "lastModified": 1794340168,
+        "narHash": "sha256-ZhN/HCLzalBki/eYENHVp7lPFKRa88HF9aAzdl4Wlfw=",
         "owner": "moq-dev",
         "repo": "quest",
-        "rev": "6a18b8a815c2d15d37d7433a619f961ec5a07165",
+        "rev": "ecf40e27dd80012265afdae3f9f5866a579449b7",
         "type": "github"
       },
       "original": {
         "owner": "moq-dev",
         "repo": "quest",
-        "rev": "6a18b8a815c2d15d37d7433a619f961ec5a07165",
         "type": "github"
       }
     },
     "quest-pinned": {
       "flake": false,
       "locked": {
-        "lastModified": 1794013809,
-        "narHash": "sha256-0oc+GpBYSBVXsUBTdJ26HgsIGyak4uZ85/V3fJPCdeI=",
+        "lastModified": 1794155982,
+        "narHash": "sha256-KuQQ8ykYgTd0kJ76PA8Jao/UQcoxn7X9uZCj3lV8alE=",
         "owner": "moq-dev",
         "repo": "quest",
-        "rev": "4b07dd37466d6fe6af5c9de3d6f1efd7f693aba7",
+        "rev": "7fe979312b792108a8911a0b38dfc3fd2bb38774",
         "type": "github"
       },
       "original": {
