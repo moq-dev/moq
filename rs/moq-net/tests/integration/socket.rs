@@ -11,7 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_net::broadcast::TracksEvent;
 use moq_net::socket::{Endpoint, TcpStream, TrackStream};
-use moq_net::{Error, Version, frame, group, origin, track};
+use moq_net::{Error, StreamError, Version, frame, group, origin, track};
 
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, spawn};
 
@@ -779,9 +779,12 @@ async fn closing_an_endpoint_ends_its_sessions() {
 	let (track_dialed, track_accepted) = connect_track(&alice, &bob).await;
 
 	bob.close();
+	// Through the relay, bob's close reaches alice as a SESSION_CLOSED reset, as it would
+	// on one origin.
+	let ended = read(&mut tcp_dialed.consumer).await;
 	assert!(
-		read(&mut tcp_dialed.consumer).await.is_err(),
-		"bob's tcp half outlived his endpoint"
+		matches!(ended, Err(Error::Stream(StreamError::Session(_)))),
+		"bob's tcp half outlived his endpoint: {ended:?}"
 	);
 	// Both halves of bob's own tcp session end.
 	assert!(read(&mut tcp_accepted.consumer).await.is_err());

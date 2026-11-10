@@ -231,7 +231,7 @@ function present(routes: Announce.Routes): Getter<ReadonlySet<Path.Valid>> {
 
 // Polls until `pred` holds, so a regression fails the test instead of hanging it.
 async function waitUntil(pred: () => boolean): Promise<void> {
-	const deadline = now().add(Duration.millis(1000));
+	const deadline = now().saturatingAdd(Duration.millis(1000));
 	while (now().le(deadline)) {
 		if (pred()) return;
 		await settle();

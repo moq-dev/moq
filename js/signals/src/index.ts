@@ -917,7 +917,7 @@ export class Effect {
 
 		if (period.isZero()) throw new RangeError("interval period must be positive");
 		const abort = new AbortController();
-		let next = now().add(period);
+		let next = now().saturatingAdd(period);
 		void (async () => {
 			for (;;) {
 				await sleepUntil(next, { signal: abort.signal });
@@ -929,7 +929,7 @@ export class Effect {
 				}
 				// A callback may install a clock with a different origin. A full Delay period
 				// starts from that clock's now, never from the previous clock's deadline.
-				next = now().add(period);
+				next = now().saturatingAdd(period);
 			}
 		})().catch(noop);
 		this.cleanup(() => abort.abort());

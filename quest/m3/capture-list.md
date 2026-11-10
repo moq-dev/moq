@@ -8,6 +8,8 @@ show pictures instead of names, on macOS, Windows, and X11:
 - **Apps:** every listed window names its app by an identity that is the same
   after the app restarts, and apps are listed with that identity, a name, and
   their icon as pixels.
+- **Placement:** every listed window says which listed display it is on and
+  its rectangle there, in that display's pixels.
 - **Cameras:** each says what kind of device it is (built in, webcam, capture
   card, phone, virtual) where the system says, and says nothing where it does
   not.
@@ -48,6 +50,15 @@ macOS. `moq devices` and moq-cli's completions are the other callers and move
 with the API.
 
 Settled in the interview:
+
+- Window placement joins the listing (2026-11-10, maintainer, /quest-complete
+  follow-up of [moq-dev/moq#8422](https://github.com/moq-dev/moq/pull/8422)):
+  ✅ plan it (rejected: a full-screen flag, keeping an excluded app's sound
+  out of system audio capture). The studio's privacy shield draws a lock
+  where an excluded window was, and its camera that keeps out of the way
+  avoids the foreground window; both need a window's position on its
+  display. Full screen follows from a window's rectangle against its
+  display's, so it gets no field of its own.
 
 - Identity and icons cover every desktop, not macOS alone.
 - A supported path per desktop is decided at setup, with an error otherwise
@@ -101,6 +112,11 @@ as given:
   may refuse; listing alone opens no device. Measure what one picture stream
   costs per item at its default rate on each desktop, and state it on the
   API.
+- **Placement.** A window moving or resizing is a change like a retitle, so
+  the watch's list stays current; coalesce a drag so it does not wake the
+  caller per frame. X11 has `ConfigureNotify`, Windows `EVENT_OBJECT_LOCATIONCHANGE`,
+  and macOS reports bounds in each listing, with the same caveat as the
+  Waiting item for events.
 - **Changes.** X11 has `PropertyNotify` on the root's client list and each
   window's title, and RandR for monitors, which `capture/x11.rs` already
   selects. Cameras have udev and PipeWire's registry on Linux, device
