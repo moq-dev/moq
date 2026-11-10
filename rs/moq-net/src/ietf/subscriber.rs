@@ -7436,10 +7436,7 @@ impl FetchRun {
 						return Poll::Pending;
 					}
 				},
-				FetchRunStep::Close {
-					mut close,
-					_registered,
-				} => match close.poll(waiter) {
+				FetchRunStep::Close { mut close, _registered } => match close.poll(waiter) {
 					Poll::Ready(_) => FetchRunStep::Done,
 					Poll::Pending => {
 						self.step = FetchRunStep::Close { close, _registered };
