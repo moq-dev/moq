@@ -200,7 +200,8 @@ module python '(\.pyi?|(^|/)pyproject\.toml)$' \
 module shell '' \
     tools='shellcheck shfmt' fix
 module large_files ''
-# Only the release cut edits a MIGRATE.md; --all has no diff to check.
+# Only the release cut edits a MIGRATE.md. A widened run still has a diff to
+# check; only an explicit --all has none.
 module migrate '(^|/)MIGRATE\.md$'
 module text ''
 module toml '' \
@@ -416,7 +417,7 @@ step() {
             run sh/markdown.sh check
             ;;
         check:large_files) run sh/large-files.sh "$large_base" ;;
-        check:migrate) [[ -n "$all" ]] || run sh/migrate.sh "$base" ;;
+        check:migrate) [[ "$base" == --all ]] || run sh/migrate.sh "$base" ;;
         check:text) run sh/text.sh ;;
         check:python)
             files '*.py' '*.pyi'
