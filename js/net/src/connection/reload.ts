@@ -269,8 +269,8 @@ export class Reload {
 
 	/** Protocol versions to offer, most preferred first, kept across retries and redirects. */
 	readonly versions?: readonly string[];
-    /** Advertise even when the peer declares SOLICIT=1; see ConnectProps.unsolicited. */
-    readonly unsolicited?: boolean;
+	/** Advertise even when the peer declares SOLICIT=1; see ConnectProps.unsolicited. */
+	readonly unsolicited?: boolean;
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
@@ -391,7 +391,7 @@ export class Reload {
 		this.goaway = props?.goaway ?? {};
 		this.redirect = this.#redirect;
 		this.versions = normalizeVersions(props);
-        this.unsolicited = props?.unsolicited;
+		this.unsolicited = props?.unsolicited;
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 		// Validated here, like the versions, rather than by every attempt.
@@ -592,7 +592,7 @@ export class Reload {
 									? { ...this.websocket, url: undefined }
 									: this.websocket,
 								versions: this.versions,
-            unsolicited: this.unsolicited,
+				unsolicited: this.unsolicited,
 								webtransport: this.webtransport,
 								timeout: this.timeout,
 								publish: this.publish,

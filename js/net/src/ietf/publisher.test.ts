@@ -1193,11 +1193,11 @@ test("a broadcast published mid-advertisement is still announced", async () => {
  * SUBSCRIBE_NAMESPACE: advertising anyway is the only way they can route.
  */
 test("an opted-in publisher advertises to a soliciting peer", async () => {
-    const pair = createMockTransportPair(ALPN.DRAFT_18);
-    const { pub, origin } = publisher(pair.server, {
-        requiresSolicitation: true,
-        unsolicited: true,
-    });
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const { pub, origin } = publisher(pair.server, {
+		requiresSolicitation: true,
+		unsolicited: true,
+	});
 
     publish(origin, Path.from("first"));
     void pub.runPublishNamespaces();

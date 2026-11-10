@@ -209,7 +209,7 @@ export interface ConnectProps {
 	 * SETUP instead, which moq-transport cannot do.
 	 */
 	versions?: readonly string[];
-    unsolicited?: boolean;
+	unsolicited?: boolean;
 
 	/** WebTransport options. */
 	webtransport?: WebTransportProps;

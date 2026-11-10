@@ -62,8 +62,8 @@ export interface ConnectionProps {
 
 	webtransport?: WebTransportPropsType;
 
-        /** Advertise even when the peer declares SOLICIT=1; see ConnectProps.unsolicited. */
-        unsolicited?: boolean;
+	/** Advertise even when the peer declares SOLICIT=1; see ConnectProps.unsolicited. */
+	unsolicited?: boolean;
 
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
 	websocket?: WebSocketPropsType;
@@ -325,7 +325,7 @@ export class Connection {
 			}
 
 			const loop = new Reload({
-                        unsolicited: props.unsolicited,
+			unsolicited: props.unsolicited,
 				url: this.url,
 				enabled: this.enabled,
 				publish,
@@ -500,7 +500,7 @@ function refuse(props?: ConnectionProps): void {
 /** Options tied to one handle cannot be represented by a URL-keyed shared entry. */
 function requiresPrivate(props: ConnectionProps): boolean {
 	return (
-                props.unsolicited !== undefined ||
+		props.unsolicited !== undefined ||
 		props.webtransport !== undefined ||
 		props.websocket !== undefined ||
 		props.delay !== undefined ||
