@@ -216,7 +216,10 @@ fn run<const TIMED: bool>(mut producers: Vec<Producer>, input: &[Frame]) -> (Dur
 			}
 		}
 	}
-	let finished = producers.into_iter().map(|producer| producer.finish().unwrap()).collect();
+	let finished = producers
+		.into_iter()
+		.map(|producer| producer.finish().unwrap())
+		.collect();
 	(slowest, finished)
 }
 

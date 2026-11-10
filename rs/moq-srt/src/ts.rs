@@ -231,7 +231,9 @@ impl Publisher {
 	/// Flush any buffered media and finish every track, the catalogs included, keeping each
 	/// finished broadcast up for `linger`.
 	pub fn finish(self, linger: Duration) -> Result<moq_mux::Linger<impl Sized + Send>> {
-		let Self { importer, log, span, .. } = self;
+		let Self {
+			importer, log, span, ..
+		} = self;
 		let (ended, broadcasts, stats) = match importer {
 			Importer::One(one) => {
 				let finished = one.instance.finish()?;

@@ -1517,7 +1517,11 @@ impl Publisher {
 		let importer = importer.finish()?;
 		catalog.finish()?;
 		let broadcast = route.broadcast().clone();
-		Ok(moq_mux::Linger::new([broadcast], (importer, catalog, metadata, route), linger))
+		Ok(moq_mux::Linger::new(
+			[broadcast],
+			(importer, catalog, metadata, route),
+			linger,
+		))
 	}
 
 	/// Flush any buffered media, finish the catalog, close out the broadcast's open groups, and end

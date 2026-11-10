@@ -1089,10 +1089,16 @@ impl<E: CatalogExt> Producer<E> {
 			return Err(err.clone());
 		}
 		// The shared outputs keep their own clones, whose appends the end refuses.
-		let result = self.outputs.hang.clone().finish().map_err(crate::Error::from).and_then(|_| {
-			let msf = self.outputs.msf_track.clone().finish();
-			msf.map(drop).map_err(crate::Error::from)
-		});
+		let result = self
+			.outputs
+			.hang
+			.clone()
+			.finish()
+			.map_err(crate::Error::from)
+			.and_then(|_| {
+				let msf = self.outputs.msf_track.clone().finish();
+				msf.map(drop).map_err(crate::Error::from)
+			});
 		match result {
 			Ok(()) => {
 				state.closed = Some(moq_net::Error::Closed.into());

@@ -406,8 +406,8 @@ async fn export_skips_a_disabled_rendition() {
 				.unwrap();
 			producer.cut(None).unwrap();
 		}
-		let producer = producer.finish().unwrap();
-		producer
+
+		producer.finish().unwrap()
 	};
 	let _on = rendition(".on", true, &[0x01, 0x02, 0x03]);
 	let _off = rendition(".off", false, &[0x0f, 0x0f, 0x0f]);

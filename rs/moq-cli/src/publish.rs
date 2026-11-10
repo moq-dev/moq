@@ -1008,7 +1008,6 @@ impl Instance {
 		}
 	}
 
-
 	/// Finish on a clean EOF and serve the finished broadcasts for the linger, or abort with
 	/// the real cause of `result`, so subscribers see it instead of a bare Error::Dropped.
 	async fn end(

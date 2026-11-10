@@ -1157,7 +1157,7 @@ mod test {
 		assert_eq!(units(&programs), 2, "the second picture counts once");
 		let finished = programs.finish().unwrap();
 		let programs = &finished.programs;
-		assert_eq!(units(&programs), 3);
+		assert_eq!(units(programs), 3);
 	}
 
 	/// A program leaving the PAT counts the picture its finish flushes on a PID the programs
@@ -1566,7 +1566,7 @@ mod test {
 		assert_eq!(units(&programs), 2, "the second picture counts once");
 		let finished = programs.finish().unwrap();
 		let programs = &finished.programs;
-		assert_eq!(units(&programs), 3);
+		assert_eq!(units(programs), 3);
 	}
 
 	/// One PAT dropping programs on either side of those it keeps rebuilds who reads each PID
@@ -1597,7 +1597,7 @@ mod test {
 		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
 		let finished = programs.finish().unwrap();
 		let programs = &finished.programs;
-		let running: Vec<_> = instances(&programs).into_iter().map(|(number, _)| number).collect();
+		let running: Vec<_> = instances(programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [2, 4]);
 		let units = |pid| programs.stats().streams[&pid].units;
 		assert_eq!([0x61, 0x72, 0x74].map(units), [4; 3], "the programs kept read on");

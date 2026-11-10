@@ -843,4 +843,3 @@ async fn an_overriding_clock_paces_on_its_own_pcrs() {
 		"a clock no program names marks no program's decoding boundary"
 	);
 }
-

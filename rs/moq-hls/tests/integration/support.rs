@@ -129,7 +129,11 @@ impl Publisher {
 	/// leaves the GOP at 12s open.
 	pub fn write(&mut self, start: u64, end: u64, payload: u8) {
 		for second in start..end {
-			self.media.as_mut().expect("open").write(frame(second, payload)).expect("write");
+			self.media
+				.as_mut()
+				.expect("open")
+				.write(frame(second, payload))
+				.expect("write");
 		}
 	}
 

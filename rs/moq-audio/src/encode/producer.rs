@@ -657,7 +657,9 @@ impl Producer {
 		if let Err(cause) = self.check().and_then(|()| self.drain()) {
 			// Every published packet stays readable, then subscribers get an error rather than an
 			// end that would claim the source was published whole: `err` when the source failed.
-			let _ = self.track.fail(err.unwrap_or_else(|| moq_net::StreamError::Internal.into()));
+			let _ = self
+				.track
+				.fail(err.unwrap_or_else(|| moq_net::StreamError::Internal.into()));
 			return Err(cause);
 		}
 		let track = match err {
@@ -881,7 +883,10 @@ mod tests {
 						idle.as_secs_f64() * 1e3,
 						catchup.as_secs_f64() * 1e3
 					);
-					let _finished: Vec<_> = producers.into_iter().map(|producer| producer.finish().unwrap()).collect();
+					let _finished: Vec<_> = producers
+						.into_iter()
+						.map(|producer| producer.finish().unwrap())
+						.collect();
 				}
 			}
 		}

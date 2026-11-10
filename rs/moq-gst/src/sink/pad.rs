@@ -987,7 +987,10 @@ impl Pad {
 		}
 		let mut text = None;
 		let (result, track) = match track {
-			Sink::Media(mut media) => (media.track.finish().map_err(anyhow::Error::from), Some(Sink::Media(media))),
+			Sink::Media(mut media) => (
+				media.track.finish().map_err(anyhow::Error::from),
+				Some(Sink::Media(media)),
+			),
 			Sink::Text(sink) => {
 				let result = sink.producer.finish().map(|finished| text = Some(finished));
 				(result.map_err(anyhow::Error::from), None)
