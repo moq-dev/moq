@@ -193,11 +193,7 @@ func (c *Claim) SetCost(cost uint64) error {
 //
 // Cancelling ctx abandons only this wait: the claim stays advertised.
 func (c *Claim) Requested(ctx context.Context) (*BroadcastRequest, error) {
-	inner, err := bridge.CallRelease(ctx, nil, c.inner.Requested, func(request **ffi.MoqBroadcastRequest) {
-		if request != nil {
-			(*request).Destroy()
-		}
-	})
+	inner, err := bridge.Call(ctx, nil, c.inner.Requested)
 	if err != nil || inner == nil {
 		return nil, err
 	}
@@ -270,7 +266,7 @@ type AnnounceOptions struct {
 }
 
 // Announced lists the paths under a literal prefix matching an optional pattern filter, as each
-// becomes present or absent. To see another publisher instance take a path over, use Follow.
+// becomes present, absent, or offline, or changes availability. To see another publisher instance take a path over, use Follow.
 func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	inner, err := o.inner.Announced(ffi.MoqAnnounceConfig{
 		Prefix: options.Prefix,
@@ -309,12 +305,12 @@ func (o *OriginConsumer) Request(ctx context.Context, path string, instance *Ins
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
-// AnnounceConsumer is a listing of paths, each present or absent.
+// AnnounceConsumer is a listing of paths, each present, absent, or offline.
 type AnnounceConsumer struct {
 	inner *ffi.MoqAnnounceConsumer
 }
 
-// Next returns the next path becoming present or absent, or (nil, nil) when the stream ends.
+// Next returns the next change to a path, or (nil, nil) when the stream ends.
 func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
 	res, err := bridge.Call(ctx, nil, a.inner.Next)
 	if err != nil || res == nil {

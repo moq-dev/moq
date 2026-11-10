@@ -12,7 +12,6 @@
 /// Accept-side settings (`[listen]`, `--listen-*`).
 #[derive(usage_rs::Config)]
 #[usage(prefix = "listen")]
-#[doc(hidden)]
 pub struct Listen {
 	#[usage(env = "MOQ_LISTEN", cli("--listen"))]
 	bind: Option<String>,
@@ -130,7 +129,6 @@ struct ListenUnixAllow {
 /// Dial-side settings (`[connect]`, `--connect-*`).
 #[derive(usage_rs::Config)]
 #[usage(prefix = "connect")]
-#[doc(hidden)]
 pub struct Connect {
 	#[usage(env = "MOQ_CONNECT", cli("--connect"))]
 	url: Option<String>,
@@ -240,7 +238,6 @@ struct ConnectWebsocket {
 /// Shared QUIC tuning (`[quic]`, `--quic-*`).
 #[derive(usage_rs::Config)]
 #[usage(prefix = "quic")]
-#[doc(hidden)]
 pub struct Quic {
 	#[usage(env = "MOQ_QUIC_MAX_STREAMS", cli("--quic-max-streams"))]
 	max_streams: Option<u64>,
@@ -279,7 +276,6 @@ pub struct Quic {
 /// Log settings (`[log]`, `--log-level`).
 #[derive(usage_rs::Config)]
 #[usage(prefix = "log")]
-#[doc(hidden)]
 pub struct Log {
 	#[usage(env = "MOQ_LOG_LEVEL", cli("--log-level"))]
 	level: Option<String>,

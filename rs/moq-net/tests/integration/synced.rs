@@ -37,7 +37,7 @@ async fn read_until_synced(announced: &mut origin::Routes) -> BTreeSet<String> {
 				seen.insert(announce.prefix.to_string());
 			}
 			origin::RouteEvent {
-				kind: origin::RouteKind::End,
+				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				announce,
 			} => {
 				seen.remove(announce.prefix.as_str());

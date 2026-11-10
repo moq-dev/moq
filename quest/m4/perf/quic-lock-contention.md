@@ -64,5 +64,4 @@ staging queue and batch dispatch should need none.
 
 ## Related
 
-- [Relay egress profile](/quest/m5/quic-egress-profile.md) - the transmit side of the same path
 - [Relay allocations](/quest/m4/perf/relay-allocs.md) - the allocation profile of the same workload

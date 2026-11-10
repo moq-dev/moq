@@ -111,7 +111,7 @@ async fn changed(follow: &mut origin::Routes) -> bool {
 				..
 			} => return true,
 			origin::RouteEvent {
-				kind: origin::RouteKind::End,
+				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				..
 			} => {
 				assert!(matches!(
@@ -445,7 +445,7 @@ async fn a_player_reads_through_a_claim_on_its_first_request() {
 	loop {
 		match routes.next().await.unwrap() {
 			origin::RouteEvent {
-				kind: origin::RouteKind::End,
+				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				announce: end,
 			} if end.prefix.as_str() == "live/media" => break,
 			_ => {}

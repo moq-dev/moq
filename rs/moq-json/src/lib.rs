@@ -31,10 +31,8 @@ pub mod stream;
 mod strict;
 pub mod window;
 
-/// The merge-patch diff, for the codec bench. Not a public API: compiled only with the `bench`
-/// feature, which nothing enables by default.
+/// Test support for the codec bench, enabled by the `bench` feature: the merge-patch diff.
 #[cfg(feature = "bench")]
-#[doc(hidden)]
 pub mod bench {
 	pub use crate::diff::{Diff, diff};
 }

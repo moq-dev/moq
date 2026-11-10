@@ -7,9 +7,10 @@
 # name stays announced with nothing behind it. Explicit withdrawals still consume
 # the handle, so only the implicit retraction on session loss is removed.
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
+index 45654a5656..8af799f04c 100644
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -8817,7 +8817,7 @@ impl Announced {
+@@ -9749,7 +9749,7 @@ impl Announced {
  		};
  		self.held.pop();
  		if let Held::Attached(entry) = held {
@@ -18,7 +19,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		}
  	}
  
-@@ -8901,7 +8901,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry
+@@ -9831,7 +9831,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry
  		let validity = if subscriber.version.has_instance() {
  			Default::default()
  		} else {
@@ -27,7 +28,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		};
  		let source = subscriber.origin.create_source(path.clone(), validity);
  		// The handler exists before the requester sees the source, so a track it
-@@ -8929,7 +8929,8 @@ struct AnnouncedRoute<K = Path> {
+@@ -9859,7 +9859,8 @@ struct AnnouncedRoute<K = Path> {
  	/// without recomputing the chain.
  	route: crate::origin::RouteInfo,
  	/// Dropping it retracts the route and rejects its queued requests.
@@ -37,7 +38,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	/// Closes as the route goes, which closes every source it minted.
  	live: kio::Producer<()>,
  	/// Queues this route on its prefix's ready set when its request queue wakes.
-@@ -8949,7 +8950,7 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
+@@ -9877,7 +9878,7 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
  	) -> Self {
  		Self {
  			route,
@@ -47,21 +48,13 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  			waker: std::task::Waker::from(wake.clone()),
  			wake,
 diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subscriber/routed.rs
+index 20fe66dd38..91675a0b9b 100644
 --- a/rs/moq-net/src/lite/subscriber/routed.rs
 +++ b/rs/moq-net/src/lite/subscriber/routed.rs
-@@ -354,7 +354,7 @@ impl Routed {
- 		self.previous = previous;
- 		self.outputs(subscriber);
- 		for (_, served) in std::mem::take(&mut self.previous) {
--			served.route.dynamic.withdrawn();
-+			std::mem::ManuallyDrop::into_inner(served.route.dynamic).withdrawn();
- 		}
- 		Ok(())
- 	}
-@@ -398,7 +398,7 @@ impl Routed {
- 			} => self.serve(subscriber, id, named, claim, served),
- 			node::Output::Unserve { id, claim } => {
- 				if let Some(served) = self.served.remove(&(id, claim)) {
+@@ -402,7 +402,7 @@ impl Routed {
+ 				if let Some(served) = self.served.remove(&(id, claim))
+ 					&& ended
+ 				{
 -					served.route.dynamic.withdrawn();
 +					std::mem::ManuallyDrop::into_inner(served.route.dynamic).withdrawn();
  				}

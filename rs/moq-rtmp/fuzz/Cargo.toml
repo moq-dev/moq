@@ -6,7 +6,7 @@
 # excluded from every gate that means "all of it" instead: libFuzzer needs a nightly
 # toolchain and sanitizer flags, so nothing in `check` or `test` may compile it.
 #
-# The target body lives in `moq-rtmp`'s hidden `fuzz` module, not here: the vendored
+# The target body lives in `moq-rtmp`'s `fuzz` module, not here: the vendored
 # `rml` module is private, and sharing the body is what lets the crate's own tests
 # replay the corpus on stable.
 [package]

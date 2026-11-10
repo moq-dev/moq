@@ -212,9 +212,8 @@ standalone build, not incremental workspace savings.
   allocator would recreate stats_alloc's instrumentation. Their own units
   cost 0.05/0.03 s; cpu-time also needs libc/platform bindings.
 - `unsafe-libopus`: a nontrivial codec with active moq-audio consumers,
-  not a helper. The [Opus backend](/quest/m5/audio-opus-backend.md) comparison
-  still owns whether a different backend is better; deleting Opus is a
-  user-facing feature decision.
+  not a helper. No quest compares Opus backends (that plan was deleted
+  2026-11-09); deleting Opus is a user-facing feature decision.
 - `moq-gst` keeps its Rust 1.92 floor for GStreamer 0.25, above the
   workspace's 1.91 library floor. Do not normalize that manifest to 1.91.
 - The QUIC/UDP, RTMP, V4L2, NVIDIA, VA-API, UniFFI and LibAV forks all have

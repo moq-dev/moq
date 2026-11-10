@@ -79,7 +79,8 @@ impl TryFrom<MoqRouteOptions> for moq_net::origin::RouteOptions {
 	}
 }
 
-/// The read-only facts on a received route: a static cost and the stream's instance.
+/// The read-only facts on a received route: a static cost, the stream's instance, and
+/// whether a usable path reaches it.
 ///
 /// Carried by `MoqAnnounceConsumer` events. A route claims capability, not
 /// inventory: by convention a publisher creates each broadcast's exact route,
@@ -91,6 +92,8 @@ pub struct MoqRouteInfo {
 	pub cost: u64,
 	/// The stream the route serves: routes with one instance are one continuous stream.
 	pub instance: Arc<MoqInstance>,
+	/// Whether a usable path reaches the route's origin; requests may fail while it is not.
+	pub available: bool,
 }
 
 impl From<moq_net::origin::RouteInfo> for MoqRouteInfo {
@@ -98,6 +101,7 @@ impl From<moq_net::origin::RouteInfo> for MoqRouteInfo {
 		Self {
 			cost: route.cost().value(),
 			instance: MoqInstance::wrap(route.instance().clone()),
+			available: route.available(),
 		}
 	}
 }
@@ -201,7 +205,8 @@ impl From<moq_net::announce::Announce> for MoqAnnounce {
 	}
 }
 
-/// What a [`MoqAnnounceConsumer`] yields: a path becoming present or absent.
+/// What a [`MoqAnnounceConsumer`] yields: a path becoming present, absent, or offline, or
+/// its availability changing.
 ///
 /// Another publisher instance taking a path over keeps it present: follow it with
 /// `MoqOriginConsumer::follow` to see the broadcast change.
@@ -212,8 +217,27 @@ pub enum MoqAnnounceEvent {
 		/// The announcement that made the path present.
 		announce: MoqAnnounce,
 	},
-	/// No route covers the path any more. Carries its last advertised route.
+	/// The present path lost every usable path to its origin but may recover one: it stays
+	/// present while requests for it may fail.
+	Unavailable {
+		/// The announcement, now unavailable.
+		announce: MoqAnnounce,
+	},
+	/// The present path recovered a usable path: request it again.
+	Available {
+		/// The announcement, available again.
+		announce: MoqAnnounce,
+	},
+	/// The origin withdrew the path: no route covers it any more. Carries its last
+	/// advertised route.
 	Absent {
+		/// The announcement that went.
+		announce: MoqAnnounce,
+	},
+	/// This origin let go of the path, and no route covers it any more: the session it
+	/// arrived on closed, or the network lost every path to it. Its origin may still serve
+	/// it. Carries its last advertised route.
+	Offline {
 		/// The announcement that went.
 		announce: MoqAnnounce,
 	},
@@ -226,7 +250,16 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 			Event::Present(announce) => Self::Present {
 				announce: announce.into(),
 			},
+			Event::Unavailable(announce) => Self::Unavailable {
+				announce: announce.into(),
+			},
+			Event::Available(announce) => Self::Available {
+				announce: announce.into(),
+			},
 			Event::Absent(announce) => Self::Absent {
+				announce: announce.into(),
+			},
+			Event::Offline(announce) => Self::Offline {
 				announce: announce.into(),
 			},
 		}

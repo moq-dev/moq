@@ -55,4 +55,4 @@ off on the ring, from shard steering.
 
 ## Related
 
-- [Stream transports](/quest/m4/perf/stream/README.md) - the TCP half of moving the relay onto the ring
+- [Stream transports](/quest/m4/stream-transports/README.md) - the TCP half of moving the relay onto the ring

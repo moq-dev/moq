@@ -135,5 +135,4 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [The `stretch` setting](/quest/m1/audio-jitter-target/stretch-setting.md) - makes this quest's skip bound configurable, and zero turns the stretch off
-- [Native rendition delay](/quest/m1/audio-jitter-target/native-rendition-delay.md) - the PCM queue native backpressure replaces
 - [Audio outlives video under bufferbloat](/quest/m4/audio-bufferbloat-av.md) - the audio and video congestion rows this behavior is asserted on

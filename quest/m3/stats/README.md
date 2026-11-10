@@ -108,8 +108,8 @@ kind.
   `drafts/draft-lcurley-moq-hang.md` specs the wire.
 
 Decided in the 2026-09-30 audit: a Rust encoder adapting its bitrate to viewer
-feedback moved to [encoder feedback](/quest/m5/stats-encoder-feedback.md) (m5),
-along with its open questions. This line publishes, reads, and classifies the
+feedback moved to m5 and was deleted there on 2026-11-09 for want of a
+consumer. This line publishes, reads, and classifies the
 reports; no encoder acts on them here.
 
 Decided 2026-10-05 (moq.pro audit): the client health model and preflight
@@ -131,7 +131,3 @@ connection view and the dashboard flow.
 
 - [QoS](/quest/m3/qos/README.md) - the relay's delivery counters; the
   combined per-broadcast verdict reading both lives downstream
-- [Encoder feedback](/quest/m5/stats-encoder-feedback.md) - a Rust encoder
-  adapts its bitrate to what its viewers report
-- [Latency ledger](/quest/m5/latency-ledger.md) - adds the viewer's latency
-  stages to the same feedback snapshot

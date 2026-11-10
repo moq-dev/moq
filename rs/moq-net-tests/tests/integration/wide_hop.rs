@@ -1,7 +1,7 @@
 //! Hop IDs span 64 bits. A link whose varint stops at 2^62 - 1 carries a larger
 //! one as 0, the reserved unknown hop.
 //!
-//! The hop chain is crate-private, so it is read through the hidden `fuzz` module.
+//! The hop chain is crate-private, so it is read through the `fuzz` module.
 
 use crate::support;
 

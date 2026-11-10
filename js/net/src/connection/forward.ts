@@ -91,8 +91,8 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 
 	const report = (interest: Interest, event: Announce.RouteEvent) => {
 		const { prefix, route } = event;
-		if (event.kind === "end") {
-			unreport(interest, prefix);
+		if (event.kind === "end" || event.kind === "offline") {
+			unreport(interest, prefix, event.kind === "end");
 			return;
 		}
 		interest.reported.add(prefix);
@@ -132,7 +132,8 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 		}
 	};
 
-	const unreport = (interest: Interest, prefix: Path.Valid) => {
+	/** Stop `interest` reporting `prefix`, which its peer `ended` rather than lost. */
+	const unreport = (interest: Interest, prefix: Path.Valid, ended = false) => {
 		interest.reported.delete(prefix);
 		const existing = routes.get(prefix);
 		if (!existing) return;
@@ -142,7 +143,8 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 		const next = existing.reporters.values().next();
 		if (next.done) {
 			routes.delete(prefix);
-			existing.handle.close();
+			if (ended) wireOf(existing.handle).end();
+			else existing.handle.close();
 		} else if (driving) {
 			// The next request takes over driving. Without an instance nothing proves it reports
 			// the stream the handle serves, so the route restarts rather than stitch two together.
@@ -329,7 +331,7 @@ async function serveRequests(conn: Session, origin: OriginProducer): Promise<voi
 
 	for (;;) {
 		const map = table.requests.peek();
-		if (!map || dead) break;
+		if (origin.closed.peek() !== undefined || dead) break;
 
 		for (const [path, slot] of map) {
 			if (!table.blind(slot)) continue;

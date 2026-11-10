@@ -33,7 +33,3 @@ both of which need a CPU conversion or decode anyway, so exporting the buffer
 saves no copy. Revisit only if NV12 camera capture lands.
 
 Refs #2481, #1837.
-
-## Related
-
-- [Capture multi-plane PipeWire cameras](/quest/m5/pipewire-camera-planes.md) - separate memory blocks from a camera, the capture offer rather than this import

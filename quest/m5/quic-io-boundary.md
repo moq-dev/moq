@@ -56,7 +56,3 @@ Require this quest and build on its transmit contract, so the contract is
 settled once; registering buffers stays with #3204, which measures whether
 it pays. Report relay CPU per Gbps before and after on
 the same workloads.
-
-## Required
-
-- [Relay egress profile](/quest/m5/quic-egress-profile.md) - its moq-quic profile ranks this quest's candidates, and its send-buffer pool shares the `SendBuffer` seam

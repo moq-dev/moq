@@ -50,7 +50,7 @@ async def main():
             # A path stays present across publisher restarts: hold client.follow(path) to
             # be handed each new run, or None once it goes offline.
             if not isinstance(event, moq.AnnounceEventPresent):
-                continue  # AnnounceEventAbsent
+                continue  # absent, offline, or a change in availability
             announcement = event.announce
             print(announcement.captures)  # list of wildcard matches, empty without wildcards
             broadcast = await client.request(announcement.prefix)

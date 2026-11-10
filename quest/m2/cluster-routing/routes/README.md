@@ -28,6 +28,8 @@ claim whose withdrawal is already known.
 13. ✅ Decided 2026-11-05 (maintainer): **ANNOUNCE_FLOOR encodes `Revision + 1`, with 0 meaning the floor certifies nothing,** the same offset as `Max Age`. Rust decodes it to `Option`. It replaces a Revision of 2^64-1 as the marker: a huge sentinel is a bad pattern and costs 9 bytes as a lite-07 varint. Rejected: a separate message; a boolean field.
 14. ✅ Decided 2026-11-05 (maintainer: "use 0 as a sentinel, or make a new message type"; the agent picked the message): **A held route is ROUTE_HOLD (0xB), `{Route ID}`,** replacing a ROUTE_UPDATE with a Metric of 2^64-1. A metric of 0 is real (the origin's own route), so 0 cannot mark held, and offsetting every metric by one would still leave a held update's seqno and down-only bit meaningless and refused. The message carries only what a hold means, item 4's rule goes away, and a metric is now only bounded by overflow, so the wire refuses no metric. The 2^64-1 Seqno and Revision bounds stay: they are bounds, not markers, leaving room for a ROUTE_REQUEST's successor and for the floor's offset.
 15. ✅ Decided 2026-11-06 (maintainer, /quest-complete on [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)), asked whether to amend the handoff contract's "a sender that certifies anything for a route answers every stream" or keep it: ✅ **send a route on a stream only while it meets the stream's interest**, with a floor certifying the last withdrawal before the route ends. Withdrawals still END, and what a node keeps per stream it answers is bounded by the origins that stream reads, at a ROUTE_END round trip when an origin leaves an interest. Rejected: keep answering every stream and bound only by per-peer caps, which is simpler but carries the whole node table on every stream. [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293) implements it.
+16. ✅ Decided 2026-11-09 (maintainer, /quest-unblock on [moq-dev/moq#8375](https://github.com/moq-dev/moq/pull/8375)), asked how a token-scoped lite-07 session certifies withdrawals so a clean finish ENDs across a relay: ✅ **the subscriber narrows its ANNOUNCE_REQUEST to its scope's single region** (where its limit and its subscribe grant meet), and reopens the request when that region changes so a widening renewal isn't lost. Floors keep their exact whole-prefix meaning, with no wire change and one SHOULD in the lite-07 draft. A multi-region scope still certifies nothing. Rejected: floors carrying regions on the wire, which reverses item 10; landing with the finish lanes accepting offline.
+17. ✅ Decided 2026-11-09 (maintainer, /quest-unblock on [moq-dev/moq#8375](https://github.com/moq-dev/moq/pull/8375)), asked how item 16's reopen counts the session's announce cap while the old request keeps serving until the new one is SYNCED: ✅ **the old request gets its own budget for the handover**, moving what it holds onto a separate counter with the same cap, so the session's count belongs wholly to the new request. A peer can make the session hold at most twice the cap, and only during one handover. Rejected: dropping the old request at once on every region change, which flickers claims offline; holding a client's first request until its credential is answered and dropping the old one on later renewals.
 
 
 The route layer's core landed in
@@ -177,7 +179,9 @@ the bullets below are the contract it carries.
 - Loop freedom is Babel's feasibility condition (RFC 8966) keyed by node:
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is
-  ROUTE_HOLD or ROUTE_END; there is no count to infinity.
+  ROUTE_HOLD or ROUTE_END. The route model found a count to infinity
+  (2026-11-10): an echo can overtake a route derived from the echoed one;
+  [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md) orders it.
 - Starvation recovery is Babel's seqno request (RFC 8966 s3.8, decided
   2026-10-12). A node whose routes to an origin are all infeasible sends
   ROUTE_REQUEST for that origin, with its feasibility seqno plus one, to the
@@ -537,15 +541,14 @@ benchmarks.
 
 ## Required
 
-- [Announcement availability](/quest/m2/cluster-routing/routes/availability.md) - announcements report availability, and a let-go is offline rather than END, in Rust and JS
 - [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - `js/net` encodes, decodes, and resolves the route layer
 - [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - forwarding fixtures ported and the model deleted, incident fixtures, end-to-end checks, and benchmarks
 - [Firefox tabs prove their route key](/quest/m2/cluster-routing/routes/browser-proof.md) - a current Firefox tab opens a lite-07 session with a route-key proof the relay verifies, once neqo's exporter follows the draft
 - [Playwright bundles Chromium's spec exporter](/quest/m2/cluster-routing/routes/playwright-pin.md) - the toolchain's Playwright bundles Chromium 158+, so the route key lane proves the Chromium tab
-- [Showing an identity's claims costs the claims that changed](/quest/m2/cluster-routing/routes/show-cost.md) - lite-07 session setup and teardown grow linearly with broadcasts, not quadratically per identity
+- [A ROUTE_END echo arrives behind the echoer's routes](/quest/m2/cluster-routing/routes/echo-order.md) - no node drops its feasibility distance while a route derived from its own can still arrive, so routes never count to infinity
+- [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - every ordering on 4-5 relay meshes with two origins and clients, with an announce budget and convergence
+- [Seeded lite-07 meshes hold the route rules and an announce budget](/quest/m1/route-mesh-sweep.md) - the route rules and message budget checked on real sessions over random meshes
 
 ## Related
 
 - [Route wakes](/quest/m4/route-wakes.md) - index work follows the settled source-selection model
-- [Route health](/quest/m5/route-health/README.md) - epoch-only progress observation and local delivery failover
-- [A route stream's interest is a set of prefixes](/quest/m5/route-interest-prefixes.md) - m5: one stream's interest covers several prefixes

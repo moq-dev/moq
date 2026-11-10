@@ -69,7 +69,7 @@ export interface OriginProducer {
 	 * the returned dispose: a session holds one while its peer's initial set is in flight.
 	 */
 	snapshot(prefix: Path.Valid): Dispose;
-	readonly requests: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
+	readonly requests: Getter<ReadonlyMap<Path.Valid, RequestSlot>>;
 	changed(): GetPromise<unknown>;
 	/** Whether sessions should answer the request with a blind subscription right now. */
 	blind(slot: RequestSlot): boolean;
@@ -87,6 +87,12 @@ export interface Route {
 	 * Announces a hidden route.
 	 */
 	update(info: Partial<WireRoute>): void;
+	/**
+	 * Close the route as its announcer withdrawing it, so readers see it end. Closing the handle
+	 * of a route a session received instead means the session lost it, and readers see it go
+	 * offline.
+	 */
+	end(): void;
 }
 
 /** The protocol-facing operations behind an origin consumer. */

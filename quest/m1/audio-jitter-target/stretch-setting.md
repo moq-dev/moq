@@ -10,6 +10,9 @@ silence, and drift between the publisher's clock and the device's is
 corrected by a small skip or pad. The default is 2 s whether `delay` is
 `auto` or fixed, so a fixed-delay live player also keeps late audio and
 catches up.
+`AUTO_MAX_DELAY` is deleted in both `js/watch/src/audio/latency.ts` and
+`rs/moq-cli/src/play/args.rs`: every budget it fed (the subscription max
+delay, the sink cap, and video retention) is derived from `delay + stretch`.
 
 ## Plan
 
@@ -28,6 +31,11 @@ want stretching.
 - Default: ✅ 2 s for `auto` and fixed delays alike (rejected: a fixed delay
   keeping max delay equal to the delay).
 - Milestone: ✅ m1 (rejected: m2). The attribute and flag are additive.
+- Decided 2026-11-09 (maintainer, /quest-unblock): ✅ delete
+  `AUTO_MAX_DELAY` in both players and derive every budget it fed
+  (subscription max delay, sink cap, video retention) from `delay + stretch`
+  (rejected: keep the 2 s constant beside the setting). The 2 s is an
+  arbitrary constant nobody can trace.
 
 The audio subscription's max delay is what makes late audio arrive at all:
 the relay and the container consumer drop media older than it. Today it is 2 s

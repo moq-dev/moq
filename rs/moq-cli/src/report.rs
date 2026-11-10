@@ -490,7 +490,9 @@ async fn write_echo(
 				let event = event.context("announcements ended")?;
 				let (announce, active) = match event {
 					moq_net::announce::Event::Present(announce) => (announce, true),
-					moq_net::announce::Event::Absent(announce) => (announce, false),
+					moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => (announce, false),
+					// A reader rides out its path being held.
+					moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
 				};
 				let path = announce.prefix;
 				if !path.has_prefix(&prefix) || !hang::echo::is_echo(&path) {

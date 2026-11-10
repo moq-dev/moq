@@ -108,7 +108,7 @@ async fn learned_hop(dialer: &origin::Producer, path: &str) -> u64 {
 					announce,
 				} => announce,
 				moq_net::origin::RouteEvent {
-					kind: moq_net::origin::RouteKind::End,
+					kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 					..
 				} => continue,
 			};

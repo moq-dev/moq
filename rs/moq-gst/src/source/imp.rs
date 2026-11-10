@@ -6275,7 +6275,7 @@ mod session_tests {
 			matches!(
 				event,
 				moq_net::origin::RouteEvent {
-					kind: moq_net::origin::RouteKind::End,
+					kind: moq_net::origin::RouteKind::Offline,
 					..
 				}
 			)

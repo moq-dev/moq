@@ -14,7 +14,7 @@ run's minimized corpus, and uploads failure inputs as workflow artifacts.
 
 ## How it fits together
 
-The target body is not in `fuzz_targets/`; it is in `moq-rtmp`'s hidden `fuzz` module
+The target body is not in `fuzz_targets/`; it is in `moq-rtmp`'s `fuzz` module
 (`src/fuzz.rs`), because the vendored `rml` module is private, and so `just check`
 replays it on the pinned stable toolchain. The shim here also registers the counting
 allocator the body measures with.

@@ -182,7 +182,4 @@ owns that feedback.
 
 ## Related
 
-- [Per-stream and per-datagram deadlines](/quest/m5/quic-deadline.md) - also consumes the forward-delay estimate
-- [BBR media study](/quest/m5/quic-bbr-study.md) - BBR3 behavior under media, the baseline here
-- [Measure ECN on the backbone](/quest/m5/quic-ecn-measure.md) - decides whether SCReAMv2's L4S path is worth porting
 - [QUIC on the sim](/quest/m4/quic-sim.md) - deterministic successor to the moq-shaper harness once it lands

@@ -48,5 +48,4 @@ Public API: `track::Fill` gains a lookup refusal; moq-ffi `MoqFill` gains
 
 ## Related
 
-- [Archive lookup withdrawal](/quest/m5/archive-lookup-withdrawal.md) - the other [moq-dev/moq#7310](https://github.com/moq-dev/moq/pull/7310) follow-up, a public withdrawal signal on `Fill`
 - [DVR rewind](/quest/m3/archive-dvr.md) - the consumer of time seeks

@@ -1011,6 +1011,8 @@ pub(super) struct SubscriberDriver {
 	announces: kio::Tasks<AnnouncePrefix>,
 	/// Each open prefix's machine in `announces`.
 	prefixes: HashMap<Path, kio::TaskKey>,
+	/// Lite-07: the subscribe permit's epoch the requests were last narrowed at.
+	auth_epoch: u64,
 	uni: UniAccept,
 	/// PROBE feedback; finishes quietly when unsupported or given up on.
 	bandwidth: Option<RecvBandwidth>,
@@ -1033,6 +1035,7 @@ impl SubscriberDriver {
 			discovery: crate::discovery::Discovery::new(&subscriber.origin, lazy, subscriber.runtime.clone()),
 			announces: kio::Tasks::new(),
 			prefixes: HashMap::new(),
+			auth_epoch: 0,
 			cleanup: SubscriptionCleanup(subscriber.subscribes.clone(), subscriber.datagrams.clone()),
 			uni: UniAccept::new(subscriber.clone(), early),
 			bandwidth: Some(RecvBandwidth::new(subscriber.clone())),
@@ -1080,6 +1083,25 @@ impl SubscriberDriver {
 	}
 
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		// A new permit may narrow a request to another region: it reopens there, so a
+		// renewal that widens the scope is not lost.
+		if self.subscriber.version.has_routes() {
+			let auth = &self.subscriber.auth;
+			let mut changed = false;
+			while auth
+				.poll_permit(crate::auth::Direction::Subscribe, &mut self.auth_epoch, waiter)
+				.is_ready()
+			{
+				changed = true;
+			}
+			if changed {
+				for key in self.prefixes.values_mut() {
+					if let Some(machine) = self.announces.remove(*key) {
+						*key = self.announces.insert(machine.reopen());
+					}
+				}
+			}
+		}
 		loop {
 			while let Poll::Ready(change) = self.discovery.poll(waiter) {
 				match change {
@@ -2103,12 +2125,20 @@ struct AnnouncePrefix {
 	/// Its place in line for the peer's stream credit while its stream opens.
 	open: crate::transport::open::Open,
 	subscriber: Subscriber,
+	/// The prefix discovery wants, which keys the machine.
 	prefix: Path,
+	/// The prefix on the wire: lite-07 narrows `prefix` to the region the session's
+	/// subscribe permit confines it to, so the peer's floors can certify it.
+	request: Path,
 	state: PrefixState,
 	/// Holds the origin's announce consumers under the prefix unsynced
 	/// until the peer's initial set is in. Dropped at the boundary the version
 	/// marks, or with the stream.
 	snapshot: Option<crate::model::Snapshot>,
+	/// Lite-07: the request this one replaces, after the region changed. It keeps
+	/// serving until this one is synced, so the node lets go only of what the new
+	/// request no longer carries.
+	replacing: Option<Box<AnnouncePrefix>>,
 }
 
 impl kio::Task for AnnouncePrefix {
@@ -2116,6 +2146,15 @@ impl kio::Task for AnnouncePrefix {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		AnnouncePrefix::poll(self, waiter)
+	}
+}
+
+/// The prefix to request for `prefix`: the region the permit confines it to when
+/// that lies beneath it, since a floor certifies only a request its scope covers whole.
+fn narrow(prefix: &Path, region: Option<Path>) -> Path {
+	match region {
+		Some(region) if region.has_prefix(prefix) => region,
+		_ => prefix.clone(),
 	}
 }
 
@@ -2139,6 +2178,8 @@ struct PrefixRun {
 	initial: u64,
 	/// Lite-07: the route layer the stream feeds in place of `announced`.
 	routed: Option<routed::Routed>,
+	/// Lite-07: SYNCED arrived.
+	synced: bool,
 }
 
 #[kio::machine(self.state: PrefixState)]
@@ -2146,18 +2187,73 @@ impl AnnouncePrefix {
 	/// `snapshot` was taken when the prefix was first wanted, so a consumer of the
 	/// origin never reads as synced before the request even goes out.
 	fn new(subscriber: Subscriber, prefix: Path, snapshot: crate::model::Snapshot) -> Self {
+		let request = Self::narrowed(&subscriber, &prefix);
 		Self {
 			open: Default::default(),
 			subscriber,
 			prefix,
+			request,
 			state: PrefixState::Start,
 			snapshot: Some(snapshot),
+			replacing: None,
+		}
+	}
+
+	/// The prefix to put on the wire for `prefix`, as the session's permit stands now.
+	fn narrowed(subscriber: &Subscriber, prefix: &Path) -> Path {
+		match subscriber.version.has_routes() {
+			true => narrow(
+				prefix,
+				subscriber.auth.permit(crate::auth::Direction::Subscribe).region(),
+			),
+			false => prefix.clone(),
+		}
+	}
+
+	/// A request for the region the permit narrows the prefix to now, replacing this
+	/// one, or this one while its request still is that region. The replacement takes
+	/// over the initial set's snapshot if this one was still waiting on it.
+	fn reopen(mut self) -> Self {
+		let request = Self::narrowed(&self.subscriber, &self.prefix);
+		if request == self.request {
+			return self;
+		}
+		// A replacement never waits on another: the one before is let go at once.
+		self.replacing = None;
+		let (subscriber, prefix, snapshot) = (self.subscriber.clone(), self.prefix.clone(), self.snapshot.take());
+		// One that never reached its loop has fed the node nothing to hand over. One that
+		// did moves its announce slots onto a budget of its own, since the replacement takes
+		// slots for the same claims: the replacement gets the session's whole cap.
+		let replacing = match &mut self.state {
+			PrefixState::Run(step) => {
+				if let Some(routed) = &mut step.run.routed {
+					routed.hand_over();
+				}
+				Some(Box::new(self))
+			}
+			_ => None,
+		};
+		Self {
+			open: Default::default(),
+			subscriber,
+			prefix,
+			request,
+			state: PrefixState::Start,
+			snapshot,
+			replacing,
 		}
 	}
 
 	/// Fails the session on any error, [`Error::TooManyRequests`] included: a peer
 	/// announcing more than the session allows loses the session.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if let Some(replacing) = &mut self.replacing
+			&& let Poll::Ready(res) = replacing.poll(waiter)
+		{
+			// The peer finished the old request: nothing left to hand over.
+			self.replacing = None;
+			res?;
+		}
 		self.poll_run(waiter)
 			.map_err(|err| lite::error::control(&mut self.subscriber.session.clone(), err))
 	}
@@ -2180,7 +2276,7 @@ impl AnnouncePrefix {
 		// the origin, and each local reader opts in on its own
 		// (`origin::Consumer::with_hidden`).
 		stream.writer.buffer(&lite::AnnounceRequest {
-			prefix: self.prefix.clone(),
+			prefix: self.request.clone(),
 			exclude_hop: self.subscriber.self_origin,
 			hidden: true,
 		})?;
@@ -2233,10 +2329,16 @@ impl AnnouncePrefix {
 			decoder: lite::AnnounceDecoder::default(),
 			auth_epoch: 0,
 			initial,
+			synced: false,
 			routed: match version.has_routes() {
 				true => {
 					let permit = self.subscriber.auth.permit(crate::auth::Direction::Subscribe);
-					Some(routed::Routed::new(&self.subscriber, &self.prefix, link_cost, &permit)?)
+					Some(routed::Routed::new(
+						&self.subscriber,
+						&self.request,
+						link_cost,
+						&permit,
+					)?)
 				}
 				false => None,
 			},
@@ -2258,7 +2360,7 @@ impl AnnouncePrefix {
 		})?;
 		if let Some(init) = init {
 			for suffix in init.suffixes {
-				let path = self.prefix.join(&suffix)?;
+				let path = self.request.join(&suffix)?;
 				// Lite01/02 don't carry hop information; the broadcast starts with
 				// an empty chain and an unpriced link. Stats are attributed in the
 				// model when this enters the origin via `route`.
@@ -2313,9 +2415,12 @@ impl AnnouncePrefix {
 							if let Some(routed) = &mut run.routed {
 								routed.outputs(&self.subscriber);
 							}
-							if self.snapshot.take().is_none() {
+							if std::mem::replace(&mut run.synced, true) {
 								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
+							self.snapshot = None;
+							// This request now carries what the one it replaces did.
+							self.replacing = None;
 							continue;
 						}
 						if run.initial > 0 {
@@ -2326,13 +2431,13 @@ impl AnnouncePrefix {
 								_ => return Poll::Ready(Err(Error::ProtocolViolation)),
 							}
 						}
-						self.subscriber.handle_announce(&self.prefix, announce, run)?;
+						self.subscriber.handle_announce(&self.request, announce, run)?;
 						// Released only once the last counted route is in the origin.
 						if run.initial == 0 && !self.subscriber.version.has_synced() {
 							self.snapshot = None;
 						}
 					}
-					Poll::Ready(Ok(None)) if run.initial > 0 || self.snapshot.is_some() => {
+					Poll::Ready(Ok(None)) if run.initial > 0 || (version.has_synced() && !run.synced) => {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
 					Poll::Ready(Ok(None)) => {
@@ -3162,8 +3267,9 @@ mod tests {
 			fill_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: tail.clone(),
-			served: None,
-			started: false,
+			started: None,
+			finishing: None,
+			parked: false,
 			starts: Default::default(),
 			declared: None,
 			end: None,
@@ -3218,7 +3324,7 @@ mod tests {
 		let largest = Some(Position::group(10));
 		let live = |ranges: &[lite::Range]| lite::LiveRanges::new(Version::Lite07, ranges);
 		active.live = live(&[lite::Range::span(Some(0), 0, Some(10), None)]);
-		active.served = Some(0);
+		active.started = Some(Some(0));
 		active.starts = [(0, Some(0))].into();
 		assert_eq!(active.never_serves(largest), None, "group 10 is in 0..11");
 
@@ -3319,8 +3425,9 @@ mod tests {
 				fill_ids: Default::default(),
 				fill_groups: Default::default(),
 				tail: Default::default(),
-				served: None,
-				started: false,
+				started: None,
+				finishing: None,
+				parked: false,
 				starts: Default::default(),
 				declared: None,
 				end: None,
@@ -3793,8 +3900,9 @@ mod tests {
 			fill_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
-			served: None,
-			started: false,
+			started: None,
+			finishing: None,
+			parked: false,
 			starts: Default::default(),
 			declared: None,
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
@@ -3815,7 +3923,7 @@ mod tests {
 			sub.start = start;
 			sub.edit(&ranges, 0).unwrap();
 		};
-		sub.started = true;
+		sub.started = Some(None);
 		update(&mut sub, Some(1), vec![lite::Range::span(Some(1), 0, None, None)]);
 		assert_eq!(
 			sub.owed(None),
@@ -3840,7 +3948,7 @@ mod tests {
 
 		update(&mut sub, Some(2), vec![lite::Range::span(Some(2), 0, None, None)]);
 		// A START for the range now live.
-		sub.served = Some(4);
+		sub.started = Some(Some(4));
 		let (id, _) = sub.live.iter().next().unwrap();
 		sub.starts = [(id, Some(4))].into();
 		assert_eq!(
@@ -3909,8 +4017,9 @@ mod tests {
 			fill_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
-			served: Some(4),
-			started: true,
+			started: Some(Some(4)),
+			finishing: None,
+			parked: false,
 			starts: [(0, Some(4))].into(),
 			declared: None,
 			end: None,
@@ -3941,11 +4050,11 @@ mod tests {
 
 		// Before SUBSCRIBE_START, a fill an update retires keeps its Range ID, since the start
 		// still names it, and it must not count as the demand's.
-		sub.started = false;
+		sub.started = None;
 		sub.edit(&[moved, demand], 1).unwrap();
 		assert_eq!(sub.fill_range(2), None, "retired");
 		assert!(sub.fill_ids.contains(&2), "still a fill's");
-		sub.started = true;
+		sub.started = Some(Some(4));
 		sub.edit(&[moved, demand], 1).unwrap();
 		assert!(!sub.fill_ids.contains(&2), "forgotten once started");
 	}
@@ -3977,8 +4086,9 @@ mod tests {
 			fill_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
-			served: Some(4),
-			started: true,
+			started: Some(Some(4)),
+			finishing: None,
+			parked: false,
 			starts: [(0, Some(4))].into(),
 			declared: None,
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
@@ -5310,8 +5420,9 @@ mod tests {
 			fill_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: tail.clone(),
-			served: None,
-			started: false,
+			started: None,
+			finishing: None,
+			parked: false,
 			starts: Default::default(),
 			declared: None,
 			end: None,
@@ -8743,7 +8854,7 @@ mod tests {
 			)
 			.unwrap();
 		assert!(!attached, "a restart outside the limit was attached");
-		cursor.expect_next_ended("room/host").await;
+		cursor.expect_next_offline("room/host").await;
 	}
 
 	/// An announce stream that dies without an explicit `ended` retracts the route
@@ -8790,7 +8901,7 @@ mod tests {
 		// The stream ends without retracting anything: the map dies with it and the
 		// route retracts.
 		drop(announced);
-		cursor.expect_next_ended("room/host").await;
+		cursor.expect_next_offline("room/host").await;
 
 		// An explicit retraction retracts it the same way.
 		let hops = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
@@ -9408,10 +9519,16 @@ struct SubStream {
 	requested: Option<u64>,
 	/// The groups received for this subscription, shared with its [`TrackEntry`].
 	tail: kio::Producer<Tail>,
-	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
-	served: Option<u64>,
-	/// Whether SUBSCRIBE_START arrived, which `served` alone cannot say when no range starts.
-	started: bool,
+	/// The first group the publisher serves, once SUBSCRIBE_START says: `Some(None)` when it
+	/// starts no range.
+	started: Option<Option<u64>>,
+	/// The tail of a lite-07 subscription whose publisher sent SUBSCRIBE_FINISH: once it
+	/// settles the copy finishes and FINs, while demand and responses keep flowing meanwhile.
+	finishing: Option<Settle>,
+	/// A pipelined subscription's group streams stay parked until the responses that beat the
+	/// accept are read, as they would have been without the wait: a SUBSCRIBE_START says where
+	/// the feed starts before its first group does.
+	parked: bool,
 	/// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range's delivery starts, by
 	/// Range ID, `None` for one with nothing to deliver.
 	starts: std::collections::BTreeMap<u64, Option<u64>>,
@@ -9440,7 +9557,7 @@ impl SubStream {
 	/// Whether a lite-07 publisher still owes SUBSCRIBE_START once it ended the track: it
 	/// answers even when no group resolved the start, unless nothing was asked below the end.
 	fn awaits_start(&self) -> bool {
-		!self.started && self.end.as_ref().is_some_and(|end| end.group > self.start.unwrap_or(0))
+		self.started.is_none() && self.end.as_ref().is_some_and(|end| end.group > self.start.unwrap_or(0))
 	}
 
 	/// Lite-07's declaration of where the live feed starts: the lowest start the demand's live
@@ -9460,7 +9577,7 @@ impl SubStream {
 				None => return Some((self.start, true)),
 			}
 		}
-		Some((start, !self.started))
+		Some((start, self.started.is_none()))
 	}
 
 	/// Declare on the copy where the live feed starts, by [`Self::feed_start`], so a reader
@@ -9508,7 +9625,7 @@ impl SubStream {
 		}
 		match range.start {
 			Some(lite::Anchor::Absolute(start)) => Some(Some(start.group)),
-			_ => self.served.or(self.start).map(Some),
+			_ => self.started.flatten().or(self.start).map(Some),
 		}
 	}
 
@@ -9541,7 +9658,7 @@ impl SubStream {
 	fn owed(&self, requested_end: Option<u64>) -> Option<Vec<std::ops::Range<u64>>> {
 		let end = self.end.as_ref()?.group;
 		let end = requested_end.map_or(end, |requested| requested.min(end));
-		if !self.started {
+		if self.started.is_none() {
 			return Some(Vec::new());
 		}
 		let mut owed = Vec::new();
@@ -9591,7 +9708,7 @@ impl SubStream {
 		let changed = !self.live.iter().map(|(id, _)| id).eq(before);
 		let live = &self.live;
 		self.starts.retain(|id, _| live.get(*id).is_some());
-		if self.started {
+		if self.started.is_some() {
 			self.fill_ids.retain(|id| live.get(*id).is_some());
 		}
 		self.fill_ids
@@ -10044,7 +10161,7 @@ impl TrackServe {
 						// tail as well as in the track's arrivals, which its start declaration
 						// restarts.
 						let lowered = subscription.start().map(|start| {
-							let floor = active.start.or(active.served);
+							let floor = active.start.or(active.started.flatten());
 							start..floor.unwrap_or(u64::MAX)
 						});
 						// So do changed ranges that keep the floor, such as a widening that joins
@@ -10052,7 +10169,7 @@ impl TrackServe {
 						// on one still owed.
 						let (edit, changed) = active.edit(&ranges, ranges.len() - demand_ranges.len())?;
 						let widened = (changed && demand.is_some())
-							.then(|| subscription.start().or(active.served).unwrap_or(0)..u64::MAX);
+							.then(|| subscription.start().or(active.started.flatten()).unwrap_or(0)..u64::MAX);
 						if let Ok(mut tail) = active.tail.write() {
 							tail.set_grace(producer.tail_grace(subscription.budget()));
 							let now = self.subscriber.runtime.now();
@@ -10279,6 +10396,7 @@ impl TrackServe {
 			subscription,
 			ranges,
 			tail,
+			parked: false,
 			state: EstablishState::Start,
 		}
 	}
@@ -10461,6 +10579,8 @@ struct Establish {
 	/// The ranges the SUBSCRIBE carries: the demand's, then the fills'.
 	ranges: Vec<lite::Range>,
 	tail: kio::Producer<Tail>,
+	/// Its group streams stay parked once it is active; see [`SubStream::parked`].
+	parked: bool,
 	/// Holds the session busy while the SUBSCRIBE opens.
 	_working: crate::session::Working,
 	state: EstablishState,
@@ -10542,8 +10662,9 @@ impl Establish {
 			order: self.subscription.order,
 			requested: self.subscription.start(),
 			tail: self.tail.clone(),
-			served: None,
-			started: false,
+			started: None,
+			finishing: None,
+			parked: self.parked,
 			starts: Default::default(),
 			declared: None,
 			end: None,
@@ -10572,13 +10693,6 @@ enum PipelinedState {
 }
 
 impl Pipelined {
-	fn id(&self) -> u64 {
-		match &self.state {
-			PipelinedState::Opening(establish) => establish.id,
-			PipelinedState::Open(active) => active.id,
-		}
-	}
-
 	/// Drive the SUBSCRIBE onto the wire; its responses wait for the accept. Only a failure
 	/// to send it is ready.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
@@ -11262,13 +11376,6 @@ struct ServeLoop {
 	/// The TRACK stream that answered, until a SUBSCRIBE has a response or nobody holds
 	/// the copy.
 	held: Option<HeldTrack>,
-	/// The tail of a lite-07 subscription whose publisher sent SUBSCRIBE_FINISH: once it
-	/// settles the copy finishes and FINs, while demand and responses keep flowing meanwhile.
-	finishing: Option<(u64, Settle)>,
-	/// A pipelined subscription whose group streams stay parked until the responses that
-	/// beat the accept are read, as they would have been without the wait: a
-	/// SUBSCRIBE_START says where the feed starts before its first group does.
-	parked: Option<u64>,
 }
 
 #[expect(
@@ -11284,7 +11391,7 @@ enum ServeMode {
 	/// The publisher FINned once the track ended, as before lite-07, but QUIC does not order
 	/// streams: keep the subscription routable until every owed group is accounted for. The
 	/// grace bounds an unaccounted sequence. Lite-07 keeps serving
-	/// instead, settling its tail in [`ServeLoop::finishing`].
+	/// instead, settling its tail in [`SubStream::finishing`].
 	Tail {
 		settle: Settle,
 		/// The demand's end when the tail started, which bounds the groups owed.
@@ -11546,15 +11653,15 @@ impl ServeLoop {
 			mode: ServeMode::Select,
 			linger: crate::time::Deadline::new(&serve.subscriber.runtime),
 			held: None,
-			finishing: None,
-			parked: None,
 		}
 	}
 
 	/// Resume the parked group streams into the accepted copy.
 	fn unpark(&mut self, serve: &TrackServe) {
-		if let Some(id) = self.parked.take() {
-			serve.accept_pipelined(id, &self.serving);
+		if let Sub::Active(active) = &mut self.sub
+			&& std::mem::take(&mut active.parked)
+		{
+			serve.accept_pipelined(active.id, &self.serving);
 		}
 	}
 
@@ -11574,11 +11681,16 @@ impl ServeLoop {
 		if let Ok(mut tail) = tail.write() {
 			tail.set_grace(self.serving.tail_grace(pipelined.pref.budget()));
 		}
-		self.parked = Some(pipelined.id());
 		self.serving.seen_subscription(Some(pipelined.pref));
 		match pipelined.state {
-			PipelinedState::Opening(establish) => self.mode = ServeMode::Establish(establish),
-			PipelinedState::Open(active) => self.sub = Sub::Active(active),
+			PipelinedState::Opening(mut establish) => {
+				establish.parked = true;
+				self.mode = ServeMode::Establish(establish);
+			}
+			PipelinedState::Open(mut active) => {
+				active.parked = true;
+				self.sub = Sub::Active(active);
+			}
 		}
 	}
 
@@ -11611,11 +11723,11 @@ impl ServeLoop {
 		}
 		// A finished track's tail waits a fresh grace for what an update newly asked for,
 		// rather than a deadline that may have passed while an earlier stream was read.
-		if let Some((id, _)) = &self.finishing
-			&& let Sub::Active(active) = &self.sub
-			&& active.id == *id
+		if let Sub::Active(active) = &mut self.sub
+			&& active.finishing.is_some()
 		{
-			self.finishing = Some((active.id, Self::settle(serve, &self.serving, active)));
+			let settle = Self::settle(serve, &self.serving, active);
+			active.finishing = Some(settle);
 		}
 		Ok(())
 	}
@@ -11660,7 +11772,8 @@ impl ServeLoop {
 				// Lite-07 keeps the stream open past it, so its tail starts now rather
 				// than at a FIN, while demand and responses keep flowing.
 				if serve.subscriber.version.keeps_subscribe_open() {
-					self.finishing = Some((active.id, Self::settle(serve, &self.serving, active)));
+					let settle = Self::settle(serve, &self.serving, active);
+					active.finishing = Some(settle);
 				}
 			}
 			// SUBSCRIBE_START names where each range's delivery starts,
@@ -11670,7 +11783,7 @@ impl ServeLoop {
 			// so a reader waiting on a skipped group fails over
 			// instead of stalling on a live route.
 			lite::SubscribeResponse::Start(start) => {
-				if active.started && serve.subscriber.version.has_ranges() {
+				if active.started.is_some() && serve.subscriber.version.has_ranges() {
 					tracing::warn!(track = %serve.name, "duplicate subscribe start");
 					return Err(Error::ProtocolViolation);
 				}
@@ -11709,14 +11822,12 @@ impl ServeLoop {
 						}
 					}
 				}
-				active.served = served;
+				active.started = Some(served);
 				// Only a live fill's Range ID matters from here.
 				let live = &active.live;
 				active.fill_ids.retain(|id| live.get(*id).is_some());
 				// One asking only for fills feeds nothing live.
-				if active.demand.is_none() {
-					active.started = true;
-				} else if serve.subscriber.version.has_largest() {
+				if active.demand.is_some() && serve.subscriber.version.has_largest() {
 					// A bounded feed that never delivers Largest goes live at the
 					// answer alone; one that does waits for it to show.
 					// An answer behind the copy's cache fails it.
@@ -11728,7 +11839,9 @@ impl ServeLoop {
 					if let Some(largest) = start.largest {
 						self.serving.report_largest(largest);
 					}
-				} else if let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id) {
+				} else if active.demand.is_some()
+					&& let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id)
+				{
 					entry.answered(served, None);
 				}
 				// A START describes the demand the SUBSCRIBE carried.
@@ -11737,7 +11850,7 @@ impl ServeLoop {
 				// that moved the start makes it stale, and one that
 				// moved back restores it); elsewhere the
 				// request-tracked floor stands rather than a guess.
-				active.started = true;
+
 				// Lite-07 says where every live range starts, so the declaration follows them
 				// whatever an update changed since.
 				if active.live.reports_starts() {
@@ -11761,7 +11874,7 @@ impl ServeLoop {
 			// Where a range an update added starts, from which its groups are owed.
 			lite::SubscribeResponse::Started(started) => {
 				let id = started.id;
-				if !active.started
+				if active.started.is_none()
 					|| !active.live.assigned(id)
 					|| active.live.initial(id)
 					|| active.starts.contains_key(&id)
@@ -11899,20 +12012,17 @@ impl ServeLoop {
 	/// Whether the tail of a lite-07 subscription the publisher finished has settled, so the
 	/// copy can FIN it: every owed group accounted for, or the grace passed.
 	fn poll_finishing(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let (Some((id, settle)), Sub::Active(active)) = (&mut self.finishing, &self.sub) else {
+		let Sub::Active(active) = &mut self.sub else {
 			return Poll::Pending;
 		};
-		// The tail belongs to the subscription that received SUBSCRIBE_FINISH, not one that
-		// replaced it after the demand left and came back.
-		if *id != active.id {
-			self.finishing = None;
-			return Poll::Pending;
-		}
 		// Nothing says which groups are owed until SUBSCRIBE_START says where delivery starts,
 		// so until then only the grace settles.
 		let owed = match active.awaits_start() {
 			true => None,
 			false => active.owed(self.serving.subscription().and_then(|sub| sub.end())),
+		};
+		let Some(settle) = &mut active.finishing else {
+			return Poll::Pending;
 		};
 		settle.poll(waiter, |tail| {
 			owed.as_ref()
@@ -12004,8 +12114,10 @@ impl ServeLoop {
 				}
 				ServeMode::Tail { settle, requested_end } => {
 					// The tail waits for groups, parked ones included.
-					if let Some(id) = self.parked.take() {
-						serve.accept_pipelined(id, &self.serving);
+					if let Sub::Active(active) = &mut self.sub
+						&& std::mem::take(&mut active.parked)
+					{
+						serve.accept_pipelined(active.id, &self.serving);
 					}
 					let owed = match &self.sub {
 						Sub::Active(active) => active.owed(*requested_end),

@@ -60,9 +60,8 @@ The CDN session and discovery remain connected. Release unused CDN media
 demand after a same-epoch handoff, except bounded overlap while validating a
 replacement. If a peer dies, drains, or was never reachable, the shared
 origin selects the best remaining eligible route. This is ordinary transport
-fallback; nothing TURN-shaped is built. Still-open delivery stalls
-are handled by [Route health](/quest/m5/route-health/README.md), only with a
-matching explicit epoch. Epochless source changes restart instead of resume.
+fallback; nothing TURN-shaped is built. Detecting a delivery stall on a
+still-open route is out of scope. Epochless source changes restart instead of resume.
 
 The relay is the nearest STUN server a client can name, but this line takes
 ICE servers from the application and works with any. Decided 2026-10-08: the
@@ -175,5 +174,4 @@ Extractor declaration checks, which analyze only published packages since
 
 ## Related
 
-- [Route health](/quest/m5/route-health/README.md) - epoch-only active/passive delivery recovery on selected connections
 - [E2EE](/quest/m5/e2ee/README.md) - what a peer would need if the token scope stopped being the trust boundary

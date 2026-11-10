@@ -1,5 +1,5 @@
-//! One producer tick, without the publish interval. The benchmark drives this
-//! over a registry it filled itself. Not a public API.
+//! Test support for the producer bench, enabled by the `bench` feature: one producer tick,
+//! without the publish interval, over a registry the bench filled itself.
 
 use std::time::Duration;
 

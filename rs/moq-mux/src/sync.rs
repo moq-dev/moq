@@ -364,6 +364,17 @@ impl Track {
 		moved
 	}
 
+	/// Wait until playback trails the reference by something other than `seen`, returning the new delay.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_delay_changed(&self, waiter: &kio::Waiter, seen: Duration) -> Poll<Duration> {
+		let mut delay = seen;
+		let _ = std::task::ready!(self.clock.changed.poll(waiter, |_| {
+			delay = self.clock.state.lock().unwrap().delay();
+			if delay == seen { Poll::Pending } else { Poll::Ready(()) }
+		}));
+		Poll::Ready(delay)
+	}
+
 	/// Stop while a tail still plays until `drained`, holding a declared end until
 	/// then. Dropping instead discards the tail with the end.
 	pub fn retire(self, drained: Option<Instant>) {
@@ -708,6 +719,11 @@ impl Consumer {
 	/// When this timestamp is due, or `None` before the first anchor.
 	pub fn due(&self, timestamp: Timestamp) -> Option<Instant> {
 		self.current.lock().unwrap().state.lock().unwrap().due(timestamp)
+	}
+
+	/// The media time the clock presents at `at`, or `None` before the first anchor.
+	pub fn position(&self, at: Instant) -> Option<Duration> {
+		self.current.lock().unwrap().state.lock().unwrap().position(at)
 	}
 
 	/// The newest due picture's index in presentation order, or `None` to repeat the previous one.

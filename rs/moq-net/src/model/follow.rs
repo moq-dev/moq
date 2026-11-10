@@ -99,7 +99,7 @@ impl Follow {
 				self.idle = matches!(
 					event,
 					RouteEvent {
-						kind: RouteKind::End,
+						kind: RouteKind::End | RouteKind::Offline,
 						..
 					}
 				);
@@ -135,18 +135,15 @@ impl Follow {
 
 	/// Apply one route's event, returning what it means for the path, if anything.
 	fn fold(&mut self, event: RouteEvent) -> Option<RouteEvent> {
-		let (RouteEvent {
-			kind: RouteKind::Start | RouteKind::Update,
-			announce,
-		}
-		| RouteEvent {
-			kind: RouteKind::Restart | RouteKind::End,
-			announce,
-		}) = &event;
-		if !self.path.has_prefix(&announce.prefix) {
+		let prefix = event.announce.prefix.clone();
+		if !self.path.has_prefix(&prefix) {
 			return None;
 		}
-		let prefix = announce.prefix.clone();
+		// A route that went reports its own way of going: ended by its origin, or let go.
+		let gone = match event.kind {
+			RouteKind::Offline => RouteKind::Offline,
+			_ => RouteKind::End,
+		};
 		let before = self
 			.serving()
 			.map(|standing| (standing.announce.clone(), standing.seen));
@@ -158,7 +155,8 @@ impl Follow {
 			.map(|index| self.covering.swap_remove(index).since);
 		let (announce, since, restart) = match event {
 			RouteEvent {
-				kind: RouteKind::End, ..
+				kind: RouteKind::End | RouteKind::Offline,
+				..
 			} => (None, None, false),
 			RouteEvent {
 				kind: RouteKind::Start,
@@ -191,7 +189,7 @@ impl Follow {
 				announce: after,
 			}),
 			(Some((before, _)), None) => Some(RouteEvent {
-				kind: RouteKind::End,
+				kind: gone,
 				announce: before,
 			}),
 			// The serving route ended, and the one left may have started after it did.
@@ -199,7 +197,7 @@ impl Follow {
 				if before.prefix == prefix && before.prefix != after.prefix && since > self.dry.max(seen) =>
 			{
 				Some(RouteEvent {
-					kind: RouteKind::End,
+					kind: gone,
 					announce: before,
 				})
 			}
@@ -428,7 +426,8 @@ impl Following {
 			// An end is a gap that ended every request on the old route, so whatever serves the
 			// path next is handed out, even the same instance coming back.
 			RouteEvent {
-				kind: RouteKind::End, ..
+				kind: RouteKind::End | RouteKind::Offline,
+				..
 			} => {
 				self.unseen = false;
 				self.end();
@@ -482,6 +481,10 @@ mod tests {
 				kind: RouteKind::End,
 				announce,
 			} => ("end", announce.prefix.to_string()),
+			RouteEvent {
+				kind: RouteKind::Offline,
+				announce,
+			} => ("offline", announce.prefix.to_string()),
 		}
 	}
 
@@ -534,7 +537,7 @@ mod tests {
 		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
 
 		drop(pool);
-		assert_eq!(followed(&mut follow).await, ("end", "pool".into()));
+		assert_eq!(followed(&mut follow).await, ("offline", "pool".into()));
 	}
 
 	/// A follower that joins late starts on the route serving the path, not on whichever
