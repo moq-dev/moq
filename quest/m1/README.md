@@ -50,6 +50,7 @@ moves what remains of them once their claims merge.
 - [.github/ffi.md holds rules, not evidence](/quest/m1/ffi-doc-trim.md) - the FFI release doc drops one-off measurements for links to their PRs
 - [Draft publishing keeps the upload and drops changelog rewriting](/quest/m1/drafts-publish-trim.md) - `sh/drafts/publish.sh` and its test shrink to the datatracker upload
 - [rs/AGENTS.md's time-test rule matches the tree](/quest/m1/test-time-rule.md) - the rule names `#[kio::test]`, which about 4,900 tests use, and is stated once
+- [A lite-07 session leaves no task behind](/quest/m1/lite07-session-tasks.md) - every task a lite-07 session spawned ends once its handles and connection close, and the session bench asserts it for both versions
 
 ## Related
 
