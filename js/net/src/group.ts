@@ -1000,7 +1000,6 @@ export class Consumer {
 		hooks.groupIndex = (group) => group.#index();
 		hooks.groupStarted = (group) =>
 			group.#state.total.peek() > group.#state.offset || group.#state.closed.peek() !== undefined;
-		hooks.groupEnd = (group, until) => group.#end(until);
 		hooks.groupFate = (group) => {
 			const state = group.#state;
 			return () => {
@@ -1032,42 +1031,6 @@ export class Consumer {
 		hooks.onShedRead = (group, notify) => {
 			group.#state.shedRead = notify;
 		};
-	}
-
-	// Resolve a FETCH's end from headers without consuming or pinning payloads. This is a
-	// reader operation: its verdict and replacement copy, not a raw producer end, decide it.
-	async #end(until?: number): Promise<{ end: number; complete: boolean }> {
-		for (;;) {
-			const verdict = this.#verdict.peek();
-			if (verdict) {
-				this.#abandon();
-				throw verdict;
-			}
-			const closed = this.#state.closed.peek();
-			const count = this.frameCount;
-			// The bound's headers are in hand: a failure after them reaches the payload reads,
-			// which drain what is buffered first, rather than refusing the answer.
-			if (until !== undefined && count >= until) {
-				this.#abandon();
-				return { end: until, complete: closed === null && count === until };
-			}
-			if (closed instanceof Error) {
-				if (await this.#resume(closed)) continue;
-				this.#abandon();
-				throw closed;
-			}
-			if (closed !== undefined) {
-				this.#abandon();
-				return { end: count, complete: true };
-			}
-			if (this.#expire()) continue;
-			if (this.#recover?.wants(undefined)) {
-				// Buffered payloads do not satisfy an end wait, so a newer copy may win here.
-				await this.#resume(undefined, false);
-				continue;
-			}
-			await this.#changed();
-		}
 	}
 
 	// Evaluate the drift budget for a read that has nothing buffered and is about to

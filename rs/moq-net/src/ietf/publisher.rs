@@ -2985,30 +2985,16 @@ impl Publisher {
 					Poll::Ready(())
 				})
 			}
-			ietf::SubscribeTracks::ID => {
-				let msg = match ietf::SubscribeTracks::decode_msg(&mut data, this.version) {
-					Err(err) if super::token::refuses_request(&err) => {
-						// Junk after the fields is fatal, which a token refusal must not hide.
-						if !data.is_empty() {
-							return Err(Error::WrongSize);
-						}
-						let kind = request::Kind::SubscribeNamespace;
-						return Ok(this.reject_token(stream, kind, err, serve));
-					}
-					msg => msg?,
-				};
-				if !data.is_empty() {
-					return Err(Error::WrongSize);
-				}
-				tracing::debug!(message = ?msg, "received subscribe_tracks");
+			ietf::SUBSCRIBE_TRACKS_ID => {
 				// We list no tracks by PUBLISH, so each listing is refused on its own and the
-				// session stays up. Decoded first, so a refusal still admits its Request ID.
-				let error =
-					super::namespace::refusal(&msg.prefix, this.version).unwrap_or_else(|| ietf::RequestError {
-						error_code: request::NOT_SUPPORTED,
-						reason_phrase: "SUBSCRIBE_TRACKS is not supported".into(),
-						retry_interval: 0,
-					});
+				// session stays up. The dispatcher already admitted its Request ID, and the rest
+				// of the body is never read.
+				tracing::debug!("refusing subscribe_tracks");
+				let error = ietf::RequestError {
+					error_code: request::NOT_SUPPORTED,
+					reason_phrase: "SUBSCRIBE_TRACKS is not supported".into(),
+					retry_interval: 0,
+				};
 				let mut stream = stream;
 				let buffered = stream.writer.buffer_message(ietf::RequestError::ID, &error);
 				deliver_refusal(stream, buffered, serve, "subscribe_tracks refusal failed")

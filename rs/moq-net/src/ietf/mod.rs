@@ -49,7 +49,6 @@ mod session;
 pub mod solicit;
 mod subscribe;
 mod subscribe_namespace;
-mod subscribe_tracks;
 #[cfg(feature = "async")]
 mod subscriber;
 pub(crate) mod token;
@@ -76,7 +75,6 @@ pub use request::*;
 pub use session::*;
 pub use subscribe::*;
 pub use subscribe_namespace::*;
-pub use subscribe_tracks::*;
 #[cfg(feature = "async")]
 use subscriber::*;
 // The fuzz harness drives a subgroup stream's ingest directly.

@@ -99,8 +99,9 @@ Still red from `main`, ours:
 - moq-dev-js `data-subgroup-basic` against libquicr never sees the track
   end, while moq-dev-rs passes. Not yet traced.
 - Every `js-web` publisher cell behind a joining FETCH (imquic, MOQtail
-  draft-22, aiomoqt, red5) was refused its FETCH; JS now serves cached and
-  draft-18 joining FETCH, so rerun them.
+  draft-22, aiomoqt, red5) was refused its FETCH; JS still refuses every
+  FETCH, but now serves a draft-18 Next Object subscription's current group
+  whole, so rerun them.
 
 Theirs, reported or waiting on others:
 

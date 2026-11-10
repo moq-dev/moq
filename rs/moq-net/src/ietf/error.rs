@@ -147,9 +147,6 @@ pub(crate) mod request {
 	/// The endpoint does not implement this request at all, as opposed to refusing this one.
 	pub(crate) const NOT_SUPPORTED: u64 = 0x3;
 
-	/// A second subscription to a track the peer already subscribes to.
-	pub(crate) const DUPLICATE_SUBSCRIPTION: u64 = 0x19;
-
 	/// The endpoint is overloaded and cannot process the request.
 	pub(crate) const EXCESSIVE_LOAD: u64 = 0x9;
 

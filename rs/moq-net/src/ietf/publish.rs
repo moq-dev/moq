@@ -228,25 +228,6 @@ pub struct Publish<'a> {
 	pub filter: Option<Filter>,
 }
 
-impl Publish<'_> {
-	/// Copy the borrowed track name, so the request outlives the bytes it came from.
-	pub fn into_owned(self) -> Publish<'static> {
-		Publish {
-			request_id: self.request_id,
-			authorization_token: self.authorization_token,
-			track_namespace: self.track_namespace,
-			track_name: Cow::Owned(self.track_name.into_owned()),
-			track_alias: self.track_alias,
-			largest_location: self.largest_location,
-			forward: self.forward,
-			properties: self.properties,
-			subscriber_priority: self.subscriber_priority,
-			group_order: self.group_order,
-			filter: self.filter,
-		}
-	}
-}
-
 impl<'a> Message<'a> for Publish<'a> {
 	const ID: u64 = 0x1D;
 

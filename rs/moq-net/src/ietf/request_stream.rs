@@ -238,51 +238,6 @@ impl Reject {
 	}
 }
 
-/// Abandon a request we sent: STOP_SENDING, then our FIN and its acknowledgement.
-///
-/// There is no message for it, only the stream itself: a FIN is explicitly not a
-/// cancellation (draft-22 section 6.4.2.2), so section 6.4.2.3's pair applies, an endpoint
-/// that has already FINed its sending direction cancels with STOP_SENDING on the receiving
-/// one. Finishing alone would leave the writer's Drop free to RESET_STREAM, discarding what
-/// was already written, so the writer is closed instead; a request the peer's send window
-/// held back resets.
-pub(super) struct Cancel {
-	/// Held until the close settles, as the request stream it belongs to.
-	_reader: crate::coding::Reader<crate::transport::boxed::RecvStream, Version>,
-	closing: Option<crate::coding::Closing<crate::transport::boxed::SendStream, Version>>,
-}
-
-impl Cancel {
-	pub(super) fn new(stream: Stream<Transport, Version>) -> Self {
-		let Stream { writer, mut reader } = stream;
-		// STOP_SENDING needs no acknowledgement, so it goes first and the wait covers only
-		// what we still have to deliver.
-		reader.abort(&Error::Cancel);
-		let closing = match writer.closing() {
-			Ok(closing) => Some(closing),
-			Err(err) => {
-				tracing::debug!(%err, "failed to close the subscribe stream");
-				None
-			}
-		};
-		Self {
-			_reader: reader,
-			closing,
-		}
-	}
-
-	/// Ready once the peer acknowledges our FIN, or the stream dies.
-	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		if let Some(closing) = &mut self.closing {
-			if let Err(err) = ready!(closing.poll(waiter)) {
-				tracing::debug!(%err, "failed to close the subscribe stream");
-			}
-			self.closing = None;
-		}
-		Poll::Ready(())
-	}
-}
-
 /// Deliver the last message buffered on a response: flush it, then finish the stream and
 /// wait for the peer's acknowledgement.
 ///

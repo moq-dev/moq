@@ -1673,7 +1673,7 @@ impl BidiServe {
 			ietf::Subscribe::ID
 				| ietf::Fetch::ID
 				| ietf::SubscribeNamespace::ID
-				| ietf::SubscribeTracks::ID
+				| ietf::SUBSCRIBE_TRACKS_ID
 				| ietf::TrackStatus::ID
 				| ietf::Publish::ID
 				| ietf::PublishNamespace::ID
@@ -1688,11 +1688,11 @@ impl BidiServe {
 			}
 		}
 		Ok(match id {
-			// Publisher handles: Subscribe, Fetch, SubscribeNamespace, SubscribeTracks, TrackStatus
+			// Publisher handles: Subscribe, Fetch, SubscribeNamespace, SUBSCRIBE_TRACKS, TrackStatus
 			ietf::Subscribe::ID
 			| ietf::Fetch::ID
 			| ietf::SubscribeNamespace::ID
-			| ietf::SubscribeTracks::ID
+			| ietf::SUBSCRIBE_TRACKS_ID
 			| ietf::TrackStatus::ID => BidiStep::Serve(publisher.handle_stream(id, data, stream)?),
 			// Subscriber handles: Publish, PublishNamespace
 			ietf::Publish::ID | ietf::PublishNamespace::ID => {
@@ -4191,9 +4191,9 @@ mod tests {
 					"a 4097 byte full track name",
 				),
 				(
-					frame(version, ietf::SubscribeTracks::ID, &oversized_prefix),
+					frame(version, ietf::SubscribeNamespace::ID, &oversized_prefix),
 					SessionError::ProtocolViolation,
-					"a 4097 byte SUBSCRIBE_TRACKS prefix",
+					"a 4097 byte SUBSCRIBE_NAMESPACE prefix",
 				),
 				(
 					subscribe(&[&valid[..], &[0]].concat()),

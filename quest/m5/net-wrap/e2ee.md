@@ -72,7 +72,7 @@ the reverse (decided 2026-10-20, maintainer):
   buffers chunks from `write` and seals at `finish`, and its frame consumer
   yields chunks only after the frame authenticates.
 - Listing (maintainer, 2026-10-24): the wire listing (moq-lite's Tracks
-  stream, IETF SUBSCRIBE_TRACKS) carries physical names unchanged, so
+  stream) carries physical names unchanged, so
   relays list a protected broadcast like any other. The consumer's `tracks`
   opens each listed physical name and reports its semantic name. A name that does not
   open (relay-forged, another epoch's, malformed) is skipped after one open

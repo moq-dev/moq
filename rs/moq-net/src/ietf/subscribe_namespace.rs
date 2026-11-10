@@ -9,6 +9,10 @@ use super::publish_namespace::{AdvertParams, Negotiated};
 
 use super::Version;
 
+/// SUBSCRIBE_TRACKS (0x51, draft-18+), which lists every track under a prefix. We send
+/// none and refuse each one received, so only its type is known.
+pub(crate) const SUBSCRIBE_TRACKS_ID: u64 = 0x51;
+
 /// SUBSCRIBE_NAMESPACE message (type 0x50).
 #[derive(Clone, Debug)]
 pub struct SubscribeNamespace {
