@@ -93,7 +93,6 @@ lite-07; bitrate enforcement is not part of the next release.
 - [Rust and JS end a lite-05 track the same way after an inclusive SUBSCRIBE_END](/quest/m5/lite05-subscribe-end.md) - after a legacy inclusive SUBSCRIBE_END, Rust and JS both end the track instead of Rust sending a FIN and JS only releasing
 - [Byte-at-a-time MKV input imports as fast as chunked input](/quest/m5/mkv-input-coalesce.md) - the MKV importer fed one byte at a time is no slower than before moq-dev/moq#7234
 - [A transcode ladder probes an unseen source shape without stalling its other rungs](/quest/m5/transcode-parallel-open.md) - a source changing to an unseen size opens the new encoders without stalling the ladder's other rungs
-- [rind-instant-acme is on crates.io](/quest/m5/rind-instant-acme.md) - waiting on instant-acme 0.9 and rind publishing its adapter
 - [Relay ACME on instant-acme](/quest/m5/relay-acme.md) - moq-relay's ACME returns on instant-acme and rind, once a user needs it
 - [Announce credit](/quest/m5/announce-credit.md) - a subscriber bounds an Announce Stream's routes with credit at the wire, so a path flood never closes a session
 - [A C origin can discover eagerly, like a relay](/quest/m5/c-origin-relay.md) - the C API puts an origin in relay mode, so forwarding a client session's routes needs no local announce watcher
