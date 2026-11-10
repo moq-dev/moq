@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, Elapsed, Manual, timeout, yieldNow } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
+import type { RouteOptions } from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { Viewers } from "../bandwidth.ts";
@@ -3567,11 +3568,11 @@ test("a cancelled legacy datagram lookup cannot refuse a stream answer arriving 
 
 // A lite-07 peer's announce stream, after the request: what the peer writes, and the replies
 // the subscriber sends back.
-async function routedStream() {
+async function routedStream(options?: RouteOptions) {
 	const version = Version.DRAFT_07;
 	const { quic, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const announced = subscriber.routes();
+	const announced = subscriber.routes(undefined, options);
 	const stream = await opened(0);
 	const peer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => stream.inbound.enqueue(new Uint8Array(chunk)) }),
@@ -3741,6 +3742,30 @@ test("a lite-07 consume pinned to an instance names its route's node", async () 
 	announced.close();
 	subscriber.close();
 	await info;
+});
+
+// Forwarding code asks for each origin node's claim at a path as its own route.
+test("a lite-07 stream reports each node's claim with claims", async () => {
+	const { subscriber, announced, send } = await routedStream({ claims: true });
+	const pool = Path.from("pool");
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: pool, route: 0n, instance: Instance.parse("a") });
+	await send({ status: "floor", id: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start", route: { node: NODE_A } });
+	await send({ status: "routeStart", node: NODE_B, advert: ADVERT });
+	await send({ status: "active", suffix: pool, route: 1n, instance: Instance.parse("b") });
+	await send({ status: "floor", id: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start", route: { node: NODE_B } });
+
+	// The route ending takes only its own claim.
+	await send({ status: "routeEnd", id: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "offline", route: { node: NODE_A } });
+	await send({ status: "update", id: 1n, cost: 3n });
+	await send({ status: "floor", id: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "update", route: { node: NODE_B } });
+
+	announced.close();
+	subscriber.close();
 });
 
 test("a lite-07 batch applies at its floor, and a held route turns unavailable", async () => {

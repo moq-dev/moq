@@ -403,7 +403,7 @@ export class Connection implements Session {
 	}
 
 	/** Every route change matching `scope`, for code that forwards routes. @internal */
-	routes(scope?: Path.Pattern, options?: announce.Options): announce.Routes {
+	routes(scope?: Path.Pattern, options?: announce.RouteOptions): announce.Routes {
 		return this.#subscriber.routes(scope, options);
 	}
 

@@ -414,9 +414,10 @@ export class Subscriber {
 	 * never hides anything, so the rule is also applied here.
 	 *
 	 * Only routes whose literal name matches `scope` are reported, unless `options.covering`
-	 * also asks for those whose subtree overlaps it.
+	 * also asks for those whose subtree overlaps it. A lite-07 stream reports the best claim at
+	 * each path, or each origin node's with `options.claims`.
 	 */
-	routes(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Routes {
+	routes(scope: Path.Pattern = Path.Pattern.all(), options?: announce.RouteOptions): announce.Routes {
 		const announced = new announce.Producer();
 		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
 		const consumer = announced.consume();
@@ -428,6 +429,7 @@ export class Subscriber {
 			scope,
 			options?.hidden ?? false,
 			options?.covering ?? false,
+			options?.claims ?? false,
 		);
 		return consumer;
 	}
@@ -438,6 +440,7 @@ export class Subscriber {
 		scope: Path.Pattern,
 		hidden: boolean,
 		covering: boolean,
+		claims: boolean,
 	): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
@@ -530,7 +533,7 @@ export class Subscriber {
 			}
 
 			if (hasRoutes(this.version)) {
-				await this.#receiveRouted(stream, announced, prefix, scope, visible);
+				await this.#receiveRouted(stream, announced, prefix, scope, visible, claims);
 				announced.close();
 				stream.close();
 				return;
@@ -854,6 +857,7 @@ export class Subscriber {
 		prefix: Path.Valid,
 		scope: Path.Pattern,
 		visible: (path: Path.Valid) => boolean,
+		perNode: boolean,
 	): Promise<void> {
 		type Claim = { instance: Instance.Valid; epoch: bigint; cost: Cost };
 		type Route = {
@@ -880,8 +884,8 @@ export class Subscriber {
 		const nodes = new Set<bigint>();
 		// The routes whose committed claims include each path.
 		const byPath = new Map<Path.Valid, Set<bigint>>();
-		// What each visible path reports.
-		const reported = new Map<Path.Valid, WireRoute>();
+		// What each visible path reports; see `refresh`.
+		const reported = new Map<Path.Valid, Map<bigint | undefined, WireRoute>>();
 		const history = new AnnounceHistory();
 		let nextRoute = 0n;
 		let synced = false;
@@ -925,10 +929,12 @@ export class Subscriber {
 			else this.#consumes.withdraw(path, wire.owner);
 		};
 
-		// Report the best claim at `path`, or its end. `lost` marks the routes leaving as let go
-		// rather than withdrawn, so the path goes offline rather than ending.
+		// Report the best claim at `path`, or with `perNode` each origin node's, and each one's end.
+		// `lost` marks the routes leaving as let go rather than withdrawn, so they go offline
+		// rather than ending.
 		const refresh = (path: Path.Valid, lost: boolean) => {
-			let best: WireRoute | undefined;
+			// Keyed by origin node with `perNode`, and otherwise the one key `undefined`.
+			const now = new Map<bigint | undefined, WireRoute>();
 			if (visible(path)) {
 				const candidates: WireRoute[] = [];
 				for (const id of byPath.get(path) ?? []) {
@@ -936,25 +942,33 @@ export class Subscriber {
 					const claim = wire.committed.get(path);
 					if (claim) candidates.push(candidate(wire, claim));
 				}
-				// The same pick a consume of `path` makes from the cache.
-				best = bestCandidate(path, path, candidates, (next) => next);
+				if (perNode) {
+					for (const next of candidates) now.set(next.node, next);
+				} else {
+					// The same pick a consume of `path` makes from the cache.
+					const best = bestCandidate(path, path, candidates, (next) => next);
+					if (best) now.set(undefined, best);
+				}
 			}
 
 			const captures = scopeCaptures(scope, path);
-			const prev = reported.get(path);
-			if (!best) {
-				if (!prev) return;
-				reported.delete(path);
-				console.debug(`announced: broadcast=${path} active=false lost=${lost}`);
-				announced.append({ prefix: path, captures, kind: lost ? "offline" : "end", route: prev });
-				return;
+			const prev = reported.get(path) ?? new Map<bigint | undefined, WireRoute>();
+			// Arrivals first, so a reader sees a claim replaced rather than the path gone between.
+			for (const [key, next] of now) {
+				const was = prev.get(key);
+				if (was && routesEqual(was, next)) continue;
+				const restart = !!was && (was.instance !== next.instance || was.epoch !== next.epoch);
+				const kind = !was ? "start" : restart ? "restart" : "update";
+				console.debug(`announced: broadcast=${path} ${kind} instance=${next.instance} node=${next.node}`);
+				announced.append({ prefix: path, captures, kind, route: next });
 			}
-			if (prev && routesEqual(prev, best)) return;
-			reported.set(path, best);
-			const restart = !!prev && (prev.instance !== best.instance || prev.epoch !== best.epoch);
-			const kind = !prev ? "start" : restart ? "restart" : "update";
-			console.debug(`announced: broadcast=${path} ${kind} instance=${best.instance} node=${best.node}`);
-			announced.append({ prefix: path, captures, kind, route: best });
+			for (const [key, was] of prev) {
+				if (now.has(key)) continue;
+				console.debug(`announced: broadcast=${path} active=false lost=${lost} node=${was.node}`);
+				announced.append({ prefix: path, captures, kind: lost ? "offline" : "end", route: was });
+			}
+			if (now.size > 0) reported.set(path, now);
+			else reported.delete(path);
 		};
 		const refreshRoute = (wire: Route, lost: boolean) => {
 			for (const path of wire.committed.keys()) {

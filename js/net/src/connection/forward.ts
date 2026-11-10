@@ -22,10 +22,20 @@ export const DISCOVERY_REMOVED =
 /** How long an announce request outlives its last watcher, so a watcher torn down and rebuilt reuses it. */
 const LINGER = Duration.millis(2000);
 
+/**
+ * Names one route a session reports: its prefix, and on lite-07 the origin node whose claim it
+ * is, since a stream reports each node's claim at a path as its own route.
+ */
+type Key = string;
+
+function keyOf(prefix: Path.Valid, route: WireRoute): Key {
+	return route.node === undefined ? prefix : `${prefix}\u0000${route.node}`;
+}
+
 /** One announce request open on the session, and the routes it currently reports. */
 interface Interest {
 	readonly announced: Announce.Routes;
-	readonly reported: Set<Path.Valid>;
+	readonly reported: Set<Key>;
 	/** The pending close, set while nothing at or beneath the prefix is watched. */
 	linger?: () => void;
 	/** Closed on purpose, so its end is not a discovery failure. */
@@ -39,6 +49,7 @@ interface Interest {
  * request handing over to another never retracts it. The first reporter drives it.
  */
 interface Reported {
+	readonly prefix: Path.Valid;
 	handle: Claim;
 	/** Each request's latest route for the prefix. */
 	readonly reporters: Map<Interest, WireRoute>;
@@ -85,22 +96,23 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 	let blind = false;
 
 	const interests = new Map<Path.Valid, Interest>();
-	const routes = new Map<Path.Valid, Reported>();
+	const routes = new Map<Key, Reported>();
 
 	void serveRequests(conn, origin);
 
 	const report = (interest: Interest, event: Announce.RouteEvent) => {
 		const { prefix, route } = event;
+		const key = keyOf(prefix, route);
 		if (event.kind === "end" || event.kind === "offline") {
-			unreport(interest, prefix, event.kind === "end");
+			unreport(interest, key, event.kind === "end");
 			return;
 		}
-		interest.reported.add(prefix);
+		interest.reported.add(key);
 
-		const existing = routes.get(prefix);
+		const existing = routes.get(key);
 		if (!existing) {
 			const handle = originWire.receive(prefix, route);
-			routes.set(prefix, { handle, reporters: new Map([[interest, route]]) });
+			routes.set(key, { prefix, handle, reporters: new Map([[interest, route]]) });
 			void drive(handle, conn);
 			return;
 		}
@@ -109,21 +121,21 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 		existing.reporters.set(interest, route);
 		// Another request covering the prefix only holds it; the first reporter drives it.
 		if (joined && existing.reporters.keys().next().value === interest) {
-			updateReported(existing, prefix, route, event.kind === "restart");
+			updateReported(existing, route, event.kind === "restart");
 		}
 	};
 
 	/**
 	 * Bring the handle up to its driving reporter's route: a fresh route for another publisher
-	 * instance, so nothing resolved through the old one is joined again, and an in-place
+	 * instance or epoch, so nothing resolved through the old one is joined again, and an in-place
 	 * update otherwise.
 	 */
-	const updateReported = (existing: Reported, prefix: Path.Valid, route: WireRoute, restart: boolean) => {
+	const updateReported = (existing: Reported, route: WireRoute, restart: boolean) => {
 		const current = wireOf(existing.handle).info;
-		if (restart || route.epoch !== current?.epoch) {
+		if (restart || route.instance !== current?.instance || route.epoch !== current?.epoch) {
 			// Inserted before the old one leaves, so local readers see one restart rather than
 			// an end and a start.
-			const handle = originWire.receive(prefix, route);
+			const handle = originWire.receive(existing.prefix, route);
 			existing.handle.close();
 			existing.handle = handle;
 			void drive(handle, conn);
@@ -132,23 +144,23 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 		}
 	};
 
-	/** Stop `interest` reporting `prefix`, which its peer `ended` rather than lost. */
-	const unreport = (interest: Interest, prefix: Path.Valid, ended = false) => {
-		interest.reported.delete(prefix);
-		const existing = routes.get(prefix);
+	/** Stop `interest` reporting the route `key` names, which its peer `ended` rather than lost. */
+	const unreport = (interest: Interest, key: Key, ended = false) => {
+		interest.reported.delete(key);
+		const existing = routes.get(key);
 		if (!existing) return;
 		const driving = existing.reporters.keys().next().value === interest;
 		if (!existing.reporters.delete(interest)) return;
 
 		const next = existing.reporters.values().next();
 		if (next.done) {
-			routes.delete(prefix);
+			routes.delete(key);
 			if (ended) wireOf(existing.handle).end();
 			else existing.handle.close();
 		} else if (driving) {
 			// The next request takes over driving. Without an instance nothing proves it reports
 			// the stream the handle serves, so the route restarts rather than stitch two together.
-			updateReported(existing, prefix, next.value, next.value.instance === undefined);
+			updateReported(existing, next.value, next.value.instance === undefined);
 		}
 	};
 
@@ -176,7 +188,7 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 
 		// Hidden and covering routes are mirrored too; each local reader opts in on its own.
 		const interest: Interest = {
-			announced: conn.routes(Path.Pattern.subtree(prefix), { hidden: true, covering: true }),
+			announced: conn.routes(Path.Pattern.subtree(prefix), { hidden: true, covering: true, claims: true }),
 			reported: new Set(),
 			closing: false,
 			held: new Map(),
@@ -298,10 +310,10 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
  */
 async function drive(handle: Claim, conn: Session): Promise<void> {
 	const session = wireOf(conn);
-	const instance = wireOf(handle).info?.instance;
 	try {
 		for await (const request of handle.requested()) {
-			request.serve(session.consume(request.path, instance));
+			// Read per request: a handover may update the handle in place.
+			request.serve(session.consume(request.path, wireOf(handle).info?.instance));
 		}
 	} catch {
 		handle.close();

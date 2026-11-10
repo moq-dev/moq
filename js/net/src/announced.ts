@@ -91,6 +91,20 @@ export interface Options {
 	covering?: boolean;
 }
 
+/**
+ * Options for a route stream, which forwarding code reads.
+ *
+ * @internal
+ */
+export interface RouteOptions extends Options {
+	/**
+	 * Report each origin node's claim at a path as its own route, rather than only the one the
+	 * session ranks best, so the origin it feeds ranks every candidate as rs/moq-net's does. Only
+	 * lite-07 carries more than one route per path on a stream.
+	 */
+	claims?: boolean;
+}
+
 /** Reactive backing state shared by announcement producers and consumers. */
 class AnnounceState {
 	queue = new Signal<RouteEvent[]>([]);
