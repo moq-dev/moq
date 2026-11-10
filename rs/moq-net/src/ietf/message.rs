@@ -7,7 +7,7 @@ pub(super) fn control(id: u64) -> crate::stats::Message {
 	use crate::stats::Message as Class;
 	match id {
 		PublishNamespace::ID | SubscribeNamespace::ID | Namespace::ID | NamespaceDone::ID => Class::Announce,
-		TrackStatus::ID | SUBSCRIBE_TRACKS_ID => Class::TrackInfo,
+		TrackStatus::ID | SubscribeTracks::ID | PublishSkipped::ID => Class::TrackInfo,
 		Subscribe::ID | SubscribeOk::ID | Publish::ID | PublishOk::ID | PublishDone::ID => Class::Subscribe,
 		Fetch::ID | FetchOk::ID => Class::Fetch,
 		auth::Auth::ID | auth::AuthOk::ID | auth::AuthError::ID => Class::Auth,

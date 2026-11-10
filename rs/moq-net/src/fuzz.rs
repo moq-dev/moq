@@ -272,7 +272,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version:
 const LITE_KINDS: u8 = 34;
 
 /// How many types [`ietf_wire`] dispatches over.
-const IETF_KINDS: u8 = 25;
+const IETF_KINDS: u8 = 27;
 
 /// Split the two selector bytes off the input: a version and a type.
 fn select(data: &[u8], versions: usize) -> Option<(usize, u8, &[u8])> {
@@ -1071,21 +1071,23 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		7 => roundtrip::<ietf::Publish<'_>, _>(rest, &mut Vec::new(), version),
 		8 => roundtrip::<ietf::PublishOk, _>(rest, &mut Vec::new(), version),
 		9 => roundtrip::<ietf::PublishDone<'_>, _>(rest, &mut Vec::new(), version),
-		10 => roundtrip::<ietf::Subscribe<'_>, _>(rest, &mut Vec::new(), version),
-		11 => roundtrip::<ietf::SubscribeOk, _>(rest, &mut Vec::new(), version),
-		12 => roundtrip::<ietf::SubscribeUpdate, _>(rest, &mut Vec::new(), version),
-		13 => roundtrip::<ietf::SubscribeNamespace, _>(rest, &mut Vec::new(), version),
-		14 => roundtrip::<ietf::Namespace, _>(rest, &mut Vec::new(), version),
-		15 => roundtrip::<ietf::NamespaceDone, _>(rest, &mut Vec::new(), version),
-		16 => roundtrip::<ietf::RequestOk, _>(rest, &mut Vec::new(), version),
-		17 => roundtrip::<ietf::RequestError<'_>, _>(rest, &mut Vec::new(), version),
-		18 => roundtrip::<ietf::GroupHeader, _>(rest, &mut Vec::new(), version),
-		19 => roundtrip::<ietf::Parameters, _>(rest, &mut Vec::new(), version),
-		20 => roundtrip::<ietf::Location, _>(rest, &mut Vec::new(), version),
-		21 => roundtrip::<ietf::FetchObject, _>(rest, &mut Vec::new(), version),
-		22 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, &mut Vec::new(), version),
-		23 => roundtrip::<ietf::ObjectDatagram, _>(rest, &mut Vec::new(), version),
-		24 => setup::<crate::setup::Setup>(rest, &mut Vec::new(), version, |setup| &setup.parameters),
+		10 => roundtrip::<ietf::PublishSkipped<'_>, _>(rest, &mut Vec::new(), version),
+		11 => roundtrip::<ietf::Subscribe<'_>, _>(rest, &mut Vec::new(), version),
+		12 => roundtrip::<ietf::SubscribeOk, _>(rest, &mut Vec::new(), version),
+		13 => roundtrip::<ietf::SubscribeUpdate, _>(rest, &mut Vec::new(), version),
+		14 => roundtrip::<ietf::SubscribeNamespace, _>(rest, &mut Vec::new(), version),
+		15 => roundtrip::<ietf::Namespace, _>(rest, &mut Vec::new(), version),
+		16 => roundtrip::<ietf::NamespaceDone, _>(rest, &mut Vec::new(), version),
+		17 => roundtrip::<ietf::RequestOk, _>(rest, &mut Vec::new(), version),
+		18 => roundtrip::<ietf::RequestError<'_>, _>(rest, &mut Vec::new(), version),
+		19 => roundtrip::<ietf::GroupHeader, _>(rest, &mut Vec::new(), version),
+		20 => roundtrip::<ietf::Parameters, _>(rest, &mut Vec::new(), version),
+		21 => roundtrip::<ietf::Location, _>(rest, &mut Vec::new(), version),
+		22 => roundtrip::<ietf::FetchObject, _>(rest, &mut Vec::new(), version),
+		23 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, &mut Vec::new(), version),
+		24 => roundtrip::<ietf::ObjectDatagram, _>(rest, &mut Vec::new(), version),
+		25 => roundtrip::<ietf::SubscribeTracks, _>(rest, &mut Vec::new(), version),
+		26 => setup::<crate::setup::Setup>(rest, &mut Vec::new(), version, |setup| &setup.parameters),
 		_ => unreachable!("kind is taken modulo IETF_KINDS"),
 	}
 }
@@ -1681,7 +1683,7 @@ pub fn seeds() -> Vec<Seed> {
 	for (index, version) in IETF_VERSIONS.iter().enumerate() {
 		let outer = crate::Version::Ietf(*version);
 		let parameters = ietf::Parameters::default().encode_bytes(*version).unwrap();
-		let messages = vec![(24, crate::setup::Setup { parameters }.encode_bytes(outer).unwrap())];
+		let messages = vec![(26, crate::setup::Setup { parameters }.encode_bytes(outer).unwrap())];
 		for (kind, message) in messages {
 			let mut data = vec![index as u8, kind];
 			data.extend(message);
@@ -1773,11 +1775,11 @@ pub fn seeds() -> Vec<Seed> {
 			continue;
 		};
 
-		let mut data = vec![index as u8, 11];
+		let mut data = vec![index as u8, 12];
 		data.extend_from_slice(&encoded);
 		seeds.push(Seed {
 			target: "ietf",
-			kind: 11,
+			kind: 12,
 			data,
 		});
 	}

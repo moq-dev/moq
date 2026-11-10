@@ -2049,6 +2049,8 @@ pub(crate) enum RequestKind {
 	/// A SUBSCRIBE_NAMESPACE: the peer discovers only the broadcasts the token allows
 	/// beneath the requested prefix.
 	Discover,
+	/// A PUBLISH: the peer offers a track. Covered by the grant's `publish` patterns.
+	Publish,
 }
 
 impl RequestKind {
@@ -2060,6 +2062,7 @@ impl RequestKind {
 		match self {
 			Self::Subscribe => grant.subscribe.matches(path),
 			Self::Discover => !grant.subscribe.is_empty(),
+			Self::Publish => grant.publish.matches(path),
 			Self::PublishNamespace => {
 				crate::Pattern::subtree(path).is_ok_and(|subtree| grant.publish.contains(&subtree))
 			}
@@ -2553,7 +2556,8 @@ impl Gate {
 	}
 
 	/// The kind of request this gate admits, for its token's grant to cover. A gate on what
-	/// the peer publishes to us verifies only a PUBLISH_NAMESPACE's token.
+	/// the peer publishes to us verifies only a PUBLISH_NAMESPACE's token; a PUBLISH's goes
+	/// straight to [`Link::verify_request`].
 	fn kind(&self) -> RequestKind {
 		match (self.discovery, self.direction) {
 			(true, _) => RequestKind::Discover,

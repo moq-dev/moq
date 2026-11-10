@@ -5,14 +5,19 @@ use crate::datagram;
 /// Keeps the initial stream interest until its answer also accepts the datagram request.
 pub(super) struct Requested {
 	this: Subscriber,
-	key: TrackKey,
+	key: tracks::TrackKey,
 	id: std::sync::Arc<()>,
 	subscribing: track::Subscribing,
 	priority: i8,
 }
 
 impl Requested {
-	pub(super) fn new(this: Subscriber, key: TrackKey, track: track::Consumer, request: datagram::Request) -> Self {
+	pub(super) fn new(
+		this: Subscriber,
+		key: tracks::TrackKey,
+		track: track::Consumer,
+		request: datagram::Request,
+	) -> Self {
 		let priority = request.priority().unwrap_or(0);
 		let id = std::sync::Arc::new(());
 		this.state
@@ -94,7 +99,7 @@ impl Shared {
 	pub(super) fn new(
 		this: &Subscriber,
 		source: &broadcast::Producer,
-		key: TrackKey,
+		key: tracks::TrackKey,
 		track: &track::Producer,
 	) -> Option<Self> {
 		let info = datagram::Info::default()

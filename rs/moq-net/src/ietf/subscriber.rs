@@ -24,24 +24,10 @@ use kio::Lock;
 mod namespaces;
 pub(super) use namespaces::Namespaces;
 mod datagrams;
+mod tracks;
 use datagrams::{Requested, Shared};
 
 const TRACK_ALIAS_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// A track, by its namespace and name.
-type TrackKey = (Path, std::sync::Arc<str>);
-
-/// How a PUBLISH_DONE ends the track: only TRACK_ENDED ends it cleanly. Any other status,
-/// INTERNAL_ERROR included, fails the copy rather than declare an end the track may run past.
-fn done_end(done: &ietf::PublishDone, version: Version) -> Result<(), Error> {
-	match done.status_code == ietf::PublishDoneStatus::TrackEnded.code() {
-		true => Ok(()),
-		false => Err(done
-			.end(version)
-			.err()
-			.unwrap_or(Error::Remote(u32::try_from(done.status_code).unwrap_or(u32::MAX)))),
-	}
-}
 
 /// How many cancelled aliases to remember. Objects keep arriving for about a round trip
 /// after we cancel, so a handful covers the window, while the cap keeps a long session with
@@ -82,13 +68,21 @@ enum Alias {
 	/// promptly is what bounds the exposure, since it caps the arrival window at a round
 	/// trip rather than leaving it open for the life of the session.
 	Retired,
+
+	/// A paused subscription a listing holds: the alias stays its own, but a group carrying
+	/// it is refused rather than buffered, since nothing reads the track.
+	Paused(RequestId),
+
+	/// A paused subscription resuming, whose REQUEST_UPDATE is not answered yet. Its groups
+	/// can overtake the answer, so they wait on it as they would on a SUBSCRIBE_OK.
+	Resuming(RequestId),
 }
 
 impl Alias {
 	/// The subscription holding the alias, if any.
 	fn holder(self) -> Option<RequestId> {
 		match self {
-			Self::Active(id) => Some(id),
+			Self::Active(id) | Self::Paused(id) | Self::Resuming(id) => Some(id),
 			Self::Retired => None,
 		}
 	}
@@ -126,6 +120,10 @@ fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 			table.retired.retain(|&retired| retired != alias);
 			Ok(())
 		}
+		Entry::Occupied(mut entry) if entry.get().holder() == Some(request_id) => {
+			entry.insert(Alias::Active(request_id));
+			Ok(())
+		}
 		Entry::Occupied(_) => Err(Error::Duplicate),
 		Entry::Vacant(entry) => {
 			entry.insert(Alias::Active(request_id));
@@ -149,6 +147,19 @@ pub(super) fn is_protocol_violation(err: &Error) -> bool {
 			| Error::UnexpectedMessage
 			| Error::UnexpectedStream
 	)
+}
+
+/// Move `alias` to `to` (paused, resuming, or active again), unless another subscription
+/// than `request_id` holds it.
+fn rebind_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId, to: Alias) {
+	let Ok(mut aliases) = aliases.write() else {
+		return;
+	};
+	if let Some(held) = aliases.map.get_mut(&alias)
+		&& held.holder() == Some(request_id)
+	{
+		*held = to;
+	}
 }
 
 /// Retire an alias, so groups still in flight for it are dropped promptly rather than
@@ -183,7 +194,7 @@ fn retire_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 struct State {
 	/// Clean ends keep their request streams until the driver drains datagrams received with them.
 	datagram_ends: Option<kio::Producer<()>>,
-	datagram_requests: HashMap<TrackKey, (std::sync::Arc<()>, crate::datagram::Request)>,
+	datagram_requests: HashMap<tracks::TrackKey, (std::sync::Arc<()>, crate::datagram::Request)>,
 	// Each active subscription
 	subscribes: HashMap<RequestId, TrackState>,
 
@@ -703,7 +714,7 @@ pub(super) async fn refusing_upstream(
 	(subscriber, task_set)
 }
 
-/// A publisher's answer to a SUBSCRIBE.
+/// A publisher's answer to a SUBSCRIBE, or to the REQUEST_UPDATE resuming one.
 enum Answer {
 	Accepted(Accepted),
 	/// A REQUEST_ERROR: the error its code reads as, and the Retry Interval it asked for.
@@ -1094,8 +1105,11 @@ pub(super) struct Subscriber {
 	going_away: crate::goaway::GoingAway,
 	// Our grant (MoQ Auth): a subscription it stops covering is cancelled.
 	auth: crate::auth::Link,
-	// Namespaces the peer may have announced at once (`session::Limits::announces`).
+	// Namespaces the peer may have announced at once (`session::Limits::announces`), and
+	// tracks it lists to us.
 	pub(super) announces: crate::session::Slots,
+	// What SUBSCRIBE_TRACKS lists of the peer's tracks.
+	listings: Lock<tracks::Listings>,
 }
 
 /// One SUBSCRIBE_NAMESPACE on its stream.
@@ -1140,8 +1154,10 @@ impl ResolveAlias {
 			// our STOP_SENDING. Discard the group now rather than waiting out the timeout
 			// for a binding that is never coming.
 			Some(Alias::Retired) => Poll::Ready(Err(Error::Cancel)),
-			None if aliases.ended => Poll::Ready(Err(Error::Cancel)),
-			None => Poll::Pending,
+			// Nothing reads a paused subscription, so its groups are refused.
+			Some(Alias::Paused(_)) => Poll::Ready(Err(Error::Cancel)),
+			Some(Alias::Resuming(_)) | None if aliases.ended => Poll::Ready(Err(Error::Cancel)),
+			Some(Alias::Resuming(_)) | None => Poll::Pending,
 		});
 		if let Poll::Ready(result) = resolved {
 			return Poll::Ready(result.unwrap_or(Err(Error::Cancel)));
@@ -1199,6 +1215,7 @@ impl Subscriber {
 			going_away,
 			auth: crate::auth::Link::new(false),
 			announces: Default::default(),
+			listings: Default::default(),
 			validity: Default::default(),
 		}
 	}
@@ -1386,6 +1403,14 @@ impl Subscriber {
 
 		state.subscribes.get_mut(&request_id).unwrap().alias = Some(alias);
 		Ok(())
+	}
+
+	/// Move the alias the subscription with `request_id` is bound to into `to`.
+	fn rebind_alias(&self, request_id: RequestId, to: Alias) {
+		let state = self.state.lock();
+		if let Some(alias) = state.subscribes.get(&request_id).and_then(|track| track.alias) {
+			rebind_track_alias(&state.aliases, alias, request_id, to);
+		}
 	}
 
 	/// Whether the subscription already holding `alias` is for the same full track name as
@@ -1894,9 +1919,11 @@ impl Subscriber {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received publish");
-				let mut reject = this.decline_publish(stream, &msg);
+				// Owned, since the task outlives the body it was read from.
+				let msg = msg.into_owned();
+				let mut serve = tracks::ServePublish::new(this, stream, msg);
 				Box::new(move |waiter: &kio::Waiter| {
-					if let Err(err) = ready!(reject.poll(waiter)) {
+					if let Err(err) = ready!(serve.poll(waiter)) {
 						tracing::debug!(%err, "publish stream error");
 					}
 					Poll::Ready(())
@@ -1958,75 +1985,6 @@ impl Subscriber {
 			}
 		};
 		Ok(task)
-	}
-
-	/// Decline a PUBLISH.
-	///
-	/// PUBLISH offers a single track, so honoring it means routing per
-	/// (namespace, track). Our model routes per namespace: a source attaches at a
-	/// path and serves every track under it, resolved on demand via SUBSCRIBE.
-	/// Accepting a PUBLISH would mean inventing a namespace-level source out of a
-	/// track-level offer, and that fiction then contradicts any real
-	/// PUBLISH_NAMESPACE for the same path.
-	///
-	/// Declining the request rather than failing the session, since a peer using
-	/// a feature we don't implement is not a protocol violation. The rejection is the
-	/// whole exchange, but it still has to arrive: [`super::request_stream::Reject`] delivers it.
-	fn decline_publish(
-		&self,
-		mut stream: Stream<Transport, Version>,
-		msg: &ietf::Publish<'_>,
-	) -> super::request_stream::Reject {
-		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
-			return super::request_stream::Reject::new(stream, error);
-		}
-		tracing::debug!(broadcast = %msg.track_namespace, track = %msg.track_name, "rejecting publish");
-
-		// We decline the method itself rather than this particular track, which would be
-		// UNINTERESTED.
-		//
-		// The alias the message carries is deliberately not recorded. Nothing will ever bind
-		// it, and a rejected request has no lifetime of ours to hang the cleanup on, so the
-		// entry would have to be swept asynchronously. Any data streams the publisher opened
-		// before reading this are dropped by the unknown-alias path instead.
-		let (kind, err) = (request::Kind::Publish, &Error::Unsupported);
-		let buffered = super::request_stream::buffer_error(
-			&mut stream.writer,
-			kind,
-			err,
-			"PUBLISH is not supported",
-			self.version,
-		);
-		super::request_stream::Reject::buffered(stream, buffered)
-	}
-
-	/// Read the answer to a SUBSCRIBE: its SUBSCRIBE_OK, or the REQUEST_ERROR refusing it.
-	fn poll_read_answer(
-		&self,
-		waiter: &kio::Waiter,
-		stream: &mut Stream<Transport, Version>,
-		messages: &mut super::request_stream::Messages,
-	) -> Poll<Result<Answer, Error>> {
-		let super::request_stream::Framed(id, body) = ready!(messages.poll_message(&mut stream.reader, waiter))?;
-		let mut data = body.decoder(self.version);
-		Poll::Ready(match id {
-			ietf::SubscribeOk::ID => {
-				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
-				tracing::debug!(message = ?msg, "received subscribe ok");
-				Ok(Answer::Accepted(Accepted {
-					alias: msg.track_alias,
-					properties: msg.properties,
-					largest: msg.largest,
-				}))
-			}
-			ietf::RequestError::ID => {
-				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
-				tracing::warn!(message = ?msg, "request error");
-				let err = request::from_code(msg.error_code, request::Kind::Subscribe, self.version);
-				Ok(Answer::Refused(err, Duration::from_millis(msg.retry_interval)))
-			}
-			_ => Err(Error::UnexpectedMessage),
-		})
 	}
 
 	/// Refuse a request whose AUTHORIZATION TOKEN repeats (section 8.9), which unlike any
@@ -3131,6 +3089,38 @@ impl Subscriber {
 		kio::wait(|waiter| kio::Task::poll(&mut run, waiter)).await
 	}
 
+	/// Answer the source's listings while anyone lists it, from a SUBSCRIBE_TRACKS covering
+	/// it; a failed listing ends its readers, which ask again.
+	fn poll_listing(
+		&self,
+		path: &Path,
+		lister: &std::sync::Arc<broadcast::Lister>,
+		listening: &mut Option<tracks::Listening>,
+		waiter: &kio::Waiter,
+	) {
+		loop {
+			match listening {
+				None => {
+					if !matches!(lister.poll_wanted(waiter), Poll::Ready(Ok(()))) {
+						return;
+					}
+					*listening = Some(self.listen(path.to_owned(), lister.clone()));
+				}
+				Some(_) if lister.poll_unwanted(waiter).is_ready() => {
+					*listening = None;
+					lister.clear();
+				}
+				Some(current) => match current.poll_failed(waiter) {
+					Poll::Ready(err) => {
+						*listening = None;
+						lister.abort(err);
+					}
+					Poll::Pending => return,
+				},
+			}
+		}
+	}
+
 	/// Serve one track request; see [`RunSubscribe`].
 	#[cfg(test)]
 	pub(super) async fn run_subscribe(
@@ -3321,8 +3311,9 @@ struct RunBroadcast {
 	broadcast: broadcast::Requests,
 	route: Option<kio::Consumer<()>>,
 	subscribes: TaskSet,
-	/// Refuses the source's listings: we never list a moq-transport peer's tracks.
-	lister: broadcast::Lister,
+	/// Answers the source's listings with the peer's tracks, while anyone lists it.
+	lister: std::sync::Arc<broadcast::Lister>,
+	listening: Option<tracks::Listening>,
 	/// The broadcast closed: no new tracks, but those in flight run to their own end.
 	draining: bool,
 }
@@ -3335,9 +3326,11 @@ impl RunBroadcast {
 		broadcast: broadcast::Requests,
 		route: Option<kio::Consumer<()>>,
 	) -> Self {
-		let lister = broadcast
-			.lister()
-			.expect("only the source answers its broadcast's listings");
+		let lister = std::sync::Arc::new(
+			broadcast
+				.lister()
+				.expect("only the source answers its broadcast's listings"),
+		);
 		Self {
 			this,
 			path,
@@ -3347,6 +3340,7 @@ impl RunBroadcast {
 			route,
 			subscribes: TaskSet::owned(),
 			lister,
+			listening: None,
 			draining: false,
 		}
 	}
@@ -3356,10 +3350,8 @@ impl RunBroadcast {
 		if self.this.session.poll_closed(waiter).is_ready() {
 			return Poll::Ready(None);
 		}
-		// An empty answer would claim the peer lists nothing.
-		while let Poll::Ready(Ok(())) = self.lister.poll_wanted(waiter) {
-			self.lister.abort(Error::Unsupported);
-		}
+		self.this
+			.poll_listing(&self.path, &self.lister, &mut self.listening, waiter);
 		loop {
 			while let Poll::Ready(Ok(request)) = self.datagrams.poll_requested(waiter) {
 				if self.this.session.max_datagram_size() == 0 {
@@ -3427,6 +3419,7 @@ impl kio::Task for RunBroadcast {
 				}
 				Some(Err(err)) => {
 					tracing::debug!(%err, "broadcast closed");
+					drop(self.listening.take());
 					self.draining = true;
 				}
 				// Session gone.
@@ -3621,6 +3614,12 @@ impl kio::Task for RunSubscribe {
 	}
 }
 
+/// How a listed track's handoff ended without a subscription to adopt.
+enum Abandon {
+	Failed(Error),
+	Unused,
+}
+
 /// What ended the wait for a SUBSCRIBE's answer. A publisher can be serving before its
 /// SUBSCRIBE_OK reaches us, since the data streams are independent of the request stream.
 /// Waiting for the response alone would miss the local side going away in that window and
@@ -3654,8 +3653,9 @@ enum ServeEnd {
 /// it failed.
 struct SubscribeOnce {
 	source: Option<broadcast::Producer>,
-	key: TrackKey,
-	/// This request's own view of the track's gate.
+	key: tracks::TrackKey,
+	/// This request's own view of the track's gate, which a resumed subscription's token
+	/// binds to.
 	gate: crate::auth::Gate,
 	_working: crate::session::Working,
 	validity: crate::model::broadcast::RequestValidity,
@@ -3721,6 +3721,8 @@ struct OnceRequest {
 	messages: super::request_stream::Messages,
 	/// The fill registered for the join's head.
 	fill: kio::Producer<Fill>,
+	/// What an adopted subscription's token earned, handed back with it when it pauses.
+	token_grant: Option<crate::auth::RequestGrant>,
 }
 
 /// What the request went out with.
@@ -3737,6 +3739,8 @@ struct Sent {
 /// A request waiting for its answer.
 struct Answering {
 	req: OnceRequest,
+	/// The resumed subscription's alias, properties, and owed answers, when resuming one.
+	held: Option<tracks::Resumed>,
 	/// The lingering copy being subscribed again. A request's target is parked in the
 	/// session's state instead, where a session abort can reject it.
 	resumed: Option<Idle>,
@@ -3754,13 +3758,23 @@ struct Serving {
 	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk; an allow, since the size gap varies by target"
 )]
 enum OnceStep {
+	/// Waiting for a listed track's paused subscription to be handed over.
+	Adopt {
+		target: Target,
+		handoff: kio::Shared<tracks::Handoff>,
+	},
 	/// Opening a fresh request stream.
 	Open {
 		target: Target,
 		open: crate::transport::open::Open,
 	},
-	/// Writing the SUBSCRIBE once the peer's SETUP says what it takes.
-	Write { target: Target, req: OnceRequest },
+	/// Writing the SUBSCRIBE, or the update resuming a held subscription, once the peer's
+	/// SETUP says what it takes.
+	Write {
+		target: Target,
+		req: OnceRequest,
+		held: Option<tracks::Resumed>,
+	},
 	/// Waiting for the answer, flushing the request meanwhile.
 	Answer(Answering),
 	/// Abandoned before the answer: cancelling the request while the fetches it drives go
@@ -3830,7 +3844,8 @@ enum Served {
 /// How an Established subscription ended, which decides what becomes of its request and
 /// its copy.
 enum Ending {
-	/// Nobody wants it any more: the subscription is cancelled, and the copy lingers.
+	/// Nobody wants it any more: a listed track's subscription pauses, any other is
+	/// cancelled, and the copy lingers.
 	Idle,
 	/// It failed here with `err`: the request is cancelled, and the copy lingers unless our
 	/// grant stopped covering it.
@@ -3842,6 +3857,7 @@ enum Ending {
 
 /// An Established subscription, from its answer to its end.
 struct Established {
+	alias: u64,
 	properties: ietf::Properties,
 	/// The answer's Largest Location.
 	largest: Option<ietf::Location>,
@@ -3901,18 +3917,25 @@ impl SubscribeOnce {
 				return None;
 			}
 		};
+		let key = (broadcast_path.clone(), track_name.into());
+		// A listed track's paused subscription is already this track's upstream copy, so
+		// resume it rather than open a second one.
+		let step = match this.want(&key) {
+			Some(handoff) => OnceStep::Adopt { target, handoff },
+			None => OnceStep::Open {
+				target,
+				open: Default::default(),
+			},
+		};
 		Some(Self {
 			source: None,
-			key: (broadcast_path.clone(), track_name.into()),
+			key,
 			gate: gate.unnamed(),
 			_working: this.session.work().start(),
 			validity: this.validity.start(),
 			resolved,
 			plan,
-			step: OnceStep::Open {
-				target,
-				open: Default::default(),
-			},
+			step,
 		})
 	}
 
@@ -3926,12 +3949,15 @@ impl SubscribeOnce {
 	) -> Poll<Option<Idle>> {
 		loop {
 			let flow = match std::mem::replace(&mut self.step, OnceStep::Done) {
+				OnceStep::Adopt { target, handoff } => {
+					self.adopt(waiter, this, broadcast_path, track_name, group_fetches, target, handoff)
+				}
 				OnceStep::Open { target, open } => {
 					self.open(waiter, this, broadcast_path, track_name, group_fetches, target, open)
 				}
-				OnceStep::Write { target, req } => match this.peer_setup.poll_get(waiter) {
-					Poll::Ready(peer) => self.write(this, broadcast_path, track_name, target, req, peer),
-					Poll::Pending => Flow::Wait(OnceStep::Write { target, req }),
+				OnceStep::Write { target, req, held } => match this.peer_setup.poll_get(waiter) {
+					Poll::Ready(peer) => self.write(this, broadcast_path, track_name, target, req, held, peer),
+					Poll::Pending => Flow::Wait(OnceStep::Write { target, req, held }),
 				},
 				OnceStep::Answer(answering) => {
 					self.answer(waiter, this, broadcast_path, track_name, group_fetches, answering)
@@ -4044,6 +4070,97 @@ impl SubscribeOnce {
 		}
 	}
 
+	/// Wait for a listed track's paused subscription to be handed over, and resume it.
+	#[allow(clippy::too_many_arguments, reason = "one step's state, split from the machine")]
+	fn adopt(
+		&mut self,
+		waiter: &kio::Waiter,
+		this: &Subscriber,
+		broadcast_path: &Path,
+		track_name: &str,
+		group_fetches: &mut TaskSet,
+		mut target: Target,
+		handoff: kio::Shared<tracks::Handoff>,
+	) -> Flow {
+		// The handoff waits for the held stream to flush, which a peer withholding credit can
+		// stall, so nobody wanting the track any more ends the wait too. Every wait here drives
+		// the fetches a lingering copy started.
+		let _ = group_fetches.poll(waiter);
+		let adopt = if self.gate.poll_denied(waiter).is_ready() {
+			Err(Abandon::Failed(Error::Unauthorized))
+		} else if let Err(err) = self.validity.check(waiter) {
+			Err(Abandon::Failed(err))
+		} else if let Poll::Ready(adopted) = Subscriber::poll_handoff(&handoff, waiter) {
+			Ok(adopted)
+		} else {
+			let unwanted = match &mut target {
+				Target::Request(request) => crate::util::poll_unwanted(&mut request.demand(), waiter),
+				Target::Resume(idle) => crate::util::poll_unwanted(&mut idle.demand, waiter),
+			};
+			if unwanted.is_pending() {
+				return Flow::Wait(OnceStep::Adopt { target, handoff });
+			}
+			Err(Abandon::Unused)
+		};
+		match adopt {
+			Ok(Some(upstream)) => {
+				this.adopted(&self.key, upstream.request_id);
+				let tracks::Upstream {
+					token_grant,
+					stream,
+					messages,
+					request_id,
+					alias,
+					properties,
+					owed,
+					// This subscription forwards into the copy itself from here.
+					copy: _,
+				} = upstream;
+				if let Some(token) = &token_grant {
+					self.gate.bind(token.clone());
+				}
+				let fill = self.register(this, broadcast_path, track_name, &target, request_id, true);
+				Flow::Next(OnceStep::Write {
+					target,
+					req: OnceRequest {
+						id: request_id,
+						stream,
+						messages,
+						fill,
+						token_grant,
+					},
+					held: Some(tracks::Resumed {
+						alias,
+						properties,
+						owed,
+						ended: None,
+					}),
+				})
+			}
+			Ok(None) => Flow::Next(OnceStep::Open {
+				target,
+				open: Default::default(),
+			}),
+			Err(Abandon::Failed(err)) => {
+				this.unwant(self.key.clone(), &handoff);
+				target.fail(err);
+				Flow::Ready(None)
+			}
+			// Nobody wants the track: a resumed copy lingers again, a request is refused.
+			Err(Abandon::Unused) => match target {
+				Target::Resume(idle) => {
+					this.unwant(self.key.clone(), &handoff);
+					Flow::Ready(Some(idle))
+				}
+				Target::Request(request) if request.reject_unwanted(Error::Cancel) => {
+					this.unwant(self.key.clone(), &handoff);
+					Flow::Ready(None)
+				}
+				target => Flow::Next(OnceStep::Adopt { target, handoff }),
+			},
+		}
+	}
+
 	/// Open a fresh request stream and register the request under its ID.
 	#[allow(clippy::too_many_arguments, reason = "one step's state, split from the machine")]
 	fn open(
@@ -4076,7 +4193,7 @@ impl SubscribeOnce {
 		};
 		let id = this.control.next_request_id();
 		let messages = super::request_stream::Messages::new(this.session.clone(), this.control.client());
-		let fill = self.register(this, broadcast_path, track_name, &target, id);
+		let fill = self.register(this, broadcast_path, track_name, &target, id, false);
 		Flow::Next(OnceStep::Write {
 			target,
 			req: OnceRequest {
@@ -4084,13 +4201,15 @@ impl SubscribeOnce {
 				stream,
 				messages,
 				fill,
+				token_grant: None,
 			},
+			held: None,
 		})
 	}
 
 	/// Register the request before writing SUBSCRIBE so SUBSCRIBE_OK can bind its alias,
 	/// and so a fill fetch stream that overtakes it finds the subscription it answers.
-	/// Returns the fill registered for it.
+	/// `held` when it resumes a held subscription. Returns the fill registered for it.
 	fn register(
 		&self,
 		this: &Subscriber,
@@ -4098,23 +4217,38 @@ impl SubscribeOnce {
 		track_name: &str,
 		target: &Target,
 		request_id: RequestId,
+		held: bool,
 	) -> kio::Producer<Fill> {
 		let fill = kio::Producer::new(match self.plan.join.fill.is_some() || self.plan.join.fetch {
 			true => Fill::Requested,
 			false => Fill::Done,
 		});
-		this.state.lock().subscribes.insert(
+		let mut state = this.state.lock();
+		// A resumed subscription keeps the alias it is bound to and the data streams it
+		// counted while it forwarded before.
+		let (alias, tail) = match held {
+			true => state
+				.subscribes
+				.remove(&request_id)
+				.map(|held| (held.alias, held.tail))
+				.unwrap_or_default(),
+			false => Default::default(),
+		};
+		state.subscribes.insert(
 			request_id,
 			TrackState {
 				// A resumed copy is the session's to abort from here on.
 				producer: target.producer().cloned(),
+				alias,
+				tail,
 				..TrackState::pending(track_name.to_owned(), broadcast_path.clone(), fill.clone())
 			},
 		);
 		fill
 	}
 
-	/// Write the SUBSCRIBE, and park the origin request where a session abort can reject it.
+	/// Write the SUBSCRIBE, or the update resuming a held subscription, and park the origin
+	/// request where a session abort can reject it.
 	#[allow(clippy::too_many_arguments, reason = "one step's state, split from the machine")]
 	fn write(
 		&mut self,
@@ -4123,6 +4257,7 @@ impl SubscribeOnce {
 		track_name: &str,
 		target: Target,
 		mut req: OnceRequest,
+		held: Option<tracks::Resumed>,
 		peer: peer::Peer,
 	) -> Flow {
 		// The aggregate is read now: a subscriber can join while the request ID and stream
@@ -4149,28 +4284,46 @@ impl SubscribeOnce {
 		let join = &self.plan.join;
 		// Buffered only: the wait for the answer flushes it, so the local terminals still end
 		// a request the peer's send window holds back.
-		let written = req.stream.writer.buffer_message(
-			ietf::Subscribe::ID,
-			&ietf::Subscribe {
-				max_age: sent.max_age,
-				new_group: sent.new_group,
-				request_id,
-				track_namespace: broadcast_path.clone(),
-				track_name: track_name.into(),
-				subscriber_priority: super::priority::to_wire(sent.priority),
-				group_order: order.into(),
-				filter: join.filter,
-				fill: join.fill,
-				properties_wanted: sent.properties_wanted,
-				forward: true,
-				rendezvous: false,
-				range_filters: false,
-				authorization_token: None,
-			},
-		);
+		let written = match &held {
+			// Resume the held subscription: its group order is the one it was made with,
+			// since no update can change it. Its groups wait on the answer from here.
+			Some(held) => {
+				this.rebind_alias(request_id, Alias::Resuming(request_id));
+				let forward = tracks::Forward {
+					forward: true,
+					filter: Some(join.filter),
+					fill: join.fill,
+					priority: Some(sent.priority),
+					max_age: sent.max_age,
+					// Only a track declaring DYNAMIC_GROUPS takes one on an update.
+					new_group: sent.new_group.filter(|_| held.properties.dynamic_groups),
+				};
+				this.buffer_forward(&mut req.stream.writer, &forward)
+			}
+			None => req.stream.writer.buffer_message(
+				ietf::Subscribe::ID,
+				&ietf::Subscribe {
+					max_age: sent.max_age,
+					new_group: sent.new_group,
+					request_id,
+					track_namespace: broadcast_path.clone(),
+					track_name: track_name.into(),
+					subscriber_priority: super::priority::to_wire(sent.priority),
+					group_order: order.into(),
+					filter: join.filter,
+					fill: join.fill,
+					properties_wanted: sent.properties_wanted,
+					forward: true,
+					rendezvous: false,
+					range_filters: false,
+					authorization_token: None,
+				},
+			),
+		};
 		if let Err(err) = written {
 			tracing::debug!(%err, "failed to encode subscribe");
 			this.remove_subscribe(request_id);
+			this.entry_ended(&self.key, request_id, Err(err.clone()));
 			target.fail(err);
 			return Flow::Ready(None);
 		}
@@ -4192,7 +4345,12 @@ impl SubscribeOnce {
 			}
 			Target::Resume(idle) => Some(idle),
 		};
-		Flow::Next(OnceStep::Answer(Answering { req, resumed, sent }))
+		Flow::Next(OnceStep::Answer(Answering {
+			req,
+			held,
+			resumed,
+			sent,
+		}))
 	}
 
 	/// Wait for the answer, or for a local terminal to abandon the request first.
@@ -4206,9 +4364,9 @@ impl SubscribeOnce {
 		mut answering: Answering,
 	) -> Flow {
 		let _ = group_fetches.poll(waiter);
-		let Answering { req, resumed, .. } = &mut answering;
+		let Answering { req, held, resumed, .. } = &mut answering;
 		let response = match req.stream.writer.poll_flush(waiter) {
-			Poll::Ready(Ok(())) => this.poll_read_answer(waiter, &mut req.stream, &mut req.messages),
+			Poll::Ready(Ok(())) => this.poll_read_answer(waiter, &mut req.stream, &mut req.messages, held.as_mut()),
 			Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
 			Poll::Pending => Poll::Pending,
 		};
@@ -4288,7 +4446,25 @@ impl SubscribeOnce {
 			track = %track_name,
 			"subscribe abandoned before it was accepted"
 		);
-		let Answering { req, resumed, .. } = answering;
+		let Answering { req, held, resumed, .. } = answering;
+		// A held subscription is still the track's entry: pause it again, owing the
+		// answer to the resume as well.
+		if let Some(held) = held
+			&& this.state.lock().subscribes.contains_key(&req.id)
+		{
+			let upstream = tracks::Upstream {
+				token_grant: req.token_grant,
+				stream: req.stream,
+				messages: req.messages,
+				request_id: req.id,
+				alias: held.alias,
+				properties: held.properties,
+				owed: held.owed + 1,
+				copy: resumed.as_ref().map(|idle| idle.track.clone()),
+			};
+			this.pause(self.key.clone(), upstream);
+			return Flow::Ready(resumed);
+		}
 		// The publisher may already be serving before it answers. A session abort
 		// already rejected the parked request; dropping what remains is not a second one,
 		// and it took the resumed copy too.
@@ -4311,7 +4487,12 @@ impl SubscribeOnce {
 		unanswered: bool,
 		response: Result<Answer, Error>,
 	) -> Flow {
-		let Answering { req, mut resumed, sent } = answering;
+		let Answering {
+			req,
+			mut held,
+			mut resumed,
+			sent,
+		} = answering;
 		let request_id = req.id;
 		// Only a refusal carries a Retry Interval, which a relay forwards to its own readers.
 		let response = match response {
@@ -4331,6 +4512,7 @@ impl SubscribeOnce {
 						pending.reject(err.clone());
 					}
 					this.remove_subscribe(request_id);
+					this.entry_ended(&self.key, request_id, Err(err.clone()));
 					if let Some(idle) = resumed {
 						let _ = idle.track.abort(err);
 					}
@@ -4347,13 +4529,25 @@ impl SubscribeOnce {
 					(None, _) => {}
 				}
 				this.remove_subscribe(request_id);
+				// A held subscription that the publisher ended before answering ends its
+				// entry as the PUBLISH_DONE says; one whose resume failed fails it, and is
+				// cancelled since its PUBLISH_DONE has yet to come.
+				let ended = held.as_mut().and_then(|held| held.ended.take());
+				let cancel = unanswered || (held.is_some() && ended.is_none());
+				let finished = matches!(ended, Some(Ok(())));
+				this.entry_ended(&self.key, request_id, ended.unwrap_or_else(|| Err(err.clone())));
+				// A resumed copy whose track finished before the resume was answered cannot
+				// place the end, so it lingers again and its reader's SUBSCRIBE learns it.
+				if finished && resumed.is_some() {
+					return Flow::Ready(resumed);
+				}
 				if let Some(idle) = resumed {
 					let _ = match retry {
 						Some(retry) => idle.track.refuse(err, retry),
 						None => idle.track.abort(err),
 					};
 				}
-				return match unanswered {
+				return match cancel {
 					true => Flow::Next(OnceStep::Refuse(Subscriber::cancelling(req.stream))),
 					false => Flow::Ready(None),
 				};
@@ -4366,9 +4560,11 @@ impl SubscribeOnce {
 		} = accepted;
 		// A resumed SUBSCRIBE opts out of the properties from draft-22, so its answer carries
 		// none and the copy keeps the ones it learned. Before that the answer declares them
-		// again.
+		// again. A pause holds these too, so a later resume still knows DYNAMIC_GROUPS.
 		let properties = match &resumed {
-			Some(idle) if !sent.properties_wanted && ietf::Filter::is_draft20(this.version) => idle.properties.clone(),
+			Some(idle) if held.is_none() && !sent.properties_wanted && ietf::Filter::is_draft20(this.version) => {
+				idle.properties.clone()
+			}
 			_ => properties,
 		};
 		let timescale = properties.timescale;
@@ -4462,7 +4658,11 @@ impl SubscribeOnce {
 				}
 			}
 		}
-		if let Err(err) = this.register_alias(request_id, alias) {
+		this.entry_info(&self.key, request_id, track.info());
+		// A resumed subscription stays bound to the alias it was held with.
+		if held.is_some() {
+			this.rebind_alias(request_id, Alias::Active(request_id));
+		} else if let Err(err) = this.register_alias(request_id, alias) {
 			if matches!(err, Error::Duplicate) {
 				tracing::warn!(track_alias = %alias, "publisher reused a live track alias for another track");
 				this.session.close(
@@ -4500,6 +4700,7 @@ impl SubscribeOnce {
 			None => {}
 		}
 		let live = Established {
+			alias,
 			properties,
 			largest,
 			timescale,
@@ -4845,10 +5046,10 @@ impl SubscribeOnce {
 				Served::Ended(Ending::Idle)
 			}
 			ServeEnd::Done(res) => {
-				// Only TRACK_ENDED ends the track quietly; a clean end of another kind, such
-				// as SUBSCRIPTION_ENDED, leaves the track's fate unknown.
+				// Only TRACK_ENDED ends a listing entry quietly; a clean end of another
+				// kind, such as SUBSCRIPTION_ENDED, leaves the track's fate unknown.
 				let end = match &res {
-					Ok(done) => done_end(done, this.version),
+					Ok(done) => tracks::listing_end(done, this.version),
 					Err(err) => Err(err.clone()),
 				};
 				match res.map(|done| done.stream_count) {
@@ -4929,6 +5130,29 @@ impl SubscribeOnce {
 		}
 		// Release an unallocated join now, or let the session cancel its committed request.
 		live.fetching = None;
+
+		match &ending {
+			Ending::Idle => {
+				if this.is_entry(&self.key, request_id) && this.state.lock().subscribes.contains_key(&request_id) {
+					// A listed track's subscription pauses rather than ends, held again as its entry.
+					live.track.set_idle();
+					let upstream = tracks::Upstream {
+						token_grant: req.token_grant,
+						stream: req.stream,
+						messages: req.messages,
+						request_id,
+						alias: live.alias,
+						properties: live.properties.clone(),
+						owed: live.unanswered,
+						copy: Some(live.track.clone()),
+					};
+					this.pause(self.key.clone(), upstream);
+					return Flow::Ready(Some(live.idle(false)));
+				}
+			}
+			Ending::Cancelled { err, .. } => this.entry_ended(&self.key, request_id, Err(err.clone())),
+			Ending::Closed(end) => this.entry_ended(&self.key, request_id, end.clone()),
+		}
 
 		// Clean up
 		let aborted = this.remove_subscribe(request_id).is_none();
@@ -12158,7 +12382,7 @@ mod tests {
 			};
 
 			// Errors are surfaced to the peer on the stream, not raised as a session error.
-			let mut decline = subscriber.decline_publish(stream, &msg);
+			let mut decline = subscriber.decline_publish(stream, msg);
 			kio::wait(|waiter| decline.poll(waiter)).await.unwrap();
 			kio::clock::sleep(Duration::from_millis(1)).await;
 

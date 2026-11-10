@@ -153,6 +153,8 @@ fn body(framed: &ietf::Framed, version: ietf::Version) {
 		ietf::SubscribeNamespace,
 		ietf::Namespace,
 		ietf::NamespaceDone,
+		ietf::SubscribeTracks,
+		ietf::PublishSkipped<'_>,
 		ietf::RequestOk,
 		ietf::RequestError<'_>,
 	);

@@ -29,6 +29,11 @@ Settled with this epic:
   [moq-dev/moq#7190](https://github.com/moq-dev/moq/pull/7190)), and the
   relay paths moq.pro's fleet smoke runs: cross-relay moq-transport
   subscribes and a draft-18 session to a third-party relay.
+- Kept (decided 2026-11-10, maintainer, in
+  [moq-dev/moq#8445](https://github.com/moq-dev/moq/pull/8445)): moq-net's
+  listing of a moq-transport peer's tracks with SUBSCRIBE_TRACKS, since
+  Cloudflare's relay (cloudflare/moq-rs) answers it; without it we could not
+  list tracks on that relay. Receiving SUBSCRIBE_TRACKS stays refused.
 - Kept, as rejected in the same interview: lite-07's `ietf` object extension
   and moq-lite 01 to 04.
 - Not here: `ietf/flate.rs`; compression removal has its own work.

@@ -1,7 +1,9 @@
 #![cfg(feature = "async")]
 
-//! We never list a moq-transport peer's tracks: a TRACKS listing over that session fails
-//! as unsupported without sending SUBSCRIBE_TRACKS, and the session and its SUBSCRIBEs carry on.
+//! A TRACKS listing over a moq-transport session (draft-18+) sends SUBSCRIBE_TRACKS with
+//! FORWARD=0, only on demand. Our own publisher refuses it, so a listing of our peer fails
+//! alone: the session and its SUBSCRIBEs carry on. The listing's handling of a peer that
+//! answers is covered against a scripted peer in `ietf::subscriber::tracks`.
 //!
 //! Deterministic: paused time and a single-threaded runtime over the mock transport.
 
@@ -15,7 +17,7 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Every supported moq-transport draft.
+/// Every draft that has SUBSCRIBE_TRACKS.
 const DRAFTS: [&str; 3] = ["moq-transport-18", "moq-transport-20", "moq-transport-22"];
 
 /// SUBSCRIBE (0x03), as the first byte of a request stream.
@@ -91,10 +93,11 @@ async fn read(sub: &mut moq_net::track::Subscriber) -> Option<(u64, Vec<u8>)> {
 	Some((group.sequence, frame.payload.to_vec()))
 }
 
-/// A listing fails as unsupported rather than claim the peer lists nothing, sends no
-/// SUBSCRIBE_TRACKS, and leaves the SUBSCRIBE delivering.
+/// SUBSCRIBE_TRACKS goes out only for a listing, since many peers do not answer it:
+/// connecting, an announce, and a reader's SUBSCRIBE send none. Our own publisher refuses
+/// it, which fails only that listing, and the SUBSCRIBE keeps delivering.
 #[kio::test]
-async fn a_listing_fails_alone() {
+async fn a_listing_of_our_own_peer_fails_alone() {
 	for version in DRAFTS {
 		let publisher = produce_origin(1);
 		let broadcast = publisher
@@ -117,14 +120,13 @@ async fn a_listing_fails_alone() {
 		group.write_frame(None, &b"before"[..]).unwrap();
 		group.finish().unwrap();
 		assert_eq!(read(&mut sub).await, Some((0, b"before".to_vec())), "{version}");
+		assert_eq!(opened(&pair, SUBSCRIBE_TRACKS), 0, "{version}: listed unasked");
 
 		let mut tracks = remote.tracks().unwrap();
-		assert_eq!(
-			next(&mut tracks).await,
-			format!("error: {}", moq_net::Error::Unsupported),
-			"{version}"
-		);
-		assert_eq!(opened(&pair, SUBSCRIBE_TRACKS), 0, "{version}");
+		assert_eq!(next(&mut tracks).await, "synced", "{version}");
+		let failed = next(&mut tracks).await;
+		assert!(failed.starts_with("error:"), "{version}: {failed}");
+		assert_eq!(opened(&pair, SUBSCRIBE_TRACKS), 1, "{version}");
 
 		let mut group = video.append_group().unwrap();
 		group.write_frame(None, &b"after"[..]).unwrap();
