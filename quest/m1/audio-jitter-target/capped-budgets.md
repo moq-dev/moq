@@ -11,10 +11,10 @@ every AAC frame on those nights arrives in order.
 ## Waiting
 
 - moq-dev/moq: seven scheduled Nightly runs on `main` after
-  [moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898) merges. Four are
+  [moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898) merges. Five are
   graded in [moq-dev/moq#8309](https://github.com/moq-dev/moq/pull/8309)'s body
-  (2026-11-05 to 11-08); the remaining three are the 2026-11-09, 11-10 and 11-11
-  scheduled runs. Find them with `gh run list --workflow nightly.yml --event
+  (2026-11-05 to 11-09); the remaining two are the 2026-11-10 and 11-11 scheduled
+  runs. Find them with `gh run list --workflow nightly.yml --event
   schedule` and download each with `gh run download <id> -n audio-quality-run`;
   never dispatch the nightly by hand. The artifacts expire after 7 days, so
   download each run's as it lands rather than waiting for the seventh.
