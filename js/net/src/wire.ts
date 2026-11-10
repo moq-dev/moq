@@ -69,7 +69,7 @@ export interface OriginProducer {
 	 * the returned dispose: a session holds one while its peer's initial set is in flight.
 	 */
 	snapshot(prefix: Path.Valid): Dispose;
-	readonly requests: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
+	readonly requests: Getter<ReadonlyMap<Path.Valid, RequestSlot>>;
 	changed(): GetPromise<unknown>;
 	/** Whether sessions should answer the request with a blind subscription right now. */
 	blind(slot: RequestSlot): boolean;

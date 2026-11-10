@@ -71,5 +71,4 @@ Public API: none; the surface landed in #4975. Wire: none.
 
 - [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) - the AMD half of the same proof
 - [GPU capacity and health](/quest/m3/gpu-health.md) - reports per device keyed by the same render node `dev_t`
-- [Linux OBS GPU input](/quest/m5/obs-linux-gpu.md) - a DMA-BUF producer that needs the same explicit sync
 - [Video hardware validation](/quest/m5/video-hardware.md) - VA-API so far ran only on Meteor Lake

@@ -23,7 +23,7 @@ async function settle() {
 
 // Polls until `pred` holds, so a regression fails the test instead of hanging it.
 async function waitUntil(pred: () => boolean, ms = 2000): Promise<void> {
-	const deadline = now().add(Duration.millis(ms));
+	const deadline = now().saturatingAdd(Duration.millis(ms));
 	for (;;) {
 		if (pred()) return;
 		if (now().gt(deadline)) throw new Error("timed out waiting for condition");

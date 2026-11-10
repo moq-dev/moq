@@ -94,7 +94,6 @@ native playback against its budgets.
 - [The `stretch` setting](/quest/m1/audio-jitter-target/stretch-setting.md) - a player sets how far audio may trail before it skips, and zero turns the stretch off
 - [Calibrate](/quest/m1/audio-jitter-target/calibrate.md) - every browser and native ceiling re-measured from seven Nightlies with the model
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - the AAC browser budgets are re-measured from nightlies after the TS importer groups each PES
-- [Native A/V lag](/quest/m1/audio-jitter-target/native-av-lag.md) - `moq play --metrics` reports how far audio trails its presentation clock, so native rows grade `av_lag_ms`
 - [Chromium Opus stalled share](/quest/m1/audio-jitter-target/opus-stalled-share.md) - the Chromium Opus browser rows' stalled-share ceiling is measured with the stretch, and passes
 - [Native backpressure](/quest/m1/audio-jitter-target/native-backpressure.md) - native playback decodes audio only when the ring has room, holding the rest of the target encoded as the browser does
 

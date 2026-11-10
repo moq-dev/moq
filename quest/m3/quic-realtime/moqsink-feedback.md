@@ -30,4 +30,3 @@ Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and r
 ## Related
 
 - [Realtime uplink congestion control](/quest/m3/quic-realtime/README.md) - the controller whose rate this follows
-- [Opus follows its grant](/quest/m5/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the same feedback for moq-audio

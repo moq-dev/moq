@@ -67,6 +67,9 @@ federation) land.
 - [OBS native codecs](/quest/m3/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
 - [MoQ in obs-studio](/quest/m3/obs-studio/README.md) - a native MoQ output and service merged into obs-studio, once its maintainers agree; the plugin carries it until then
 - [AudioToolbox decode](/quest/m3/audio-decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
+- [AudioToolbox encode](/quest/m3/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC, for moq-dev/studio's RTMP destinations
+- [Media Foundation decode](/quest/m3/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
+- [Media Foundation encode](/quest/m3/audio-encode-mediafoundation.md) - Windows encodes AAC-LC, for moq-dev/studio's RTMP destinations
 - [GPU CI](/quest/m3/gpu-ci.md) - NVIDIA tests gate the merge queue on a self-hosted GPU runner VM, and `just rs nvidia` runs them locally instead of skipping
 - [Media stats](/quest/m3/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and one model turns both into a health verdict and a preflight report
 - [Wire stats](/quest/m3/wire-stats/README.md) - `Presence` counts each root's transport bytes on the wire, `wire_tx` and `wire_rx`, from QUIC, WebSocket, and embedder gateway sources
@@ -136,6 +139,7 @@ federation) land.
 - [Lint override and deprecation audit](/quest/m3/audit-lints.md) - repeat the suppression and deprecation audit after the release ships, starting with clippy on the macOS and Windows targets
 - [Clean ALSA playback onset](/quest/m3/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Read a bus source's own samples](/quest/m3/audio-strip-tap.md) - a tap reads one source's samples before its delay with their bus-clock positions, for the studio's clap sync
+- [moq-audio filter chain](/quest/m3/audio-filters.md) - per-source suppression, gate, compressor, limiter, ducking, and plugins, which moq-dev/studio configures
 - [Interop audit](/quest/m3/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
 - [moq-hls exposes each rendition's bound source](/quest/m3/hls-rendition-source.md) - playlists and segments report the source path and instance they read, so a cache can key on the source
 - [The memory bench finishes at 1 MiB frames](/quest/m3/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
@@ -177,6 +181,7 @@ federation) land.
 - [A published capture exposes its bandwidth grant](/quest/m3/video-publish-grant.md) - a moq-video publish shows each track's granted bitrate, not only its target
 - [The test relay can enable stats](/quest/m3/relay-test-stats.md) - `moq_relay::test_relay` starts with stats on when asked
 - [macOS capture listing futures are Send](/quest/m3/capture-shareable-send.md) - ScreenCaptureKit listing and start no longer hold a non-Send block across an await
+- [A capture listing a picker can draw](/quest/m3/capture-list.md) - windows grouped by app with icons and placed on their displays, camera kinds, low-rate pictures, and a wait for changes on macOS, Windows, and X11, for moq-dev/studio's Add page
 - [Denied macOS system audio names its settings pane](/quest/m3/audio-system-denied-hint.md) - a permission error pointing at Screen & System Audio Recording
 - [One encoder follows several connections' estimates](/quest/m3/bandwidth-multi-connection.md) - a track published to two relays tracks both estimates
 - [Bandwidth reservations ignore in-process readers](/quest/m3/reservation-local-readers.md) - a local recorder no longer counts as uplink demand
@@ -189,6 +194,8 @@ federation) land.
 - [Padding probes from the browser](/quest/m3/probe-padding.md) - parked: the maintainer doubts padding is the right way for a browser to probe
 - [JS rung disable](/quest/m3/probe-rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding; parked with it
 - [Layered broadcasts](/quest/m3/layers/README.md) - hang specifies a layer layout track, and `moq play` and `@moq/watch` composite layers over the main picture
+- [moq-rtmp dials rtmps:// and always advertises a tcUrl](/quest/m3/rtmp-rtmps-tcurl.md) - the RTMP client dials an `rtmp://` or `rtmps://` URL and sends its `tcUrl` on both, for moq-dev/studio's destinations
+- [moq-webrtc and moq-rtmp dial through a caller's policy](/quest/m3/webrtc-dial-policy.md) - a host that dials untrusted URLs refuses private, loopback, and link-local addresses on every WHIP, WHEP, and RTMP dial
 - [A room keeps a participant while one of its aliases is announced](/quest/m3/room-alias-withdraw.md) - withdrawing `camera` while `camera.hang` stays announced keeps the participant
 - [@moq/auth key derivation and key sets validate like single keys](/quest/m3/auth-key-validation.md) - `Key.public` shares no scope and never yields an invalid key, and key sets and Rust refuse mismatched keys at parse
 - [Binding server helpers observe session errors and describe close truthfully](/quest/m3/serve-session-errors.md) - Python retrieves session task errors, and the Kotlin, Go, and Dart docs say close ends every connection
