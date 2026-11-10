@@ -75,10 +75,14 @@ Public API: additive. Wire: none.
   Accessibility API posts when focus moves between two windows of one app.
   An agent cannot choose it because one option adds a permission prompt to
   every embedder. Options: (1, recommended) report the app by event and its
-  front window as of that event, and say in the docs that a window switch
-  inside one app is not noticed, since a macOS caller can capture the whole
-  app with `Source::App`; (2) ask for the Accessibility permission and
-  follow the focused window; (3) report the app only on macOS. Done when
+  front window as of that event, and narrow the Goal, the change contract,
+  and the Mac test to say a window switch inside one app is not noticed on
+  macOS. A caller can capture the whole app with `Source::App`, but
+  `open_app` captures the main display only, so a game on another display is
+  missed until the app capture follows the app's display; (2) ask for the
+  Accessibility permission and follow the focused window, keeping the Goal
+  as written; (3) report the app only on macOS, narrowing the Goal the same
+  way as (1). Done when
   this item names the pick.
 
 ## Required

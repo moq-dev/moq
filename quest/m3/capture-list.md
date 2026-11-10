@@ -21,8 +21,8 @@ show pictures instead of names, on macOS, Windows, and X11:
 Each desktop's path for each of these is decided at setup. What a desktop
 cannot do is an `Unsupported` error naming the reason, never an empty list, a
 blank picture, or a watch that stays silent. On a Wayland session the caller
-learns up front that the system's picker owns windows and displays, so they
-are not listed, and that any `x11:` window listed is XWayland's alone.
+learns up front that the system's picker owns windows and displays, so every
+window and display listing call is `Unsupported`, even with XWayland running.
 
 Not part of this: capturing an app off macOS, which
 [Windows](/quest/m3/capture-windows.md) and

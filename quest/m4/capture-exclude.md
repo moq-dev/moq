@@ -14,8 +14,11 @@ an `Unsupported` error naming the reason, never a capture that shows the app
 anyway. A caller can ask whether exclusion is supported without opening a
 capture.
 
-Not part of this: hiding the caller's own windows, which it does with its
-windows' own sharing flags; drawing anything where an excluded window was,
+Not part of this: hiding the caller's own windows. On Windows,
+`SetWindowDisplayAffinity` does that for the caller's own windows. On macOS,
+ScreenCaptureKit ignores `NSWindow.sharingType`, so the caller names its own
+app in the exclusion like any other; elsewhere its windows are not protected.
+Also not part of this: drawing anything where an excluded window was,
 since the capture shows whatever the system composites behind it; window and
 app captures, which already show only what was chosen; and sound, since
 `moq_audio`'s system capture still carries an excluded app's audio.
@@ -67,7 +70,9 @@ Recommendations for the PR:
   has not started, so a private app could show between its launch and the
   filter's update. Either prove that gap cannot reach a frame or build the
   filter from the apps to include, so an app nobody has allowed is absent
-  until it is added. The Goal holds either way.
+  until it is added. An inclusion filter must admit each app that is not
+  excluded as it launches, so excluding one app never hides a newly started
+  game or browser. The Goal holds either way.
 - **Shape.** The exclusion belongs to the display selection, not to a
   `Config` field every other source ignores, as `cursor` is by cameras. It
   is a breaking change to `Source::Display` if it lands there.
