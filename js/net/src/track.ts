@@ -46,7 +46,7 @@ import {
 	staleHole,
 	type TrackRequestOptions,
 } from "./internal.ts";
-import { grace, Ledger } from "./ledger.ts";
+import { RUN_OVERHEAD as ARRIVAL_OVERHEAD, grace, Ledger } from "./ledger.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
@@ -1095,6 +1095,9 @@ export class Producer {
 	// subscription's grace after a later arrival opened it, as the session's tail does, so this
 	// holds only the gaps still worth waiting for.
 	#arrivals = new Ledger();
+	// What `#arrivals` bills to the account, `ARRIVAL_OVERHEAD` per gap. Paying eviction debt folds
+	// its oldest gaps early, so an unbounded grace holds no more gaps than the pool would.
+	#arrivalsBilled = 0;
 	// What this track's own publisher produced since its last append, which skips every
 	// sequence below it that never arrived and was not given up: the producer moved on. The
 	// arrivals cannot say so, since a gap folds into them once nobody waits for it. Only
@@ -1138,6 +1141,7 @@ export class Producer {
 			shed: (entry, debt, cap) => hooks.shedGroup(entry.group, debt, cap, entry.mirrors.values()),
 			settle: () => this.#settle(),
 			shedDrops: (debt, cap) => this.#shedDrops(debt, cap),
+			shedArrivals: (debt, cap) => this.#shedArrivals(debt, cap),
 			expireDrops: (now) => this.#expireDrops(now),
 			holdsDrops: () => (this.#state.drops.all[0]?.start ?? UNBOUNDED) < this.#keptDrops(),
 		});
@@ -1185,6 +1189,31 @@ export class Producer {
 			this.#forgot([{ start: run.start, end }]);
 			paid += billed - this.#dropsBilled;
 		}
+		return paid;
+	}
+
+	// Bill the arrivals' gaps to the account as they now stand. The run they split is the track's
+	// own, so an in-order feed bills nothing.
+	#billArrivals(): void {
+		const billed = Math.max(0, this.#arrivals.size - 1) * ARRIVAL_OVERHEAD;
+		if (billed > this.#arrivalsBilled) this.#account.bill(billed - this.#arrivalsBilled);
+		else this.#account.unbill(this.#arrivalsBilled - billed);
+		this.#arrivalsBilled = billed;
+	}
+
+	// Fold the arrivals' oldest gaps toward `debt`, at most about `cap` bytes, returning the bytes
+	// freed: nothing waits on them any longer, as when their grace passes, so a reader parked on one
+	// judges it missing. Mirrors the Rust `TrackState::shed_arrivals`.
+	#shedArrivals(debt: number, cap: number): number {
+		let paid = 0;
+		let folded = false;
+		while (paid < debt && paid < cap && this.#arrivals.foldOldest()) {
+			const billed = this.#arrivalsBilled;
+			this.#billArrivals();
+			paid += billed - this.#arrivalsBilled;
+			folded = true;
+		}
+		if (folded) this.#owe();
 		return paid;
 	}
 
@@ -1255,6 +1284,7 @@ export class Producer {
 				throw new Error("track already caches groups");
 			producer.#account = producer.#openAccount(pool);
 		};
+		hooks.arrivalRuns = (producer) => producer.#arrivals.size;
 		hooks.subscribing = (producer) => producer.#subscribing;
 		hooks.requested = (producer) => producer.#state.update;
 		resubscribe = (producer) => producer.#updateSubscription();
@@ -2159,6 +2189,7 @@ export class Producer {
 		this.#arrivals.account(start, end, at);
 		// Only a gap folds, so an in-order feed never reads the subscription.
 		if (this.#arrivals.hasGaps()) this.#arrivals.expire(at, this.#grace());
+		this.#billArrivals();
 		this.#owe();
 	}
 
@@ -2319,7 +2350,10 @@ export class Producer {
 	#close(abort: Error | undefined) {
 		if (this.#state.closed.peek() !== undefined) return;
 		// A gap past the grace was lost before the abort rather than cut off by it.
-		if (abort && this.#state.end.peek()?.tail) this.#arrivals.expire(now(), this.#grace());
+		if (abort && this.#state.end.peek()?.tail) {
+			this.#arrivals.expire(now(), this.#grace());
+			this.#billArrivals();
+		}
 		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.

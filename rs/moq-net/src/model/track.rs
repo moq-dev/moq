@@ -652,6 +652,10 @@ pub(crate) struct TrackState {
 	// away a subscription's grace after a later arrival opened it, as the session's tail
 	// does, so this holds only the gaps still worth waiting for.
 	arrivals: Ledger,
+	// What `arrivals` bills to the pool, [`ledger::RUN_OVERHEAD`] per gap. Paying eviction
+	// debt folds its oldest gaps early, so an unbounded grace holds no more gaps than the
+	// pool would.
+	arrivals_bill: cache::Extra,
 
 	// The first sequence the live feed serves, as the publisher declared it (the wire's
 	// SUBSCRIBE_START). Lower groups are not waited for, though one may still arrive late
@@ -1570,6 +1574,7 @@ impl TrackState {
 			.and_then(|end| end.tail)
 			.map_or(now, |tail| tail.min(now));
 		self.arrivals.account(start..run.end, since);
+		self.bill_arrivals();
 		self.cache.wakes().arrived(start..run.end);
 	}
 
@@ -2505,11 +2510,42 @@ impl TrackState {
 	/// the session's tail uses, from the max delay the track's subscribers ask for.
 	fn fold_arrivals(&mut self, now: crate::time::Instant) {
 		// Only a gap folds, so an in-order feed never reads the subscriptions.
-		if !self.arrivals.has_gaps() {
-			return;
+		if self.arrivals.has_gaps() {
+			self.arrivals.set_grace(self.arrival_grace());
+			self.arrivals.expire(now);
 		}
-		self.arrivals.set_grace(self.arrival_grace());
-		self.arrivals.expire(now);
+		self.bill_arrivals();
+	}
+
+	/// Bill the arrivals' gaps to the pool, after any change to them. The run they split is
+	/// the track's own, so an in-order feed bills nothing.
+	fn bill_arrivals(&mut self) {
+		let billed = self.arrivals.len().saturating_sub(1) as u64 * ledger::RUN_OVERHEAD;
+		let before = self.arrivals_bill.size();
+		if billed > before {
+			self.arrivals_bill.add(billed - before);
+		} else {
+			self.arrivals_bill.sub(before - billed);
+		}
+	}
+
+	/// Fold the oldest gaps of the arrivals until the debt is paid or `cap` bytes are freed,
+	/// returning the bytes freed: nothing waits on them any longer, as when their grace
+	/// passes, so a reader parked on one judges it missing.
+	fn shed_arrivals(&mut self, cap: u64) -> u64 {
+		let mut paid = 0u64;
+		while self.debt > 0 && paid < cap {
+			let Some(gap) = self.arrivals.fold_oldest() else {
+				break;
+			};
+			let billed = self.arrivals_bill.size();
+			self.bill_arrivals();
+			let freed = billed.saturating_sub(self.arrivals_bill.size());
+			self.debt -= freed.min(self.debt);
+			paid = paid.saturating_add(freed);
+			self.cache.wakes().arrived(gap);
+		}
+		paid
 	}
 
 	/// How long a missing live group is waited for, from the max delay the track's
@@ -2557,6 +2593,7 @@ impl TrackState {
 		let cache = cache::Track::new(broadcast.pool.clone(), broadcast.frames.clone(), state.downgrade());
 		let mut new = state.write().ok().expect("a new track is open");
 		new.drops_bill = cache.extra();
+		new.arrivals_bill = cache.extra();
 		new.cache = cache;
 		drop(new);
 		state
@@ -2881,6 +2918,11 @@ impl TrackState {
 			self.debt -= size;
 			paid = paid.saturating_add(size);
 			self.evict_group(sequence, Error::Evicted);
+		}
+		// Then the arrivals' oldest gaps, which costs a reader only the wait for a late group, as
+		// the grace passing would.
+		if self.debt > 0 && paid < cap {
+			paid = paid.saturating_add(self.shed_arrivals(cap - paid));
 		}
 		// Then the drop set, oldest sequences first: losing a run costs a reader a judgment or
 		// a fill, never content being read.
@@ -24134,6 +24176,33 @@ mod test {
 			reported.push(run);
 		}
 		assert_eq!(reported[1..], held[..]);
+	}
+
+	/// A peer fragmenting its arrivals under a grace that never folds a gap bills each run to
+	/// the pool, which folds the oldest gaps early to stay within it.
+	#[test]
+	fn an_arrival_flood_stays_within_the_pool() {
+		const GROUPS: u64 = 1000;
+		let capacity = 64 * ledger::RUN_OVERHEAD;
+		let (producer, pool) = pooled_producer(capacity);
+		producer.received();
+		// A reader that waits an hour for a late group, so no gap folds by its grace.
+		let _subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(3600))));
+		for group in 0..GROUPS {
+			write_group(&producer, 2 * group);
+		}
+		let state = producer.state.read();
+		let runs = state.arrivals.len() as u64;
+		assert!(runs > 1, "the youngest gaps are still waited for");
+		assert!(runs < GROUPS, "the oldest gaps were folded");
+		assert_eq!(state.arrivals_bill.size(), (runs - 1) * ledger::RUN_OVERHEAD);
+		assert!(
+			pool.used() <= capacity + 2 * cache::ENTRY_OVERHEAD,
+			"the arrivals took the pool to {}",
+			pool.used()
+		);
+		assert!(state.arrivals.covers(0..3), "a folded gap is no longer waited for");
 	}
 
 	/// A local skip kept above the track's edge is dated once the edge passes it, so the next

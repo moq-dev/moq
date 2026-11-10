@@ -47,6 +47,21 @@ test("demand changes age order and restarts the entire intersecting gap", () => 
 	expect(ledger.hasGaps()).toBe(false);
 });
 
+test("a reclaim folds the oldest gap first however young, never the leading one", () => {
+	const ledger = new Ledger();
+	ledger.account(2n, 3n, at(0));
+	ledger.account(4n, 5n, at(10));
+	ledger.account(6n, 7n, at(20));
+	// Demand restarts the gap below 4, so the one above it is now the older.
+	ledger.demand(3n, 4n, at(30));
+	expect(ledger.size).toBe(3);
+	expect(ledger.foldOldest()).toEqual({ start: 5n, end: 6n });
+	expect(ledger.foldOldest()).toEqual({ start: 3n, end: 4n });
+	expect(ledger.covers(2n, 7n)).toBe(true);
+	expect(ledger.foldOldest()).toBeUndefined();
+	expect(ledger.size).toBe(1);
+});
+
 test("a leading gap keeps its age until a lower arrival makes it foldable", () => {
 	const ledger = new Ledger();
 	ledger.account(10n, 11n, at(0));
