@@ -56,5 +56,3 @@ publication; [old-crate retirement](/quest/m3/release/c-retire.md) follows.
 ## Required
 
 - [Switch to rust2's exporter](/quest/m3/ffi-exporter.md) - the C ABI comes from rust2's exporter instead of a UniFFI generator
-- [C consumers](/quest/m3/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
-- [Async failure contract](/quest/m3/c/async-failure-contract.md) - every generated async call returns a task and calls back exactly once, cancelled when its task was freed first

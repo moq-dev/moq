@@ -267,7 +267,3 @@ queue before counting queues, fixed by
 [moq-dev/moq#8396](https://github.com/moq-dev/moq/pull/8396).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Interop's finish cases hold up under load](/quest/m0/test-flakes-2/interop-finish.md) - every publisher's finish cells pass under load, and the scenario's quarantine is removed

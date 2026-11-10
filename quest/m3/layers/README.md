@@ -35,9 +35,3 @@ Decided 2026-11-08 (maintainer, moq-dev/studio /quest-plan):
   maps priority onto moq-lite's subscription priorities and unsubscribes a
   toggled-off layer.
 - m3: moq-dev/studio is the named consumer, and its side sits in its m2.
-
-## Required
-
-- [hang specifies a layer layout track](/quest/m3/layers/spec.md) - a versioned layout track in the hang draft, `rs/hang`, and `js/hang` that both players composite
-- [moq play composites layers](/quest/m3/layers/play.md) - `moq play` composites visible layers, mixes their audio, and toggles them
-- [The watch player composites layers](/quest/m3/layers/watch.md) - `@moq/watch` composites visible layers, mixes their audio, and toggles them
