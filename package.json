@@ -58,7 +58,6 @@
 		"demo/boy",
 		"demo/web",
 		"demo/carla/web",
-		"js/moq-boy",
 		"test/audio-quality/clients/js",
 		"test/interop/clients/js",
 		"test/interop/clients/js-native",

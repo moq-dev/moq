@@ -836,6 +836,132 @@ async fn a_peer_goaway_wins_over_a_probe() {
 	);
 }
 
+/// Pins an open finding (`verify-reconnect`, `RedirectFollowed`): once a probe got
+/// through, the fallback session drains as the predecessor and nothing watches its peer's
+/// GOAWAY anymore, so a redirect the peer sends while the handshake runs is never read and
+/// the redial goes back to the node that is leaving.
+#[kio::test]
+async fn residual_a_redirect_after_a_probe_got_through_is_lost() {
+	let (mut machine, fallback_server) = on_fallback(Config::default()).await;
+	probe(&mut machine).await;
+	assert!(machine.probed(kio::clock::now(), Ok(())));
+	assert!(matches!(next(&mut machine).await, Action::Migrating));
+
+	let elsewhere = url("https://peer:2/");
+	fallback_server
+		.drain()
+		.send(goaway::Goaway::redirect(elsewhere.to_string()))
+		.expect("the fallback peer sends a GOAWAY");
+	kio::clock::sim::idle().await;
+	// The handshake over the preferred transport fails, so the policy dials again.
+	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Retry);
+	assert!(matches!(next(&mut machine).await, Action::Retrying(_)));
+	let Action::Dial(attempt) = next(&mut machine).await else {
+		panic!("expected a redial");
+	};
+	assert_eq!(
+		attempt.target(),
+		&url("https://peer:1/"),
+		"the redial followed the redirect: flip this test"
+	);
+	assert!(machine.predecessor().is_some(), "the redirected session still drains");
+}
+
+/// A client and server session where the client holds a subscription the server serves,
+/// so neither end is idle while the returned handles live.
+async fn busy_handshake() -> (Session, Session, Vec<Box<dyn std::any::Any>>) {
+	use crate::model::ProduceTest;
+	let publisher = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+	let broadcast = publisher.route("bcast", crate::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"video",
+			crate::track::Info::default().with_timescale(crate::Timescale::MILLI),
+		)
+		.unwrap();
+	broadcast.announce().unwrap();
+	let subscriber = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
+
+	let (client, server) = crate::transport::memory::pair(crate::transport::memory::Config {
+		protocol: Some(version().alpn().to_string()),
+		..Default::default()
+	});
+	let dial = crate::Client::new()
+		.with_versions(version().into())
+		.with_subscriber(subscriber.clone());
+	let serve = crate::Server::new()
+		.with_versions(version().into())
+		.with_publisher(publisher.consume());
+	let (client, server) = futures::join!(
+		async {
+			let (session, driver) = dial.connect(kio::clock::now(), client).await.unwrap();
+			drop(kio::clock::sim::spawn(crate::time::run(driver)));
+			session
+		},
+		async {
+			let (session, driver) = serve.accept(kio::clock::now(), server).await.unwrap();
+			drop(kio::clock::sim::spawn(crate::time::run(driver)));
+			session
+		},
+	);
+
+	let remote = subscriber
+		.consume()
+		.follow("bcast", None)
+		.unwrap()
+		.available()
+		.await
+		.expect("the broadcast resolves")
+		.unwrap();
+	let mut group = track.append_group().unwrap();
+	group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
+	group.finish().unwrap();
+	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+	sub.recv_group().await.unwrap().expect("the track ended");
+	(
+		client,
+		server,
+		vec![Box::new(sub), Box::new(track), Box::new(broadcast), Box::new(publisher)],
+	)
+}
+
+/// Pins an open finding (`verify-reconnect`, `OfflineMeansNothingServes`): a replacement
+/// that drops while the predecessor still drains reports [`Action::Offline`], whose
+/// promise is that nothing serves, though the predecessor still carries a subscription.
+#[kio::test]
+async fn residual_a_dropped_replacement_reports_offline_while_the_predecessor_serves() {
+	let a = url("tcp://peer:1/");
+	let b = url("tcp://peer:2/");
+	let mut machine: Reconnect<Url, TestError> = Reconnect::new(Config::default(), vec![a], kio::clock::now()).unwrap();
+	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
+	let (client, server, _busy) = busy_handshake().await;
+	machine.connected(kio::clock::now(), client);
+
+	kio::clock::sleep(Duration::from_secs(2)).await;
+	server.drain().send(goaway::Goaway::redirect(b.to_string())).unwrap();
+	assert!(matches!(next(&mut machine).await, Action::Migrating));
+	let Action::Dial(attempt) = next(&mut machine).await else {
+		panic!("expected the redirect's dial");
+	};
+	assert_eq!(attempt.target(), &b);
+	let (replacement, replacement_server) = handshake().await;
+	machine.connected(kio::clock::now(), replacement);
+	drop(replacement_server);
+
+	let action = next(&mut machine).await;
+	assert!(
+		matches!(action, Action::Offline(Some(_))),
+		"the replacement's drop no longer reports offline: flip this test ({action:?})"
+	);
+	let (predecessor, _) = machine.predecessor().expect("the predecessor still drains");
+	assert!(predecessor.poll_closed(&kio::Waiter::noop()).is_pending());
+	assert!(
+		predecessor.poll_idle(&kio::Waiter::noop()).is_pending(),
+		"it still serves"
+	);
+}
+
 /// A target that never reaches the preferred transport keeps its fallback session and
 /// probes no faster than the doubling backoff allows, capped at one every five minutes.
 #[kio::test]
