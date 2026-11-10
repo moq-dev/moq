@@ -24197,8 +24197,8 @@ mod test {
 		let (producer, pool) = pooled_producer(capacity);
 		producer.received();
 		// A reader that waits an hour for a late group, so no gap folds by its grace.
-		let _subscriber =
-			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(3600))));
+		let _subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(3600))));
 		for group in 0..GROUPS {
 			write_group(&producer, 2 * group);
 		}
