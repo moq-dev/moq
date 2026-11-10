@@ -1681,7 +1681,7 @@ pub fn seeds() -> Vec<Seed> {
 	for (index, version) in IETF_VERSIONS.iter().enumerate() {
 		let outer = crate::Version::Ietf(*version);
 		let parameters = ietf::Parameters::default().encode_bytes(*version).unwrap();
-		let messages = vec![(26, crate::setup::Setup { parameters }.encode_bytes(outer).unwrap())];
+		let messages = vec![(24, crate::setup::Setup { parameters }.encode_bytes(outer).unwrap())];
 		for (kind, message) in messages {
 			let mut data = vec![index as u8, kind];
 			data.extend(message);
@@ -1773,11 +1773,11 @@ pub fn seeds() -> Vec<Seed> {
 			continue;
 		};
 
-		let mut data = vec![index as u8, 12];
+		let mut data = vec![index as u8, 11];
 		data.extend_from_slice(&encoded);
 		seeds.push(Seed {
 			target: "ietf",
-			kind: 12,
+			kind: 11,
 			data,
 		});
 	}
