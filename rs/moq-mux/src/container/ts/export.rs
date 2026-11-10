@@ -1810,8 +1810,12 @@ where
 
 		// 4. Mux each frame the jitter buffer lets go (the first carries the buffered
 		// PAT/PMT), then lay out every grid slot whose time has come ([`Self::lay_due`]).
-		if self.program.queue.is_empty() {
-			self.shed();
+		// A shed makes room in each source's jitter window, so read them again.
+		if self.program.queue.is_empty()
+			&& self.shed()
+			&& let Err(err) = self.fill(waiter)
+		{
+			self.leave(err)?;
 		}
 		loop {
 			if let Some(out) = self.pop() {
@@ -3911,22 +3915,23 @@ where
 	/// caught up: a frame held back while the output keeps up (for the program's tables, or a
 	/// generation still going out) is no lag of the sink's, and a source that fell silent leaves
 	/// nothing overdue.
-	fn shed(&mut self) {
+	/// Returns whether it shed.
+	fn shed(&mut self) -> bool {
 		// Once every source has ended, the tail goes out late if it must.
-		let live = self.program.tracks.values().any(|track| track.read == Read::Live);
-		if self.program.mux_rate.is_none() || self.held.is_some() || !live {
-			return;
+		if self.program.mux_rate.is_none() || self.held.is_some() || self.program.schedule.ended() {
+			return false;
 		}
 		let (Some(due), Some(caught_up)) = (self.jitter.front_deadline(), self.caught_up) else {
-			return;
+			return false;
 		};
 		let behind = kio::clock::now().saturating_duration_since(due.max(caught_up));
 		if behind <= self.budget() {
-			return;
+			return false;
 		}
 		tracing::warn!(?behind, "MPEG-TS output fell behind its multiplex rate, shedding");
 		self.jitter.shed(kio::clock::now());
 		self.rewind();
+		true
 	}
 
 	/// Lay out every grid slot whose time has come, and wake when the next one is due.

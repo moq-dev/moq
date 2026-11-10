@@ -253,7 +253,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				ready.deadline,
 				ready.item,
 				ready.bytes,
-				ready.sync,
+				ready.place,
 			));
 			track.bytes += ready.bytes;
 		}
@@ -432,7 +432,7 @@ pub(crate) struct Ready<K, T> {
 	/// Whether it is the first frame of its track to go out.
 	pub first: bool,
 	bytes: usize,
-	sync: bool,
+	place: Place,
 }
 
 /// What [`Buffer::push`] did with a frame.
@@ -758,6 +758,13 @@ struct Floor<K> {
 	began: Instant,
 }
 
+/// Where a queued frame sits in its group, so a shed can resume the track as [`Admit`] would.
+#[derive(Clone, Copy)]
+struct Place {
+	sync: bool,
+	leading: bool,
+}
+
 /// Which frames a track admits to its queue.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Admit {
@@ -772,8 +779,8 @@ enum Admit {
 
 struct Track<T> {
 	/// Frames in arrival order, each with its generation, decode time, deadline, bytes, and
-	/// whether it is a sync frame.
-	queue: VecDeque<(u64, Decode, Instant, T, usize, bool)>,
+	/// place in its group.
+	queue: VecDeque<(u64, Decode, Instant, T, usize, Place)>,
 	/// Wake the reader when its future tail enters the admission window.
 	read_timer: Option<Pin<Box<Sleep>>>,
 	/// What its queued frames hold against the byte budget.
@@ -1090,9 +1097,17 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 				}
 				let cost = arrival.cost();
 				track.bytes += cost;
-				track
-					.queue
-					.push_back((generation, arrival.decode, deadline, arrival.item, cost, arrival.sync));
+				track.queue.push_back((
+					generation,
+					arrival.decode,
+					deadline,
+					arrival.item,
+					cost,
+					Place {
+						sync: arrival.sync,
+						leading: arrival.leading,
+					},
+				));
 				self.horizon = self.horizon.max(Some(deadline));
 				Push::Queued
 			}
@@ -1397,7 +1412,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 				&& (self.delay.is_zero() || now >= *deadline)
 			{
 				let track = self.tracks.get_mut(key).expect("the front's track");
-				let (generation, decode, deadline, item, bytes, sync) =
+				let (generation, decode, deadline, item, bytes, place) =
 					track.queue.pop_front().expect("the front frame");
 				track.bytes -= bytes;
 				let first = !std::mem::replace(&mut track.started, true);
@@ -1414,7 +1429,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 					deadline,
 					first,
 					bytes,
-					sync,
+					place,
 				});
 			}
 			let Some(wake) = front.map(|(deadline, _)| deadline).into_iter().chain(acquired).min() else {
@@ -1460,18 +1475,37 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 
 	/// Drop every frame due before `before`, which an output that fell that far behind can no
 	/// longer send in time, and any read later that is. A track that loses a frame resumes at its
-	/// next sync frame.
+	/// next sync frame, queued or still to come, as if the frames had dropped as late.
 	pub fn shed(&mut self, before: Instant) {
 		self.shed = self.shed.max(Some(before));
 		for track in self.tracks.values_mut() {
 			let mut lost = 0;
-			while let Some((_, _, deadline, _, bytes, sync)) = track.queue.front()
-				&& (*deadline < before || (lost > 0 && !sync))
-			{
-				track.bytes -= bytes;
-				track.queue.pop_front();
-				lost += 1;
-			}
+			let mut admit = Admit::Flowing;
+			let bytes = &mut track.bytes;
+			track.queue.retain(|(_, _, deadline, _, cost, place)| {
+				let keep = match admit {
+					_ if *deadline < before => {
+						admit = Admit::Waiting;
+						false
+					}
+					Admit::Waiting if !place.sync => false,
+					Admit::Resumed if place.leading => false,
+					_ => {
+						if place.sync {
+							admit = match admit {
+								Admit::Waiting => Admit::Resumed,
+								Admit::Flowing | Admit::Resumed => Admit::Flowing,
+							};
+						}
+						true
+					}
+				};
+				if !keep {
+					lost += 1;
+					*bytes -= *cost;
+				}
+				keep
+			});
 			if lost == 0 {
 				continue;
 			}
@@ -1479,10 +1513,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 				true => self.dropped += lost,
 				false => self.trimmed += lost,
 			}
-			track.admit = match track.queue.is_empty() {
-				true => Admit::Waiting,
-				false => Admit::Resumed,
-			};
+			track.admit = admit;
 		}
 	}
 
@@ -2265,6 +2296,45 @@ mod tests {
 
 		tokio::time::advance(Duration::from_secs(1)).await;
 		assert_eq!(due(&mut buffer), ["v200", "v280", "v320", "v360"]);
+	}
+
+	/// A shed drops what is due before the cut and resumes the track at its next sync frame
+	/// already queued, losing that frame's leading frames too, as a late frame would.
+	#[tokio::test(start_paused = true)]
+	async fn a_shed_resumes_at_the_next_queued_sync_frame() {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY).replay();
+		let video = |decode, sync, leading, item| Arrival {
+			sync,
+			leading,
+			..arrival(start, decode, item)
+		};
+		buffer.push(1, video(0, true, false, "v0")).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(due(&mut buffer), ["v0"]);
+		for (decode, sync, leading, item) in [
+			(40, false, false, "v40"),
+			(80, false, false, "v80"),
+			(120, true, false, "v120"),
+			(160, false, true, "v160"),
+			(200, false, false, "v200"),
+			(240, true, false, "v240"),
+			(280, false, true, "v280"),
+		] {
+			assert_eq!(
+				buffer.push(1, video(decode, sync, leading, item)).unwrap(),
+				Push::Queued
+			);
+		}
+
+		buffer.shed(start.saturating_add(DELAY + Duration::from_millis(100)));
+		assert_eq!(
+			buffer.dropped(),
+			3,
+			"the stale frames and the resumed sync frame's leading frame"
+		);
+		tokio::time::advance(Duration::from_secs(1)).await;
+		assert_eq!(due(&mut buffer), ["v120", "v200", "v240", "v280"]);
 	}
 
 	/// A forward restart before anything went out keeps the clock, so the tracks stay on one.
