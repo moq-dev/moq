@@ -23,6 +23,7 @@ CONSTANTS
     Origin,       \* the node that declares the identity
     Leaves,       \* nodes that send only identities they serve (`Sim::leaf`)
     Links,        \* sessions, as 2-element sets of nodes
+    Cost,         \* Cost[l]: the cost of link l in Links, strictly positive
     Claims,       \* claim paths
     MaxRev,       \* the origin's claim changes
     MaxFlaps,     \* session opens and closes
@@ -97,16 +98,18 @@ Certifiers(s) == {m \in Nodes : s.rx[m].on /\ Feasible(s, s.rx[m])}
 Recoverable(s) == \E m \in Certifiers(s) : s.rx[m].held
 
 \* The lowest metric, then the lowest key: `selected`'s rank with equal priority.
-Best(s, S) ==
+Best(n, s, S) ==
     CHOOSE m \in S : \A k \in S :
-        s.rx[m].met < s.rx[k].met \/ (s.rx[m].met = s.rx[k].met /\ m <= k)
+        LET mm == s.rx[m].met + Cost[{n, m}]
+            mk == s.rx[k].met + Cost[{n, k}]
+        IN mm < mk \/ (mm = mk /\ m <= k)
 
 NoSel == [on |-> FALSE, next |-> None, seq |-> 0, met |-> 0]
 Selected(n, s, ov) ==
     IF n = Origin THEN [on |-> TRUE, next |-> None, seq |-> ov.seq, met |-> 0]
     ELSE IF UsableSet(s) = {} THEN NoSel
-    ELSE LET m == Best(s, UsableSet(s))
-         IN [on |-> TRUE, next |-> m, seq |-> s.rx[m].seq, met |-> s.rx[m].met + 1]
+    ELSE LET m == Best(n, s, UsableSet(s))
+         IN [on |-> TRUE, next |-> m, seq |-> s.rx[m].seq, met |-> s.rx[m].met + Cost[{n, m}]]
 
 Live(n, s) ==
     n = Origin \/ UsableSet(s) # {} \/ InfeasibleSet(s) # {} \/ Recoverable(s)
@@ -192,7 +195,7 @@ Requests(n, s, sel) ==
               ELSE p0
         answered == sel.on /\ sel.seq >= p1.seq
         hasTarget == sel.on \/ InfeasibleSet(s) # {}
-        target == IF sel.on THEN sel.next ELSE Best(s, InfeasibleSet(s))
+        target == IF sel.on THEN sel.next ELSE Best(n, s, InfeasibleSet(s))
     IN IF ~p1.on THEN [pending |-> p1, to |-> None, seq |-> 0]
        ELSE IF answered \/ (p1.from = {} /\ ~starved) \/ ~hasTarget
             THEN [pending |-> NoPending, to |-> None, seq |-> 0]
@@ -506,17 +509,31 @@ Hop(n, k) == IF k = 0 THEN n ELSE Hop(NextHop(n), k - 1)
 \* Following selected next hops from any relay never cycles.
 LoopFree == \A n \in Relays : Hop(n, Cardinality(Nodes)) \notin Relays
 
-\* Every link costs 1, so a loop-free path to the origin has at most this metric.
-Longest == Cardinality(Nodes) - 1
+\* The costliest loop-free path from the origin to n through nodes that
+\* forward: no route n selects can be longer without having looped.
+RECURSIVE Paths(_, _)
+Paths(p, k) ==
+    IF k = 0 THEN {p}
+    ELSE {p} \cup UNION {Paths(Append(p, x), k - 1) :
+                          x \in {y \in Nodes : {p[Len(p)], y} \in Links
+                                               /\ \A i \in DOMAIN p : p[i] # y
+                                               /\ (Len(p) = 1 \/ Serves(p[Len(p)]))}}
+RECURSIVE PathCost(_)
+PathCost(p) == IF Len(p) < 2 THEN 0 ELSE Cost[{p[1], p[2]}] + PathCost(Tail(p))
+LongestTable == [n \in Nodes |->
+    LET ps == {p \in Paths(<<Origin>>, Cardinality(Nodes) - 1) : p[Len(p)] = n}
+    IN IF ps = {} THEN 0 ELSE CHOOSE c \in {PathCost(p) : p \in ps} : \A p \in ps : PathCost(p) <= c]
+Longest(n) == LongestTable[n]
 
 \* No relay selects a route longer than any loop-free path: a longer one is a
 \* stale route counting up as it bounces between relays (Babel's feasibility
 \* condition exists to rule this out).
-NoCountToInfinity == \A n \in Relays : Selected(n, st[n], OV).met <= Longest
+NoCountToInfinity == \A n \in Relays : Selected(n, st[n], OV).met <= Longest(n)
 
 \* Explore one step past NoCountToInfinity and no further, so a count to
-\* infinity is reported rather than explored forever.
-Bounded == \A n, m \in Nodes : st[n].rx[m].met <= Longest
+\* infinity is reported rather than explored forever: what m advertises is a
+\* metric m selected.
+Bounded == \A n, m \in Nodes : st[n].rx[m].met <= Longest(m)
 
 \* Nodes the origin reaches over open sessions, through nodes that forward.
 RECURSIVE Grow(_, _)
