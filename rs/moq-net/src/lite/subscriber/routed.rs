@@ -184,7 +184,7 @@ impl Routed {
 					id,
 					WireRoute {
 						node,
-						reach,
+						reach: reach.clone(),
 						claims: BTreeMap::new(),
 						pending: BTreeMap::new(),
 						committed: None,
@@ -274,7 +274,7 @@ impl Routed {
 
 	fn reach(&mut self, id: u64, reach: route::Reach) -> Result<(), Error> {
 		let route = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
-		route.reach = reach;
+		route.reach = reach.clone();
 		self.stream.route(route.node, Some(reach));
 		Ok(())
 	}
@@ -358,7 +358,7 @@ impl Routed {
 		ids.sort_unstable();
 		for id in &ids {
 			let route = &self.routes[id];
-			stream.route(route.node, Some(route.reach));
+			stream.route(route.node, Some(route.reach.clone()));
 		}
 		let certifies = self.certifies();
 		for id in &ids {
@@ -636,12 +636,15 @@ mod tests {
 	use crate::lite::{AnnounceBroadcast as Msg, AnnounceDecoder, PathRef, test_transport::SinkSession};
 	use crate::{Instance, Path, auth::Permit, origin::Cost, route::Advert};
 
-	const ADVERT: Advert = Advert {
-		seqno: 0,
-		metric: 0,
-		down_only: false,
-		rtt: None,
-	};
+	fn advert() -> Advert {
+		Advert {
+			seqno: 0,
+			metric: 0,
+			down_only: false,
+			rtt: None,
+			hops: [].into(),
+		}
+	}
 
 	fn start(path: &'static str) -> Msg {
 		Msg::Active {
@@ -683,7 +686,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -722,7 +725,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [
 			route,
@@ -765,7 +768,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -801,7 +804,7 @@ mod tests {
 			};
 			let route = Msg::RouteStart {
 				node: 7,
-				advert: ADVERT,
+				advert: advert(),
 			};
 			for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
 				routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -831,14 +834,14 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 
 		for (id, node) in [(0, 7), (1, 8)] {
-			let route = Msg::RouteStart { node, advert: ADVERT };
+			let route = Msg::RouteStart { node, advert: advert() };
 			routed.receive(&prefix, route, &mut decoder).unwrap();
 			routed.receive(&prefix, Msg::RouteEnd { id }, &mut decoder).unwrap();
 			routed.poll(&subscriber, &mut writer, &waiter).unwrap();
 		}
 		let route = Msg::RouteStart {
 			node: 9,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		assert!(
 			routed.receive(&prefix, route, &mut decoder).is_err(),
@@ -859,7 +862,7 @@ mod tests {
 		let prefix = Path::empty();
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		routed.receive(&prefix, route, decoder)?;
 		for path in paths {
@@ -957,7 +960,7 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		routed.receive(&prefix, route, &mut decoder).unwrap();
 		let downstream = (subscriber.origin.route_node())
@@ -1034,7 +1037,7 @@ mod tests {
 			node: 7,
 			advert: Advert {
 				rtt: Some(ms(5)),
-				..ADVERT
+				..advert()
 			},
 		};
 		let floor = Msg::Floor {
@@ -1077,7 +1080,7 @@ mod tests {
 
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		routed.receive(&prefix, route, &mut decoder).unwrap();
 		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
@@ -1098,7 +1101,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [route, start("room/host"), floor] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();

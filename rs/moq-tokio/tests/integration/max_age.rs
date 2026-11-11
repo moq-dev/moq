@@ -110,6 +110,8 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 		let front = consumer.request("age", None).await?;
 		for (i, age) in AGES.into_iter().enumerate() {
 			let track = front.track(&i.to_string())?.subscribe(None).await?;
+			// moq-transport never sends MAX_CACHE_DURATION: it would expire the newest group too.
+			let age = if version.is_lite() { age } else { None };
 			anyhow::ensure!(
 				track.info().max_age == age,
 				"{version}: track {i} age {:?}, wanted {age:?}",

@@ -293,7 +293,7 @@ fn sweep_forgetting_distances() {
 /// zero-cost link is refused when it is configured.
 #[test]
 fn zero_cost_links_are_refused() {
-	let mut router: Router<Node, Item> = Router::new(1);
+	let mut router: Router<Node, Item> = Router::new(99, 1);
 	let link = Link {
 		cost: 0,
 		..Link::default()
@@ -775,7 +775,7 @@ fn an_unanswerable_request_stops() {
 #[test]
 fn a_newer_request_raises_the_pending_one() {
 	let (up, a, b) = (0, 1, 2);
-	let mut relay = Router::<Node, Item>::new(9);
+	let mut relay = Router::<Node, Item>::new(99, 9);
 	for neighbor in [up, a, b] {
 		relay.connect(neighbor, Link::default()).unwrap();
 	}
@@ -784,6 +784,7 @@ fn a_newer_request_raises_the_pending_one() {
 		metric: 1,
 		down_only: false,
 		rtt: None,
+		hops: [].into(),
 	};
 	relay.route(up, 7, Some(Reach::Finite(advert)));
 	relay.drain();
@@ -872,6 +873,7 @@ fn an_overflowing_route_neither_certifies_nor_holds() {
 			metric,
 			down_only: false,
 			rtt: None,
+			hops: [].into(),
 		}))
 	};
 	let item = Item {
@@ -885,7 +887,7 @@ fn an_overflowing_route_neither_certifies_nor_holds() {
 		..Link::default()
 	};
 
-	let mut router: Router<Node, Item> = Router::new(1);
+	let mut router: Router<Node, Item> = Router::new(99, 1);
 	router.connect(near, Link::default()).unwrap();
 	router.connect(far, far_link.clone()).unwrap();
 	router.asks(near, p("live/a")).unwrap();
@@ -901,7 +903,7 @@ fn an_overflowing_route_neither_certifies_nor_holds() {
 		"only the unreachable route certifies it"
 	);
 
-	let mut router: Router<Node, Item> = Router::new(1);
+	let mut router: Router<Node, Item> = Router::new(99, 1);
 	router.connect(far, far_link).unwrap();
 	router.route(far, 7, finite(1));
 	router.batch(far, 7, vec![(p("live/x"), Some(item))], Some(1), 0);
@@ -909,6 +911,51 @@ fn an_overflowing_route_neither_certifies_nor_holds() {
 	assert!(router.selected(7).is_none());
 	assert!(!router.grounded(7), "an unreachable held route recovers nothing");
 	assert_eq!(router.shows(7, &p("live/x")), None);
+}
+
+/// A route grows to the hop limit with nothing else about it changed, so its sender
+/// stops certifying. What only that neighbor certified is let go at once, though a
+/// change of hops alone otherwise lets go of nothing.
+#[test]
+fn a_route_grown_to_the_hop_limit_certifies_nothing() {
+	let finite = |hops: usize| {
+		Some(Reach::Finite(Advert {
+			seqno: 0,
+			metric: 1,
+			down_only: false,
+			rtt: None,
+			hops: (1..=hops as Id).collect(),
+		}))
+	};
+	let item = Item {
+		seed: 0,
+		epoch: None,
+		since: 1,
+	};
+	let (narrow, wide) = (1, 2);
+	let mut router: Router<Node, Item> = Router::new(99, 1);
+	router.connect(narrow, Link::default()).unwrap();
+	router.connect(wide, Link::default()).unwrap();
+	router.asks(narrow, p("live/a")).unwrap();
+	router.route(narrow, 7, finite(2));
+	router.batch(narrow, 7, vec![(p("live/a/x"), Some(item))], Some(1), 0);
+	router.route(wide, 7, finite(MAX_HOPS - 2));
+	router.batch(wide, 7, vec![(p("live/b/y"), Some(item))], Some(1), 0);
+	assert_eq!(router.shows(7, &p("live/b/y")), Some(true));
+
+	router.route(wide, 7, finite(MAX_HOPS - 1));
+	assert_eq!(
+		router.shows(7, &p("live/b/y")),
+		Some(true),
+		"one hop more moves nothing"
+	);
+	router.route(wide, 7, finite(MAX_HOPS));
+	assert_eq!(
+		router.shows(7, &p("live/b/y")),
+		None,
+		"the route crossed as many nodes as one may"
+	);
+	assert_eq!(router.shows(7, &p("live/a/x")), Some(true));
 }
 
 /// A fresh claim arrives only on a stream that certifies nothing, while an
@@ -924,6 +971,7 @@ fn a_fresh_uncertified_claim_waits_on_an_older_floor() {
 			metric,
 			down_only: false,
 			rtt: None,
+			hops: [].into(),
 		}))
 	};
 	let item = Item {
@@ -933,7 +981,7 @@ fn a_fresh_uncertified_claim_waits_on_an_older_floor() {
 	};
 	let (certifier, carrier) = (1, 2);
 	for refresh in [true, false] {
-		let mut router: Router<Node, Item> = Router::new(1);
+		let mut router: Router<Node, Item> = Router::new(99, 1);
 		router.connect(certifier, Link::default()).unwrap();
 		router.connect(carrier, Link::default()).unwrap();
 		router.route(certifier, 7, finite(1));
@@ -950,23 +998,20 @@ fn a_fresh_uncertified_claim_waits_on_an_older_floor() {
 	}
 }
 
-/// Pins a count to infinity that `verify/route/RouteHandoff.tla` found. An echo
-/// travels apart from the echoing node's routes, so it can overtake an
-/// advertisement that node derived from this one's. b learned its route from a
-/// and advertised it back, then ended it on a's ROUTE_END. Its echo arrives
-/// first, so a drains its feasibility distance and accepts b's stale
-/// advertisement as a fresh, longer route to an origin neither reaches through
-/// the other. With every echo overtaking, the two relays count up without end.
-/// A fix keeps a's distance until that advertisement can no longer arrive:
-/// then a refuses it and the route is gone.
+/// An echo travels apart from the echoing node's routes, so it can overtake a
+/// route that node derived from this one's. b learned its route from a and sent it
+/// back, then ended it on a's ROUTE_END. Its echo arrives first, so a drops its
+/// feasibility distance, and b's old route arrives looking like a fresh, longer one
+/// to an origin neither reaches. Its hops name a, so a refuses it, where two relays
+/// once counted up without end.
 #[test]
-fn residual_an_overtaking_echo_counts_to_infinity() {
+fn a_route_that_crossed_a_node_is_refused_once_its_distance_is_gone() {
 	let (origin, a, b) = (0, 1, 2);
 	let mut sim = Sim::new(3);
 	sim.join(origin, a, 1);
 	sim.join(origin, b, 1);
 	sim.join(a, b, 1);
-	// b hears the origin only through a, and b's advertisement to a waits.
+	// b hears the origin only through a, and b's route to a waits.
 	sim.hold(origin, b);
 	sim.hold(b, a);
 	originate(&mut sim, origin, 7, 0);
@@ -976,27 +1021,400 @@ fn residual_an_overtaking_echo_counts_to_infinity() {
 	sim.disconnect(origin, a);
 	assert!(sim.run());
 	assert!(!sim.holds(b, 7), "b let go on a's ROUTE_END");
-	assert!(sim.deliver_ack(b, a), "b's echo overtakes its own advertisement");
-	assert!(!sim.remembers(a, 7), "a drained its distance");
+	assert!(sim.deliver_ack(b, a), "b's echo overtakes its own route");
+	assert!(!sim.remembers(a, 7), "a dropped its distance");
 	assert!(sim.deliver(b, a));
+	assert!(sim.holds(a, 7), "b's route stays open until b ends it");
+	assert!(sim.route(a, 7).is_none(), "a refuses its own route, come back");
+	assert!(!sim.starved(a, 7), "no seqno would help");
+	assert_eq!(sim.shows(a, 7, ""), None);
+
+	// b still reaches the origin, and a takes the route b learns there.
+	sim.release(b, a);
+	sim.release(origin, b);
+	assert!(sim.run());
 	assert_eq!(
 		sim.route(a, 7).map(|route| (route.next, route.metric)),
-		Some((Some(b), 3))
+		Some((Some(b), 2))
+	);
+}
+
+/// The origin sits behind relay a, in a triangle with b and c. An echo proves only
+/// that nothing derived is in flight on its own link: here c's copy of a's route
+/// waits on its way to b while both echo a's ROUTE_END, so a drops its distance, and
+/// then b takes c's copy and offers it to a. It crossed a, so a refuses it and the
+/// copies die out, where the three relays once handed it round at a growing metric.
+#[test]
+fn a_route_handed_round_a_triangle_is_refused_where_it_began() {
+	let (origin, a, b, c) = (0, 1, 2, 3);
+	let mut sim = Sim::new(4);
+	sim.join(origin, a, 1);
+	sim.join(a, b, 2);
+	sim.join(a, c, 1);
+	sim.join(b, c, 2);
+	for (from, to) in [(c, b), (b, c), (b, a), (c, a)] {
+		sim.hold(from, to);
+	}
+	originate(&mut sim, origin, 7, 0);
+	assert!(sim.run());
+	assert_eq!(sim.route(b, 7).map(|route| route.metric), Some(3));
+
+	sim.disconnect(origin, a);
+	assert!(sim.run());
+	assert!(!sim.holds(b, 7) && !sim.holds(c, 7), "both let go on a's ROUTE_END");
+	assert!(sim.deliver_ack(b, a) && sim.deliver_ack(c, a));
+	assert!(!sim.remembers(a, 7), "every neighbor echoed, so a dropped its distance");
+
+	// c's copy, sent before the end, is shorter than what b advertised: feasible there.
+	assert!(sim.deliver(c, b));
+	assert_eq!(
+		sim.route(b, 7).map(|route| (route.next, route.metric)),
+		Some((Some(c), 4))
 	);
 
-	// Each round, the relay that just drained accepts the other's stale route.
-	for round in 0..6 {
-		let (from, to) = if round % 2 == 0 { (b, a) } else { (a, b) };
-		let mut peak = 0;
-		while sim.deliver(from, to) {
-			peak = peak.max(sim.route(to, 7).map_or(0, |route| route.metric));
+	// b may offer it to a once a echoes the ROUTE_END b sent it.
+	let mut peak = 0;
+	for _ in 0..100 {
+		for (from, to) in [(b, a), (c, a), (a, b), (a, c)] {
+			sim.deliver(from, to);
+			sim.deliver_ack(from, to);
+			peak = peak.max(sim.route(a, 7).map_or(0, |route| route.metric));
 		}
-		// The origin echoes b's ends, and echoes overtake every route still waiting.
-		while sim.deliver(b, origin) {}
-		while [(a, b), (b, a), (origin, b)]
-			.into_iter()
-			.any(|(x, y)| sim.deliver_ack(x, y))
-		{}
-		assert_eq!(peak, 3 + round, "round {round}");
+	}
+	assert_eq!(peak, 0, "a never takes back a route that crossed it");
+
+	for (from, to) in [(c, b), (b, c), (b, a), (c, a)] {
+		sim.release(from, to);
+	}
+	assert!(sim.run());
+	for node in [a, b, c] {
+		assert!(!sim.holds(node, 7), "node {node}");
+		assert!(!sim.remembers(node, 7), "node {node}");
+	}
+}
+
+/// An origin names itself in its route's hops like any relay, so once it rotated
+/// to a fresh identity and forgot the old one, a copy of the old route is still
+/// refused where it began.
+#[test]
+fn a_retired_identitys_route_is_refused_by_the_node_that_originated_it() {
+	let (origin, b) = (0, 1);
+	let mut sim = Sim::new(2);
+	sim.join(origin, b, 1);
+	sim.hold(b, origin);
+	originate(&mut sim, origin, 7, MAX - 1);
+	assert!(sim.run());
+	assert_eq!(next(&sim, b, 7), Some(origin));
+
+	sim.bump(origin);
+	assert_ne!(sim.proven(origin), 7, "the last seqno rotates the identity");
+	assert!(sim.run());
+	assert!(sim.deliver_ack(b, origin), "b's echo overtakes its own route");
+	assert!(!sim.remembers(origin, 7));
+	assert!(sim.deliver(b, origin));
+	assert!(sim.holds(origin, 7), "b's copy of the old route arrived");
+	assert!(sim.route(origin, 7).is_none(), "it crossed the node that began it");
+
+	sim.release(b, origin);
+	assert!(sim.run());
+	assert!(!sim.holds(origin, 7) && !sim.remembers(origin, 7));
+}
+
+/// A scoped peer hands a relay's own route back under the key the relay files that
+/// peer's identities by. The hops are never qualified, so the relay still finds
+/// itself in them and refuses the copy.
+#[test]
+fn a_route_that_returns_through_a_scoped_peer_is_refused() {
+	let (origin, relay, peer) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.join(origin, relay, 1);
+	sim.link(relay, peer, SimLink::cost(1).grant(LOCAL), SimLink::cost(1));
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "local/x", 0, None);
+	assert!(sim.run());
+	let key = qualified(LOCAL.subject, 7);
+	assert_eq!(next(&sim, peer, 7), Some(relay));
+	assert!(sim.holds(relay, key), "the peer sent the route back");
+	assert!(sim.route(relay, key).is_none(), "it crossed the relay");
+	assert_eq!(sim.shows(relay, key, "local/x"), None);
+
+	sim.disconnect(origin, relay);
+	assert!(sim.run());
+	assert!(!sim.holds(relay, key) && !sim.holds(peer, 7));
+}
+
+/// A route that already crossed as many nodes as one may goes no further: the next
+/// relay cannot add itself, so it is unreachable there, not waiting on a seqno.
+#[test]
+fn a_route_stops_at_the_hop_limit() {
+	let last = MAX_HOPS + 1;
+	let mut sim = Sim::new(last + 1);
+	for node in 0..last {
+		sim.join(node, node + 1, 1);
+	}
+	originate(&mut sim, 0, 7, 0);
+	assert!(sim.run());
+	let full = last - 2;
+	assert_eq!(sim.route(full, 7).map(|route| route.metric), Some(full as Metric));
+	assert!(
+		sim.route(full + 1, 7).is_none(),
+		"the route crossed as many nodes as one may"
+	);
+	assert!(sim.holds(full + 1, 7) && !sim.starved(full + 1, 7));
+	assert!(!sim.holds(last, 7), "nothing is sent on");
+}
+
+/// A relay sends the origin's route to a peer that files it under a qualified key
+/// and hands it back. While the peer got there by another relay the copy is a route
+/// like any other; once the peer takes this relay's own, the copy has crossed it. No
+/// seqno changes that, so the relay lets the key go without asking for one.
+#[test]
+fn a_scoped_copy_that_crossed_a_relay_asks_for_no_seqno() {
+	let (origin, near, far, cdn) = (0, 1, 2, 3);
+	let mut sim = Sim::new(4);
+	sim.join(origin, near, 1);
+	sim.join(origin, far, 1);
+	sim.link(near, cdn, SimLink::cost(1), SimLink::cost(1).grant(LOCAL));
+	sim.link(far, cdn, SimLink::cost(1), SimLink::cost(2).grant(LOCAL));
+	// The peer hears the far relay first.
+	sim.hold(near, cdn);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "local/x", 0, None);
+	assert!(sim.run());
+	let key = qualified(LOCAL.subject, 7);
+	assert_eq!(next(&sim, cdn, key), Some(far));
+	assert_eq!(next(&sim, near, key), Some(cdn));
+
+	sim.release(near, cdn);
+	assert!(sim.run());
+	assert_eq!(next(&sim, cdn, key), Some(near), "the peer took the shorter route");
+	assert!(sim.route(near, key).is_none(), "which crossed the near relay");
+	assert!(!sim.starved(near, key));
+	assert_eq!(sim.seqno(origin), 0, "nothing failed, so nothing was asked");
+	assert_eq!(sim.retained().pending, 0);
+	assert_eq!(sim.shows(near, 7, "local/x"), Some(true));
+}
+
+/// The same copy, arriving at a metric the relay's distance refuses: the peer had
+/// the origin through the far relay, and falls back on the near one's route when
+/// that goes. The copy is infeasible, but it extends nothing the near relay sent
+/// under the key, so the peer will never move off it: the relay does not wait.
+#[test]
+fn a_scoped_copy_that_crossed_a_relay_is_not_waited_on() {
+	let (origin, near, far, cdn) = (0, 1, 2, 3);
+	let mut sim = Sim::new(4);
+	sim.join(origin, near, 5);
+	sim.join(origin, far, 1);
+	// The near relay is nearer the origin than the peer, so its route is feasible there.
+	sim.link(near, cdn, SimLink::cost(1), SimLink::cost(3).grant(LOCAL));
+	sim.link(far, cdn, SimLink::cost(1), SimLink::cost(5).grant(LOCAL));
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "local/x", 0, None);
+	assert!(sim.run());
+	let key = qualified(LOCAL.subject, 7);
+	assert_eq!(next(&sim, cdn, key), Some(far));
+	assert_eq!(sim.route(near, key).map(|route| route.metric), Some(7));
+
+	sim.disconnect(far, cdn);
+	assert!(sim.run());
+	assert_eq!(
+		sim.route(cdn, key).map(|route| (route.next, route.metric)),
+		Some((Some(near), 8))
+	);
+	assert!(sim.holds(near, key) && sim.route(near, key).is_none());
+	assert!(
+		!sim.starved(near, key),
+		"the peer's route stands whatever the relay does"
+	);
+	assert_eq!(sim.seqno(origin), 0);
+	assert_eq!(sim.retained().pending, 0);
+	assert_eq!(sim.shows(near, 7, "local/x"), Some(true));
+}
+
+/// The cost of the longest loop-free path from `from` through nodes not yet `seen`,
+/// each hop charged at the receiver's side of the link.
+fn longest(sim: &Sim, from: Node, seen: &mut Vec<Node>) -> Metric {
+	seen.push(from);
+	let mut best = 0;
+	for to in 0..sim.links.len() {
+		if let Some(link) = sim.links[to][from]
+			&& !seen.contains(&to)
+		{
+			best = best.max(link.cost + longest(sim, to, seen));
+		}
+	}
+	seen.pop();
+	best
+}
+
+/// Random meshes with the origin behind a relay deliver every message and echo in a
+/// random order while links flap and relays restart and collect. A route names the
+/// relays it crossed, so no relay ever selects one longer than a loop-free path: a
+/// node that forgot the origin cannot take back a copy of its own old route. Without
+/// the hops this finds a count to infinity within a dozen cases. Every fourth mesh
+/// scopes some relays under a grant, which hands a relay its own route back under a
+/// qualified key: nothing may wait on that copy once the mesh is quiet.
+#[test]
+fn sweep_no_route_outgrows_a_loop_free_path() {
+	let mut rng = XorShift(0x0bad_c0de);
+	let (mut flaps, mut collected, mut cut, mut restarts) = (0, 0, 0, 0);
+	for case in 0..200 {
+		let relays = 3 + rng.next(3) as usize;
+		let origin = relays;
+		let scoped = case % 4 == 1;
+		let mut sim = Sim::new(relays + 1);
+		let mut links = Vec::new();
+		for a in 0..relays {
+			for b in a + 1..relays {
+				if b == a + 1 || rng.chance(50) {
+					let side = SimLink::cost(1 + rng.next(3));
+					let grant = Grant {
+						subject: ["ga", "gb"][rng.next(2) as usize],
+						scope: "",
+					};
+					match scoped && rng.chance(30) {
+						true => sim.link(a, b, side.grant(grant), side),
+						false => sim.link(a, b, side, side),
+					}
+					links.push((a, b));
+				}
+			}
+		}
+		// The origin's links come first, so they flap most.
+		for _ in 0..1 + rng.next(2) {
+			let relay = rng.next(relays as u64) as usize;
+			if !sim.connected(origin, relay) {
+				sim.join(origin, relay, 1 + rng.next(2));
+				links.insert(0, (origin, relay));
+			}
+		}
+		// A restart is a new relay as far as hops go, which a route may cross once more.
+		let mut bound = longest(&sim, origin, &mut Vec::new());
+		originate(&mut sim, origin, 7, 0);
+
+		let check = |sim: &Sim, step: usize, bound: Metric| {
+			for node in 0..relays {
+				let metric = sim.route(node, 7).map_or(0, |route| route.metric);
+				assert!(
+					metric <= bound,
+					"case {case} step {step}: node {node} selected a route of {metric}, past {bound}"
+				);
+			}
+			assert_loop_free(sim, relays + 1, 7);
+		};
+		for step in 0..300 {
+			match rng.next(40) {
+				0 | 1 => {
+					let pick = match rng.chance(60) {
+						true => 0,
+						false => rng.next(links.len() as u64) as usize,
+					};
+					let (a, b) = links[pick];
+					match sim.connected(a, b) {
+						true => sim.disconnect(a, b),
+						false => sim.connect(a, b),
+					}
+					flaps += 1;
+				}
+				2 => {
+					let node = rng.next(relays as u64) as usize;
+					if !sim.holds(node, 7) {
+						sim.collect(node, 7);
+						collected += 1;
+					}
+				}
+				3 => sim.bump(origin),
+				4 if case % 4 == 0 && rng.chance(25) => {
+					let node = rng.next(relays as u64) as usize;
+					sim.kill(node);
+					sim.reconnect(node);
+					bound += 3 * relays as Metric;
+					restarts += 1;
+				}
+				_ => {
+					let (busy, acks) = (sim.busy(), sim.busy_acks());
+					let pick = rng.next((busy.len() + acks.len()).max(1) as u64) as usize;
+					if let Some(&(from, to)) = busy.get(pick) {
+						sim.deliver(from, to);
+					} else if let Some(&(from, to)) = acks.get(pick - busy.len()) {
+						sim.deliver_ack(from, to);
+					}
+				}
+			}
+			check(&sim, step, bound);
+		}
+		assert!(sim.run(), "case {case} never settles");
+		check(&sim, usize::MAX, bound);
+
+		// Quiet: a relay the origin still reaches routes to it and shows its claim, and
+		// every other one holds nothing, its distance included. No request is left.
+		let mut reached = vec![origin];
+		let mut next = 0;
+		while let Some(&at) = reached.get(next) {
+			next += 1;
+			for peer in 0..=relays {
+				if sim.links[at][peer].is_some() && sim.connected(at, peer) && !reached.contains(&peer) {
+					reached.push(peer);
+				}
+			}
+		}
+		cut += usize::from(reached.len() <= relays);
+		for node in 0..relays {
+			for &id in sim.nodes[node].rx.keys() {
+				assert!(!sim.starved(node, id), "case {case}: node {node} waits on {id}");
+			}
+			// A scoped link files the origin under another key past it.
+			if scoped {
+				continue;
+			}
+			match reached.contains(&node) {
+				true => {
+					assert!(sim.route(node, 7).is_some(), "case {case}: node {node} lost its route");
+					assert_eq!(sim.shows(node, 7, ""), Some(true), "case {case}: node {node}");
+				}
+				false => {
+					assert!(!sim.holds(node, 7), "case {case}: node {node} holds a dead route");
+					assert!(
+						!sim.remembers(node, 7),
+						"case {case}: node {node} keeps a dead distance"
+					);
+					assert_eq!(sim.shows(node, 7, ""), None, "case {case}: node {node}");
+				}
+			}
+		}
+		assert_eq!(sim.retained().pending, 0, "case {case}");
+	}
+	assert!(
+		flaps > 0 && collected > 0 && cut > 0 && restarts > 0,
+		"{flaps} flaps, {collected} collects, {cut} cut, {restarts} restarts"
+	);
+}
+
+/// A relay restarts with no memory and hands node 4 a reflection of the route 4 sent
+/// before its last one. It crossed 4 and is infeasible there, so 4 waits on it like
+/// any infeasible route, and its readers see the claim unavailable, never gone.
+#[test]
+fn a_relay_restart_keeps_the_claim_unavailable() {
+	let origin = 6;
+	let mut sim = Sim::new(7);
+	sim.join(origin, 1, 1);
+	sim.join(1, 3, 1);
+	sim.link(1, 4, SimLink::cost(1), SimLink::cost(2));
+	sim.link(1, 5, SimLink::cost(1).priority(1), SimLink::cost(3).priority(-1));
+	sim.join(3, 4, 1);
+	sim.join(4, 5, 1);
+	originate(&mut sim, origin, 7, 0);
+	assert!(sim.run());
+
+	let before = sim.events.len();
+	sim.kill(1);
+	sim.reconnect(1);
+	assert!(sim.run());
+	for node in [4, 5] {
+		let seen: Vec<Kind> = (sim.events[before..].iter())
+			.filter(|event| event.node == node)
+			.map(|event| event.kind)
+			.collect();
+		assert_eq!(seen, [Kind::Unavailable, Kind::Available], "node {node}");
 	}
 }

@@ -67,11 +67,10 @@ The edit rule those three imply, to prove rather than assume:
 
 Work:
 
-- Start from the model and `Sim` with per-link costs and the hop list
-  ([the fix](/quest/m2/cluster-routing/routes/echo-order.md)), and move the
-  echo from its own queue onto the neighbour's FIFO, as
-  [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487) did: with one
-  stream per side nothing overtakes anything.
+- Start from the model and `Sim` with link costs and hops
+  ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)), and move the echo from its own queue onto the neighbour's FIFO, as
+  that PR's first commit (`81c0698295`) did: with one stream per side nothing
+  overtakes anything.
 - Give the model at least two prefixes and edits in flight: add, remove,
   widen, narrow, and an edit that crosses a claim change, a route change, a
   ROUTE_END, and its echo. The model fixes interest at the root today, so
@@ -98,7 +97,3 @@ one key, which `Sim` and the tests use, so this changes no behaviour on its
 own.
 
 Public API: none (the router is crate-private). Wire: none.
-
-## Required
-
-- [A node never takes back a route that crossed it](/quest/m2/cluster-routing/routes/echo-order.md) - the model, `Sim`, and router with per-link costs and the hop list, which this builds on

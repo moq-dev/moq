@@ -9025,6 +9025,7 @@ mod tests {
 				metric: 0,
 				down_only: false,
 				rtt: None,
+				hops: [].into(),
 			};
 			lite::AnnounceBroadcast::RouteStart { node, advert }
 				.encode(w, Version::Lite07)

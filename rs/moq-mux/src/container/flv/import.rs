@@ -140,19 +140,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// completes. The buffer is fully consumed; a trailing partial tag is retained
 	/// for the next call.
 	///
+	/// A malformed or unsupported tag leaves the importer usable, since tags are framed
+	/// independently. A failure to publish, such as a
+	/// [`TimestampRewind`](crate::container::TimestampRewind) from a restarted source,
+	/// refuses all later input, so a caller skipping bad tags can tell the two apart by
+	/// whether the next call is refused.
+	///
 	/// Input after [`finish`](Self::finish) is refused with [`Finished`](crate::Error::Finished),
 	/// or with the cause of a finish that failed.
 	pub fn decode(&mut self, data: &[u8]) -> crate::Result<()> {
 		self.input.check()?;
 		self.buffer.extend_from_slice(data);
 
-		match self.drain() {
-			Ok(()) => Ok(()),
-			Err(err) => match err.downcast::<crate::Error>() {
-				Ok(err) => Err(err),
-				Err(err) => Err(err.into()),
-			},
-		}
+		self.drain().map_err(typed)
 	}
 
 	fn drain(&mut self) -> anyhow::Result<()> {
@@ -489,20 +489,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Ok(());
 		}
 		// The first frame anchors the stream before the reservation below publishes.
-		let timestamp = self.timebase.shift(Timestamp::from_millis(pts_ms as u64)?)?;
+		let shifted = self.timebase.shift(Timestamp::from_millis(pts_ms as u64)?);
+		let timestamp = self.refuse(shifted)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
 		let stream = self.video.get_mut(&track_id).expect("checked above");
-		match stream.track.write(Frame {
+		let result = match stream.track.write(Frame {
 			timestamp,
 			duration: None,
 			payload: Bytes::copy_from_slice(data),
 			keyframe,
 		}) {
-			Ok(()) | Err(crate::Error::MissingKeyframe(_)) => Ok(()),
-			Err(e) => Err(e.into()),
-		}
+			Err(crate::Error::MissingKeyframe(_)) => Ok(()),
+			result => result,
+		};
+		self.refuse(result)
 	}
 
 	/// Write one audio frame as its own group, so the relay can forward it immediately.
@@ -512,23 +514,39 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Ok(());
 		}
 		// The first frame anchors the stream before the reservation below publishes.
-		let timestamp = self.timebase.shift(Timestamp::from_millis(timestamp)?)?;
+		let shifted = self.timebase.shift(Timestamp::from_millis(timestamp)?);
+		let timestamp = self.refuse(shifted)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
 		let stream = self.audio.get_mut(&track_id).expect("checked above");
-		stream.track.write(Frame {
-			timestamp,
-			duration: None,
-			payload: Bytes::copy_from_slice(data),
-			keyframe: true,
-		})?;
-		stream.track.cut(None)?;
-		Ok(())
+		let result = stream
+			.track
+			.write(Frame {
+				timestamp,
+				duration: None,
+				payload: Bytes::copy_from_slice(data),
+				keyframe: true,
+			})
+			.and_then(|()| stream.track.cut(None));
+		self.refuse(result)
+	}
+
+	/// Refuse all later input when publishing failed, so the caller can tell it from a bad tag.
+	fn refuse<T>(&mut self, result: crate::Result<T>) -> anyhow::Result<T> {
+		result.map_err(|err| {
+			self.input = crate::container::Input::Refused(err.clone());
+			err.into()
+		})
 	}
 
 	/// (Re)build the video track `track_id` for `config`, unless it matches the current one.
-	fn init_video(&mut self, track_id: u8, mut config: VideoConfig) -> anyhow::Result<()> {
+	fn init_video(&mut self, track_id: u8, config: VideoConfig) -> anyhow::Result<()> {
+		let result = self.build_video(track_id, config).map_err(typed);
+		self.refuse(result)
+	}
+
+	fn build_video(&mut self, track_id: u8, mut config: VideoConfig) -> anyhow::Result<()> {
 		config.container = self.container.clone();
 		if self.video.get(&track_id).is_some_and(|s| s.config == config) {
 			return Ok(());
@@ -556,7 +574,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// (Re)build the audio track `track_id` for `config`, unless it matches the current one.
-	fn init_audio(&mut self, track_id: u8, mut config: AudioConfig) -> anyhow::Result<()> {
+	fn init_audio(&mut self, track_id: u8, config: AudioConfig) -> anyhow::Result<()> {
+		let result = self.build_audio(track_id, config).map_err(typed);
+		self.refuse(result)
+	}
+
+	fn build_audio(&mut self, track_id: u8, mut config: AudioConfig) -> anyhow::Result<()> {
 		config.container = self.container.clone();
 		if self.audio.get(&track_id).is_some_and(|s| s.config == config) {
 			return Ok(());
@@ -627,9 +650,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	fn finish_in_place(&mut self) -> crate::Result<()> {
 		match &self.input {
-			crate::container::Input::Open => {}
 			crate::container::Input::Finished => return Ok(()),
-			crate::container::Input::Refused(err) | crate::container::Input::Failed(err) => return Err(err.clone()),
+			crate::container::Input::Failed(err) => return Err(err.clone()),
+			crate::container::Input::Open | crate::container::Input::Refused(_) => {}
 		}
 		// No input follows, so the buffer that waited for the rest of a tag is done.
 		self.buffer = BytesMut::new();
@@ -642,10 +665,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for stream in self.audio.values_mut() {
 			result = result.and(stream.track.end());
 		}
-		self.input = match &result {
-			Ok(()) => crate::container::Input::Finished,
-			Err(err) => crate::container::Input::Failed(err.clone()),
-		};
+		match &result {
+			// A refusal keeps refusing input with its own cause.
+			Ok(()) if matches!(self.input, crate::container::Input::Refused(_)) => {}
+			Ok(()) => self.input = crate::container::Input::Finished,
+			Err(err) => self.input = crate::container::Input::Failed(err.clone()),
+		}
 		result
 	}
 
@@ -831,4 +856,9 @@ fn config_from_eac3(frame: &[u8]) -> anyhow::Result<AudioConfig> {
 		header.sample_rate,
 		header.channel_count,
 	))
+}
+
+/// The typed error inside `err`, or `err` wrapped as [`Other`](crate::Error::Other).
+fn typed(err: anyhow::Error) -> crate::Error {
+	err.downcast().unwrap_or_else(crate::Error::from)
 }

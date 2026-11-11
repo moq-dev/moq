@@ -85,15 +85,14 @@ pub fn import(
 		body.len() <= 0xFF_FFFF,
 		"RTMP message body exceeds FLV's 24-bit tag size"
 	);
-	match importer.decode(&tag(tag_type, timestamp, body)) {
-		Ok(()) => Ok(()),
-		Err(err @ moq_mux::Error::TimestampRewind(_)) => Err(err.into()),
-		Err(err) => {
-			// A whole tag is consumed atomically; a bad frame cannot desynchronize the next tag.
-			tracing::warn!(%err, "dropping RTMP frame that failed to demux");
-			Ok(())
-		}
-	}
+	let Err(err) = importer.decode(&tag(tag_type, timestamp, body)) else {
+		return Ok(());
+	};
+	// A publish failure, such as a restarted timeline, refuses all later input; a bad tag does not.
+	importer.decode(&[])?;
+	// A whole tag is consumed atomically; a bad frame cannot desynchronize the next tag.
+	tracing::warn!(%err, "dropping RTMP frame that failed to demux");
+	Ok(())
 }
 
 /// One FLV media tag pulled out of an [`Export`](moq_mux::container::flv::Export)

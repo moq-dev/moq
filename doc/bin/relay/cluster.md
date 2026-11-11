@@ -16,9 +16,11 @@ same way so the cluster converges instead of flapping. Both wire protocols
 carry it: natively on moq-lite up to moq-lite-06, and via the
 [cluster extension](/draft/moq-cluster) on moq-transport.
 
-moq-lite-07-wip carries no hop list. Each publishing node declares a random
-routing identity, and relays run a distance-vector route to it, loop-free by
-Babel's feasibility condition, so every claim of one origin shares that route.
+moq-lite-07-wip carries the list once per publishing node instead of once per
+broadcast. Each publishing node declares a random routing identity, and relays
+run a distance-vector route to it, loop-free by Babel's feasibility condition,
+so every claim of one origin shares that route. The route names the relays it
+crossed, and a relay never uses one that names itself.
 The first relay a request reaches picks the origin node, by a hash of the path
 and the node's identity that every relay computes alike, and names it on the
 request so later hops follow their own route to that node. A relay running both
@@ -110,8 +112,9 @@ max_hops = 6
 
 The same setting is `--cluster-max-hops` or `MOQ_CLUSTER_MAX_HOPS`. It covers
 moq-lite-03 through moq-lite-06 and moq-transport drafts 18 through 22 when
-the MoQ Cluster extension is negotiated. moq-lite-07-wip routes carry no hop
-path, so it does not bound them. A forwarded path counts this relay's
+the MoQ Cluster extension is negotiated. A moq-lite-07-wip route crosses at
+most 32 nodes whatever this is set to: it does not hunt for paths, so a lower
+cap would only hide a short path behind a cheaper long one. A forwarded path counts this relay's
 own hop even when its peer appends it on receipt. Older versions and peers
 without hop paths hide their depth, which this setting cannot bound.
 
@@ -182,7 +185,8 @@ the same one for a given path. A publisher connected straight to the relay is
 not hashed at its own path: its newest session wins, so a publisher that
 restarts takes over from its lingering old session at once.
 
-moq-lite-07-wip carries no hop list, so both hop-list steps drop out: the first
+moq-lite-07-wip keeps its hop list on the route to a publishing node, not on
+each broadcast, so both hop-list steps drop out: the first
 relay ranks the origin nodes announcing a path the same way otherwise, and
 remaining ties hash the path with each node's routing identity. Later hops
 follow their own route to the node it picked. Routes learned over an older
@@ -295,7 +299,8 @@ decides which relays receive the cluster token.
 
 Each relay has an identity that it uses for loop detection and routing, and
 declares in SETUP on moq-lite-05 and later: a Hop ID added to each route's hop
-list, or on the opt-in `moq-lite-07-wip` a Node ID naming the route's origin. It is random on every start, so a
+list, or on the opt-in `moq-lite-07-wip` a Node ID naming the route's origin,
+which it also adds to the hops of each route it forwards. It is random on every start, so a
 restarted relay is a new node to the rest of the mesh, and there is no setting
 to pin it.
 
