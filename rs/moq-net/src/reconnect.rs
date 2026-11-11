@@ -10,7 +10,8 @@
 //!
 //! The first walk of the peer's addresses fails fast: if no address establishes a
 //! session, the policy ends with [`Action::Done`] carrying that walk's error rather than
-//! retrying, so a setup mistake surfaces at once instead of looping. A client started
+//! retrying, so a setup mistake surfaces at once instead of looping. The one exception is
+//! a refused credential the tokens have replaced since, which earns another dial. A client started
 //! before its peer is reachable therefore exits, for its supervisor or app to restart.
 //! Once a session has been established, a later failure backs off and retries under
 //! [`Backoff`], so restarts and redeploys still recover.
@@ -880,15 +881,18 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 
 	fn walk_failed(&mut self, now: Instant, err: E, verdict: Verdict, presented: Option<&auth::Dial>) {
 		self.walk = Walk::default();
+		// Credentials replaced since the dial read them are the caller's fix, so they earn
+		// another dial even before a first session.
+		let renewed = verdict == Verdict::Refused && self.changed(presented);
 		let terminal = match verdict {
 			Verdict::Fatal | Verdict::Unusable => true,
-			Verdict::Refused => !self.changed(presented),
+			Verdict::Refused => !renewed,
 			Verdict::Retry | Verdict::Settled => false,
 		};
-		// The first walk fails fast: a peer that never answered with a session is more
-		// likely misconfigured (an unknown host, an untrusted certificate, no version in
+		// Otherwise the first walk fails fast: a peer that never answered with a session is
+		// more likely misconfigured (an unknown host, an untrusted certificate, no version in
 		// common) than restarting, and only the caller can fix that.
-		if terminal || self.config.once || !self.established {
+		if terminal || self.config.once || !(self.established || renewed) {
 			return self.done(Err(err));
 		}
 		self.queue.push_back(Action::Retrying(err.clone()));

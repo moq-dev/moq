@@ -529,6 +529,33 @@ async fn a_refusal_retries_only_new_tokens() {
 	);
 }
 
+/// A first walk refused for tokens replaced since its dial still earns another dial: the
+/// new tokens are the caller's fix. Unchanged tokens fail fast.
+#[kio::test]
+async fn a_first_refusal_retries_only_new_tokens() {
+	let peer = url("tcp://peer:1/");
+	let tokens = auth::Tokens::new(vec!["old".parse().unwrap()]);
+	let mut machine = Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now())
+		.unwrap()
+		.with_tokens(tokens.clone());
+
+	let Action::Dial(_) = next(&mut machine).await else {
+		panic!("expected a dial")
+	};
+	tokens.set(vec!["new".parse().unwrap()]);
+	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Refused);
+	assert!(matches!(next(&mut machine).await, Action::Retrying(_)));
+
+	let Action::Dial(_) = next(&mut machine).await else {
+		panic!("expected a redial")
+	};
+	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Refused);
+	assert!(
+		matches!(next(&mut machine).await, Action::Done(Err(TestError::Dial))),
+		"an unchanged credential is refused for good"
+	);
+}
+
 /// Ending the tokens' handle ends the policy at its next walk, rather than redialing
 /// sessions the handle refuses.
 #[kio::test]

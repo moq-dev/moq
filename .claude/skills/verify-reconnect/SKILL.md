@@ -18,7 +18,7 @@ Each rule is an INVARIANT; the harm says why it matters. All but `NoOrphan`, `Re
 | `OfflineMeansNothingServes` | Disconnected is reported only when no predecessor still serves (`Action::Offline`: "nothing serves anymore"). | An app waiting on `established` stalls, and the UI says disconnected, while a session still carries its media. |
 | `NoOrphan` | Until the policy is done, every open session is the live one or the predecessor. | A transport and the peer's state stay open with nothing able to reach them. |
 | `PresenceBalanced` | `sessions_started - sessions_ended` is 1 while connected and 0 otherwise. | Presence counts drift on every migration. |
-| `FirstWalkFailsFast` | Nothing backs off before a session has been established: a failed first walk ends the policy. | A setup mistake (an untrusted certificate, no version in common) retries forever instead of surfacing. |
+| `FirstWalkFailsFast` | Nothing backs off before a session has been established: a failed first walk ends the policy (a refusal of since-replaced tokens is the exception, and tokens are not modeled). | A setup mistake (an untrusted certificate, no version in common) retries forever instead of surfacing. |
 | `RedirectFollowed` | A dial never goes elsewhere than a redirect, named to a session the policy still holds, that the policy never acted on. | The replacement lands back on the node that is leaving. |
 
 ## Run
