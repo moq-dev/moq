@@ -584,7 +584,7 @@ impl Stream {
 	pub fn route(&self, named: Id, reach: Option<Reach>) {
 		let mut state = self.node.lock();
 		// Only the peer's own route has metric 0: any other means the peer forwards.
-		if matches!(reach, Some(Reach::Finite(advert)) if advert.metric > 0) {
+		if matches!(&reach, Some(Reach::Finite(advert)) if advert.metric > 0) {
 			state.links.insert(self.key);
 		}
 		state.router.route(self.key, named, reach);
@@ -1353,11 +1353,14 @@ mod tests {
 		assert_eq!(read.len(), 2, "the route, then its claim");
 	}
 
-	/// The ROUTE messages for `id` a stream would send.
-	fn routes(stream: &Stream, id: Id) -> Vec<Option<Reach>> {
+	/// The seqnos of the finite ROUTE messages for `id` a stream would send.
+	fn routes(stream: &Stream, id: Id) -> Vec<Seqno> {
 		(outputs(stream).into_iter())
 			.filter_map(|output| match output {
-				Output::Route { id: to, reach } if to == id => Some(reach),
+				Output::Route { id: to, reach } if to == id => match reach {
+					Some(Reach::Finite(advert)) => Some(advert.seqno),
+					reach => panic!("unexpected reach {reach:?}"),
+				},
 				_ => None,
 			})
 			.collect()
@@ -1368,6 +1371,8 @@ mod tests {
 			seqno,
 			metric,
 			down_only: false,
+			rtt: None,
+			hops: [].into(),
 		}))
 	}
 
@@ -1385,7 +1390,7 @@ mod tests {
 		let from_b = relay.receive(Link::default(), Path::empty()).unwrap();
 		from_a.route(5, finite(0, 1));
 		from_b.route(6, finite(0, 1));
-		assert_eq!(routes(&to_b, 2), [finite(0, 0)]);
+		assert_eq!(routes(&to_b, 2), [0]);
 		outputs(&to_a);
 
 		// A client sending only its own route connects and leaves.
@@ -1405,7 +1410,7 @@ mod tests {
 
 		// Losing a forwarding peer does change a path.
 		drop((to_a, refiled));
-		assert_eq!(routes(&to_b, 2), [finite(1, 0)]);
+		assert_eq!(routes(&to_b, 2), [1]);
 		drop(from_b);
 	}
 
@@ -1421,9 +1426,9 @@ mod tests {
 		};
 		let first = publisher.answer(origin.clone(), Path::empty()).unwrap();
 		let second = publisher.answer(origin, Path::empty()).unwrap();
-		assert_eq!(routes(&second, 9), [finite(0, 0)]);
+		assert_eq!(routes(&second, 9), [0]);
 		drop(first);
-		assert_eq!(routes(&second, 9), [finite(1, 0)]);
+		assert_eq!(routes(&second, 9), [1]);
 
 		// A session whose prefix matches no claim carries no route, so its close moves no path.
 		let unmatched = publisher
