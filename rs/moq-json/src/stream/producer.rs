@@ -87,15 +87,55 @@ impl<T: Serialize> Producer<T> {
 		self.inner.lock().unwrap().append(value.into())
 	}
 
-	/// Finish the track, closing the group.
-	pub fn finish(&mut self) -> Result<()> {
-		self.inner.lock().unwrap().finish()
+	/// Finish the track, closing the group, and return the [`Finished`] log.
+	///
+	/// Clones sharing the track see it ended: their next [`append`](Self::append) fails.
+	pub fn finish(self) -> Result<Finished<T>> {
+		self.inner.lock().unwrap().finish()?;
+		Ok(Finished {
+			inner: self.inner,
+			_marker: PhantomData,
+		})
 	}
 
 	/// Abort the track with the given error, which consumers see in place of a clean end.
 	///
 	/// Consumes the handle, since nothing can be appended afterwards. Clones sharing the track see
 	/// it closed: their next [`append`](Self::append) fails.
+	pub fn abort(self, err: moq_net::Error) -> Result<()> {
+		self.inner.lock().unwrap().track.abort(err);
+		Ok(())
+	}
+}
+
+/// A log whose producer [finished](Producer::finish) it: it can still be read or aborted, but
+/// not appended to.
+///
+/// Dropping the last handle sharing the track releases it, so new readers can no longer find it.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_append(log: moq_json::stream::Finished<u32>) {
+/// log.append(&1).unwrap();
+/// # }
+/// ```
+#[must_use = "dropping the last handle releases the track, which new readers can then no longer find"]
+pub struct Finished<T> {
+	inner: Arc<Mutex<Inner<T>>>,
+	_marker: PhantomData<fn(T)>,
+}
+
+impl<T> Finished<T> {
+	/// Create a subscriber for the underlying track.
+	pub fn consume(&self) -> moq_net::track::Subscriber {
+		self.inner.lock().unwrap().track.inner.subscribe(None)
+	}
+
+	/// A watch-only handle to the underlying track's subscriber demand.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.inner.lock().unwrap().track.inner.demand()
+	}
+
+	/// Release the track's cache, reporting `err` to readers that have not drained it.
 	pub fn abort(self, err: moq_net::Error) -> Result<()> {
 		self.inner.lock().unwrap().track.abort(err);
 		Ok(())
