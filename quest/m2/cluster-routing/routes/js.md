@@ -18,6 +18,7 @@ Decided 2026-10-27 (maintainer), from
 the cheapest one; fix it with the route-selection rework here.
 - Feed the availability API (`RouteInfo.available` and the `offline` route kind) from the route layer.
 - Rust/JS interop covers the route messages, the floor marker, and the echo.
+- Decode the hop list on ROUTE_START and ROUTE_UPDATE and send an empty one for the tab's own route, once [the fix](/quest/m2/cluster-routing/routes/echo-order.md) adds it. A tab forwards nothing, so it never appends itself; the [browser mesh](/quest/m5/browser-mesh.md) does.
 - Encode lite-07's Route ID (ANNOUNCE_START) and Node ID (every TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS request, 0 when the publisher selects the node) as Rust does, and pin `js/net/src/lite/announce.test.ts`'s goldens to `lite::compress`'s `GOLDEN` and `JS_LITERAL`.
 - Leave the temporary Lite-06 Chain Setup Parameter unsent: JS translates nothing, so it keeps no chain, and a Rust peer sends the chain only to a peer that offers it.
 - Restore the native JS lite-07 lanes. Decided 2026-11-06 (maintainer,

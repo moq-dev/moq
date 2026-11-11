@@ -67,9 +67,11 @@ The edit rule those three imply, to prove rather than assume:
 
 Work:
 
-- Start from the model and `Sim` with the echo on the neighbour's FIFO
-  and a sound drain
-  ([the echo fix](/quest/m2/cluster-routing/routes/echo-order.md)).
+- Start from the model and `Sim` with per-link costs and the hop list
+  ([the fix](/quest/m2/cluster-routing/routes/echo-order.md)), and move the
+  echo from its own queue onto the neighbour's FIFO, as
+  [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487) did: with one
+  stream per side nothing overtakes anything.
 - Give the model at least two prefixes and edits in flight: add, remove,
   widen, narrow, and an edit that crosses a claim change, a route change, a
   ROUTE_END, and its echo. The model fixes interest at the root today, so
@@ -96,8 +98,4 @@ Public API: none (the router is crate-private). Wire: none.
 
 ## Required
 
-- [A node forgets a route only once nothing derived from it remains](/quest/m2/cluster-routing/routes/echo-order.md) - the model, `Sim`, and router with the echo on the neighbour's FIFO, per-link costs, and a sound drain, which this builds on
-
-## Related
-
-- [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - grows the same spec to larger meshes and unequal costs; whichever lands second adapts
+- [A node never takes back a route that crossed it](/quest/m2/cluster-routing/routes/echo-order.md) - the model, `Sim`, and router with per-link costs and the hop list, which this builds on

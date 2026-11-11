@@ -18,10 +18,13 @@ Decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing).
 
 Why: today a side's requests ride the streams it opened and its answers ride
 the streams its peer opened, and QUIC orders no stream against another. The
-first count to infinity [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md)
+first count to infinity [the fix](/quest/m2/cluster-routing/routes/echo-order.md)
 records is one message overtaking another across that split, and the router
 keys each stream as its own neighbour (`route/node.rs`), where the model and
-`Sim` have one neighbour per session.
+`Sim` have one neighbour per session. That fix no longer rests on this: the
+hop list it adds holds with the echo unordered, so it lands first, on
+today's streams. This removes the ordering hazard as a class and makes a
+token-scope change an edit.
 
 Settled:
 
