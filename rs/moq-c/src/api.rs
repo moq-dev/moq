@@ -2342,6 +2342,24 @@ pub extern "C" fn moq_route_set_cost(route: u32, cost: u64) -> i32 {
 	})
 }
 
+/// Swap the credential a route's announcing request carries, renewing that request in place.
+///
+/// `credential` is a [crate::moq_session_credential] handle, or zero to announce under the
+/// session's scope. Only the session that minted it carries it; any other session announces
+/// the route under its own scope. The route keeps its own reference, so the handle can be
+/// freed after this call. Fails once its broadcast closed. Returns zero on success, or a
+/// negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_route_set_auth(route: u32, credential: u32) -> i32 {
+	ffi::enter(move || {
+		let route = ffi::parse_id(route)?;
+		let credential = ffi::parse_id_optional(credential)?;
+		let state = State::lock();
+		let credential = credential.map(|id| state.auth.credential(id)).transpose()?;
+		state.origin.route_with(route, |route| route.set_auth(credential))
+	})
+}
+
 /// Release a route handle, retracting the route.
 ///
 /// The broadcast handle stays the caller's until [moq_publish_close].
@@ -2408,6 +2426,23 @@ pub extern "C" fn moq_claim_set_cost(claim: u32, cost: u64) -> i32 {
 	ffi::enter(move || {
 		let claim = ffi::parse_id(claim)?;
 		State::lock().origin.claim_with(claim, |claim| claim.set_cost(cost))
+	})
+}
+
+/// Swap the credential a claim's announcing request carries, renewing that request in place.
+///
+/// `credential` is a [crate::moq_session_credential] handle, or zero to announce under the
+/// session's scope. Only the session that minted it carries it; any other session announces
+/// the claim under its own scope. The claim keeps its own reference, so the handle can be
+/// freed after this call. Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_claim_set_auth(claim: u32, credential: u32) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		let credential = ffi::parse_id_optional(credential)?;
+		let state = State::lock();
+		let credential = credential.map(|id| state.auth.credential(id)).transpose()?;
+		state.origin.claim_with(claim, |claim| claim.set_auth(credential))
 	})
 }
 

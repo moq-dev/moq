@@ -9161,3 +9161,203 @@ fn preencoded_rungs_and_rate_control() {
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
+
+/// What a [`base_moqt_server`] saw happen to one request token.
+#[derive(Debug, PartialEq)]
+enum TokenSeen {
+	/// The peer presented it, and it was granted in full.
+	Presented(Vec<u8>),
+	/// The peer withdrew it, or the last request naming it ended.
+	Withdrawn(Vec<u8>),
+}
+
+/// Listen over TCP for one moq-transport `version` session as a base moq-transport peer,
+/// declining the Solicit extension so only requests carry tokens, and consuming
+/// the peer's broadcasts into the moq-c origin `sink`. Returns the address and what happens
+/// to each non-empty token the session presents.
+fn base_moqt_server(version: &str, sink: u32) -> (String, mpsc::Receiver<TokenSeen>) {
+	let version: moq_net::Version = version.parse().unwrap();
+	let mut config = moq_tokio::listen::Config::default();
+	config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+	config.version = vec![version];
+	config.extensions.solicit = false;
+	let mut listener = crate::ffi::RUNTIME
+		.block_on(async { config.init(Default::default()).unwrap().listen().await })
+		.unwrap();
+	let addr = listener.tcp_local_addr().unwrap().to_string();
+	let sink = State::lock()
+		.origin
+		.get(crate::ffi::parse_id(sink).unwrap())
+		.unwrap()
+		.producer
+		.clone();
+
+	let (tx, rx) = mpsc::channel();
+	crate::ffi::RUNTIME.spawn(async move {
+		let mut request = listener.accept().await.unwrap();
+		let mut requests = request.requests();
+		let _session = request.with_subscriber(sink).ok().await.unwrap();
+		// The connection credential's grant, held for the session.
+		let mut held = Vec::new();
+		while let Some(request) = requests.next().await {
+			let token = request.token().to_vec();
+			let issued = request.accept(moq_net::auth::Grant::all());
+			if token.is_empty() {
+				held.push(issued);
+				continue;
+			}
+			if tx.send(TokenSeen::Presented(token.clone())).is_err() {
+				break;
+			}
+			let tx = tx.clone();
+			tokio::spawn(async move {
+				issued.closed().await;
+				let _ = tx.send(TokenSeen::Withdrawn(token));
+			});
+		}
+	});
+	(addr, rx)
+}
+
+/// Dial `addr` once over moq-transport `version`, publishing `source`, and wait until connected.
+fn dial_once(addr: &str, version: &str, source: u32) -> (u32, States) {
+	let versions = [moq_str(version)];
+	let mut config = client_config();
+	config.versions = versions.as_ptr();
+	config.versions_len = versions.len();
+	config.once = true;
+	let url = format!("tcp://{addr}/");
+	let states = States::new();
+	let client = id(unsafe {
+		moq_session_connect(
+			url.as_ptr() as *const c_char,
+			url.len(),
+			&config,
+			source,
+			0,
+			Some(state_callback),
+			states.ptr,
+		)
+	});
+	assert_eq!(
+		states.recv().phase,
+		moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED,
+		"{version}"
+	);
+	(client, states)
+}
+
+/// Mint a credential on `session` for `token`, waiting for its handle.
+fn credential(session: u32, token: &[u8]) -> u32 {
+	let cb = Callback::new();
+	assert_eq!(
+		unsafe { moq_session_credential(session, token.as_ptr(), token.len(), Some(channel_callback), cb.ptr) },
+		0
+	);
+	id(cb.recv())
+}
+
+/// A route's credential rides its moq-transport PUBLISH_NAMESPACE to the peer's acceptor,
+/// and swapping it renews the announcement on the same session, withdrawing the old token.
+#[test]
+fn a_route_credential_rides_and_renews_the_moq_transport_announce() {
+	for version in ["moq-transport-18", "moq-transport-22"] {
+		let sink = id(moq_origin_create());
+		let (addr, seen) = base_moqt_server(version, sink);
+		let source = id(moq_origin_create());
+		let (client, states) = dial_once(&addr, version, source);
+
+		let (route, broadcast) = create_route(source, b"room/x", Some(&hidden()));
+		let first = credential(client, b"first");
+		assert_eq!(moq_route_set_auth(route, first), 0);
+		assert_eq!(moq_credential_free(first), 0, "the route keeps its own reference");
+		assert_eq!(moq_route_announce(route), 0);
+		assert_eq!(
+			seen.recv_timeout(TIMEOUT).unwrap(),
+			TokenSeen::Presented(b"first".to_vec()),
+			"{version}"
+		);
+
+		let second = credential(client, b"second");
+		assert_eq!(moq_route_set_auth(route, second), 0);
+		assert_eq!(moq_credential_free(second), 0);
+		assert_eq!(
+			seen.recv_timeout(TIMEOUT).unwrap(),
+			TokenSeen::Presented(b"second".to_vec()),
+			"{version}"
+		);
+		assert_eq!(
+			seen.recv_timeout(TIMEOUT).unwrap(),
+			TokenSeen::Withdrawn(b"first".to_vec()),
+			"{version}"
+		);
+		// The renewed announcement still routes the broadcast to the peer.
+		assert_eq!(moq_consume_close(request_broadcast(sink, b"room/x")), 0);
+
+		// The one connection the server accepts carried both tokens, so the session held.
+		assert_eq!(moq_session_close(client), 0);
+		states.recv_terminal();
+		assert_eq!(moq_route_free(route), 0);
+		assert_eq!(moq_publish_close(broadcast), 0);
+		assert_eq!(moq_origin_close(source), 0);
+		assert_eq!(moq_origin_close(sink), 0);
+	}
+}
+
+/// A claim's credential rides its announcement too, and zero takes it off again.
+#[test]
+fn a_claim_credential_rides_the_moq_transport_announce() {
+	let sink = id(moq_origin_create());
+	let (addr, seen) = base_moqt_server("moq-transport-18", sink);
+	let source = id(moq_origin_create());
+	let (client, states) = dial_once(&addr, "moq-transport-18", source);
+
+	let claim_cb = Callback::new();
+	let options = hidden();
+	let prefix = "room";
+	let claim = id(unsafe {
+		moq_origin_claim(
+			source,
+			prefix.as_ptr() as *const c_char,
+			prefix.len(),
+			&options,
+			Some(channel_callback),
+			claim_cb.ptr,
+		)
+	});
+	let token = credential(client, b"claimed");
+	assert_eq!(moq_claim_set_auth(claim, token), 0);
+	assert_eq!(moq_claim_announce(claim), 0);
+	assert_eq!(
+		seen.recv_timeout(TIMEOUT).unwrap(),
+		TokenSeen::Presented(b"claimed".to_vec())
+	);
+
+	assert_eq!(moq_claim_set_auth(claim, 0), 0);
+	assert_eq!(moq_credential_free(token), 0);
+	assert_eq!(
+		moq_credential_free(token),
+		MOQ_ERROR_NOT_FOUND,
+		"a freed handle is gone"
+	);
+	assert_eq!(
+		seen.recv_timeout(TIMEOUT).unwrap(),
+		TokenSeen::Withdrawn(b"claimed".to_vec()),
+		"zero announces under the session's scope"
+	);
+
+	assert_eq!(moq_session_close(client), 0);
+	states.recv_terminal();
+	assert_eq!(moq_claim_free(claim), 0);
+	assert_eq!(claim_cb.recv_terminal(), 0);
+	assert_eq!(moq_origin_close(source), 0);
+	assert_eq!(moq_origin_close(sink), 0);
+}
+
+/// An empty token mints no credential.
+#[test]
+fn an_empty_credential_token_is_invalid() {
+	let cb = Callback::new();
+	let code = unsafe { moq_session_credential(1, std::ptr::null(), 0, Some(channel_callback), cb.ptr) };
+	assert_eq!(code, MOQ_ERROR_INVALID_CONFIG);
+}

@@ -8,11 +8,12 @@ use crate::ffi::{self, OnStatus};
 use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, State, moq_string};
 
-/// Grant snapshots and the watchers delivering them.
+/// Grant snapshots, the watchers delivering them, and the credentials routes name.
 #[derive(Default)]
 pub struct Auth {
 	grant: NonZeroSlab<GrantRecord>,
 	grants: NonZeroSlab<Task>,
+	credentials: NonZeroSlab<moq_net::auth::Credential>,
 }
 
 /// One grant delivered to a [moq_session_grants] callback, owning the strings it lends.
@@ -80,6 +81,11 @@ pub struct moq_grant {
 }
 
 impl Auth {
+	/// The credential behind a [moq_session_credential] handle.
+	pub fn credential(&self, id: Id) -> Result<moq_net::auth::Credential, Error> {
+		Ok(self.credentials.get(id).ok_or(Error::NotFound)?.clone())
+	}
+
 	fn grants(&mut self, handle: moq_net::auth::Handle, callback: OnStatus) -> Result<Id, Error> {
 		let watch = handle.grant();
 		self.grants.spawn(
@@ -257,6 +263,73 @@ pub extern "C" fn moq_grant_free(grant: u32) -> i32 {
 	ffi::enter(move || {
 		let grant = ffi::parse_id(grant)?;
 		State::lock().auth.grant.remove(grant).ok_or(Error::NotFound)?;
+		Ok(())
+	})
+}
+
+/// Present a request token on a session, for routes and claims to carry with
+/// [crate::moq_route_set_auth] and [crate::moq_claim_set_auth].
+///
+/// The token is opaque bytes. On moq-transport it rides each naming route's announcing
+/// request as its `AUTHORIZATION TOKEN`; where the session negotiates AUTH it also earns a
+/// grant there. A dialed session presents it again on every reconnect, and with no session
+/// live it waits for the next one.
+///
+/// `on_credential` fires exactly once: a positive credential handle once a peer accepts the
+/// token, at once on moq-transport, where only requests carry
+/// it there, or a negative code. A refusal carries the peer's code through
+/// [crate::moq_error_protocol]; `MOQ_ERROR_UNSUPPORTED` means neither the session nor its
+/// requests can carry a token; the session's end is its close reason. Release the handle
+/// with [moq_credential_free].
+///
+/// Returns zero once the token is queued, or a negative code: `MOQ_ERROR_INVALID_CONFIG` for
+/// an empty token and `MOQ_ERROR_OFFLINE` for an accepted session still in SETUP, in which
+/// case `on_credential` never fires.
+///
+/// # Safety
+/// - `token` must point at `token_len` readable bytes.
+/// - `on_credential` must be non-NULL, and `user_data` valid until it fires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_session_credential(
+	session: u32,
+	token: *const u8,
+	token_len: usize,
+	on_credential: ffi::moq_status_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let session = ffi::parse_id(session)?;
+		let token = bytes::Bytes::copy_from_slice(unsafe { ffi::parse_slice(token, token_len)? });
+		if token.is_empty() {
+			return Err(Error::InvalidConfig("a token cannot be empty".into()));
+		}
+		let callback = unsafe { OnStatus::new(user_data, on_credential)? };
+		let handle = State::lock().session.auth(session)?;
+		tokio::spawn(async move {
+			let res = ffi::run(async {
+				let credential = handle.add(token).await?;
+				State::lock().auth.credentials.insert(credential)
+			})
+			.await;
+			callback.call(res);
+		});
+		Ok(())
+	})
+}
+
+/// Release a credential handle from [moq_session_credential].
+///
+/// The token stays presented while a route or claim still names it, and is withdrawn once
+/// none does. Returns zero, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_credential_free(credential: u32) -> i32 {
+	ffi::enter(move || {
+		let credential = ffi::parse_id(credential)?;
+		State::lock()
+			.auth
+			.credentials
+			.remove(credential)
+			.ok_or(Error::NotFound)?;
 		Ok(())
 	})
 }
