@@ -359,6 +359,9 @@ struct State {
 	/// ROUTE_REQUEST: one whose peer forwarded it a route, or, on a node that does
 	/// not forward, one this node's route goes out on. A new stream lengthens no path.
 	links: HashSet<Key>,
+	/// Answer streams of a node that does not forward, which join `links` once this
+	/// node's route goes out on them.
+	origins: HashSet<Key>,
 }
 
 /// An identity's usable feasible routes: each stream, its metric, and the peer's name.
@@ -420,6 +423,7 @@ impl Node {
 				homes: BTreeMap::new(),
 				routes: HashMap::new(),
 				links: HashSet::new(),
+				origins: HashSet::new(),
 			})),
 		}
 	}
@@ -467,24 +471,21 @@ impl Node {
 
 	/// Register a stream this node asked the peer for under `prefix`.
 	pub fn receive(&self, link: Link, prefix: Path) -> Result<Stream, Error> {
-		self.register(link, |router, key| router.asks(key, prefix))
+		self.register(link, false, |router, key| router.asks(key, prefix))
 	}
 
 	/// Register a stream answering the peer's request for `prefix`.
 	pub fn answer(&self, link: Link, prefix: Path) -> Result<Stream, Error> {
 		// A node that forwards nothing knows no better than that every stream carrying
-		// its route is a path to it.
+		// its route is a path to it; one whose prefix matches no claim carries none yet.
 		let origin = !link.proxy;
-		let stream = self.register(link, |router, key| router.peer_interest(key, prefix))?;
-		if origin {
-			self.lock().links.insert(stream.key);
-		}
-		Ok(stream)
+		self.register(link, origin, |router, key| router.peer_interest(key, prefix))
 	}
 
 	fn register(
 		&self,
 		link: Link,
+		origin: bool,
 		open: impl FnOnce(&mut Router<Key, Claim>, Key) -> Result<(), Error>,
 	) -> Result<Stream, Error> {
 		let mut state = self.lock();
@@ -493,9 +494,14 @@ impl Node {
 		state.router.connect(key, link)?;
 		let queue = kio::Shared::default();
 		state.queues.insert(key, queue.clone());
+		if origin {
+			state.origins.insert(key);
+		}
 		if let Err(err) = open(&mut state.router, key) {
 			state.router.disconnect(key);
 			state.queues.remove(&key);
+			state.origins.remove(&key);
+			state.links.remove(&key);
 			return Err(err);
 		}
 		state.flush();
@@ -588,6 +594,9 @@ impl Stream {
 		if state.links.remove(&self.key) {
 			state.links.insert(next.key);
 		}
+		if state.origins.remove(&self.key) {
+			state.origins.insert(next.key);
+		}
 	}
 
 	/// A batch of claim changes for the route the peer names `named`, closed by
@@ -642,6 +651,7 @@ impl Drop for Stream {
 		for home in state.homes.values_mut() {
 			home.keys.remove(&self.key);
 		}
+		state.origins.remove(&self.key);
 		if state.links.remove(&self.key) {
 			let _ = state.router.bump();
 		}
@@ -662,7 +672,12 @@ impl State {
 			let mut acked = Vec::new();
 			for out in self.router.drain() {
 				let (key, output) = match out {
-					Out::Route { to, id, reach } => (to, Output::Route { id, reach }),
+					Out::Route { to, id, reach } => {
+						if reach.is_some() && Some(id) == self.router.declared() && self.origins.contains(&to) {
+							self.links.insert(to);
+						}
+						(to, Output::Route { id, reach })
+					}
 					Out::Batch { to, id, changes, floor } => (to, Output::Batch { id, changes, floor }),
 					Out::Request { to, id, seqno } => {
 						if let Some(queue) = self.queues.get(&to) {
@@ -1395,6 +1410,20 @@ mod tests {
 		assert_eq!(routes(&second, 9), [finite(0, 0)]);
 		drop(first);
 		assert_eq!(routes(&second, 9), [finite(1, 0)]);
+
+		// A session whose prefix matches no claim carries no route, so its close moves no path.
+		let unmatched = publisher
+			.answer(
+				Link {
+					proxy: false,
+					..Link::default()
+				},
+				p("other"),
+			)
+			.unwrap();
+		assert!(outputs(&unmatched).is_empty());
+		drop(unmatched);
+		assert!(routes(&second, 9).is_empty());
 	}
 
 	#[test]
