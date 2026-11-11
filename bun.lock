@@ -84,7 +84,6 @@
         "@moq/room": "workspace:^",
         "@moq/signals": "workspace:^",
         "@moq/stats": "workspace:^",
-        "@moq/stats": "workspace:^",
         "@moq/watch": "workspace:^",
       },
       "devDependencies": {

@@ -6,26 +6,51 @@ const counter = z._default(z.number(), 0);
 // which the generic shape cannot show the type checker.
 const zeros = <S extends z.core.$ZodLooseShape>(shape: S) => z.prefault(z.object(shape), {} as never);
 
+// Copies each legacy counter name to its canonical one when only the legacy is present, so an
+// older relay still reads correctly; the canonical value wins when both are.
+const legacy = <S extends z.core.$ZodType>(names: Record<string, string>, schema: S) =>
+	z.pipe(
+		z.transform((input: unknown) => {
+			if (typeof input !== "object" || input === null) return input;
+			const out: Record<string, unknown> = { ...input };
+			for (const [old, name] of Object.entries(names)) {
+				if (out[name] === undefined && out[old] !== undefined) out[name] = out[old];
+			}
+			return out;
+		}),
+		schema,
+	);
+
 /** Payload a subscriber skipped for falling behind its delay budget. */
 export const ContentSchema = zeros({ bytes: counter, frames: counter, groups: counter });
 
 /** Cumulative traffic counters for one slice of a node's traffic; a live count is `*_started - *_ended`. */
-export const TrafficSchema = zeros({
-	announces_started: counter,
-	announces_ended: counter,
-	announced_bytes: counter,
-	broadcasts_started: counter,
-	broadcasts_ended: counter,
-	subscriptions_started: counter,
-	subscriptions_ended: counter,
-	fetches: counter,
-	bytes: counter,
-	frames: counter,
-	groups: counter,
-	datagrams: counter,
-	inflated: counter,
-	stale: ContentSchema,
-});
+export const TrafficSchema = legacy(
+	{
+		announced: "announces_started",
+		announced_closed: "announces_ended",
+		broadcasts: "broadcasts_started",
+		broadcasts_closed: "broadcasts_ended",
+		subscriptions: "subscriptions_started",
+		subscriptions_closed: "subscriptions_ended",
+	},
+	zeros({
+		announces_started: counter,
+		announces_ended: counter,
+		announced_bytes: counter,
+		broadcasts_started: counter,
+		broadcasts_ended: counter,
+		subscriptions_started: counter,
+		subscriptions_ended: counter,
+		fetches: counter,
+		bytes: counter,
+		frames: counter,
+		groups: counter,
+		datagrams: counter,
+		inflated: counter,
+		stale: ContentSchema,
+	}),
+);
 
 /** Sessions refused before admission, by reason. */
 export const RefusalsSchema = zeros({
@@ -46,19 +71,22 @@ export const FailuresSchema = zeros({
 });
 
 /** Sessions and requests under one stats label; live sessions are `sessions_started - sessions_ended`. */
-export const PresenceSchema = zeros({
-	sessions_refused: RefusalsSchema,
-	sessions_failed: FailuresSchema,
-	requests: counter,
-	sessions_started: counter,
-	sessions_ended: counter,
-	sent_bytes: counter,
-	received_bytes: counter,
-	announces_peak: counter,
-	subscriptions_peak: counter,
-	wire_tx: counter,
-	wire_rx: counter,
-});
+export const PresenceSchema = legacy(
+	{ sessions: "sessions_started", sessions_closed: "sessions_ended" },
+	zeros({
+		sessions_refused: RefusalsSchema,
+		sessions_failed: FailuresSchema,
+		requests: counter,
+		sessions_started: counter,
+		sessions_ended: counter,
+		sent_bytes: counter,
+		received_bytes: counter,
+		announces_peak: counter,
+		subscriptions_peak: counter,
+		wire_tx: counter,
+		wire_rx: counter,
+	}),
+);
 
 /** One tier's cumulative counters for a whole node: egress, ingress, and sessions. */
 export const TotalsSchema = zeros({ publisher: TrafficSchema, subscriber: TrafficSchema, sessions: PresenceSchema });

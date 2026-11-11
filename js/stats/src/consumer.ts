@@ -104,6 +104,7 @@ export class BucketReader {
 	#listing?: Promise<Listed>;
 	#run?: Run;
 	#closed = false;
+	#reading: Promise<unknown> = Promise.resolve();
 
 	private constructor(broadcast: Broadcast.Consumer, bucket: string) {
 		this.#broadcast = broadcast;
@@ -121,7 +122,14 @@ export class BucketReader {
 	 * large to cache, and the next call waits for a newer run; throws when the listing fails, which
 	 * closes the reader.
 	 */
-	async next(): Promise<BucketUpdate | undefined> {
+	next(): Promise<BucketUpdate | undefined> {
+		// Calls run one at a time, since each one advances the shared listing and run.
+		const next = this.#reading.then(() => this.#next());
+		this.#reading = next.catch(() => undefined);
+		return next;
+	}
+
+	async #next(): Promise<BucketUpdate | undefined> {
 		for (;;) {
 			if (this.#closed) return undefined;
 			this.#listing ??= this.#tracks.next().then(

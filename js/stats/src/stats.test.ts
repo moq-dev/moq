@@ -1,7 +1,16 @@
 import { expect, test } from "bun:test";
 import * as Json from "@moq/json";
 import { type Broadcast, Origin, Path } from "@moq/net";
-import { Consumer, Nodes, parseBucketTrack, parseNodePath, prefixTrack, presenceTrack } from "./index.ts";
+import {
+	Consumer,
+	Nodes,
+	PresenceSchema,
+	parseBucketTrack,
+	parseNodePath,
+	prefixTrack,
+	presenceTrack,
+	TrafficSchema,
+} from "./index.ts";
 
 function publish(broadcast: Broadcast.Producer, name: string) {
 	return new Json.Snapshot.Producer<unknown>({ track: broadcast.createTrack(name) });
@@ -77,6 +86,31 @@ test("totals, presence, and prefix tracks decode with defaults", async () => {
 	expect(prefix?.self.publisher.bytes).toBe(3);
 	expect(prefix?.children).toEqual({});
 	origin.close();
+});
+
+test("concurrent bucket reads each get a frame", async () => {
+	const origin = new Origin.Producer();
+	const broadcast = origin.route(Path.from(".stats/node/a")).broadcast;
+	const bucket = new Consumer(broadcast.consume()).bucket("");
+	const run = publish(broadcast, "bucket.e1.json");
+	run.update({ value: { epoch: "e1" } });
+
+	const first = bucket.next();
+	const second = bucket.next();
+	expect((await first)?.kind).toBe("frame");
+	run.update({ value: { epoch: "e1", tiers: { "": {} } } });
+	expect(await second).toMatchObject({ kind: "frame", frame: { tiers: { "": {} } } });
+	bucket.close();
+	origin.close();
+});
+
+test("legacy counter names fill in for missing canonical ones", () => {
+	const traffic = TrafficSchema.parse({ announced: 3, broadcasts: 2, broadcasts_ended: 1, broadcasts_closed: 9 });
+	expect(traffic).toMatchObject({ announces_started: 3, broadcasts_started: 2, broadcasts_ended: 1 });
+	expect(PresenceSchema.parse({ sessions: 4, sessions_closed: 2 })).toMatchObject({
+		sessions_started: 4,
+		sessions_ended: 2,
+	});
 });
 
 test("track and node names", () => {

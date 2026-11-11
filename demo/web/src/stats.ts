@@ -216,8 +216,7 @@ const countSessions = (f: SessionFrame) =>
 // ---- Time-series history ---------------------------------------------------
 
 // One sample captures cumulative byte counters (for rate charts) plus the
-// instantaneous gauges. Keyed by node name, with "" reserved for the
-// cluster-wide aggregate.
+// instantaneous gauges, per node and for the cluster-wide aggregate.
 interface Sample {
 	t: number;
 	egress: number; // cumulative egress bytes
@@ -231,7 +230,9 @@ interface Sample {
 	sessions: number;
 }
 
+// Keyed by node name; a nodeless relay is "", so the aggregate lives apart.
 const history = new Map<string, Sample[]>();
+let cluster: Sample[] = [];
 // Bumped every sample so the chart effects re-render without making the whole
 // history map reactive.
 const clock = new Signals.Signal(0);
@@ -252,11 +253,10 @@ function sampleNode(t: number, stats: NodeStats): Sample {
 	};
 }
 
-function pushSample(key: string, s: Sample) {
-	const arr = history.get(key) ?? [];
+function pushSample(arr: Sample[], s: Sample): Sample[] {
 	arr.push(s);
 	if (arr.length > MAX_SAMPLES) arr.shift();
-	history.set(key, arr);
+	return arr;
 }
 
 // The set of nodes in the most recent cluster-aggregate sample. The aggregate
@@ -271,6 +271,7 @@ sampler.run((effect) => {
 	// samples onto stale ones across the downtime gap.
 	if (effect.get(connection.status) !== "connected") {
 		history.clear();
+		cluster = [];
 		clusterMembership = "";
 		clock.update((n) => n + 1);
 		return;
@@ -294,7 +295,7 @@ sampler.run((effect) => {
 		};
 		for (const node of nodes) {
 			const s = sampleNode(t, all[node] as NodeStats);
-			pushSample(node, s);
+			history.set(node, pushSample(history.get(node) ?? [], s));
 			agg.egress += s.egress;
 			agg.ingress += s.ingress;
 			agg.announce += s.announce;
@@ -309,14 +310,14 @@ sampler.run((effect) => {
 		// previous one, so start the cluster series fresh instead of splicing.
 		const membership = nodes.join("\0");
 		if (membership !== clusterMembership) {
-			history.delete("");
+			cluster = [];
 			clusterMembership = membership;
 		}
-		pushSample("", agg);
+		pushSample(cluster, agg);
 
 		// Drop history for nodes that have gone away.
 		for (const key of history.keys()) {
-			if (key !== "" && !nodes.includes(key)) history.delete(key);
+			if (!nodes.includes(key)) history.delete(key);
 		}
 
 		clock.update((n) => n + 1);
@@ -376,7 +377,7 @@ ui.run((effect) => {
 ui.run((effect) => {
 	const nodes = Object.keys(effect.get(nodeStats)).sort();
 	const cur = selectedNode.peek();
-	if (cur && nodes.includes(cur)) return;
+	if (cur !== undefined && nodes.includes(cur)) return;
 	selectedNode.set(nodes[0]);
 });
 
@@ -385,7 +386,6 @@ ui.run((effect) => {
 	effect.get(clock);
 	const all = nodeStats.peek();
 	const nodes = Object.keys(all);
-	const cluster = history.get("") ?? [];
 	const latest = cluster[cluster.length - 1];
 
 	$("kpi-nodes").textContent = String(nodes.length);
@@ -405,7 +405,6 @@ ui.run((effect) => {
 // Cluster throughput chart.
 ui.run((effect) => {
 	effect.get(clock);
-	const cluster = history.get("") ?? [];
 	const egress = rateSeries(cluster, "egress");
 	const ingress = rateSeries(cluster, "ingress");
 
@@ -442,14 +441,14 @@ ui.run((effect) => {
 	const all = effect.get(nodeStats);
 	const node = effect.get(selectedNode);
 	const detail = $("node-detail");
-	const stats = node ? all[node] : undefined;
+	const stats = node === undefined ? undefined : all[node];
 
-	if (!node || !stats) {
+	if (node === undefined || !stats) {
 		detail.hidden = true;
 		return;
 	}
 	detail.hidden = false;
-	$("node-title").textContent = node;
+	$("node-title").textContent = node || "(unnamed)";
 
 	const samples = history.get(node) ?? [];
 	renderChart($("chart-node-throughput"), [
@@ -561,7 +560,7 @@ function nodeCard(effect: Signals.Effect, node: string, samples: Sample[], selec
 	head.className = "flex items-center justify-between gap-2 mb-2";
 	const name = document.createElement("span");
 	name.className = "font-mono text-sm text-neutral-200 truncate";
-	name.textContent = node;
+	name.textContent = node || "(unnamed)";
 	const rate = document.createElement("span");
 	rate.className = "text-sm font-semibold tabular-nums text-emerald-400 whitespace-nowrap";
 	rate.textContent = formatRate(lastRate(samples, "egress"));
