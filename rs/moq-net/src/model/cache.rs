@@ -1375,8 +1375,12 @@ impl Reader {
 			self.bytes = bytes;
 			self.track.charge_over();
 		} else {
+			// Whatever a record frees pays toward its readers' debt, however it shrank.
 			let shrunk = self.bytes - bytes;
 			readers.bytes.fetch_sub(shrunk, Ordering::Relaxed);
+			let _ = readers.debt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |debt| {
+				(debt > 0).then(|| debt.saturating_sub(shrunk))
+			});
 			self.track.pool.sub(shrunk);
 			self.bytes = bytes;
 		}
@@ -1387,20 +1391,16 @@ impl Reader {
 		self.bytes
 	}
 
-	/// The debt the track's readers owe.
+	/// The debt the track's readers owe, forgiven once the pool is back within its capacity:
+	/// nothing needs the room any more, as the track forgives its own debt.
 	pub(super) fn debt(&self) -> u64 {
-		self.track.readers.debt.load(Ordering::Relaxed)
-	}
-
-	/// Pay up to `bytes` of the readers' debt, as a record that shrank by that much.
-	pub(super) fn pay(&self, bytes: u64) {
-		let _ = self
-			.track
-			.readers
-			.debt
-			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |debt| {
-				Some(debt.saturating_sub(bytes))
-			});
+		let readers = &self.track.readers;
+		let pool = &self.track.pool;
+		if pool.capacity().is_none_or(|capacity| pool.used() <= capacity) {
+			readers.debt.store(0, Ordering::Relaxed);
+			return 0;
+		}
+		readers.debt.load(Ordering::Relaxed)
 	}
 
 	/// Whether this record is one to end when folding leaves a debt: it bills more than a
@@ -1416,9 +1416,7 @@ impl Reader {
 
 impl Drop for Reader {
 	fn drop(&mut self) {
-		let bytes = self.bytes;
 		self.set(0);
-		self.pay(bytes);
 	}
 }
 

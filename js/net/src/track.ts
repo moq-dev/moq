@@ -1327,7 +1327,12 @@ export class Producer {
 		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#wire = { starts, served: producer.#wire?.served };
 		};
-		hooks.receiveGroup = (producer, { sequence, start }) => producer.#createGroup(sequence, start);
+		hooks.receiveGroup = (producer, { sequence, start, fill }) => {
+			const group = producer.#createGroup(sequence, start);
+			const entry = fill ? producer.#cached.get(sequence) : undefined;
+			if (entry) entry.fetched = true;
+			return group;
+		};
 		hooks.arrivingGroup = (producer, sequence) => {
 			const closed = producer.#cached.get(sequence)?.group.closed;
 			return closed?.peek() === undefined ? closed : undefined;
@@ -2510,6 +2515,8 @@ function blocksHole(reported: Reported, hole: Hole): boolean {
 export interface WireRecord {
 	/** Whether the wire was told of `sequence`: served, or given up. */
 	told(sequence: bigint): boolean;
+	/** Whether the pool folded `sequence` into the record's floor, final for this reader. */
+	folded(sequence: bigint): boolean;
 	/** Whether `sequence` went out as a stale drop, which a group still replaces. */
 	toldStale(sequence: bigint): boolean;
 	/** The parts of `[start, end)` the wire was told nothing of. */
@@ -3018,6 +3025,7 @@ export class Subscriber {
 		const reported = this.#reported;
 		return {
 			told: (sequence) => sequence < this.#folded || reported.at(sequence) !== undefined,
+			folded: (sequence) => sequence < this.#folded,
 			toldStale: (sequence) => reported.at(sequence)?.kind === "stale",
 			untold: (start, end) => {
 				const from = max(start, this.#folded);
@@ -3053,6 +3061,14 @@ export class Subscriber {
 		};
 	}
 
+	// A bill against the account of the track this reads: a resumed reader's serving copy, as the
+	// Rust logical track's account bills its routes' readers.
+	#openBill(): cache.Reader | undefined {
+		if (this.#resume) return this.#resume.bill();
+		const producer = this.#state.producer;
+		return producer && accountOf(producer).reader();
+	}
+
 	// How many runs the record holds above its floor, each billed `cache.READER_RUN_OVERHEAD`:
 	// the handed-out prefix is one run that bills nothing.
 	#recordRuns(): number {
@@ -3074,18 +3090,15 @@ export class Subscriber {
 		if (this.#lagged) return new TooFarBehind();
 		const bytes = this.#recordRuns() * cache.READER_RUN_OVERHEAD;
 		if (!this.#bill) {
-			const producer = this.#state.producer;
-			if (bytes === 0 || !producer) return undefined;
-			this.#bill = accountOf(producer).reader();
+			if (bytes === 0) return undefined;
+			this.#bill = this.#openBill();
 		}
 		const bill = this.#bill;
+		if (!bill) return undefined;
 		bill.set(bytes);
 		if (bill.debt === 0) return undefined;
 		this.#fold(handed);
-		const folded = this.#recordRuns() * cache.READER_RUN_OVERHEAD;
-		const freed = Math.max(0, bill.size - folded);
-		bill.set(folded);
-		bill.pay(freed);
+		bill.set(this.#recordRuns() * cache.READER_RUN_OVERHEAD);
 		if (bill.debt > 0 && bill.ends) {
 			this.#lagged = true;
 			bill.close();
@@ -3804,6 +3817,7 @@ export class Subscriber {
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && mayLand(producer, land);
 		};
+		hooks.billSubscriber = (subscriber) => subscriber.#openBill();
 		hooks.resumeSubscriber = (name, subscription, source) => {
 			const state = new TrackState(subscription ?? Subscription.default());
 			const subscriber = new Subscriber(name, state);
@@ -4208,7 +4222,10 @@ export class Subscriber {
 		// it hands out stays above the fold until the next read, so the publisher tells its wire of
 		// it first rather than taking it for one already served.
 		const lagged = this.#settleRecord(recv.kind === "group" ? recv.group.sequence : undefined);
-		return lagged ? { kind: "error", error: lagged } : recv;
+		if (!lagged) return recv;
+		// Nobody takes the group the lag replaced, so it lets go of its source here.
+		if (recv.kind === "group") recv.group.close();
+		return { kind: "error", error: lagged };
 	}
 
 	#tryRecvUnsettled(dispositions: boolean): Recv {
@@ -4593,7 +4610,11 @@ export class Subscriber {
 		if (this.#lagged) return { kind: "error", error: new TooFarBehind() };
 		let recv = this.#resume ? this.#tryResumed(true) : this.#tryNextBuffered();
 		const lagged = this.#settleRecord();
-		if (lagged) recv = { kind: "error", error: lagged };
+		if (lagged) {
+			// Nobody takes the group the lag replaced, so it lets go of its source here.
+			if (recv.kind === "group") recv.group.close();
+			recv = { kind: "error", error: lagged };
+		}
 		// One cursor: the frame helpers must not keep draining a group this read just
 		// moved past, or interleaved reads would run backwards.
 		if (recv.kind === "group" && this.#frameGroup && this.#frameGroup.sequence < recv.group.sequence) {

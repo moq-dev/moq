@@ -55,17 +55,17 @@ export class Tail {
 		if (!bill) return;
 		bill.set(this.#finished.length * READER_RUN_OVERHEAD);
 		if (bill.debt > 0 && this.#finished.length > 1) {
-			const freed = bill.size - READER_RUN_OVERHEAD;
 			this.#finished = this.#finished.slice(-1);
 			bill.set(READER_RUN_OVERHEAD);
-			bill.pay(freed);
 		}
 	}
 
 	/** Release what the tail bills, once its subscription ended. */
 	close(): void {
 		this.#finished = [];
+		// A stream still in flight finishes after this: with no bill, it can never bill again.
 		this.#bill?.close();
+		this.#bill = undefined;
 	}
 
 	/** Group streams whose header arrived, whether they finished or were reset. */

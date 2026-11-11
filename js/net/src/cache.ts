@@ -558,8 +558,14 @@ export class Reader {
 		return this.#bytes;
 	}
 
-	/** The debt the track's readers owe. */
+	/**
+	 * The debt the track's readers owe, forgiven once the pool is back within its capacity:
+	 * nothing needs the room any more, as the track forgives its own debt.
+	 */
 	get debt(): number {
+		const pool = this.#track.pool;
+		const capacity = pool.capacity;
+		if (capacity === undefined || pool.used <= capacity) this.#readers.debt = 0;
 		return this.#readers.debt;
 	}
 
@@ -577,13 +583,10 @@ export class Reader {
 			this.#track.wrote(bytes - before);
 			this.#track.chargeOver();
 		} else {
+			// Whatever a record frees pays toward its readers' debt, however it shrank.
+			readers.debt = Math.max(0, readers.debt - (before - bytes));
 			this.#track.pool.sub(before - bytes);
 		}
-	}
-
-	/** Pay up to `bytes` of the readers' debt, as a record that shrank by that much. */
-	pay(bytes: number): void {
-		this.#readers.debt = Math.max(0, this.#readers.debt - bytes);
 	}
 
 	/**
@@ -598,9 +601,7 @@ export class Reader {
 
 	/** Release the bill, paying the readers' debt with it. */
 	close(): void {
-		const bytes = this.#bytes;
 		this.set(0);
-		this.pay(bytes);
 	}
 }
 

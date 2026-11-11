@@ -490,6 +490,8 @@ export interface ResumeSource {
 	 * route change keeps, and those the serving copy reported.
 	 */
 	reofferStale(): Run[];
+	/** Open a bill for the reader's record against the serving copy's account, undefined without one. */
+	bill(): CacheReader | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -610,8 +612,11 @@ export const hooks: {
 	 * ask below it. Assigned by `track.ts`.
 	 */
 	receiveTrack: (producer: Producer, starts?: FillStarts) => void;
-	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
-	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number }) => GroupProducer;
+	/**
+	 * Create a received group at its wire offset before publishing it to readers; `fill` marks one a
+	 * fill's subscription answered, which the feed never promised. Assigned by `track.ts`.
+	 */
+	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number; fill?: boolean }) => GroupProducer;
 	/** How the copy of `sequence` still arriving ends, if one is, for a duplicate to wait on. Assigned by `track.ts`. */
 	arrivingGroup: (producer: Producer, sequence: bigint) => GetPromise<Error | null> | undefined;
 	/** The producer's largest reported location and its subsequent changes. */
@@ -754,6 +759,8 @@ export const hooks: {
 	 * the pool can hand it debt. Mirrors the Rust crate-private `track::Producer::bill`.
 	 */
 	billTrack: (producer: Producer) => CacheReader;
+	/** Open a bill against the account of the track `subscriber` reads, undefined while it has none. */
+	billSubscriber: (subscriber: Subscriber) => CacheReader | undefined;
 	/**
 	 * Re-offer what a subscriber gave up as stale through dispositions, as a wire whose every update
 	 * reopens its stale drops does: each run is judged again under the new terms. Returns the runs
@@ -1062,6 +1069,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	billTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	billSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	supersedeStale: () => {

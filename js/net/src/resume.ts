@@ -48,6 +48,7 @@
 import { Duration, Instant, now, sleepUntil } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import * as broadcast from "./broadcast.ts";
+import type { Reader as CacheReader } from "./cache.ts";
 import { Delivered } from "./delivered.ts";
 import { NotFound, SessionError, StreamCode, StreamError, sessionClosed } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
@@ -744,6 +745,11 @@ class Reader implements ResumeSource {
 	 * replaced copy may no longer deliver, so what it gave up is the new route's to deliver or
 	 * give up. Mirrors the Rust `Reader::reoffer_stale`.
 	 */
+	bill(): CacheReader | undefined {
+		const serving = this.#serving();
+		return serving && hooks.billSubscriber(serving.sub);
+	}
+
 	reofferStale(): Run[] {
 		const taken = this.#reportedStale;
 		this.#reportedStale = [];

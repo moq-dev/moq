@@ -402,6 +402,38 @@ test("a tail forgets its finished streams under debt", () => {
 	tail.close();
 });
 
+// Whatever a bill frees pays its readers' debt, however it shrank, and the debt is forgiven once
+// the pool is back within its capacity. A closed tail never bills again. Mirrors Rust
+// `a_debt_is_paid_by_any_shrink_and_forgiven_without_pressure`.
+test("a reader's debt is paid by any shrink and forgiven without pressure", () => {
+	const unit = cache.READER_RUN_OVERHEAD;
+	const pool = new cache.Pool({ capacity: 1 << 30 });
+	const producer = pooled(pool);
+	const bill = hooks.billTrack(producer);
+	bill.set(4 * unit);
+	pool.resize(2 * unit);
+	// Nothing else is cached, so the debt the track accrues falls to its readers.
+	producer.createGroup(0n).abort(new Error("gone"));
+	bill.set(5 * unit);
+	const owed = bill.debt;
+	expect(owed).toBeGreaterThan(unit);
+	bill.set(4 * unit);
+	expect(bill.debt).toBe(owed - unit);
+	pool.resize(1 << 30);
+	expect(bill.debt).toBe(0);
+	pool.resize(2 * unit);
+	expect(bill.debt).toBe(0);
+	bill.close();
+
+	const tail = new Tail({ bill: hooks.billTrack(producer) });
+	tail.finish(0n);
+	tail.finish(2n);
+	tail.close();
+	const used = pool.used;
+	tail.finish(4n);
+	expect(pool.used).toBe(used);
+});
+
 // A peer fragmenting its arrivals under a grace that never folds a gap bills each run to the pool,
 // which folds the oldest gaps early to stay within it. Mirrors Rust `an_arrival_flood_stays_within_the_pool`.
 test("an arrival flood stays within the pool", () => {

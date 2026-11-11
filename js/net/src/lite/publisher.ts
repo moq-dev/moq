@@ -1551,12 +1551,17 @@ export class Publisher {
 					skipped.length = 0;
 				}
 				if (pendingDrops.length > 0) {
-					for (const { start, end, error } of pendingDrops.splice(0)) {
+					for (const { start, end, error: failed } of pendingDrops.splice(0)) {
+						let error = failed;
+						const old = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
+						// The pool folded the run while its stream was open, which is final for this
+						// reader: no update would re-offer a stale drop on it. Mirrors the Rust `TrackRun`.
+						if (old && record?.folded(end - 1n)) error = new StreamError(StreamCode.Evicted);
 						// A stream expired under this subscription's budget is a stale verdict, which
 						// a later verdict or group replaces as any stale drop sent, and each update drops
 						// again. A re-offer an update owed again is given up now, so the end sweep never
 						// names it.
-						if (hasSkip(this.version) && toStreamCode(error) === StreamCode.Old) toldStale(start, end);
+						else if (old) toldStale(start, end);
 						else record?.tell(start, end, reportOf({ error }));
 						const msg = SubscribeDrop.given(start, end, error, this.version, updateNumber);
 						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
@@ -1830,6 +1835,22 @@ export class Publisher {
 				// A lite-07 stale drop is no final verdict, and a Group Stream wins over it, so a group
 				// handed out after one is served, as one a route the front switched to delivers: the
 				// update that reopens the drop would never re-offer it.
+				// The pool folded a re-offered group while it waited, which is final for this reader:
+				// tell the wire it is gone, since an update re-offered it. Mirrors the Rust `TrackRun`.
+				if (again && record?.folded(group.sequence)) {
+					group.close();
+					const evicted = new StreamError(StreamCode.Evicted);
+					const msg = SubscribeDrop.given(
+						group.sequence,
+						group.sequence + 1n,
+						evicted,
+						this.version,
+						updateNumber,
+					);
+					if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
+						return false;
+					continue;
+				}
 				if (record?.toldStale(group.sequence)) {
 					record.replaceDrops(group.sequence, group.sequence + 1n);
 				} else if (record?.told(group.sequence)) {

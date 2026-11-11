@@ -2760,7 +2760,11 @@ export class Subscriber {
 				await race([settled, stream.closed.then(() => settled)]);
 				arriving = hooks.arrivingGroup(track, group.sequence);
 			}
-			producer = hooks.receiveGroup(track, { sequence: group.sequence, start: group.frameStart });
+			producer = hooks.receiveGroup(track, {
+				sequence: group.sequence,
+				start: group.frameStart,
+				fill: entry.filling,
+			});
 
 			const reading = readFrames(stream, producer, { scale: timescale, compress: entry.compress });
 			await (entry.filling ? untilAbandoned(producer, reading) : reading);

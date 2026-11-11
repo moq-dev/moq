@@ -5451,6 +5451,11 @@ impl TrackRun {
 			for (sequence, err) in dropped {
 				// A stream expired under this subscription's budget is a stale verdict.
 				let hole = match err {
+					// The pool folded the group while its stream was open, which is final for this
+					// reader: no update would re-offer a stale drop on it.
+					StreamError::Old if self.ctx.version.has_skip() && self.track.record_mut().folded(sequence) => {
+						Hole::drop(StreamError::Evicted)
+					}
 					StreamError::Old => {
 						if self.ctx.version.has_skip() {
 							self.sent_stale(sequence..sequence + 1);
@@ -5539,6 +5544,12 @@ impl TrackRun {
 			&& let Some(group) = self.reoffered.pop_front()
 		{
 			let sequence = group.sequence;
+			// The pool folded it while it waited, which is final for this reader: tell the wire
+			// it is gone, since an update re-offered it.
+			if self.emit_range && self.track.record_mut().folded(sequence) {
+				writer.buffer(&self.hole(sequence..sequence + 1, &Hole::drop(StreamError::Evicted)))?;
+				return Poll::Ready(Ok(ControlFlow::Continue(())));
+			}
 			if self.emit_range && self.track.record_mut().told(sequence) {
 				return Poll::Ready(Ok(ControlFlow::Continue(())));
 			}
@@ -5675,6 +5686,11 @@ impl TrackRun {
 			false => self.track.poll_queued_drop(waiter),
 		};
 		let Poll::Ready((range, hole)) = polled else {
+			// A reader the pool ended reports no drop: end the subscription now, rather than once
+			// a group waiting on stream credit reads the failure.
+			if self.track.lagged() {
+				return Err(Error::Lagged);
+			}
 			return Ok(false);
 		};
 		match self.start {

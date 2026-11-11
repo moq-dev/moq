@@ -197,6 +197,11 @@ impl Record {
 		sequence < self.floor || self.reported.contains_key(&sequence)
 	}
 
+	/// Whether the pool folded `sequence` into this record's floor, final for this reader.
+	pub fn folded(&self, sequence: u64) -> bool {
+		sequence < self.floor
+	}
+
 	/// Whether `sequence` went out as a stale drop, which a group still replaces.
 	pub fn told_stale(&self, sequence: u64) -> bool {
 		matches!(self.reported.get(&sequence), Some(Report::Stale { .. }))
@@ -335,9 +340,7 @@ impl Record {
 		beside.forget_below(self.floor);
 		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
 		let bill = self.bill.as_mut().expect("opened above");
-		let freed = bill.size().saturating_sub(bytes);
 		bill.set(bytes);
-		bill.pay(freed);
 		if bill.debt() > 0 && bill.ends() {
 			self.fail();
 			return Err(Error::Lagged);
@@ -431,8 +434,9 @@ mod test {
 	use super::*;
 	use crate::StreamError;
 
+	/// An account on a pool that any bill puts over its capacity, so a debt it is owed stands.
 	fn account() -> (cache::Pool, Arc<cache::Track>) {
-		let pool = cache::Pool::unbounded();
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(1));
 		let track = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		(pool, track)
 	}
@@ -584,5 +588,22 @@ mod test {
 		assert!(large.settle(|| track.clone(), &mut (), None).is_err());
 		assert_eq!(pool.used(), RUN_OVERHEAD);
 		small.settle(|| track.clone(), &mut (), None).unwrap();
+	}
+
+	/// Whatever a bill frees pays its readers' debt, however it shrank, and the debt is forgiven
+	/// once the pool is back within its capacity: nothing needs the room any more.
+	#[test]
+	fn a_debt_is_paid_by_any_shrink_and_forgiven_without_pressure() {
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(2 * RUN_OVERHEAD));
+		let track = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let mut bill = track.reader();
+		bill.set(4 * RUN_OVERHEAD);
+		owe(&track, 3 * RUN_OVERHEAD);
+		bill.set(3 * RUN_OVERHEAD);
+		assert_eq!(bill.debt(), 2 * RUN_OVERHEAD, "the shrink paid what it freed");
+		bill.set(2 * RUN_OVERHEAD);
+		assert_eq!(bill.debt(), 0, "within its capacity, the pool forgives the rest");
+		bill.set(5 * RUN_OVERHEAD);
+		assert_eq!(bill.debt(), 0, "a later pressure owes nothing of it");
 	}
 }

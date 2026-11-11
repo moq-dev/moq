@@ -4027,19 +4027,9 @@ impl Bill {
 		self.0.set(bytes);
 	}
 
-	/// What this bill holds.
-	pub(crate) fn size(&self) -> u64 {
-		self.0.size()
-	}
-
 	/// The debt the track left its readers, which this bill pays by shrinking.
 	pub(crate) fn debt(&self) -> u64 {
 		self.0.debt()
-	}
-
-	/// Pay up to `bytes` of that debt, as a bill that shrank by that much.
-	pub(crate) fn pay(&self, bytes: u64) {
-		self.0.pay(bytes);
 	}
 }
 
@@ -9738,7 +9728,6 @@ impl Subscriber {
 	fn hand_out(&mut self, sequence: u64, ordered: bool) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.hand_out(sequence, ordered),
-			// A resumed reader retires its own stale reports.
 			Inner::Resume(resume, logical) => {
 				let delivered = &mut logical.record.delivered;
 				if ordered {
@@ -9746,6 +9735,8 @@ impl Subscriber {
 				}
 				delivered.insert(sequence);
 				resume.forget_past_budget(delivered);
+				// The group won over any stale report its publisher made on it.
+				logical.record.retire(sequence);
 			}
 		}
 	}
@@ -9767,7 +9758,7 @@ impl Subscriber {
 
 	/// Bill what this reader settled, and pay what it can of the debt its track left its
 	/// readers; [`Error::Lagged`] once that needed a run it was promised.
-	fn settle_record(&mut self, handed: Option<u64>) -> Result<()> {
+	pub(super) fn settle_record(&mut self, handed: Option<u64>) -> Result<()> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				let state = &cursor.state;
@@ -9789,6 +9780,12 @@ impl Subscriber {
 			Inner::Plain(cursor) => &cursor.record,
 			Inner::Resume(_, logical) => &logical.record,
 		}
+	}
+
+	/// Whether the pool ended this reader, needing a run it was promised.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn lagged(&self) -> bool {
+		self.record().failed()
 	}
 
 	/// What this reader settled, for its publisher to record what its wire was told.

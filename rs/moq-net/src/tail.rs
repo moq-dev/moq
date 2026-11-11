@@ -82,11 +82,9 @@ impl Tail {
 			&& self.finished.len() > 1
 			&& let Some(newest) = self.finished.iter().next_back().cloned()
 		{
-			let freed = bill.size() - FINISHED_OVERHEAD;
 			self.finished = RangeSet::new();
 			self.finished.insert(newest);
 			bill.set(FINISHED_OVERHEAD);
-			bill.pay(freed);
 		}
 	}
 

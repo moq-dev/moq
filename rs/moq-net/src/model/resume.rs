@@ -1514,7 +1514,12 @@ impl Reader {
 				if ordered {
 					sub.skip_ordered(floor);
 				}
-				let res = sub.poll_peek_group(ordered, waiter);
+				// The copy's own record bills to its track as a direct reader's does, including
+				// what a peek skipped before it parked.
+				let mut res = sub.poll_peek_group(ordered, waiter);
+				if let Err(err) = sub.settle_record(None) {
+					res = Poll::Ready(Err(err));
+				}
 				match res {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(reserved))) => {
