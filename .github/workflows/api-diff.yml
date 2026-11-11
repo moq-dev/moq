@@ -59,8 +59,8 @@ jobs:
       - name: Diff against the last release
         id: diff
         if: ${{ !steps.mode.outputs.skip }}
-        # Unquoted on purpose: the report-only mode passes no argument.
-        run: nix develop --command just api-diff $ARGS
+        # The report-only mode passes no argument.
+        run: nix develop --command just api-diff ${ARGS:+"$ARGS"}
         env:
           ARGS: ${{ steps.mode.outputs.args }}
           # Lists and downloads the moq-c and moq-ffi release assets.
