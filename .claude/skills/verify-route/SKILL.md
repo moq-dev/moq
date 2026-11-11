@@ -54,7 +54,7 @@ A counterexample is a path through the model, not yet a bug. Replay it on the ro
 
 ## Coverage
 
-Sync commit: `0f66e70ec26f1de2f8e781c7cfcb635d30b86377`. Run `git log 0f66e70ec2.. -- rs/moq-net/src/route/` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `52fa6b2f0ece29c44bfa2459ec93fc54b4b48221`, plus the change that added a route's hops ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)). Run `git log 52fa6b2f0e.. -- rs/moq-net/src/route/` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
 
 | Code (`rs/moq-net/src/route/`) | Model |
 | --- | --- |
