@@ -1335,7 +1335,10 @@ mod tests {
 
 	/// A sink whose dial hangs for the whole test: a first dial that failed would end the
 	/// session, and the broadcast with it.
-	struct CatalogRun(super::super::MoqSink, std::net::TcpListener);
+	struct CatalogRun(
+		super::super::MoqSink,
+		#[allow(dead_code, reason = "held so the dial hangs")] std::net::TcpListener,
+	);
 
 	impl CatalogRun {
 		fn new() -> Self {
