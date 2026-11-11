@@ -301,7 +301,13 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 	run_seeded(seed_from_env(), future)
 }
 
-fn run_seeded<F: IntoFuture>(seed: u64, future: F) -> F::Output {
+/// [`run`] with the seed fixed by the caller rather than `MOQ_SIM_SEED`, for a harness
+/// that must replay an input exactly, such as a fuzz target.
+///
+/// # Panics
+///
+/// As [`run`], except it never reads `MOQ_SIM_SEED`.
+pub fn run_seeded<F: IntoFuture>(seed: u64, future: F) -> F::Output {
 	let runtime = Runtime::enter(seed);
 	let enter = Enter { seed };
 

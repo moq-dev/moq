@@ -26,7 +26,7 @@ async = ["dep:futures", "kio/async", "kio/runtime"]
 # session views of an origin to the viewers bench, the lite publisher's run loop to the
 # publisher bench, and a lite-07 publisher's frame bounds to the ranges bench, through the
 # `fuzz` module. Off by default.
-fuzz = ["async"]
+fuzz = ["async", "kio/sim"]
 
 [dependencies]
 arrayvec = "0.7"

@@ -12,9 +12,11 @@
 
 mod ingest;
 mod request;
+mod session;
 
 pub use ingest::ingest;
 pub use request::request;
+pub use session::{session_ietf, session_lite};
 
 /// A lite-07 publisher run loop waiting on SUBSCRIBE_START, for the publisher bench.
 pub use crate::lite::CoverageBench;
@@ -252,6 +254,8 @@ pub const TARGETS: &[(&str, Target)] = &[
 	("pattern", pattern),
 	("ingest", ingest),
 	("request", request),
+	("session_lite", session_lite),
+	("session_ietf", session_ietf),
 ];
 
 /// The moq-lite versions a target decodes at, selected by the input's first byte.
@@ -1905,6 +1909,7 @@ pub fn seeds() -> Vec<Seed> {
 	seeds.extend(ingest::seeds());
 	seeds.extend(ingest::limit_seeds());
 	seeds.extend(request::seeds());
+	seeds.extend(session::seeds());
 
 	seeds
 }

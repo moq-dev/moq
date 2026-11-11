@@ -1,4 +1,4 @@
-# The libFuzzer harness for moq-net's wire codecs. `just rs fuzz <target>` drives it,
+# The libFuzzer harness for moq-net's wire codecs and sessions. `just rs fuzz <target>` drives it,
 # and nightly.yml runs every target for five minutes.
 #
 # A workspace member so it shares the root lockfile, which is the only thing that
@@ -72,6 +72,20 @@ bench = false
 [[bin]]
 name = "request"
 path = "fuzz_targets/request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "session_lite"
+path = "fuzz_targets/session_lite.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "session_ietf"
+path = "fuzz_targets/session_ietf.rs"
 test = false
 doc = false
 bench = false
