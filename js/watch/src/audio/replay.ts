@@ -73,6 +73,8 @@ export interface Options {
 
 /** One render quantum, as the worklet produced it. */
 export interface Quantum {
+	/** Frames the decoder received so far. */
+	delivered: number;
 	/** When it finished rendering, on the trace's clock, in ms. */
 	at: number;
 	/** The quantum: what the ring supplied at the front, zeros after it. Reused between yields. */
@@ -206,6 +208,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 	// The decoder's read loop, with the codec taken out. Traces record no declared ends, so a gap is
 	// the only codec epoch a replay meets. A failure is rethrown at the next quantum.
+	let delivered = 0;
 	const delivery = Promise.withResolvers<void>();
 	if (options.decodeAfter === undefined) delivery.resolve();
 	let failure: { error: unknown } | undefined;
@@ -216,6 +219,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			const next = await consumer.next();
 			if (!next) return;
 			if (next.kind !== "frame") continue;
+			delivered++;
 
 			const { timestamp: media, arrival } = next.frame;
 			const timestamp = media.asMicros();
@@ -318,6 +322,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			if (sync.playing.peek()) ring.read([output]);
 			observe();
 			yield {
+				delivered,
 				at: now,
 				output,
 				stalled: ring.stalled,

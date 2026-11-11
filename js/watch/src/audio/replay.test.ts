@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
 import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
-import { type Arrival, type Options, QUANTUM, replay } from "./replay";
+import { type Arrival, type Options, QUANTUM, type Quantum, replay } from "./replay";
 
 const RATE = 48000;
 const CONFIG = { codec: "opus", sampleRate: RATE, numberOfChannels: 1 } as Catalog.AudioConfig;
@@ -342,7 +342,7 @@ describe("buffered replay against the shared clock", () => {
 			trimmed: last.trimmed,
 			accelerated: last.accelerated,
 			// Frames the consumer passed over rather than delivered.
-			lost: trace.length - last.arrivals.filter((a) => a.kind === "frame").length,
+			lost: trace.length - last.delivered,
 			heard: (heard * 1000) / RATE,
 		};
 	}
