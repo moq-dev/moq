@@ -179,10 +179,8 @@ the bullets below are the contract it carries.
 - Loop freedom is Babel's feasibility condition (RFC 8966) keyed by node:
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is
-  ROUTE_HOLD or ROUTE_END. Draining a distance relies on each ROUTE_END
-  echo arriving behind every route the echoer sent before it: an echo that
-  overtakes a route derived from the echoed one counts to infinity (the
-  route model, 2026-11-10);
+  ROUTE_HOLD or ROUTE_END. The route model found a count to infinity
+  (2026-11-10): an echo can overtake a route derived from the echoed one;
   [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md) orders it.
 - Starvation recovery is Babel's seqno request (RFC 8966 s3.8, decided
   2026-10-12). A node whose routes to an origin are all infeasible sends

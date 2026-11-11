@@ -11,6 +11,7 @@ type Msg = { type: string; reach: { kind: string; seq: number; met: number } };
 type Vars = {
 	st: Record<string, Node>;
 	q: Record<string, Record<string, Msg>>;
+	acks: Record<string, number>;
 	up: number[][];
 	own: Record<string, number>;
 };
@@ -80,13 +81,15 @@ export const step = (action: string, from: Vars, to: Vars) => {
 		}
 		case "Collect":
 			return "a relay with no route collects its state";
-		case "Deliver":
-		case "DeliverEcho": {
+		case "DeliverAck": {
+			const [m, n] = ends(Object.keys(from.acks).find((k) => to.acks[k] < from.acks[k]));
+			return `${name(m)}'s echo of a route end reaches ${name(n)}`;
+		}
+		case "Deliver": {
 			const d = Object.keys(from.q).find((k) => len(to.q[k]) === len(from.q[k]) - 1);
 			const [m, n] = ends(d);
 			const msg = from.q[d ?? ""]?.["1"];
 			if (!msg) return "a message arrives";
-			if (msg.type === "echo") return `${name(m)}'s echo of a route end reaches ${name(n)}`;
 			if (msg.type === "batch") return `${name(m)}'s claims reach ${name(n)}`;
 			const what =
 				msg.type === "request"

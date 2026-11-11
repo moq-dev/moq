@@ -5,7 +5,7 @@ description: Model-check the lite-07 route layer (`rs/moq-net/src/route/`) with 
 
 # Verify the route layer
 
-`rs/moq-net/verify/route/RouteHandoff.tla` models one origin identity in `route::Router` as `route::tests::Sim` drives it: every router entry point is one atomic step ending in `update`, ROUTE, batches, ROUTE_REQUEST, and echoes share one FIFO per direction, so an echo arrives behind every route its sender sent before it. TLC checks every ordering of those messages in a triangle of the origin and two relays, under the bounds in the config.
+`rs/moq-net/verify/route/RouteHandoff.tla` models one origin identity in `route::Router` as `route::tests::Sim` drives it: every router entry point is one atomic step ending in `update`, ROUTE, batches, and ROUTE_REQUEST share one FIFO per direction, and echoes travel on their own queue. TLC checks every ordering of those messages in a triangle of the origin and two relays, under the bounds in the config.
 
 ## Rules
 
@@ -28,19 +28,20 @@ The constraint `Bounded` stops exploring one hop past `NoCountToInfinity`, so a 
 
 ```sh
 just rs tla moq-net/verify/route/RouteHandoff.tla
+just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/CountToInfinity.cfg
 ```
 
-It checks every rule: about 1.2M distinct states, under a minute on 24 cores.
+The first checks every rule but `NoCountToInfinity`: about 3.7M states, two minutes on 32 cores, and it passes at the sync commit. The second fails at the sync commit on the open finding below.
 
 Read a counterexample with `/statechart`, passing it the spec, a config, and `RouteHandoff.view.ts`, which labels each relay's route and each step as the message that arrives. It gives the shortest path to each broken rule in those words.
 
-## Open finding: the echo's stream
+## Open finding: an overtaking echo counts to infinity
 
-`NoCountToInfinity` holds only because an echo arrives behind every route its sender sent before it: otherwise it can overtake an advertisement the echoer derived from this node's, and the node, its distance already drained, accepts it as a fresh, longer route (`an_echo_never_overtakes_the_echoers_routes` in `route/tests/routing.rs`). The model and `Sim` carry the echo that way, but `node.rs` still sends it back on the stream the ROUTE_END came on, apart from the echoer's routes, until [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md) moves it.
+`CountToInfinity.cfg` fails. A node drops its feasibility distance once every neighbour echoed its ROUTE_END (`update` in `mod.rs`), on the reasoning that no advertisement derived from its own can then still arrive. But an echo travels apart from the echoer's own routes (the answering stream carries it, per `node.rs`), so it can overtake an advertisement that neighbour derived from this node's and sent before the end. The node then accepts that advertisement as a fresh, longer route, and two relays can count up without end while each shows the broadcast available. `residual_an_overtaking_echo_counts_to_infinity` in `route/tests/routing.rs` replays it on the router. Once it is fixed, flip that test, move `NoCountToInfinity` into `RouteHandoff.cfg`, and delete `CountToInfinity.cfg`.
 
 ## Reading a failure
 
-A counterexample is a path through the model, not yet a bug. Replay it on the router with `Sim` (`hold`, `deliver`, `disconnect`, `collect`), one call per step. If the router does not follow the path, the model is wrong: fix the model to match the code. If it does, report the path and the rule in the code's words. Do not weaken a rule, add a constraint, or shrink the bounds until the check passes.
+A counterexample is a path through the model, not yet a bug. Replay it on the router with `Sim` (`hold`, `deliver`, `deliver_ack`, `disconnect`, `collect`), one call per step. If the router does not follow the path, the model is wrong: fix the model to match the code. If it does, report the path and the rule in the code's words. Do not weaken a rule, add a constraint, or shrink the bounds until the check passes.
 
 ## Coverage
 
@@ -52,10 +53,10 @@ Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07
 | `mod.rs` `certified`, `prune`, `adopted` | `Certified`, `Prune`, `Adopted` |
 | `mod.rs` `update`, `record`, `advertise`, `requests` | `Update`, `Record`, `Plan`, `Requests` |
 | `mod.rs` `show`, `shown_now` | `Events`, `ShownNow` |
-| `mod.rs` `route`, `batch`, `request`, `echo` | `OnRoute`, `OnBatch`, `OnRequest`, `Deliver`, `DeliverEcho` |
+| `mod.rs` `route`, `batch`, `request`, `echo` | `OnRoute`, `OnBatch`, `OnRequest`, `Deliver`, `DeliverAck` |
 | `mod.rs` `connect`, `peer_interest`, `disconnect`, `collect`, `change` | `Connect`, `Opened`, `Disconnect`, `Closed`, `Collect`, `ChangeClaim` |
 | `view.rs` `View::merge`, `View::restrict` | `Merge`, `Certify` |
-| `tests/mod.rs` `Sim` queues and `revivals`, `false_ends` | `q`, `revivals`, `falseEnds` |
+| `tests/mod.rs` `Sim` queues and `revivals`, `false_ends` | `q`, `acks`, `revivals`, `falseEnds` |
 
 ## Not covered
 

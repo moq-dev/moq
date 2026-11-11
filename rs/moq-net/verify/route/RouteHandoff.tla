@@ -7,9 +7,9 @@
 (* `request`, `echo`, `collect`, `connect`/`peer_interest`, `disconnect`,  *)
 (* `announce`/`unannounce`) is one atomic step that ends in `update`, as   *)
 (* in the code. Messages travel as the Sim queues them: ROUTE, batches,    *)
-(* ROUTE_REQUEST, and echoed ROUTE_ENDs on one FIFO per direction, so an  *)
-(* echo arrives behind every route its sender sent before it. A session    *)
-(* opens and closes atomically, dropping what was in flight.               *)
+(* and ROUTE_REQUEST on one FIFO per direction, echoed ROUTE_ENDs on their *)
+(* own queue. A session opens and closes atomically, dropping what was in  *)
+(* flight.                                                                 *)
 (*                                                                         *)
 (* Scope: every node watches the root, links cost 1 with equal priority,   *)
 (* no scoped grants, no GOAWAY, and the origin keeps its identity. Claims  *)
@@ -55,11 +55,11 @@ NotShown == [item |-> None, avail |-> FALSE]
 RouteMsg(reach) == [type |-> "route", reach |-> reach, view |-> NoView, seq |-> 0]
 BatchMsg(view) == [type |-> "batch", reach |-> NoReach, view |-> view, seq |-> 0]
 RequestMsg(seq) == [type |-> "request", reach |-> NoReach, view |-> NoView, seq |-> seq]
-EchoMsg == [type |-> "echo", reach |-> NoReach, view |-> NoView, seq |-> 0]
 
 VARIABLES
     up,         \* open sessions (`Sim::up`)
     q,          \* q[<<m, n>>]: ROUTE, batches, and ROUTE_REQUEST from m to n, in order
+    acks,       \* acks[<<m, n>>]: echoed ROUTE_ENDs from m to n
     rev,        \* the origin's claim revision (`Origin::view.floors[""]`)
     own,        \* the origin's claims (`Origin::view.items`)
     seqno,      \* the origin's route seqno (`Origin::seqno`)
@@ -72,7 +72,7 @@ VARIABLES
     flaps,
     collects
 
-vars == <<up, q, rev, own, seqno, hist, st, ended, revivals, falseEnds,
+vars == <<up, q, acks, rev, own, seqno, hist, st, ended, revivals, falseEnds,
           regressions, flaps, collects>>
 
 \* The origin's view and seqno.
@@ -249,8 +249,7 @@ Update(n, s0, ov, ups, eb) ==
     IN [s |-> [s5 EXCEPT !.shown = now], out |-> out, ev |-> ev]
 
 \* The origin ignores every ROUTE and batch it hears for its own identity, so
-\* only ROUTE_REQUEST, ROUTE_END (which it echoes), and echoes are queued
-\* toward it.
+\* only ROUTE_REQUEST and ROUTE_END (which it echoes) are queued toward it.
 \* Dropping the rest changes no behavior and keeps the state space small.
 Heeded(d, m) ==
     d[2] # Origin \/ m.type = "request" \/ (m.type = "route" /\ m.reach.kind = "none")
@@ -289,6 +288,7 @@ InitNode == [
 Init ==
     /\ up = Links
     /\ q = [d \in Dirs |-> <<>>]
+    /\ acks = [d \in Dirs |-> 0]
     /\ rev = 0
     /\ own = NoItems
     /\ seqno = 0
@@ -311,7 +311,7 @@ ChangeClaim(c, item) ==
        /\ own' = own1
        /\ hist' = Append(hist, own1)
        /\ Commit([n \in {Origin} |-> Update(Origin, st[Origin], ov1, up, ended[Origin])], q)
-       /\ UNCHANGED <<up, seqno, flaps, collects>>
+       /\ UNCHANGED <<up, acks, seqno, flaps, collects>>
 
 \* A new claim, or new attributes for one, under a fresh revision.
 Announce(c) == rev < MaxRev /\ ChangeClaim(c, rev + 1)
@@ -364,10 +364,8 @@ Deliver(d) ==
     LET m == d[1]
         n == d[2]
         msg == Head(q[d])
+        q0 == [q EXCEPT ![d] = Tail(@)]
         isEnd == msg.type = "route" /\ msg.reach.kind = "none"
-        \* Every ROUTE_END is echoed once applied, ahead of what the update sends.
-        q0 == [q EXCEPT ![d] = Tail(@),
-                        ![<<n, m>>] = IF isEnd THEN Append(@, EchoMsg) ELSE @]
         \* Only the origin advances its seqno to answer a request.
         ov1 == IF n = Origin /\ msg.type = "request"
                THEN [OV EXCEPT !.seq = Max(seqno, msg.seq)] ELSE OV
@@ -380,7 +378,8 @@ Deliver(d) ==
                      [] msg.type = "batch" -> OnBatch(st[n], m, msg.view)
                      [] OTHER -> OnRequest(st[n], m, msg.seq)
     IN /\ q[d] # <<>>
-       /\ msg.type # "echo"
+       \* Every ROUTE_END is echoed once applied.
+       /\ acks' = IF isEnd THEN [acks EXCEPT ![<<n, m>>] = @ + 1] ELSE acks
        /\ seqno' = ov1.seq
        /\ IF skip
           THEN /\ q' = q0
@@ -388,18 +387,16 @@ Deliver(d) ==
           ELSE Commit([x \in {n} |-> Update(n, s1, ov1, up, ended[n])], q0)
        /\ UNCHANGED <<up, rev, own, hist, flaps, collects>>
 
-\* `echo`: an echoed ROUTE_END comes back, behind the echoer's earlier routes.
-DeliverEcho(d) ==
+\* `echo`: an echoed ROUTE_END comes back (`Sim::deliver_ack`).
+DeliverAck(d) ==
     LET m == d[1]
         n == d[2]
-        q0 == [q EXCEPT ![d] = Tail(@)]
-    IN /\ q[d] # <<>>
-       /\ Head(q[d]).type = "echo"
+    IN /\ acks[d] > 0
+       /\ acks' = [acks EXCEPT ![d] = @ - 1]
        /\ IF st[n].unacked[m] = 0
-          THEN /\ q' = q0
-               /\ UNCHANGED <<st, ended, revivals, falseEnds, regressions>>
+          THEN UNCHANGED <<st, q, ended, revivals, falseEnds, regressions>>
           ELSE Commit([x \in {n} |->
-                  Update(n, [st[n] EXCEPT !.unacked[m] = @ - 1], OV, up, ended[n])], q0)
+                  Update(n, [st[n] EXCEPT !.unacked[m] = @ - 1], OV, up, ended[n])], q)
        /\ UNCHANGED <<up, rev, own, seqno, hist, flaps, collects>>
 
 -----------------------------------------------------------------------------
@@ -427,7 +424,7 @@ Connect(l) ==
        /\ Commit([x \in l |->
                LET y == CHOOSE y \in l : y # x
                IN Update(x, Opened(st[x], y), OV, up1, ended[x])], q)
-       /\ UNCHANGED <<rev, own, seqno, hist, collects>>
+       /\ UNCHANGED <<acks, rev, own, seqno, hist, collects>>
 
 Disconnect(l) ==
     LET up1 == up \ {l}
@@ -436,6 +433,7 @@ Disconnect(l) ==
        /\ flaps < MaxFlaps
        /\ up' = up1
        /\ flaps' = flaps + 1
+       /\ acks' = [d \in Dirs |-> IF {d[1], d[2]} = l THEN 0 ELSE acks[d]]
        /\ Commit([x \in l |->
                LET y == CHOOSE y \in l : y # x
                IN Update(x, Closed(st[x], y), OV, up1, ended[x])], q0)
@@ -452,9 +450,9 @@ Collect(n) ==
                                     !.heard = [m \in Nodes |-> NoHeard],
                                     !.pending = NoPending],
                    OV, up, [c \in Claims |-> None])], q)
-    /\ UNCHANGED <<up, rev, own, seqno, hist, flaps>>
+    /\ UNCHANGED <<up, acks, rev, own, seqno, hist, flaps>>
 
-Quiet == \A d \in Dirs : q[d] = <<>>
+Quiet == \A d \in Dirs : q[d] = <<>> /\ acks[d] = 0
 
 \* Nothing is in flight and no more churn is allowed: the run is over.
 Done ==
@@ -464,7 +462,7 @@ Done ==
 
 Next ==
     \/ \E c \in Claims : Announce(c) \/ Unannounce(c)
-    \/ \E d \in Dirs : Deliver(d) \/ DeliverEcho(d)
+    \/ \E d \in Dirs : Deliver(d) \/ DeliverAck(d)
     \/ \E l \in Links : Connect(l) \/ Disconnect(l)
     \/ \E n \in Relays : Collect(n)
     \/ Done
