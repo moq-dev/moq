@@ -467,8 +467,3 @@ Decided (maintainer, 2026-11-01, cluster spike):
   control-plane cost. Weighing the two is for the planning to settle.
 - Rejected: calling relay-per-thread a no-win and leaving sharding to the
   replica spike alone, and restoring the no-sharding rule now.
-
-## Required
-
-- [Plan relay-per-thread on a worker mesh that never re-announces](/quest/m4/kio-channel-contention/relay-per-thread.md) - measure no-re-announce, weigh it against per-track replicas, and decide whether log adoption waits on it
-- [Log adoption](/quest/m4/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win

@@ -53,8 +53,7 @@ three wire generations of "start".
   edge at once (the "start past everything" branch in `TrackRun`'s poll) only
   sets `self.start`. So any drop collected while unresolved is never sent,
   and the subscriber waits out its grace for those groups. Reproduce this
-  first. Found by the 2026-11-07 audit of implicit state machines (see
-  [Lifecycles are explicit state](/quest/m1/explicit-state/README.md)).
+  first. Found by the 2026-11-07 audit of implicit state machines.
   Recommended: `enum Start { Legacy, Unresolved { skipped, first },
   Resolved { start, served } }`, with `skipped` moved out at the transition.
 

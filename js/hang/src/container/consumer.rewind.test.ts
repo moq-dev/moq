@@ -76,7 +76,7 @@ for (const start of [16_000, 0]) {
 			expect((await frame(consumer))?.group).toBe(1n);
 		} finally {
 			consumer.close();
-			producer.close();
+			producer.finish();
 		}
 	});
 }
@@ -132,6 +132,6 @@ test("Producer refuses a rewind before closing the current group", () => {
 		producer.encode(new Uint8Array([1]), Duration.micros(150_000), false);
 		expect(() => producer.encode(new Uint8Array([1]), Duration.micros(99_000), false)).toThrow("below");
 	} finally {
-		producer.close();
+		producer.finish();
 	}
 });

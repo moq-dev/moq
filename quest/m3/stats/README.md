@@ -118,15 +118,6 @@ generic, so they join this line as [client health](/doc/concept/stats.md#health)
 and [preflight](/quest/m3/stats/preflight.md). moq.pro keeps the per-project
 connection view and the dashboard flow.
 
-## Required
-
-- [Rust reporters](/quest/m3/stats/rust.md) - the player and gateways
-  publish stats and feedback, as the CLI remuxes and capture do
-- [Preflight](/quest/m3/stats/preflight.md) - a bounded test run over a
-  broadcast reports which media layer is broken and why
-- [Client health in use](/quest/m3/stats/health-consumers.md) - a per-connection media counter, consumers of the grade, and re-measured limits
-- [The media test checks browser feedback](/quest/m3/stats/feedback-media-test.md) - a browser publishes feedback and Rust reads it back with `moq export echo`
-
 ## Related
 
 - [QoS](/quest/m3/qos/README.md) - the relay's delivery counters; the

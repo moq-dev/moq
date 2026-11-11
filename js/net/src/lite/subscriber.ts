@@ -207,27 +207,39 @@ interface SubscribeEntry {
 	// since the publisher re-offers or drops them again under it.
 	// Coalesced, so a peer repeating a drop holds one run, not one per message.
 	stale?: DropRun[];
-	// Whether our side is FINned, which lite-07 does once the tail settles past SUBSCRIBE_FINISH.
-	fin?: boolean;
+	// The subscribe stream, from the setup that registered this entry to its end.
+	stream: SubscribeStream;
 	// How many SUBSCRIBE_UPDATEs went out, so a tail settling past SUBSCRIBE_FINISH waits a fresh
 	// grace for what one sent meanwhile asks for.
 	sent: number;
-	// Set by the subscribe stream's FIN before lite-05, the track's only end there.
-	finished?: boolean;
-	// Settles once the subscribe stream's responses are read to its FIN or reset, which
-	// Subscriber.drain waits on.
-	responses?: Promise<void>;
 	// The ranges the SUBSCRIBE asked for, as `wireRanges` gives them.
 	asked: track.Range[];
-	// The TRACK stream that answered (lite-05+), held open as interest in the track until
-	// the SUBSCRIBE has its first response, so the publisher's demand never lapses between
-	// the two.
-	held?: Stream;
-	// Called at the SUBSCRIBE's first response (lite-05+). Until then a SUBSCRIBE without an
-	// instance may be answered by whichever stream won the path, so a replacement refuses it.
-	answered?: () => void;
 	// A fill's own subscription, whose groups are cancelled once nobody wants them, as a FETCH's.
 	filling?: boolean;
+	// Until the SUBSCRIBE's first response (lite-05+); see `Unanswered`.
+	unanswered?: Unanswered;
+}
+
+// A subscribe stream's phases. Every SUBSCRIBE_UPDATE and our FIN go out on it.
+type SubscribeStream =
+	// Being set up: its responses are not read yet.
+	| { kind: "setup" }
+	// Its responses are read until the publisher's FIN or reset, which Subscriber.drain waits on.
+	| { kind: "reading"; responses: Promise<void> }
+	// Our side is FINned too, which lite-05+ does once the tail settles past the publisher's end.
+	| { kind: "fin"; responses: Promise<void> }
+	// The publisher's FIN finished the track, as only it does before lite-05, where our side
+	// never FINs.
+	| { kind: "finished"; responses: Promise<void> };
+
+// A lite-05+ SUBSCRIBE waiting for its first response.
+interface Unanswered {
+	// The TRACK stream that answered, held open as interest in the track, so the publisher's
+	// demand never lapses between the two.
+	held: Stream;
+	// Aborted at the first response. Until then a SUBSCRIBE without an instance may be answered
+	// by whichever stream won the path, so a replacement refuses it.
+	answered: AbortController;
 }
 
 /**
@@ -1364,9 +1376,8 @@ export class Subscriber {
 		// Sent but unanswered (lite-05+; older drafts already waited for SUBSCRIBE_OK), only a
 		// replacement refuses it, since that instance may be the one answering.
 		const replaced = this.#retirer(state, answering);
-		if (hasTrackStream(this.version) && answering) {
-			answering.addEventListener("abort", replaced);
-			entry.answered = () => answering.removeEventListener("abort", replaced);
+		if (entry.unanswered && answering) {
+			answering.addEventListener("abort", replaced, { signal: entry.unanswered.answered.signal });
 			if (answering.aborted) replaced();
 		}
 		try {
@@ -1377,8 +1388,7 @@ export class Subscriber {
 			// The publisher sends responses on this stream until its FIN. Group streams can
 			// still be in flight, so the track ends only once the tail is accounted for. A reset
 			// rejects instead, so the track ends with that error rather than a clean tail.
-			const responses = this.runResponses(stream, entry);
-			entry.responses = responses.catch(() => {});
+			const responses = this.#read(stream, entry);
 			let tailSettled = false;
 			const closed = responses.then(async () => {
 				await this.#settleTail(entry);
@@ -1421,12 +1431,12 @@ export class Subscriber {
 			// A settled lite-05+ tail acknowledges completion with FIN, without cancelling
 			// the publisher's already-finished receive half.
 			if (tailSettled && waitsForSubscriberFin(this.version)) this.#fin(stream, entry);
-			else if (!entry.fin) stream.close();
+			else if (entry.stream.kind !== "fin") stream.close();
 			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${producer.name}`);
 
 			// Only a received SUBSCRIBE_FINISH, or before lite-05 a FIN, declares the track's end: a
 			// subscription nobody wants anymore is a released copy, not finished content.
-			if (tailSettled && entry.finished) producer.finish();
+			if (tailSettled && entry.stream.kind === "finished") producer.finish();
 			hooks.releaseTrack(producer);
 		} catch (err) {
 			const e = await sessionCause(this.#quic, err);
@@ -1439,7 +1449,7 @@ export class Subscriber {
 			this.#reoffers.get(producer)?.set([]);
 			this.#reoffers.delete(producer);
 			entry.tail.close();
-			entry.held?.close();
+			entry.unanswered?.held.close();
 			entry.datagramDemand?.();
 			if (entry.datagrams) {
 				// The stream track's end is its datagrams' end: those received with it route first.
@@ -1537,7 +1547,7 @@ export class Subscriber {
 				scale: model.timescale ?? undefined,
 			};
 			const entry = this.#register(id, msg, ranges, producer, framing, state);
-			entry.held = state.track;
+			entry.unanswered = { held: answered.stream, answered: new AbortController() };
 			settle(entry);
 			return { stream, entry };
 		} catch (err) {
@@ -1602,6 +1612,7 @@ export class Subscriber {
 			starts: new Map(),
 			update: 0n,
 			sent: 0,
+			stream: { kind: "setup" },
 		};
 		if (hasDatagrams(this.version) && !hasDatagramTracks(this.version) && state.consumer && state.legacyKey) {
 			const info = { priority: producer.priority, timescale: framing.scale };
@@ -2053,6 +2064,8 @@ export class Subscriber {
 			starts: new Map(),
 			update: 0n,
 			sent: 0,
+			// Its responses are read by the fill itself, which owns this stream's end.
+			stream: { kind: "setup" },
 			filling: true,
 		};
 		const left = new AbortController();
@@ -2285,6 +2298,13 @@ export class Subscriber {
 		}
 	}
 
+	// Start reading the subscribe stream's responses; see `runResponses`.
+	#read(stream: Stream, entry: SubscribeEntry): Promise<void> {
+		const responses = this.runResponses(stream, entry);
+		entry.stream = { kind: "reading", responses: responses.catch(() => {}) };
+		return responses;
+	}
+
 	// Reads the subscribe stream's responses until FIN, recording the range the tail is
 	// accounted against: SUBSCRIBE_START/END/DROP on lite-05+, and any SUBSCRIBE_DROP after the
 	// OK before then, where the FIN itself ends the track. Reading to the FIN, rather than
@@ -2296,14 +2316,17 @@ export class Subscriber {
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
 			// The publisher answered, so its demand stands on the subscription from here.
-			entry.held?.close();
-			entry.held = undefined;
-			entry.answered?.();
-			entry.answered = undefined;
+			if (entry.unanswered) {
+				entry.unanswered.held.close();
+				entry.unanswered.answered.abort();
+				entry.unanswered = undefined;
+			}
 			if (!resp) {
 				// Before lite-05 the FIN is the track's only end.
 				if (!hasTrackStream(this.version)) {
-					entry.finished = true;
+					// Our side never FINs there, so the stream is still being read.
+					if (entry.stream.kind === "reading")
+						entry.stream = { kind: "finished", responses: entry.stream.responses };
 					return;
 				}
 				if (entry.end === undefined && hooks.trackReleased(entry.track).peek() === undefined)
@@ -2443,8 +2466,8 @@ export class Subscriber {
 
 	// FIN our side once, acknowledging a settled tail without cancelling the publisher's half.
 	#fin(stream: Stream, entry: SubscribeEntry): void {
-		if (entry.fin) return;
-		entry.fin = true;
+		if (entry.stream.kind !== "reading") return;
+		entry.stream = { kind: "fin", responses: entry.stream.responses };
 		stream.writer.close();
 	}
 
@@ -3013,7 +3036,9 @@ export class Subscriber {
 	 * @internal
 	 */
 	async drain(): Promise<void> {
-		await Promise.all(Array.from(this.#subscribes.values(), (entry) => entry.responses));
+		await Promise.all(
+			Array.from(this.#subscribes.values(), (entry) => entry.stream.kind !== "setup" && entry.stream.responses),
+		);
 	}
 
 	/**
@@ -3024,8 +3049,8 @@ export class Subscriber {
 	close(err: Error = new SessionError(SessionCode.Cancel)) {
 		this.#closed.abort(err);
 
-		for (const { track, finished, end, datagrams } of this.#subscribes.values()) {
-			if (finished) track.finish();
+		for (const { track, stream, end, datagrams } of this.#subscribes.values()) {
+			if (stream.kind === "finished") track.finish();
 			track.abort(err);
 			// Lite-05/06: the stream track's end is its datagrams' end. An abort after the declared
 			// end settled ends it cleanly, even while the FIN that would finalize it is in flight.
