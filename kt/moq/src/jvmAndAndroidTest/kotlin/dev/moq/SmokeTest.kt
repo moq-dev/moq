@@ -38,12 +38,17 @@ import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.nanoseconds
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 import kotlinx.serialization.Serializable
 import uniffi.moq.MoqException
 
@@ -1171,14 +1176,14 @@ class SmokeTest {
                     val catalog = CatalogConsumer.subscribe(consumer).next()!!
                     val rendition = catalog.audio["mic"]!!
 
-                    // The skip budget ages groups by wall clock, so a max of zero lets a host
-                    // stalled under load skip both frames and wait for a third that never comes.
-                    // The test writes nothing more, so tolerate any stall.
-                    val budget = java.time.Duration.ofSeconds(30)
                     val fixedOutput =
                         AudioDecoderOutput(
                             format = AudioSampleFormat.F32,
-                            delay = Delay(min = java.time.Duration.ofMillis(80), max = budget),
+                            delay =
+                                Delay(
+                                    min = java.time.Duration.ofMillis(80),
+                                    max = java.time.Duration.ZERO,
+                                ),
                             estimate = false,
                         )
                     val fixed = AudioConsumer.subscribe(consumer, "mic", rendition, fixedOutput)
@@ -1187,25 +1192,33 @@ class SmokeTest {
                             consumer,
                             "mic",
                             rendition,
-                            AudioDecoderOutput(
-                                format = AudioSampleFormat.F32,
-                                delay = Delay(min = java.time.Duration.ZERO, max = budget),
-                            ),
+                            AudioDecoderOutput(format = AudioSampleFormat.F32),
                         )
                     assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
                     val initial = estimated.delay()
 
-                    // Two 20 ms Opus frames of silence at 48 kHz mono.
-                    for (i in 0 until 2) {
-                        audio.write(
-                            AudioFrame(
-                                timestamp = Timestamp(i.toULong() * 960uL, 48_000uL),
-                                data = ByteArray(960 * 4),
-                            )
-                        )
+                    // 20 ms Opus frames of silence at 48 kHz mono, fed until both consumers read
+                    // one. A max delay of zero skips groups by the native wall clock, which the
+                    // test cannot control, so a host stalled under load may skip any fixed set
+                    // of frames; a newer one always follows.
+                    val writer =
+                        launch(Dispatchers.Default) {
+                            var i = 0uL
+                            while (isActive) {
+                                audio.write(
+                                    AudioFrame(
+                                        timestamp = Timestamp(i++ * 960uL, 48_000uL),
+                                        data = ByteArray(960 * 4),
+                                    )
+                                )
+                                yield()
+                            }
+                        }
+                    // A skipped group reads as a gap before the frame after it.
+                    for (reader in listOf(fixed, estimated)) {
+                        while (assertNotNull(reader.next()) !is AudioReadFrame) {}
                     }
-                    assertIs<AudioReadFrame>(fixed.next())
-                    assertIs<AudioReadFrame>(estimated.next())
+                    writer.cancelAndJoin()
 
                     assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
                     assertTrue(
