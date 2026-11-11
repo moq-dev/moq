@@ -732,9 +732,11 @@ subscription opens on is skipped rather than played out at the stretch's pace,
 and playback starts on the clock. A shared clock whose reference moves earlier,
 as it does through a tune-in backlog that arrives faster than real time, jumps
 ahead by as much, and audio skips those jumps as video skips the frames they
-pass, as far as the playhead trails the clock. Jumps skip once they add up to
-more than one window, so a publisher's clock drifting fast, which moves the
-reference by a little at a time, is the stretch's to catch up. Only those
+pass, as far as the playhead trails the clock and the player holds audio past
+its target, which the early media that moved the reference leaves it. Jumps
+skip once they add up to more than one window, so a publisher's clock drifting
+fast, which moves the reference by a little at a time, and a reference moving
+while the buffer runs low, are the stretch's to catch up. Only those
 skips and a ring overflowing its fixed capacity drop received audio; each
 counts as a skip in
 the player's stats. A finite tail before a declared end plays as received, and

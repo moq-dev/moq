@@ -670,10 +670,12 @@ async fn play_audio<O: Output>(
 	let anchor = |sink: &mut <O::Speaker as Speaker>::Sink,
 	              anchored: &mut Option<(Instant, Duration, Duration)>,
 	              end: Duration| {
-		if let Some(at) = moq_net::Timestamp::try_from(end)
-			.ok()
-			.and_then(|end| presentation.due(end))
-		{
+		let Ok(timestamp) = moq_net::Timestamp::try_from(end) else {
+			return;
+		};
+		if let Some(at) = presentation.due(timestamp) {
+			// The end as the clock placed it, so rounding never reads as a jump.
+			let end = Duration::from(timestamp);
 			let delay = schedule.delay();
 			let nanos = |duration: Duration| duration.as_nanos() as i128;
 			let jumped = anchored.replace((at, end, delay)).map_or(0, |(was, from, before)| {

@@ -32,8 +32,10 @@ export class AudioRingBuffer {
 	// Whether the ring has read on the clock since the last reset. Until it has, nothing trailing the
 	// clock was heard, so a join lands on it rather than at the bound.
 	#joined = false;
-	// Samples the shared clock jumped ahead by moving its reference earlier, as far as the playhead
-	// still trails it, not yet skipped.
+	// Samples the shared clock jumped ahead by moving its reference earlier since the last read on it,
+	// and those of them the ring holds audio past its target for, as far as the playhead still trails
+	// the clock, not yet skipped.
+	#incoming = 0;
 	#jumped = 0;
 	// Samples of media a skip dropped, and that the stretch removed by accelerating, gap zeros
 	// included and declared silence excluded, as moq-audio counts them.
@@ -207,12 +209,14 @@ export class AudioRingBuffer {
 
 	/**
 	 * Note that the shared clock's reference moved `micros` earlier, jumping the clock ahead by as much.
-	 * Once jumps add up to more than a stretch window, a read skips them, as far as the playhead trails
-	 * the clock; less, as a publisher's clock drifting fast moves it, is the stretch's to catch up. A fall
-	 * in the target moves the clock ahead too, which is always caught up by speeding up.
+	 * A jump counts as far as the ring holds audio past its target, which the early media that moved
+	 * the reference left it. Once they add up to more than a stretch window, a read skips them, as far as
+	 * the playhead trails the clock; less, as a publisher's clock drifting fast moves it, is the
+	 * stretch's to catch up. A fall in the target moves the clock ahead too, which is always caught up
+	 * by speeding up.
 	 */
 	jumped(micros: number): void {
-		this.#jumped += Math.round((micros / 1_000_000) * this.rate);
+		this.#incoming += Math.round((micros / 1_000_000) * this.rate);
 	}
 
 	/** Where the shared clock stands at the first frame of the next read, in microseconds, if it has one. */
@@ -451,6 +455,7 @@ export class AudioRingBuffer {
 		this.#level = 0;
 		this.#clock = undefined;
 		this.#joined = false;
+		this.#incoming = 0;
 		this.#jumped = 0;
 		this.#skipping = false;
 	}
@@ -482,7 +487,10 @@ export class AudioRingBuffer {
 		if (this.#clock !== undefined) {
 			const inputs = this.#inputs(0);
 			const bound = this.#joined ? inputs.bound : 0;
-			this.#jumped = this.#joined ? Math.min(this.#jumped, Math.max(0, inputs.lag)) : 0;
+			const excess = Math.max(0, inputs.raw - inputs.target);
+			const jumped = this.#jumped + Math.min(this.#incoming, excess);
+			this.#jumped = this.#joined ? Math.min(jumped, Math.max(0, inputs.lag)) : 0;
+			this.#incoming = 0;
 			this.#joined = true;
 			if (!this.#ending()) {
 				if (inputs.lag > bound + this.#stretch.window) skip = inputs.lag - bound;

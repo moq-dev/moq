@@ -1029,6 +1029,20 @@ describe("time stretch", () => {
 		expect(buffer.trimmed).toBe(0);
 	});
 
+	// A jump counts only as far as the ring holds audio past its target, so one that left no audio to
+	// skip, as a reference moving on jitter while the buffer runs low, is the stretch's.
+	it("ignores a jump while it holds no audio past its target", () => {
+		const buffer = live(100, { bound: 2000 });
+		write(buffer, 0, frames(100), { value: 0.5 });
+		buffer.clock(0);
+		read(buffer, QUANTUM, 1);
+
+		buffer.jumped(50_000);
+		buffer.clock(buffer.timestamp + 50_000);
+		read(buffer, QUANTUM, 1);
+		expect(buffer.skips).toBe(0);
+	});
+
 	// A clock whose reference moved earlier skips as much, as far as the playhead trails it, where the
 	// same lag from a fallen target is caught up by speeding up.
 	for (const jumped of [false, true]) {
@@ -1090,6 +1104,8 @@ describe("time stretch", () => {
 			buffer.clock(0);
 			read(buffer, QUANTUM, 1);
 
+			// The backlog that moved the reference arrived, still encoded past what is decoded.
+			buffer.received(900_000);
 			buffer.jumped(500_000);
 			const clock = buffer.timestamp + 500_000;
 			buffer.clock(clock);

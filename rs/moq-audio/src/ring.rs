@@ -606,7 +606,9 @@ pub(crate) struct Consumer {
 	/// target's headroom. Stretch skips by the clock instead.
 	trim: bool,
 	/// Frames the writer's clock jumped ahead by moving its reference earlier,
-	/// as far as the reader still trails it, not yet skipped.
+	/// as far as the queue held audio past its target when they came, which the
+	/// early media that moved it left, and the reader still trails the clock,
+	/// not yet skipped.
 	jumped: usize,
 	/// Whether received audio has played on the clock. Until it has, nothing
 	/// trailing the clock was heard, so a join lands on it rather than at the
@@ -744,7 +746,8 @@ impl Consumer {
 		let clocked = self.shared.clocked.load(Ordering::Acquire);
 		let bound = if self.joined || !clocked { inputs.bound } else { 0 };
 		self.jumped = if self.joined {
-			(self.jumped + jumped).min(inputs.lag.max(0) as usize)
+			let excess = inputs.raw.saturating_sub(inputs.target);
+			(self.jumped + jumped.min(excess)).min(inputs.lag.max(0) as usize)
 		} else {
 			0
 		};
@@ -1427,35 +1430,41 @@ mod tests {
 		}
 	}
 
-	/// A jump past what is queued skips the rest once it arrives, whether or
-	/// not the lag past the bound skipped first.
+	/// A jump counts only as far as the queue holds audio past its target,
+	/// which the early media that moved the reference leaves it, so one on a
+	/// queue running low is the stretch's to catch up, inside the bound.
 	#[test]
-	fn a_jump_past_the_queue_skips_the_rest_once_it_arrives() {
-		for late in [Duration::from_secs(2), Duration::from_millis(200)] {
+	fn a_jump_skips_only_audio_held_past_the_target() {
+		for deep in [false, true] {
 			let rate = 48_000;
-			let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(10));
+			let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(80));
 			let base = prod.base;
+			let late = Duration::from_secs(2);
 			let mut out = vec![0.0; 480 * 2];
-			for _ in 0..5 {
+			let packets = if deep { 50 } else { 5 };
+			for _ in 0..packets {
 				assert_eq!(prod.push(&pcm), Push::Ok);
 			}
-			// On time through the 10 ms prime, which joins the clock.
-			prod.due(base + Duration::from_millis(110), late, Duration::ZERO);
-			assert_eq!(pull(&mut cons, &mut out, base), Read::Ok);
-			assert_eq!(pull(&mut cons, &mut out, base + Duration::from_millis(10)), Read::Ok);
-			// The reference jumps 500 ms, past the 90 ms queued.
-			let shift = Duration::from_millis(500);
-			prod.due(base + Duration::from_millis(110) - shift, late, shift);
-			let read = pull(&mut cons, &mut out, base + Duration::from_millis(20));
-			assert!(matches!(read, Read::Underflow { .. }), "{read:?}");
-			for _ in 0..50 {
-				assert_eq!(prod.push(&pcm), Push::Ok);
+			// On time through the 80 ms prime, which joins the clock.
+			let end = Duration::from_millis(80 + 20 * packets);
+			prod.due(base + end, late, Duration::ZERO);
+			let mut now = base;
+			for _ in 0..9 {
+				assert!(!matches!(pull(&mut cons, &mut out, now), Read::Trimmed { .. }));
+				now += Duration::from_millis(10);
 			}
-			prod.due(base + Duration::from_millis(1110) - shift, late, Duration::ZERO);
-			let now = base + Duration::from_millis(30);
-			assert!(matches!(pull(&mut cons, &mut out, now), Read::Trimmed { .. }));
+			// The reference jumps 50 ms.
+			let shift = Duration::from_millis(50);
+			prod.due(base + end - shift, late, shift);
+			let read = pull(&mut cons, &mut out, now);
 			let lag = cons.inputs(0).lag as f64 * 1000.0 / rate as f64;
-			assert!((-20.0..=5.0).contains(&lag), "{late:?}: {lag} ms behind");
+			if deep {
+				assert!(matches!(read, Read::Trimmed { .. }), "{read:?}");
+				assert!((-20.0..=5.0).contains(&lag), "{lag} ms behind");
+			} else {
+				assert_eq!(cons.skips(), 0, "{read:?}");
+				assert!(lag >= 30.0, "{lag} ms behind");
+			}
 		}
 	}
 
