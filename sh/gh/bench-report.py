@@ -16,7 +16,22 @@ from pathlib import Path
 from urllib.parse import quote
 
 BIGGER = {"MB/s", "MiB/s", "B/s", "ops/s", "frames/s", "frames"}
-SMALLER = {"ns", "us", "µs", "ms", "s", "ms/MB", "x", "bytes", "B", "MiB", "packets", "streams", "instructions", "messages"}
+SMALLER = {
+    "ns",
+    "us",
+    "µs",
+    "ms",
+    "s",
+    "ms/MB",
+    "x",
+    "bytes",
+    "B",
+    "MiB",
+    "packets",
+    "streams",
+    "instructions",
+    "messages",
+}
 ROOT = Path(__file__).resolve().parents[2]
 
 

@@ -273,7 +273,11 @@ impl Mesh {
 		Size {
 			sessions: self.links.iter().filter(|link| link.pair.is_some()).count() as u64 + clients,
 			identities: self.relays.len() as u64 + clients,
-			claims: self.publications.values().filter(|publication| publication.live).count() as u64,
+			claims: self
+				.publications
+				.values()
+				.filter(|publication| publication.live)
+				.count() as u64,
 		}
 	}
 
@@ -540,7 +544,11 @@ impl Mesh {
 		}
 		for (c, client) in self.clients.iter_mut().enumerate() {
 			if let Some(client) = client {
-				readers.push((format!("client {c}"), Some(components[client.relay]), &mut client.reader));
+				readers.push((
+					format!("client {c}"),
+					Some(components[client.relay]),
+					&mut client.reader,
+				));
 			}
 		}
 
@@ -764,7 +772,9 @@ fn seeded_meshes_hold_the_route_rules() {
 		eprintln!("MOQ_ROUTE_CASE={index} {shape:?}");
 		let result = kio::clock::sim::run_seeded(case_seed, run_case(Rng(case_seed), shape));
 		if let Err(err) = result {
-			panic!("{shape:?} failed; replay it with MOQ_ROUTE_SEED={seed} MOQ_ROUTE_CASE={index} MOQ_ROUTE_CASES=1\n{err}");
+			panic!(
+				"{shape:?} failed; replay it with MOQ_ROUTE_SEED={seed} MOQ_ROUTE_CASE={index} MOQ_ROUTE_CASES=1\n{err}"
+			);
 		}
 	}
 }

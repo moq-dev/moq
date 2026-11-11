@@ -841,11 +841,9 @@ impl Scrape {
 				"Control messages encoded for sending.",
 				|b| b.tx_messages,
 			),
-			(
-				"moq_relay_control_rx_messages",
-				"Control messages decoded.",
-				|b| b.rx_messages,
-			),
+			("moq_relay_control_rx_messages", "Control messages decoded.", |b| {
+				b.rx_messages
+			}),
 		] {
 			let rows = control
 				.iter()
