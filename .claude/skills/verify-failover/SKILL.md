@@ -24,10 +24,11 @@ Each rule is an INVARIANT, except `Settles`, which is TLC's deadlock check: ever
 
 ```sh
 just rs tla moq-net/verify/failover/FailoverChain.tla
+just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/Leave.cfg
 just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/EndedRelay.cfg
 ```
 
-The first checks every rule with `E` failing over between `A` and `B`, one death, one switch per relay, and a client that may leave: about 2.2M states, 25 seconds on 24 cores, and it passes at the sync commit. The second adds `B`'s route through `A`, so the route also moves at the middle hop: it fails at the sync commit on the open finding below after about 100M states, 11 minutes on 24 cores.
+The first checks every rule with `E` failing over between `A` and `B`, one death, and one switch per relay, with a client that stays, so a deadlock is a playback hang: about 2.0M states. The second lets the client leave at any point, so a deadlock is a relay still holding a copy after it left; leaving is always possible there, which is why it cannot stand in for the first: about 2.2M states. Each takes under 30 seconds on 24 cores and passes at the sync commit. The third adds `B`'s route through `A`, so the route also moves at the middle hop: it fails at the sync commit on the open finding below after about 100M states, 11 minutes on 24 cores.
 
 ## Open finding: an ended relay cannot move a fetch off a dying route
 
@@ -46,7 +47,7 @@ A counterexample is a path through the model, not yet a bug. Replay it on the re
 
 ## Coverage
 
-Sync commit: `88572c583e2f64c7f5fc9bfa59df90706308497e`. Run `git log 88572c583e.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun both configs, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `88572c583e2f64c7f5fc9bfa59df90706308497e`. Run `git log 88572c583e.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
 
 | Code (`rs/moq-net/src/model/`) | Model |
 | --- | --- |
