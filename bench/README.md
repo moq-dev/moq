@@ -839,8 +839,8 @@ The table includes these measurements:
 - The CSV tables the JS benchmarks and the Rust benchmark tests print. A header
   line names the columns; the time columns (`ns`, `us`, `ms`, and their
   per-operation variants such as `ns_per_frame` or `plain_ns_per_read`),
-  `size_bytes` and `peak_bytes`, `mib_per_s`, and `*_packets` columns are
-  measurements, and every other column is a workload dimension in each series
+  `size_bytes` and `peak_bytes`, `mib_per_s`, and `*_packets` and `*_messages`
+  columns are measurements, and every other column is a workload dimension in each series
   name, so print outcomes only in measured columns. The Rust benchmark tests
   (`just gh nightly rust-test`) run in release builds, one at a time, under
   nextest's `bench` profile, which keeps each test's output in a JUnit report;
@@ -912,7 +912,7 @@ A new source uploads a `bench-*` artifact containing `report.json`, a nonempty
 JSON array of `{ "name": "case/dimensions", "unit": "ns", "value": 123 }`,
 and `outcome.json` containing `{ "status": "success" }`. Names must be unique
 within a source; dimensions belong in the name. Supported units are `ns`, `us`,
-`µs`, `ms`, `s`, `ms/MB`, `x`, `bytes`, `B`, `MiB`, `packets`, `streams`,
+`µs`, `ms`, `s`, `ms/MB`, `x`, `bytes`, `B`, `MiB`, `packets`, `messages`, `streams`,
 `instructions`, `MB/s`, `MiB/s`, `B/s`, `ops/s`, `frames/s`, and `frames`. Optional `range` and `extra` fields retain uncertainty
 and context. Validate and split sources into cost and throughput histories with
 `just gh benchmark-report prepare INPUT_DIRECTORY OUTPUT_DIRECTORY`; extending
