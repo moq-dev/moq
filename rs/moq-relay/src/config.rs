@@ -493,14 +493,14 @@ mod tests {
 		let path = dir.path().join("relay.toml");
 		std::fs::write(
 			&path,
-			"[listen.extensions]\nauth = false\n\n[connect.extensions]\nsolicit = false\n",
+			"[listen.extensions]\nietf = true\n\n[connect.extensions]\nsolicit = false\n",
 		)
 		.unwrap();
 		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).unwrap();
-		assert!(!config.listen.extensions.auth);
+		assert!(config.listen.extensions.ietf);
 		assert!(config.listen.extensions.solicit);
 		assert!(!config.connect.extensions.solicit);
-		assert!(config.connect.extensions.auth);
+		assert!(!config.connect.extensions.ietf);
 	}
 
 	#[cfg(feature = "stun")]

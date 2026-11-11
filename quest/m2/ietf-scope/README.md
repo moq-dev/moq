@@ -6,8 +6,9 @@ Our moq-transport support covers what a third-party implementation needs to
 exchange live media with ours, and stops there: SETUP, the standard
 AUTHORIZATION TOKEN, live PUBLISH_NAMESPACE / SUBSCRIBE / PUBLISH, joining
 FETCH, and relay forwarding between moq-transport and moq-lite sessions,
-including across our relays. Our own extensions and the IETF-only features
-nobody third-party uses are deleted from Rust, JS, and the drafts.
+including across our relays, plus the extensions a third party speaks. The
+IETF-only features nobody third-party uses are deleted from Rust, JS, and the
+drafts.
 
 ## Plan
 
@@ -33,6 +34,17 @@ Settled with this epic:
   and moq-lite 01 to 04.
 - Not here: `ietf/flate.rs`; compression removal has its own work.
 
+Our moq-transport extensions, decided 2026-11-10 (maintainer, on
+[moq-dev/moq#8444](https://github.com/moq-dev/moq/pull/8444)):
+✅ keep MoQ Cluster (HOP_ID, RELAY_COST, HOP_PATH, ROUTE_COST), Solicit,
+Hidden, and Active Count, and delete only the in-band AUTH exchange (rejected:
+delete all five). OpenMOQ's moqx relay implements draft-lcurley-moq-cluster-01
+over moq-transport draft 18 and turns it on by default, so a third party does
+speak cluster, and the other three cost about 780 dedicated lines between
+them. AUTH cost about 2k dedicated lines plus wiring and no third party uses
+it; a third party authenticates with the standard AUTHORIZATION TOKEN, which
+stays. In-band grants and token renewal are moq-lite-07 only.
+
 This epic's own work, after its children: the docs that describe
 moq-transport support (`doc/concept/`, `drafts/draft-lcurley-moq-ietf.md` if
 it lists the extensions, and the interop matrix in
@@ -41,4 +53,4 @@ AGENTS.md's IETF rule is reworded only if the maintainer asks.
 
 ## Related
 
-- [Simplification audit](/quest/m3/audit-simplify.md) - owns duplication inside the IETF code that remains
+- [Code audit](/quest/m3/audit-code.md) - owns duplication inside the IETF code that remains

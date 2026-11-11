@@ -57,6 +57,7 @@ export namespace Snapshot {
 		update(value: T): Snapshot.Pending | undefined;
 		get value(): T | undefined;
 	}
+	export interface Finished {}
 	export { MissingSnapshot };
 	export interface Pending extends Snapshot.Encoded {
 		commit(): void;
@@ -69,7 +70,7 @@ export namespace Snapshot {
 	export class Producer<T> {
 		constructor(config: Snapshot.Producer.Config<T>);
 		cut(): void;
-		finish(): void;
+		finish(): Snapshot.Finished;
 		mutate(fn: (value: T) => void, at?: Time.Timestamp): void;
 		update({ ... }: Timed<T>): void;
 	}
@@ -97,6 +98,7 @@ export namespace Stream {
 		constructor(config?: Stream.Config<T>);
 		encode(value: T): Stream.Pending;
 	}
+	export interface Finished {}
 	export interface Pending {
 		commit(): void;
 		payload: Uint8Array;
@@ -109,7 +111,7 @@ export namespace Stream {
 	export class Producer<T> {
 		constructor(config: Stream.Producer.Config<T>);
 		append({ ... }: Timed<T>): void;
-		finish(): void;
+		finish(): Stream.Finished;
 	}
 	export class Rolled extends Error {
 		constructor();
@@ -160,6 +162,11 @@ export namespace Window {
 	} | {
 		skip: Window.Span;
 	};
+	export interface Finished<T> {
+		abort(err: Error): void;
+		readonly offset: number;
+		readonly window: T[];
+	}
 	export interface Group {
 		decode(payload: Uint8Array): void;
 	}
@@ -170,7 +177,7 @@ export namespace Window {
 		constructor(config: Window.ProducerConfig);
 		abort(err: Error): void;
 		cut(): void;
-		finish(): void;
+		finish(): Window.Finished<T>;
 		get offset(): number;
 		pop(count: number, at?: Time.Timestamp): void;
 		push({ ... }: Timed<T>): void;

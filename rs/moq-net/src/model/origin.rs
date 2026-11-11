@@ -7327,23 +7327,33 @@ impl Consumer {
 	}
 
 	fn create_route_node(&self) -> (crate::route::Node, std::sync::Weak<std::sync::Mutex<OwnClaims>>) {
-		// The whole table, whatever this handle's scope, counted against no session.
-		let own = |upstream| {
-			Self {
-				scope: OriginScope::default(),
-				root: Path::default(),
-				horizon: Horizon {
-					node: NodeFilter::Own,
-					upstream,
-					..Horizon::default()
-				},
-				covering: false,
-				stats: stats::Session::default(),
-				..self.clone()
-			}
-			.with_hidden(true)
-			// Feeding the node is no reason to ask any peer about anything.
-			.serving()
+		// The whole table, counted against no session: only origin-wide state, so the node
+		// is the same whichever handle creates it. No `..self` here, so a new per-handle
+		// field cannot leak in.
+		let own = |upstream| Self {
+			hop: self.hop,
+			max_hops: self.max_hops,
+			scope: OriginScope::default(),
+			root: Path::default(),
+			shared: self.shared.clone(),
+			stats: stats::Session::default(),
+			horizon: Horizon {
+				node: NodeFilter::Own,
+				upstream,
+				..Horizon::default()
+			},
+			hidden: Hidden {
+				include: true,
+				from: None,
+			},
+			// Feeding the node is no reason to ask any peer about anything, as when serving.
+			covering: true,
+			interested: false,
+			proxy: false,
+			pool: self.pool.clone(),
+			cache_duration: self.cache_duration,
+			tasks: self.tasks.clone(),
+			timers: self.timers.clone(),
 		};
 		// Built before taking the lock, since opening a cursor takes it.
 		let node = crate::route::Node::origin(self.hop());
@@ -9941,7 +9951,7 @@ mod tests {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_auth_swap_is_an_update() {
-		let handle = crate::auth::Link::ietf(false);
+		let handle = crate::auth::Link::ietf();
 		let first = handle.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 		let second = handle.present(bytes::Bytes::from_static(b"second"), false).unwrap();
 		let producer = origin(1).produce();
@@ -10764,11 +10774,17 @@ mod tests {
 	}
 
 	/// A route node already fed by its driver still answers a new stream with the table as
-	/// it stands, including a claim announced since the driver last ran.
+	/// it stands, including a claim announced since the driver last ran, whichever handle
+	/// created it: one scoped away from the claim, upstream, proxying, and hiding hidden
+	/// routes sees the whole table all the same.
 	#[test]
 	fn the_route_node_answers_with_the_table_as_it_stands() {
 		let producer = origin(1).produce();
-		producer.route_node();
+		(producer.clone().with_link(Link::Upstream).with_proxy(true).consume())
+			.scope("elsewhere", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.with_hidden(false)
+			.route_node();
 		// Nothing polls this test's driver.
 		let _shown = producer.announce("room/alice", RouteInfo::new()).unwrap();
 		let link = crate::route::Link {
@@ -15101,6 +15117,74 @@ mod tests {
 		// The incumbent's clean end is the track's, not the newcomer's error.
 		let _old = old.finish().unwrap();
 		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
+	}
+
+	/// The serving route is withdrawn while its copy of the track is still open, and the
+	/// next route for the same publisher no longer has the broadcast: its refusal must not
+	/// end the track, which takes the incumbent's remaining groups and clean end.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_refused_replacement_keeps_a_withdrawn_incumbent_open() {
+		// The incumbent arrives from relay 2, a stale standby from relay 3, both for
+		// publisher 9, so withdrawing relay 2 leaves the standby standing.
+		let producer = origin(1).produce();
+		let server = producer
+			.forward(
+				"room",
+				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[9, 2])),
+			)
+			.unwrap();
+		let standby = producer
+			.forward(
+				"room",
+				RouteInfo::new()
+					.with_instance(instance(), 0)
+					.with_hops(hops(&[9, 5, 3])),
+			)
+			.unwrap();
+		let pending = producer.consume().request("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		let old = upstream.create_track("video", crate::track::Info::timed()).unwrap();
+		queued(&server).await.serve(&upstream);
+		let resolved = pending.await.expect("resolves");
+		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = old.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = next_group(&mut subscription).await.unwrap().expect("first group");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
+
+		// The peer withdraws the broadcast: the route retracts and its source closes,
+		// while the subscription already in flight stays open.
+		server.withdrawn();
+		upstream.close();
+
+		let successor = broadcast::Info::new().produce();
+		let mut handler = successor.requests();
+		queued(&standby).await.serve(&successor);
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front asked the standby")
+			.expect("request");
+		request.reject(Error::Unroutable);
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+
+		let mut group = old.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = next_group(&mut subscription)
+			.await
+			.expect("the incumbent keeps serving")
+			.expect("track open");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"last");
+
+		let _old = old.finish().unwrap();
+		let end = next_group(&mut subscription)
+			.await
+			.map(|group| group.map(|group| group.sequence));
+		assert!(matches!(end, Ok(None)), "the incumbent's clean end, not {end:?}");
 	}
 
 	/// The newcomer answers "video" with matching metadata, the front reads that answer,

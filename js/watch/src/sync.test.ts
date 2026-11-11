@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Duration, type Installed, Instant, Manual, now, yieldNow } from "@moq/clock";
 
 // A monotonic instant `ms` after the clock origin.
-const at = (ms: number) => Instant.ZERO.add(Duration.millis(ms));
+const at = (ms: number) => Instant.ZERO.saturatingAdd(Duration.millis(ms));
 
 import { Signal } from "@moq/signals";
 import { type Delay, Sync } from "./sync";

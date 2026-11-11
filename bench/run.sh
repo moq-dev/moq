@@ -138,6 +138,11 @@ case $MODE in
                 exit 1
             fi
         done
+        # Refuse at setup, after validating the selection but before creating evidence.
+        if [[ $(uname -s) != Linux ]]; then
+            printf 'relay profiling needs Linux for perf and /proc\n' >&2
+            exit 1
+        fi
         # Without frame pointers, perf's DWARF unwinder stops at the first relay frame,
         # and CPU stacks unwind by frame pointer alone.
         export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes"
@@ -965,10 +970,6 @@ run_shard_sweep() {
 }
 
 run_profiles() {
-    if [[ $(uname -s) != Linux ]]; then
-        printf 'relay profiling needs Linux for perf and /proc\n' >&2
-        return 1
-    fi
     # Refuse before the build when the host would refuse a capture.
     local mode
     for mode in $PROFILE_MODES; do

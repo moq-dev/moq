@@ -188,6 +188,12 @@ fn config(initial: Duration, timeout: Option<Duration>) -> Config {
 	config
 }
 
+/// `machine` as it stands once a session has been established, so a failed walk retries.
+fn established<A, E>(mut machine: Reconnect<A, E>) -> Reconnect<A, E> {
+	machine.established = true;
+	machine
+}
+
 /// Check each gap between consecutive sessions against the jittered delay it should
 /// have waited: between half of `delay` and all of it, starting at `initial` and
 /// doubling up to `max`.
@@ -310,13 +316,36 @@ async fn a_zero_initial_redials_at_once() {
 	}
 }
 
-/// A zero window is a real bound, not "unlimited": the first walk still dials, and its
-/// failure gives up at once. A peer that keeps serving is unaffected.
+/// The first walk never retries: with no session yet, its failure ends the policy at once
+/// with that walk's error, however long the window. Its addresses still fall back in turn.
 #[kio::test]
-async fn a_zero_timeout_gives_up_when_the_first_walk_fails() {
+async fn the_first_walk_fails_fast() {
+	let targets = vec![url("tcp://a:1/"), url("tcp://b:1/")];
+	let peers = [
+		(targets[0].clone(), Peer::Fail(Verdict::Retry)),
+		(targets[1].clone(), Peer::Fail(Verdict::Retry)),
+	];
+	let started = kio::clock::now();
+	let mut machine = Reconnect::new(config(INITIAL, None), targets.clone(), started).unwrap();
+	let mut run = Run::default();
+	let err = drive(&mut machine, &peers, &mut run, |_| false)
+		.await
+		.unwrap()
+		.expect_err("the first walk failed");
+	assert!(matches!(err, TestError::Dial), "{err}");
+	assert_eq!(run.dials, targets, "the walk tried every address once");
+	assert!(run.events.is_empty(), "retried: {:?}", run.events);
+	assert_eq!(kio::clock::now(), started, "gave up without waiting");
+}
+
+/// A zero window is a real bound, not "unlimited": a retry's failure gives up at once. A
+/// peer that keeps serving is unaffected.
+#[kio::test]
+async fn a_zero_timeout_gives_up_at_the_first_retry() {
 	let peer = url("tcp://peer:1/");
 	let started = kio::clock::now();
-	let mut machine = Reconnect::new(config(INITIAL, Some(Duration::ZERO)), vec![peer.clone()], started).unwrap();
+	let mut machine =
+		established(Reconnect::new(config(INITIAL, Some(Duration::ZERO)), vec![peer.clone()], started).unwrap());
 	let mut run = Run::default();
 	let err = drive(
 		&mut machine,
@@ -328,7 +357,7 @@ async fn a_zero_timeout_gives_up_when_the_first_walk_fails() {
 	.unwrap()
 	.expect_err("a failed walk kept retrying");
 	assert!(matches!(err, TestError::Policy(Failure::Exhausted { .. })), "{err}");
-	assert_eq!(run.dials, std::slice::from_ref(&peer), "the first walk dialed once");
+	assert_eq!(run.dials, std::slice::from_ref(&peer), "the walk dialed once");
 	assert_eq!(kio::clock::now(), started, "gave up without waiting");
 
 	let mut machine = Reconnect::new(config(INITIAL, Some(Duration::ZERO)), vec![peer.clone()], started).unwrap();
@@ -346,7 +375,8 @@ async fn a_zero_timeout_gives_up_when_the_first_walk_fails() {
 fn a_late_poll_past_the_window_gives_up() {
 	let started = Instant::now();
 	let config = config(INITIAL, Some(Duration::from_secs(1)));
-	let mut machine = Reconnect::<Url, TestError>::new(config, vec![url("tcp://peer:1/")], started).unwrap();
+	let mut machine =
+		established(Reconnect::<Url, TestError>::new(config, vec![url("tcp://peer:1/")], started).unwrap());
 	let waiter = kio::Waiter::noop();
 	assert!(matches!(machine.poll(started, &waiter), Action::Dial(_)));
 	machine.failed(started, TestError::Dial, Verdict::Retry);
@@ -394,7 +424,7 @@ async fn only_an_address_with_a_fallback_is_bounded() {
 	let mut config = Config::default();
 	config.backoff.timeout = Some(Duration::from_secs(1));
 	let started = kio::clock::now();
-	let mut machine = Reconnect::new(config, targets.clone(), started).unwrap();
+	let mut machine = established(Reconnect::new(config, targets.clone(), started).unwrap());
 	let mut run = Run::default();
 
 	let err = drive(&mut machine, &peers, &mut run, |_| false)
@@ -422,12 +452,14 @@ async fn a_settled_answer_stops_the_walk() {
 		(targets[0].clone(), Peer::Fail(Verdict::Settled)),
 		(targets[1].clone(), Peer::Serve),
 	];
-	let mut machine = Reconnect::new(
-		config(INITIAL, Some(Duration::from_secs(1))),
-		targets.clone(),
-		kio::clock::now(),
-	)
-	.unwrap();
+	let mut machine = established(
+		Reconnect::new(
+			config(INITIAL, Some(Duration::from_secs(1))),
+			targets.clone(),
+			kio::clock::now(),
+		)
+		.unwrap(),
+	);
 	let mut run = Run::default();
 
 	drive(&mut machine, &peers, &mut run, |run| run.dials.len() == 2).await;
@@ -448,14 +480,14 @@ async fn an_unusable_address_ends_only_a_walk_without_hope() {
 		(targets[0].clone(), Peer::Fail(Verdict::Retry)),
 		(targets[1].clone(), Peer::Fail(Verdict::Unusable)),
 	];
-	let mut machine = Reconnect::new(config(INITIAL, None), targets.clone(), kio::clock::now()).unwrap();
+	let mut machine = established(Reconnect::new(config(INITIAL, None), targets.clone(), kio::clock::now()).unwrap());
 	let mut run = Run::default();
 	drive(&mut machine, &peers, &mut run, |run| run.dials.len() == 4).await;
 	assert_eq!(run.events, ["retrying"], "an unlimited window keeps retrying");
 
 	let lone = url("tcp://c:1/");
 	let started = kio::clock::now();
-	let mut machine = Reconnect::new(config(INITIAL, None), vec![lone.clone()], started).unwrap();
+	let mut machine = established(Reconnect::new(config(INITIAL, None), vec![lone.clone()], started).unwrap());
 	let err = drive(
 		&mut machine,
 		&[(lone, Peer::Fail(Verdict::Unusable))],
@@ -472,6 +504,35 @@ async fn an_unusable_address_ends_only_a_walk_without_hope() {
 /// A refused credential is terminal, unless the tokens changed since the dial read them.
 #[kio::test]
 async fn a_refusal_retries_only_new_tokens() {
+	let peer = url("tcp://peer:1/");
+	let tokens = auth::Tokens::new(vec!["old".parse().unwrap()]);
+	let mut machine = established(
+		Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now())
+			.unwrap()
+			.with_tokens(tokens.clone()),
+	);
+
+	let Action::Dial(_) = next(&mut machine).await else {
+		panic!("expected a dial")
+	};
+	tokens.set(vec!["new".parse().unwrap()]);
+	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Refused);
+	assert!(matches!(next(&mut machine).await, Action::Retrying(_)));
+
+	let Action::Dial(_) = next(&mut machine).await else {
+		panic!("expected a redial")
+	};
+	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Refused);
+	assert!(
+		matches!(next(&mut machine).await, Action::Done(Err(TestError::Dial))),
+		"an unchanged credential is refused for good"
+	);
+}
+
+/// A first walk refused for tokens replaced since its dial still earns another dial: the
+/// new tokens are the caller's fix. Unchanged tokens fail fast.
+#[kio::test]
+async fn a_first_refusal_retries_only_new_tokens() {
 	let peer = url("tcp://peer:1/");
 	let tokens = auth::Tokens::new(vec!["old".parse().unwrap()]);
 	let mut machine = Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now())
@@ -836,6 +897,132 @@ async fn a_peer_goaway_wins_over_a_probe() {
 	);
 }
 
+/// Pins an open finding (`verify-reconnect`, `RedirectFollowed`): once a probe got
+/// through, the fallback session drains as the predecessor and nothing watches its peer's
+/// GOAWAY anymore, so a redirect the peer sends while the handshake runs is never read and
+/// the redial goes back to the node that is leaving.
+#[kio::test]
+async fn residual_a_redirect_after_a_probe_got_through_is_lost() {
+	let (mut machine, fallback_server) = on_fallback(Config::default()).await;
+	probe(&mut machine).await;
+	assert!(machine.probed(kio::clock::now(), Ok(())));
+	assert!(matches!(next(&mut machine).await, Action::Migrating));
+
+	let elsewhere = url("https://peer:2/");
+	fallback_server
+		.drain()
+		.send(goaway::Goaway::redirect(elsewhere.to_string()))
+		.expect("the fallback peer sends a GOAWAY");
+	kio::clock::sim::idle().await;
+	// The handshake over the preferred transport fails, so the policy dials again.
+	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Retry);
+	assert!(matches!(next(&mut machine).await, Action::Retrying(_)));
+	let Action::Dial(attempt) = next(&mut machine).await else {
+		panic!("expected a redial");
+	};
+	assert_eq!(
+		attempt.target(),
+		&url("https://peer:1/"),
+		"the redial followed the redirect: flip this test"
+	);
+	assert!(machine.predecessor().is_some(), "the redirected session still drains");
+}
+
+/// A client and server session where the client holds a subscription the server serves,
+/// so neither end is idle while the returned handles live.
+async fn busy_handshake() -> (Session, Session, Vec<Box<dyn std::any::Any>>) {
+	use crate::model::ProduceTest;
+	let publisher = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+	let broadcast = publisher.route("bcast", crate::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"video",
+			crate::track::Info::default().with_timescale(crate::Timescale::MILLI),
+		)
+		.unwrap();
+	broadcast.announce().unwrap();
+	let subscriber = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
+
+	let (client, server) = crate::transport::memory::pair(crate::transport::memory::Config {
+		protocol: Some(version().alpn().to_string()),
+		..Default::default()
+	});
+	let dial = crate::Client::new()
+		.with_versions(version().into())
+		.with_subscriber(subscriber.clone());
+	let serve = crate::Server::new()
+		.with_versions(version().into())
+		.with_publisher(publisher.consume());
+	let (client, server) = futures::join!(
+		async {
+			let (session, driver) = dial.connect(kio::clock::now(), client).await.unwrap();
+			drop(kio::clock::sim::spawn(crate::time::run(driver)));
+			session
+		},
+		async {
+			let (session, driver) = serve.accept(kio::clock::now(), server).await.unwrap();
+			drop(kio::clock::sim::spawn(crate::time::run(driver)));
+			session
+		},
+	);
+
+	let remote = subscriber
+		.consume()
+		.follow("bcast", None)
+		.unwrap()
+		.available()
+		.await
+		.expect("the broadcast resolves")
+		.unwrap();
+	let mut group = track.append_group().unwrap();
+	group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
+	group.finish().unwrap();
+	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+	sub.recv_group().await.unwrap().expect("the track ended");
+	(
+		client,
+		server,
+		vec![Box::new(sub), Box::new(track), Box::new(broadcast), Box::new(publisher)],
+	)
+}
+
+/// Pins an open finding (`verify-reconnect`, `OfflineMeansNothingServes`): a replacement
+/// that drops while the predecessor still drains reports [`Action::Offline`], whose
+/// promise is that nothing serves, though the predecessor still carries a subscription.
+#[kio::test]
+async fn residual_a_dropped_replacement_reports_offline_while_the_predecessor_serves() {
+	let a = url("tcp://peer:1/");
+	let b = url("tcp://peer:2/");
+	let mut machine: Reconnect<Url, TestError> = Reconnect::new(Config::default(), vec![a], kio::clock::now()).unwrap();
+	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
+	let (client, server, _busy) = busy_handshake().await;
+	machine.connected(kio::clock::now(), client);
+
+	kio::clock::sleep(Duration::from_secs(2)).await;
+	server.drain().send(goaway::Goaway::redirect(b.to_string())).unwrap();
+	assert!(matches!(next(&mut machine).await, Action::Migrating));
+	let Action::Dial(attempt) = next(&mut machine).await else {
+		panic!("expected the redirect's dial");
+	};
+	assert_eq!(attempt.target(), &b);
+	let (replacement, replacement_server) = handshake().await;
+	machine.connected(kio::clock::now(), replacement);
+	drop(replacement_server);
+
+	let action = next(&mut machine).await;
+	assert!(
+		matches!(action, Action::Offline(Some(_))),
+		"the replacement's drop no longer reports offline: flip this test ({action:?})"
+	);
+	let (predecessor, _) = machine.predecessor().expect("the predecessor still drains");
+	assert!(predecessor.poll_closed(&kio::Waiter::noop()).is_pending());
+	assert!(
+		predecessor.poll_idle(&kio::Waiter::noop()).is_pending(),
+		"it still serves"
+	);
+}
+
 /// A target that never reaches the preferred transport keeps its fallback session and
 /// probes no faster than the doubling backoff allows, capped at one every five minutes.
 #[kio::test]
@@ -936,12 +1123,9 @@ fn dialing_never_logs_the_credential() {
 			Action::Dial(_)
 		));
 		machine.failed(started.saturating_add(ATTEMPT), TestError::Dial, Verdict::Retry);
-		loop {
-			match machine.poll(started.saturating_add(ATTEMPT), &waiter) {
-				Action::Retrying(err) => reported.push(err.to_string()),
-				Action::Wait(_) => break,
-				action => panic!("unexpected {action:?}"),
-			}
+		match machine.poll(started.saturating_add(ATTEMPT), &waiter) {
+			Action::Done(Err(err)) => reported.push(err.to_string()),
+			action => panic!("unexpected {action:?}"),
 		}
 	});
 

@@ -18,6 +18,6 @@ nix build .#moq-relay .#moq --out-link "$roots/runtime" --print-build-logs
 just infra nix push nix-ci-moq-dev "$roots"/runtime*
 
 # `nix copy` skipped paths already uploaded, possibly weeks ago, so restart
-# their age now rather than leave them to the next daily refresh.
+# their age now, while this commit is the newest Smoke may pin.
 just infra nix roots nix-ci-moq-dev "${GITHUB_SHA:?not set}" runtime-x86_64-linux "$roots"/*
 just infra nix refresh nix-ci-moq-dev "$GITHUB_SHA"

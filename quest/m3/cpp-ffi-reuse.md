@@ -32,7 +32,7 @@ and doc samples. All four jobs then verified/extracted their checked archives
 and produced C++ packages. Later commits change only documentation and the
 tag-only release-creation notes, which that dry-run does not exercise.
 
-The [FFI build evidence](/.github/ffi.md#c-comparison) separates historical
+The [FFI build evidence](https://github.com/moq-dev/moq/pull/5740) separates historical
 archive/metadata comparisons from this current executable consumer proof.
 Historical Windows assembly and Rust LTO comparisons do not prove complete
 byte-for-byte code equivalence. The current four-host consumers have passed;

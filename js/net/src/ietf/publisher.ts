@@ -397,16 +397,12 @@ export class Publisher {
 	// back came from us. `undefined` when nothing negotiated it.
 	#advert?: Cluster.Advert;
 
-	// Our grant (MoQ Auth): only what it lets us publish is advertised and served, and a
+	// Our grant: only what it lets us publish is advertised and served, and a
 	// shrink withdraws what it no longer covers. Undefined until the peer answers, which
 	// allows everything.
 	#grant: Getter<Grant | undefined>;
 	// Holds every incoming request to that grant from dispatch to its end.
 	#gate: Gate;
-
-	// Resolves once the tokens this session presented at setup are answered, so nothing is
-	// advertised before the grant it would be checked against.
-	#ready: Promise<void>;
 
 	// The bytes a request carries for a route's token, for only the tokens this session issued.
 	#auth?: Carrier;
@@ -426,7 +422,6 @@ export class Publisher {
 		cluster,
 		grant = new Signal<Grant | undefined>(undefined),
 		auth,
-		ready = Promise.resolve(),
 	}: {
 		/** The WebTransport session, for uni streams. */
 		quic: WebTransport;
@@ -442,19 +437,16 @@ export class Publisher {
 		activeCount?: boolean;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
-		/** The union of our tokens' grants (MoQ Auth), which bounds what we publish. */
+		/** The union of our tokens' grants, which bounds what we publish. */
 		grant?: Getter<Grant | undefined>;
 		/** This session's tokens, which a route names for its request to carry. */
 		auth?: Carrier;
-		/** Resolves once the setup tokens are answered (MoQ Auth). */
-		ready?: Promise<void>;
 	}) {
 		this.#quic = quic;
 		this.#datagramWriter = DatagramStream.datagramWriter(quic);
 		this.#grant = grant;
 		this.#gate = new Gate(grant);
 		this.#auth = auth;
-		this.#ready = ready;
 		this.#session = session;
 		const origin = publish && wireOf(publish);
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
@@ -1688,9 +1680,6 @@ export class Publisher {
 			const visible = (covered: Path.Valid) => !this.#hidden || msg.hidden || !hiddenBelow(prefix, covered);
 			const carries = (covered: Path.Valid) => visible(covered) && this.#gate.allows(covered);
 
-			// Nothing is advertised before the grant it would be checked against.
-			await this.#ready;
-
 			// Inline entries always land, and the receiver treats a repeated NAMESPACE as a
 			// replacement, so repricing one is just sending it again, a new original
 			// publisher included, as Rust does.
@@ -1839,9 +1828,6 @@ export class Publisher {
 
 		let dispose: Dispose | undefined;
 		try {
-			// Nothing is advertised before the grant it would be checked against.
-			if ((await Promise.race([this.#ready.then(() => "ready" as const), closed])) !== "ready") return;
-
 			// Keyed by path.
 			const ns: Namespaces = { active: new Map(), refused: new Map(), offered: new Map() };
 			// How long to stay away the next time the peer ends each advertisement while idle,
@@ -1868,7 +1854,7 @@ export class Publisher {
 					ns.active.delete(key);
 					const wait = lapses.get(key)?.wait ?? RETRY_BASE;
 					lapses.set(key, { snap, wait: Math.min(wait * 2, RETRY_MAX) });
-					ns.refused.set(key, now().add(Duration.millis(wait)));
+					ns.refused.set(key, now().saturatingAdd(Duration.millis(wait)));
 					ns.offered.set(key, snap);
 				}
 
@@ -1881,7 +1867,7 @@ export class Publisher {
 				const updated = new Map<Path.Valid, Advertised>();
 				for (const [covered, candidates] of advertised) {
 					// Only peers that declared MoQ Hidden filter unsolicited discovery, and
-					// nothing our grant does not cover reaches the peer at all (MoQ Auth).
+					// nothing our grant does not cover reaches the peer at all.
 					if ((this.#hidden && hiddenBelow(Path.empty(), covered)) || !this.#gate.allows(covered)) continue;
 					const best = firstEligible(candidates);
 					if (best) updated.set(covered, best);
@@ -2040,10 +2026,11 @@ export class Publisher {
 
 	/**
 	 * What a REQUEST_ERROR's retry interval, in milliseconds, says about re-offering the
-	 * namespace: 0 means the peer does not want this again.
+	 * namespace: 0, or an interval past the clock's range, means the peer does not want this again.
 	 */
 	#refusal(err: RequestError): Answer {
-		return err.retryInterval === 0n ? "never" : now().add(Duration.millis(toNumber(err.retryInterval)));
+		if (err.retryInterval === 0n) return "never";
+		return now().checkedAdd(Duration.millis(toNumber(err.retryInterval))) ?? "never";
 	}
 
 	/**

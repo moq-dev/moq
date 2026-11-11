@@ -2,6 +2,7 @@
 """Exercise pre-setup selection with real diffs and no development toolchain."""
 
 import contextlib
+import json
 import os
 import select
 import shutil
@@ -18,6 +19,7 @@ from unittest.mock import patch
 from test_env import dispatch_env
 
 ROOT = Path(__file__).resolve().parent.parent
+JQ = shutil.which("jq")
 
 
 class QueryTests(unittest.TestCase):
@@ -246,7 +248,6 @@ class QueryTests(unittest.TestCase):
             "python3",
             "cargo",
             "release-plz",
-            "jq",
             "shellcheck",
             "shfmt",
             "taplo",
@@ -285,6 +286,33 @@ class QueryTests(unittest.TestCase):
         path = self.bin / "just"
         path.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >>"$CALLS"\n' + just)
         path.chmod(0o755)
+        # The bridge reaches rs/dep, which reaches rs/deep; rs/dev is only a
+        # dev-dependency of rs/dep, and rs/other is unrelated.
+        root = self.repo
+        bridge = {"packages": [{"dependencies": [{"kind": None, "path": f"{root}/rs/dep"}]}]}
+        workspace = {
+            "workspace_root": str(root),
+            "packages": [
+                {
+                    "manifest_path": f"{root}/rs/dep/Cargo.toml",
+                    "dependencies": [
+                        {"kind": None, "path": f"{root}/rs/deep"},
+                        {"kind": "dev", "path": f"{root}/rs/dev"},
+                    ],
+                },
+                {"manifest_path": f"{root}/rs/deep/Cargo.toml", "dependencies": []},
+                {"manifest_path": f"{root}/rs/other/Cargo.toml", "dependencies": []},
+            ],
+        }
+        cargo = self.bin / "cargo"
+        cargo.write_text(
+            "#!/usr/bin/env bash\n"
+            f"case \"$*\" in *--manifest-path*) echo '{json.dumps(bridge)}' ;; "
+            f"*) echo '{json.dumps(workspace)}' ;; esac\n"
+        )
+        jq = self.bin / "jq"
+        jq.unlink(missing_ok=True)
+        jq.symlink_to(JQ)
         nix = self.bin / "nix"
         nix.write_text('#!/usr/bin/env bash\nprintf "nix %s\\n" "$*" >>"$CALLS"\n')
         nix.chmod(0o755)
@@ -292,7 +320,7 @@ class QueryTests(unittest.TestCase):
         quest.write_text('#!/usr/bin/env bash\nprintf "pinned quest %s\\n" "$*" >>"$CALLS"\n')
         self.env.update(IN_MOQ_DEV_SHELL="1", DEV_SHELL_QUEST=str(quest), CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
-        for script in ("markdown.sh", "shell.sh", "large-files.sh", "text.sh"):
+        for script in ("markdown.sh", "shell.sh", "large-files.sh", "migrate.sh", "text.sh"):
             path = self.repo / "sh" / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
@@ -304,6 +332,22 @@ class QueryTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
+
+    def test_carla_bridge_follows_the_rs_crates_it_builds(self):
+        for path, checked in (
+            ("demo/carla/bridge/src/main.rs", True),
+            ("rs/dep/src/lib.rs", True),
+            ("rs/deep/src/lib.rs", True),
+            ("rs/dev/src/lib.rs", False),
+            ("rs/other/src/lib.rs", False),
+            ("clippy.toml", True),
+            ("rust-toolchain.toml", True),
+            ("Cargo.toml", True),
+        ):
+            with self.subTest(path=path):
+                self.change(path)
+                self.assertEqual("carla bridge-check" in self.run_ci(), checked)
+                (self.repo / path).unlink()
 
     def test_check_and_ci_reject_em_dashes_outside_the_diff(self):
         self.stub_ci()

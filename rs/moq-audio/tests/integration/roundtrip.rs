@@ -94,7 +94,7 @@ async fn opus_roundtrip(case: Case) {
 	let mut consumer = decode::Consumer::new(&source, rendition, "audio", options)
 		.await
 		.unwrap();
-	producer.finish().unwrap();
+	let _finished = producer.finish().unwrap();
 	// Decoded from the track's first packet, so only the codec's pre-skip is dropped.
 	let mut pcm = Vec::new();
 	while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
@@ -168,7 +168,7 @@ async fn pcm_round_trip_is_lossless() {
 	let mut consumer = decode::Consumer::new(&broadcast_consumer, catalog, "pcm", decode::Options::default())
 		.await
 		.unwrap();
-	producer.finish().unwrap();
+	let _finished = producer.finish().unwrap();
 
 	let frame = next_frame(&mut consumer).await.unwrap().unwrap();
 	assert_eq!(frame.timestamp, Timestamp::from_micros(123_000).unwrap());
@@ -232,7 +232,7 @@ async fn pcm_five_one_reads_back_at_any_layout() {
 				.unwrap(),
 		);
 	}
-	producer.finish().unwrap();
+	let _finished = producer.finish().unwrap();
 
 	for (mut consumer, (_, layout, frame)) in consumers.into_iter().zip(cases) {
 		assert_eq!(consumer.layout(), layout);

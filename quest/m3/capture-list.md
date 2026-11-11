@@ -8,6 +8,8 @@ show pictures instead of names, on macOS, Windows, and X11:
 - **Apps:** every listed window names its app by an identity that is the same
   after the app restarts, and apps are listed with that identity, a name, and
   their icon as pixels.
+- **Placement:** every listed window says which listed display it is on and
+  its rectangle there, in that display's pixels.
 - **Cameras:** each says what kind of device it is (built in, webcam, capture
   card, phone, virtual) where the system says, and says nothing where it does
   not.
@@ -48,6 +50,15 @@ macOS. `moq devices` and moq-cli's completions are the other callers and move
 with the API.
 
 Settled in the interview:
+
+- Window placement joins the listing (2026-11-10, maintainer, /quest-complete
+  follow-up of [moq-dev/moq#8422](https://github.com/moq-dev/moq/pull/8422)):
+  ✅ plan it (rejected: a full-screen flag, keeping an excluded app's sound
+  out of system audio capture). The studio's privacy shield draws a lock
+  where an excluded window was, and its camera that keeps out of the way
+  avoids the foreground window; both need a window's position on its
+  display. Full screen follows from a window's rectangle against its
+  display's, so it gets no field of its own.
 
 - Identity and icons cover every desktop, not macOS alone.
 - A supported path per desktop is decided at setup, with an error otherwise
@@ -101,13 +112,32 @@ as given:
   may refuse; listing alone opens no device. Measure what one picture stream
   costs per item at its default rate on each desktop, and state it on the
   API.
+- **Placement.** A window moving or resizing is a change like a retitle, so
+  the watch's list stays current; coalesce a drag so it does not wake the
+  caller per frame. X11 has `ConfigureNotify`, Windows `EVENT_OBJECT_LOCATIONCHANGE`,
+  and macOS reports bounds in each listing, noticed the same way as the
+  other window changes.
 - **Changes.** X11 has `PropertyNotify` on the root's client list and each
   window's title, and RandR for monitors, which `capture/x11.rs` already
   selects. Cameras have udev and PipeWire's registry on Linux, device
   notifications on Windows, and AVFoundation's connect and disconnect
   notifications on macOS. Windows has `SetWinEventHook`. macOS reports
-  another app's windows only through the Accessibility API, which is the
-  decision under Waiting.
+  another app's windows only through the Accessibility API, so the caller
+  picks a macOS mode when it opens the watch, as decided below.
+- **macOS window changes.** Decided 2026-11-10 (maintainer,
+  /quest-unblock): ✅ both modes, the application picks one at setup
+  (rejected: re-list only; Accessibility only; app launch, quit, and
+  activation only). In the Accessibility mode moq-video observes each app's
+  window events, and setup refuses with `Unsupported` naming the missing
+  permission rather than falling back. In the basic mode, which needs no
+  Accessibility permission, moq-video re-lists windows at a documented rate only while a
+  caller holds a watch, and wakes it on a difference; no caller polls.
+  Re-listing is wasteful, so it never runs without a watch. Window pictures
+  still need Screen Recording permission in either mode, as any
+  ScreenCaptureKit capture does. The Mac tests
+  cover both modes.
+  [The foreground app](/quest/m4/capture-foreground.md) takes the same mode,
+  so one permission serves both.
 
 Tests, sized to what each runner has:
 
@@ -130,18 +160,6 @@ Tests, sized to what each runner has:
 
 Public API: breaking for `capture::{Camera, Display, Window, App}` and the
 listing calls. Wire: none.
-
-## Waiting
-
-- Maintainer: how macOS notices another app's windows opening, closing, and
-  being retitled, which only the Accessibility API reports as events. An
-  agent cannot choose it because one option adds a permission prompt to every
-  embedder. Options: (1, recommended) moq-video re-lists inside the watch at
-  a stated rate while a caller holds one, on macOS windows only, so no caller
-  polls and no permission is added; (2) ask for the Accessibility permission
-  and observe each app; (3) notify on app launch, quit, and activation only,
-  missing a window that opens inside a running app. Done when this item names
-  the pick.
 
 ## Related
 

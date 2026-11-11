@@ -283,10 +283,8 @@ Some cases change shape on moq-transport:
   so a tail reader started before the publisher's groups may begin past group 0.
   The tails take any contiguous run of groups through group 3, each verified
   byte for byte, and still require the clean end at 4.
-- The AUTH extension carries prefixes alone, and a relay refuses a
-  grant narrower than a subtree, closing the session as Unauthorized. Pinned
-  passes mint `name/**` for both roles instead of the exact and `**/name`
-  patterns above.
+- Requests name prefixes alone, so pinned passes mint `name/**` for both roles
+  instead of the exact and `**/name` patterns above.
 
 The browser pins through the `versions` attribute on `<moq-watch>` and
 `<moq-publish>`, and GStreamer through the `versions` property on `moqsrc`.

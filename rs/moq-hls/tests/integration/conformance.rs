@@ -105,7 +105,7 @@ async fn segments_match_their_manifests() {
 		recorder.caught_up(&seen.newest()).await;
 	}
 	seen.reload = true;
-	import.finish().expect("finish import");
+	let _finished = import.finish().expect("finish import");
 	catalog.finish().expect("finish catalog");
 
 	let deadline = kio::clock::now().saturating_add(TIMEOUT);

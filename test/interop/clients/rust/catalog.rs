@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
 		commands.next_line().await?.as_deref() == Some("clean end"),
 		"readers did not acknowledge the catalog"
 	);
-	catalog.finish()?;
+	let _catalog = catalog.finish()?;
 	route.broadcast().close();
 	session.close().await?;
 	eprintln!("catalog acknowledged");

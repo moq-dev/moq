@@ -31,6 +31,17 @@ claim whose withdrawal is already known.
 16. ✅ Decided 2026-11-09 (maintainer, /quest-unblock on [moq-dev/moq#8375](https://github.com/moq-dev/moq/pull/8375)), asked how a token-scoped lite-07 session certifies withdrawals so a clean finish ENDs across a relay: ✅ **the subscriber narrows its ANNOUNCE_REQUEST to its scope's single region** (where its limit and its subscribe grant meet), and reopens the request when that region changes so a widening renewal isn't lost. Floors keep their exact whole-prefix meaning, with no wire change and one SHOULD in the lite-07 draft. A multi-region scope still certifies nothing. Rejected: floors carrying regions on the wire, which reverses item 10; landing with the finish lanes accepting offline.
 17. ✅ Decided 2026-11-09 (maintainer, /quest-unblock on [moq-dev/moq#8375](https://github.com/moq-dev/moq/pull/8375)), asked how item 16's reopen counts the session's announce cap while the old request keeps serving until the new one is SYNCED: ✅ **the old request gets its own budget for the handover**, moving what it holds onto a separate counter with the same cap, so the session's count belongs wholly to the new request. A peer can make the session hold at most twice the cap, and only during one handover. Rejected: dropping the old request at once on every region change, which flickers claims offline; holding a client's first request until its credential is answered and dropping the old one on later renewals.
 
+The items below were decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing), which reopened the route layer's rules after the echo ordering bug.
+
+18. ✅ Asked who is an origin node: **every publisher stays an origin node.** Its identity is for signing, for one node across several links (redundant publishers), and because browsers will forward ([browser mesh](/quest/m5/browser-mesh.md)). Rejected: a relay originating, under its own Node ID, the claims of any peer that sends no Node ID or holds a scoped publish grant, as it already does for lite-06 and moq-transport publishers. That would make route state follow relays rather than publishers and remove qualified Node IDs, the Route Key, and the echo, but a publisher would have no identity of its own. Accepted cost: routes, holds, and seqno requests scale with publishers, so a node must still forget dead identities, and the echo that makes forgetting safe has to be sound.
+19. ✅ Asked whether to keep them: **ROUTE_HOLD stays, and the newest floor wins per identity.** Rejected: dropping holds, where each stall takes every claim behind the node offline and re-sends them all; and claims that follow only the selected next hop, which re-pulls a node's whole claim table on each next-hop change and showed revivals and false ENDs in the sweeps below.
+20. ✅ Asked when an origin advances its seqno unprompted: **only when a route link changes**, which [the seqno bumps](/quest/m1/route-seqno-bumps.md) implements. Today every announce stream open or close bumps it. Rejected: only to answer a ROUTE_REQUEST; keeping the per-stream bump.
+21. ✅ Asked how one side's routing messages travel so none overtakes another: **one unidirectional Announce Stream per side**, carrying its requests, its answers, and its echoes in order ([the route stream](/quest/m2/cluster-routing/routes/route-stream.md)). It replaces "There MAY be multiple Announce Streams". Rejected: one bidirectional Announce Stream per direction with the echo moved to the answering half; one bidirectional stream per session.
+22. ✅ **A side's interest is a set of prefixes edited in place.** The live set never nests, and one edit may swap prefixes for a wider or narrower one without re-sending what both cover ([the interest set](/quest/m2/cluster-routing/routes/interest-set.md)). A token-scope change is such an edit, with one prefix per region of the scope. This supersedes items 16 and 17, and the handoff contract's "An interest change opens a new stream" below, once the route stream lands.
+23. ✅ Asked what a floor covers with several prefixes on one stream: **one prefix, named by its id.** This amends item 10: the floor is still a marker and never a region list. Rejected: a floor over the whole set.
+24. ✅ Asked how a side learns a newly added prefix's initial set is complete: **SYNCED per prefix, naming its id**, plus one marker per edit where it takes effect for both sides. Rejected: one SYNCED per edit, counted in order.
+25. ✅ Asked how a relay safely forgets a publisher that is gone, after the model showed a per-neighbour echo is not enough once the origin sits behind a relay: **each route names the relays it crossed, and a node never uses a route that names itself** ([the fix](/quest/m2/cluster-routing/routes/echo-order.md), which holds the counterexamples and the model results). Feasibility still selects routes; the list is one per origin route, not the per-claim Hop ID list item 6 removed, and the echo and the drain rule stay as they are. This supersedes the claim, in the handoff contract and in decision 6 below, that the echo alone makes forgetting safe. First decided as a relay echoing a ROUTE_END only once its own downstream had; the model ran that the same day and it fails when a session closes before answering. Rejected: that deferred echo; never dropping the distance; a timer; relays as the only origin nodes.
+
 
 The route layer's core landed in
 [moq-dev/moq#7676](https://github.com/moq-dev/moq/pull/7676): a
@@ -179,7 +190,12 @@ the bullets below are the contract it carries.
 - Loop freedom is Babel's feasibility condition (RFC 8966) keyed by node:
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is
-  ROUTE_HOLD or ROUTE_END; there is no count to infinity.
+  ROUTE_HOLD or ROUTE_END. The route model found a count to infinity
+  (2026-11-10): an echo can overtake a route derived from the echoed one,
+  and even in order a per-neighbour echo misses a derived copy held by a
+  third relay; [the fix](/quest/m2/cluster-routing/routes/echo-order.md)
+  adds the relays a route crossed, and a node refuses one naming itself
+  (Plan item 25).
 - Starvation recovery is Babel's seqno request (RFC 8966 s3.8, decided
   2026-10-12). A node whose routes to an origin are all infeasible sends
   ROUTE_REQUEST for that origin, with its feasibility seqno plus one, to the
@@ -539,10 +555,8 @@ benchmarks.
 
 ## Required
 
-- [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - forwarding fixtures ported and the model deleted, incident fixtures, end-to-end checks, and benchmarks
-- [Firefox tabs prove their route key](/quest/m2/cluster-routing/routes/browser-proof.md) - a current Firefox tab opens a lite-07 session with a route-key proof the relay verifies, once neqo's exporter follows the draft
-- [Playwright bundles Chromium's spec exporter](/quest/m2/cluster-routing/routes/playwright-pin.md) - the toolchain's Playwright bundles Chromium 158+, so the route key lane proves the Chromium tab
-- [The route node behaves the same whoever creates it](/quest/m2/cluster-routing/routes/node-creation-order.md) - creating an origin's lite-07 route node from SETUP instead of the route layer changes nothing observable
+- [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - every ordering on 4-5 relay meshes with two origins and clients, with an announce budget and convergence
+- [Seeded lite-07 meshes hold the route rules and an announce budget](/quest/m1/route-mesh-sweep.md) - the route rules and message budget checked on real sessions over random meshes
 
 ## Related
 
