@@ -27,6 +27,16 @@ announced back to the relay. Reproduce with
 load, find why the consumed broadcast reaches the publish side, and fix it
 there.
 
+A later full run on the same branch, with this cell quarantined, failed
+three other lanes once each, all passing when rerun; like
+[the finish cases](/quest/m0/test-flakes-2/interop-finish.md)' extra lanes,
+they are recorded here, not quarantined: `rust-swapped -> js` timed out
+after decoding only the opus rendition into the swapped tone, and
+`rust-swapped -> js-native-node` ended with `Error: unroutable`, both on
+`moq-lite-06`; the Python/Rust sockets lane on `moq-lite-07-wip` also ended
+with only `Error: unroutable`, and passed in three narrowed reruns. Check
+whether they share this cell's cause before quarantining them.
+
 ## Related
 
 - [Interop's finish cases hold up under load](/quest/m0/test-flakes-2/interop-finish.md) - another interop quarantine seen under the same load
