@@ -138,8 +138,8 @@ pub struct Info {
 	/// budget [`Delay::max`] sets for a subscriber.
 	///
 	/// Encoded as milliseconds in a QUIC varint, so a duration of `2^62` milliseconds
-	/// or more cannot be put on lite-07 wires. moq-transport never carries it, since its
-	/// `MAX_CACHE_DURATION` would also expire the newest group. Lite05/06 map values at or above
+	/// or more cannot be put on lite-07 wires. moq-transport egress never sends it, since
+	/// its `MAX_CACHE_DURATION` would also expire the newest group; a received one still sets it. Lite05/06 map values at or above
 	/// `2^53 - 1` milliseconds to no limit for older JavaScript readers. Sub-millisecond precision is truncated
 	/// (`Duration::as_millis`) at encode time.
 	pub max_age: Option<Duration>,
