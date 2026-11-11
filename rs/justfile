@@ -18,6 +18,11 @@ no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuz
 default:
     just check
 
+# Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/route/RouteHandoff.tla`.
+# Pass `-config rs/<path>.cfg` for a config not named after the spec.
+tla spec *args:
+    nix shell --inputs-from . nixpkgs#tlaplus --command tlc -workers auto -cleanup -metadir "$(mktemp -d)" {{ args }} rs/{{ spec }}
+
 # Default features for the selected packages; `features` covers the feature
 # matrix nightly and on release PRs. No `cargo check` pass: clippy is a
 # superset of it, and the two use different rustc wrappers, so running both

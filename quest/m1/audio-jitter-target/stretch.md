@@ -123,11 +123,6 @@ decision now runs a filter.
 
 Public API: none expected. Wire: none.
 
-## Required
-
-- [The audio harness grades the stretch model](/quest/m1/audio-jitter-target/grading.md) - the gates that pushed toward zero underruns and zero lag are gone before this is measured against them
-- [Native backpressure](/quest/m1/audio-jitter-target/native-backpressure.md) - native holds its ring at a floor and the rest of the target encoded, as the browser does, so one rule reads the same buffer in both
-
 ## Closes
 
 - [#8031](https://github.com/moq-dev/moq/issues/8031) - buffered playback loses lip sync and cuts audio out on a live stream

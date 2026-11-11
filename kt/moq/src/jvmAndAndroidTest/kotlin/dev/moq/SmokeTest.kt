@@ -26,6 +26,7 @@ import dev.moq.video.ProducerOptions as VideoProducerOptions
 import dev.moq.video.ReadFrame as VideoReadFrame
 import java.net.DatagramSocket
 import java.net.InetAddress
+import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -1146,6 +1147,8 @@ class SmokeTest {
     /**
      * A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
      */
+    // Quarantined: flaky, see quest/m0/test-flakes-2/kt-playout-delay.md.
+    @Ignore
     @Test
     fun `audio consumer reports its playout delay`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->

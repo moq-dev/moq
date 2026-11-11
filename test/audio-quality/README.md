@@ -1,8 +1,9 @@
 # Audio quality
 
 Plays a tone in headless Chromium and in the native `moq play` over a seeded, impaired UDP path and
-grades what the listener would have heard: how often the ring ran dry, how much audio a re-anchor
-threw away, how much of the run was silent, and where the playout delay settled. A regression in
+grades what the listener would have heard: how often the ring ran dry, how much audio the player
+threw away, how much of the run was silent, how far audio trailed the clock video plays from, and
+where the playout delay settled. A regression in
 any of them fails a row against [`budgets.json`](budgets.json) instead of arriving as a bug report,
 and a divergence between the two players shows up as one failing where the other passes.
 
@@ -18,8 +19,8 @@ just test audio-quality --profiles bursty --capture --out ~/runs/burst # keep ar
 just test audio-quality --replays                              # the replays only, in seconds
 ```
 
-The matrix is runtime x codec x profile: 12 browser rows and 12 [native rows](#native-rows), about 30
-minutes, plus 5 [replay rows](#traces) of recorded arrivals. `--profiles`, `--runtimes`, and `--codecs` take comma-separated
+The matrix is runtime x codec x profile: 14 browser rows and 14 [native rows](#native-rows), about 35
+minutes, plus 6 [replay rows](#traces) of recorded arrivals. `--profiles`, `--runtimes`, and `--codecs` take comma-separated
 lists; `--seed` replays a given impairment. The table prints either way, and only `--enforce` (which
 the nightly job passes) turns a breach into a failed run.
 
@@ -38,15 +39,24 @@ the nightly job passes) turns a breach into a failed run.
 | `wide` | 40 ms one way, 40 ms Gaussian sigma, in order | auto |
 | `bursty` | batches of seven datagrams, released within 160 ms | auto |
 | `step` | 5 ms one way, stepping to 60 ms at 30 s | auto |
+| `congestion` | 1 Mbit/s down behind a 1 s queue, collapsing to 16 kbit/s from 25 s to 26.5 s | auto |
 | `fixed-250` | through the shaper, untreated | a fixed 250 ms |
 
 `fixed-250` is the control: every other row adapts, so without it the whole matrix could pass while a
 fixed preset regressed, and a fixed preset is what many viewers land on. Loss, reorder, and rate
-limits stay off: the buffer's job is absorbing arrival spread, and congestion response would make a
-failure hard to attribute. The `mild` and `wide` profiles preserve datagram order and share one path across the page's sessions.
+limits stay off but for `congestion`: the buffer's job is absorbing arrival spread, and congestion
+response would make a failure hard to attribute. The `mild` and `wide` profiles preserve datagram order and share one path across the page's sessions.
 `bursty` and `step` use the shaper's named profiles on that same shared path. The step is timed from
 shaper startup, before the page connects; the driver gives up on a row with no audio 20 s in, so the
 measured window starts before the step, and `--duration` must exceed 30 s so playback spans it.
+
+`congestion` ([`congestion.toml`](../../rs/moq-shaper/profiles/congestion.toml), built into moq-shaper) is a queue that fills until it drops, as a
+congested link's does, rather than random loss. The tone needs about 140 kbit/s, so for a second and
+a half the queue holds its full second of wait and drops the rest, longer than any row's target.
+When the rate returns, the transport delivers the backlog, the queue's and every retransmit. The
+row grades the audio the player trimmed and reports how long audio took to return to the clock
+(`recover_ms`). Like the step, the change is timed from shaper startup, and `--duration` must
+exceed 30 s.
 
 The AAC arm keeps ffmpeg's default PES packing, whose multi-frame bursts are the flush-span shape
 the reporter measured on the public relay (#3477). The source is a sine tone rather than a film, so a
@@ -163,8 +173,7 @@ separated presses have an identifiable onset.
 
 `summary.json` matches inputs, outputs, writes, and arrivals by media timestamp, so a late arrival
 is still attributed to its utterance. The command checks pipeline completeness and reports latency,
-underruns, and stalls without gating them; the [audio grading](../../quest/m1/audio-jitter-target/grading.md)
-judges those. It refuses missing encoder inputs,
+underruns, and stalls without gating them, since zero underruns is not a goal. It refuses missing encoder inputs,
 a head that never reaches the listener or never decodes, submitted frames that never encode or reach the container, written frames that never reach
 the listener, reopened capture, a new encoder (a probe or a rebuilt codec) or subscription, a mute
 that disables or drops the rendition, and separated
@@ -192,8 +201,8 @@ alongside the audio quality rows.
 
 ## Traces
 
-The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, each graded as a
-`replay` row whose profile is the file's name:
+The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, and one derived from
+them, each graded as a `replay` row whose profile is the file's name:
 
 | Trace | Recorded from |
 | --- | --- |
@@ -202,6 +211,7 @@ The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, ea
 | `relay-mic` | `<moq-publish>` through the public relay: a real microphone with `--mic-broadcast` (the checked-in one is Chrome on a MacBook Air, its built-in microphone), otherwise headless Chromium's fake capture device |
 | `bursty-aac` | a nightly `bursty` AAC row's capture, from when the publisher sent each frame as its own group: each flush delivered newest first, which kept the player re-stalling until the estimator measured reordered frames |
 | `relay-mic-rtt40` | a page playing a real microphone (Chrome on a MacBook Air) through the public relay with 40 ms of added round trip: the steady-state re-stalls time stretch must remove |
+| `relay-mic-stall` | `relay-mic` with nothing arriving from 15 s to 16.5 s, then the held frames trickling in oldest first at twice real time until they meet live arrivals at 18 s: the stall a congested path causes, longer than the target, with its backlog arriving late |
 
 A trace is a [`Trace`](clients/js/src/schema.ts): the catalog's audio rendition, the smallest
 PROBE round trip the session saw, how long it observed, and every frame's `[at, timestamp, group, duration]`,
@@ -227,8 +237,7 @@ its budgets are exactly what it measured.
 The ring time-stretches live playback as the page's does, but the replay's audio is a constant, so
 every seam admits at the shortest pitch period, 2.5 ms. Accelerate therefore moves less per stretch
 than it would from speech; only fast accelerate, which takes every whole period that fits, moves its
-most. `skip_aheads` also reads a sustained accelerate as a skip; `player_skips` counts only the ring's
-own re-anchors.
+most.
 
 ```bash
 just test audio-quality-record                        # the three recorded lanes, 35 s each, needs the network
@@ -250,7 +259,8 @@ Recording is by hand: the public relay and a browser publisher are not something
 should depend on. Re-measure the replay budgets after re-recording. The recorder asks the relay for
 ten seconds of backlog so a late group is kept, which makes a trace's tune-in heavier than a
 player's; the warmup excludes it from the grade. `bursty-aac` is not recorded here: it is a nightly
-capture converted by the recipe [above](#diagnosing-live-rows).
+capture converted by the recipe [above](#diagnosing-live-rows), and `relay-mic-stall` is `relay-mic`
+with the rewrite its `source` names, so re-recording `relay-mic` redoes it.
 
 ## The metric contract
 
@@ -290,24 +300,15 @@ player's own count, which its stats panel shows, is read alongside:
   re-stalled to refill, plus each quantum it filled only part-way. The tap files the quanta after a
   run-dry as stalled time, so `underruns` leaves those out and this counts them. Unset natively.
 - `player_skips`: `audio.out.stats.skips`, each jump that dropped buffered audio rather than playing
-  it faster. `skip_aheads` below infers the same events from the playhead, and also reads a time
-  stretch that sustains 40 ms of acceleration as one, so this is the exact count. Natively, each
-  trim of the ring, and each run of consecutive frames `moq play` skipped at the stretch's fast
-  threshold or a full ring refused.
+  it faster. Speeding up is not a skip. Natively, each trim of the ring, and each run of
+  consecutive frames `moq play` skipped at the stretch's fast threshold or a full ring refused.
 - `underruns`: quanta the ring filled only partly, or not at all, while playing.
 - `short_quanta`: the underruns that were partly filled: the ring ran dry part-way through.
 - `underrun_episodes`: maximal runs of consecutive underruns, one audible gap each.
 - `underrun_ms`: the missing audio, summed, and the longest episode as `max`.
-- `skip_aheads`: re-anchors that discarded buffered audio, seen as a forward step of more than 40 ms
-  in the lag between the viewer clock and the playhead (judged on the median of four samples either
-  side, after removing the media clock's drift). A time stretch that accelerates onto a lower target
-  by more than 40 ms across those nine samples counts too, though it re-anchors nothing: `moq play`
-  accelerates about 8%, so shedding more than about 40 ms reads as one skip or more.
-- `discarded_ms`: the media those skip-aheads jumped over. Audio dropped before it reached the ring
-  moves no playhead, so it is not counted.
 - `trimmed_ms`: `audio.out.stats.trimmed`, the media those `player_skips` dropped unplayed,
   including the zeros filling a network gap; neither player counts its opening silence, declared
-  silence, or comfort noise. Unlike `discarded_ms`, it never counts an accelerate. Media the
+  silence, or comfort noise. It never counts an accelerate. Media the
   subscription skipped before decoding, a group past its age budget, is a gap in the timeline, not
   a trim, in either player.
 - `accelerated_ms`: `audio.out.stats.accelerated`, the media the time stretch removed by
@@ -319,8 +320,13 @@ player's own count, which its stats panel shows, is read alongside:
 - `av_lag_ms`: how far the audio playhead trails the shared clock video plays from (`sync.now()`),
   sampled while playing. Audio and video keep separate clocks that align once the delay covers the
   arrivals, so this is the latency audio adds beyond the target: positive is audio late, negative
-  early. Its replay ceilings hold audio from settling later to buy fewer underruns. Natively, the
-  presentation clock `moq play` paces video from (`sync::Consumer::position`).
+  early. Its `p50` is where audio rests, so latency spent to buy fewer underruns shows there; its
+  `p95` includes audio trailing through a stall. Natively, the presentation clock `moq play` paces
+  video from (`sync::Consumer::position`).
+- `recover_ms`: the longest audio spent off its resting point, from the ring stalling, or audio
+  trailing the shared clock by more than one 20 ms bucket past the window's `av_lag_ms` p50, to
+  audio back within it. Reported, not budgeted: it is how long a stall costs, which a player may
+  trade against the audio it keeps.
 - `converge_ms`: from first audio to the last time the target moved more than one 20 ms bucket from
   its final value.
 - `render_load`: Chromium's render capacity, the share of each quantum's budget the graph used.
@@ -368,6 +374,13 @@ replays run under `--enforce` in `just ci` on every diff that touches the player
 fails when it moves in either direction: a change that moves one updates `budgets.json` to what it
 now measures in the same PR, so run `just test audio-quality --replays --enforce` before pushing one.
 
+The grade follows the player's model: audio rests on the shared clock, trails it through a stall,
+and catches up after. So every row budgets the steady-state lag (`av_lag_ms` p50) and the audio the
+player dropped (`trimmed_ms`, `player_skips`), while lag through a stall (`av_lag_ms` p95) and
+underruns are ceilings with measured headroom, never zero. When a change moves a replay row, a
+steady-state lag that rises or audio the player trimmed is a regression to fix rather than budget;
+a p95 lag that rises through a stall, or an underrun count that moves, is re-measured in.
+
 ## Layout
 
 ```text
@@ -394,8 +407,8 @@ clients/js/
 ## Attribution
 
 The harness is the reporter's, from #3477: fperex built it on their fork `fperex/moq` (branches
-`debug/rt-audio` and `debug-findings-solution`), with the black-box probe, the analyzer's skip-ahead
-rule, the Playwright matrix over `moq-shaper`, the budget file graded under `--enforce`, and the
+`debug/rt-audio` and `debug-findings-solution`), with the black-box probe, the analyzer's per-minute
+normalisation, the Playwright matrix over `moq-shaper`, the budget file graded under `--enforce`, and the
 nightly job. The harness and opt-in shaper features preserve that author's credit. The player and estimator
 changes remain separate: the underrun count comes from a tap on the output, read alongside the player's own counter, and
 the profiles now include the fork's batch, step, and order-preserving jitter treatments.
