@@ -40,6 +40,16 @@ the cheapest one; fix it with the route-selection rework here.
   [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) resolves it.
   The local drain/datagram recipes and `just test media --media-cases replacement` remain
   available to validate the port.
+- Decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing): every
+  publisher stays an origin node, a tab included, so this port keeps the
+  origin side (its own Node ID, seqno, and answering ROUTE_REQUEST). A tab
+  that forwards is planned separately, on the Rust router:
+  [browser mesh](/quest/m5/browser-mesh.md).
+- The Announce Stream becomes one one-way stream per side with a set of
+  prefixes ([the route stream](/quest/m2/cluster-routing/routes/route-stream.md)).
+  Whichever of the two lands second adapts: JS then shares one stream across
+  its `announced()` calls, with the covering-prefix logic Rust's `Discovery`
+  has, instead of one stream per call.
 
 ## Related
 
