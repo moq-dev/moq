@@ -81,8 +81,7 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 				})
 				.unwrap();
 		}
-		publisher.finish().unwrap();
-		publishers.push(publisher);
+		publishers.push(publisher.finish().unwrap());
 	}
 	catalog.finish().unwrap();
 	broadcast.announce().unwrap();
@@ -136,7 +135,7 @@ fn cmaf_import(passthrough: bool) -> (moq_mux::catalog::Producer, moq_mux::conta
 fn import_cmaf(
 	import: (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
 	data: &Bytes,
-) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
+) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Finished) {
 	import_cmaf_chunks(import, data, data.len())
 }
 
@@ -144,12 +143,11 @@ fn import_cmaf_chunks(
 	(catalog, mut import): (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
 	data: &Bytes,
 	chunk: usize,
-) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
+) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Finished) {
 	for chunk in data.chunks(chunk) {
 		import.decode(chunk).unwrap();
 	}
-	import.finish().unwrap();
-	(catalog, import)
+	(catalog, import.finish().unwrap())
 }
 
 struct Annexb {
@@ -403,7 +401,7 @@ fn containers(c: &mut Criterion) {
 						for passthrough in [false, true] {
 							let (catalog, mut import) = cmaf_import(passthrough);
 							import.decode(&data).unwrap();
-							import.finish().unwrap();
+							let _finished = import.finish().unwrap();
 							assert_eq!(catalog.snapshot().video.renditions.len(), *tracks);
 						}
 						use mp4_atom::DecodeMaybe;
@@ -759,8 +757,7 @@ fn mkv_chunks(c: &mut Criterion) {
 					for bytes in std::hint::black_box(data).chunks(chunk) {
 						import.decode(bytes).unwrap();
 					}
-					import.finish().unwrap();
-					(catalog, import)
+					(catalog, import.finish().unwrap())
 				},
 				BatchSize::PerIteration,
 			);
@@ -832,8 +829,7 @@ fn mkv_payloads(c: &mut Criterion) {
 						for bytes in std::hint::black_box(&data).chunks(chunk) {
 							import.decode(bytes).unwrap();
 						}
-						import.finish().unwrap();
-						(catalog, import)
+						(catalog, import.finish().unwrap())
 					},
 					BatchSize::PerIteration,
 				);
