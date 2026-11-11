@@ -2345,10 +2345,11 @@ pub extern "C" fn moq_route_set_cost(route: u32, cost: u64) -> i32 {
 /// Swap the credential a route's announcing request carries, renewing that request in place.
 ///
 /// `credential` is a [crate::moq_session_credential] handle, or zero to announce under the
-/// session's scope. Only the session that minted it carries it; any other session announces
-/// the route under its own scope. The route keeps its own reference, so the handle can be
-/// freed after this call. Fails once its broadcast closed. Returns zero on success, or a
-/// negative code on failure.
+/// session's scope. Only the session it was minted on carries it, a dialed one across every
+/// reconnect; any other session announces the route under its own scope. The route keeps
+/// its own reference, so the handle can be freed after this call. Fails, keeping the
+/// route's credential as it was, once its broadcast closed or the origin's background task
+/// stopped. Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_route_set_auth(route: u32, credential: u32) -> i32 {
 	ffi::enter(move || {
@@ -2432,9 +2433,11 @@ pub extern "C" fn moq_claim_set_cost(claim: u32, cost: u64) -> i32 {
 /// Swap the credential a claim's announcing request carries, renewing that request in place.
 ///
 /// `credential` is a [crate::moq_session_credential] handle, or zero to announce under the
-/// session's scope. Only the session that minted it carries it; any other session announces
-/// the claim under its own scope. The claim keeps its own reference, so the handle can be
-/// freed after this call. Returns zero on success, or a negative code on failure.
+/// session's scope. Only the session it was minted on carries it, a dialed one across every
+/// reconnect; any other session announces the claim under its own scope. The claim keeps
+/// its own reference, so the handle can be freed after this call. Fails, keeping the
+/// claim's credential as it was, once the origin's background task stopped. Returns zero on
+/// success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_claim_set_auth(claim: u32, credential: u32) -> i32 {
 	ffi::enter(move || {

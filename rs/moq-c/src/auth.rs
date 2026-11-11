@@ -271,16 +271,16 @@ pub extern "C" fn moq_grant_free(grant: u32) -> i32 {
 /// [crate::moq_route_set_auth] and [crate::moq_claim_set_auth].
 ///
 /// The token is opaque bytes. On moq-transport it rides each naming route's announcing
-/// request as its `AUTHORIZATION TOKEN`; where the session negotiates AUTH it also earns a
-/// grant there. A dialed session presents it again on every reconnect, and with no session
-/// live it waits for the next one.
+/// request as its `AUTHORIZATION TOKEN`; on moq-lite it needs AUTH, where it earns a grant
+/// on the session. A dialed session presents it again on every reconnect, and with no
+/// session live it waits for the next one.
 ///
 /// `on_credential` fires exactly once: a positive credential handle once a peer accepts the
-/// token, at once on moq-transport, where only requests carry
-/// it there, or a negative code. A refusal carries the peer's code through
-/// [crate::moq_error_protocol]; `MOQ_ERROR_UNSUPPORTED` means neither the session nor its
-/// requests can carry a token; the session's end is its close reason. Release the handle
-/// with [moq_credential_free].
+/// token, at once on moq-transport, where only requests carry it, or a negative code. A
+/// refusal carries the peer's code through [crate::moq_error_protocol];
+/// `MOQ_ERROR_UNSUPPORTED` means neither the session nor its requests can carry a token,
+/// as on moq-lite without AUTH; closing the session ends a token still waiting, with its
+/// close reason. Release the handle with [moq_credential_free].
 ///
 /// Returns zero once the token is queued, or a negative code: `MOQ_ERROR_INVALID_CONFIG` for
 /// an empty token and `MOQ_ERROR_OFFLINE` for an accepted session still in SETUP, in which

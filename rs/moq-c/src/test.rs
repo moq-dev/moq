@@ -9361,3 +9361,38 @@ fn an_empty_credential_token_is_invalid() {
 	let code = unsafe { moq_session_credential(1, std::ptr::null(), 0, Some(channel_callback), cb.ptr) };
 	assert_eq!(code, MOQ_ERROR_INVALID_CONFIG);
 }
+
+/// A credential still waiting for a session is answered when that session closes.
+#[test]
+fn a_pending_credential_ends_with_its_session() {
+	let addr = std::net::TcpListener::bind("127.0.0.1:0")
+		.unwrap()
+		.local_addr()
+		.unwrap()
+		.to_string();
+	let url = format!("tcp://{addr}/");
+	let config = client_config();
+	let client = id(unsafe {
+		moq_session_connect(
+			url.as_ptr() as *const c_char,
+			url.len(),
+			&config,
+			0,
+			0,
+			Some(ignore_state),
+			std::ptr::null_mut(),
+		)
+	});
+	let cb = Callback::new();
+	let token = b"pending";
+	assert_eq!(
+		unsafe { moq_session_credential(client, token.as_ptr(), token.len(), Some(channel_callback), cb.ptr) },
+		0
+	);
+	assert_eq!(moq_session_close(client), 0);
+	let code = cb
+		.rx
+		.recv_timeout(TIMEOUT)
+		.expect("closing the session answers the credential");
+	assert!(code < 0, "expected a negative code, got {code}");
+}
