@@ -62,7 +62,7 @@ try {
 			if (index > 0) producer.discontinuity();
 			for (const { ms, key } of part) producer.encode(new Uint8Array([1]), Duration.micros(ms * 1000), key);
 		}
-		producer.close();
+		producer.finish();
 		if (kind === "video") renditions.video[kind] = { codec: "avc1.64001f", container: { kind: "legacy" } };
 		else
 			renditions.audio[kind] = {
