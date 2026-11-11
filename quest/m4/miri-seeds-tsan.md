@@ -29,7 +29,7 @@ moq-net). Milestone m4.
 - Both are random, not exhaustive: a pass is evidence, not a proof. Say so in
   the recipe's doc line.
 - Miri's GenMC mode would explore every schedule without shims, but does not
-  support `cargo miri test` today.
+  support `cargo miri test` today. It is not part of this quest.
   [Its own quest](/quest/m5/miri-genmc.md) waits on that.
 
 Public API: none. Wire: none.
