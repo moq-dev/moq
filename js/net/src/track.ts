@@ -1721,6 +1721,7 @@ export class Producer {
 	// source is written and keeps its own read cursor; frame bytes are shared by
 	// reference. Tracked on the entry so eviction can drop it from the sink.
 	#mirror(entry: CachedGroup, sink: TrackState): void {
+		if (entry.fetched && entry.group.closed.peek() instanceof Error) return;
 		const dst = entry.group.mirror();
 		hooks.arriveGroup(dst, entry.arrived);
 		if (entry.unverified) hooks.unverifyGroup(dst);
@@ -1750,6 +1751,25 @@ export class Producer {
 		const mirrors = [...entry.mirrors.values()].filter((mirror) => hooks.evictGroup(mirror, lost));
 		this.#unlink(entry);
 		for (const mirror of mirrors) mirror.close();
+	}
+
+	// Take a failed fill answer out of every sink that has not read it, as Rust serves no failed
+	// fetch-only slot; #mirror gives it to no new sink either. The entry stays cached, billed and
+	// reclaimable, as Rust keeps a spent slot until its scan reclaims it, so a reader already
+	// holding it keeps its frames and the fill's own failure while the pool still counts them.
+	#withhold(entry: CachedGroup): void {
+		for (const [sink, mirror] of entry.mirrors) {
+			const index = sink.groups.peek().indexOf(mirror);
+			if (index < 0) continue;
+			sink.groups.mutate((groups) => {
+				groups.splice(index, 1);
+			});
+			const at = timelineIndex(sink.timeline, mirror.sequence);
+			if (sink.timeline[at] === mirror) sink.timeline.splice(at, 1);
+			entry.mirrors.delete(sink);
+			entry.charge.sub(cache.MIRROR_OVERHEAD);
+			hooks.releaseGroupReader(mirror, undefined);
+		}
 	}
 
 	// Take a cached group's mirrors out of every sink, so a subscriber can no longer
@@ -1914,15 +1934,10 @@ export class Producer {
 			if (current && current.group !== group) return;
 			// A failed fill answer says nothing of the feed, so it gives nothing up: the track's drops
 			// and arrivals hold only the feed's verdicts, as Rust records nothing for a failed fill.
-			// No reader is handed it either, as Rust serves no failed fetch-only slot, so its sequence
-			// is unknown again: owed while the feed owes it, else judged by budget or filled again.
-			// A reader already holding it keeps its frames and the fill's own failure.
+			// No reader is handed it either (see #withhold), so its sequence is unknown again: owed
+			// while the feed owes it, else judged by budget or filled again.
 			if (fetched) {
-				if (!current) return;
-				const unread = [...entry.mirrors].filter(([sink, mirror]) => sink.groups.peek().includes(mirror));
-				this.#unlink(entry);
-				this.#uncache(entry);
-				for (const [, mirror] of unread) hooks.releaseGroupReader(mirror, undefined);
+				if (current) this.#withhold(entry);
 				return;
 			}
 			if (HOLES.has(toStreamCode(closed))) return;

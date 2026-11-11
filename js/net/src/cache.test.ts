@@ -614,6 +614,25 @@ test("a forgotten failed fill answer leaves its gap owed", async () => {
 	});
 });
 
+// A failed fill answer a reader still holds stays billed, and reclaimable by the pool, while the
+// reader keeps its frames: it leaves delivery, not the cache, as Rust keeps a spent fetch-only slot
+// until its scan reclaims it.
+test("a held failed fill answer stays billed", async () => {
+	const pool = new cache.Pool({});
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
+	const answer = hooks.receiveGroup(producer, { sequence: 1n, start: 0, fill: true });
+	answer.writeFrame({ payload: new Uint8Array(10_000) });
+	const group = await reader.recvGroup();
+	expect(group?.sequence).toBe(1n);
+	answer.abort(new Error("archive failed"));
+	await yieldNow();
+	expect(pool.used).toBeGreaterThanOrEqual(10_000);
+	expect((await group?.readFrame())?.payload.byteLength).toBe(10_000);
+	reader.close();
+});
+
 // A received copy that reached its end through a skip stays ended once the pool forgets the skip,
 // since the forgotten run stays accounted for. Mirrors Rust
 // `a_reached_end_outlives_its_expired_drops`.
