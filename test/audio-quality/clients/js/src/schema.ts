@@ -109,28 +109,14 @@ export const METRICS = {
 		clock: "render",
 		aggregations: ["total", "per_min"],
 		description:
-			"The player's own count of skips: each jump that dropped buffered audio rather than playing it faster. `skip_aheads` infers them from the playhead, which reads a sustained time stretch as one too.",
-	},
-	skip_aheads: {
-		unit: "count",
-		clock: "viewer",
-		aggregations: ["total", "per_min"],
-		description:
-			"Re-anchors that discarded buffered audio: a forward step in the lag between the viewer clock and the playhead.",
-	},
-	discarded_ms: {
-		unit: "ms",
-		clock: "media",
-		aggregations: ["total", "per_min"],
-		description:
-			"Media time the skip-aheads jumped over without playing. Audio dropped before it reached the ring moves no playhead and is not counted.",
+			"The player's own count of skips: each jump that dropped buffered audio rather than playing it faster.",
 	},
 	trimmed_ms: {
 		unit: "ms",
 		clock: "media",
 		aggregations: ["total", "per_min"],
 		description:
-			"The player's own count of media its skips dropped unplayed. Unlike `discarded_ms`, a time stretch's accelerate is not in it.",
+			"The player's own count of media its skips dropped unplayed: the audio a listener lost. A time stretch's accelerate is not in it.",
 	},
 	accelerated_ms: {
 		unit: "ms",
@@ -157,7 +143,14 @@ export const METRICS = {
 		clock: "media",
 		aggregations: ["p50", "p95"],
 		description:
-			"How far the audio playhead trails the shared clock video plays from (`sync.now()`), sampled while playing: latency audio adds beyond the resolved target. Negative is audio ahead. Unset natively.",
+			"How far the audio playhead trails the shared clock video plays from (`sync.now()`), sampled while playing: latency audio adds beyond the resolved target. Negative is audio ahead.",
+	},
+	recover_ms: {
+		unit: "ms",
+		clock: "viewer",
+		aggregations: ["max"],
+		description:
+			"The longest audio spent off its resting point: from the ring stalling, or audio trailing the shared clock by more than one bucket past the window's median lag, to audio back within it.",
 	},
 	target_ms: {
 		unit: "ms",
@@ -410,7 +403,7 @@ export type Sample = {
 	 * is only a sink with nothing written yet, or none at all.
 	 */
 	stalled?: boolean;
-	/** `sync.now()`: where the shared clock puts video, on the `media` clock. Unset natively. */
+	/** `sync.now()`: where the shared clock puts video, on the `media` clock. Natively, `sync::Consumer::position`. */
 	clock?: Ms;
 	/** `sync.out.delay`: the resolved playout target. Natively, the target the speaker is held on. */
 	delay?: Ms;

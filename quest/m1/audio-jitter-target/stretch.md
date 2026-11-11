@@ -123,10 +123,6 @@ decision now runs a filter.
 
 Public API: none expected. Wire: none.
 
-## Required
-
-- [The audio harness grades the stretch model](/quest/m1/audio-jitter-target/grading.md) - the gates that pushed toward zero underruns and zero lag are gone before this is measured against them
-
 ## Closes
 
 - [#8031](https://github.com/moq-dev/moq/issues/8031) - buffered playback loses lip sync and cuts audio out on a live stream

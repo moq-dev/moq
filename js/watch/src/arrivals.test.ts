@@ -5,7 +5,7 @@ import { Producer } from "./arrivals";
 const frame = (arrival: number) => ({
 	kind: "frame" as const,
 	timestamp: Duration.millis(arrival),
-	arrival: Instant.ZERO.add(Duration.millis(arrival)),
+	arrival: Instant.ZERO.saturatingAdd(Duration.millis(arrival)),
 	late: false,
 });
 
