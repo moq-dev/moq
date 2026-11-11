@@ -20,8 +20,9 @@ from pathlib import Path
 TICKED = re.compile(r"`([^`]+)`")
 PAREN = re.compile(r"\([^()]*\)")
 ITEM = r"\b(?:fn|struct|enum|trait|type|mod|const|static|union)\s+{}\b"
-# Where a type's members live: its definition, and each `impl` of it or a trait for it.
-OWNER = r"\b(?:(?:struct|enum|union|trait)\s+{0}\b|impl\b[^;{{]*?\b{0}\b)[^;{{]*\{{"
+# Where a type's members live: its definition, and each `impl` whose header `implements` names it.
+DEFINITION = r"\b(?:struct|enum|union|trait)\s+{}\b[^;{{]*\{{"
+IMPL = re.compile(r"\bimpl\b([^;{]*)\{")
 # A field or variant: `name: T`, `Name,`, `Name(..)`, `Name {{`, or `Name` alone.
 MEMBER = r"^\s*(?:pub(?:\([^)]*\))?\s+)?{}\s*(?::|,|\(|\{{|$)"
 
@@ -46,10 +47,24 @@ def defines(source: str, name: str) -> bool:
     return bool(re.search(ITEM.format(escaped), source) or re.search(MEMBER.format(escaped), source, re.MULTILINE))
 
 
+def implements(header: str) -> str:
+    """The last segment of the type an `impl` header implements, ignoring generics, bounds, and `where`."""
+    flat, depth = "", 0
+    for char in header:
+        depth += {"<": 1, ">": -1}.get(char, 0)
+        if depth == 0 and char != ">":
+            flat += char
+    flat = re.split(r"\bwhere\b", flat)[0]
+    flat = re.split(r"\bfor\b", flat)[-1]
+    path = re.findall(r"[A-Za-z_][\w:]*", flat)
+    return path[0].split("::")[-1] if path else ""
+
+
 def bodies(source: str, owner: str) -> str:
     """Join the brace-matched bodies of `owner`'s definition and `impl` blocks."""
     spans = []
-    for match in re.finditer(OWNER.format(re.escape(owner)), source):
+    impls = (m for m in IMPL.finditer(source) if implements(m.group(1)) == owner)
+    for match in sorted([*re.finditer(DEFINITION.format(re.escape(owner)), source), *impls], key=lambda m: m.start()):
         depth, start = 0, match.end() - 1
         for end in range(start, len(source)):
             depth += {"{": 1, "}": -1}.get(source[end], 0)

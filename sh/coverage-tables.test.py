@@ -19,10 +19,11 @@ pub struct Reader {
 impl Reader {
     pub fn sync(&mut self) {}
 }
-pub struct Mirror;
-impl Mirror {
+pub struct Mirror<T>(T);
+impl<T: AsRef<Reader>> Mirror<T> where T: Into<Reader> {
     fn sync(&self) {}
 }
+impl<T> std::fmt::Debug for Mirror<Vec<Reader>> {}
 """
 SKILL = """\
 # Verify
