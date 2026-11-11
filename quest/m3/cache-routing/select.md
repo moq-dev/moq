@@ -13,9 +13,10 @@ and how many moves warm routes caused.
 ## Plan
 
 - Implement the rules the epic's Plan records as proven, which
-  `rs/moq-net/src/route/tests/cache.rs` models over the real router: the
-  Warm Routes SETUP extension (warm routes on the announce stream, and the
-  relay each pull serves on SUBSCRIBE), warm state per neighbor derived from
+  `rs/moq-net/src/route/tests/cache.rs` models over the real router: lite-07's
+  warm routes (WARM_START, WARM_UPDATE, and WARM_END on the announce stream,
+  and the `Serves` each SUBSCRIBE and SUBSCRIBE_UPDATE carries, whose codec
+  `rs/moq-net/src/lite/` already reads and ignores), warm state per neighbor derived from
   each front's demand, and eligibility through `Router::eligible` with the
   rendezvous hash ordering tied routes. Port that file's fixtures and sweep
   to the implementation, or drive it from them.
@@ -32,8 +33,10 @@ and how many moves warm routes caused.
   only to a copy of its own instance.
 - Bound the warm state a peer can make a relay hold by design, as
   announcements are bounded.
-- Only relay sessions that negotiated warm routes exchange them. A browser
-  never parents and never negotiates them, so `js/net` needs nothing.
+- Each pull states whom it serves, where Rust says unknown today: alone for
+  a local reader or a client session, which forwards nothing. `js/net`
+  already says alone and skips the warm types as unknown, so it needs
+  nothing.
 - Export upstream copies held, warm routes sent and received, and moves by
   cause through the relay's existing metrics.
 - `rs/moq-net/AGENTS.md` says a relay behaves the same warm or cold. That
@@ -41,9 +44,10 @@ and how many moves warm routes caused.
   request goes to. If the rule's wording contradicts warm routes, bring a
   rewording to the maintainer.
 
-Public API: report any relay configuration added for warm routes. Wire: the
-Warm Routes extension as the epic's Plan designs it, with its draft section in
-the same PR.
+Public API: report any relay configuration added for warm routes. Wire:
+lite-07 already carries warm routes as the epic's item 11 records; a change
+settling the long sweep needs updates the draft's Warm Routes section in the
+same PR, in lite-07 while it is unpublished and in the next version after.
 
 ## Related
 

@@ -252,6 +252,9 @@ impl Routed {
 			}
 			// Lite-07 ends a claim by its Announce ID only.
 			Msg::Ended { .. } => return Err(Error::ProtocolViolation),
+			// Only a relay choosing a parent per broadcast uses warm routes, which this
+			// endpoint does not do.
+			Msg::WarmStart { .. } | Msg::WarmUpdate { .. } | Msg::WarmEnd { .. } => {}
 			Msg::Skipped | Msg::Synced => {}
 		}
 		Ok(())
