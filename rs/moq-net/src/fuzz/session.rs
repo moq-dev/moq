@@ -637,7 +637,10 @@ impl Relay {
 				let mut routes = origin.routes();
 				while let Some(event) = routes.next().await {
 					let path = event.announce.prefix;
-					if event.kind != origin::RouteKind::Start || !path.as_str().starts_with(PEER) {
+					// A restart is a new instance at the path, which the reader before it never
+					// follows onto.
+					let started = matches!(event.kind, origin::RouteKind::Start | origin::RouteKind::Restart);
+					if !started || !path.as_str().starts_with(PEER) {
 						continue;
 					}
 					let read = Rc::default();
@@ -1038,5 +1041,18 @@ impl poll::RecvStream for Recorded<memory::RecvStream> {
 
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
 		self.inner.poll_reset(waiter)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A run is decided by its input alone, so a transcript recorded twice is the same bytes,
+	/// and a failing input replays exactly.
+	#[test]
+	fn recording_replays() {
+		let record = || seeds().into_iter().map(|seed| seed.data).collect::<Vec<_>>();
+		assert_eq!(record(), record());
 	}
 }
