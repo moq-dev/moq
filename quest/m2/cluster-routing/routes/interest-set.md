@@ -71,10 +71,13 @@ Work:
   ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)), and move the echo from its own queue onto the neighbour's FIFO, as
   that PR's first commit (`81c0698295`) did: with one stream per side nothing
   overtakes anything.
-- Give the model at least two prefixes and edits in flight: add, remove,
-  widen, narrow, and an edit that crosses a claim change, a route change, a
-  ROUTE_END, and its echo. The model fixes interest at the root today, so
-  this is new state; keep it tractable by bounding edits as it bounds flaps.
+- The model has two prefixes and a scoped relay since
+  [it has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md).
+  Give it edits in flight: add, remove, widen, narrow, and an edit that
+  crosses a claim change, a route change, a ROUTE_END, and its echo. Keep it
+  tractable by bounding edits as it bounds flaps. Where Settled item 1 says
+  the merge rule is unchanged, read it as that quest's rule: a floor names
+  its route's prefix, and the newest floor wins among one publisher's routes.
 - In the router, `Peer::asked` and `Peer::watch` become sets with a floor and
   a synced flag per prefix, `batch` takes the prefix its floor names, and a
   neighbour is one key for both directions, as `Sim` already has it. The
@@ -97,3 +100,12 @@ one key, which `Sim` and the tests use, so this changes no behaviour on its
 own.
 
 Public API: none (the router is crate-private). Wire: none.
+
+## Required
+
+- [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - the two prefixes and the rule for whose claims a relay believes, which an edit must preserve
+
+## Related
+
+- [The router keeps a route per scope](/quest/m2/cluster-routing/routes/scope.md) - rewrites how the router keeps a floor per prefix; whichever lands second adapts
+- [Widening an interest ends no live claim](/quest/m2/cluster-routing/routes/widen-false-end.md) - a false END on an interest change today, which the edit in place may remove

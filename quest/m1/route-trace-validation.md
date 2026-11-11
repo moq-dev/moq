@@ -40,3 +40,7 @@ Related: [the mesh route model](/quest/m1/route-mesh-model.md), which grows
 the spec these traces are checked against.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - replaces who a relay believes and adds two prefixes and a scoped relay, so traces are validated against the rule that stays
