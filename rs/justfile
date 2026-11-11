@@ -305,8 +305,6 @@ coroutines:
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-mux --no-deps --no-default-features
     run bash sh/rs/coroutines.sh moq-hls -- --no-default-features
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-hls --no-deps --no-default-features
-    run bash sh/rs/coroutines.sh moq-room -- --no-default-features
-    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-room --no-deps --no-default-features
     run bash sh/rs/coroutines.sh moq-stats -- --no-default-features
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-stats --no-deps --no-default-features
     run bash sh/rs/coroutines.sh moq-crypto -- --no-default-features --features sign,e2ee,provider,serde
@@ -498,12 +496,6 @@ fuzz target *args:
 # Report native workspace or one crate's coverage under target/coverage/<crate>.
 coverage crate="workspace":
     bash sh/rs/coverage.sh '{{ crate }}'
-
-# Fail on mutants of .cargo/mutants.toml's scope that no test catches, under
-# target/mutants. Arguments pass to cargo-mutants: `just rs mutants --shard 0/8`.
-[positional-arguments]
-mutants *args:
-    bash sh/rs/mutants.sh "$@"
 
 # Build the default workspace members.
 build:

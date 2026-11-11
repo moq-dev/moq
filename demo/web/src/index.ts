@@ -306,6 +306,7 @@ ui.run((effect) => {
 	else if (stream === "unsupported") setPill("bcast-status", "bcast-text", "Update player", "bad");
 	else if (stream === "error") setPill("bcast-status", "bcast-text", "Refused", "bad");
 	else if (watch && stream === "loading") setPill("bcast-status", "bcast-text", "Loading", "wait");
+	else if (watch && stream === "connecting") setPill("bcast-status", "bcast-text", "Connecting", "wait");
 	else setPill("bcast-status", "bcast-text", "Offline", "bad");
 });
 

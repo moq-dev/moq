@@ -98,7 +98,8 @@ impl Hop {
 #[non_exhaustive]
 pub struct Config {
 	/// The origin's identity on every wire: the hop id appended to broadcast hop chains
-	/// for loop detection, and the route identity it declares on moq-lite-07. Random by
+	/// for loop detection, and the route identity it declares on moq-lite-07, which also
+	/// names it in the hops of each route it forwards there. Random by
 	/// default, so each process is a fresh identity; one reused across a restart has its
 	/// lite-07 routes refused until a seqno request lifts them past the old process's.
 	pub hop: NonZeroU64,
@@ -114,7 +115,8 @@ pub struct Config {
 	/// moq-transport. A forwarded path counts this origin's own hop too, including
 	/// when the receiving peer reconstructs that hop from the announce handshake.
 	/// Protocols without a hop path cannot reveal or bound the depth they hide. No wire
-	/// carries a path longer than 32, so a larger value acts as 32.
+	/// carries a path longer than 32, so a larger value acts as 32, and a moq-lite-07
+	/// route's own hops stop there whatever this is.
 	pub max_hops: NonZeroUsize,
 
 	/// The cache pool broadcasts under this origin charge their groups into. It flows
@@ -512,6 +514,10 @@ pub struct RouteInfo {
 
 	/// Whether a usable path reaches the route's origin; see [`Self::available`].
 	pub(crate) available: bool,
+
+	/// The round trip to the route's origin node; see [`Self::rtt`]. Never forwarded:
+	/// each node measures its own link.
+	pub(crate) rtt: Option<Duration>,
 }
 
 impl RouteInfo {
@@ -529,6 +535,7 @@ impl RouteInfo {
 			node: None,
 			draining: false,
 			available: true,
+			rtt: None,
 		}
 	}
 }
@@ -564,6 +571,17 @@ impl RouteInfo {
 	/// and finally the most recently announced route. See [`Cost`].
 	pub fn cost(&self) -> Cost {
 		self.cost
+	}
+
+	/// The round trip to the route's origin node over moq-lite-07, informational: it
+	/// never ranks or selects a route.
+	///
+	/// Each link on the path adds its min RTT, the lowest smoothed RTT it measured over
+	/// the last 30 seconds, this session's own link included. `None` on any other wire,
+	/// on a route this origin serves itself, and while any link on the path has no
+	/// measurement.
+	pub fn rtt(&self) -> Option<Duration> {
+		self.rtt
 	}
 
 	/// Whether a usable path reaches the route's origin. An unavailable route is held:
@@ -632,6 +650,13 @@ impl RouteInfo {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_available(mut self, available: bool) -> Self {
 		self.available = available;
+		self
+	}
+
+	/// Set the round trip to the route's origin node; see [`Self::rtt`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn with_rtt(mut self, rtt: Option<Duration>) -> Self {
+		self.rtt = rtt;
 		self
 	}
 
@@ -847,8 +872,8 @@ type RouteOrder = (
 	Reverse<u64>,
 );
 
-/// The `(hops, cost, source, instance, epoch, auth, node, available)` metadata an announce
-/// cursor delivers alongside a prefix.
+/// The `(hops, cost, source, instance, epoch, auth, node, available, rtt)` metadata
+/// an announce cursor delivers alongside a prefix.
 type RouteMeta = (
 	Hops,
 	Cost,
@@ -858,6 +883,7 @@ type RouteMeta = (
 	Option<crate::auth::Credential>,
 	Option<u64>,
 	bool,
+	Option<Duration>,
 );
 
 /// The earlier of two optional deadlines.
@@ -1256,6 +1282,7 @@ impl OriginConsumerState {
 				node: meta.6,
 				draining: false,
 				available: meta.7,
+				rtt: meta.8,
 			},
 		};
 		(RouteEvent { kind, announce }, owed)
@@ -1298,6 +1325,8 @@ struct RouteEntry {
 	draining: bool,
 	/// Whether a usable path reaches the route's origin; see [`RouteInfo::available`].
 	available: bool,
+	/// The round trip to the route's origin node; see [`RouteInfo::rtt`].
+	rtt: Option<Duration>,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a [`Claim`]). `None` for an advertise-only
 	/// announcement ([`Producer::announce`]) and for a local broadcast.
@@ -1366,12 +1395,13 @@ impl RouteEntry {
 			self.auth.clone(),
 			self.node,
 			self.available,
+			self.rtt,
 		)
 	}
 
 	/// Whether [`Self::meta`] would equal `meta`, without building it.
 	fn delivers(&self, meta: &RouteMeta) -> bool {
-		let (hops, cost, source, instance, epoch, auth, node, available) = meta;
+		let (hops, cost, source, instance, epoch, auth, node, available, rtt) = meta;
 		*hops == self.hops
 			&& *cost == self.cost
 			&& *source == self.entered()
@@ -1380,6 +1410,7 @@ impl RouteEntry {
 			&& *auth == self.auth
 			&& *node == self.node
 			&& *available == self.available
+			&& *rtt == self.rtt
 	}
 
 	/// Whether a request for `path` can be served through this entry. A served
@@ -2973,6 +3004,7 @@ impl Announcing {
 				node: route.node,
 				draining: route.draining,
 				available: route.available,
+				rtt: route.rtt,
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
@@ -3589,6 +3621,7 @@ impl AnnounceProducer {
 			entry.node = route.node;
 			entry.draining = route.draining;
 			entry.available = route.available;
+			entry.rtt = route.rtt;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim, Gone::End);
@@ -3650,6 +3683,7 @@ impl AnnounceProducer {
 			node: entry.node,
 			draining: entry.draining,
 			available: entry.available,
+			rtt: entry.rtt,
 		})
 	}
 
@@ -9897,7 +9931,7 @@ mod tests {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_auth_swap_is_an_update() {
-		let handle = crate::auth::Link::ietf(false);
+		let handle = crate::auth::Link::ietf();
 		let first = handle.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 		let second = handle.present(bytes::Bytes::from_static(b"second"), false).unwrap();
 		let producer = origin(1).produce();

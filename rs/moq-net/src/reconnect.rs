@@ -8,6 +8,14 @@
 //! predecessor serving through its handover, and drops neither on the caller's behalf
 //! until it reports [`Action::Done`].
 //!
+//! The first walk of the peer's addresses fails fast: if no address establishes a
+//! session, the policy ends with [`Action::Done`] carrying that walk's error rather than
+//! retrying, so a setup mistake surfaces at once instead of looping. The one exception is
+//! a refused credential the tokens have replaced since, which earns another dial. A client started
+//! before its peer is reachable therefore exits, for its supervisor or app to restart.
+//! Once a session has been established, a later failure backs off and retries under
+//! [`Backoff`], so restarts and redeploys still recover.
+//!
 //! A caller whose session landed on a fallback transport says so with
 //! [`Reconnect::fallback`]. The machine then asks for [`Action::Probe`]s of the preferred
 //! transport on a slow backoff and, once one gets through, moves to it through the same
@@ -45,7 +53,10 @@ const PROBE_INITIAL: Duration = Duration::from_secs(10);
 /// The longest wait between probes of the preferred transport, before jitter.
 const PROBE_MAX: Duration = Duration::from_secs(300);
 
-/// When to redial after a failure, and when to give up.
+/// When to redial after a failure, and when to give up, once a session has been established.
+///
+/// Before then nothing retries: the first walk ending without a session ends the policy,
+/// unless the peer refused credentials the tokens have replaced since.
 ///
 /// `initial` and `multiplier` set the wait before each retry, `max` caps it, and
 /// `healthy` decides which sessions count as failed attempts. The delays carry jitter,
@@ -78,7 +89,7 @@ pub struct Backoff {
 	pub healthy: Duration,
 	/// How long to keep retrying before giving up. `None` (the default) retries forever, so
 	/// an outage of any length recovers on its own; a caller that can react to a persistent
-	/// failure sets one. Zero still makes the first walk, and gives up when it fails.
+	/// failure sets one. Zero gives up at the first failure.
 	///
 	/// No new walk of the peer's addresses starts once it has passed, but one under way
 	/// finishes: each address but the last gets up to 5 s, and the last runs to
@@ -367,6 +378,8 @@ pub struct Reconnect<A, E> {
 	phase: Phase,
 	/// The failures of the walk under way.
 	walk: Walk<E>,
+	/// Whether any walk established a session. Until one has, a failed walk ends the policy.
+	established: bool,
 	/// An old session kept serving after a GOAWAY so its in-flight groups finish.
 	predecessor: Option<Predecessor>,
 	queue: VecDeque<Action<A, E>>,
@@ -500,6 +513,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			redirects: Redirects::default(),
 			phase: Phase::Start,
 			walk: Walk::default(),
+			established: false,
 			predecessor: None,
 			queue: VecDeque::new(),
 		})
@@ -644,6 +658,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		// Its `Retired` stays, so the caller still drops the predecessor.
 		self.queue.retain(|action| !matches!(action, Action::Offline(_)));
 		self.walk = Walk::default();
+		self.established = true;
 		self.phase = Phase::Live(Box::new(Live {
 			goaway: Some(session.draining()),
 			session,
@@ -867,12 +882,18 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 
 	fn walk_failed(&mut self, now: Instant, err: E, verdict: Verdict, presented: Option<&auth::Dial>) {
 		self.walk = Walk::default();
+		// Credentials replaced since the dial read them are the caller's fix, so they earn
+		// another dial even before a first session.
+		let renewed = verdict == Verdict::Refused && self.changed(presented);
 		let terminal = match verdict {
 			Verdict::Fatal | Verdict::Unusable => true,
-			Verdict::Refused => !self.changed(presented),
+			Verdict::Refused => !renewed,
 			Verdict::Retry | Verdict::Settled => false,
 		};
-		if terminal || self.config.once {
+		// Otherwise the first walk fails fast: a peer that never answered with a session is
+		// more likely misconfigured (an unknown host, an untrusted certificate, no version in
+		// common) than restarting, and only the caller can fix that.
+		if terminal || self.config.once || !(self.established || renewed) {
 			return self.done(Err(err));
 		}
 		self.queue.push_back(Action::Retrying(err.clone()));

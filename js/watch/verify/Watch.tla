@@ -2,75 +2,88 @@
 \* A viewer watching one broadcast in <moq-watch>, as the viewer sees it.
 \*
 \* `net` is the relay connection (js/net/src/connection/reload.ts): dialing, serving, waiting
-\* out a backoff, or stopped after the relay refused the token. `active` is the broadcast handle
-\* Broadcast.#runBroadcast follows, which the session's announcement sets and its retraction or the
-\* publisher's end clears. `status` is Broadcast.out.status from #runCatalog. `media` is whether
-\* frames are painting. What the screen shows is derived exactly as js/watch/src/ui/components
-\* derive it: the OFFLINE notice, the buffering spinner, the unsupported notice, and the status
-\* badge, which hides while the broadcast reads offline.
+\* out a backoff, or stopped after the relay refused the token. `heard` is whether the serving
+\* session has delivered its initial announcements; the connection holds the origin's listings
+\* unsynced until then. `active` is the broadcast handle Broadcast.#runBroadcast follows, which
+\* the session's announcement sets and its retraction or the publisher's end clears. `status` is
+\* Broadcast.out.status: "connecting" without a handle until a session could have announced the
+\* broadcast (#runStatus), and #runCatalog's progress otherwise. `media` is whether frames are
+\* painting. What the screen shows is derived exactly as js/watch/src/ui/components derive it.
+\* An announcement reaches a synced viewer in the step that makes it; its transit is left out.
 EXTENDS Naturals
 
-VARIABLES net, live, active, status, media, paused
+VARIABLES net, heard, live, active, status, media, paused
 
-vars == <<net, live, active, status, media, paused>>
+vars == <<net, heard, live, active, status, media, paused>>
 
 Init ==
     /\ net = "connecting"
+    /\ heard = FALSE
     /\ live \in BOOLEAN
     /\ active = FALSE
-    /\ status = "offline"
+    /\ status = "connecting"
     /\ media = "none"
     /\ paused = FALSE
 
+Synced == net = "connected" /\ heard
+
 \* The relay connection.
-Connect == net = "connecting" /\ net' = "connected" /\ UNCHANGED <<live, active, status, media, paused>>
-DialFails == net = "connecting" /\ net' = "retrying" /\ UNCHANGED <<live, active, status, media, paused>>
-Redial == net = "retrying" /\ net' = "connecting" /\ UNCHANGED <<live, active, status, media, paused>>
-\* An UNAUTHORIZED, MALFORMED_AUTH_TOKEN, or EXPIRED close stops the loop (Reload.#retry).
-Refused == net = "connecting" /\ net' = "refused" /\ UNCHANGED <<live, active, status, media, paused>>
-\* The entries a session fed retract when it dies, so the handle clears and #runCatalog's
-\* cleanup sets "offline".
+Connect == net = "connecting" /\ net' = "connected" /\ UNCHANGED <<heard, live, active, status, media, paused>>
+DialFails == net = "connecting" /\ net' = "retrying" /\ UNCHANGED <<heard, live, active, status, media, paused>>
+Redial == net = "retrying" /\ net' = "connecting" /\ UNCHANGED <<heard, live, active, status, media, paused>>
+\* An UNAUTHORIZED, MALFORMED_AUTH_TOKEN, or EXPIRED close stops the loop (Reload.#retry) and
+\* sets Reload.error.
+Refused == net = "connecting" /\ net' = "refused" /\ UNCHANGED <<heard, live, active, status, media, paused>>
+\* The session's initial announcements arrive: the broadcast is announced, or now known absent.
+Initial ==
+    /\ net = "connected" /\ ~heard
+    /\ heard' = TRUE
+    /\ active' = live
+    /\ status' = IF live THEN "loading" ELSE "offline"
+    /\ UNCHANGED <<net, live, media, paused>>
+\* The entries a session fed retract when it dies, and the connection takes the origin's sync
+\* back, so the handle clears and the status reads "connecting".
 Drop ==
     /\ net = "connected"
     /\ net' = "retrying"
+    /\ heard' = FALSE
     /\ active' = FALSE
-    /\ status' = "offline"
+    /\ status' = "connecting"
     /\ media' = "none"
     /\ UNCHANGED <<live, paused>>
 
-\* The publisher.
-Start == ~live /\ live' = TRUE /\ UNCHANGED <<net, active, status, media, paused>>
+\* The publisher, whose announcement or retraction reaches a synced viewer.
+Start ==
+    /\ ~live
+    /\ live' = TRUE
+    /\ active' = Synced
+    /\ status' = IF Synced THEN "loading" ELSE status
+    /\ UNCHANGED <<net, heard, media, paused>>
 Stop ==
     /\ live
     /\ live' = FALSE
     /\ active' = FALSE
-    /\ status' = "offline"
+    /\ status' = IF Synced THEN "offline" ELSE status
     /\ media' = "none"
-    /\ UNCHANGED <<net, paused>>
+    /\ UNCHANGED <<net, heard, paused>>
 
-\* The broadcast's announcement reaches the viewer's origin, and #runCatalog subscribes.
-Announced ==
-    /\ net = "connected" /\ live /\ ~active
-    /\ active' = TRUE
-    /\ status' = "loading"
-    /\ UNCHANGED <<net, live, media, paused>>
-CatalogArrives == active /\ status = "loading" /\ status' = "live" /\ UNCHANGED <<net, live, active, media, paused>>
+CatalogArrives == active /\ status = "loading" /\ status' = "live" /\ UNCHANGED <<net, heard, live, active, media, paused>>
 \* Catalog.UnsupportedVersion.
-CatalogTooNew == active /\ status = "loading" /\ status' = "unsupported" /\ UNCHANGED <<net, live, active, media, paused>>
+CatalogTooNew == active /\ status = "loading" /\ status' = "unsupported" /\ UNCHANGED <<net, heard, live, active, media, paused>>
 
 \* Media.
 Frames ==
     /\ status = "live" /\ ~paused /\ media # "playing"
     /\ media' = "playing"
-    /\ UNCHANGED <<net, live, active, status, paused>>
-Stall == media = "playing" /\ media' = "stalled" /\ UNCHANGED <<net, live, active, status, paused>>
-Pause == ~paused /\ paused' = TRUE /\ media' = "none" /\ UNCHANGED <<net, live, active, status>>
-Play == paused /\ paused' = FALSE /\ UNCHANGED <<net, live, active, status, media>>
+    /\ UNCHANGED <<net, heard, live, active, status, paused>>
+Stall == media = "playing" /\ media' = "stalled" /\ UNCHANGED <<net, heard, live, active, status, paused>>
+Pause == ~paused /\ paused' = TRUE /\ media' = "none" /\ UNCHANGED <<net, heard, live, active, status>>
+Play == paused /\ paused' = FALSE /\ UNCHANGED <<net, heard, live, active, status, media>>
 
 Next ==
-    \/ Connect \/ DialFails \/ Redial \/ Refused \/ Drop
+    \/ Connect \/ DialFails \/ Redial \/ Refused \/ Initial \/ Drop
     \/ Start \/ Stop
-    \/ Announced \/ CatalogArrives \/ CatalogTooNew
+    \/ CatalogArrives \/ CatalogTooNew
     \/ Frames \/ Stall \/ Pause \/ Play
 
 Spec == Init /\ [][Next]_vars
@@ -83,10 +96,12 @@ Spinner == (status = "loading" \/ (status = "live" /\ media # "playing")) /\ Onl
 OfflineShown == status = "offline"
 \* unsupported-indicator.ts.
 UpdateShown == status = "unsupported"
-\* live-badge.ts hides while the broadcast reads offline or unsupported; only then can it say
-\* CONNECTING or DISCONNECTED.
+\* refused-indicator.ts shows Reload.error, set once the loop gives up.
+RefusedShown == net = "refused"
+\* live-badge.ts hides while the broadcast reads offline or unsupported, and says CONNECTING or
+\* DISCONNECTED while the connection is down or its announcements have not arrived.
 BadgeShown == status \notin {"offline", "unsupported"}
-ConnectionShown == BadgeShown /\ net # "connected"
+ConnectionShown == BadgeShown /\ (net # "connected" \/ status = "connecting")
 
 \* Rules.
 
@@ -98,6 +113,6 @@ NeverFrozenSilently ==
 OfflineMeansOffline == OfflineShown => ~live
 
 \* A viewer the relay refused is told so, rather than shown OFFLINE.
-RefusalIsExplained == net = "refused" => ~OfflineShown
+RefusalIsExplained == net = "refused" => (RefusedShown /\ ~OfflineShown)
 
 ====
