@@ -101,6 +101,7 @@ case "$1" in
         nextest just rs test -p moq-tokio --release -E 'test(benchmark_receive_windows)' --run-ignored only --success-output immediate
         nextest just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ignored only --success-output immediate
         nextest just rs test -p moq-tokio --release -E 'test(benchmark_datagram_delivery)' --run-ignored only --success-output immediate
+        nextest just rs test -p moq-net --release --features async --test integration -E 'test(=mesh_sweep::benchmark_route_mesh)' --run-ignored only --success-output immediate
         # One build for the crates whose benchmarks need no features of their own.
         nextest just rs test --release --no-fail-fast -p moq-relay -p moq-c -p moq-mux -p moq-cli \
             -E 'test(benchmark_stun_sources) | test(benchmark_handles) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_stream_import)' \

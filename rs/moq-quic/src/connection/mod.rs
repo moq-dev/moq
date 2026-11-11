@@ -1306,6 +1306,13 @@ impl Connection {
 				first_decode,
 				remaining,
 			}) => {
+				// A datagram read after the idle deadline, as one buffered while this process was
+				// stopped, finds the connection already timed out: handling it first would restart
+				// the idle timer, and its ACKs would fold the stop into the RTT and so into 3 * PTO.
+				if self.timers.is_expired(Timer::Idle, now) {
+					self.handle_timeout(now);
+					return;
+				}
 				// If this packet could initiate a migration and we're a client or a server that
 				// forbids migration, drop the datagram. This could be relaxed to heuristically
 				// permit NAT-rebinding-like migration.

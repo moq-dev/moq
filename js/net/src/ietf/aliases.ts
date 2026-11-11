@@ -83,9 +83,11 @@ export class TrackAliases<T> {
 	#active = new Map<bigint, { value: T; track: TrackIdentity }>();
 	#pending = new Map<bigint, Set<Resolver<T>>>();
 
-	/** Aliases whose subscription we cancelled, in retirement order so the oldest is forgotten first. */
-	#retired: bigint[] = [];
-	#retiredSet = new Set<bigint>();
+	/**
+	 * Aliases whose subscription we cancelled, with the track each served, in retirement order
+	 * (a Map iterates by insertion) so the oldest is forgotten first.
+	 */
+	#retired = new Map<bigint, TrackIdentity>();
 
 	/**
 	 * Waits briefly for an alias to be established by SUBSCRIBE_OK or PUBLISH.
@@ -96,7 +98,7 @@ export class TrackAliases<T> {
 	async get(alias: bigint): Promise<T> {
 		const bound = this.#active.get(alias);
 		if (bound !== undefined) return bound.value;
-		if (this.#retiredSet.has(alias)) throw new RetiredTrackAlias(alias);
+		if (this.#retired.has(alias)) throw new RetiredTrackAlias(alias);
 
 		const { promise, resolve } = Promise.withResolvers<T>();
 		let resolvers = this.#pending.get(alias);
@@ -139,7 +141,7 @@ export class TrackAliases<T> {
 
 		// Our subscription is gone, so the publisher is free to point the alias somewhere
 		// new. Reclaiming it also drops the tombstone early.
-		this.#forget(alias);
+		this.#retired.delete(alias);
 
 		this.#active.set(alias, { value, track });
 		const resolvers = this.#pending.get(alias);
@@ -158,24 +160,32 @@ export class TrackAliases<T> {
 	 * only torn down by the owner and never out from under whoever reclaimed it.
 	 */
 	retire(alias: bigint, value: T): boolean {
-		if (this.#active.get(alias)?.value !== value) return false;
+		const active = this.#active.get(alias);
+		if (active?.value !== value) return false;
 		this.#active.delete(alias);
 
-		if (this.#retiredSet.has(alias)) return true;
-		this.#retiredSet.add(alias);
-		this.#retired.push(alias);
+		this.#retired.delete(alias);
+		this.#retired.set(alias, active.track);
 
-		while (this.#retired.length > RETIRED_ALIAS_CAPACITY) {
-			const oldest = this.#retired.shift();
-			if (oldest !== undefined) this.#retiredSet.delete(oldest);
+		for (const oldest of this.#retired.keys()) {
+			if (this.#retired.size <= RETIRED_ALIAS_CAPACITY) break;
+			this.#retired.delete(oldest);
 		}
 
 		return true;
 	}
 
-	#forget(alias: bigint) {
-		if (!this.#retiredSet.delete(alias)) return;
-		const at = this.#retired.indexOf(alias);
-		if (at !== -1) this.#retired.splice(at, 1);
+	/**
+	 * Forgets the tombstones of a track we are subscribing to again.
+	 *
+	 * The publisher may answer the new SUBSCRIBE with the alias it used before (draft-22
+	 * section 3.1.3), and the first group can overtake that SUBSCRIBE_OK. Without its tombstone
+	 * the alias reads as unknown, so that group waits on the binding instead of being dropped as
+	 * a straggler. Other tracks' tombstones stay, so their stragglers are still dropped at once.
+	 */
+	resubscribe(track: TrackIdentity) {
+		for (const [alias, retired] of this.#retired) {
+			if (sameTrack(retired, track)) this.#retired.delete(alias);
+		}
 	}
 }

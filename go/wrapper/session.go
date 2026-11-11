@@ -138,8 +138,7 @@ func (s *Session) Grants() *GrantConsumer {
 // GrantConsumer follows the grant a session's peer gave it: the union of every
 // token the session presented.
 //
-// AUTH is only on moq-lite-07-wip and on moq-transport sessions that negotiate
-// the MoQ Auth extension; elsewhere the grant stays nil.
+// AUTH is only on moq-lite-07-wip; elsewhere the grant stays nil.
 type GrantConsumer struct {
 	inner *ffi.MoqGrantConsumer
 }

@@ -33,7 +33,8 @@ export interface LocalProps {
  *
  * Enable {@link enabled} to join (announce `{identity}/camera.hang`). Camera and
  * microphone capture are separate knobs; the screenshare broadcast is
- * announced only while a share is live.
+ * announced only while joined and a share is live, so nothing is published
+ * before joining or after leaving.
  */
 export class Local {
 	/** Participant identity. */
@@ -95,6 +96,9 @@ export class Local {
 	#screenVideo = new Signal<Publish.Video.Source | undefined>(undefined);
 	#screenAudioSource = new Signal<Publish.Audio.Source | undefined>(undefined);
 	#screenLive = new Signal(false);
+
+	// The screen broadcast and its encoders run only while joined and sharing.
+	#screenPublished = new Signal(false);
 
 	#signals = new Effect();
 
@@ -189,9 +193,13 @@ export class Local {
 		});
 		this.#signals.cleanup(() => this.camera.close());
 
+		this.#signals.run((effect) => {
+			this.#screenPublished.set(effect.get(this.enabled) && effect.get(this.#screenLive));
+		});
+
 		this.screen = new Publish.Broadcast({
 			origin,
-			enabled: this.#screenLive,
+			enabled: this.#screenPublished,
 			name: screenName,
 			display: this.screenCapture.out.display,
 		});
@@ -236,7 +244,7 @@ export class Local {
 		const screenHd = new Publish.Video.Encoder("video/hd", {
 			broadcast: this.screen,
 			capture: this.screenCapture,
-			enabled: this.#screenLive,
+			enabled: this.#screenPublished,
 			bandwidth,
 			config: { maxPixels: 1920 * 1080 },
 		});
@@ -245,7 +253,7 @@ export class Local {
 		const screenSd = new Publish.Video.Encoder("video/sd", {
 			broadcast: this.screen,
 			capture: this.screenCapture,
-			enabled: this.#screenLive,
+			enabled: this.#screenPublished,
 			bandwidth,
 			config: { maxPixels: 960 * 540 },
 		});
@@ -260,7 +268,7 @@ export class Local {
 		const screenAudio = new Publish.Audio.Encoder("audio", {
 			broadcast: this.screen,
 			capture: screenAudioCapture,
-			enabled: this.#screenLive,
+			enabled: this.#screenPublished,
 			bandwidth,
 		});
 		this.#signals.cleanup(() => screenAudio.close());

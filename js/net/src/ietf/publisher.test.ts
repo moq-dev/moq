@@ -261,7 +261,6 @@ test("TRACK_STATUS is answered on every draft without subscribing", async () => 
 							timescale: Timescale.MILLI,
 							priority: toWire(2),
 							groupOrder: GroupOrder.Descending,
-							maxCacheDuration: 5000n,
 						};
 			expect(ok.properties).toEqual(expected);
 			origin.close();
@@ -4883,10 +4882,10 @@ for (const endObject of [BigInt(Number.MAX_SAFE_INTEGER), (1n << 60n) + 1n]) {
 	});
 }
 
-test("a fractional max age reaches MAX_CACHE_DURATION as whole milliseconds rounded up", () => {
+test("a max age is never sent as MAX_CACHE_DURATION", () => {
 	const properties = trackProperties(
-		{ compression: "none", timescale: null, maxAge: Duration.micros(1500), priority: 0, refresh: null },
+		{ compression: "none", timescale: null, maxAge: Duration.millis(7000), priority: 0, refresh: null },
 		true,
 	);
-	expect(properties.maxCacheDuration).toBe(2n);
+	expect(properties.maxCacheDuration).toBeUndefined();
 });
