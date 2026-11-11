@@ -430,6 +430,27 @@ fn runtime() -> tokio::runtime::Runtime {
 		.unwrap()
 }
 
+/// Drop what a cell built on `rt`, if Criterion's filter ran it, and assert every task its
+/// sessions and origins spawned ends with it: a task that outlives its handles leaks for
+/// as long as a relay runs.
+fn retire<T>(rt: &tokio::runtime::Runtime, built: Option<T>) {
+	let Some(built) = built else {
+		return;
+	};
+	drop(built);
+	// Each close reaches the next driver on its following poll; this many passes is far
+	// more than any teardown chain takes.
+	rt.block_on(async {
+		for _ in 0..1024 {
+			if rt.metrics().num_alive_tasks() == 0 {
+				break;
+			}
+			tokio::task::yield_now().await;
+		}
+	});
+	assert_eq!(rt.metrics().num_alive_tasks(), 0, "tasks outlived the cell's handles");
+}
+
 /// A multi-threaded runtime with `workers` threads, for the scenarios timed in process CPU.
 fn threaded(workers: usize) -> tokio::runtime::Runtime {
 	tokio::runtime::Builder::new_multi_thread()
@@ -1232,6 +1253,7 @@ fn delivery<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator
 				let room = room.get_or_insert_with(|| rt.block_on(Room::<B>::new(version, *shape)));
 				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
 			});
+			retire(&rt, room);
 		}
 	}
 	group.finish();
@@ -1477,6 +1499,7 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 					})
 				})
 			});
+			retire(&rt, cluster);
 		}
 	}
 	group.finish();
@@ -1540,6 +1563,7 @@ fn announce<B: Backend>(c: &mut Criterion) {
 					})
 				})
 			});
+			retire(&rt, room);
 		}
 	}
 	group.finish();
@@ -1668,6 +1692,7 @@ fn dash<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 				let room = room.get_or_insert_with(|| rt.block_on(DashRoom::<B>::new(version, *shape)));
 				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
 			});
+			retire(&rt, room);
 		}
 	}
 	group.finish();
@@ -1846,6 +1871,7 @@ fn churn<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<It
 				let room = room.get_or_insert_with(|| rt.block_on(ChurnRoom::<B>::new(version, *shape)));
 				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
 			});
+			retire(&rt, room);
 		}
 	}
 	group.finish();

@@ -1009,3 +1009,32 @@ fn unsupported_codecs_fail_at_the_public_importer_boundary() {
 		}
 	}
 }
+
+/// A restart that cannot shift onto a shared catalog clock, because another source anchored it
+/// behind this one, is a publish failure like a rewind: it refuses all later input.
+#[tokio::test]
+async fn an_unmappable_restart_refuses_later_input() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	catalog
+		.timebase()
+		.anchor(moq_net::Timestamp::from_secs(1).unwrap())
+		.unwrap();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+
+	importer.decode(&session(true, 3_600_000, 5)).unwrap();
+	// The sequence headers and first video frame of a session: a tag header, a 14-byte body, and
+	// its trailing size.
+	let first_frame = |start_ms| {
+		let mut data = session(false, start_ms, 1);
+		data.truncate(session(false, start_ms, 0).len() + 11 + 14 + 4);
+		data
+	};
+	let err = importer.decode(&first_frame(0)).unwrap_err();
+	assert!(matches!(err, crate::Error::UnmappableTimestamp(_)), "{err:?}");
+	let err = importer.decode(&first_frame(3_700_000)).unwrap_err();
+	assert!(
+		matches!(err, crate::Error::UnmappableTimestamp(_)),
+		"refused with the cause: {err:?}"
+	);
+}

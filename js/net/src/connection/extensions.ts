@@ -6,8 +6,6 @@ import * as Ietf from "../ietf/index.ts";
  * core, so this only changes moq-transport sessions.
  */
 export interface Extensions {
-	/** The MoQ Auth extension: tokens presented and granted on their own stream (draft-18+). */
-	auth?: boolean;
 	/** The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than announcing unasked. */
 	solicit?: boolean;
 }
@@ -18,7 +16,6 @@ export type Offered = Required<Extensions>;
 /** Resolve each unset extension to offered. */
 export function offered(extensions?: Extensions): Offered {
 	return {
-		auth: extensions?.auth ?? true,
 		solicit: extensions?.solicit ?? true,
 	};
 }
@@ -26,5 +23,4 @@ export function offered(extensions?: Extensions): Offered {
 /** Write the options for the offered extensions into a SETUP. */
 export function intoSetup(params: Ietf.SetupOptions, extensions: Offered) {
 	if (extensions.solicit) Ietf.solicitIntoSetup(params);
-	if (extensions.auth) Ietf.Auth.intoSetup(params);
 }

@@ -7285,7 +7285,7 @@ fn session_connect_and_close() {
 	);
 }
 
-/// Every failed dial reaches `on_state` while the loop retries, before any connect.
+/// A failing first dial reaches `on_state` as the terminal snapshot, naming its failure.
 #[test]
 fn a_failing_dial_reports_its_failure() {
 	// Hang up on every connection, so a WebSocket dial fails fast. Holding the listener
@@ -7311,8 +7311,8 @@ fn a_failing_dial_reports_its_failure() {
 		)
 	});
 
-	let failed = cb.recv();
-	assert_eq!(failed.phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTING);
+	// The first dial never retries, so its failure is the terminal snapshot.
+	let failed = cb.recv_terminal();
 	assert_eq!(failed.connects, 0);
 	assert!(failed.failure < 0, "the refused dial reports why: {failed:?}");
 	assert!(
@@ -7320,11 +7320,8 @@ fn a_failing_dial_reports_its_failure() {
 		"moq_error describes the failure during the callback"
 	);
 	assert!(failed.version.is_empty(), "nothing is serving");
-
-	assert_eq!(moq_session_close(session), 0);
-	let terminal = cb.recv_terminal();
-	assert_eq!(terminal.failure, 0, "a requested close is clean: {terminal:?}");
-	assert_eq!(terminal.connects, 0);
+	// The terminal snapshot already released the handle.
+	assert!(moq_session_close(session) < 0);
 }
 
 /// Borrow a `&str` as the `moq_string` the list setters take.
