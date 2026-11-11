@@ -17,7 +17,7 @@ async fn ts_surround_opus_decodes() {
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 	let mut import = moq_mux::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&data[..]).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	let (name, config) = snapshot.audio.renditions.iter().next().expect("an Opus track");

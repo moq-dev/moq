@@ -40,4 +40,4 @@ export { MissingSnapshot } from "../error.ts";
 export { Consumer } from "./consumer.ts";
 export { Decoder } from "./decoder.ts";
 export { type Config, type Encoded, Encoder, type Pending } from "./encoder.ts";
-export { Producer } from "./producer.ts";
+export { type Finished, Producer } from "./producer.ts";
