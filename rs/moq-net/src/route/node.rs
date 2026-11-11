@@ -581,10 +581,13 @@ impl Stream {
 		state.flush();
 	}
 
-	/// Another stream of the same session took this one's place, so closing this one
-	/// changes no path.
-	pub fn replaced(&self) {
-		self.node.lock().links.remove(&self.key);
+	/// `next`, of the same session, takes this stream's place: it inherits whether
+	/// this one was a route link, so closing this one changes no path.
+	pub fn replaced_by(&self, next: &Stream) {
+		let mut state = self.node.lock();
+		if state.links.remove(&self.key) {
+			state.links.insert(next.key);
+		}
 	}
 
 	/// A batch of claim changes for the route the peer names `named`, closed by
@@ -1365,9 +1368,9 @@ mod tests {
 		assert!(routes(&to_b, 2).is_empty());
 
 		// A permit change refiling a peer's stream is no link change either.
+		// The refile replays no forwarded route, yet the session stays a route link.
 		let refiled = relay.receive(Link::default(), Path::empty()).unwrap();
-		refiled.route(5, finite(0, 1));
-		from_a.replaced();
+		from_a.replaced_by(&refiled);
 		drop(from_a);
 		assert!(routes(&to_b, 2).is_empty());
 
