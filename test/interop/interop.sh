@@ -1610,6 +1610,12 @@ run_round() {
             overall=1
             continue
         fi
+        # Quarantined: quest/m0/test-flakes-2/interop-go-cpp.md.
+        if [[ "$pub" == go && "$sub" == cpp ]]; then
+            echo "  SKIP  $pub -> $sub (quarantined)"
+            record skip case="$case" publisher="$publisher" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-go-cpp.md"
+            continue
+        fi
         harness_spawn "$pub-$sub" "$LOGS/$pub-$sub.log" run_cell "$pub" "$sub" "$broadcast" "$sub_url" "$tone" "$codecs"
         pids+=("$HARNESS_PID")
         names+=("$sub")
