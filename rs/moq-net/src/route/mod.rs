@@ -1129,7 +1129,12 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 				}
 				let metric = self.metric(next, entry)?;
 				let rtt = through_rtt(&entry.advert, &self.neighbors[&next]);
-				Some(Eligible { next, metric, rtt, tied })
+				Some(Eligible {
+					next,
+					metric,
+					rtt,
+					tied,
+				})
 			})
 			.collect()
 	}
