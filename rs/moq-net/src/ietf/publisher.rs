@@ -718,7 +718,7 @@ struct Namespaces {
 	/// Requests whose stream woke the loop, so a wake polls those rather than every
 	/// update in flight.
 	woken: Arc<Woken>,
-	/// What we may advertise: our grant (MoQ Auth) and the ceiling on the peer.
+	/// What we may advertise: our grant and the ceiling on the peer.
 	permit: crate::auth::Permit,
 	/// The dispatcher-owned gate for a solicited namespace request.
 	gate: Option<crate::auth::Gate>,
@@ -871,7 +871,7 @@ enum NamespaceEvent {
 	Update(Option<(crate::announce::Announce, bool, bool)>),
 	/// The retry sleep fired: re-offer whatever the peer should be holding and isn't.
 	Retry,
-	/// Our grant (MoQ Auth) or the ceiling changed: re-check every namespace against it.
+	/// Our grant or the ceiling changed: re-check every namespace against it.
 	Regrant(crate::auth::Permit),
 	/// The queued update at the front got this request ID.
 	Renew(RequestId),
@@ -948,7 +948,7 @@ pub(super) struct Publisher {
 	// Shared across request handlers; None marks a dispatched subscription still resolving.
 	joins: kio::Shared<HashMap<RequestId, Option<Joined<GroupOf<Transport>>>>>,
 	version: Version,
-	// Our grant (MoQ Auth): only what it lets us publish is advertised and served, and a
+	// Our grant: only what it lets us publish is advertised and served, and a
 	// shrink withdraws what it no longer covers.
 	auth: crate::auth::Link,
 	// Dispatched finite serves, including those not yet polled.
@@ -1058,20 +1058,32 @@ impl<G> Drop for Join<G> {
 
 /// Serves a SUBSCRIBE on its bidi stream, from the checks on its first poll to the last
 /// message the request carries.
-struct SubscribeServe {
-	request: SubscribeRequest,
-	state: SubscribeState,
+#[allow(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk; an allow, since the size gap varies by target"
+)]
+enum SubscribeServe {
+	/// The request holds its stream: from its checks to the subscription's end.
+	Open {
+		request: SubscribeRequest,
+		state: SubscribeState,
+	},
+	/// Ending the subscription with PUBLISH_DONE, which closes the request.
+	PublishDone {
+		publisher: Publisher,
+		credit: kio::Producer<()>,
+		done: WritePublishDone,
+	},
+	Done,
 }
 
-/// What a SUBSCRIBE holds whichever step it is at.
+/// What a SUBSCRIBE holds whichever step it is at, until PUBLISH_DONE takes its stream.
 struct SubscribeRequest {
 	publisher: Publisher,
-	/// Taken to end the request with PUBLISH_DONE, which closes it.
-	stream: Option<Stream<Transport, Version>>,
+	stream: Stream<Transport, Version>,
 	/// Its serving parameters follow the updates applied while paused.
 	msg: ietf::Subscribe<'static>,
-	/// Taken by a [`Retain`] that keeps the join.
-	gate: Option<crate::auth::Gate>,
+	gate: crate::auth::Gate,
 	/// Registered at dispatch, before either request task can be polled.
 	join: Option<Join<GroupOf<Transport>>>,
 	/// Held for the life of the subscription, and by every token verification the
@@ -1080,8 +1092,6 @@ struct SubscribeRequest {
 	/// go, so a peer cancelling and resubscribing cannot leave more verifications in flight
 	/// than its credit admits.
 	credit: kio::Producer<()>,
-	/// The subscription's slot, held with the credit once the request passes its checks.
-	slot: Option<crate::auth::Hold>,
 	request_finished: bool,
 	goaways: super::request_stream::Messages,
 	/// The grant the request's own token earned, if one admitted it.
@@ -1096,93 +1106,150 @@ struct SubscribeRequest {
 	lapse: Lapse,
 }
 
+/// A cleanly finished subscription's join, with the subscription slot it keeps holding
+/// past PUBLISH_DONE; see [`Retain`].
+type Kept = (Join<GroupOf<Transport>>, crate::auth::Hold);
+
+/// How a subscription ends with PUBLISH_DONE: what `served` reports, after `streams` group
+/// streams, keeping the join when `kept`.
+struct Finished {
+	served: Served,
+	streams: u64,
+	kept: Option<Kept>,
+}
+
+/// Where a step of an open SUBSCRIBE leaves it.
+enum Next {
+	Step(SubscribeState),
+	PublishDone(Finished),
+}
+
 enum SubscribeState {
 	/// Not polled yet: the request's checks run on its first poll.
 	Start,
 	/// Refused: delivering the REQUEST_ERROR already buffered.
 	Refuse(super::request_stream::Deliver),
-	/// Verifying the request's AUTHORIZATION TOKEN.
-	Verify(crate::auth::RequestVerdict),
+	/// Verifying the request's AUTHORIZATION TOKEN, holding the subscription's slot with the
+	/// credit.
+	Verify {
+		verdict: crate::auth::RequestVerdict,
+		slot: crate::auth::Hold,
+	},
 	/// Withdrawn before an answer: waiting for its verifications to let go of the credit.
 	Release,
 	/// Admitted, serving under its authority.
-	Serve(Box<Serving>),
+	Serve {
+		serving: Box<Serving>,
+		slot: crate::auth::Hold,
+	},
 	/// A refused renewal ended the request: flushing its REQUEST_ERROR before PUBLISH_DONE.
 	RenewalRefused {
 		error: Error,
 		streams: u64,
-		retain: Option<Retain>,
+		kept: Option<Kept>,
 	},
-	/// Ending the subscription with PUBLISH_DONE.
-	PublishDone(WritePublishDone),
+	/// Over, or between two steps.
 	Done,
 }
 
 impl SubscribeServe {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let request = &mut self.request;
 		loop {
-			match &mut self.state {
-				SubscribeState::Start => self.state = request.start()?,
-				SubscribeState::Refuse(deliver) => {
-					let stream = request.stream.as_mut().expect("open until PUBLISH_DONE");
-					return deliver.poll(waiter, &mut stream.writer);
+			*self = match std::mem::replace(self, SubscribeServe::Done) {
+				SubscribeServe::Open { mut request, mut state } => match request.poll(waiter, &mut state) {
+					Poll::Ready(Ok(Some(finished))) => request.publish_done(finished),
+					Poll::Ready(res) => return Poll::Ready(res.map(drop)),
+					Poll::Pending => {
+						*self = SubscribeServe::Open { request, state };
+						return Poll::Pending;
+					}
+				},
+				SubscribeServe::PublishDone {
+					publisher,
+					credit,
+					mut done,
+				} => {
+					let res = done.poll(waiter, &publisher, &credit);
+					if res.is_pending() {
+						*self = SubscribeServe::PublishDone {
+							publisher,
+							credit,
+							done,
+						};
+					}
+					return res;
 				}
-				SubscribeState::Verify(verdict) => {
-					let stream = request.stream.as_mut().expect("open until PUBLISH_DONE");
-					let fin_cancels = super::request_stream::fin_cancels(request.publisher.version);
+				SubscribeServe::Done => panic!("polled after it resolved"),
+			};
+		}
+	}
+}
+
+impl SubscribeRequest {
+	/// Ready with how the subscription ends: `Some` with PUBLISH_DONE, `None` once it ended
+	/// without one.
+	fn poll(&mut self, waiter: &kio::Waiter, state: &mut SubscribeState) -> Poll<Result<Option<Finished>, Error>> {
+		loop {
+			let next = match state {
+				SubscribeState::Start => Next::Step(self.start()?),
+				SubscribeState::Refuse(deliver) => {
+					return deliver.poll(waiter, &mut self.stream.writer).map_ok(|()| None);
+				}
+				SubscribeState::Verify { verdict, .. } => {
+					let fin_cancels = super::request_stream::fin_cancels(self.publisher.version);
 					// The subscriber cancelling or the session closing withdraws the token.
-					let verified = ready!(request.publisher.poll_until_withdrawn(
-						stream,
+					let verified = ready!(self.publisher.poll_until_withdrawn(
+						&mut self.stream,
 						fin_cancels,
 						waiter,
 						|waiter| verdict.poll_grant(waiter)
 					));
-					let SubscribeState::Verify(verdict) = std::mem::replace(&mut self.state, SubscribeState::Release)
+					let SubscribeState::Verify { verdict, slot } = std::mem::replace(state, SubscribeState::Release)
 					else {
 						unreachable!("matched above");
 					};
 					let Some(verified) = verified else {
-						drop((verdict, request.slot.take()));
+						drop((verdict, slot));
 						continue;
 					};
 					let admitted = crate::auth::RequestGrant::new(
-						&request.publisher.runtime,
+						&self.publisher.runtime,
 						verdict,
 						verified,
-						request.msg.track_namespace.clone(),
+						self.msg.track_namespace.clone(),
 						crate::auth::RequestKind::Subscribe,
-						request.slot.clone(),
+						Some(slot.clone()),
 					);
-					self.state = match admitted {
+					Next::Step(match admitted {
 						Ok(grant) => {
-							request.gate = request.gate.take().map(crate::auth::Gate::named);
-							request.grant = Some(grant);
-							request.admitted()
+							self.gate.name();
+							self.grant = Some(grant);
+							self.admitted(slot)
 						}
-						Err(refusal) => request.refuse(&refusal.error, &refusal.reason, None)?,
-					};
+						Err(refusal) => self.refuse(&refusal.error, &refusal.reason, None)?,
+					})
 				}
 				SubscribeState::Release => {
-					ready!(request.publisher.poll_released(waiter, &request.credit));
-					self.state = SubscribeState::Done;
-					return Poll::Ready(Ok(()));
+					ready!(self.publisher.poll_released(waiter, &self.credit));
+					return Poll::Ready(Ok(None));
 				}
-				SubscribeState::Serve(serving) => {
+				SubscribeState::Serve { serving, .. } => {
 					// Polled first, so the request never acts on authority that already ended.
-					let subscribed = match request.poll_ended(waiter) {
+					let subscribed = match self.poll_ended(waiter) {
 						Poll::Ready(refusal) => Err(refusal),
-						Poll::Pending => Ok(ready!(serving.poll(waiter, request))),
+						Poll::Pending => Ok(ready!(serving.poll(waiter, self))),
+					};
+					let SubscribeState::Serve { serving, slot } = std::mem::replace(state, SubscribeState::Done) else {
+						unreachable!("matched above");
 					};
 					// Dropping the serve releases what it holds upstream; only then is the peer told.
-					self.state = SubscribeState::Done;
-					self.state = request.served(subscribed)?;
+					drop(serving);
+					self.served(subscribed, slot)?
 				}
 				SubscribeState::RenewalRefused { .. } => {
-					let stream = request.stream.as_mut().expect("open until PUBLISH_DONE");
-					let flushed = ready!(stream.writer.poll_flush(waiter));
-					let SubscribeState::RenewalRefused { error, streams, retain } =
-						std::mem::replace(&mut self.state, SubscribeState::Done)
+					let flushed = ready!(self.stream.writer.poll_flush(waiter));
+					let SubscribeState::RenewalRefused { error, streams, kept } =
+						std::mem::replace(state, SubscribeState::Done)
 					else {
 						unreachable!("matched above");
 					};
@@ -1190,15 +1257,31 @@ impl SubscribeServe {
 						Ok(()) => Served::UpdateFailed(error),
 						Err(err) => Served::Track(Err(err)),
 					};
-					self.state = request.publish_done(served, streams, retain);
-				}
-				SubscribeState::PublishDone(done) => {
-					let res = ready!(done.poll(waiter, &request.publisher, &request.credit));
-					self.state = SubscribeState::Done;
-					return Poll::Ready(res);
+					Next::PublishDone(Finished { served, streams, kept })
 				}
 				SubscribeState::Done => panic!("polled after it resolved"),
+			};
+			match next {
+				Next::Step(next) => *state = next,
+				Next::PublishDone(finished) => return Poll::Ready(Ok(Some(finished))),
 			}
+		}
+	}
+
+	/// End the subscription with PUBLISH_DONE, which takes the request's stream.
+	fn publish_done(self, finished: Finished) -> SubscribeServe {
+		let Finished { served, streams, kept } = finished;
+		let (grant, gate) = (self.grant, self.gate);
+		let retain = kept.map(|(join, slot)| Retain {
+			_join: join,
+			grant,
+			gate,
+			_slot: slot,
+		});
+		SubscribeServe::PublishDone {
+			done: WritePublishDone::new(self.stream, served, streams, retain),
+			publisher: self.publisher,
+			credit: self.credit,
 		}
 	}
 }
@@ -1209,22 +1292,21 @@ impl SubscribeRequest {
 		let publisher = &self.publisher;
 		let msg = &self.msg;
 		if let Some(error) = super::namespace::refusal(&msg.track_namespace, publisher.version) {
-			let stream = self.stream.as_mut().expect("open until PUBLISH_DONE");
-			stream.writer.buffer_message(ietf::RequestError::ID, &error)?;
+			self.stream.writer.buffer_message(ietf::RequestError::ID, &error)?;
 			return Ok(SubscribeState::Refuse(super::request_stream::Deliver::new()));
 		}
 		// Logged beside the root rather than joined, so a namespace too long under it is
 		// refused by the lookup, on this request alone.
 		tracing::debug!(id = %msg.request_id, broadcast = %self.broadcast(), track = %msg.track_name, "subscribe started");
 
-		// Serve only what our grant lets us publish (MoQ Auth), and stop once it no
+		// Serve only what our grant lets us publish, and stop once it no
 		// longer does. Checked before resolving, so a denied request never reaches the
 		// origin. Our own authorization of the peer (the limit) admits a request without a
 		// token; an AUTHORIZATION TOKEN on the request goes to the application to verify for
 		// this request alone (MoQ request-token), even where the limit covers it. What the
 		// peer granted us bounds what we send either way, and never stands in for our
 		// authorization of it.
-		let gate = self.gate.as_ref().expect("held until the subscription ends");
+		let gate = &self.gate;
 		let token = match &msg.authorization_token {
 			Some(token)
 				if publisher
@@ -1243,8 +1325,7 @@ impl SubscribeRequest {
 		// session. Serving a Range Filter unfiltered would deliver objects the subscriber
 		// excluded.
 		if msg.range_filters {
-			let stream = self.stream.as_mut().expect("open until PUBLISH_DONE");
-			stream.writer.buffer_message(
+			self.stream.writer.buffer_message(
 				ietf::RequestError::ID,
 				&ietf::RequestError {
 					error_code: request::INVALID_FILTER,
@@ -1255,14 +1336,16 @@ impl SubscribeRequest {
 			return Ok(SubscribeState::Refuse(super::request_stream::Deliver::new()));
 		}
 		let slot: crate::auth::Hold = Arc::new((publisher.subscriptions.hold(), self.credit.consume()));
-		self.slot = Some(slot.clone());
 		// A token-authorized subscription is held to its own grant, which ends it when the
 		// grant lapses, is revoked, or stops covering it. Every subscription is gated so it
 		// ends once what the peer granted us stops covering it, and a limit-authorized one
 		// once the limit does too.
 		Ok(match token {
-			Some(token) => SubscribeState::Verify(gate.verify(token, Some(slot))),
-			None => self.admitted(),
+			Some(token) => SubscribeState::Verify {
+				verdict: gate.verify(token, Some(slot.clone())),
+				slot,
+			},
+			None => self.admitted(slot),
 		})
 	}
 
@@ -1271,21 +1354,23 @@ impl SubscribeRequest {
 		crate::path::Rooted(self.publisher.origin.root(), &self.msg.track_namespace)
 	}
 
-	/// Serve the admitted request.
-	fn admitted(&mut self) -> SubscribeState {
+	/// Serve the admitted request, which holds `slot` while it does.
+	fn admitted(&mut self, slot: crate::auth::Hold) -> SubscribeState {
 		self.updates = SubscriptionUpdates {
 			grant: self.grant.clone(),
 			renewal: Default::default(),
 		};
-		SubscribeState::Serve(Box::new(Serving::new(&self.publisher, &self.msg)))
+		SubscribeState::Serve {
+			serving: Box::new(Serving::new(&self.publisher, &self.msg)),
+			slot,
+		}
 	}
 
 	/// Refuse the request with `err`, delivering its REQUEST_ERROR next, as
 	/// [`subscribe_refusal`] words it.
 	fn refuse(&mut self, err: &Error, reason: &str, retry: Option<Duration>) -> Result<SubscribeState, Error> {
 		let error = subscribe_refusal(err, reason, self.publisher.version, retry);
-		let stream = self.stream.as_mut().expect("open until PUBLISH_DONE");
-		let deliver = self.publisher.reject_subscribe(&mut stream.writer, &error)?;
+		let deliver = self.publisher.reject_subscribe(&mut self.stream.writer, &error)?;
 		Ok(SubscribeState::Refuse(deliver))
 	}
 
@@ -1303,77 +1388,70 @@ impl SubscribeRequest {
 			}
 			return Poll::Ready(refusal);
 		}
-		let gate = self.gate.as_mut().expect("held until the subscription ends");
-		if gate.poll_denied(waiter).is_ready() {
+		if self.gate.poll_denied(waiter).is_ready() {
 			tracing::info!(broadcast = %self.broadcast(), track = %self.msg.track_name, "subscription no longer authorized");
 			return Poll::Ready(Error::Unauthorized.into());
 		}
 		Poll::Pending
 	}
 
-	/// How the request ends once serving stopped, or why its authority ended first.
+	/// How the request ends once serving stopped, or why its authority ended first. `slot`
+	/// is the subscription's, which only a kept join holds on to.
 	fn served(
 		&mut self,
 		subscribed: std::result::Result<Result<Subscribed, Error>, crate::auth::Refusal>,
-	) -> Result<SubscribeState, Error> {
+		slot: crate::auth::Hold,
+	) -> Result<Next, Error> {
 		// No update follows the subscription's end, so its pending renewals no longer matter.
 		drop(std::mem::take(&mut self.updates));
 		// A track that ended cleanly keeps what a joining FETCH needs (see [`Retain`]); any
 		// other end drops the join, refusing a joining FETCH that has not answered yet.
-		let retain = match (&subscribed, self.join.take()) {
+		let kept = match (&subscribed, self.join.take()) {
 			(Ok(Ok(Subscribed::Served(Served::Track(Ok(())), _))), Some(join))
 				if self.track_ended && join.answers() =>
 			{
-				Some(Retain {
-					_join: join,
-					grant: self.grant.take(),
-					gate: self.gate.take().expect("held until the subscription ends"),
-					_slot: self.slot.take().expect("held since admission"),
-				})
+				Some((join, slot))
 			}
 			_ => {
 				// The subscription's demand is gone; only its credit may still wait on a
 				// verification.
-				drop((self.grant.take(), self.slot.take()));
+				drop((self.grant.take(), slot));
 				None
 			}
 		};
 
 		Ok(match subscribed {
 			Ok(Ok(Subscribed::Served(Served::RenewalRefused(refusal), streams))) => {
-				let stream = self.stream.as_mut().expect("open until PUBLISH_DONE");
 				match self
 					.publisher
-					.buffer_subscribe_error(&mut stream.writer, &refusal.error, &refusal.reason)
+					.buffer_subscribe_error(&mut self.stream.writer, &refusal.error, &refusal.reason)
 				{
-					Ok(()) => SubscribeState::RenewalRefused {
+					Ok(()) => Next::Step(SubscribeState::RenewalRefused {
 						error: refusal.error,
 						streams,
-						retain,
-					},
-					Err(err) => self.publish_done(Served::Track(Err(err)), streams, retain),
+						kept,
+					}),
+					Err(err) => Next::PublishDone(Finished {
+						served: Served::Track(Err(err)),
+						streams,
+						kept,
+					}),
 				}
 			}
-			Ok(Ok(Subscribed::Served(served, streams))) => self.publish_done(served, streams, retain),
-			Ok(Ok(Subscribed::Refused(reason, err, retry))) => self.refuse(&err, &reason, retry)?,
+			Ok(Ok(Subscribed::Served(served, streams))) => Next::PublishDone(Finished { served, streams, kept }),
+			Ok(Ok(Subscribed::Refused(reason, err, retry))) => Next::Step(self.refuse(&err, &reason, retry)?),
 			// Nobody is left to answer.
-			Ok(Ok(Subscribed::Withdrawn)) => SubscribeState::Release,
+			Ok(Ok(Subscribed::Withdrawn)) => Next::Step(SubscribeState::Release),
 			Ok(Err(err)) => return Err(err),
 			Err(refusal) => match &self.acked {
-				Some(opened) => {
-					let streams = opened.load(Ordering::Relaxed);
-					self.publish_done(Served::Track(Err(refusal.error)), streams, retain)
-				}
-				None => self.refuse(&refusal.error, &refusal.reason, None)?,
+				Some(opened) => Next::PublishDone(Finished {
+					served: Served::Track(Err(refusal.error)),
+					streams: opened.load(Ordering::Relaxed),
+					kept,
+				}),
+				None => Next::Step(self.refuse(&refusal.error, &refusal.reason, None)?),
 			},
 		})
-	}
-
-	/// End the subscription with the PUBLISH_DONE `served` reports, after `streams` group
-	/// streams.
-	fn publish_done(&mut self, served: Served, streams: u64, retain: Option<Retain>) -> SubscribeState {
-		let stream = self.stream.take().expect("open until PUBLISH_DONE");
-		SubscribeState::PublishDone(WritePublishDone::new(stream, served, streams, retain))
 	}
 
 	/// Mark the subscription for joining FETCHes from the boundary it serves from: the
@@ -1508,7 +1586,7 @@ impl Serving {
 		};
 		let version = request.publisher.version;
 		loop {
-			let stream = request.stream.as_mut().expect("open until PUBLISH_DONE");
+			let stream = &mut request.stream;
 			match &mut self.step {
 				ServingStep::Resolve(resolve) => {
 					let broadcast = match ready!(resolve.poll(waiter, &request.publisher, stream)) {
@@ -1660,7 +1738,7 @@ impl Serving {
 					// Buffered whole before its first wait, so however the subscription is
 					// dropped from here, the request can still end on the wire.
 					request.acked = Some(serve.opened.clone());
-					let stream = request.stream.as_mut().expect("open until PUBLISH_DONE");
+					let stream = &mut request.stream;
 					stream.writer.buffer_message(
 						ietf::SubscribeOk::ID,
 						&ietf::SubscribeOk {
@@ -1809,7 +1887,7 @@ impl Serving {
 			drop(serve);
 			self.step = match answer {
 				true => {
-					let stream = request.stream.as_mut().expect("open until PUBLISH_DONE");
+					let stream = &mut request.stream;
 					Publisher::buffer_request_ok(&mut stream.writer, None)?;
 					ServingStep::Pausing
 				}
@@ -1841,7 +1919,7 @@ impl Serving {
 		retry: Option<Duration>,
 	) -> Result<ServingStep, Error> {
 		let error = subscribe_refusal(&err, "resume failed", request.publisher.version, retry);
-		let stream = request.stream.as_mut().expect("open until PUBLISH_DONE");
+		let stream = &mut request.stream;
 		stream.writer.buffer_message(ietf::RequestError::ID, &error)?;
 		Ok(ServingStep::ResumeFailed(err))
 	}
@@ -2773,7 +2851,7 @@ impl Publisher {
 		}
 	}
 
-	/// Bound what we publish by the grant this session's tokens earn (MoQ Auth).
+	/// Bound what we publish by the grant this session's tokens earn.
 	pub fn with_auth(mut self, auth: crate::auth::Link) -> Self {
 		self.auth = auth;
 		self
@@ -3092,15 +3170,14 @@ impl Publisher {
 		// Register during dispatch, before either request task can be polled.
 		let join = (!Filter::is_draft20(self.version)).then(|| self.register_join(msg.request_id));
 		let goaways = super::request_stream::Messages::new(self.session.clone(), self.control.client());
-		SubscribeServe {
+		SubscribeServe::Open {
 			request: SubscribeRequest {
 				publisher: self,
-				stream: Some(stream),
+				stream,
 				msg,
-				gate: Some(gate),
+				gate,
 				join,
 				credit: Default::default(),
-				slot: None,
 				request_finished: false,
 				goaways,
 				grant: None,
@@ -4666,10 +4743,28 @@ impl Admitted {
 /// Its highest group is read before replying: FETCH_OK names where the response ends, which
 /// a range running past the track only learns by reading it, and a refusal can still replace
 /// it until then.
-struct FetchServe {
+#[allow(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk; an allow, since the size gap varies by target"
+)]
+enum FetchServe {
+	/// Answering on the request stream.
+	Open(FetchOpen),
+	/// FETCH_OK is the last thing this stream has to say, and [`Writer`] resets on drop:
+	/// without the finish the answer is discarded before the peer ever reads it, exactly as
+	/// it would be for a refusal.
+	Close {
+		_admitted: Admitted,
+		_track: track::Consumer,
+		answered: Answered,
+	},
+	Done,
+}
+
+/// A FETCH being answered on its request stream.
+struct FetchOpen {
 	publisher: Publisher,
-	/// The request stream, until its answer is finished or reset.
-	stream: Option<Stream<Transport, Version>>,
+	stream: Stream<Transport, Version>,
 	request_id: RequestId,
 	priority: i8,
 	properties_wanted: bool,
@@ -4677,11 +4772,23 @@ struct FetchServe {
 	/// it for a cancel, so a second GOAWAY is caught wherever it arrives.
 	finished: bool,
 	messages: super::request_stream::Messages,
-	/// The track once resolved, held until the request ends.
-	track: Option<track::Consumer>,
 	state: FetchState,
 }
 
+/// How a [`FetchOpen`] leaves its request stream.
+enum FetchEnd {
+	/// Nothing more to say on it.
+	Done,
+	/// Reset it with the error: no REQUEST_ERROR can follow FETCH_OK.
+	Abort(Admitted, Error),
+	/// Finish it, the response written from the track it read.
+	Answered(Admitted, track::Consumer),
+}
+
+#[allow(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk; an allow, since the size gap varies by target"
+)]
 enum FetchState {
 	Start {
 		msg: ietf::Fetch<'static>,
@@ -4725,6 +4832,8 @@ enum FetchState {
 	/// waits on stream credit stops there instead of sending what it no longer may.
 	Answer {
 		admitted: Admitted,
+		/// The track the answer reads, held until the request ends.
+		track: track::Consumer,
 		/// Taken once buffered.
 		ok: Option<ietf::FetchOk>,
 		/// Where the response starts, which ranks its stream.
@@ -4735,16 +4844,11 @@ enum FetchState {
 	/// its stream is flow controlled, and a joining one no longer ends with its subscription.
 	Respond {
 		admitted: Admitted,
+		track: track::Consumer,
 		respond: FetchRespond,
 	},
-	/// FETCH_OK is the last thing this stream has to say, and [`Writer`] resets on drop:
-	/// without the finish the answer is discarded before the peer ever reads it, exactly as
-	/// it would be for a refusal.
-	Close {
-		_admitted: Admitted,
-		answered: Answered,
-	},
 	Reject(super::request_stream::Deliver),
+	/// Between two steps.
 	Done,
 }
 
@@ -4756,27 +4860,71 @@ impl FetchServe {
 		admission: FetchGate,
 	) -> Self {
 		let messages = super::request_stream::Messages::new(publisher.session.clone(), publisher.control.client());
-		Self {
+		Self::Open(FetchOpen {
 			request_id: msg.request_id,
 			priority: super::priority::from_wire(msg.subscriber_priority),
 			properties_wanted: msg.properties_wanted,
 			publisher,
-			stream: Some(stream),
+			stream,
 			finished: false,
 			messages,
-			track: None,
 			state: FetchState::Start { msg, admission },
-		}
+		})
 	}
 
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			*self = match std::mem::replace(self, FetchServe::Done) {
+				FetchServe::Open(mut open) => match open.poll(waiter) {
+					Poll::Ready(Ok(FetchEnd::Done)) => return Poll::Ready(Ok(())),
+					Poll::Ready(Ok(FetchEnd::Abort(admitted, err))) => {
+						admitted.lapse.abort(open.stream.writer, &err);
+						return Poll::Ready(Err(err));
+					}
+					Poll::Ready(Ok(FetchEnd::Answered(admitted, track))) => match Answered::new(open.stream) {
+						Some(answered) => FetchServe::Close {
+							_admitted: admitted,
+							_track: track,
+							answered,
+						},
+						None => return Poll::Ready(Ok(())),
+					},
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Pending => {
+						*self = FetchServe::Open(open);
+						return Poll::Pending;
+					}
+				},
+				FetchServe::Close {
+					_admitted,
+					_track,
+					mut answered,
+				} => {
+					// The peer dropping the stream first is a normal end.
+					if answered.closing.poll(waiter).is_pending() {
+						*self = FetchServe::Close {
+							_admitted,
+							_track,
+							answered,
+						};
+						return Poll::Pending;
+					}
+					return Poll::Ready(Ok(()));
+				}
+				FetchServe::Done => panic!("polled after it finished"),
+			};
+		}
+	}
+}
+
+impl FetchOpen {
 	fn fin_cancels(&self) -> bool {
 		super::request_stream::fin_cancels(self.publisher.version)
 	}
 
 	/// Refuse the request with `error`, delivered on the following polls.
 	fn refuse(&mut self, error: ietf::RequestError<'_>) -> Result<(), Error> {
-		let stream = self.stream.as_mut().expect("refused before answering");
-		stream.writer.buffer_message(ietf::RequestError::ID, &error)?;
+		self.stream.writer.buffer_message(ietf::RequestError::ID, &error)?;
 		self.state = FetchState::Reject(super::request_stream::Deliver::new());
 		Ok(())
 	}
@@ -4784,18 +4932,10 @@ impl FetchServe {
 	/// Refuse the FETCH with `err`. See [`Publisher::reject_subscribe`] for why the close is
 	/// not optional.
 	fn reject(&mut self, err: &Error, reason: &str) -> Result<(), Error> {
-		let stream = self.stream.as_mut().expect("refused before answering");
 		let kind = request::Kind::Fetch;
-		super::request_stream::buffer_error(&mut stream.writer, kind, err, reason, self.publisher.version)?;
+		super::request_stream::buffer_error(&mut self.stream.writer, kind, err, reason, self.publisher.version)?;
 		self.state = FetchState::Reject(super::request_stream::Deliver::new());
 		Ok(())
-	}
-
-	/// Reset the request stream once its answer is out: no REQUEST_ERROR can follow FETCH_OK.
-	fn abort(&mut self, admitted: Admitted, err: Error) -> Poll<Result<(), Error>> {
-		let stream = self.stream.take().expect("aborted once");
-		admitted.lapse.abort(stream.writer, &err);
-		Poll::Ready(Err(err))
 	}
 
 	/// Everything up to the first wait: refusals the request alone decides, then admission.
@@ -4949,6 +5089,7 @@ impl FetchServe {
 	fn answer(
 		&mut self,
 		admitted: Admitted,
+		track: track::Consumer,
 		prepared: PreparedFetch,
 		compression: bool,
 		joined: bool,
@@ -4971,7 +5112,6 @@ impl FetchServe {
 		};
 		let draft20 = Filter::is_draft20(version);
 		// Only a finished track's final object ends it, never a live track's Largest Object.
-		let track = self.track.as_ref().expect("found before answering");
 		let complete = end.is_some_and(|end| until.is_none_or(|until| until >= end));
 		let end_of_track = !joined && complete && track.final_sequence() == sequence.checked_add(1);
 		// One past the last object the answer carries; settling bounds a live group's range.
@@ -5027,6 +5167,7 @@ impl FetchServe {
 		// requests it answers without ever naming this one.
 		self.state = FetchState::Answer {
 			admitted,
+			track,
 			ok: Some(ietf::FetchOk {
 				end_of_track,
 				end_location,
@@ -5038,16 +5179,10 @@ impl FetchServe {
 		Ok(())
 	}
 
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<FetchEnd, Error>> {
 		loop {
-			if let FetchState::Close { answered, .. } = &mut self.state {
-				// The peer dropping the stream first is a normal end.
-				let _ = ready!(answered.closing.poll(waiter));
-				self.state = FetchState::Done;
-				return Poll::Ready(Ok(()));
-			}
 			let fin_cancels = self.fin_cancels();
-			let stream = self.stream.as_mut().expect("held until answered");
+			let stream = &mut self.stream;
 			match &mut self.state {
 				FetchState::Start { .. } => {
 					let FetchState::Start { msg, admission } = std::mem::replace(&mut self.state, FetchState::Done)
@@ -5064,7 +5199,7 @@ impl FetchServe {
 					};
 					match admitted {
 						Ok(true) => self.admitted(gate, request)?,
-						Ok(false) => return Poll::Ready(Ok(())),
+						Ok(false) => return Poll::Ready(Ok(FetchEnd::Done)),
 						Err(refusal) => self.reject(&refusal.error, &refusal.reason)?,
 					}
 				}
@@ -5080,7 +5215,7 @@ impl FetchServe {
 					};
 					let broadcast = match resolved {
 						Ok(Some(broadcast)) => broadcast,
-						Ok(None) => return Poll::Ready(Ok(())),
+						Ok(None) => return Poll::Ready(Ok(FetchEnd::Done)),
 						Err(err) => {
 							self.reject(&err, &err.to_string())?;
 							continue;
@@ -5148,8 +5283,10 @@ impl FetchServe {
 					// The cache outlives the subscription, so the fetch holds its own gate rather than
 					// trusting the cache. One the subscription's request token authorized is held to
 					// the peer's grant alone, as the subscription is.
-					let gate = crate::auth::Gate::new(auth, namespace, crate::auth::Direction::Publish);
-					let gate = if grant.is_some() { gate.named() } else { gate };
+					let mut gate = crate::auth::Gate::new(auth, namespace, crate::auth::Direction::Publish);
+					if grant.is_some() {
+						gate.name();
+					}
 					let start = match fetch_type {
 						FetchType::RelativeJoining { group_offset: 0, .. } => end.group,
 						FetchType::RelativeJoining { .. } => {
@@ -5207,7 +5344,7 @@ impl FetchServe {
 					)
 					.is_ready()
 					{
-						return Poll::Ready(Ok(()));
+						return Poll::Ready(Ok(FetchEnd::Done));
 					}
 					let prepared = 'prepared: {
 						if let Poll::Ready(refusal) = admitted.poll_token_ended(waiter) {
@@ -5231,16 +5368,9 @@ impl FetchServe {
 					else {
 						unreachable!("preparing");
 					};
-					let prepared = match prepared {
-						Ok((track, prepared)) => {
-							self.track = Some(track);
-							prepared
-						}
-						Err(refusal) => Err(refusal),
-					};
 					match prepared {
-						Ok(prepared) => self.answer(admitted, prepared, compression, joined)?,
-						Err((err, reason)) => self.reject(&err, &reason)?,
+						Ok((track, Ok(prepared))) => self.answer(admitted, track, prepared, compression, joined)?,
+						Ok((_, Err((err, reason)))) | Err((err, reason)) => self.reject(&err, &reason)?,
 					}
 				}
 				FetchState::Answer { admitted, ok, .. } => {
@@ -5261,18 +5391,26 @@ impl FetchServe {
 						ready!(stream.writer.poll_flush(waiter))
 					};
 					let FetchState::Answer {
-						admitted, start, write, ..
+						admitted,
+						track,
+						start,
+						write,
+						..
 					} = std::mem::replace(&mut self.state, FetchState::Done)
 					else {
 						unreachable!("answering");
 					};
 					if let Err(err) = res {
-						return self.abort(admitted, err);
+						return Poll::Ready(Ok(FetchEnd::Abort(admitted, err)));
 					}
 					let respond = FetchRespond::new(&self.publisher, &admitted, start, self.request_id, write);
-					self.state = FetchState::Respond { admitted, respond };
+					self.state = FetchState::Respond {
+						admitted,
+						track,
+						respond,
+					};
 				}
-				FetchState::Respond { admitted, respond } => {
+				FetchState::Respond { admitted, respond, .. } => {
 					if super::request_stream::poll_cancel(
 						stream,
 						&mut self.finished,
@@ -5284,7 +5422,7 @@ impl FetchServe {
 					{
 						// The fetch stream, if open, resets as it drops with the response.
 						self.state = FetchState::Done;
-						return Poll::Ready(Ok(()));
+						return Poll::Ready(Ok(FetchEnd::Done));
 					}
 					let res = 'respond: {
 						if let Poll::Ready(refusal) = admitted.poll_token_ended(waiter) {
@@ -5295,30 +5433,23 @@ impl FetchServe {
 						}
 						ready!(respond.poll(waiter))
 					};
-					let FetchState::Respond { admitted, .. } = std::mem::replace(&mut self.state, FetchState::Done)
+					let FetchState::Respond { admitted, track, .. } =
+						std::mem::replace(&mut self.state, FetchState::Done)
 					else {
 						unreachable!("responding");
 					};
-					if let Err(err) = res {
+					return Poll::Ready(Ok(match res {
 						// The fetch stream, if open, reset as it dropped with the response. Once
 						// FETCH_OK is out, no REQUEST_ERROR can follow it, so the reset is the
 						// whole refusal.
-						return self.abort(admitted, err);
-					}
-					let stream = self.stream.take().expect("answered once");
-					let Some(answered) = Answered::new(stream) else {
-						return Poll::Ready(Ok(()));
-					};
-					self.state = FetchState::Close {
-						_admitted: admitted,
-						answered,
-					};
+						Err(err) => FetchEnd::Abort(admitted, err),
+						Ok(()) => FetchEnd::Answered(admitted, track),
+					}));
 				}
-				FetchState::Close { .. } => unreachable!("closed above"),
 				FetchState::Reject(deliver) => {
 					let res = ready!(deliver.poll(waiter, &mut stream.writer));
 					self.state = FetchState::Done;
-					return Poll::Ready(res);
+					return Poll::Ready(res.map(|()| FetchEnd::Done));
 				}
 				FetchState::Done => panic!("polled after it finished"),
 			}
@@ -5383,38 +5514,69 @@ impl FetchRespond {
 }
 
 /// Answer a TRACK_STATUS: see [`Publisher::serve_track_status_stream`].
-struct TrackStatusServe {
+#[allow(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk; an allow, since the size gap varies by target"
+)]
+enum TrackStatusServe {
+	/// Answering on the request stream.
+	Open(TrackStatusOpen),
+	/// The answer is all this stream carries. See [`Publisher::reject_subscribe`] for why the
+	/// close is not optional.
+	Close {
+		answered: Answered,
+		_track: track::Consumer,
+	},
+	Done,
+}
+
+/// A TRACK_STATUS being answered on its request stream.
+struct TrackStatusOpen {
 	publisher: Publisher,
-	/// The request stream, until its answer is finished or reset.
-	stream: Option<Stream<Transport, Version>>,
+	stream: Stream<Transport, Version>,
 	namespace: crate::Path,
 	track_name: std::borrow::Cow<'static, str>,
 	properties_wanted: bool,
 	gate: crate::auth::Gate,
-	/// The track once resolved, held until the request ends.
-	track: Option<track::Consumer>,
 	state: TrackStatusState,
+}
+
+/// How a [`TrackStatusOpen`] leaves its request stream.
+enum TrackStatusEnd {
+	/// Nothing more to say on it.
+	Done,
+	/// Reset it with the error.
+	Abort(Error),
+	/// Finish it, the answer read from the track.
+	Answered(track::Consumer),
 }
 
 enum TrackStatusState {
 	Start(Option<super::token::RequestToken>),
 	Admit(Admit),
 	Resolve(Resolve),
-	/// The requester abandoning the request is owed nothing.
+	/// The requester abandoning the request is owed nothing. The track is held until the
+	/// request ends.
 	Info {
 		query: kio::Pending<track::Resolving>,
 		finished: bool,
 		messages: super::request_stream::Messages,
+		track: track::Consumer,
 	},
 	/// Waiting on the peer's SETUP, which says whether it reads compressed tracks.
-	Setup(Result<track::Info, Error>),
+	Setup {
+		info: Result<track::Info, Error>,
+		track: track::Consumer,
+	},
 	/// The answer stays gated until the transport takes it: one parked on stream credit when
 	/// the grant narrows is reset rather than delivered.
-	Respond(Option<ietf::Properties>),
-	/// The answer is all this stream carries. See [`Publisher::reject_subscribe`] for why the
-	/// close is not optional.
-	Close(Answered),
+	Respond {
+		/// Taken once buffered.
+		properties: Option<ietf::Properties>,
+		track: track::Consumer,
+	},
 	Reject(super::request_stream::Deliver),
+	/// Between two steps.
 	Done,
 }
 
@@ -5425,38 +5587,67 @@ impl TrackStatusServe {
 		msg: ietf::TrackStatus<'static>,
 		gate: crate::auth::Gate,
 	) -> Self {
-		Self {
+		Self::Open(TrackStatusOpen {
 			publisher,
-			stream: Some(stream),
+			stream,
 			namespace: msg.track_namespace,
 			track_name: msg.track_name,
 			properties_wanted: msg.properties_wanted,
 			gate,
-			track: None,
 			state: TrackStatusState::Start(msg.authorization_token),
-		}
+		})
 	}
 
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			*self = match std::mem::replace(self, TrackStatusServe::Done) {
+				TrackStatusServe::Open(mut open) => match open.poll(waiter) {
+					Poll::Ready(Ok(TrackStatusEnd::Done)) => return Poll::Ready(Ok(())),
+					Poll::Ready(Ok(TrackStatusEnd::Abort(err))) => {
+						open.stream.writer.abort(&err);
+						return Poll::Ready(Err(err));
+					}
+					Poll::Ready(Ok(TrackStatusEnd::Answered(track))) => match Answered::new(open.stream) {
+						Some(answered) => TrackStatusServe::Close {
+							answered,
+							_track: track,
+						},
+						None => return Poll::Ready(Ok(())),
+					},
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Pending => {
+						*self = TrackStatusServe::Open(open);
+						return Poll::Pending;
+					}
+				},
+				TrackStatusServe::Close { mut answered, _track } => {
+					if answered.closing.poll(waiter).is_pending() {
+						*self = TrackStatusServe::Close { answered, _track };
+						return Poll::Pending;
+					}
+					return Poll::Ready(Ok(()));
+				}
+				TrackStatusServe::Done => panic!("polled after it finished"),
+			};
+		}
+	}
+}
+
+impl TrackStatusOpen {
 	/// Refuse the TRACK_STATUS with `err`, delivered on the following polls.
 	fn reject(&mut self, err: &Error) -> Result<(), Error> {
-		let stream = self.stream.as_mut().expect("refused before answering");
 		let (kind, reason) = (request::Kind::TrackStatus, err.to_string());
-		super::request_stream::buffer_error(&mut stream.writer, kind, err, &reason, self.publisher.version)?;
+		super::request_stream::buffer_error(&mut self.stream.writer, kind, err, &reason, self.publisher.version)?;
 		self.state = TrackStatusState::Reject(super::request_stream::Deliver::new());
 		Ok(())
 	}
 
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<TrackStatusEnd, Error>> {
 		// Nothing can follow a TRACK_STATUS, so a FIN only ends the requester's input; a reset or
 		// STOP_SENDING withdraws it.
 		let fin_cancels = false;
 		loop {
-			if let TrackStatusState::Close(answered) = &mut self.state {
-				let _ = ready!(answered.closing.poll(waiter));
-				self.state = TrackStatusState::Done;
-				return Poll::Ready(Ok(()));
-			}
-			let stream = self.stream.as_mut().expect("held until answered");
+			let stream = &mut self.stream;
 			match &mut self.state {
 				TrackStatusState::Start(token) => {
 					if let Some(error) = super::namespace::refusal(&self.namespace, self.publisher.version) {
@@ -5470,7 +5661,7 @@ impl TrackStatusServe {
 				TrackStatusState::Admit(admit) => {
 					match ready!(admit.poll(waiter, &self.publisher, stream, &mut self.gate)) {
 						Ok(true) => {}
-						Ok(false) => return Poll::Ready(Ok(())),
+						Ok(false) => return Poll::Ready(Ok(TrackStatusEnd::Done)),
 						Err(refusal) => {
 							self.reject(&refusal.error)?;
 							continue;
@@ -5490,7 +5681,7 @@ impl TrackStatusServe {
 					};
 					let broadcast = match resolved {
 						Ok(Some(broadcast)) => broadcast,
-						Ok(None) => return Poll::Ready(Ok(())),
+						Ok(None) => return Poll::Ready(Ok(TrackStatusEnd::Done)),
 						Err(err) => {
 							self.reject(&err)?;
 							continue;
@@ -5503,35 +5694,41 @@ impl TrackStatusServe {
 							continue;
 						}
 					};
-					let query = track.info();
-					self.track = Some(track);
 					self.state = TrackStatusState::Info {
-						query,
+						query: track.info(),
 						finished: false,
 						messages: super::request_stream::Messages::new(
 							self.publisher.session.clone(),
 							self.publisher.control.client(),
 						),
+						track,
 					};
 				}
 				TrackStatusState::Info {
 					query,
 					finished,
 					messages,
+					..
 				} => {
 					if super::request_stream::poll_cancel(stream, finished, messages, fin_cancels, waiter).is_ready() {
-						return Poll::Ready(Ok(()));
+						return Poll::Ready(Ok(TrackStatusEnd::Done));
 					}
 					if self.gate.poll_denied(waiter).is_ready() {
 						self.reject(&Error::Unauthorized)?;
 						continue;
 					}
 					let info = ready!(query.poll_ok(waiter));
-					self.state = TrackStatusState::Setup(info);
+					let TrackStatusState::Info { track, .. } =
+						std::mem::replace(&mut self.state, TrackStatusState::Done)
+					else {
+						unreachable!("querying");
+					};
+					self.state = TrackStatusState::Setup { info, track };
 				}
-				TrackStatusState::Setup(_) => {
+				TrackStatusState::Setup { .. } => {
 					let negotiated = ready!(self.publisher.peer_setup.poll_get(waiter)).flate;
-					let TrackStatusState::Setup(info) = std::mem::replace(&mut self.state, TrackStatusState::Done)
+					let TrackStatusState::Setup { info, track } =
+						std::mem::replace(&mut self.state, TrackStatusState::Done)
 					else {
 						unreachable!("waiting on SETUP");
 					};
@@ -5539,17 +5736,21 @@ impl TrackStatusServe {
 						track_properties(&info, self.properties_wanted, self.publisher.version, negotiated)
 					});
 					match properties {
-						Ok(properties) => self.state = TrackStatusState::Respond(Some(properties)),
+						Ok(properties) => {
+							self.state = TrackStatusState::Respond {
+								properties: Some(properties),
+								track,
+							}
+						}
 						Err(err) => self.reject(&err)?,
 					}
 				}
-				TrackStatusState::Respond(properties) => {
+				TrackStatusState::Respond { properties, track } => {
 					let res = 'respond: {
 						if self.gate.poll_denied(waiter).is_ready() {
 							break 'respond Err(Error::Unauthorized);
 						}
 						if let Some(properties) = properties.take() {
-							let track = self.track.as_ref().expect("resolved before answering");
 							let ok = ietf::TrackStatusOk {
 								largest: live_edge(track).largest,
 								properties,
@@ -5560,22 +5761,22 @@ impl TrackStatusServe {
 						}
 						ready!(stream.writer.poll_flush(waiter))
 					};
-					let stream = self.stream.take().expect("answered once");
 					if let Err(err) = res {
-						stream.writer.abort(&err);
-						return Poll::Ready(Err(err));
+						return Poll::Ready(Ok(TrackStatusEnd::Abort(err)));
 					}
-					let Some(answered) = Answered::new(stream) else {
-						return Poll::Ready(Ok(()));
+					let TrackStatusState::Respond { track, .. } =
+						std::mem::replace(&mut self.state, TrackStatusState::Done)
+					else {
+						unreachable!("responding");
 					};
-					self.state = TrackStatusState::Close(answered);
+					return Poll::Ready(Ok(TrackStatusEnd::Answered(track)));
 				}
-				TrackStatusState::Close(_) => unreachable!("closed above"),
 				TrackStatusState::Reject(deliver) => {
 					let res = ready!(deliver.poll(waiter, &mut stream.writer));
 					self.state = TrackStatusState::Done;
-					return Poll::Ready(res);
+					return Poll::Ready(res.map(|()| TrackStatusEnd::Done));
 				}
+
 				TrackStatusState::Done => panic!("polled after it finished"),
 			}
 		}
@@ -5673,9 +5874,7 @@ struct ForwardNamespaces {
 
 enum ForwardState {
 	Start,
-	/// Waiting on the peer's SETUP, and with MoQ Auth on the answer to the credential we
-	/// presented at setup, so the first advertisement, the initial set included, is already
-	/// checked against our grant.
+	/// Waiting on the peer's SETUP, which says which extensions an advertisement carries.
 	Setup,
 	/// Streaming updates (origin route (un)announces), until the peer closes its side.
 	Run,
@@ -5727,9 +5926,7 @@ impl ForwardNamespaces {
 					self.state = ForwardState::Setup;
 				}
 				ForwardState::Setup => {
-					if ready!(publisher.peer_setup.poll_get(waiter)).auth {
-						ready!(publisher.auth.poll_setup_answered(waiter));
-					}
+					ready!(publisher.peer_setup.poll_get(waiter));
 					(ns.permit, ns.epoch) = publisher.permit_now(ns.gate.as_ref());
 					self.work = std::mem::take(&mut self.initial)
 						.into_iter()
@@ -6151,28 +6348,28 @@ impl PublishNamespaces {
 	}
 
 	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if self.run.is_none() {
-			if ready!(self.publisher.poll_requires_solicitation(waiter)) {
-				return Poll::Ready(Ok(()));
-			}
-
-			// The cluster extension changes what an advertisement carries, so nothing can be
-			// sent until the peer's SETUP says whether it speaks it.
-			let peer = ready!(self.publisher.poll_peer(waiter));
-			let hidden = ready!(self.publisher.peer_setup.poll_get(waiter)).hidden;
-
-			// Split horizon, as the solicited loop applies it: never advertise a route back
-			// to the peer it came from.
-			let origin = self
-				.publisher
-				.advertising(self.publisher.origin.clone(), &peer)
-				.discovery(!hidden || self.publisher.origin.includes_hidden());
-
-			let ns = Namespaces::new(peer, Target::Requests);
-			let run = NamespaceLoop::new(&self.publisher, origin.routes(), crate::Path::empty(), ns, Vec::new());
-			self.run = Some(run);
+		if let Some(run) = &mut self.run {
+			return run.poll(waiter, &self.publisher);
 		}
-		self.run.as_mut().expect("started").poll(waiter, &self.publisher)
+		if ready!(self.publisher.poll_requires_solicitation(waiter)) {
+			return Poll::Ready(Ok(()));
+		}
+
+		// The cluster extension changes what an advertisement carries, so nothing can be
+		// sent until the peer's SETUP says whether it speaks it.
+		let peer = ready!(self.publisher.poll_peer(waiter));
+		let hidden = ready!(self.publisher.peer_setup.poll_get(waiter)).hidden;
+
+		// Split horizon, as the solicited loop applies it: never advertise a route back
+		// to the peer it came from.
+		let origin = self
+			.publisher
+			.advertising(self.publisher.origin.clone(), &peer)
+			.discovery(!hidden || self.publisher.origin.includes_hidden());
+
+		let ns = Namespaces::new(peer, Target::Requests);
+		let run = NamespaceLoop::new(&self.publisher, origin.routes(), crate::Path::empty(), ns, Vec::new());
+		self.run.insert(run).poll(waiter, &self.publisher)
 	}
 }
 
@@ -6181,16 +6378,40 @@ impl PublishNamespaces {
 /// All the announce state is local to this task (mirroring `lite::Publisher`'s announce
 /// handling): whatever this subscription advertised is withdrawn when its stream ends. Every
 /// match is a NAMESPACE on this stream, whatever the peer's SETUP said.
-struct NamespaceServe {
+#[allow(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk; an allow, since the size gap varies by target"
+)]
+enum NamespaceServe {
+	/// Answering the request on its stream.
+	Open(NamespaceOpen),
+	/// Running the announce loop, whose [`Target`] carries the stream and which holds the
+	/// gate.
+	Run {
+		publisher: Publisher,
+		run: Box<NamespaceLoop>,
+	},
+	Done,
+}
+
+/// A SUBSCRIBE_NAMESPACE being answered on its request stream.
+struct NamespaceOpen {
 	publisher: Publisher,
-	/// The request stream, until the loop's [`Target`] carries it.
-	stream: Option<Stream<Transport, Version>>,
+	stream: Stream<Transport, Version>,
 	prefix: crate::Path,
 	/// Whether the requester asked for hidden namespaces too.
 	wants_hidden: bool,
-	/// The request's gate, until the loop holds it.
-	gate: Option<crate::auth::Gate>,
+	/// The request's gate, filtering discovery by its token.
+	gate: crate::auth::Gate,
 	state: NamespaceServeState,
+}
+
+/// What the announce loop starts from once the request is acknowledged.
+struct Acknowledged {
+	peer: cluster::Peer,
+	hidden: bool,
+	announced: crate::origin::Routes,
+	initial: Vec<crate::announce::Announce>,
 }
 
 enum NamespaceServeState {
@@ -6200,23 +6421,18 @@ enum NamespaceServeState {
 	/// peer's SETUP says whether it speaks it. The same SETUP says whether the OK counts what
 	/// it sends first (MoQ Active Count).
 	Setup,
-	/// With MoQ Auth, the count waits for our grant and leaves out what it does not cover.
-	Count {
-		peer: cluster::Peer,
-		hidden: bool,
-		announced: crate::origin::Routes,
-	},
 	/// The acknowledgement, sent only while the token is live, even behind stream credit.
 	Ok {
 		peer: cluster::Peer,
 		hidden: bool,
-		announced: crate::origin::Routes,
+		// Boxed: the routes cursor dwarfs every other state.
+		announced: Box<crate::origin::Routes>,
 		initial: Vec<crate::announce::Announce>,
 		/// Taken once buffered.
 		ok: Option<ietf::RequestOk>,
 	},
-	Run(Box<NamespaceLoop>),
 	Reject(super::request_stream::Deliver),
+	/// Between two steps.
 	Done,
 }
 
@@ -6227,21 +6443,62 @@ impl NamespaceServe {
 		msg: ietf::SubscribeNamespace,
 		gate: crate::auth::Gate,
 	) -> Self {
-		Self {
+		Self::Open(NamespaceOpen {
 			publisher,
-			stream: Some(stream),
+			stream,
 			prefix: msg.namespace,
 			wants_hidden: msg.hidden,
-			gate: Some(gate),
+			gate: gate.discovery(),
 			state: NamespaceServeState::Start(msg.authorization_token),
-		}
+		})
 	}
 
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			*self = match std::mem::replace(self, NamespaceServe::Done) {
+				NamespaceServe::Open(mut open) => match open.poll(waiter) {
+					Poll::Ready(Ok(Some(acked))) => {
+						let Acknowledged {
+							peer,
+							hidden,
+							announced,
+							initial,
+						} = acked;
+						let NamespaceOpen {
+							publisher,
+							stream,
+							prefix,
+							gate,
+							..
+						} = open;
+						let mut ns = Namespaces::new(peer, Target::Inline(stream));
+						ns.gate = Some(gate);
+						ns.hidden = hidden;
+						let run = Box::new(NamespaceLoop::new(&publisher, announced, prefix, ns, initial));
+						NamespaceServe::Run { publisher, run }
+					}
+					Poll::Ready(res) => return Poll::Ready(res.map(drop)),
+					Poll::Pending => {
+						*self = NamespaceServe::Open(open);
+						return Poll::Pending;
+					}
+				},
+				NamespaceServe::Run { publisher, mut run } => {
+					let res = run.poll(waiter, &publisher);
+					*self = NamespaceServe::Run { publisher, run };
+					return res;
+				}
+				NamespaceServe::Done => panic!("polled after it finished"),
+			};
+		}
+	}
+}
+
+impl NamespaceOpen {
 	/// MoQ Active Count: take what is advertised now, so the OK can say how many NAMESPACE
 	/// messages carry it. They go out first, ahead of any change.
 	fn count(&mut self, peer: cluster::Peer, hidden: bool, mut announced: crate::origin::Routes) {
-		let gate = self.gate.as_ref().expect("held until the loop starts");
-		let (permit, _) = self.publisher.permit_now(Some(gate));
+		let (permit, _) = self.publisher.permit_now(Some(&self.gate));
 		let initial = Publisher::snapshot(&mut announced);
 		let count = initial
 			.iter()
@@ -6251,7 +6508,7 @@ impl NamespaceServe {
 		self.state = NamespaceServeState::Ok {
 			peer,
 			hidden,
-			announced,
+			announced: Box::new(announced),
 			initial,
 			ok: Some(ietf::RequestOk {
 				largest: None,
@@ -6260,13 +6517,12 @@ impl NamespaceServe {
 		};
 	}
 
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	/// Ready once the request is acknowledged, with what the announce loop starts from, or
+	/// `None` once it ended without one.
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Acknowledged>, Error>> {
 		loop {
-			if let NamespaceServeState::Run(run) = &mut self.state {
-				return run.poll(waiter, &self.publisher);
-			}
-			let stream = self.stream.as_mut().expect("held until the loop starts");
-			let gate = self.gate.as_mut().expect("held until the loop starts");
+			let stream = &mut self.stream;
+			let gate = &mut self.gate;
 			match &mut self.state {
 				NamespaceServeState::Start(token) => {
 					if let Some(error) = super::namespace::refusal(&self.prefix, self.publisher.version) {
@@ -6274,16 +6530,14 @@ impl NamespaceServe {
 						self.state = NamespaceServeState::Reject(super::request_stream::Deliver::new());
 						continue;
 					}
-					let discovery = self.gate.take().expect("held until the loop starts").discovery();
 					let fin_cancels = super::request_stream::fin_cancels(self.publisher.version);
-					let admit = Admit::new(&self.publisher, &discovery, token.take(), fin_cancels);
-					self.gate = Some(discovery);
+					let admit = Admit::new(&self.publisher, gate, token.take(), fin_cancels);
 					self.state = NamespaceServeState::Admit(admit);
 				}
 				NamespaceServeState::Admit(admit) => {
 					match ready!(admit.poll(waiter, &self.publisher, stream, gate)) {
 						Ok(true) => {}
-						Ok(false) => return Poll::Ready(Ok(())),
+						Ok(false) => return Poll::Ready(Ok(None)),
 						Err(refusal) => {
 							super::request_stream::buffer_error(
 								&mut stream.writer,
@@ -6337,19 +6591,12 @@ impl NamespaceServe {
 					let announced = origin.routes();
 
 					match declared.active_count {
-						true if declared.auth => {
-							self.state = NamespaceServeState::Count {
-								peer,
-								hidden,
-								announced,
-							}
-						}
 						true => self.count(peer, hidden, announced),
 						false => {
 							self.state = NamespaceServeState::Ok {
 								peer,
 								hidden,
-								announced,
+								announced: Box::new(announced),
 								initial: Vec::new(),
 								ok: Some(ietf::RequestOk {
 									largest: None,
@@ -6358,18 +6605,6 @@ impl NamespaceServe {
 							}
 						}
 					}
-				}
-				NamespaceServeState::Count { .. } => {
-					ready!(gate.poll_setup_answered(waiter));
-					let NamespaceServeState::Count {
-						peer,
-						hidden,
-						announced,
-					} = std::mem::replace(&mut self.state, NamespaceServeState::Done)
-					else {
-						unreachable!("counting");
-					};
-					self.count(peer, hidden, announced);
 				}
 				NamespaceServeState::Ok { ok, .. } => {
 					if let Poll::Ready(refusal) = gate.poll_token_ended(waiter) {
@@ -6389,20 +6624,19 @@ impl NamespaceServe {
 					else {
 						unreachable!("acknowledging");
 					};
-					let target = Target::Inline(self.stream.take().expect("acknowledged once"));
-					let mut ns = Namespaces::new(peer, target);
-					ns.gate = self.gate.take();
-					ns.hidden = hidden;
-					let prefix = self.prefix.clone();
-					let run = NamespaceLoop::new(&self.publisher, announced, prefix, ns, initial);
-					self.state = NamespaceServeState::Run(Box::new(run));
+					return Poll::Ready(Ok(Some(Acknowledged {
+						peer,
+						hidden,
+						announced: *announced,
+						initial,
+					})));
 				}
-				NamespaceServeState::Run(_) => unreachable!("run above"),
 				NamespaceServeState::Reject(deliver) => {
 					let res = ready!(deliver.poll(waiter, &mut stream.writer));
 					self.state = NamespaceServeState::Done;
-					return Poll::Ready(res);
+					return Poll::Ready(res.map(|()| None));
 				}
+
 				NamespaceServeState::Done => panic!("polled after it finished"),
 			}
 		}
@@ -19361,7 +19595,6 @@ mod tests {
 			solicit,
 			hidden: false,
 			max_age: false,
-			auth: false,
 			active_count: false,
 			flate: false,
 		});
@@ -19698,7 +19931,7 @@ mod tests {
 
 	async fn swaps_a_route_auth(version: Version) {
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
 		let second = auth
 			.present(bytes::Bytes::from_static(b"second-secret"), false)
@@ -19764,7 +19997,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let other = crate::auth::Link::ietf(false);
+		let other = crate::auth::Link::ietf();
 		let foreign = other
 			.present(bytes::Bytes::from_static(b"foreign-secret"), false)
 			.unwrap();
@@ -19774,7 +20007,7 @@ mod tests {
 		settle().await;
 
 		let ok = publish_namespace_ok(VERSION).await;
-		let (publisher, log) = auth_publisher(&origin, &crate::auth::Link::ietf(false), vec![ok], VERSION);
+		let (publisher, log) = auth_publisher(&origin, &crate::auth::Link::ietf(), vec![ok], VERSION);
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"cam", 1).await;
 
@@ -19793,7 +20026,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let token = auth.present(bytes::Bytes::from_static(b"late-secret"), false).unwrap();
 		let cam = origin.announce("cam", crate::origin::RouteInfo::new()).unwrap();
 		settle().await;
@@ -19819,7 +20052,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let a = origin
 			.announce("cam-a", crate::origin::RouteInfo::new().with_auth(present(b"a-first")))
@@ -20018,7 +20251,7 @@ mod tests {
 			// A token too big for the header's u16 length, so the header fails after its stream
 			// opened and its request ID was spent. A message goes out whole, so this is the one
 			// failure a fresh in-memory stream can be made to show.
-			let auth = crate::auth::Link::ietf(false);
+			let auth = crate::auth::Link::ietf();
 			let token = auth.present(bytes::Bytes::from(vec![0; 70_000]), false).unwrap();
 			let _cam = origin
 				.announce("cam", crate::origin::RouteInfo::new().with_auth(token))
@@ -20065,7 +20298,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let cam = origin
 			.announce("cam", crate::origin::RouteInfo::new().with_auth(present(b"first")))
@@ -20118,7 +20351,7 @@ mod tests {
 
 	async fn advertises_again_unanswered(version: Version) {
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let cam = origin
 			.announce("cam", crate::origin::RouteInfo::new().with_auth(present(b"first")))
@@ -20351,7 +20584,7 @@ mod tests {
 					}
 					for end in [End::Local, End::Fin, End::Reset, End::Refused] {
 						let origin = unheld_origin();
-						let auth = crate::auth::Link::ietf(false);
+						let auth = crate::auth::Link::ietf();
 						let first = auth.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 						let mut first_grant = first.grant();
 						let cam = origin

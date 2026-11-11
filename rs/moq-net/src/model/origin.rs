@@ -512,6 +512,10 @@ pub struct RouteInfo {
 
 	/// Whether a usable path reaches the route's origin; see [`Self::available`].
 	pub(crate) available: bool,
+
+	/// The round trip to the route's origin node; see [`Self::rtt`]. Never forwarded:
+	/// each node measures its own link.
+	pub(crate) rtt: Option<Duration>,
 }
 
 impl RouteInfo {
@@ -529,6 +533,7 @@ impl RouteInfo {
 			node: None,
 			draining: false,
 			available: true,
+			rtt: None,
 		}
 	}
 }
@@ -564,6 +569,17 @@ impl RouteInfo {
 	/// and finally the most recently announced route. See [`Cost`].
 	pub fn cost(&self) -> Cost {
 		self.cost
+	}
+
+	/// The round trip to the route's origin node over moq-lite-07, informational: it
+	/// never ranks or selects a route.
+	///
+	/// Each link on the path adds its min RTT, the lowest smoothed RTT it measured over
+	/// the last 30 seconds, this session's own link included. `None` on any other wire,
+	/// on a route this origin serves itself, and while any link on the path has no
+	/// measurement.
+	pub fn rtt(&self) -> Option<Duration> {
+		self.rtt
 	}
 
 	/// Whether a usable path reaches the route's origin. An unavailable route is held:
@@ -632,6 +648,13 @@ impl RouteInfo {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_available(mut self, available: bool) -> Self {
 		self.available = available;
+		self
+	}
+
+	/// Set the round trip to the route's origin node; see [`Self::rtt`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn with_rtt(mut self, rtt: Option<Duration>) -> Self {
+		self.rtt = rtt;
 		self
 	}
 
@@ -847,8 +870,8 @@ type RouteOrder = (
 	Reverse<u64>,
 );
 
-/// The `(hops, cost, source, instance, epoch, auth, node, available)` metadata an announce
-/// cursor delivers alongside a prefix.
+/// The `(hops, cost, source, instance, epoch, auth, node, available, rtt)` metadata
+/// an announce cursor delivers alongside a prefix.
 type RouteMeta = (
 	Hops,
 	Cost,
@@ -858,6 +881,7 @@ type RouteMeta = (
 	Option<crate::auth::Credential>,
 	Option<u64>,
 	bool,
+	Option<Duration>,
 );
 
 /// The earlier of two optional deadlines.
@@ -1256,6 +1280,7 @@ impl OriginConsumerState {
 				node: meta.6,
 				draining: false,
 				available: meta.7,
+				rtt: meta.8,
 			},
 		};
 		(RouteEvent { kind, announce }, owed)
@@ -1298,6 +1323,8 @@ struct RouteEntry {
 	draining: bool,
 	/// Whether a usable path reaches the route's origin; see [`RouteInfo::available`].
 	available: bool,
+	/// The round trip to the route's origin node; see [`RouteInfo::rtt`].
+	rtt: Option<Duration>,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a [`Claim`]). `None` for an advertise-only
 	/// announcement ([`Producer::announce`]) and for a local broadcast.
@@ -1366,12 +1393,13 @@ impl RouteEntry {
 			self.auth.clone(),
 			self.node,
 			self.available,
+			self.rtt,
 		)
 	}
 
 	/// Whether [`Self::meta`] would equal `meta`, without building it.
 	fn delivers(&self, meta: &RouteMeta) -> bool {
-		let (hops, cost, source, instance, epoch, auth, node, available) = meta;
+		let (hops, cost, source, instance, epoch, auth, node, available, rtt) = meta;
 		*hops == self.hops
 			&& *cost == self.cost
 			&& *source == self.entered()
@@ -1380,6 +1408,7 @@ impl RouteEntry {
 			&& *auth == self.auth
 			&& *node == self.node
 			&& *available == self.available
+			&& *rtt == self.rtt
 	}
 
 	/// Whether a request for `path` can be served through this entry. A served
@@ -2973,6 +3002,7 @@ impl Announcing {
 				node: route.node,
 				draining: route.draining,
 				available: route.available,
+				rtt: route.rtt,
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
@@ -3589,6 +3619,7 @@ impl AnnounceProducer {
 			entry.node = route.node;
 			entry.draining = route.draining;
 			entry.available = route.available;
+			entry.rtt = route.rtt;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim, Gone::End);
@@ -3650,6 +3681,7 @@ impl AnnounceProducer {
 			node: entry.node,
 			draining: entry.draining,
 			available: entry.available,
+			rtt: entry.rtt,
 		})
 	}
 
@@ -9897,7 +9929,7 @@ mod tests {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_auth_swap_is_an_update() {
-		let handle = crate::auth::Link::ietf(false);
+		let handle = crate::auth::Link::ietf();
 		let first = handle.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 		let second = handle.present(bytes::Bytes::from_static(b"second"), false).unwrap();
 		let producer = origin(1).produce();
@@ -15063,6 +15095,74 @@ mod tests {
 		// The incumbent's clean end is the track's, not the newcomer's error.
 		let _old = old.finish().unwrap();
 		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
+	}
+
+	/// The serving route is withdrawn while its copy of the track is still open, and the
+	/// next route for the same publisher no longer has the broadcast: its refusal must not
+	/// end the track, which takes the incumbent's remaining groups and clean end.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_refused_replacement_keeps_a_withdrawn_incumbent_open() {
+		// The incumbent arrives from relay 2, a stale standby from relay 3, both for
+		// publisher 9, so withdrawing relay 2 leaves the standby standing.
+		let producer = origin(1).produce();
+		let server = producer
+			.forward(
+				"room",
+				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[9, 2])),
+			)
+			.unwrap();
+		let standby = producer
+			.forward(
+				"room",
+				RouteInfo::new()
+					.with_instance(instance(), 0)
+					.with_hops(hops(&[9, 5, 3])),
+			)
+			.unwrap();
+		let pending = producer.consume().request("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		let old = upstream.create_track("video", crate::track::Info::timed()).unwrap();
+		queued(&server).await.serve(&upstream);
+		let resolved = pending.await.expect("resolves");
+		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = old.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = next_group(&mut subscription).await.unwrap().expect("first group");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
+
+		// The peer withdraws the broadcast: the route retracts and its source closes,
+		// while the subscription already in flight stays open.
+		server.withdrawn();
+		upstream.close();
+
+		let successor = broadcast::Info::new().produce();
+		let mut handler = successor.requests();
+		queued(&standby).await.serve(&successor);
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front asked the standby")
+			.expect("request");
+		request.reject(Error::Unroutable);
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+
+		let mut group = old.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = next_group(&mut subscription)
+			.await
+			.expect("the incumbent keeps serving")
+			.expect("track open");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"last");
+
+		let _old = old.finish().unwrap();
+		let end = next_group(&mut subscription)
+			.await
+			.map(|group| group.map(|group| group.sequence));
+		assert!(matches!(end, Ok(None)), "the incumbent's clean end, not {end:?}");
 	}
 
 	/// The newcomer answers "video" with matching metadata, the front reads that answer,

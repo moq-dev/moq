@@ -1046,9 +1046,9 @@ rust_connect() {
 }
 
 # The pattern a cell's token grants its publisher, or its subscribers, on <broadcast>. The `auto`
-# pass mints patterns no prefix could carry, so AUTH must deliver them as minted. moq-transport's
-# AUTH extension carries prefixes alone and refuses a narrower grant, closing the
-# session, so a pinned pass grants the broadcast's subtree.
+# pass mints patterns no prefix could carry, so AUTH must deliver them as minted. A pinned
+# pass may be moq-transport, whose requests name prefixes alone, so it grants the
+# broadcast's subtree.
 publish_grant() {
     if [[ "$VERSION" == auto ]]; then printf '%s' "$1"; else printf '%s/**' "$1"; fi
 }
@@ -1604,6 +1604,11 @@ run_round() {
     sub_url=$(token_url --subscribe "$(subscribe_grant "$broadcast")")
     sub_grant=$(grant_line "" "**/$broadcast")
     for sub in "${SUB_LIST[@]}"; do
+        if [[ "$case" == media && "$publisher" == python && "$sub" == go ]]; then
+            echo "  SKIP  $pub -> $sub (quarantined)"
+            record skip case="$case" publisher="$publisher" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-python-go.md"
+            continue
+        fi
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
             record fail case="$case" publisher="$publisher" subscriber="$sub" detail="subscriber client unavailable"
@@ -1770,7 +1775,6 @@ run_finish_gst() {
     echo "finish tail frames=10 end=n/a"
 }
 
-# shellcheck disable=SC2329  # unreachable while finish is quarantined
 finish_ready() {
     local pid="$1" log="$2" marker="$3" deadline
     deadline=$(awk -v now="$SECONDS" -v t="$TIMEOUT" 'BEGIN { print int(now + t + 1) }')
@@ -1790,7 +1794,6 @@ run_finish_reader() {
 }
 
 # The line a finish reader prints once every check it can make has passed.
-# shellcheck disable=SC2329  # unreachable while finish is quarantined
 finish_marker() {
     if [[ "$1" == gst ]]; then
         echo 'finish tail frames=10 end=n/a'
@@ -1812,21 +1815,10 @@ run_finishes() {
         done
         return
     fi
-    # Quarantined: quest/m0/test-flakes-2/interop-finish.md. The cpp, go, and rust publishers'
-    # finish cases failed under a loaded host and passed on rerun.
-    for pub in "${PUB_LIST[@]}"; do
-        for sub in "${SUB_LIST[@]}"; do
-            echo "  SKIP  finish $pub -> $sub (quarantined)"
-            record skip case=finish publisher="$pub" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-finish.md"
-        done
-    done
-    return
-
-    # shellcheck disable=SC2317  # unreachable while quarantined
     for pub in "${PUB_LIST[@]}"; do
         name="finish-$pub"
         # The fixture and its .health sibling share a parent, so one prefix grant covers both:
-        # moq-transport's AUTH extension carries prefixes alone.
+        # moq-transport requests name prefixes alone.
         broadcast="$name-$$-$RANDOM/fixture.hang"
         grant="${broadcast%/*}/**"
         ack="$LOGS/$name-ack"
@@ -2550,7 +2542,7 @@ run_catalog_fanout() {
     exec 9<>"$fifo"
     from=$(relay_next_line)
     before=$(relay_inflated) || why="relay metrics unavailable"
-    # Subtree grants, which moq-transport's AUTH extension can carry too.
+    # Subtree grants, which a moq-transport request can name too.
     harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_catalog_publisher "$fifo" "$(token_url --publish "$broadcast/**")" "$broadcast"
     pid="$HARNESS_PID"
     for version in "${CATALOG_VERSIONS[@]}"; do

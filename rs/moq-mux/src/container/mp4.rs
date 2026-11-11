@@ -942,8 +942,8 @@ mod tests {
 		for i in 0..12u64 {
 			audio.write(raw_frame(i * 20_000, OPUS, i % 5 == 0)).unwrap();
 		}
-		live.track.finish().unwrap();
-		audio.finish().unwrap();
+		live.track.end_with(None).unwrap();
+		let _finished = audio.finish().unwrap();
 
 		let mut export = export(&live).await;
 		let mut file = Vec::new();
@@ -1006,9 +1006,9 @@ mod tests {
 		for i in 0..10u64 {
 			audio.write(raw_frame(i * 20_000, OPUS, i % 5 == 0)).unwrap();
 		}
-		audio.finish().unwrap();
+		let _finished = audio.finish().unwrap();
 		live.track.write(video_frame(200_000, true)).unwrap();
-		live.track.finish().unwrap();
+		live.track.end_with(None).unwrap();
 		record(&mut export, &mut file).await;
 
 		let unfinished = atoms(&file);
@@ -1052,12 +1052,12 @@ mod tests {
 		for i in 0..5u64 {
 			audio.write(raw_frame(i * 20_000, OPUS, i == 0)).unwrap();
 		}
-		audio.finish().unwrap();
+		let audio = audio.finish().unwrap();
 		record(&mut export, &mut file).await;
 		let name = audio.name().to_string();
 		live.catalog.modify().unwrap().audio.renditions.remove(&name);
 		live.track.write(video_frame(200_000, true)).unwrap();
-		live.track.finish().unwrap();
+		live.track.end_with(None).unwrap();
 		record(&mut export, &mut file).await;
 		assert_eq!(export.fmp4.declarations().count(), 2);
 
@@ -1076,12 +1076,12 @@ mod tests {
 		for i in 0..10u64 {
 			audio.write(raw_frame(i * 20_000, OPUS, i % 5 == 0)).unwrap();
 		}
-		audio.finish().unwrap();
+		let _finished = audio.finish().unwrap();
 		// Video starts 100 ms in, and its second GOP comes a second after the first.
 		for (timestamp, keyframe) in [(100_000, true), (133_000, false), (1_133_000, true), (1_166_000, false)] {
 			live.track.write(video_frame(timestamp, keyframe)).unwrap();
 		}
-		live.track.finish().unwrap();
+		live.track.end_with(None).unwrap();
 
 		let mut export = export(&live).await;
 		let mut file = Vec::new();
@@ -1126,7 +1126,7 @@ mod tests {
 		for (i, &timestamp) in presentations.iter().enumerate() {
 			live.track.write(video_frame(timestamp as u64, i % 4 == 0)).unwrap();
 		}
-		live.track.finish().unwrap();
+		live.track.end_with(None).unwrap();
 
 		let mut export = export(&live).await.with_fragment_duration(Duration::ZERO);
 		let mut file = Vec::new();
@@ -1280,11 +1280,11 @@ mod tests {
 		for i in 0..10u64 {
 			audio.write(raw_frame(100_000 + i * 20_000, OPUS, i % 5 == 0)).unwrap();
 		}
-		audio.finish().unwrap();
+		let _finished = audio.finish().unwrap();
 		for i in 4..9u64 {
 			live.track.write(video_frame(i * 33_000, i % 3 == 0)).unwrap();
 		}
-		live.track.finish().unwrap();
+		live.track.end_with(None).unwrap();
 		record_indexed(&mut export, &mut file, &mut indexes).await;
 		assert!(indexes.len() > 4, "several writes to cut between");
 
@@ -1324,8 +1324,8 @@ mod tests {
 			live.track.write(video_frame(i * 33_000, i % 3 == 0)).unwrap();
 			audio.write(raw_frame(i * 20_000, OPUS, i == 0)).unwrap();
 		}
-		live.track.finish().unwrap();
-		audio.finish().unwrap();
+		live.track.end_with(None).unwrap();
+		let _finished = audio.finish().unwrap();
 		let mut export = export(&live).await;
 		let mut file = Vec::new();
 		record(&mut export, &mut file).await;

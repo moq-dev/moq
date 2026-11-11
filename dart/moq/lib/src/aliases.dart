@@ -67,7 +67,8 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// Follows a specific broadcast path across the publisher instances that serve it.
 typedef Following = MoqFollowing;
 
-/// The read-only facts on a received route: a static cost and the stream's instance.
+/// The read-only facts on a received route: a static cost, the stream's instance, and
+/// its informational `rtt` to the origin node.
 typedef RouteInfo = MoqRouteInfo;
 
 /// One continuous stream at a path: `Instance.parse` names one, and only a session mints one.
@@ -255,6 +256,8 @@ typedef ConnectionPhaseClosed = ClosedMoqConnectionPhase;
 typedef ConnectionState = MoqConnectionState;
 
 /// Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
+/// It applies only once a session has been established: a first dial that
+/// reaches no session ends the connection with its error rather than retrying.
 typedef Backoff = MoqBackoff;
 
 /// Whether a protocol code is from the session or stream registry.

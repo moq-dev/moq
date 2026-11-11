@@ -78,7 +78,10 @@ one, the player inserts a second recovery point with a zero count before its
 first slice. The slices are untouched; the stripes clear as the sweep
 completes.
 
-`el.broadcast.out.status` is `offline`, `loading`, `live`, `error`, or `unsupported`.
+`el.broadcast.out.status` is `connecting`, `offline`, `loading`, `live`, `error`, or `unsupported`.
+It reads `connecting` until a session could have announced the broadcast: while the
+connection dials, redials, or was refused (`el.connection.error` says why), and until the
+relay's initial announcements arrive. Only then does a missing broadcast read `offline`.
 On `unsupported`, update the player to read the broadcast's newer catalog; the overlay shows this notice.
 On `error` the origin refused the broadcast, `el.broadcast.out.error` says why,
 and the player does not ask again until it is pointed elsewhere or re-enabled.

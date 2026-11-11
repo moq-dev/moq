@@ -94,6 +94,9 @@ pub struct MoqRouteInfo {
 	pub instance: Arc<MoqInstance>,
 	/// Whether a usable path reaches the route's origin; requests may fail while it is not.
 	pub available: bool,
+	/// The round trip to the route's origin node over moq-lite-07, absent while any link
+	/// has no measurement. Informational; it never ranks a route.
+	pub rtt: Option<std::time::Duration>,
 }
 
 impl From<moq_net::origin::RouteInfo> for MoqRouteInfo {
@@ -102,6 +105,7 @@ impl From<moq_net::origin::RouteInfo> for MoqRouteInfo {
 			cost: route.cost().value(),
 			instance: MoqInstance::wrap(route.instance().clone()),
 			available: route.available(),
+			rtt: route.rtt(),
 		}
 	}
 }

@@ -982,8 +982,8 @@ sharing one can leave a bench linked against the other tree's library.
 
 ### CodSpeed
 
-The CodSpeed workflow adds instruction counts for every `main` commit that
-touches Rust, at <https://codspeed.io/moq-dev/moq>. Its CPU simulation runs
+The CodSpeed workflow adds nightly instruction counts for `main`, at
+<https://codspeed.io/moq-dev/moq>. Its CPU simulation runs
 each bench under Valgrind on a hosted runner, so a change of a few percent
 shows without the paired comparison's rounds. It does not see syscalls, I/O,
 contention, or caches, and skips `iter_custom` benches, so `just rs codspeed`
