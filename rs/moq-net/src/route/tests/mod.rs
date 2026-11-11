@@ -5,7 +5,9 @@
 //! are written with a trailing `/` where the contract means a wildcard; every
 //! lite-07 claim already covers the paths below it, so the slash is dropped.
 
+mod compare;
 mod handoff;
+mod paths;
 mod routing;
 mod rtt;
 
