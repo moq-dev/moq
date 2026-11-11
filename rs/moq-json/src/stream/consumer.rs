@@ -130,7 +130,7 @@ mod timestamps {
 					})
 					.unwrap();
 			}
-			producer.finish().unwrap();
+			let _finished = producer.finish().unwrap();
 			for (n, ticks) in times.into_iter().enumerate() {
 				let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&kio::Waiter::noop()) else {
 					panic!("missing state {n}")

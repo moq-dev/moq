@@ -66,7 +66,7 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 		let mut cursor = rendition.segments();
 		let mut next = std::pin::pin!(cursor.next());
 		// Waiting for its first segment, the cursor subscribes before any media exists.
-		let mut demand = publisher.media.demand();
+		let mut demand = publisher.media.as_ref().expect("open").demand();
 		let wanted = async {
 			while demand.wanted_changed().await?.is_none() {}
 			moq_net::Result::Ok(())
