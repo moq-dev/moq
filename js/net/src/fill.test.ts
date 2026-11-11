@@ -233,8 +233,9 @@ test("fill: an answer aborted below the end does not hold the end open", async (
 });
 
 // A fill's answer is no feed arrival: one that fails leaves the gap the live feed still owes holding
-// the end, as the Rust track records arrivals only for the groups its feed delivers.
-test("fill: a failed answer to a gap the feed owes still holds the end", async () => {
+// the end and the ordered reader, as the Rust track records arrivals only for the groups its feed
+// delivers and serves no failed fetch-only slot. Mirrors Rust `a_failed_fill_answer_holds_an_ordered_reader`.
+test("fill: a failed answer to a gap the feed owes holds the end and the ordered reader", async () => {
 	for (const error of [new StreamError(StreamCode.Cancel), new Error("archive failed")]) {
 		await failedAnswerHoldsTheEnd(error);
 	}
@@ -244,8 +245,10 @@ async function failedAnswerHoldsTheEnd(error: Error) {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { maxAge: null });
 	hooks.receiveTrack(track);
-	track.subscribe({ delay: { max: null } });
+	const reader = track.subscribe({ delay: { max: null } });
+	const ordered = reader.ordered();
 	for (const sequence of [0n, 2n]) hooks.receiveGroup(track, { sequence, start: 0 }).finish();
+	expect((await ordered.nextGroup())?.sequence).toBe(0n);
 	const requests = track.requests();
 	const fetching = wireOf(broadcast).fetchGroup("video", 1n);
 	const fill = await requests.requestedFill();
@@ -257,6 +260,15 @@ async function failedAnswerHoldsTheEnd(error: Error) {
 	await yieldNow();
 	expect(track.closed.peek()).toBeUndefined();
 
+	// The failed answer is no verdict on group 1, so an ordered reader still waits for it rather
+	// than moving on to group 2, and gets it once the feed delivers it.
+	const next = ordered.nextGroup();
+	expect(await Promise.race([next.then(() => "moved"), yieldNow().then(() => "waiting")])).toBe("waiting");
+	hooks.receiveGroup(track, { sequence: 1n, start: 0 }).finish();
+	expect((await next)?.sequence).toBe(1n);
+	expect((await ordered.nextGroup())?.sequence).toBe(2n);
+
+	reader.close();
 	requests.close();
 	broadcast.close();
 }

@@ -226,8 +226,6 @@ export function staleHole(budget: number): Hole {
 export interface DropRun extends Run, Hole {
 	/** Copied into a cursor from the track's runs, which it folds in afresh on each change. */
 	received?: boolean;
-	/** A failed fill answer, which the live feed never accounted for: reclaiming it accounts nothing. */
-	fill?: boolean;
 }
 
 /** Whether two runs say the same thing, so they may merge. */
@@ -236,8 +234,7 @@ export function sameHole(a: DropRun, b: DropRun): boolean {
 		toStreamCode(a.error) === toStreamCode(b.error) &&
 		!a.skip === !b.skip &&
 		a.stale === b.stale &&
-		!a.received === !b.received &&
-		!a.fill === !b.fill
+		!a.received === !b.received
 	);
 }
 

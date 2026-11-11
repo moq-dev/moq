@@ -603,7 +603,9 @@ test("a forgotten failed fill answer leaves its gap owed", async () => {
 		hooks.receiveGroup(producer, { sequence: 1n, start: 0, fill: true }).abort(new Error("archive failed"));
 		hooks.endTrack(producer, { group: 3n, frame: 0 });
 		await yieldNow();
-		expect(dropsHeld(producer).length).toBe(1);
+		// A failed fill answer says nothing of the feed, so it records no drop, as in Rust.
+		expect(dropsHeld(producer)).toEqual([]);
+		expect(producer.closed.peek()).toBeUndefined();
 
 		await clock.advance(3_000);
 		expect(dropsHeld(producer)).toEqual([]);

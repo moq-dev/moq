@@ -14948,6 +14948,40 @@ mod test {
 		groups.assert_no_group();
 	}
 
+	/// A failed fill answer is no verdict on a gap the feed owes: an ordered reader neither takes
+	/// the failed copy nor moves past it, and gets the feed's group once it lands. Mirrors JS
+	/// `fill: a failed answer to a gap the feed owes holds the end and the ordered reader`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_failed_fill_answer_holds_an_ordered_reader() {
+		for error in [Error::Cancel, Error::App(1)] {
+			let producer = received_producer(None);
+			let dynamic = producer.requests();
+			let consumer = producer.consume();
+			let mut ordered = producer.subscribe(replay()).ordered();
+			put(&producer, 0, None);
+			put(&producer, 2, None);
+			assert_eq!(drain_ordered(&mut ordered), [0]);
+
+			let pending = consumer.fetch_group(1, None);
+			let req = dynamic
+				.requested_fill_group()
+				.now_or_never()
+				.expect("fill request is ready")
+				.unwrap();
+			req.accept(None).unwrap().abort(error.clone()).unwrap();
+			drop(pending);
+			assert!(drain_ordered(&mut ordered).is_empty(), "{error}: group 1 is still owed");
+
+			put(&producer, 1, None);
+			assert_eq!(
+				drain_ordered(&mut ordered),
+				[1, 2],
+				"{error}: the feed's group lands in order"
+			);
+		}
+	}
+
 	/// The live edge is resolved once per poll and applied to every group that poll
 	/// walks off, so it has to be revalidated before it convicts anything: an eviction
 	/// in between would otherwise discard a group on the strength of content that is no
