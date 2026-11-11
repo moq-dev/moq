@@ -308,7 +308,7 @@ sampler.run((effect) => {
 		}
 		// A changed node set makes this aggregate's baseline incompatible with the
 		// previous one, so start the cluster series fresh instead of splicing.
-		const membership = nodes.join("\0");
+		const membership = nodes.length ? nodes.join("\0") : undefined;
 		if (membership !== clusterMembership) {
 			cluster = [];
 			clusterMembership = membership;
