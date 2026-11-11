@@ -193,11 +193,7 @@ func (c *Claim) SetCost(cost uint64) error {
 //
 // Cancelling ctx abandons only this wait: the claim stays advertised.
 func (c *Claim) Requested(ctx context.Context) (*BroadcastRequest, error) {
-	inner, err := bridge.CallRelease(ctx, nil, c.inner.Requested, func(request **ffi.MoqBroadcastRequest) {
-		if request != nil {
-			(*request).Destroy()
-		}
-	})
+	inner, err := bridge.Call(ctx, nil, c.inner.Requested)
 	if err != nil || inner == nil {
 		return nil, err
 	}

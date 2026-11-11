@@ -156,9 +156,6 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	all_random_access: bool,
 
 	mux_rate: Meter,
-
-	/// Whether input is still accepted: [`finish`](Self::finish) ends it.
-	input: crate::container::Input,
 }
 
 /// Owns the `m2ts` catalog section once written, removing it however the track ends, as the
@@ -166,6 +163,34 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 struct Section<E: crate::catalog::hang::CatalogExt> {
 	catalog: crate::catalog::Producer<E>,
 	written: hang::catalog::M2ts,
+}
+
+/// A passthrough that [finished](Passthrough::finish): its track has ended, and it can still be
+/// read or aborted, but it takes no more input.
+///
+/// Dropping it releases the track and removes the catalog's `m2ts` section.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut passthrough: moq_mux::container::ts::passthrough::Finished) {
+/// passthrough.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it releases the track and its catalog section"]
+pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
+	passthrough: Passthrough<E>,
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
+	/// The name of the track carrying the packets.
+	pub fn track(&self) -> &str {
+		self.passthrough.track()
+	}
+
+	/// Release the track's cache, reporting `err` to readers that have not drained it; see
+	/// [`Passthrough::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.passthrough.abort(err);
+	}
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Drop for Section<E> {
@@ -282,7 +307,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			groups: Groups::Waiting(None),
 			all_random_access: true,
 			mux_rate: Meter::default(),
-			input: crate::container::Input::Open,
 		})
 	}
 
@@ -305,7 +329,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	/// Append `data` and publish every whole packet it completes. A trailing partial packet is
 	/// kept for the next call.
 	pub fn decode(&mut self, data: &[u8]) -> crate::Result<()> {
-		self.input.check()?;
 		self.scratch.extend_from_slice(data);
 		if !self.sized {
 			self.probe_packet_size(false)?;
@@ -313,31 +336,21 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		self.packets()
 	}
 
-	/// Publish what is left at the end of the input and close the track.
+	/// Publish what is left at the end of the input, close the track, and return the
+	/// [`Finished`] passthrough.
 	///
 	/// No later PCR will arrive, so the objects since the last one are timed at the rate of the
-	/// interval before it. The catalog keeps the `m2ts` section until the importer drops.
+	/// interval before it. The catalog keeps the `m2ts` section until the [`Finished`] passthrough
+	/// drops.
 	///
-	/// A finish that fails ends the track with an error, and every later call returns its cause.
-	/// Calling it again after a success does nothing, and later input is refused with
-	/// [`Finished`](crate::Error::Finished).
-	pub fn finish(&mut self) -> crate::Result<()> {
-		match &self.input {
-			crate::container::Input::Open => {}
-			crate::container::Input::Finished => return Ok(()),
-			crate::container::Input::Refused(err) | crate::container::Input::Failed(err) => return Err(err.clone()),
+	/// A finish that fails ends the track with an error, so it can't be retried.
+	pub fn finish(mut self) -> crate::Result<Finished<E>> {
+		if let Err(err) = self.end() {
+			// The objects already written stay readable, then subscribers get an error.
+			let _ = self.media.end_with(Some(err.reason()));
+			return Err(err);
 		}
-		let result = self.end();
-		match &result {
-			Ok(()) => self.input = crate::container::Input::Finished,
-			Err(err) => {
-				// The objects already written stay readable, then subscribers get an error.
-				let _ = self.media.fail(err.reason());
-				self.reservation = None;
-				self.input = crate::container::Input::Failed(err.clone());
-			}
-		}
-		result
+		Ok(Finished { passthrough: self })
 	}
 
 	/// Publish the rest of the input and finish the track, stopping at the first failure.
@@ -349,7 +362,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		self.close_object();
 		self.drain_queue()?;
 		self.reservation = None;
-		self.media.finish()?;
+		self.media.end_with(None)?;
 		Ok(())
 	}
 

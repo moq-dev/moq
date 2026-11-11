@@ -58,7 +58,8 @@ const checkRuns = check.jobs.check.steps.filter((step: { run?: string }) => step
 assert.ok(checkRuns.length >= 2);
 for (const step of checkRuns) assert.match(step.run, /just ci(-select)? --all\b/, `${step.name} must run --all`);
 // Check runs the whole gate in one job.
-for (const step of check.jobs.check.steps) assert.equal(step.env?.CHECK_MODULES, undefined, `${step.name} sets CHECK_MODULES`);
+for (const step of check.jobs.check.steps)
+	assert.equal(step.env?.CHECK_MODULES, undefined, `${step.name} sets CHECK_MODULES`);
 // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
 assert.equal(check.concurrency.group, "check-${{ github.event.pull_request.number }}");
 assert.equal(check.concurrency["cancel-in-progress"], true);

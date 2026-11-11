@@ -162,6 +162,8 @@
             cargo-hakari
             cargo-nextest
             cargo-codspeed
+            # Sets versions for a release cut; `sh/version.py` needs 0.4.1 or newer.
+            release-plz
             # Source-based test coverage (`just rs coverage`).
             # Its LLVM test helpers must read the compiler's profile format.
             (cargo-llvm-cov.override {
@@ -173,8 +175,6 @@
           ]
           ++ gstreamerDeps
           ++ pkgs.lib.optionals (!pkgs.stdenv.hostPlatform.isDarwin) [
-            # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
-            pkgs.release-plz
             # cpal's `alsa-sys` (moq-audio `capture` / `playback` features) links
             # libasound on Linux via pkg-config; macOS uses CoreAudio, so no dep
             # there. See `alsaPlugins` below for reaching the default device at

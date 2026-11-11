@@ -50,7 +50,7 @@ export class Publisher {
 		if (!text) return;
 		this.expire();
 		this.#producer.push({ value: text, at: Time.Timestamp.now() });
-		this.#expires.update((expires) => [...expires, now().add(HISTORY)]);
+		this.#expires.update((expires) => [...expires, now().saturatingAdd(HISTORY)]);
 	}
 
 	/** Retire elapsed messages now; the publisher also schedules this automatically. */

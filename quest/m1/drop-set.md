@@ -14,13 +14,14 @@ the cursor's floor, and losing any other ends the subscription with
 
 The track's drop set is billed and bounded, and every reader folds it in
 incrementally ([moq-dev/moq#8294](https://github.com/moq-dev/moq/pull/8294)).
+So are the track's arrivals: each gap is billed, and paying eviction debt
+folds the oldest gaps early ([moq-dev/moq#8440](https://github.com/moq-dev/moq/pull/8440)).
 The per-cursor storage is not billed to anything: `DropCursor`'s `pending`
-and its `reported`, `reported_stale`, `reported_received`, and
-`reported_skip` sets, `Skipped`, `Delivered`, `TrackRun`'s `served`,
-`dropped`, `dropped_stale`, and `expired`, the lite subscriber's record of
-the group streams that finished since its last update (`Tail::finished`, JS
-`Tail#finished`), and the JS wire cursor's `#pending`, `#skipped`,
-`#reported`, `#reportedStale`, `#reportedReceived`, and `#reportedSkip`.
+and its `reported` record (one `RangeMap<u64, Report>`), `Skipped`,
+`Delivered`, `TrackRun`'s `served`, `dropped`, `dropped_stale`, and
+`expired`, the lite subscriber's record of the group streams that finished
+since its last update (`Tail::finished`, JS `Tail#finished`), and the JS wire
+cursor's `#pending`, `#skipped`, and `#reported` (one `Runs<Reported>`).
 This quest bounds them, keeping the behavior
 [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670) and
 moq-dev/moq#8294 landed and the decisions recorded there.
@@ -34,14 +35,18 @@ because runs keyed by group sequence convert mechanically to starts.
   reason and, for a stale run, the budget it was judged under. It replaces
   `Skipped` (`rs/moq-net/src/model/skipped.rs`), `Delivered`
   (`rs/moq-net/src/model/delivered.rs`, whose floor folds stale gaps in with
-  delivered groups), `DropCursor`'s `reported*` sets, `TrackRun::served` in
-  `rs/moq-net/src/lite/publisher.rs`, and their JS mirrors. Delivery is
+  delivered groups), `DropCursor`'s `reported` record, whose `Report` kinds
+  carry over, `TrackRun::served` in `rs/moq-net/src/lite/publisher.rs`, and
+  their JS mirrors. Delivery is
   recorded, not inferred from the cursor position, since an arrival-order or
   descending cursor delivers out of sequence order.
 - **Billed to the pool, never guessed.** Each cursor run is billed through a
   `Charge` at a fixed per-run cost (in JS, through the pool in
   `js/net/src/cache.ts`), as the track's runs are. A relay's own eviction is
-  never a run.
+  never a run. A cursor pays only the debt its track could not: the track
+  pays with its groups, its arrivals' oldest gaps, and its drop set first, so
+  a relay running at capacity never ends a reader whose lowest run is an
+  unknown hole while cheaper bookkeeping is left to shed.
 - **The floor rises only over a final prefix:** the runs from the floor up to
   the lowest run that is not final. A final run is a delivered one, one
   skipped at the track's max age bound, a skip, a budget-independent drop,
@@ -54,16 +59,8 @@ because runs keyed by group sequence convert mechanically to starts.
   `rs/moq-net/src/model/track/miss.rs` keeps per gap (from
   [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171), decided
   2026-10-23).
-- **The track's arrivals ledger,** billed and bounded too (decided
-  2026-11-09, maintainer: ✅ fold it into this quest's memory work; rejected:
-  a separate m1 quest, dropping it). `TrackState::arrivals` (Rust) and JS
-  `#arrivals` are unbilled and fold a gap only once the grace passes, so
-  under an unbounded grace (no cache duration, no max age, an unbounded max
-  delay) a peer fragmenting its arrivals, or in JS its drops, which JS
-  accounts as they land, grows them without bound. A reclaimed drop run
-  already adds no run to them (moq-dev/moq#8294).
-- **CPU per drop.** Every report inserts into the per-cursor `RangeSet`s and
-  sorted arrays, so `track_subscriber_churn_drops` in
+- **CPU per drop.** Every report inserts into the per-cursor records, so
+  `track_subscriber_churn_drops` in
   `rs/moq-net/benches/track.rs` slows once many readers each hold many
   reported runs (256 readers holding 65,536 each: about 0.75 ms per drop
   against 0.18 ms with one each). JS `#askFills` still walks every run above

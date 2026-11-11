@@ -97,10 +97,6 @@ This README's own work, once the children land:
   `doc/lib` pages rather than adding a page, unless the material outgrows
   them. Children keep their own API docs and drafts current inline.
 
-## Required
-
-- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - browser publishers adapt to `getStats()`'s send estimate once Chrome and Safari report one
-
 ## Related
 
 - [Realtime uplink congestion control](/quest/m3/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks; it must implement native probing to ship (decided 2026-10-25)

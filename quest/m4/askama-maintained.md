@@ -16,5 +16,5 @@ its template syntax. Verify binding generation after the upgrade.
 
 ## Related
 
-- [Dependency audit](/quest/m3/audit-deps.md) - recheck the rest of the dependency graph
+- [Cost audit](/quest/m3/audit-cost.md) - recheck the rest of the dependency graph
 - [Switch to rust2's exporter](/quest/m3/ffi-exporter.md) - askama reaches the lock only through `uniffi_bindgen`, which that switch deletes

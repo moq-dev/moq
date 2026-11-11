@@ -196,7 +196,7 @@ test("a mute that disables the rendition fails the run", async () => {
 });
 
 // The silence between presses is declared, so playback crosses it without counting it. Underruns
-// and stalls the player does count are reported, not failed: the audio grading judges them.
+// and stalls the player does count are reported, not failed: zero underruns is not a goal.
 test("an underrun or stall across the presses is reported and passes", async () => {
 	const result = trace();
 	result.playback = { underruns: 3, stalls: 2 };

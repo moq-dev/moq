@@ -1,4 +1,4 @@
-import { Duration, Instant } from "@moq/clock";
+import { Duration, type Instant } from "@moq/clock";
 
 /**
  * Maps a file's presentation timeline onto our clock, repeating it forever.
@@ -33,9 +33,9 @@ export class Timeline {
 	 * zero, so it stays signed until it lands on the clock, which saturates at the clock's origin.
 	 */
 	at(micros: number, loop: number): Instant {
-		const start = this.#zero.add(this.#duration.mul(loop));
-		if (micros >= 0) return start.add(Duration.micros(micros));
-		return Instant.ZERO.add(start.since(Instant.ZERO).saturatingSub(Duration.micros(-micros)));
+		const start = this.#zero.saturatingAdd(this.#duration.mul(loop));
+		if (micros >= 0) return start.saturatingAdd(Duration.micros(micros));
+		return start.saturatingSub(Duration.micros(-micros));
 	}
 
 	/** The file timestamp and pass due at the given clock time, the inverse of {@link at}. */

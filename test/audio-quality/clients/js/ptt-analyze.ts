@@ -206,7 +206,7 @@ console.log(
 	JSON.stringify({ latency, path, delay, unencoded, unsent, unreceived, playback, native: summary.native }, null, 2),
 );
 
-// Latency, underruns, and stalls are reported, never gated: the audio grading quest judges them.
+// Latency, underruns, and stalls are reported, never gated: zero underruns is not a goal.
 const failures: string[] = [];
 if (presses.some((press, i) => (i === 0 || i >= 8) && press.audible === null)) {
 	failures.push("a separated utterance never reached the output");
