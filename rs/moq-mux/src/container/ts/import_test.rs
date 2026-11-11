@@ -27,7 +27,7 @@ fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	let buf = BytesMut::from(data);
 	import.decode(&buf).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	catalog.snapshot()
 }
@@ -44,7 +44,7 @@ fn import_ts_ext(data: &[u8]) -> crate::catalog::hang::Catalog<crate::container:
 
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(data).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	catalog.snapshot()
 }
@@ -85,7 +85,7 @@ async fn public_container_preserves_loc_for_ts() {
 	let reserved = catalog.reserve();
 	let mut import = super::Import::new(broadcast, reserved).with_container(hang::catalog::Container::Loc);
 	import.decode(data).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	let (name, config) = snapshot.video.renditions.iter().next().unwrap();
@@ -240,7 +240,7 @@ async fn import_opus_frames() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let name = catalog
 		.snapshot()
@@ -299,7 +299,7 @@ async fn opus_catalog_carries_the_anchored_clock() {
 		import.decode(pkt).unwrap();
 		published.extend(clocks.drain());
 	}
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 	published.extend(clocks.drain());
 
 	let anchored = catalog.snapshot().media.clock.expect("a clock");
@@ -447,7 +447,7 @@ fn resyncs_across_chunk_boundaries() {
 	for chunk in misaligned.chunks(100) {
 		import.decode(&BytesMut::from(chunk)).unwrap();
 	}
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	assert_eq!(
@@ -473,7 +473,7 @@ async fn import_export_import_roundtrip() {
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	let buf = BytesMut::from(&data[..]);
 	import.decode(&buf).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	// Re-export to TS. `import` and `catalog` stay alive so the exporter can
 	// subscribe to the finished, retained tracks.
@@ -525,7 +525,7 @@ async fn survives_midstream_join() {
 	import
 		.decode(&BytesMut::from(&buf[..]))
 		.expect("a mid-stream join must not abort the demux");
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	assert_eq!(snapshot.video.renditions.len(), 1, "video track lost across the join");
@@ -577,7 +577,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	import
 		.decode(&BytesMut::from(&data[..]))
 		.expect("a dirty mid-stream join must not abort the demux");
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1, "video track lost across the dirty join");
@@ -640,7 +640,7 @@ fn import_handles_unaligned_chunks() {
 		let buf = BytesMut::from(chunk);
 		import.decode(&buf).unwrap();
 	}
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	assert_eq!(snapshot.video.renditions.len(), 1);
@@ -723,7 +723,7 @@ async fn import_stream(data: &[u8]) -> Imported {
 	let before = kio::clock::wall();
 	import.decode(data).unwrap();
 	let after = kio::clock::wall();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	Imported {
