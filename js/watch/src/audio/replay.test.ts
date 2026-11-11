@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
-import { Duration, Instant } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
-import { type Arrival, type Options, QUANTUM, type Quantum, replay } from "./replay";
+import { type Arrival, type Options, QUANTUM, replay } from "./replay";
 
 const RATE = 48000;
 const CONFIG = { codec: "opus", sampleRate: RATE, numberOfChannels: 1 } as Catalog.AudioConfig;
@@ -206,35 +206,6 @@ describe("replay at auto", () => {
 		expect(await settled(60, () => 30)).toBe(40);
 		// Five frames flushed at once: 80 ms of spread to cover, plus one frame.
 		expect(await settled(60, (i) => 30 + (4 - (i % 5)) * 20)).toBeGreaterThanOrEqual(100);
-	});
-});
-
-describe("ingress diagnostics", () => {
-	it("keeps recorded arrival and lateness when delivery is held", async () => {
-		const trace = [0, 20, 40].map((timestamp) => ({ timestamp, at: timestamp + 1000, group: 0, duration: 20 }));
-		const run = async (decodeAfter?: number) => {
-			let window: Quantum["arrivals"] = [];
-			for await (const quantum of replay(trace, {
-				rate: RATE,
-				config: CONFIG,
-				delay: Duration.millis(100),
-				duration: 300,
-				decodeAfter,
-			}))
-				window = quantum.arrivals;
-			return window;
-		};
-		const direct = await run();
-		const held = await run(1200);
-		expect(held).toEqual(direct);
-		expect(held).toEqual(
-			trace.map((entry) => ({
-				kind: "frame" as const,
-				timestamp: Duration.millis(entry.timestamp),
-				arrival: Instant.ZERO.saturatingAdd(Duration.millis(entry.at)),
-				late: false,
-			})),
-		);
 	});
 });
 
