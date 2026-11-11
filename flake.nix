@@ -160,8 +160,6 @@
             cargo-bloat
             # The workspace-hack that gives every build one feature set per dependency.
             cargo-hakari
-            # Weekly mutation testing of the security-critical modules (`just rs mutants`).
-            cargo-mutants
             cargo-nextest
             cargo-codspeed
             # Sets versions for a release cut; `sh/version.py` needs 0.4.1 or newer.
