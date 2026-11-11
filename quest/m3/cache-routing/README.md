@@ -149,7 +149,7 @@ Measured by the proof:
     before its warm parent makes the parent's older route ineligible, so the
     child moves off and back (2 moves in the chain fixture); origins advance
     on every announce stream open and close, so fewer advances cut this
-    churn.
+    churn, which [seqno churn](/quest/m3/cache-routing/seqno-churn.md) takes up.
 
 Prior art: warm/cold route prices
 ([moq-dev/moq#2925](https://github.com/moq-dev/moq/pull/2925)) were deleted
