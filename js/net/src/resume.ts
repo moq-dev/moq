@@ -2148,7 +2148,7 @@ export class Front {
 	}
 
 	async fetchGroup(name: string, sequence: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
-		const fetched = await this.#fetch(name, sequence, options, undefined, undefined, true);
+		const fetched = await this.#fetch(name, sequence, options);
 		let current = fetched.source;
 		// Too old and evicted judge a subscription's delivery, not whether the group exists, so
 		// neither is a verdict on a fetch: one answered from a group still arriving over a
@@ -2195,16 +2195,13 @@ export class Front {
 
 	// Fetch a group from whichever route serves the track, asking the next one when a route
 	// fails, and never `avoid`. The source comes back retained for as long as the group is read.
-	// Once no route will come, it ends with `ended`, or as not found. With `judgesDrops`, the
-	// first fetch, a sequence the route's copy gave up for good is refused with that drop rather
-	// than asked again; a continuation goes past a drop, as a resumed group does.
+	// Once no route will come, it ends with `ended`, or as not found.
 	async #fetch(
 		name: string,
 		sequence: bigint,
 		options: track.FetchGroupOptions | undefined,
 		avoid?: Source,
 		ended?: Error,
-		judgesDrops = false,
 	): Promise<{ group: GroupConsumer; source: Source }> {
 		for (;;) {
 			const source = this.#source;
@@ -2218,8 +2215,6 @@ export class Front {
 			const retired = this.#retire.signal;
 			const signal = options?.signal ? AbortSignal.any([options.signal, retired]) : retired;
 			try {
-				const refused = judgesDrops ? source.wire.givenUp(name, sequence) : undefined;
-				if (refused) throw refused;
 				// Asked alongside the check that the source claims the track's recorded properties,
 				// rather than a round trip after it: only handing the group out waits for the check.
 				const fetchGroup = source.wire.fetchGroup;

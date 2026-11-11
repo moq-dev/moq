@@ -653,13 +653,6 @@ export const hooks: {
 	stageRequest: (request: Request, info: InfoInit) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
-	/**
-	 * The error a producer gave `sequence` up for good with, when it holds no group for it: a
-	 * skip, or a drop under no budget, which none of its readers fills. A stale drop stays
-	 * fillable by a wider budget. Mirrors the Rust `poll_fetch_cached` `judges_drops`; assigned
-	 * by `track.ts`.
-	 */
-	givenUpGroup: (producer: Producer, sequence: bigint) => Error | undefined;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
 	demandPriority: (demand: Demand) => number;
 	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
@@ -1021,9 +1014,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	cachedLargest: () => {
-		throw new Error("track.ts not loaded");
-	},
-	givenUpGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	demandPriority: () => {

@@ -2204,14 +2204,8 @@ impl TrackState {
 	/// Resolve a one-shot fetch from the track side: the cached group, or an [`Error`]
 	/// once it can never be served. A missing group is a failure ([`Error::NotFound`]), not an
 	/// end-of-stream. The handler side (a refusal, or no [`Requests`] at all) lives
-	/// in the track's fills; [`Fetching`] polls both. `judges_drops` answers a sequence given
-	/// up for good from the drop set, as this track's readers are answered.
-	fn poll_fetch_cached(
-		&self,
-		sequence: u64,
-		frames: group::Bounds,
-		judges_drops: bool,
-	) -> Poll<Result<group::Consumer>> {
+	/// in the track's fills; [`Fetching`] polls both.
+	fn poll_fetch_cached(&self, sequence: u64, frames: group::Bounds) -> Poll<Result<group::Consumer>> {
 		// A group aborted between the lookup and the consume (an abandoned fetch cut
 		// short) is a miss, not a hit that fails on its first read.
 		if let Some(group) = self.covering_range(sequence, frames)
@@ -2231,16 +2225,6 @@ impl TrackState {
 		// Past the final sequence: the group can never exist.
 		if self.final_sequence().is_some_and(|fin| sequence >= fin) {
 			return Poll::Ready(Err(Error::NotFound));
-		}
-
-		// Given up for good: skipped, or dropped under no budget, which no reader of this
-		// track fills, so a request asks nothing upstream for it either. A stale drop stays
-		// fillable by a wider budget.
-		if judges_drops
-			&& let Some(hole) = self.drops.get(&sequence)
-			&& hole.stale_budget().is_none()
-		{
-			return Poll::Ready(Err(Error::Stream(hole.error())));
 		}
 
 		Poll::Pending
@@ -6172,7 +6156,6 @@ impl Consumer {
 				options: options.into().unwrap_or_default(),
 				end: None,
 			},
-			false,
 		)
 	}
 
@@ -6194,10 +6177,10 @@ impl Consumer {
 				request.end = None;
 			}
 		}
-		self.fetching(sequence, request, true)
+		self.fetching(sequence, request)
 	}
 
-	fn fetching(&self, sequence: u64, request: FetchOptions, judges_drops: bool) -> kio::Pending<Fetching> {
+	fn fetching(&self, sequence: u64, request: FetchOptions) -> kio::Pending<Fetching> {
 		let FetchOptions {
 			options,
 			end: frame_end,
@@ -6221,7 +6204,6 @@ impl Consumer {
 				priority: options.priority,
 				max_delay: options.max_delay,
 				judges_drift: true,
-				judges_drops,
 				result: None,
 				hit: Some(Box::new(group)),
 				stats: self.stats.clone(),
@@ -6243,7 +6225,6 @@ impl Consumer {
 				priority: options.priority,
 				max_delay: options.max_delay,
 				judges_drift: true,
-				judges_drops,
 				result: None,
 				hit: None,
 				stats: self.stats.clone(),
@@ -6266,7 +6247,6 @@ impl Consumer {
 				end: frame_end,
 			},
 			self.stats.clone(),
-			judges_drops,
 		))
 	}
 
@@ -6605,10 +6585,6 @@ pub struct Fetching {
 	// Whether this fetch refuses a group a newer cached one superseded, judged across the
 	// whole cache. A cursor's head fill leaves it to the cursor, which judges its window.
 	judges_drift: bool,
-	// Whether this fetch, a request on a reader's behalf, refuses a sequence the track gave up
-	// for good. A group already partly read is continued past a drop, which judged only the
-	// subscription.
-	judges_drops: bool,
 	// The fill this fetch joined; `None` on a cache hit, or when no handler existed to
 	// queue on. Boxed: a miss already allocates, and the handle stays small.
 	result: Option<Box<fill::Join>>,
@@ -6631,7 +6607,6 @@ impl Fetching {
 		sequence: u64,
 		request: FetchOptions,
 		stats: stats::Scope,
-		judges_drops: bool,
 	) -> Self {
 		let frames = group::Bounds {
 			start: request.options.frame_start,
@@ -6639,10 +6614,7 @@ impl Fetching {
 		};
 		let (fills, cached) = {
 			let state = state.read();
-			(
-				state.fills.clone(),
-				state.poll_fetch_cached(sequence, frames, judges_drops),
-			)
+			(state.fills.clone(), state.poll_fetch_cached(sequence, frames))
 		};
 		let result = match cached.is_pending() {
 			true => queue(&fills, sequence, &request),
@@ -6663,7 +6635,6 @@ impl Fetching {
 			priority: request.options.priority,
 			max_delay: request.options.max_delay,
 			judges_drift: true,
-			judges_drops,
 			result,
 			hit,
 			stats,
@@ -6765,9 +6736,7 @@ impl Fetching {
 			start: frame_start,
 			end: self.frame_end,
 		};
-		let judges_drops = self.judges_drops;
-		let cached = |waiter: &kio::Waiter| match state
-			.poll(waiter, |state| state.poll_fetch_cached(sequence, frames, judges_drops))
+		let cached = |waiter: &kio::Waiter| match state.poll(waiter, |state| state.poll_fetch_cached(sequence, frames))
 		{
 			Poll::Ready(Ok(res)) => Poll::Ready(res.map(resolve)),
 			Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.outcome.aborted().cloned().unwrap_or(Error::Dropped))),
@@ -9057,8 +9026,7 @@ impl Cursor {
 		};
 		// The cursor judges the answer against its window when it hands it out.
 		let mut fetching =
-			Fetching::cached_or_queued(self.state.clone(), sequence, request, stats::Scope::default(), false)
-				.unjudged();
+			Fetching::cached_or_queued(self.state.clone(), sequence, request, stats::Scope::default()).unjudged();
 		let heads = self.heads.get_or_insert_default();
 		match kio::Task::poll(&mut fetching, waiter) {
 			Poll::Pending => {

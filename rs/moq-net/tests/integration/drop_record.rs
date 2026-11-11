@@ -315,11 +315,12 @@ async fn a_lite06_hop_keeps_a_reported_group_dropped() {
 }
 
 /// [`a_lite06_hop_keeps_a_reported_group_dropped`] with the lite-06 hop upstream of a lite-07
-/// one: the relay forwards the final drop as a stale one, the viewer's widening update reopens
-/// it and fetches the group, and the relay fetches it from the publisher instead of answering
-/// from the drop it holds.
+/// one: a lite-06 drop is final for the relay's subscription, which no update re-offers, but
+/// it was judged under that subscription's budget. The relay forwards it as a stale one, the
+/// viewer's widening update reopens it, and the group is fetched from the publisher, which
+/// still holds it, as the relay drills' FETCH recovery requires.
 #[kio::test]
-async fn a_lite06_upstream_keeps_a_reported_group_dropped_for_a_lite07_viewer() {
+async fn a_lite06_upstream_drop_is_fetched_for_a_widened_lite07_viewer() {
 	reported_drop_through([LITE06, LITE07]).await;
 }
 
@@ -343,8 +344,9 @@ async fn reported_drop_through(versions: [&str; 2]) {
 		write(&chain.source, 7, 7000);
 		assert_eq!(received(&mut first).await, BTreeSet::new(), "{name}");
 
-		// Only lite-07 end to end leaves the stale report open to a widening update.
-		let want: BTreeSet<u64> = match versions.contains(&LITE06) {
+		// A lite-07 viewer hop leaves the stale report open to a widening update, which fills
+		// the group from upstream; over a lite-06 viewer hop the drop is final.
+		let want: BTreeSet<u64> = match versions[1] == LITE06 {
 			true => (0..GROUPS).filter(|sequence| *sequence != 7).collect(),
 			false => (0..GROUPS).collect(),
 		};

@@ -288,12 +288,6 @@ function largest(state: BroadcastState, name: string): track.Position | undefine
 	return producer && hooks.cachedLargest(producer);
 }
 
-// The error `name`'s cache gave `sequence` up for good with, without subscribing.
-function givenUp(state: BroadcastState, name: string, sequence: bigint): Error | undefined {
-	const producer = lookup(state, name);
-	return producer && hooks.givenUpGroup(producer, sequence);
-}
-
 // Fetch one group as a one-range subscription: the cached group at once, or else one the track's
 // {@link track.Requests} handler answers, asked at once whether the group was written yet or not,
 // as the Rust `fetch_group` does. A group the producer writes meanwhile answers it too. With no
@@ -399,7 +393,6 @@ export class Producer {
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
 			largest: (name) => largest(this.#state, name),
-			givenUp: (name, sequence) => givenUp(this.#state, name, sequence),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),
@@ -562,7 +555,6 @@ export class Consumer {
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
 			largest: (name) => largest(this.#state, name),
-			givenUp: (name, sequence) => givenUp(this.#state, name, sequence),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),

@@ -1381,11 +1381,6 @@ export class Producer {
 			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
 		};
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
-		hooks.givenUpGroup = (producer, sequence) => {
-			if (cachedHolds(producer, sequence)) return undefined;
-			const drop = producer.#state.drops.at(sequence);
-			return drop && (drop.skip || drop.stale === undefined) ? drop.error : undefined;
-		};
 		hooks.reportedLargest = (producer, largest) => producer.#advanceObject(largest);
 		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
 		objectLargest = (producer) => producer.#objectLargest;

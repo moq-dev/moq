@@ -508,9 +508,9 @@ for (const down of [Version.DRAFT_06, Version.DRAFT_07]) {
 	});
 }
 
-// Mirrors Rust `a_lite06_upstream_keeps_a_reported_group_dropped_for_a_lite07_viewer` in
+// Mirrors Rust `a_lite06_upstream_drop_is_fetched_for_a_widened_lite07_viewer` in
 // rs/moq-net/tests/integration/drop_record.rs.
-test("through a lite-06 upstream, a group reported dropped as it lands stays dropped for a lite-07 viewer", async () => {
+test("through a lite-06 upstream, a group reported dropped as it lands is fetched for a widened lite-07 viewer", async () => {
 	using clock = manual();
 	const chained = await chain(Version.DRAFT_06, Version.DRAFT_07);
 	for (let sequence = 0n; sequence < 10n; sequence++) {
@@ -522,16 +522,18 @@ test("through a lite-06 upstream, a group reported dropped as it lands stays dro
 	expect(groupsOf(await drain(clock, first))).toEqual([5n, 6n, 8n, 9n]);
 
 	// Group 7 lands once its successor is older than 3.5s by the clock, so the lite-06
-	// publisher reports it dropped, which lite-06 makes final.
+	// publisher reports it dropped, final for the relay's subscription but judged under its
+	// budget: the publisher still holds the group.
 	await clock.advance(Duration.millis(4500));
 	chained.write(7n, 7000);
 	expect(groupsOf(await drain(clock, first))).toEqual([]);
 
-	// Reaches every group: the widened reader fills 0 to 4, and group 7 alone stays dropped,
-	// for it and for a later reader, rather than being fetched from the publisher.
-	const all = [0n, 1n, 2n, 3n, 4n, 5n, 6n, 8n, 9n];
+	// Reaches every group: the relay forwards the drop to the lite-07 viewer as a stale one, so
+	// the widening reopens it, and the widened reader fills 0 to 4 and 7 from the publisher, as
+	// a later reader does.
+	const all = [0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n];
 	first.update({ delay: { max: Duration.millis(60_000) }, ranges: [{}] });
-	expect(groupsOf(await drain(clock, first))).toEqual([0n, 1n, 2n, 3n, 4n]);
+	expect(groupsOf(await drain(clock, first))).toEqual([0n, 1n, 2n, 3n, 4n, 7n]);
 	const second = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(60_000) }, ranges: [{}] });
 	expect(groupsOf(await drain(clock, second))).toEqual(all);
 
