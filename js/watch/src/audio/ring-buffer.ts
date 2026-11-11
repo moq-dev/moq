@@ -186,8 +186,9 @@ export class AudioRingBuffer {
 		if (latencySamples > this.capacity) throw new Error("latency exceeds capacity");
 		this.#latencySamples = latencySamples;
 		const target = this.#samples(terms?.target ?? latency);
-		// A target that falls moves the clock ahead by as much, which audio follows by speeding up.
-		if (this.#joined) this.#retarget += Math.max(0, this.#target - target);
+		// A target that falls moves the clock ahead by as much, which audio follows by speeding up. One
+		// that rises moves it back, cancelling as much of a fall the stretch has yet to catch up.
+		if (this.#joined) this.#retarget = Math.max(0, this.#retarget + this.#target - target);
 		this.#target = target;
 		this.#bound = this.#samples(terms?.bound ?? 0);
 

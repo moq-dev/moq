@@ -884,9 +884,18 @@ impl Driver {
 						+ Duration::from_secs_f64((data.len() / channels) as f64 / sample_rate);
 					mixer.complete(now);
 					mixer.latency(timestamp.playback.checked_duration_since(timestamp.callback));
+					// One reading for the callback, each staging chunk starting as
+					// many frames past it as precede it.
+					let start = crate::ring::host();
+					let mut offset = 0;
 					for chunk in data.chunks_mut(scratch.len()) {
 						let scratch = &mut scratch[..chunk.len()];
-						mixer.fill(scratch, played_at);
+						mixer.fill(
+							scratch,
+							played_at,
+							start + Duration::from_secs_f64(offset as f64 / sample_rate),
+						);
+						offset += chunk.len() / channels;
 						for (out, sample) in chunk.iter_mut().zip(scratch.iter()) {
 							*out = T::from_sample(*sample);
 						}
@@ -1066,11 +1075,11 @@ mod tests {
 		let (retired, _rx) = sync_channel(8);
 		let mut mixer = Mixer::new(wired.mixer, retired, 48_000, Layout::Stereo, Default::default()).unwrap();
 		let mut out = vec![0.0; 4096 * 2];
-		mixer.fill(&mut out, Duration::ZERO);
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		let samples: Vec<_> = [0.25f32; 123 * 2].iter().flat_map(|s| s.to_le_bytes()).collect();
 		assert_eq!(sink.write(&samples).unwrap().accepted_sample_frames, 123);
 		let mut drain = std::pin::pin!(sink.finish());
-		mixer.fill(&mut out, Duration::from_millis(100));
+		mixer.fill(&mut out, Duration::from_millis(100), crate::ring::host());
 		mixer.complete(Duration::from_millis(100));
 		wired.shared.unbind();
 		assert!(wired.shared.sync());

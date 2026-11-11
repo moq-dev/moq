@@ -1056,6 +1056,22 @@ describe("time stretch", () => {
 		expect(buffer.skips).toBe(1);
 	});
 
+	// A rise moves the clock back, cancelling a fall the stretch has yet to catch up, so lateness past
+	// the bound skips as it would have without either.
+	it("cancels a fall in its target with a rise before the stretch catches it up", () => {
+		const buffer = live(200, { bound: 0 });
+		write(buffer, 0, frames(1000), { value: 0.5 });
+		// Joined on the clock.
+		buffer.clock(0);
+		read(buffer, QUANTUM, 1);
+
+		buffer.setLatency(100, { target: 100, bound: 0 });
+		buffer.setLatency(200, { target: 200, bound: 0 });
+		buffer.clock(buffer.timestamp + 80_000);
+		read(buffer, QUANTUM, 1);
+		expect(buffer.skips).toBe(1);
+	});
+
 	// Nothing trailing the clock was heard before the first read on it, so a join lands on the clock
 	// past a backlog the bound would otherwise keep.
 	it("joins on the clock past a backlog inside its bound", () => {

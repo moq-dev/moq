@@ -599,7 +599,7 @@ mod tests {
 		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, Default::default()).unwrap();
 		registration.attach(&commands);
 		let mut out = [0.0; 960];
-		mixer.fill(&mut out, Duration::from_millis(100));
+		mixer.fill(&mut out, Duration::from_millis(100), crate::ring::host());
 		let samples = [0.25f32; 123 * 2];
 		let bytes: Vec<_> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
 		assert_eq!(sink.write(&bytes).unwrap().accepted_sample_frames, 123);
@@ -608,14 +608,14 @@ mod tests {
 		assert!(Pin::new(&mut drain).poll(&mut cx).is_pending());
 		let mut heard = 0;
 		while heard < 123 * 2 {
-			mixer.fill(&mut out, Duration::from_millis(100));
+			mixer.fill(&mut out, Duration::from_millis(100), crate::ring::host());
 			heard += out.iter().filter(|s| **s == 0.25).count();
 			registration.complete();
 			assert!(Pin::new(&mut drain).poll(&mut cx).is_pending());
 		}
 		assert_eq!(heard, 123 * 2);
 		// Another staging chunk in the same callback does not finish the drain.
-		mixer.fill(&mut out, Duration::from_millis(100));
+		mixer.fill(&mut out, Duration::from_millis(100), crate::ring::host());
 		registration.complete();
 		assert!(Pin::new(&mut drain).poll(&mut cx).is_pending());
 		// Later callbacks can still run before the device plays its queued tail.
@@ -644,13 +644,13 @@ mod tests {
 		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, shared.observe.clone()).unwrap();
 		registration.attach(&commands);
 		let mut out = [0.0; 1024];
-		mixer.fill(&mut out, Duration::ZERO);
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		assert!(observer.read().unwrap().stalled, "nothing written yet");
 
 		let tone: Vec<_> = [0.25f32; 2048].iter().flat_map(|s| s.to_le_bytes()).collect();
 		let _ = sink.write(&tone).unwrap();
 		for _ in 0..4 {
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		}
 		// Running dry waits for a 30 ms window and the device period to resume.
 		let refill: Vec<_> = [0.25f32; 2 * (1440 + 512)]
@@ -658,26 +658,26 @@ mod tests {
 			.flat_map(|s| s.to_le_bytes())
 			.collect();
 		let _ = sink.write(&refill).unwrap();
-		mixer.fill(&mut out, Duration::ZERO);
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		let observation = observer.read().unwrap();
 		assert!(!observation.stalled);
 		assert_eq!(observation.gaps.len(), 1, "the sink ran dry once: {observation:?}");
 
 		// A finished sink still plays its tail: no stall while it lasts.
 		let _drain = sink.finish();
-		mixer.fill(&mut out, Duration::ZERO);
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		let observation = observer.read().unwrap();
 		assert!(!observation.stalled && observation.stalls.is_empty(), "{observation:?}");
 		let tail = observation.clock;
 
 		for _ in 0..4 {
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		}
 		{
 			let mut cx = Context::from_waker(std::task::Waker::noop());
 			let mut finish = std::pin::pin!(observer.finish());
 			assert!(finish.as_mut().poll(&mut cx).is_pending());
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 			assert!(finish.as_mut().poll(&mut cx).is_ready());
 		}
 		// Once the tail runs out nothing plays. The gap where it ran out lands in
@@ -720,7 +720,7 @@ mod tests {
 		let rms =
 			|samples: &[f32]| (samples.iter().map(|&s| s as f64 * s as f64).sum::<f64>() / samples.len() as f64).sqrt();
 		let mut out = [0.0; 960];
-		mixer.fill(&mut out, Duration::ZERO);
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 
 		// 100 ms of a quiet background, then a declared end.
 		let quiet = 0.0002;
@@ -728,7 +728,7 @@ mod tests {
 		sink.end();
 		let mut heard = Vec::new();
 		for _ in 0..150 {
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 			heard.extend_from_slice(&out);
 		}
 		// The primed silence, the background, then a second of noise at its level.
@@ -741,7 +741,7 @@ mod tests {
 		let _ = sink.write(&pcm(0.5, 960)).unwrap();
 		let mut until = 0;
 		loop {
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 			if let Some(at) = out.iter().position(|s| *s == 0.5) {
 				until += at / 2;
 				break;
@@ -752,7 +752,7 @@ mod tests {
 		assert_eq!(until, 48_000 * 40 / 1000);
 		for _ in 0..10 {
 			let _ = sink.write(&pcm(0.5, 480)).unwrap();
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		}
 
 		let observation = observer.read().unwrap();
@@ -761,10 +761,10 @@ mod tests {
 
 		// Once the next utterance plays, running dry is a gap again.
 		for _ in 0..20 {
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		}
 		let _ = sink.write(&pcm(0.5, 2_400)).unwrap();
-		mixer.fill(&mut out, Duration::ZERO);
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		assert_eq!(observer.read().unwrap().gaps.len(), 1);
 	}
 
@@ -798,7 +798,7 @@ mod tests {
 		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, Default::default()).unwrap();
 		registration.attach(&commands);
 		let mut out = [0.0; 960];
-		mixer.fill(&mut out, Duration::ZERO);
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 
 		let bytes: Vec<_> = [0.25f32]
 			.repeat(frames * 2)
@@ -814,7 +814,7 @@ mod tests {
 		let mut heard = 0;
 		for period in 1..100 {
 			let now = Duration::from_millis(10 * period);
-			mixer.fill(&mut out, now);
+			mixer.fill(&mut out, now, crate::ring::host());
 			mixer.complete(now);
 			registration.complete();
 			heard += out.iter().step_by(2).filter(|left| **left > 0.125).count();

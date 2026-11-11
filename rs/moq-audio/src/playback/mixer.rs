@@ -250,13 +250,9 @@ impl Mixer {
 		self.ledger.latency(latency);
 	}
 
-	/// Fill one device buffer, interleaved at the device's channel count.
-	pub(super) fn fill(&mut self, out: &mut [f32], played_at: Duration) {
-		self.fill_at(out, played_at, ring::host());
-	}
-
-	/// [`fill`](Self::fill), for a callback that starts at `start`.
-	fn fill_at(&mut self, out: &mut [f32], played_at: Duration, start: ring::Instant) {
+	/// Fill one device buffer, interleaved at the device's channel count, whose
+	/// first frame the device reads at `start` on the host clock.
+	pub(super) fn fill(&mut self, out: &mut [f32], played_at: Duration, start: ring::Instant) {
 		loop {
 			match self.commands.try_recv() {
 				Ok(Command::Add {
@@ -526,7 +522,7 @@ mod tests {
 		/// its first callback.
 		fn fill(&mut self, out: &mut [f32]) {
 			self.mixer.complete(Duration::ZERO);
-			self.mixer.fill(out, Duration::ZERO);
+			self.mixer.fill(out, Duration::ZERO, ring::host());
 		}
 
 		/// Fill twice and hand back the buffer, so assertions look at gain that has
@@ -621,7 +617,7 @@ mod tests {
 		// One read marks the sink ready, then a second of tone is due exactly
 		// as it would play from the next callback on.
 		let start = ring::host();
-		harness.mixer.fill_at(&mut [0.0; 128 * STEREO], Duration::ZERO, start);
+		harness.mixer.fill(&mut [0.0; 128 * STEREO], Duration::ZERO, start);
 		let tone: Vec<f32> = (0..RATE as usize)
 			.flat_map(|i| [(i as f32 * std::f32::consts::TAU * 200.0 / RATE as f32).sin() * 0.25; STEREO])
 			.collect();
@@ -633,7 +629,7 @@ mod tests {
 		let period = Duration::from_secs_f64(callback as f64 / RATE as f64);
 		let mut out = vec![0.0f32; callback * STEREO];
 		for _ in 0..10 {
-			harness.mixer.fill_at(&mut out, Duration::ZERO, now);
+			harness.mixer.fill(&mut out, Duration::ZERO, now);
 			now += period;
 		}
 		let entry = &harness.mixer.entries[0];

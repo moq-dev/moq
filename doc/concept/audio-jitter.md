@@ -729,7 +729,8 @@ the player has read once on the clock, its bound is zero, so the backlog a
 subscription opens on is skipped rather than played out at the stretch's pace,
 and playback starts on the clock. A target that falls moves the clock ahead by
 as much, which is the stretch's to catch up however small the bound, so the
-skip also waits past whatever of that fall the stretch has yet to remove. Only
+skip also waits past whatever of that fall the stretch has yet to remove; a
+rise moves the clock back and cancels as much of it. Only
 those skips and a ring
 overflowing its fixed capacity drop received audio; each counts as a skip in
 the player's stats. A finite tail before a declared end plays as received, and

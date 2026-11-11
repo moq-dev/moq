@@ -729,10 +729,15 @@ impl Consumer {
 		let inputs = self.inputs(0);
 		let clocked = self.shared.clocked.load(Ordering::Acquire);
 		// A target that fell moved the clock ahead by as much, which audio
-		// follows by speeding up. Before the join, nothing trailing was heard.
-		let fell = self.target.saturating_sub(inputs.target);
-		self.target = inputs.target;
-		self.retarget = if self.joined { self.retarget + fell } else { 0 };
+		// follows by speeding up, and one that rose moved it back, cancelling as
+		// much of a fall not yet caught up. Before the join, nothing trailing
+		// was heard.
+		let last = std::mem::replace(&mut self.target, inputs.target);
+		self.retarget = if self.joined {
+			(self.retarget + last).saturating_sub(inputs.target)
+		} else {
+			0
+		};
 		let bound = if self.joined || !clocked {
 			inputs.bound.saturating_add(self.retarget as i64)
 		} else {
@@ -1369,6 +1374,41 @@ mod tests {
 		assert!(cons.accelerated() > 0);
 		// Lateness past the rest of the fall still skips.
 		prod.due(base + Duration::from_millis(1900), Duration::ZERO);
+		let read = cons.read_at(&mut out, now);
+		assert!(matches!(read, Read::Trimmed { .. }), "{read:?}");
+		assert_eq!(cons.skips(), 1);
+	}
+
+	/// A rise moves the clock back, cancelling a fall the stretch has yet to
+	/// catch up, so lateness past the bound skips as it would without either.
+	#[test]
+	fn a_rise_cancels_a_fall_not_yet_caught_up() {
+		let rate = 48_000;
+		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(200));
+		let base = prod.base;
+		let mut out = vec![0.0; 480 * 2];
+		for _ in 0..100 {
+			assert_eq!(prod.push(&pcm), Push::Ok);
+		}
+		// On time with no bound, through the 200 ms prime, which joins the clock.
+		prod.due(base + Duration::from_millis(2200), Duration::ZERO);
+		let mut now = base;
+		for _ in 0..25 {
+			assert_eq!(cons.read_at(&mut out, now), Read::Ok);
+			now += Duration::from_millis(10);
+		}
+		// The target falls by 100 ms for one read, then rises back.
+		assert!(prod.set_latency(Duration::from_millis(100)));
+		prod.due(base + Duration::from_millis(2100), Duration::ZERO);
+		assert_eq!(cons.read_at(&mut out, now), Read::Ok);
+		now += Duration::from_millis(10);
+		assert!(prod.set_latency(Duration::from_millis(200)));
+		prod.due(base + Duration::from_millis(2200), Duration::ZERO);
+		assert_eq!(cons.read_at(&mut out, now), Read::Ok);
+		now += Duration::from_millis(10);
+		assert_eq!(cons.skips(), 0);
+		// 80 ms of lateness, past the bound and a window, skips.
+		prod.due(base + Duration::from_millis(2120), Duration::ZERO);
 		let read = cons.read_at(&mut out, now);
 		assert!(matches!(read, Read::Trimmed { .. }), "{read:?}");
 		assert_eq!(cons.skips(), 1);
