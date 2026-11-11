@@ -11,8 +11,8 @@ Follow CONTRIBUTING.md's release procedure: merge release into main first,
 then main into release using merge commits. Confirm the maintainer's cut
 instruction before executing it. Right after merging release into main, set
 every eligible package with `just version 0.22.0` for this cut, then one
-minor up per later API or wire cut, following [Versions](/CONTRIBUTING.md#versions), including
-packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
+minor up per later API or wire cut, following
+[Versions](/CONTRIBUTING.md#versions), including packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
 exempt from that version (`version.json`), so check each against its
 registry by hand: npm already has `@moq/qmux` 0.3.3 and 0.3.4, published
 from moq-dev/web-transport, while `js/qmux` is at 0.3.3. Publishing 0.3.3
@@ -114,10 +114,10 @@ moq-ffi. It has no work of its own and completes when every child merges. It
 recurs once per release cycle, always in m3, and never re-creates itself: m3
 holds it and the cycle's wire cut requires m3, so a copy made before that cut
 would block it forever. Cuts earlier in the cycle do not wait on it, but each
-confirms on its candidate that the gate's finished checks still hold. Re-create its README with that Goal and this recurrence, a
-fresh "main is no slower than release" child with its Goal and no
+confirms on its candidate that the gate's finished checks still hold.
+Re-create its README with that Goal and this recurrence, a fresh "main is no slower than release" child with its Goal and no
 measurements yet, and the [vendor sync](/quest/m3/vendor-sync/README.md)
-questline that the last run re-created in m3. Only `/quest-delete` ends the
+questline that the last run re-created in the later-work milestone. Only `/quest-delete` ends the
 recurrence.
 
 Decided 2026-11-09 (maintainer, /quest-unblock): the cut, not the gate,
