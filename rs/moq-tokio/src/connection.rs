@@ -47,7 +47,8 @@ fn verdict(err: &Error) -> Verdict {
 /// Three knobs, each with one job: `initial` and `multiplier` set the wait before
 /// each retry, `max` caps it, and `healthy` decides which sessions count as failed
 /// attempts. See [`moq_net::reconnect::Backoff`], which this resolves to, for how
-/// the policy applies them.
+/// the policy applies them. It applies only once a session has been established: a first
+/// dial that reaches no session ends the connection instead of retrying.
 #[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -860,8 +861,8 @@ pub struct Snapshot {
 /// The task connects, waits for the session to end, then (unless reconnecting is
 /// disabled, see [`crate::Client::with_reconnect`])
 /// redials with exponential backoff. A first dial that reaches no session never retries:
-/// the loop stops with its error, so a setup mistake surfaces at once. The read surface mirrors [`moq_net::Session`]
-/// so a caller can treat it like a session that transparently reconnects:
+/// the loop stops with its error, so a setup mistake surfaces at once. The read surface
+/// mirrors [`moq_net::Session`] so a caller can treat it like a session that transparently reconnects:
 /// [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
 /// The extra toggle a plain session doesn't have is the connection lifecycle: [`established`](Self::established)
@@ -2084,10 +2085,12 @@ mod tests {
 		}
 	}
 
-	/// A refused socket still spends the retry budget rather than stopping on its first error.
+	/// A refused first dial ends the loop with its error at once, spending none of an
+	/// unlimited retry window: a peer that never answered is more likely a setup mistake
+	/// than a restart.
 	#[cfg(feature = "tcp")]
 	#[tokio::test(start_paused = true)]
-	async fn a_refused_tcp_dial_keeps_retrying() {
+	async fn a_refused_first_dial_fails_at_once() {
 		// Refusal is what's under test, so this can't use [`dead`]. Only Linux
 		// refuses a SYN to a port that is bound but not listening, so only Linux
 		// holds it: a released port can become another process's listener mid-test.
@@ -2108,9 +2111,9 @@ mod tests {
 			.to_string();
 
 		let mut config = crate::connect::Config::default();
-		config.backoff.initial = Some((Duration::from_millis(50)).into());
-		config.backoff.max = Some((Duration::from_millis(50)).into());
-		config.backoff.timeout = Some((Duration::from_millis(100)).into());
+		config.backoff.initial = Some((FAST).into());
+		// Zero retries forever, so only the first walk failing fast ends this loop.
+		config.backoff.timeout = Some((Duration::ZERO).into());
 		// No timer may be pending while a dial is in flight, since the paused clock
 		// jumps to it whenever the runtime idles. Linux and macOS refuse a loopback
 		// connect inside the call, but Windows reports it later, after retrying the
@@ -2122,9 +2125,48 @@ mod tests {
 		let started = kio::clock::now();
 		let connection = client.connect(url(&format!("tcp://{addr}/")));
 		let err = connection.closed().await.expect_err("refused socket connected");
-		assert!(matches!(err, Error::Reconnect(_)), "{err}");
 		assert!(err.to_string().contains(&refused), "{err}");
-		assert!(started.elapsed() >= Duration::from_millis(100));
+		// A retry would first wait out a jittered share of `initial`.
+		assert_eq!(started.elapsed(), Duration::ZERO, "the first walk backed off");
+	}
+
+	/// A connection to `host` that had a session and now redials a [`dead`] address.
+	///
+	/// A first walk that fails ends the loop rather than retrying, so a test of the retry
+	/// loop starts from a session: this serves one, repoints `host` at a dead address, and
+	/// ends the session from the server. Returns the connection, already reporting
+	/// [`Status::Disconnected`], the live server's address and its later sessions, and the
+	/// server task.
+	#[cfg(feature = "tcp")]
+	async fn redialing(
+		host: &str,
+		config: crate::connect::Config,
+	) -> (
+		Connection,
+		std::net::SocketAddr,
+		tokio::sync::mpsc::UnboundedReceiver<moq_net::Session>,
+		tokio::task::JoinHandle<()>,
+	) {
+		let (live, mut accepted, task) = serve(crate::origin::spawn()).await;
+		crate::resolve::hosts::point(host, [live]);
+		let mut connection = config
+			.init(Default::default())
+			.unwrap()
+			.connect(url(&format!("tcp://{host}:1/")));
+		assert_eq!(connection.status().await.unwrap(), Status::Connected);
+		let session = accepted.recv().await.unwrap();
+
+		// Hold the failing listener until the runtime ends: a released port can
+		// become another process's listener while the connection keeps retrying.
+		let failing = dead().await.socket_addrs(|| None).unwrap();
+		assert!(
+			std::net::TcpListener::bind(failing[0]).is_err(),
+			"the failing port stays reserved"
+		);
+		crate::resolve::hosts::point(host, failing);
+		drop(session);
+		assert_eq!(connection.status().await.unwrap(), Status::Disconnected);
+		(connection, live, accepted, task)
 	}
 
 	/// A redial that keeps failing reports why while it retries, and the connect that
@@ -2133,31 +2175,21 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_failing_redial_reports_why_until_it_connects() {
-		// Hold the failing listener until the runtime ends: a released port can
-		// become another process's listener while the connection keeps retrying.
-		let failing = dead().await.socket_addrs(|| None).unwrap();
-		assert!(
-			std::net::TcpListener::bind(failing[0]).is_err(),
-			"the failing port stays reserved"
-		);
-		let (live, mut accepted, _task) = serve(crate::origin::spawn()).await;
-
 		// Unique to this test: the table is process-wide.
 		const HOST: &str = "failing-redial.test";
-		crate::resolve::hosts::point(HOST, failing);
 
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.max = Some((FAST).into());
 		config.backoff.timeout = Some((Duration::ZERO).into());
-		let client = config.init(Default::default()).unwrap();
-		let mut connection = client.connect(url(&format!("tcp://{HOST}:1/")));
+		let (mut connection, live, mut accepted, _task) = redialing(HOST, config).await;
 		let monitor = connection.monitor();
 
+		// The session's end may be reported first; wait for a failed redial's reason.
 		let failure = kio::wait(|waiter| {
 			monitor.state.poll(waiter, |state| match state.lifecycle.failure() {
-				Some(err) => Poll::Ready(err.clone()),
-				None => Poll::Pending,
+				Some(err @ Error::Tcp(_)) => Poll::Ready(err.clone()),
+				_ => Poll::Pending,
 			})
 		})
 		.await
@@ -2186,14 +2218,14 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn closing_between_retries_clears_the_failure() {
-		// A held port, not a released one: another test's server could claim a
-		// released port, and the dial would connect instead of failing.
+		// Unique to this test: the table is process-wide.
+		const HOST: &str = "closing-between-retries.test";
+
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.max = Some((FAST).into());
 		config.backoff.timeout = Some((Duration::ZERO).into());
-		let client = config.init(Default::default()).unwrap();
-		let connection = client.connect(dead().await);
+		let (connection, _live, _accepted, _task) = redialing(HOST, config).await;
 		let mut monitor = connection.monitor();
 
 		kio::wait(|waiter| {
@@ -2204,11 +2236,14 @@ mod tests {
 		})
 		.await
 		.unwrap_or_else(|_| panic!("the connection ended before reporting its retry reason"));
+		// The one session's connect and disconnect, both already counted.
+		let presence = monitor.presence_changed().await.unwrap();
+		assert_eq!((presence.sessions_started, presence.sessions_ended), (1, 1));
 
 		connection.close().await.expect("close");
 		// Resolves with an error once the loop's state is final.
 		let ended = monitor.presence_changed().await;
-		assert!(ended.is_err(), "nothing connected, so only the end moves presence");
+		assert!(ended.is_err(), "nothing reconnected, so only the end moves presence");
 		assert!(monitor.failure().is_none(), "nothing is retrying");
 	}
 
