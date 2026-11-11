@@ -60,6 +60,8 @@ describe("render dispatch", () => {
 		expect([...read(50)]).toEqual(Array(50).fill(1));
 		send({ type: "truncate", timestamp: 100_000 });
 		send({ type: "data", timestamp: 100_000, data: [new Float32Array(20).fill(2)] });
+		// The retired tail no longer counts toward the depth, so a target at what is left holds it.
+		send({ type: "latency", latency: 100, target: 70, bound: 0 });
 		const output = read(100);
 		// A short quantum fades its final 64 samples. The full prefix remains untouched and the
 		// retired tail is silent, so ignoring either message changes the output.

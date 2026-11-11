@@ -329,22 +329,30 @@ export class AudioRingBuffer {
 	 */
 	truncate(timestamp: number): void {
 		const target = Math.round((timestamp / 1_000_000) * this.rate);
-		if (target >= this.#writeIndex) return;
-		// A staged window runs the read index ahead of the playhead. Unstage it so the successor
-		// replaces whatever of it is still unplayed, resuming the ring at the sample now playing.
-		const stretch = this.#stretch;
-		if (target < this.#readIndex && stretch.available > 0) {
-			const staged = (stretch.available * this.#window) / stretch.length;
-			const capacity = this.#buffer[0].length;
-			this.#readIndex = Math.max(Math.round(this.#readIndex - staged), this.#writeIndex - capacity);
-			stretch.clear();
-			this.#window = 0;
+		if (target < this.#writeIndex) {
+			// A staged window runs the read index ahead of the playhead. Unstage it so the successor
+			// replaces whatever of it is still unplayed, resuming the ring at the sample now playing.
+			const stretch = this.#stretch;
+			if (target < this.#readIndex && stretch.available > 0) {
+				const staged = (stretch.available * this.#window) / stretch.length;
+				const capacity = this.#buffer[0].length;
+				this.#readIndex = Math.max(Math.round(this.#readIndex - staged), this.#writeIndex - capacity);
+				stretch.clear();
+				this.#window = 0;
+			}
+			// Never retreat past the playhead: those samples are already due.
+			this.#writeIndex = Math.max(target, this.#readIndex);
+			this.#pauses = this.#pauses.filter((pause) => pause.start < this.#writeIndex);
+			const last = this.#pauses.at(-1);
+			if (last) last.end = Math.min(last.end, this.#writeIndex);
 		}
-		// Never retreat past the playhead: those samples are already due.
-		this.#writeIndex = Math.max(target, this.#readIndex);
-		this.#pauses = this.#pauses.filter((pause) => pause.start < this.#writeIndex);
-		const last = this.#pauses.at(-1);
-		if (last) last.end = Math.min(last.end, this.#writeIndex);
+		// What arrived past the cut, decoded or not, was the predecessor's, so the successor's arrivals
+		// count from there.
+		const received = Math.max(target, this.#writeIndex);
+		if (this.#received !== undefined && this.#received > received) {
+			this.#received = received;
+			if (this.#anchored) this.#level = received - this.#playhead();
+		}
 	}
 
 	/**
@@ -480,10 +488,13 @@ export class AudioRingBuffer {
 				if (inputs.lag > bound + this.#stretch.window) skip = inputs.lag - bound;
 				else if (this.#jumped > this.#stretch.window) skip = this.#jumped;
 			}
-			if (skip > 0) this.#jumped = 0;
 		}
 		if (skip > 0) {
-			const index = Math.min(this.#writeIndex, Math.ceil(this.#playhead() + skip));
+			const target = this.#playhead() + skip;
+			const index = Math.min(this.#writeIndex, Math.ceil(target));
+			// A jump past what is decoded skips the rest once it lands, rather than leaving it inside the
+			// bound for the stretch.
+			this.#jumped = skip === this.#jumped ? Math.max(0, target - index) : 0;
 			if (!this.#skipping) this.#skips++;
 			this.#skipping = true;
 			this.#skip(index, this.#writeIndex);

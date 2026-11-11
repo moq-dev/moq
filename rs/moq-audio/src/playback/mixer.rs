@@ -363,7 +363,7 @@ impl Mixer {
 				// stays on the timeline instead of queueing up and jumping when
 				// it unmutes. The status only reports under/overflow, which the
 				// channel has already corrected for.
-				let status = entry.cons.read_at(&mut scratch[..samples], now);
+				let status = entry.cons.read_at(&mut scratch[..samples], now, total - done);
 				if !matches!(status, Read::NotReady | Read::Underflow { frames: 0 }) {
 					entry.played_at = played_at;
 				}

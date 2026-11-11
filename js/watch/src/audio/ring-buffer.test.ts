@@ -1062,6 +1062,44 @@ describe("time stretch", () => {
 		});
 	}
 
+	// A successor's arrivals count from where it cut the predecessor, so audio the predecessor had
+	// received past the cut never reads as depth to speed through.
+	it("counts a successor's arrivals from the cut", () => {
+		const buffer = live(100, { bound: 2000 });
+		write(buffer, 0, frames(200), { value: 0.5 });
+		buffer.received(10_000_000);
+		buffer.clock(0);
+		read(buffer, QUANTUM, 1);
+
+		buffer.truncate(100_000);
+		write(buffer, 100, frames(60), { value: 0.9 });
+		// 20 ms behind the clock, on 60 ms of the successor's audio: too little to speed through.
+		for (let i = 0; i < 20; i++) {
+			buffer.clock(buffer.timestamp + 20_000);
+			read(buffer, QUANTUM, 1);
+		}
+		expect(buffer.accelerated).toBe(0);
+	});
+
+	// A jump past what is decoded skips the rest once it lands.
+	it("skips the rest of a jump past what is decoded once it lands", () => {
+		const buffer = live(100, { bound: 2000 });
+		write(buffer, 0, frames(100), { value: 0.5 });
+		buffer.clock(0);
+		read(buffer, QUANTUM, 1);
+
+		buffer.jumped(500_000);
+		const clock = buffer.timestamp + 500_000;
+		buffer.clock(clock);
+		read(buffer, QUANTUM, 1);
+		expect(buffer.skips).toBe(1);
+
+		write(buffer, 100, frames(800), { value: 0.9 });
+		buffer.clock(clock);
+		read(buffer, QUANTUM, 1);
+		expect(Math.abs(buffer.timestamp - clock - (QUANTUM * 1_000_000) / RATE)).toBeLessThan(50);
+	});
+
 	// Nothing trailing the clock was heard before the first read on it, so a join lands on the clock
 	// past a backlog the bound would otherwise keep.
 	it("joins on the clock past a backlog inside its bound", () => {
