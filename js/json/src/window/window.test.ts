@@ -614,3 +614,15 @@ test("events on an untimed track have no timestamp", async () => {
 	expect(events.length).toBe(2);
 	expect(events.every((event) => event.at === undefined)).toBeTrue();
 });
+
+// Mirrors the Rust `window::Finished` doctest: the window `finish` returns still reads, but takes
+// no edit, at compile time and at run time.
+test("finishing returns a window that reads but takes no edit", () => {
+	const producer = new Producer<Rec>({ track: new Track.Producer("test") });
+	producer.push({ value: { n: 1 } });
+	const finished = producer.finish();
+	expect(finished.window).toEqual([{ n: 1 }]);
+	expect(finished.offset).toBe(0);
+	// @ts-expect-error a finished window takes no record
+	expect(() => finished.push({ value: { n: 2 } })).toThrow("track is closed");
+});
