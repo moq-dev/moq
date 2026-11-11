@@ -761,6 +761,29 @@ mod tests {
 		for value in [0, 7000, 7001] {
 			assert!(seal(MAX_CACHE_DURATION, value).is_none(), "{value}");
 		}
+
+		// Egress forwards the sealed block unchanged and restates no mutable duration beside it.
+		let version = Version::Draft22;
+		let mut sealed = Vec::new();
+		let w = &mut Encoder::new(&mut sealed, version.into());
+		w.varint(MAX_CACHE_DURATION).unwrap();
+		w.varint(7000).unwrap();
+		let unknown = vec![Property {
+			id: IMMUTABLE,
+			value: Value::Bytes(sealed.into()),
+		}];
+		let info = crate::track::Info::default().with_max_age(Duration::from_secs(7));
+		let egress = Properties {
+			unknown: unknown.clone(),
+			..Properties::restated(&info)
+		};
+		let mut buf = Vec::new();
+		egress
+			.encode(&mut Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
+		let decoded = decode_draft22(&buf).unwrap();
+		assert_eq!(decoded.max_cache_duration, Some(Duration::from_millis(7000)));
+		assert_eq!(decoded.unknown, unknown);
 	}
 
 	/// A track's max age never reaches the wire, since MAX_CACHE_DURATION would expire
