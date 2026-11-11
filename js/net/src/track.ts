@@ -2652,6 +2652,15 @@ export class Subscriber {
 	// Fill-owed runs this reader gave up once its budget convicted them: never wanted again, so
 	// the fills withdraw them and their handlers hear, as the Rust `Misses` gives up a stale run.
 	#givenUp: Run[] = [];
+	// The received stale runs that do not settle this reader, and the terms they were judged
+	// under; see #unknownRuns.
+	#unknown?: {
+		drops: number;
+		judged: readonly Run[] | undefined;
+		budget: number;
+		coverage: Coverage;
+		runs: DropRun[];
+	};
 	// The last read waited on a fill, so the staleness deadline it armed wakes the next one: a
 	// fill that never answers cannot pin a reader in either order.
 	#fillWait = false;
@@ -3384,9 +3393,12 @@ export class Subscriber {
 			const edge = min(end, max(this.#state.received.peek(), (fillEdge(producer) ?? -1n) + 1n));
 			const spans: Run[] = [{ start: low, end: edge }];
 			// The upstream accounted for a stale run, so the live feed brings none of it unless an
-			// update supersedes it: asked even above the newest group received.
-			for (const dropped of drops.overlapping(max(low, edge), end)) {
-				const span = { ...dropped, start: max(dropped.start, max(low, edge)), end: min(dropped.end, end) };
+			// update supersedes it: asked even above the newest group received. Only the runs that
+			// do not settle this reader are walked, never every run above the edge.
+			const above = max(low, edge);
+			for (const dropped of this.#unknownRuns(budget, coverage)) {
+				if (dropped.end <= above || dropped.start >= end) continue;
+				const span = { ...dropped, start: max(dropped.start, above), end: min(dropped.end, end) };
 				if (span.start < span.end && !settles(span, budget, coverage, this.#state.judged)) spans.push(span);
 			}
 			for (const run of spans.flatMap((span) => this.#wants(span.start, span.end))) {
@@ -3437,6 +3449,34 @@ export class Subscriber {
 			this.#fillsMoved();
 		}
 		return owed;
+	}
+
+	// The received stale runs that do not settle this reader under `budget` and `coverage`,
+	// lowest first. While the terms hold, only what changed since is judged again: a run the
+	// track changed or forgot leaves the memo, and the runs the change left are judged anew, so a
+	// drop costs each probe the runs it touches. A later start only narrows what a run asks the
+	// reader to read, so a run that settles here settles clipped too. Mirrors the Rust
+	// `Misses::unknown`.
+	#unknownRuns(budget: number, coverage: Coverage): readonly DropRun[] {
+		const { drops, judged } = this.#state;
+		const unsettled = (run: DropRun) => !settles(run, budget, coverage, judged);
+		const memo = this.#unknown;
+		let runs: DropRun[];
+		if (memo && memo.judged === judged && memo.budget === budget && sameCoverage(memo.coverage, coverage)) {
+			if (memo.drops === drops.revision) return memo.runs;
+			runs = memo.runs.filter((run) => drops.at(run.start) === run);
+			for (const changed of drops.since(memo.drops)) {
+				for (const run of drops.overlapping(changed.start, changed.end)) {
+					if (!unsettled(run) || runs.includes(run)) continue;
+					const at = runs.findIndex((held) => held.start > run.start);
+					runs.splice(at < 0 ? runs.length : at, 0, run);
+				}
+			}
+		} else {
+			runs = drops.all.filter(unsettled);
+		}
+		this.#unknown = { drops: drops.revision, judged, budget, coverage, runs };
+		return runs;
 	}
 
 	// Ask a fill for a fetch's group at once, written yet or not, as the Rust `fetch_group` queues

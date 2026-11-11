@@ -845,6 +845,39 @@ test("fill: a stale run that does not settle the reader is still asked for", asy
 	broadcast.close();
 });
 
+// The stale runs above the newest group a reader cannot trust are memoized, and what the track
+// gives up after a probe is judged on the next: a run given up later is asked too. Mirrors the
+// Rust `Misses::unknown`.
+test("fill: a stale run given up after a probe is asked on the next", async () => {
+	const { broadcast, track } = resumed(2n);
+	const requests = track.requests();
+	hooks.dropTrackGroups(track, 5n, 7n, staleHole(60_000));
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 2n }, end: { absolute: 20n } }],
+		delay: { max: Duration.millis(500) },
+	});
+	expect(reader.tryRecvGroup()?.sequence).toBe(2n);
+	reader.tryRecvGroup();
+	const asked = async () => {
+		const fills: bigint[][] = [];
+		for (;;) {
+			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+			if (!fill) return fills;
+			fills.push([fill.start, fill.end]);
+			fill.close();
+		}
+	};
+	expect(await asked()).toEqual([[5n, 7n]]);
+
+	hooks.dropTrackGroups(track, 9n, 10n, staleHole(60_000));
+	reader.tryRecvGroup();
+	expect(await asked()).toEqual([[9n, 10n]]);
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a stale run that does not settle the reader leaves its own refusal reported", async () => {
 	const { broadcast, track } = resumed(2n);
 	const requests = track.requests();
