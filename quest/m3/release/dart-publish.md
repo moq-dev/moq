@@ -9,9 +9,10 @@ A `moq-dart-v*` tag publishes `moq` to pub.dev with no manual step, as
 
 Both packages are on pub.dev (checked 2026-10-25). `moq_ffi` publishes from
 every `moq-ffi-v*` tag (0.4.3 through 0.4.18, the latest 2026-10-23), so its
-tag-driven publish works. `moq` has only 0.1.0 (2026-09-25), the one
-`moq-dart-v*` tag so far, so whether its tag publishes unattended through
-trusted publishing is still unproven.
+tag-driven publish works. `moq` has 0.1.0 (2026-09-25) and 0.1.1
+(2026-11-11, published by a rerun of its tag's workflow, below), so whether a
+tag publishes unattended through trusted publishing, with no rerun, is still
+unproven.
 
 Trusted-publishing configuration and checks of already-published artifacts
 can proceed independently; cutting the tag cannot.
