@@ -26,7 +26,6 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 ## Required
 
-- [The C bindings accept MoqInstance again](/quest/m0/check-c-moqinstance.md) - `check c` passes on main once the C generator stops refusing `MoqInstance`'s exported `Debug`
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
 - [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Dart `moq` 0.1.1 reaches pub.dev from `release`
