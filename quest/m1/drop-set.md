@@ -76,14 +76,6 @@ how a cursor judges a missing or stale group keeps that verdict in step.
 
 Still to cover, beyond the memory work:
 
-- **Idle START unreport test.** [moq-dev/moq#6717](https://github.com/moq-dev/moq/pull/6717)
-  made the JS lite publisher unreport stale skips below an idle
-  SUBSCRIBE_START, without a test: the case needs an update between START
-  and the first group. Cover it deterministically through the track hooks.
-- **Cancelled fetches hold the end.** Found 2026-10-28 by
-  [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149): a cancelled
-  fetch below a track's end holds the end open until the cache expiry scan
-  removes it. Settle it with a run reason.
 - **Untimed fills below a resolved start.** Noted 2026-10-31 from
   [moq-dev/moq#7235](https://github.com/moq-dev/moq/pull/7235): a lite-07
   copy with no media time asks a fill below the start even for a reader whose
@@ -93,6 +85,9 @@ Still to cover, beyond the memory work:
   (`rs/moq-net/src/model/track/fill.rs`) records what a fill's source gave up
   as a budget-independent drop, including OLD judged under that fill's own
   terms. Record it as a stale run, so it settles only the readers it covers.
+  Check first that a case is left: `Inner::old_binds_everyone` already
+  records an OLD only when the fill asked at or past the max age bound, which
+  the floor rule above counts as final.
 
 Tests, on mock time through a relay, in Rust and mirrored in `js/net`:
 

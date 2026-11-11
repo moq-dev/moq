@@ -867,9 +867,10 @@ impl Slot {
 	/// nothing it promised a reader is still in flight. A fetched head serving the group to
 	/// its end is judged in place of the live copy beside it, which may still be written or
 	/// may have been cut or evicted. Once no head serves, an aborted live copy holds the end
-	/// open: a session that died mid-group delivered less than the end promised.
+	/// open: a session that died mid-group delivered less than the end promised. A failed
+	/// fetch-only copy holds nothing open, since the feed never promised it.
 	fn is_settled(&self) -> bool {
-		self.serving().is_settled()
+		(!self.visible && self.is_aborted()) || self.serving().is_settled()
 	}
 
 	/// Every copy this slot holds, the live group first.
@@ -19310,6 +19311,65 @@ mod test {
 		producer.clone().abort(Error::Timeout).unwrap();
 		assert!(matches!(producer.poll_closed(&noop), Poll::Ready(Ok(()))));
 		assert!(matches!(consumer.poll_complete(&noop), Poll::Ready(Ok(()))));
+	}
+
+	/// A fetch below the end that was cancelled, or failed, before the live feed delivered its
+	/// group holds nothing the feed promised, so the end settles at once rather than once the
+	/// expiry scan reclaims its slot, and a later abort keeps that clean end.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_aborted_fetch_below_the_end_does_not_hold_it() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		for (err, parked) in [(Error::Cancel, false), (Error::Cancel, true), (Error::App(5), true)] {
+			let mut producer = track_producer("test", Info::timed());
+			let dynamic = producer.requests();
+			let consumer = producer.consume();
+			let noop = kio::Waiter::noop();
+			// The feed delivered group 1 and never group 0, which a fetch asks of the source.
+			producer
+				.create_group(group::Info { sequence: 1 })
+				.unwrap()
+				.finish()
+				.unwrap();
+
+			let fetch = consumer.fetch_group(0, None);
+			let mut fetched = dynamic
+				.requested_fill_group()
+				.await
+				.unwrap()
+				.accept(Info::timed())
+				.unwrap();
+			fetched
+				.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"backfill"))
+				.unwrap();
+			let woken = Arc::new(AtomicBool::new(false));
+			let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+			if parked {
+				producer.finish_at(Position::group(2), None).unwrap();
+				assert!(
+					producer.poll_closed(&waiter).is_pending(),
+					"{err:?}: the fetch still writes"
+				);
+			}
+			fetched.abort(err.clone()).unwrap();
+			drop(fetch);
+			if parked {
+				assert!(
+					woken.load(Ordering::SeqCst),
+					"{err:?}: the fetch failing wakes the wait"
+				);
+			} else {
+				producer.finish_at(Position::group(2), None).unwrap();
+			}
+			assert!(
+				matches!(producer.poll_closed(&noop), Poll::Ready(Ok(()))),
+				"{err:?} parked={parked}: the end settles"
+			);
+			producer.clone().abort(Error::Timeout).unwrap();
+			assert!(matches!(producer.poll_closed(&noop), Poll::Ready(Ok(()))), "{err:?}");
+			assert!(matches!(consumer.poll_complete(&noop), Poll::Ready(Ok(()))), "{err:?}");
+		}
 	}
 
 	/// A fetched head still writing holds the largest stream open after the live copy

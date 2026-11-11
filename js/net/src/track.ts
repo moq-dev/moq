@@ -810,6 +810,7 @@ function after(a: Position, b: Position): boolean {
 // `arrived` is when the group joined this track, which its mirrors age a predecessor from.
 // `bound` is its first frame's timestamp once checked to fit between its neighbors', which
 // bounds theirs; `unverified` marks one accepted below the eviction watermark instead.
+// `fetched` marks one a fill answered, which the feed never promised.
 type CachedGroup = {
 	group: GroupProducer;
 	charge: cache.Charge;
@@ -817,6 +818,7 @@ type CachedGroup = {
 	arrived: Instant;
 	bound?: Timestamp;
 	unverified?: boolean;
+	fetched?: boolean;
 };
 
 // A group's checked start, kept by sequence.
@@ -1116,7 +1118,10 @@ export class Producer {
 			name,
 			accept: (sequence, info) => {
 				if (info !== undefined && this.#state.info.peek() === undefined) this.accept(info);
-				return this.#createGroup(sequence, 0);
+				const group = this.#createGroup(sequence, 0);
+				const entry = this.#cached.get(sequence);
+				if (entry) entry.fetched = true;
+				return group;
 			},
 			drop: (start, end, error) => {
 				this.#drop(start, end, { error });
@@ -2400,13 +2405,18 @@ export class Producer {
 	// Whether the declared end was reached, the pending tail owes nothing below it, and every
 	// cached group below it finished, so the track already holds everything it promised. An
 	// abort over a group the tail still owed cut it off, so readers get the error rather than
-	// a clean end without it. Mirrors the Rust `is_settled`.
+	// a clean end without it. A failed fill answer holds nothing open, since the feed never
+	// promised it. Mirrors the Rust `is_settled`.
 	#settled(): boolean {
 		const end = this.#state.end.peek();
 		if (end === undefined) return false;
 		const final = finalSequence(end.at);
 		if (!reaches(this.#received, this.#state.drops, end) || this.#owes(final)) return false;
-		for (const { group } of this.#cache) if (group.sequence < final && group.closed.peek() !== null) return false;
+		for (const { group, fetched } of this.#cache) {
+			if (group.sequence >= final) continue;
+			const closed = group.closed.peek();
+			if (closed !== null && !(fetched && closed instanceof Error)) return false;
+		}
 		return true;
 	}
 

@@ -203,6 +203,35 @@ test("fill: a fetch cancelled while its fill awaits a reply withdraws the fill",
 	broadcast.close();
 });
 
+// As in Rust: a failed fill answer holds nothing the feed promised, so it never holds the end.
+test("fill: an answer aborted below the end does not hold the end open", async () => {
+	for (const parked of [false, true]) {
+		const { broadcast, track } = resumed(1n);
+		const requests = track.requests();
+		const fetching = wireOf(broadcast).fetchGroup("video", 0n);
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill");
+		const group = fill.accept(0n);
+		group.writeFrame({ payload: enc.encode("backfill") });
+		if (parked) {
+			track.finishAt({ group: 2n, frame: 0 });
+			await yieldNow();
+			expect(track.closed.peek()).toBeUndefined();
+		}
+		group.abort(new StreamError(StreamCode.Cancel));
+		fill.close();
+		await fetching.catch(() => undefined);
+		if (!parked) track.finishAt({ group: 2n, frame: 0 });
+		await yieldNow();
+		expect(track.closed.peek()).toBeNull();
+		track.abort(new Error("boom"));
+		expect(track.closed.peek()).toBeNull();
+
+		requests.close();
+		broadcast.close();
+	}
+});
+
 test("fill: a reader reaching back for history gets the misses filled in order", async () => {
 	const { broadcast, track } = resumed(4n);
 	const requests = track.requests();
