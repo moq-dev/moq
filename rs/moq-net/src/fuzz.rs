@@ -677,6 +677,7 @@ impl RouteRelay {
 			seqno: 0,
 			metric: 0,
 			down_only: false,
+			hops: [].into(),
 		};
 		let receive = (0..streams)
 			.map(|_| {

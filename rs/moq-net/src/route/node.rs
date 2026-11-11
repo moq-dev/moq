@@ -405,7 +405,7 @@ impl Node {
 			id != 0 && id & QUALIFIED == 0,
 			"a declared identity is non-zero and unqualified"
 		);
-		let mut router = Router::new(seed);
+		let mut router = Router::new(id, seed);
 		router.originate(id, 0);
 		Self {
 			state: Arc::new(Mutex::new(State {
@@ -1203,6 +1203,7 @@ mod tests {
 				seqno,
 				metric: 0,
 				down_only: false,
+				hops: [].into(),
 			}))
 		};
 		for origin in 10..110 {
@@ -1326,6 +1327,7 @@ mod tests {
 			seqno: 0,
 			metric: 0,
 			down_only: false,
+			hops: [].into(),
 		};
 		receive.route(1, Some(Reach::Finite(advert)));
 		receive.batch(1, vec![(p("live/x"), Some(claim(&instance, 0)))], Some(1));

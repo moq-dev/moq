@@ -114,15 +114,23 @@ pub enum AnnounceBroadcast {
 	Floor { id: u64, revision: Option<route::Rev> },
 }
 
-/// Encode a seqno, metric, and down-only bit. No origin advertises the last seqno,
-/// which would leave no room for the successor a ROUTE_REQUEST names.
+/// Encode a seqno, metric, down-only bit, and the hops the route crossed. No origin
+/// advertises the last seqno, which would leave no room for the successor a
+/// ROUTE_REQUEST names.
 fn encode_advert(w: &mut Encoder<'_>, advert: &Advert) -> Result<(), EncodeError> {
 	if advert.seqno == route::MAX {
 		return Err(EncodeError::InvalidState);
 	}
+	if advert.hops.len() > route::MAX_HOPS {
+		return Err(EncodeError::TooMany);
+	}
 	w.varint(advert.seqno)?;
 	w.varint(advert.metric)?;
 	w.bool(advert.down_only);
+	w.varint(advert.hops.len() as u64)?;
+	for hop in advert.hops.iter() {
+		w.varint(*hop)?;
+	}
 	Ok(())
 }
 
@@ -131,10 +139,18 @@ fn decode_advert(r: &mut Decoder<'_>) -> Result<Advert, DecodeError> {
 	if seqno == route::MAX {
 		return Err(DecodeError::InvalidValue);
 	}
+	let metric = r.varint()?;
+	let down_only = r.bool()?;
+	let count = r.varint()?;
+	if count > route::MAX_HOPS as u64 {
+		return Err(DecodeError::TooMany);
+	}
+	let hops = (0..count).map(|_| r.varint()).collect::<Result<_, _>>()?;
 	Ok(Advert {
 		seqno,
-		metric: r.varint()?,
-		down_only: r.bool()?,
+		metric,
+		down_only,
+		hops,
 	})
 }
 
@@ -1541,6 +1557,7 @@ mod tests {
 			seqno,
 			metric,
 			down_only,
+			hops: [].into(),
 		}
 	}
 
@@ -1691,6 +1708,7 @@ mod tests {
 				w.varint(seqno).unwrap();
 				w.varint(metric).unwrap();
 				w.u8(down_only);
+				w.varint(0u64).unwrap();
 			}
 		};
 		let malformed = [

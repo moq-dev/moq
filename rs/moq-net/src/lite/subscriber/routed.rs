@@ -585,11 +585,14 @@ mod tests {
 	use crate::lite::{AnnounceBroadcast as Msg, AnnounceDecoder, PathRef, test_transport::SinkSession};
 	use crate::{Instance, Path, auth::Permit, origin::Cost, route::Advert};
 
-	const ADVERT: Advert = Advert {
-		seqno: 0,
-		metric: 0,
-		down_only: false,
-	};
+	fn advert() -> Advert {
+		Advert {
+			seqno: 0,
+			metric: 0,
+			down_only: false,
+			hops: [].into(),
+		}
+	}
 
 	fn start(path: &'static str) -> Msg {
 		Msg::Active {
@@ -631,7 +634,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -670,7 +673,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [
 			route,
@@ -713,7 +716,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -749,7 +752,7 @@ mod tests {
 			};
 			let route = Msg::RouteStart {
 				node: 7,
-				advert: ADVERT,
+				advert: advert(),
 			};
 			for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
 				routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -779,14 +782,14 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 
 		for (id, node) in [(0, 7), (1, 8)] {
-			let route = Msg::RouteStart { node, advert: ADVERT };
+			let route = Msg::RouteStart { node, advert: advert() };
 			routed.receive(&prefix, route, &mut decoder).unwrap();
 			routed.receive(&prefix, Msg::RouteEnd { id }, &mut decoder).unwrap();
 			routed.poll(&subscriber, &mut writer, &waiter).unwrap();
 		}
 		let route = Msg::RouteStart {
 			node: 9,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		assert!(
 			routed.receive(&prefix, route, &mut decoder).is_err(),
@@ -807,7 +810,7 @@ mod tests {
 		let prefix = Path::empty();
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		routed.receive(&prefix, route, decoder)?;
 		for path in paths {
@@ -905,7 +908,7 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		routed.receive(&prefix, route, &mut decoder).unwrap();
 		let downstream = (subscriber.origin.route_node())
@@ -954,7 +957,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [route, start("room/host"), floor] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();

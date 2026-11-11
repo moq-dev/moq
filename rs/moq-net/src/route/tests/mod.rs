@@ -53,6 +53,11 @@ fn fnv(label: &str, ids: &[u64]) -> u64 {
 	hash
 }
 
+/// How `node` names itself in a route's hops, fresh for each restart like its process.
+pub(super) fn hop(node: Node, restarts: u32) -> Id {
+	1_000 * (u64::from(restarts) + 1) + node as u64
+}
+
 /// One side's configuration of a link.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SimLink {
@@ -162,7 +167,7 @@ pub(super) struct Sim {
 impl Sim {
 	pub fn new(nodes: usize) -> Self {
 		Self {
-			nodes: (0..nodes).map(|node| Router::new(node as u64 + 1)).collect(),
+			nodes: (0..nodes).map(|node| Router::new(hop(node, 0), node as u64 + 1)).collect(),
 			leaf: vec![false; nodes],
 			watch: vec![Path::empty(); nodes],
 			restarts: vec![0; nodes],
@@ -257,7 +262,9 @@ impl Sim {
 		}
 		self.restarts[node] += 1;
 		self.declared[node] = None;
-		self.nodes[node] = Router::new(fnv("restart", &[node as u64, u64::from(self.restarts[node])]));
+		let restarts = self.restarts[node];
+		let seed = fnv("restart", &[node as u64, u64::from(restarts)]);
+		self.nodes[node] = Router::new(hop(node, restarts), seed);
 		let watch = self.watch[node].clone();
 		self.nodes[node].watch(watch);
 		self.flush();
@@ -471,6 +478,14 @@ impl Sim {
 			for out in self.nodes[node].drain() {
 				let (to, msg) = match out {
 					Out::Route { to, id, reach } => {
+						// A route names every relay it crossed once, the sender last.
+						if let Some(Reach::Finite(advert)) = &reach {
+							let own = self.nodes[node].origins.contains_key(&id);
+							let me = hop(node, self.restarts[node]);
+							assert_eq!(advert.hops.last().copied(), (!own).then_some(me), "node {node}'s hops for {id}");
+							let named: BTreeSet<Id> = advert.hops.iter().copied().collect();
+							assert_eq!(named.len(), advert.hops.len(), "node {node} sent {id} round a loop");
+						}
 						self.stats.route_msgs += 1;
 						(to, Msg::Route { id, reach })
 					}
