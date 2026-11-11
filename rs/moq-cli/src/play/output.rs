@@ -5,6 +5,8 @@
 
 use std::time::Duration;
 
+use kio::clock::Instant;
+
 use moq_audio::playback::Input;
 
 use super::window::Event;
@@ -39,6 +41,10 @@ pub(super) trait Sink: Send + Sync + 'static {
 	/// Update the callback's playout target without replacing the sink.
 	fn set_latency(&mut self, latency: Duration) -> anyhow::Result<()>;
 
+	/// The audio written so far is due to finish sounding at `at`; trailing that
+	/// by more than `late` is skipped.
+	fn due(&mut self, at: Instant, late: Duration);
+
 	/// How much audio is queued ahead of the speaker.
 	fn buffered(&self) -> Duration;
 
@@ -63,6 +69,10 @@ impl Speaker for moq_audio::playback::Engine {
 impl Sink for moq_audio::playback::Sink {
 	fn set_latency(&mut self, latency: Duration) -> anyhow::Result<()> {
 		Ok(moq_audio::playback::Sink::set_latency(self, latency)?)
+	}
+
+	fn due(&mut self, at: Instant, late: Duration) {
+		moq_audio::playback::Sink::due(self, at, late);
 	}
 
 	fn write(&mut self, samples: &[u8]) -> anyhow::Result<moq_audio::playback::Write> {

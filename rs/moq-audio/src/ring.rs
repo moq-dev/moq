@@ -4,8 +4,10 @@
 //! reader-rate frames and both its size and what it admits are counted in them.
 //! It opens primed with silence to its latency, can pad back up to it when the
 //! writer falls behind, and can trim back down to it when the writer runs ahead.
-//! Native playback instead enables received-audio stretch; only an actual
-//! underrun refills with emergency silence, which never enters the pitch search.
+//! Native playback instead enables received-audio stretch, which plays the
+//! queue onto the writer's clock (see [`Producer::due`]) and skips only audio
+//! that trails it too far; an actual underrun refills with emergency silence,
+//! which never enters the pitch search, until one window is queued again.
 //! A silence the writer declared is not an underrun: the reader fills it with
 //! comfort noise, and the next utterance plays one latency after it resumes.
 //! Neither end allocates, locks, or blocks after construction, so either may
@@ -20,7 +22,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ringbuf::traits::{Consumer as _, Observer as _, Producer as _, Split as _};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
@@ -87,6 +89,20 @@ struct Shared {
 	/// correction. One publication avoids sampling the ring and staging buffer
 	/// on opposite sides of a window transfer.
 	consumed: AtomicUsize,
+	/// Frames of the writer's stream the reader has played or skipped:
+	/// `consumed` before the stretch's length correction.
+	played: AtomicUsize,
+	/// The writer's end less `played`, at its latest push. Adding the reader's
+	/// `played` less `consumed` gives the depth that push left, less what the
+	/// stretch removed since: the level the stretch decides on.
+	level: AtomicUsize,
+	/// The writer's end less the frames from [`Producer::base`] to when it is
+	/// due, once [`clocked`](Self::clocked). Adding the frames to now less
+	/// `consumed` gives how far the reader trails the writer's clock.
+	clock: AtomicUsize,
+	clocked: AtomicBool,
+	/// How far the reader may trail that clock before it skips ahead.
+	late: AtomicUsize,
 	target: AtomicUsize,
 	finished: AtomicBool,
 	stretch: AtomicBool,
@@ -135,12 +151,15 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 
 	let shared = Arc::new(Shared {
 		target: AtomicUsize::new(latency),
+		level: AtomicUsize::new(latency),
 		..Default::default()
 	});
+	let base = Instant::now();
 	let producer = Producer {
 		ring: prod,
 		channels,
 		rate: output_rate,
+		base,
 		convert,
 		latency: config.latency,
 		written: latency,
@@ -152,6 +171,10 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 	let consumer = Consumer {
 		ring: cons,
 		channels,
+		rate: output_rate,
+		base,
+		now: 0,
+		played: 0,
 		stretch: None,
 		staged_prime: false,
 		refill: false,
@@ -177,6 +200,8 @@ pub(crate) struct Producer {
 	channels: usize,
 	/// The reader's rate, which every queued frame is at.
 	rate: u32,
+	/// Where both ends count time from.
+	base: Instant,
 	/// Boxed, since the resampler state dwarfs the rest and a producer moves
 	/// through the mixer's command channel by value.
 	convert: Option<Box<Convert>>,
@@ -267,6 +292,13 @@ impl Producer {
 		if !self.shared.read.load(Ordering::Relaxed) {
 			return Push::NotReady;
 		}
+		let push = self.queue(input);
+		let level = self.head().wrapping_sub(self.shared.played.load(Ordering::Relaxed));
+		self.shared.level.store(level, Ordering::Relaxed);
+		push
+	}
+
+	fn queue(&mut self, input: &[f32]) -> Push {
 		if input.len() >= self.channels && std::mem::take(&mut self.next) {
 			self.resume();
 		}
@@ -304,6 +336,28 @@ impl Producer {
 		}
 
 		Push::Ok
+	}
+
+	/// Where the audio pushed so far ends, in frames: what was queued, and what
+	/// the resampler still owes for input it holds.
+	fn head(&self) -> usize {
+		let owed = self.convert.as_ref().map_or(0, |convert| convert.owed());
+		self.written.wrapping_add(owed)
+	}
+
+	/// Anchor what was pushed so far to the writer's clock: its end is due to
+	/// play at `at`. The stretch then plays the queue onto that clock, and the
+	/// reader skips audio trailing it by more than `late` plus one window.
+	/// Without an anchor, the latency is the clock.
+	pub(crate) fn due(&mut self, at: Instant, late: Duration) {
+		let frames = |duration: Duration| (duration.as_secs_f64() * self.rate as f64).round() as usize;
+		let at = match at.checked_duration_since(self.base) {
+			Some(since) => frames(since),
+			None => frames(self.base - at).wrapping_neg(),
+		};
+		self.shared.clock.store(self.head().wrapping_sub(at), Ordering::Relaxed);
+		self.shared.late.store(frames(late), Ordering::Relaxed);
+		self.shared.clocked.store(true, Ordering::Release);
 	}
 
 	/// Convert silence until the resampler has emitted the full duration of
@@ -437,6 +491,14 @@ impl Convert {
 		accepted
 	}
 
+	/// Output frames the input admitted so far is still owed, the filter's lag
+	/// included.
+	fn owed(&self) -> usize {
+		let owed = (self.fed as u128 * self.output_rate as u128 / self.input_rate as u128) as u64
+			+ self.resampler.output_delay() as u64;
+		owed.saturating_sub(self.emitted) as usize
+	}
+
 	/// Pad with silence a chunk at a time until the output covers the filter's
 	/// lag and the input's whole duration, returning false if the ring filled
 	/// first.
@@ -483,11 +545,19 @@ impl Convert {
 pub(crate) struct Consumer {
 	ring: HeapCons<f32>,
 	channels: usize,
+	rate: u32,
+	/// Where both ends count time from.
+	base: Instant,
+	/// Frames from `base` to the start of the current read.
+	now: usize,
+	/// See [`Shared::played`].
+	played: usize,
 	stretch: Option<Box<crate::stretch::Stretch>>,
 	/// Whether the window staged in the stretcher is startup cushion.
 	staged_prime: bool,
-	/// An actual underrun waits for received PCM, emitting emergency silence
-	/// directly rather than putting padding through the pitch search.
+	/// An actual underrun waits for one window of received PCM and the read
+	/// that plays it, emitting emergency silence directly rather than putting
+	/// padding through the pitch search.
 	refill: bool,
 	/// The startup cushion is silence, not received audio to stretch.
 	prime: usize,
@@ -502,7 +572,8 @@ pub(crate) struct Consumer {
 	comfort: crate::comfort::Comfort,
 	/// Whether the comfort noise measures what plays; unmeasured, it fills plain silence.
 	measure: bool,
-	/// Trim only after filling three quarters of the current target's headroom.
+	/// Without stretch, trim only after filling three quarters of the current
+	/// target's headroom. Stretch skips by the clock instead.
 	trim: bool,
 	/// Times [`Read::Trimmed`] was returned, ever.
 	skips: u64,
@@ -522,7 +593,13 @@ impl Consumer {
 
 	/// Fill `output` with queued interleaved frames, and silence past them.
 	pub(crate) fn read(&mut self, output: &mut [f32]) -> Read {
+		self.read_at(output, Instant::now())
+	}
+
+	/// [`read`](Self::read), starting at `now`.
+	pub(crate) fn read_at(&mut self, output: &mut [f32], now: Instant) -> Read {
 		self.start();
+		self.now = (now.saturating_duration_since(self.base).as_secs_f64() * self.rate as f64).round() as usize;
 		let whole = output.len() - output.len() % self.channels;
 		output[whole..].fill(0.0);
 		if !self.shared.pushed.load(Ordering::Relaxed) {
@@ -535,6 +612,7 @@ impl Consumer {
 			return Read::NotReady;
 		}
 
+		let skipped = self.skip();
 		let read = self.fill(&mut output[..whole]);
 		if read < whole {
 			if self.declared() {
@@ -550,7 +628,11 @@ impl Consumer {
 			};
 		}
 
-		if self.trim {
+		if skipped > 0 {
+			return Read::Trimmed { frames: skipped };
+		}
+
+		if self.trim && self.stretch.is_none() {
 			let queued = self.available();
 			let latency = self.shared.target.load(Ordering::Relaxed);
 			let capacity = self.ring.capacity().get() / self.channels;
@@ -564,6 +646,62 @@ impl Consumer {
 		}
 
 		Read::Ok
+	}
+
+	/// What a stretch window starting `elapsed` frames into this read decides on.
+	fn inputs(&self, elapsed: usize) -> crate::stretch::Inputs {
+		let target = self.shared.target.load(Ordering::Relaxed);
+		let level = self
+			.shared
+			.level
+			.load(Ordering::Relaxed)
+			.wrapping_add(self.played)
+			.wrapping_sub(self.consumed) as isize;
+		let (lag, bound) = if self.shared.clocked.load(Ordering::Acquire) {
+			let lag = self
+				.shared
+				.clock
+				.load(Ordering::Relaxed)
+				.wrapping_add(self.now + elapsed)
+				.wrapping_sub(self.consumed) as isize;
+			(lag, self.shared.late.load(Ordering::Relaxed))
+		} else {
+			// Without a clock, the latency is where the reader belongs, and
+			// only an excess past three quarters of the headroom is skipped.
+			let capacity = self.ring.capacity().get() / self.channels;
+			(level - target as isize, capacity.saturating_sub(target) * 3 / 4)
+		};
+		crate::stretch::Inputs {
+			target,
+			level: level.max(0) as f64,
+			raw: self.available(),
+			lag: lag as i64,
+			bound: bound as i64,
+		}
+	}
+
+	/// Skip what trails the clock by more than its bound plus one window, back
+	/// to the bound, returning the frames skipped. Less than that is the
+	/// stretch's to catch up. A finished or silenced stream plays as written.
+	fn skip(&mut self) -> usize {
+		let Some(window) = self.stretch.as_ref().map(|stretch| stretch.window) else {
+			return 0;
+		};
+		if self.shared.finished.load(Ordering::Relaxed) || self.declared() {
+			return 0;
+		}
+		let inputs = self.inputs(0);
+		if inputs.lag <= inputs.bound + window as i64 {
+			return 0;
+		}
+		let available = self.available();
+		let pushed = self.discard((inputs.lag - inputs.bound) as usize);
+		let skipped = available - self.available();
+		if skipped > 0 {
+			self.skips += 1;
+			self.trimmed += pushed as u64;
+		}
+		skipped
 	}
 
 	/// Whether running dry now is a silence the writer declared: an end it has
@@ -594,6 +732,7 @@ impl Consumer {
 		let frames = frames.min(left);
 		if let Some(output) = output {
 			self.comfort.fill(&mut output[..frames * self.channels]);
+			self.played = self.played.wrapping_add(frames);
 		}
 		self.cushioned += frames;
 		self.consumed = self.consumed.wrapping_add(frames);
@@ -608,11 +747,20 @@ impl Consumer {
 	/// Fill `output` from the queue, returning the samples written.
 	fn fill(&mut self, output: &mut [f32]) -> usize {
 		if self.refill && !self.shared.finished.load(Ordering::Relaxed) {
+			// One window for the stretch and this read's device period: the
+			// least that resumes without running dry again at once, and never
+			// more than the start waits for. Expanding then rebuilds the level
+			// rather than this wait.
+			let window = self.stretch.as_ref().map_or(0, |stretch| stretch.window);
+			let cushion = (window + output.len() / self.channels).min(self.shared.target.load(Ordering::Relaxed));
 			// Nothing more comes before a declared silence, so its tail plays now.
-			if !self.declared() && self.available() < self.shared.target.load(Ordering::Relaxed) {
+			if !self.declared() && self.available() < cushion {
 				return 0;
 			}
 			self.refill = false;
+			if let Some(stretch) = &mut self.stretch {
+				stretch.level.reset();
+			}
 		}
 		let channels = self.channels;
 		let mut done = 0;
@@ -624,11 +772,11 @@ impl Consumer {
 				}
 				done += frames * channels;
 				self.consumed = self.consumed.wrapping_add(frames);
+				self.played = self.played.wrapping_add(frames);
 				continue;
 			}
 
-			let buffered = self.ring.occupied_len() / channels;
-			let mut frames = buffered;
+			let mut frames = self.ring.occupied_len() / channels;
 			if let Some((ahead, _)) = self.resume() {
 				if ahead == 0 {
 					let room = (output.len() - done) / channels;
@@ -640,7 +788,7 @@ impl Consumer {
 			// A declared end's tail drains as received: running dry after it is
 			// silence, not an underrun, so nothing should expand toward the target.
 			let declared = self.declared();
-			let Some(stretch) = self.stretch.as_mut() else {
+			let Some(window) = self.stretch.as_ref().map(|stretch| stretch.window) else {
 				let frames = frames.min((output.len() - done) / channels);
 				if frames == 0 {
 					break;
@@ -654,22 +802,25 @@ impl Consumer {
 				}
 				self.position = self.position.wrapping_add(frames);
 				self.consumed = self.consumed.wrapping_add(frames);
+				self.played = self.played.wrapping_add(frames);
 				done += read;
 				continue;
 			};
-			let frames = frames.min(stretch.window);
+			let frames = frames.min(window);
 			if frames == 0 {
 				break;
 			}
 			// Never transform startup padding or a finite stream's tail.
 			let enabled = self.prime == 0 && !self.shared.finished.load(Ordering::Relaxed) && !declared;
+			let inputs = (enabled && frames == window).then(|| self.inputs(done / channels));
+			let stretch = self.stretch.as_mut().expect("a window comes from the stretch");
 			let frames = if self.prime > 0 { frames.min(self.prime) } else { frames };
 			self.staged_prime = self.prime > 0;
 			self.prime -= frames.min(self.prime);
 			let read = self.ring.pop_slice(&mut stretch.input[..frames * channels]);
 			debug_assert_eq!(read, frames * channels);
 			self.position = self.position.wrapping_add(frames);
-			stretch.process(frames, buffered, self.shared.target.load(Ordering::Relaxed), enabled);
+			stretch.process(frames, inputs);
 			self.accelerated += frames.saturating_sub(stretch.available()) as u64;
 			// The writer still counts the input while it is being analysed.
 			// Publish only the resulting duration change, then the rendered
@@ -677,6 +828,7 @@ impl Consumer {
 			self.consumed = self.consumed.wrapping_add(frames).wrapping_sub(stretch.available());
 		}
 		self.shared.consumed.store(self.consumed, Ordering::Relaxed);
+		self.shared.played.store(self.played, Ordering::Relaxed);
 		done
 	}
 
@@ -720,6 +872,7 @@ impl Consumer {
 	/// Drop up to `frames` queued frames unread, returning how many of them were
 	/// pushed rather than the startup silence or a resume's comfort noise.
 	pub(crate) fn discard(&mut self, frames: usize) -> usize {
+		// Skipped audio leaves `played` behind, so the level drops with it.
 		let staged = self.stretch.as_mut().map_or(0, |stretch| stretch.discard(frames));
 		self.consumed = self.consumed.wrapping_add(staged);
 		let mut pushed = if self.staged_prime { 0 } else { staged };
@@ -745,6 +898,7 @@ impl Consumer {
 			left -= skipped;
 		}
 		self.shared.consumed.store(self.consumed, Ordering::Relaxed);
+		self.shared.played.store(self.played, Ordering::Relaxed);
 		pushed
 	}
 }
@@ -964,62 +1118,171 @@ mod tests {
 		}
 	}
 
-	/// Clock-controlled packet/device drift, without padding to hide a dropout.
+	/// A stretching queue fed 20 ms of a 200 Hz tone every `interval`
+	/// microseconds against a 10 ms device period.
+	fn tone(rate: u32, latency: Duration) -> (Producer, Consumer, Vec<f32>) {
+		let (prod, mut cons) = channel(
+			2,
+			rate,
+			rate,
+			Config {
+				latency,
+				capacity: Duration::from_secs(3),
+				pad: false,
+				trim: false,
+				comfort: true,
+			},
+		);
+		cons.stretch(rate);
+		cons.start();
+		let mut pcm = vec![0.0; rate as usize / 50 * 2];
+		for (i, frame) in pcm.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+			frame.fill((i as f32 * std::f32::consts::TAU * 200.0 / rate as f32).sin() * 0.25);
+		}
+		(prod, cons, pcm)
+	}
+
+	/// Packets on a clock that drifts from the device's, each due one target
+	/// after it arrives. The queue plays onto that clock, in either direction
+	/// of drift, and onto it again after the target rises (slowing down rather
+	/// than parking) or falls (speeding up rather than skipping). Without a
+	/// clock, the target alone is where it settles.
 	#[test]
-	fn stretch_tracks_both_clock_directions_and_target_changes() {
-		for rate in [8_000, 44_100, 48_000, 96_000] {
-			for interval in [19_960u64, 20_040] {
-				let (mut prod, mut cons) = channel(
-					2,
-					rate,
-					rate,
-					Config {
-						latency: Duration::from_millis(80),
-						capacity: Duration::from_secs(3),
-						pad: false,
-						trim: false,
-						comfort: true,
-					},
-				);
-				cons.stretch(rate);
-				cons.start();
-				let mut pcm = vec![0.0; rate as usize / 50 * 2];
-				for (i, frame) in pcm.as_chunks_mut::<2>().0.iter_mut().enumerate() {
-					frame.fill((i as f32 * std::f32::consts::TAU * 200.0 / rate as f32).sin() * 0.25);
-				}
-				let mut out = vec![0.0; rate as usize / 100 * 2];
-				let mut arrival = 0;
-				for tick in 0..9000u64 {
-					if tick == 3000 {
-						assert!(prod.set_latency(Duration::from_millis(120)));
+	fn stretch_plays_onto_the_clock_through_drift_and_target_changes() {
+		for clocked in [true, false] {
+			for rate in [8_000, 44_100, 48_000, 96_000] {
+				for interval in [19_960u64, 20_040] {
+					let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(80));
+					let base = prod.base;
+					let mut out = vec![0.0; rate as usize / 100 * 2];
+					let mut arrival = 0;
+					let mut target = Duration::from_millis(80);
+					for tick in 0..9000u64 {
+						if tick == 3000 || tick == 6000 {
+							target = Duration::from_millis(if tick == 3000 { 120 } else { 60 });
+							assert!(prod.set_latency(target));
+						}
+						while arrival <= tick * 10_000 {
+							assert_eq!(prod.push(&pcm), Push::Ok);
+							if clocked {
+								prod.due(base + Duration::from_micros(arrival) + target, Duration::from_secs(2));
+							}
+							arrival += interval;
+						}
+						let now = base + Duration::from_millis(tick * 10);
+						let (status, allocations) = crate::allocation::measure(|| cons.read_at(&mut out, now));
+						assert_eq!(allocations.operations, 0, "callback allocated");
+						assert_eq!(status, Read::Ok, "{rate} Hz, {interval} us, tick {tick}");
+						if tick % 3000 > 500 {
+							let target = target.as_secs_f64() * 1000.0;
+							let buffered = prod.buffered().as_secs_f64() * 1000.0;
+							assert!(
+								(target - 40.0..=target + 40.0).contains(&buffered),
+								"{rate} Hz tick {tick}: {buffered} ms, target {target}"
+							);
+							if clocked {
+								let lag = cons.inputs(0).lag as f64 * 1000.0 / rate as f64;
+								assert!(
+									lag.abs() <= 20.0,
+									"{rate} Hz {interval} us tick {tick}: {lag} ms behind"
+								);
+							}
+						}
 					}
-					if tick == 6000 {
-						assert!(prod.set_latency(Duration::from_millis(60)));
-					}
-					while arrival <= tick * 10_000 {
-						assert_eq!(prod.push(&pcm), Push::Ok);
-						arrival += interval;
-					}
-					let (status, allocations) = crate::allocation::measure(|| cons.read(&mut out));
-					assert_eq!(allocations.operations, 0, "callback allocated");
-					assert_eq!(status, Read::Ok, "{rate} Hz, {interval} us, tick {tick}");
-					if tick % 3000 > 500 {
-						let target = if tick < 3000 {
-							80.0
-						} else if tick < 6000 {
-							120.0
-						} else {
-							60.0
-						};
-						let buffered = prod.buffered().as_secs_f64() * 1000.0;
-						assert!(
-							(target - 40.0..=target + 40.0).contains(&buffered),
-							"{rate} Hz tick {tick}: {buffered} ms, target {target}"
-						);
-					}
+					assert_eq!(cons.skips(), 0);
 				}
 			}
 		}
+	}
+
+	/// A 300 ms stall runs the queue dry. It resumes on one window and a device
+	/// period rather than its target, then slows down to rebuild the target,
+	/// falling behind the clock without running dry again. Media that keeps
+	/// arriving that late leaves it there; media that arrives in a burst once
+	/// the stall clears lets it speed back onto the clock.
+	#[test]
+	fn a_stall_resumes_early_and_catches_up_once_the_buffer_returns() {
+		for burst in [false, true] {
+			let rate = 48_000;
+			let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(80));
+			let base = prod.base;
+			let target = Duration::from_millis(80);
+			let mut out = vec![0.0; 480 * 2];
+			let mut underruns = Vec::new();
+			let mut lag = 0.0;
+			let mut sent = 0;
+			for tick in 0..1500u64 {
+				let now = tick * 10;
+				// Packets sent every 20 ms, each due one target after it is sent.
+				// From 1000 ms they arrive 300 ms late, or all at 1300 ms and
+				// on time after.
+				let arrival = |sent: u64| match sent {
+					..1000 => sent,
+					_ if burst => sent.max(1300),
+					_ => sent + 300,
+				};
+				while arrival(sent) <= now {
+					assert_eq!(prod.push(&pcm), Push::Ok);
+					prod.due(base + Duration::from_millis(sent) + target, Duration::from_secs(2));
+					sent += 20;
+				}
+				let read = cons.read_at(&mut out, base + Duration::from_millis(now));
+				if matches!(read, Read::Underflow { .. }) {
+					underruns.push(now);
+				}
+				lag = cons.inputs(0).lag as f64 * 1000.0 / rate as f64;
+			}
+			// Running dry once the buffer drains, until a cushion arrives: two
+			// packets rather than the four of the target.
+			assert!(
+				underruns.iter().all(|&at| (1040..1330).contains(&at)),
+				"{burst}: {underruns:?}"
+			);
+			if burst {
+				assert!(lag.abs() <= 20.0, "back on the clock, {lag} ms behind");
+			} else {
+				assert!(
+					(250.0..1000.0).contains(&lag),
+					"settled behind the clock, {lag} ms behind"
+				);
+			}
+			// Rebuilt into NetEq's band: from three quarters of the target to it.
+			let level = cons.inputs(0).level * 1000.0 / rate as f64;
+			assert!((60.0..=100.0).contains(&level), "{burst}: rebuilt to {level} ms");
+			assert_eq!(cons.skips(), 0);
+		}
+	}
+
+	/// Audio trailing the clock by more than its bound and a window skips back
+	/// to the bound; less than that is the stretch's to catch up.
+	#[test]
+	fn only_audio_past_the_bound_skips() {
+		let rate = 48_000;
+		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(10));
+		let base = prod.base;
+		let mut out = vec![0.0; 480 * 2];
+		// Two seconds queued behind the 10 ms prime, all due at 10 ms: the
+		// reader starts 2000 ms behind.
+		for _ in 0..100 {
+			assert_eq!(prod.push(&pcm), Push::Ok);
+		}
+		let due = base + Duration::from_millis(10);
+		prod.due(due, Duration::from_millis(1970));
+		assert_eq!(cons.read_at(&mut out, base), Read::Ok);
+		assert_eq!(cons.skips(), 0, "a window past the bound is the stretch's");
+		prod.due(due, Duration::from_millis(1960));
+		let read = cons.read_at(&mut out, base + Duration::from_millis(10));
+		assert_eq!(read, Read::Trimmed { frames: 1920 });
+		assert_eq!(cons.trimmed(), 1920, "back to the bound");
+		// A fixed delay has no bound: whatever trails the clock goes, here
+		// what is due before the second the end is due at.
+		prod.due(base + Duration::from_secs(1), Duration::ZERO);
+		let read = cons.read_at(&mut out, base + Duration::from_millis(20));
+		assert!(matches!(read, Read::Trimmed { .. }), "{read:?}");
+		assert!(cons.inputs(0).lag <= 0);
+		assert_eq!(cons.skips(), 2);
+		let left = cons.available() as f64 * 1000.0 / rate as f64;
+		assert!((970.0..990.0).contains(&left), "{left} ms left");
 	}
 
 	#[test]
@@ -1104,15 +1367,18 @@ mod tests {
 		assert_eq!(prod.push(&[]), Push::Ok);
 		let mut out = vec![1.0; 4800 * 2];
 		assert_eq!(cons.read(&mut out), Read::Underflow { frames: 2400 });
-		for _ in 0..2 {
-			assert_eq!(prod.push(&[0.25; 960 * 2]), Push::Ok, "no padding inserted in the ring");
-			assert_eq!(cons.read(&mut out[..128 * 2]), Read::Underflow { frames: 0 });
-			assert!(out[..128 * 2].iter().all(|&sample| sample == 0.0));
-		}
-		assert_eq!(prod.push(&[0.25; 960 * 2]), Push::Ok);
+		// One 30 ms window and the 128-frame read, not the 50 ms target: 1568 frames.
+		assert_eq!(
+			prod.push(&[0.25; 1567 * 2]),
+			Push::Ok,
+			"no padding inserted in the ring"
+		);
+		assert_eq!(cons.read(&mut out[..128 * 2]), Read::Underflow { frames: 0 });
+		assert!(out[..128 * 2].iter().all(|&sample| sample == 0.0));
+		assert_eq!(prod.push(&[0.25; 2]), Push::Ok);
 		assert_eq!(cons.read(&mut out[..128 * 2]), Read::Ok);
 		assert!(out[..128 * 2].iter().all(|&sample| sample == 0.25));
-		// A final short input must not wait forever to reach the refill target.
+		// A final short input must not wait forever to reach the cushion.
 		assert!(prod.flush());
 		while cons.available() > 0 {
 			cons.read(&mut out);

@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use kio::clock::Instant;
+
 use super::driver::Shared;
 use super::mixer::{self, Gain};
 use crate::resample::Remix;
@@ -166,10 +168,11 @@ impl Sink {
 	/// how far ahead of the speaker you are, which is the anchor an A/V sync
 	/// clock steers video by.
 	///
-	/// Received audio is time-stretched toward the current latency. A writer
-	/// that outruns that correction eventually overflows and drops the excess;
-	/// one that leaves no received audio underruns and plays silence. Both are
-	/// logged and neither is an error, since the next write can recover.
+	/// Received audio is time-stretched toward the current latency, or toward
+	/// the clock [`due`](Self::due) anchors it to. A writer that outruns that
+	/// correction eventually overflows and drops the excess; one that leaves no
+	/// received audio underruns and plays silence. Both are logged and neither
+	/// is an error, since the next write can recover.
 	/// The returned [`Write`] counts input sample frames accepted and dropped;
 	/// dropped live audio should be observed for telemetry, not retried.
 	pub fn write(&mut self, samples: &[u8]) -> Result<Write, Error> {
@@ -254,6 +257,10 @@ impl Sink {
 
 	/// Set the playout target, converging by stretching received PCM.
 	///
+	/// This is the buffer the sink keeps against jitter: it slows down while
+	/// what it holds runs short of it, and speeds up past it only to catch up
+	/// with the clock [`due`](Self::due) anchors it to.
+	///
 	/// Must be non-zero, at most [`Input::LATENCY_MAX`], and fit in the current
 	/// ring. Each device open or rebuild allocates the then-current target plus
 	/// three seconds, less a 30 ms processing window reserved as headroom.
@@ -270,6 +277,27 @@ impl Sink {
 		}
 		self.input = input;
 		Ok(())
+	}
+
+	/// Anchor the audio written so far to the caller's clock: its end is due to
+	/// sound at `at`.
+	///
+	/// The sink then plays onto that clock rather than at its latency alone.
+	/// Behind it, it speeds up once it holds more than its latency; ahead of
+	/// it, it slows down. Its buffer running low slows it down too, falling
+	/// behind the clock by at most `late`, and audio trailing the clock by more
+	/// than `late` plus one 30 ms window is skipped. Call it after each write
+	/// and whenever the clock moves; until the first call, or after the device
+	/// changes, the latency alone is the clock.
+	pub fn due(&mut self, at: Instant, late: Duration) {
+		// The device thread reads std's clock, so carry the distance from now
+		// over to it rather than the instant.
+		let (now, host) = (Instant::now(), std::time::Instant::now());
+		let at = match at.checked_duration_since(now) {
+			Some(ahead) => host + ahead,
+			None => host.checked_sub(now.duration_since(at)).unwrap_or(host),
+		};
+		self.channel.lock().unwrap().prod.due(at, late);
 	}
 
 	/// The PCM layout this sink was built with.
@@ -621,7 +649,12 @@ mod tests {
 		for _ in 0..4 {
 			mixer.fill(&mut out, Duration::ZERO);
 		}
-		let _ = sink.write(&tone).unwrap();
+		// Running dry waits for a 30 ms window and the device period to resume.
+		let refill: Vec<_> = [0.25f32; 2 * (1440 + 512)]
+			.iter()
+			.flat_map(|s| s.to_le_bytes())
+			.collect();
+		let _ = sink.write(&refill).unwrap();
 		mixer.fill(&mut out, Duration::ZERO);
 		let observation = observer.read().unwrap();
 		assert!(!observation.stalled);

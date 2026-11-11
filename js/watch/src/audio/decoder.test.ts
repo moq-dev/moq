@@ -11,7 +11,7 @@ import { type Delay, Sync } from "../sync";
 import { Decoder as VideoDecoder } from "../video/decoder";
 import { Source as VideoSource } from "../video/source";
 import { decoderConfigKey } from "./config";
-import type { Message, State } from "./render";
+import type { Message, State, Terms } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 import { Source } from "./source";
 
@@ -30,6 +30,7 @@ let moduleLoaded: Promise<void> = Promise.resolve();
 
 class FakeContext extends EventTarget {
 	state: AudioContextState = "running";
+	readonly currentTime = 0;
 	readonly sampleRate: number;
 	readonly audioWorklet = { addModule: () => moduleLoaded };
 	readonly calls = { suspend: 0, resume: 0, close: 0 };
@@ -60,24 +61,26 @@ class FakeContext extends EventTarget {
 let worklets: FakeWorklet[] = [];
 
 // The render worklet's side of the port, synchronous: each message applies to a real ring, and
-// every quantum read reports the ring's state back, the way `render-worklet.ts` does.
+// every quantum read reports the ring's state back, the way `render-worklet.ts` does. It takes no
+// clock readings, so the ring decides on its buffer alone.
 class FakeWorklet {
 	ring?: AudioRingBuffer;
+	// The terms the ring was last given, in ms.
+	terms?: Terms;
+	readonly context: FakeContext;
 	#epoch = 0;
 	#playing = true;
 	readonly port = Object.assign(new EventTarget(), {
 		postMessage: (msg: Message) => {
+			if (msg.type === "init" || msg.type === "latency")
+				this.terms = { latency: msg.latency, target: msg.target, bound: msg.bound };
 			if (msg.type === "init") {
 				this.ring = new AudioRingBuffer(msg);
 				this.#playing = msg.playing ?? true;
 			} else if (msg.type === "data") this.ring?.write(msg.timestamp, msg.data);
-			else if (msg.type === "latency") {
-				this.ring?.setLatency(msg.latency);
-				if (msg.park !== undefined) {
-					this.ring?.park();
-					this.#epoch = msg.park;
-				}
-			} else if (msg.type === "truncate") this.ring?.truncate(msg.timestamp);
+			else if (msg.type === "received") this.ring?.received(msg.end);
+			else if (msg.type === "latency") this.ring?.setLatency(msg.latency, msg);
+			else if (msg.type === "truncate") this.ring?.truncate(msg.timestamp);
 			else if (msg.type === "end") this.ring?.end(msg.timestamp);
 			else if (msg.type === "reset") {
 				if (msg.next) this.ring?.next();
@@ -88,7 +91,8 @@ class FakeWorklet {
 		},
 		start() {},
 	});
-	constructor() {
+	constructor(context: FakeContext) {
+		this.context = context;
 		worklets.push(this);
 	}
 	get stalled(): boolean {
@@ -1339,7 +1343,9 @@ it("a missing live group re-primes without clearing decoded PCM or resetting Syn
 		const buffered = ring?.length;
 		await playback.hole();
 		expect(ring?.length).toBe(buffered);
-		await playback.run(2000);
+		// A missing group is waited on for the subscription's max delay, as late audio could still
+		// arrive inside it, and skipped once the frames past it span that much.
+		await playback.run(4000);
 		expect(received.some((arrival) => arrival.kind === "gap")).toBe(true);
 		expect(prime).toHaveBeenCalledTimes(1);
 		expect(reset).not.toHaveBeenCalled();
@@ -1726,16 +1732,9 @@ for (const cmaf of [false, true]) {
 					(buffered ? [0, 20, 40, 60, 80] : [140, 160]).map((ms) => start + ms * 1000),
 				);
 
-				// A running live ring sheds old audio and lands on its floor once it reaches the fast
-				// accelerate threshold, four times a 100 ms floor plus its 20 ms band; a buffered ring
-				// plays it all.
-				const ring = worklets.at(-1)?.ring;
-				if (!ring) throw new Error("no running audio ring");
-				ring.reset();
-				const samples = [new Float32Array(4800), new Float32Array(4800)];
-				for (let timestamp = 0; timestamp < 500_000; timestamp += 100_000) ring.write(timestamp, samples);
-				expect(ring.length).toBe(samples[0].length * (buffered ? 5 : 1));
-				expect(ring.skips).toBe(buffered ? 0 : 1);
+				// Either ring keeps what it receives and plays onto the clock. Buffered audio may trail it
+				// by the lookahead; live audio at a fixed delay by nothing the subscription still delivers.
+				expect(worklets.at(-1)?.terms).toEqual({ latency: 100, target: 100, bound: buffered ? 1000 : 0 });
 			} finally {
 				playback.close();
 				await microtasks();
