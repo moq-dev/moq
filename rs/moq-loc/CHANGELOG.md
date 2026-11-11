@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.32](https://github.com/moq-dev/moq/compare/moq-loc-v0.2.31...moq-loc-v0.2.32) - 2026-11-11
+
+### Other
+
+- updated the following local packages: moq-net
+
 ## [0.2.31](https://github.com/moq-dev/moq/compare/moq-loc-v0.2.30...moq-loc-v0.2.31) - 2026-11-08
 
 ### Other
