@@ -115,6 +115,9 @@ struct Shared {
 	/// the clock gives how far the reader trails it.
 	anchor: AtomicU64,
 	clocked: AtomicBool,
+	/// Frames the writer's clock jumped ahead by moving its reference earlier,
+	/// since the reader last looked. See [`Producer::due`].
+	jumped: AtomicUsize,
 	target: AtomicUsize,
 	finished: AtomicBool,
 	stretch: AtomicBool,
@@ -198,9 +201,8 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 		comfort: crate::comfort::Comfort::new(output_rate, channels),
 		measure: config.comfort,
 		trim: config.trim,
+		jumped: 0,
 		joined: false,
-		target: latency,
-		retarget: 0,
 		skips: 0,
 		trimmed: 0,
 		accelerated: 0,
@@ -363,8 +365,10 @@ impl Producer {
 	/// Anchor what was pushed so far to the writer's clock: its end is due to
 	/// play at `at`. The stretch then plays the queue onto that clock, and the
 	/// reader skips audio trailing it by more than `late` plus one window.
+	/// `jumped` is how far the clock's reference moved earlier since the last
+	/// anchor, which the reader skips too, as far as it trails the clock.
 	/// Without an anchor, the latency is the clock.
-	pub(crate) fn due(&mut self, at: Instant, late: Duration) {
+	pub(crate) fn due(&mut self, at: Instant, late: Duration, jumped: Duration) {
 		let frames = |duration: Duration| (duration.as_secs_f64() * self.rate as f64).round() as usize;
 		let at = match at.checked_duration_since(self.base) {
 			Some(since) => frames(since),
@@ -379,6 +383,8 @@ impl Producer {
 			.anchor
 			.store(u64::from(late) << 32 | u64::from(clock as u32), Ordering::Release);
 		self.shared.clocked.store(true, Ordering::Release);
+		// After the anchor, so a reader that sees the jump also sees the clock it moved.
+		self.shared.jumped.fetch_add(frames(jumped), Ordering::Release);
 	}
 
 	/// Convert silence until the resampler has emitted the full duration of
@@ -596,16 +602,13 @@ pub(crate) struct Consumer {
 	/// Without stretch, trim only after filling three quarters of the current
 	/// target's headroom. Stretch skips by the clock instead.
 	trim: bool,
+	/// Frames the writer's clock jumped ahead by moving its reference earlier,
+	/// as far as the reader still trails it, not yet skipped.
+	jumped: usize,
 	/// Whether received audio has played on the clock. Until it has, nothing
 	/// trailing the clock was heard, so a join lands on it rather than at the
 	/// bound.
 	joined: bool,
-	/// The target as of the last read.
-	target: usize,
-	/// Lag a falling target left, which moved the clock ahead by as much. The
-	/// stretch catches it up however small the bound, so the skip waits past
-	/// it too, and what the stretch removes spends it.
-	retarget: usize,
 	/// Times [`Read::Trimmed`] was returned, ever.
 	skips: u64,
 	/// Received frames [`Read::Trimmed`] discarded, ever.
@@ -715,11 +718,15 @@ impl Consumer {
 	}
 
 	/// Skip what trails the clock by more than its bound plus one window, back
-	/// to the bound, returning the frames skipped. Less than that is the
-	/// stretch's to catch up. A join has the bound of nothing heard yet, so it
-	/// lands on the clock past whatever backlog it was handed. A finished or
-	/// silenced stream plays as written.
+	/// to the bound, or the jumps of its reference past one window, returning
+	/// the frames skipped. Less than that is the stretch's to catch up, as a
+	/// writer's clock drifting fast moves the reference. A join has the bound
+	/// of nothing heard yet, so it lands on the clock past whatever backlog it
+	/// was handed, and a jump before it was never heard. A finished or silenced
+	/// stream plays as written.
 	fn skip(&mut self) -> usize {
+		// Acquired before the anchor, so a jump comes with the clock it moved.
+		let jumped = self.shared.jumped.swap(0, Ordering::Acquire);
 		let Some(window) = self.stretch.as_ref().map(|stretch| stretch.window) else {
 			return 0;
 		};
@@ -728,27 +735,23 @@ impl Consumer {
 		}
 		let inputs = self.inputs(0);
 		let clocked = self.shared.clocked.load(Ordering::Acquire);
-		// A target that fell moved the clock ahead by as much, which audio
-		// follows by speeding up, and one that rose moved it back, cancelling as
-		// much of a fall not yet caught up. Before the join, nothing trailing
-		// was heard.
-		let last = std::mem::replace(&mut self.target, inputs.target);
-		self.retarget = if self.joined {
-			(self.retarget + last).saturating_sub(inputs.target)
-		} else {
-			0
-		};
-		let bound = if self.joined || !clocked {
-			inputs.bound.saturating_add(self.retarget as i64)
+		let bound = if self.joined || !clocked { inputs.bound } else { 0 };
+		self.jumped = if self.joined {
+			(self.jumped + jumped).min(inputs.lag.max(0) as usize)
 		} else {
 			0
 		};
 		self.joined |= clocked && self.prime == 0;
-		if inputs.lag <= bound.saturating_add(window as i64) {
+		let skip = if inputs.lag > bound.saturating_add(window as i64) {
+			(inputs.lag - bound) as usize
+		} else if self.jumped > window {
+			self.jumped
+		} else {
 			return 0;
-		}
+		};
+		self.jumped = 0;
 		let available = self.available();
-		let pushed = self.discard((inputs.lag - bound) as usize);
+		let pushed = self.discard(skip);
 		let skipped = available - self.available();
 		if skipped > 0 {
 			self.skips += 1;
@@ -876,7 +879,6 @@ impl Consumer {
 			stretch.process(frames, inputs);
 			let removed = frames.saturating_sub(stretch.available());
 			self.accelerated += removed as u64;
-			self.retarget = self.retarget.saturating_sub(removed);
 			// The writer still counts the input while it is being analysed.
 			// Publish only the resulting duration change, then the rendered
 			// frames. Moving PCM into staging never makes it disappear.
@@ -1220,7 +1222,11 @@ mod tests {
 						while arrival <= tick * 10_000 {
 							assert_eq!(prod.push(&pcm), Push::Ok);
 							if clocked {
-								prod.due(base + Duration::from_micros(arrival) + target, Duration::from_secs(2));
+								prod.due(
+									base + Duration::from_micros(arrival) + target,
+									Duration::from_secs(2),
+									Duration::ZERO,
+								);
 							}
 							arrival += interval;
 						}
@@ -1278,7 +1284,11 @@ mod tests {
 				};
 				while arrival(sent) <= now {
 					assert_eq!(prod.push(&pcm), Push::Ok);
-					prod.due(base + Duration::from_millis(sent) + target, Duration::from_secs(2));
+					prod.due(
+						base + Duration::from_millis(sent) + target,
+						Duration::from_secs(2),
+						Duration::ZERO,
+					);
 					sent += 20;
 				}
 				let read = cons.read_at(&mut out, base + Duration::from_millis(now));
@@ -1321,21 +1331,25 @@ mod tests {
 		for _ in 0..100 {
 			assert_eq!(prod.push(&pcm), Push::Ok);
 		}
-		prod.due(base + Duration::from_millis(2010), Duration::from_millis(1970));
+		prod.due(
+			base + Duration::from_millis(2010),
+			Duration::from_millis(1970),
+			Duration::ZERO,
+		);
 		assert_eq!(cons.read_at(&mut out, base), Read::Ok);
 		assert_eq!(cons.read_at(&mut out, base + Duration::from_millis(10)), Read::Ok);
 		// Now all due at 10 ms: the reader trails by 2000 ms.
 		let due = base + Duration::from_millis(10);
-		prod.due(due, Duration::from_millis(1970));
+		prod.due(due, Duration::from_millis(1970), Duration::ZERO);
 		assert_eq!(cons.read_at(&mut out, base + Duration::from_millis(20)), Read::Ok);
 		assert_eq!(cons.skips(), 0, "a window past the bound is the stretch's");
-		prod.due(due, Duration::from_millis(1960));
+		prod.due(due, Duration::from_millis(1960), Duration::ZERO);
 		let read = cons.read_at(&mut out, base + Duration::from_millis(30));
 		assert_eq!(read, Read::Trimmed { frames: 1920 });
 		assert_eq!(cons.trimmed(), 1920, "back to the bound");
 		// A fixed delay has no bound: whatever trails the clock goes, here
 		// what is due before the second the end is due at.
-		prod.due(base + Duration::from_secs(1), Duration::ZERO);
+		prod.due(base + Duration::from_secs(1), Duration::ZERO, Duration::ZERO);
 		let read = cons.read_at(&mut out, base + Duration::from_millis(40));
 		assert!(matches!(read, Read::Trimmed { .. }), "{read:?}");
 		assert!(cons.inputs(0).lag <= 0);
@@ -1344,74 +1358,52 @@ mod tests {
 		assert!((940.0..960.0).contains(&left), "{left} ms left");
 	}
 
-	/// A falling target moves the clock ahead by as much, which the stretch
-	/// catches up on however small the bound: only lateness past what is left
-	/// of the fall skips.
+	/// A clock whose reference moved earlier skips as much, as far as the
+	/// reader trails it, where the same lag from a fallen target is caught up
+	/// by speeding up.
 	#[test]
-	fn a_falling_target_is_caught_up_rather_than_skipped() {
-		let rate = 48_000;
-		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(200));
-		let base = prod.base;
-		let mut out = vec![0.0; 480 * 2];
-		for _ in 0..100 {
-			assert_eq!(prod.push(&pcm), Push::Ok);
+	fn a_reference_jump_skips_as_much() {
+		for jumped in [false, true] {
+			let rate = 48_000;
+			let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(200));
+			let base = prod.base;
+			let mut out = vec![0.0; 480 * 2];
+			for _ in 0..100 {
+				assert_eq!(prod.push(&pcm), Push::Ok);
+			}
+			// On time, through the 200 ms prime, which joins the clock.
+			let late = Duration::from_secs(2);
+			prod.due(base + Duration::from_millis(2200), late, Duration::ZERO);
+			let mut now = base;
+			for _ in 0..25 {
+				assert_eq!(cons.read_at(&mut out, now), Read::Ok);
+				now += Duration::from_millis(10);
+			}
+			// The clock moves 100 ms ahead: its reference, or a fall in the target.
+			let at = base + Duration::from_millis(2100);
+			if jumped {
+				prod.due(at, late, Duration::from_millis(150));
+			} else {
+				assert!(prod.set_latency(Duration::from_millis(100)));
+				prod.due(at, late, Duration::ZERO);
+			}
+			let read = cons.read_at(&mut out, now);
+			let lag = cons.inputs(0).lag as f64 * 1000.0 / rate as f64;
+			if jumped {
+				// Never past the clock, however far the reference moved.
+				assert!(matches!(read, Read::Trimmed { .. }), "{read:?}");
+				assert!((-20.0..=5.0).contains(&lag), "{lag} ms behind");
+			} else {
+				assert_eq!(read, Read::Ok);
+				assert!(lag >= 90.0, "{lag} ms behind");
+				for _ in 0..50 {
+					now += Duration::from_millis(10);
+					assert_eq!(cons.read_at(&mut out, now), Read::Ok);
+				}
+				assert_eq!(cons.skips(), 0);
+				assert!(cons.accelerated() > 0);
+			}
 		}
-		// On time with no bound, through the 200 ms prime, which joins the clock.
-		prod.due(base + Duration::from_millis(2200), Duration::ZERO);
-		let mut now = base;
-		for _ in 0..25 {
-			assert_eq!(cons.read_at(&mut out, now), Read::Ok);
-			now += Duration::from_millis(10);
-		}
-		// The target falls by 100 ms, and the clock moves 100 ms ahead with it.
-		assert!(prod.set_latency(Duration::from_millis(100)));
-		prod.due(base + Duration::from_millis(2100), Duration::ZERO);
-		for _ in 0..20 {
-			assert_eq!(cons.read_at(&mut out, now), Read::Ok);
-			now += Duration::from_millis(10);
-		}
-		assert_eq!(cons.skips(), 0);
-		assert!(cons.accelerated() > 0);
-		// Lateness past the rest of the fall still skips.
-		prod.due(base + Duration::from_millis(1900), Duration::ZERO);
-		let read = cons.read_at(&mut out, now);
-		assert!(matches!(read, Read::Trimmed { .. }), "{read:?}");
-		assert_eq!(cons.skips(), 1);
-	}
-
-	/// A rise moves the clock back, cancelling a fall the stretch has yet to
-	/// catch up, so lateness past the bound skips as it would without either.
-	#[test]
-	fn a_rise_cancels_a_fall_not_yet_caught_up() {
-		let rate = 48_000;
-		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(200));
-		let base = prod.base;
-		let mut out = vec![0.0; 480 * 2];
-		for _ in 0..100 {
-			assert_eq!(prod.push(&pcm), Push::Ok);
-		}
-		// On time with no bound, through the 200 ms prime, which joins the clock.
-		prod.due(base + Duration::from_millis(2200), Duration::ZERO);
-		let mut now = base;
-		for _ in 0..25 {
-			assert_eq!(cons.read_at(&mut out, now), Read::Ok);
-			now += Duration::from_millis(10);
-		}
-		// The target falls by 100 ms for one read, then rises back.
-		assert!(prod.set_latency(Duration::from_millis(100)));
-		prod.due(base + Duration::from_millis(2100), Duration::ZERO);
-		assert_eq!(cons.read_at(&mut out, now), Read::Ok);
-		now += Duration::from_millis(10);
-		assert!(prod.set_latency(Duration::from_millis(200)));
-		prod.due(base + Duration::from_millis(2200), Duration::ZERO);
-		assert_eq!(cons.read_at(&mut out, now), Read::Ok);
-		now += Duration::from_millis(10);
-		assert_eq!(cons.skips(), 0);
-		// 80 ms of lateness, past the bound and a window, skips.
-		prod.due(base + Duration::from_millis(2120), Duration::ZERO);
-		let read = cons.read_at(&mut out, now);
-		assert!(matches!(read, Read::Trimmed { .. }), "{read:?}");
-		assert_eq!(cons.skips(), 1);
 	}
 
 	/// Nothing trailing the clock was heard before the first audio plays on
@@ -1426,7 +1418,11 @@ mod tests {
 			assert_eq!(prod.push(&pcm), Push::Ok);
 		}
 		// All due at 10 ms, inside a 1970 ms bound.
-		prod.due(base + Duration::from_millis(10), Duration::from_millis(1970));
+		prod.due(
+			base + Duration::from_millis(10),
+			Duration::from_millis(1970),
+			Duration::ZERO,
+		);
 		let read = cons.read_at(&mut out, base);
 		assert!(matches!(read, Read::Trimmed { .. }), "{read:?}");
 		assert_eq!(cons.skips(), 1);

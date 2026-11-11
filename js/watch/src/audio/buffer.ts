@@ -283,6 +283,9 @@ export class AudioBuffer {
 	// the reading taken nearest a quantum's start. It rises only slowly, as drift needs, unless it moves
 	// past any quantum, as a delay or reference change moves it.
 	#offset?: number;
+	// The shared clock's reference as last sent, in milliseconds. One that moved earlier jumped the
+	// clock ahead, which the ring skips rather than speeds through, as video skips the frames it passed.
+	#reference?: number;
 
 	#signals = new Effect();
 
@@ -297,8 +300,8 @@ export class AudioBuffer {
 			bound?: Duration;
 			/** Anchor to the first frame and hold the lookahead upstream until playback starts. */
 			buffered: boolean;
-			/** The shared clock the ring plays onto. */
-			clock?: { now(): Duration | undefined };
+			/** The shared clock the ring plays onto, and the reference it plays from. */
+			clock?: { now(): Duration | undefined; out: { reference: Getter<number | undefined> } };
 			/** Hold consumption until the shared startup floor is ready. */
 			playing?: Getter<boolean>;
 		},
@@ -339,7 +342,7 @@ export class AudioBuffer {
 				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
-					if (clock) this.#clock(clock.now());
+					if (clock) this.#clock(clock.now(), clock.out.reference.peek());
 				}
 			}
 		});
@@ -360,19 +363,28 @@ export class AudioBuffer {
 	// time so a late message misplaces neither. Each reading follows a state report, which lands just
 	// after the context renders a callback, when its time runs up to that callback ahead of the wall
 	// clock: the ring then trails the clock by up to one callback, the audio a callback pulls at once.
-	#clock(now: Duration | undefined): void {
+	#clock(now: Duration | undefined, reference: number | undefined): void {
 		const time = this.#worklet.context.currentTime;
+		const last = this.#reference;
+		this.#reference = reference;
 		if (now === undefined) {
 			this.#offset = undefined;
 			const msg: Clock = { type: "clock", time };
 			this.#worklet.port.postMessage(msg);
 			return;
 		}
+		// A jump is a step of the clock, not where a reading landed, so the offset takes it whole.
+		const jumped = last !== undefined && reference !== undefined ? Math.max(0, last - reference) * 1000 : 0;
 		const offset = now.asMicros() - this.#backpressure.offset - time * 1_000_000;
-		const previous = this.#offset;
+		const previous = this.#offset === undefined ? undefined : this.#offset + jumped;
 		this.#offset =
 			previous !== undefined && Math.abs(offset - previous) < JUMP ? Math.min(offset, previous + RISE) : offset;
-		const msg: Clock = { type: "clock", timestamp: this.#offset + time * 1_000_000, time };
+		const msg: Clock = {
+			type: "clock",
+			timestamp: this.#offset + time * 1_000_000,
+			time,
+			...(jumped > 0 && { jumped }),
+		};
 		this.#worklet.port.postMessage(msg);
 	}
 

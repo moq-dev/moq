@@ -713,8 +713,10 @@ and slowing down lets audio fall behind by at most `bound`, or brings a
 playhead ahead of the clock back onto it. These are NetEq's thresholds and
 rates, untuned. A moved target moves the clock, so a rise leaves audio ahead of
 it and a fall leaves audio behind, and both become ordinary slowing down and
-speeding up: nothing parks in silence on a rise or skips buffered audio on a
-fall.
+speeding up: nothing parks in silence on a rise, and in `auto` nothing skips
+buffered audio on a fall, since the bound, the max delay less the target,
+always covers a fall of the target. A fixed delay lowered at runtime by more
+than its bound and one window skips to the bound, as any lag past it does.
 
 Without a clock reading the target is where the playhead belongs, so
 `lag = level - target`. The browser then never skips; native playback bounds
@@ -727,12 +729,14 @@ ahead to `bound` behind it, dropping the staged window and the audio it passes.
 Less than that is the stretch's to catch up. A join is the exception: until
 the player has read once on the clock, its bound is zero, so the backlog a
 subscription opens on is skipped rather than played out at the stretch's pace,
-and playback starts on the clock. A target that falls moves the clock ahead by
-as much, which is the stretch's to catch up however small the bound, so the
-skip also waits past whatever of that fall the stretch has yet to remove; a
-rise moves the clock back and cancels as much of it. Only
-those skips and a ring
-overflowing its fixed capacity drop received audio; each counts as a skip in
+and playback starts on the clock. A shared clock whose reference moves earlier,
+as it does through a tune-in backlog that arrives faster than real time, jumps
+ahead by as much, and audio skips those jumps as video skips the frames they
+pass, as far as the playhead trails the clock. Jumps skip once they add up to
+more than one window, so a publisher's clock drifting fast, which moves the
+reference by a little at a time, is the stretch's to catch up. Only those
+skips and a ring overflowing its fixed capacity drop received audio; each
+counts as a skip in
 the player's stats. A finite tail before a declared end plays as received, and
 a playhead behind the clock skips a declared silence by its lag rather than
 stretching across it, which drops no audio.

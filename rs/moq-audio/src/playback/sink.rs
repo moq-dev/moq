@@ -286,12 +286,13 @@ impl Sink {
 	/// Behind it, it speeds up once it holds more than its latency; ahead of
 	/// it, it slows down. Its buffer running low slows it down too, falling
 	/// behind the clock by at most `late`, and audio trailing the clock by more
-	/// than `late` plus one 30 ms window is skipped. A lower latency moves the
-	/// clock ahead, which it catches up on by speeding up rather than a skip,
-	/// however small `late` is. Call it after each write
-	/// and whenever the clock moves; until the first call, or after the device
-	/// changes, the latency alone is the clock.
-	pub fn due(&mut self, at: Instant, late: Duration) {
+	/// than `late` plus one 30 ms window is skipped. `jumped` is how far the
+	/// clock's reference moved earlier since the last call, which skips as much
+	/// audio as trails the clock, where a lower latency moves the clock ahead
+	/// by speeding up. Call it after each write and whenever the clock moves;
+	/// until the first call, or after the device changes, the latency alone is
+	/// the clock.
+	pub fn due(&mut self, at: Instant, late: Duration, jumped: Duration) {
 		// The device thread reads std's clock, so carry the distance from now
 		// over to it rather than the instant.
 		let (now, host) = (Instant::now(), crate::ring::host());
@@ -299,7 +300,7 @@ impl Sink {
 			Some(ahead) => host + ahead,
 			None => host.checked_sub(now.duration_since(at)).unwrap_or(host),
 		};
-		self.channel.lock().unwrap().prod.due(at, late);
+		self.channel.lock().unwrap().prod.due(at, late, jumped);
 	}
 
 	/// The PCM layout this sink was built with.

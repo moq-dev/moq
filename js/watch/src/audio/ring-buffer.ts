@@ -32,9 +32,9 @@ export class AudioRingBuffer {
 	// Whether the ring has read on the clock since the last reset. Until it has, nothing trailing the
 	// clock was heard, so a join lands on it rather than at the bound.
 	#joined = false;
-	// Lag a falling target left, which moved the clock ahead by as much. The stretch catches it up
-	// however small the bound, so the skip waits past it too, and what the stretch removes spends it.
-	#retarget = 0;
+	// Samples the shared clock jumped ahead by moving its reference earlier, as far as the playhead
+	// still trails it, not yet skipped.
+	#jumped = 0;
 	// Samples of media a skip dropped, and that the stretch removed by accelerating, gap zeros
 	// included and declared silence excluded, as moq-audio counts them.
 	#trimmed = 0;
@@ -185,11 +185,7 @@ export class AudioRingBuffer {
 		if (latencySamples <= 0) throw new Error("empty buffer");
 		if (latencySamples > this.capacity) throw new Error("latency exceeds capacity");
 		this.#latencySamples = latencySamples;
-		const target = this.#samples(terms?.target ?? latency);
-		// A target that falls moves the clock ahead by as much, which audio follows by speeding up. One
-		// that rises moves it back, cancelling as much of a fall the stretch has yet to catch up.
-		if (this.#joined) this.#retarget = Math.max(0, this.#retarget + this.#target - target);
-		this.#target = target;
+		this.#target = this.#samples(terms?.target ?? latency);
 		this.#bound = this.#samples(terms?.bound ?? 0);
 
 		// Start a ring that the buffer already covers, which `write` would only notice on the next
@@ -207,6 +203,16 @@ export class AudioRingBuffer {
 		if (this.#received !== undefined && end <= this.#received) return;
 		this.#received = end;
 		if (this.#anchored) this.#level = end - this.#playhead();
+	}
+
+	/**
+	 * Note that the shared clock's reference moved `micros` earlier, jumping the clock ahead by as much.
+	 * Once jumps add up to more than a stretch window, a read skips them, as far as the playhead trails
+	 * the clock; less, as a publisher's clock drifting fast moves it, is the stretch's to catch up. A fall
+	 * in the target moves the clock ahead too, which is always caught up by speeding up.
+	 */
+	jumped(micros: number): void {
+		this.#jumped += Math.round((micros / 1_000_000) * this.rate);
 	}
 
 	/** Where the shared clock stands at the first frame of the next read, in microseconds, if it has one. */
@@ -437,7 +443,7 @@ export class AudioRingBuffer {
 		this.#level = 0;
 		this.#clock = undefined;
 		this.#joined = false;
-		this.#retarget = 0;
+		this.#jumped = 0;
 		this.#skipping = false;
 	}
 
@@ -460,15 +466,24 @@ export class AudioRingBuffer {
 			return 0;
 		}
 
-		// Skip what trails the clock past its bound, any fall in the target still to catch up, and one
-		// window, back to that. Less than that is the stretch's to catch up. A join has the bound of
-		// nothing heard yet, so it lands on the clock past whatever backlog it was handed. A finite
-		// tail plays as received.
-		const inputs = this.#inputs(0);
-		const bound = this.#joined || this.#clock === undefined ? inputs.bound + this.#retarget : 0;
-		if (this.#clock !== undefined) this.#joined = true;
-		if (!this.#ending() && inputs.lag > bound + this.#stretch.window) {
-			const index = Math.min(this.#writeIndex, Math.ceil(this.#playhead() + inputs.lag - bound));
+		// Skip what trails the clock past its bound and one window, back to the bound, or the jumps of
+		// its reference past one window. Less than that is the stretch's to catch up. A join has the
+		// bound of nothing heard yet, so it lands on the clock past whatever backlog it was handed, and a
+		// jump before it was never heard. A finite tail plays as received.
+		let skip = 0;
+		if (this.#clock !== undefined) {
+			const inputs = this.#inputs(0);
+			const bound = this.#joined ? inputs.bound : 0;
+			this.#jumped = this.#joined ? Math.min(this.#jumped, Math.max(0, inputs.lag)) : 0;
+			this.#joined = true;
+			if (!this.#ending()) {
+				if (inputs.lag > bound + this.#stretch.window) skip = inputs.lag - bound;
+				else if (this.#jumped > this.#stretch.window) skip = this.#jumped;
+			}
+			if (skip > 0) this.#jumped = 0;
+		}
+		if (skip > 0) {
+			const index = Math.min(this.#writeIndex, Math.ceil(this.#playhead() + skip));
 			if (!this.#skipping) this.#skips++;
 			this.#skipping = true;
 			this.#skip(index, this.#writeIndex);
@@ -562,9 +577,7 @@ export class AudioRingBuffer {
 		const stretch = this.#stretch;
 		stretch.process(frames, enabled && frames === window ? this.#inputs(elapsed) : undefined);
 		this.#level -= frames - stretch.length;
-		const removed = Math.max(0, frames - stretch.length);
-		this.#accelerated += removed;
-		this.#retarget = Math.max(0, this.#retarget - removed);
+		this.#accelerated += Math.max(0, frames - stretch.length);
 		this.#readIndex += frames;
 		this.#window = frames;
 		this.#windowQuiet = quiet;

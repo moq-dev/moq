@@ -641,7 +641,7 @@ mod tests {
 		// goes, so none of them restarts the clock.
 		let callback = 4 * CHUNK;
 		let mut now = start + Duration::from_millis(10);
-		prod.due(now + prod.buffered(), Duration::from_secs(2));
+		prod.due(now + prod.buffered(), Duration::from_secs(2), Duration::ZERO);
 
 		let period = Duration::from_secs_f64(callback as f64 / RATE as f64);
 		let mut out = vec![0i16; callback * STEREO];

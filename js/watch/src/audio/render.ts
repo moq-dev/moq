@@ -70,6 +70,9 @@ export interface Clock {
 	timestamp?: number;
 	// The AudioContext's `currentTime` when the clock was read, in seconds.
 	time: number;
+	// How far the clock's reference moved earlier since the last reading, in microseconds, which the
+	// ring skips rather than speeds through.
+	jumped?: number;
 }
 
 /** Media arrived ending at `end`, in the ring's coordinates, decoded or not. */

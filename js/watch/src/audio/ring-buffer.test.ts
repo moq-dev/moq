@@ -1029,48 +1029,38 @@ describe("time stretch", () => {
 		expect(buffer.trimmed).toBe(0);
 	});
 
-	// A falling target moves the clock ahead by as much, which the stretch catches up on however small
-	// the bound: only lateness past what is left of the fall skips.
-	it("catches up on a fall in its target rather than skipping, however small its bound", () => {
-		const buffer = live(200, { bound: 0 });
-		write(buffer, 0, frames(1000), { value: 0.5 });
-		// Joined on the clock.
-		buffer.clock(0);
-		read(buffer, QUANTUM, 1);
+	// A clock whose reference moved earlier skips as much, as far as the playhead trails it, where the
+	// same lag from a fallen target is caught up by speeding up.
+	for (const jumped of [false, true]) {
+		it(`${jumped ? "skips" : "catches up on"} a clock moved ahead by ${jumped ? "its reference" : "a fall in its target"}`, () => {
+			const buffer = live(200, { bound: 2000 });
+			write(buffer, 0, frames(1000), { value: 0.5 });
+			// Joined on the clock.
+			buffer.clock(0);
+			read(buffer, QUANTUM, 1);
 
-		// The target falls by 100 ms, and the clock moves 100 ms ahead with it.
-		buffer.setLatency(100, { target: 100, bound: 0 });
-		const quantum = (QUANTUM * 1_000_000) / RATE;
-		let clock = buffer.timestamp + 100_000;
-		for (let i = 0; i < 40; i++) {
+			// The clock moves 100 ms ahead.
+			if (jumped) buffer.jumped(150_000);
+			else buffer.setLatency(100, { target: 100, bound: 2000 });
+			const quantum = (QUANTUM * 1_000_000) / RATE;
+			let clock = buffer.timestamp + 100_000;
 			buffer.clock(clock);
 			read(buffer, QUANTUM, 1);
-			clock += quantum;
-		}
-		expect(buffer.skips).toBe(0);
-		expect(buffer.accelerated).toBeGreaterThan(0);
-
-		// Lateness past the rest of the fall still skips.
-		buffer.clock(clock + 200_000);
-		read(buffer, QUANTUM, 1);
-		expect(buffer.skips).toBe(1);
-	});
-
-	// A rise moves the clock back, cancelling a fall the stretch has yet to catch up, so lateness past
-	// the bound skips as it would have without either.
-	it("cancels a fall in its target with a rise before the stretch catches it up", () => {
-		const buffer = live(200, { bound: 0 });
-		write(buffer, 0, frames(1000), { value: 0.5 });
-		// Joined on the clock.
-		buffer.clock(0);
-		read(buffer, QUANTUM, 1);
-
-		buffer.setLatency(100, { target: 100, bound: 0 });
-		buffer.setLatency(200, { target: 200, bound: 0 });
-		buffer.clock(buffer.timestamp + 80_000);
-		read(buffer, QUANTUM, 1);
-		expect(buffer.skips).toBe(1);
-	});
+			if (jumped) {
+				// Never past the clock, however far the reference moved.
+				expect(buffer.skips).toBe(1);
+				expect(Math.abs(buffer.timestamp - clock - quantum)).toBeLessThan(50);
+				return;
+			}
+			for (let i = 0; i < 40; i++) {
+				clock += quantum;
+				buffer.clock(clock);
+				read(buffer, QUANTUM, 1);
+			}
+			expect(buffer.skips).toBe(0);
+			expect(buffer.accelerated).toBeGreaterThan(0);
+		});
+	}
 
 	// Nothing trailing the clock was heard before the first read on it, so a join lands on the clock
 	// past a backlog the bound would otherwise keep.

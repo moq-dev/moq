@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { Duration } from "@moq/clock";
+import { type Getter, Signal } from "@moq/signals";
 import { AudioBuffer, Backpressure } from "./buffer";
 import type { Init, Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
@@ -402,7 +403,13 @@ describe("Backpressure", () => {
 });
 
 // A worklet whose port records what the buffer posts and delivers state reports synchronously.
-function fake(delay: number, props: { bound?: number; clock?: { now(): Duration | undefined } } = {}) {
+function fake(
+	delay: number,
+	props: {
+		bound?: number;
+		clock?: { now(): Duration | undefined; out: { reference: Getter<number | undefined> } };
+	} = {},
+) {
 	const sent: Message[] = [];
 	const port = Object.assign(new EventTarget(), {
 		postMessage: (msg: Message) => sent.push(msg),
@@ -515,7 +522,8 @@ describe("AudioBuffer steering", () => {
 	// jumps when the delay moves the clock for real.
 	it("sends the clock at its earliest offset from the context's time", () => {
 		let now: Duration | undefined = Duration.millis(1000);
-		const { buffer, sent, state, context } = fake(100, { clock: { now: () => now } });
+		const reference = new Signal<number | undefined>(0);
+		const { buffer, sent, state, context } = fake(100, { clock: { now: () => now, out: { reference } } });
 		const report = (time: number, clock: number | undefined) => {
 			context.currentTime = time;
 			now = clock === undefined ? undefined : Duration.millis(clock);
@@ -528,13 +536,21 @@ describe("AudioBuffer steering", () => {
 			report(1.5, 1500);
 			// A delay change moved the clock 50 ms.
 			report(1.75, 1800);
-			report(2, undefined);
+			// The reference moved 5 ms earlier: a jump the offset takes whole, under the filter's.
+			reference.set(-5);
+			report(2, 2055);
+			// A later reference is no jump.
+			reference.set(0);
+			report(2.25, 2300);
+			report(2.5, undefined);
 			expect(sent.filter((msg) => msg.type === "clock")).toEqual([
 				{ type: "clock", timestamp: 1_000_000, time: 1 },
 				{ type: "clock", timestamp: 1_250_100, time: 1.25 },
 				{ type: "clock", timestamp: 1_500_000, time: 1.5 },
 				{ type: "clock", timestamp: 1_800_000, time: 1.75 },
-				{ type: "clock", time: 2 },
+				{ type: "clock", timestamp: 2_055_000, time: 2, jumped: 5000 },
+				{ type: "clock", timestamp: 2_300_000, time: 2.25 },
+				{ type: "clock", time: 2.5 },
 			]);
 		} finally {
 			buffer.close();
