@@ -46,7 +46,3 @@ which JS cannot raise; Chrome stalled at 103, Firefox at 100):
 This epic owns the end-to-end test: a browser reader and a Rust relay over
 WebTransport, 300 live tracks of mixed priority, the highest-priority ones
 receiving every group, and nothing hanging.
-
-## Required
-
-- [Takeover](/quest/m1/stream-credit/takeover.md) - on lite-07 a higher-priority group takes over an acknowledged stream, and a group that lost its stream resumes

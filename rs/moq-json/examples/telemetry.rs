@@ -100,7 +100,7 @@ fn frame_bytes(config: snapshot::Config, ticks: u64) -> usize {
 			.update(moq_net::Timed::from(&telemetry(tick)).at(moq_net::Timestamp::now()))
 			.unwrap();
 	}
-	producer.finish().unwrap();
+	let _finished = producer.finish().unwrap();
 
 	// Drain the frames and sum their sizes.
 	let waiter = kio::Waiter::noop();
@@ -134,7 +134,7 @@ fn verify(producer_config: snapshot::Config, compress: bool, ticks: u64) {
 			other => panic!("tick {tick}: expected a value, got {other:?}"),
 		}
 	}
-	producer.finish().unwrap();
+	let _finished = producer.finish().unwrap();
 
 	// Drain: nothing left and the stream ends cleanly.
 	assert!(
@@ -158,7 +158,7 @@ fn verify_late_joiner(producer_config: snapshot::Config, compress: bool, ticks: 
 			.update(moq_net::Timed::from(&telemetry(tick)).at(moq_net::Timestamp::now()))
 			.unwrap();
 	}
-	producer.finish().unwrap();
+	let _finished = producer.finish().unwrap();
 
 	let waiter = kio::Waiter::noop();
 	let mut last = None;
