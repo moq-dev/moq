@@ -13,6 +13,11 @@
 //! own metric, so the origin ranks them and fails over at once when one goes; any
 //! feasible route forwards without a loop. A stream that stops carrying one lets go
 //! only once another serves it, so the origin always holds a route for it.
+//!
+//! A claim of another identity reaches the other streams only once a stream serving
+//! it confirmed that instance, so a peer never names an instance this node's origin
+//! cannot route yet. Until then its batches hold the claim back and their floors
+//! certify nothing.
 
 use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
@@ -132,6 +137,10 @@ struct Outbox {
 	serving: HashMap<(Id, Path), u64>,
 	/// Each route the reader holds, and the claims it was sent under it.
 	delivered: HashMap<Id, BTreeSet<Path>>,
+	/// Claim starts and restarts held back until a stream serving them confirms their
+	/// instance, by identity, with the identity's last floor, which certifies nothing
+	/// while any is held. Bounded like `pending`: one per claim.
+	withheld: HashMap<Id, (BTreeMap<Path, Claim>, Option<Rev>)>,
 	/// ROUTE_REQUESTs to send, by the identity as the peer advertised it. A higher
 	/// seqno subsumes a lower one, so a writer that stalls holds one per identity.
 	requests: BTreeMap<Id, Seqno>,
@@ -181,6 +190,8 @@ impl Outbox {
 	fn push(&mut self, output: Output) -> Option<Id> {
 		match output {
 			Output::Route { id, reach: None } => {
+				// The peer drops the route's claims, so nothing held back is owed.
+				self.withheld.remove(&id);
 				let holds = self.delivered.contains_key(&id);
 				let entry = self.entry(id);
 				// The reader holds the route once it reads what is pending: an end of
@@ -217,22 +228,7 @@ impl Outbox {
 				entry.held = false;
 				None
 			}
-			Output::Batch { id, changes, floor } => {
-				let ended = self.entry(id).ended;
-				let (_, entry) = self.pending.get_mut(&id).expect("just queued");
-				let sent = self.delivered.get(&id);
-				let (merged, last) = entry.batch.get_or_insert_default();
-				for (path, claim) in changes {
-					// The reader holds nothing here once the entry reaches it.
-					let unsent = ended || sent.is_none_or(|sent| !sent.contains(&path));
-					match claim {
-						None if unsent => merged.remove(&path),
-						claim => merged.insert(path, claim),
-					};
-				}
-				*last = floor;
-				None
-			}
+			Output::Batch { .. } => unreachable!("a batch is queued with Outbox::batch"),
 			// Each serving change replaces the last: the session acts on where the claim
 			// ends up, in place when it keeps its instance.
 			Output::Serve { id, ref claim, .. } | Output::Unserve { id, ref claim, .. } => {
@@ -254,11 +250,77 @@ impl Outbox {
 				self.serves.insert(seq, output);
 				None
 			}
-			other => {
-				self.ready.push_back(other);
+			Output::Echo { .. } => {
+				self.ready.push_back(output);
 				None
 			}
 		}
+	}
+
+	/// Queue a batch of `id`'s claim changes, closed by `floor`, holding back each start
+	/// or restart whose instance is not `advertised` yet.
+	fn batch(
+		&mut self,
+		id: Id,
+		changes: Vec<(Path, Option<Claim>)>,
+		floor: Option<Rev>,
+		advertised: impl Fn(&Path, &Claim) -> bool,
+	) {
+		let ended = self.entry(id).ended;
+		let Self {
+			pending,
+			delivered,
+			withheld,
+			..
+		} = self;
+		let (_, entry) = pending.get_mut(&id).expect("just queued");
+		let sent = delivered.get(&id);
+		let (merged, last) = entry.batch.get_or_insert_default();
+		for (path, claim) in changes {
+			// A newer change replaces one held back.
+			if let Some((held, _)) = withheld.get_mut(&id) {
+				held.remove(&path);
+			}
+			if let Some(claim) = &claim
+				&& !advertised(&path, claim)
+			{
+				// The reader keeps what it was sent until then.
+				merged.remove(&path);
+				withheld.entry(id).or_default().0.insert(path, claim.clone());
+				continue;
+			}
+			// The reader holds nothing here once the entry reaches it.
+			let unsent = ended || sent.is_none_or(|sent| !sent.contains(&path));
+			match claim {
+				None if unsent => merged.remove(&path),
+				claim => merged.insert(path, claim),
+			};
+		}
+		*last = floor;
+		if withheld.get(&id).is_some_and(|(held, _)| held.is_empty()) {
+			withheld.remove(&id);
+		}
+	}
+
+	/// A stream serves `claim` of `id` at `confirmed`: queue it, if held back at that.
+	fn release(&mut self, id: Id, claim: &Path, confirmed: &(Instance, u64)) {
+		let Some((held, floor)) = self.withheld.get_mut(&id) else {
+			return;
+		};
+		if !held
+			.get(claim)
+			.is_some_and(|held| held.instance == confirmed.0 && held.epoch == confirmed.1)
+		{
+			return;
+		}
+		let item = held.remove(claim).expect("just found");
+		let floor = *floor;
+		if held.is_empty() {
+			self.withheld.remove(&id);
+		}
+		// A batch still queued closes with a newer floor.
+		let (merged, _) = self.entry(id).batch.get_or_insert_with(|| (Changes::new(), floor));
+		merged.insert(claim.clone(), Some(item));
 	}
 
 	fn pop(&mut self) -> Option<Output> {
@@ -304,6 +366,14 @@ impl Outbox {
 			});
 		}
 		if let Some((merged, floor)) = pending.batch {
+			// What is held back leaves the floor certifying nothing until it goes.
+			let floor = match self.withheld.get_mut(&id) {
+				Some((_, last)) => {
+					*last = floor;
+					None
+				}
+				None => floor,
+			};
 			let changes = ordered(merged);
 			if let Some(sent) = self.delivered.get_mut(&id) {
 				for (path, claim) in &changes {
@@ -373,7 +443,8 @@ struct Slot {
 	served: Served,
 	/// The identity as the stream's peer names it, kept while no route to it is left.
 	named: Id,
-	confirmed: bool,
+	/// The instance and epoch the stream last confirmed serving.
+	confirmed: Option<(Instance, u64)>,
 	/// No longer a route to the claim's identity: let go once a wanted stream confirms.
 	leaving: bool,
 }
@@ -381,7 +452,7 @@ struct Slot {
 impl Home {
 	/// Unserve every leaving stream once a wanted one serves the claim.
 	fn release(&mut self, queues: &Queues, id: Id, claim: &Path) {
-		if !self.keys.values().any(|slot| !slot.leaving && slot.confirmed) {
+		if !self.keys.values().any(|slot| !slot.leaving && slot.confirmed.is_some()) {
 			return;
 		}
 		self.keys.retain(|key, slot| {
@@ -597,9 +668,10 @@ impl Stream {
 		self.with(|router, key| router.rtt(key, rtt));
 	}
 
-	/// This stream's session now serves `claim` of `id`, so a stream that no longer
-	/// carries a route to it lets go.
-	pub fn serving(&self, id: Id, claim: &Path) {
+	/// This stream's session now serves `claim` of `id` at `served`'s instance, so the
+	/// other streams are sent that instance, and a stream that no longer carries a route
+	/// to it lets go.
+	pub fn serving(&self, id: Id, claim: &Path, served: &Claim) {
 		let mut state = self.node.lock();
 		let State { homes, queues, .. } = &mut *state;
 		let Some(home) = homes.get_mut(&(id, claim.clone())) else {
@@ -608,10 +680,16 @@ impl Stream {
 		let Some(slot) = home.keys.get_mut(&self.key) else {
 			return;
 		};
-		if slot.confirmed {
+		let confirmed = (served.instance.clone(), served.epoch);
+		if slot.confirmed.as_ref() == Some(&confirmed) {
 			return;
 		}
-		slot.confirmed = true;
+		slot.confirmed = Some(confirmed.clone());
+		for queue in queues.values() {
+			if queue.read().withheld.contains_key(&id) {
+				queue.lock().release(id, claim, &confirmed);
+			}
+		}
 		home.release(queues, id, claim);
 	}
 }
@@ -637,14 +715,23 @@ fn push(queues: &Queues, key: Key, output: Output) -> Option<Id> {
 }
 
 impl State {
-	/// Route the router's messages and shown claims to the streams.
+	/// Route the router's messages and shown claims to the streams. Claims are served
+	/// before the batches carrying them go, so a batch knows what is not served yet.
 	fn flush(&mut self) {
 		loop {
+			let outs = self.router.drain();
+			self.serve();
 			let mut acked = Vec::new();
-			for out in self.router.drain() {
+			for out in outs {
 				let (key, output) = match out {
 					Out::Route { to, id, reach } => (to, Output::Route { id, reach }),
-					Out::Batch { to, id, changes, floor } => (to, Output::Batch { id, changes, floor }),
+					Out::Batch { to, id, changes, floor } => {
+						if let Some(queue) = self.queues.get(&to) {
+							let advertised = |claim: &Path, item: &Claim| self.advertised(id, claim, item);
+							queue.lock().batch(id, changes, floor, advertised);
+						}
+						continue;
+					}
 					Out::Request { to, id, seqno } => {
 						if let Some(queue) = self.queues.get(&to) {
 							let mut outbox = queue.lock();
@@ -667,6 +754,10 @@ impl State {
 				self.router.echo(key, id);
 			}
 		}
+	}
+
+	/// Serve the shown claims that changed through the streams.
+	fn serve(&mut self) {
 		// The shown claims are read in place; the events only say which changed, and
 		// whether a claim that went was ended by its origin or let go here.
 		let mut ended = BTreeMap::new();
@@ -680,6 +771,20 @@ impl State {
 				self.home(id, claims, &ended);
 			}
 		}
+	}
+
+	/// Whether `item`, a claim of `id` at `claim`, may go to other streams: a stream
+	/// serving it confirmed its instance, or none serves it here to wait for.
+	fn advertised(&self, id: Id, claim: &Path, item: &Claim) -> bool {
+		let Some(home) = self.homes.get(&(id, claim.clone())) else {
+			return true;
+		};
+		home.keys.is_empty()
+			|| (home.keys.values()).any(|slot| {
+				(slot.confirmed.as_ref()).is_some_and(|(instance, epoch)| {
+					*instance == item.instance && *epoch == item.epoch
+				})
+			})
 	}
 
 	/// Serve each shown claim of `id` through every stream with a usable feasible
@@ -752,7 +857,7 @@ impl State {
 						let slot = Slot {
 							served: served.clone(),
 							named,
-							confirmed: false,
+							confirmed: None,
 							leaving: false,
 						};
 						home.keys.insert(key, slot);
@@ -974,8 +1079,8 @@ mod tests {
 		};
 		assert_eq!(metric(outputs(&far)), Some(3));
 		assert_eq!(metric(outputs(&near)), Some(1));
-		far.serving(1, &p("live/x"));
-		near.serving(1, &p("live/x"));
+		far.serving(1, &p("live/x"), &claim(&instance, 0));
+		near.serving(1, &p("live/x"), &claim(&instance, 0));
 
 		// A stream whose route ends lets go, since the other still serves it.
 		far.route(1, None);
@@ -1310,6 +1415,51 @@ mod tests {
 		assert_eq!(read.len(), 2, "the route, then its claim");
 	}
 
+	/// A relay sends another stream a claim only once a stream serving it confirmed
+	/// its instance, so a request naming that instance always finds a route: first when
+	/// the claim starts, again when it restarts at a new instance.
+	#[test]
+	fn a_claim_goes_on_only_once_served() {
+		let (old, new) = (Instance::random(), Instance::random());
+		let origin = Node::new(1, 1);
+		let relay = Node::new(2, 2);
+		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
+		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		let edge = relay.answer(Link::default(), Path::empty()).unwrap();
+		outputs(&edge);
+		let claims = |read: Vec<Output>| -> Vec<(Vec<(Path, Option<Instance>)>, Option<Rev>)> {
+			(read.into_iter())
+				.filter_map(|output| match output {
+					Output::Batch { id: 1, changes, floor } => {
+						let changes = (changes.into_iter())
+							.map(|(path, claim)| (path, claim.map(|claim| claim.instance)))
+							.collect();
+						Some((changes, floor))
+					}
+					_ => None,
+				})
+				.collect()
+		};
+
+		origin.own(p("live/x"), Some(claim(&old, 0)));
+		pump(&answer, &receive);
+		assert_eq!(claims(outputs(&edge)), [(vec![], None)], "held until served");
+		receive.serving(1, &p("live/x"), &claim(&old, 0));
+		assert_eq!(claims(outputs(&edge)), [(vec![(p("live/x"), Some(old.clone()))], Some(1))]);
+
+		origin.own(p("live/x"), Some(claim(&new, 0)));
+		pump(&answer, &receive);
+		assert_eq!(
+			claims(outputs(&edge)),
+			[(vec![], None)],
+			"the old instance stays until the new one is served, the floor certifying nothing"
+		);
+		receive.serving(1, &p("live/x"), &claim(&old, 0));
+		assert_eq!(claims(outputs(&edge)), [], "a stale confirmation releases nothing");
+		receive.serving(1, &p("live/x"), &claim(&new, 0));
+		assert_eq!(claims(outputs(&edge)), [(vec![(p("live/x"), Some(new.clone()))], Some(2))]);
+	}
+
 	#[test]
 	fn a_route_lost_with_its_session_leaves_the_others_serving() {
 		let instance = Instance::random();
@@ -1324,7 +1474,7 @@ mod tests {
 		pump(&second_answer, &second);
 		outputs(&first);
 		assert!(matches!(served(outputs(&second))[..], [.., Output::Serve { .. }]));
-		second.serving(1, &p("live/x"));
+		second.serving(1, &p("live/x"), &claim(&instance, 0));
 
 		drop(first);
 		assert!(served(outputs(&second)).is_empty(), "already served where it still is");
@@ -1346,7 +1496,7 @@ mod tests {
 		receive.route(1, Some(Reach::Finite(advert)));
 		receive.batch(1, vec![(p("live/x"), Some(claim(&instance, 0)))], Some(1));
 		assert!(matches!(served(outputs(&receive))[..], [Output::Serve { .. }]));
-		receive.serving(1, &p("live/x"));
+		receive.serving(1, &p("live/x"), &claim(&instance, 0));
 
 		receive.route(1, Some(Reach::Held));
 		assert!(matches!(
