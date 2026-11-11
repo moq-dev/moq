@@ -1111,7 +1111,10 @@ fn a_route_stops_at_the_hop_limit() {
 	assert!(sim.run());
 	let full = last - 2;
 	assert_eq!(sim.route(full, 7).map(|route| route.metric), Some(full as Metric));
-	assert!(sim.route(full + 1, 7).is_none(), "the route crossed as many nodes as one may");
+	assert!(
+		sim.route(full + 1, 7).is_none(),
+		"the route crossed as many nodes as one may"
+	);
 	assert!(sim.holds(full + 1, 7) && !sim.starved(full + 1, 7));
 	assert!(!sim.holds(last, 7), "nothing is sent on");
 }
@@ -1169,9 +1172,15 @@ fn a_scoped_copy_that_crossed_a_relay_is_not_waited_on() {
 
 	sim.disconnect(far, cdn);
 	assert!(sim.run());
-	assert_eq!(sim.route(cdn, key).map(|route| (route.next, route.metric)), Some((Some(near), 8)));
+	assert_eq!(
+		sim.route(cdn, key).map(|route| (route.next, route.metric)),
+		Some((Some(near), 8))
+	);
 	assert!(sim.holds(near, key) && sim.route(near, key).is_none());
-	assert!(!sim.starved(near, key), "the peer's route stands whatever the relay does");
+	assert!(
+		!sim.starved(near, key),
+		"the peer's route stands whatever the relay does"
+	);
 	assert_eq!(sim.seqno(origin), 0);
 	assert_eq!(sim.retained().pending, 0);
 	assert_eq!(sim.shows(near, 7, "local/x"), Some(true));
@@ -1197,7 +1206,9 @@ fn longest(sim: &Sim, from: Node, seen: &mut Vec<Node>) -> Metric {
 /// random order while links flap and relays restart and collect. A route names the
 /// relays it crossed, so no relay ever selects one longer than a loop-free path: a
 /// node that forgot the origin cannot take back a copy of its own old route. Without
-/// the hops this finds a count to infinity within a dozen cases.
+/// the hops this finds a count to infinity within a dozen cases. Every fourth mesh
+/// scopes some relays under a grant, which hands a relay its own route back under a
+/// qualified key: nothing may wait on that copy once the mesh is quiet.
 #[test]
 fn sweep_no_route_outgrows_a_loop_free_path() {
 	let mut rng = XorShift(0x0bad_c0de);
@@ -1205,12 +1216,21 @@ fn sweep_no_route_outgrows_a_loop_free_path() {
 	for case in 0..200 {
 		let relays = 3 + rng.next(3) as usize;
 		let origin = relays;
+		let scoped = case % 4 == 1;
 		let mut sim = Sim::new(relays + 1);
 		let mut links = Vec::new();
 		for a in 0..relays {
 			for b in a + 1..relays {
 				if b == a + 1 || rng.chance(50) {
-					sim.join(a, b, 1 + rng.next(3));
+					let side = SimLink::cost(1 + rng.next(3));
+					let grant = Grant {
+						subject: ["ga", "gb"][rng.next(2) as usize],
+						scope: "",
+					};
+					match scoped && rng.chance(30) {
+						true => sim.link(a, b, side.grant(grant), side),
+						false => sim.link(a, b, side, side),
+					}
 					links.push((a, b));
 				}
 			}
@@ -1295,6 +1315,13 @@ fn sweep_no_route_outgrows_a_loop_free_path() {
 		}
 		cut += usize::from(reached.len() <= relays);
 		for node in 0..relays {
+			for &id in sim.nodes[node].rx.keys() {
+				assert!(!sim.starved(node, id), "case {case}: node {node} waits on {id}");
+			}
+			// A scoped link files the origin under another key past it.
+			if scoped {
+				continue;
+			}
 			match reached.contains(&node) {
 				true => {
 					assert!(sim.route(node, 7).is_some(), "case {case}: node {node} lost its route");

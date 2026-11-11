@@ -115,7 +115,8 @@ pub struct Config {
 	/// moq-transport. A forwarded path counts this origin's own hop too, including
 	/// when the receiving peer reconstructs that hop from the announce handshake.
 	/// Protocols without a hop path cannot reveal or bound the depth they hide. No wire
-	/// carries a path longer than 32, so a larger value acts as 32.
+	/// carries a path longer than 32, so a larger value acts as 32, and a moq-lite-07
+	/// route's own hops stop there whatever this is.
 	pub max_hops: NonZeroUsize,
 
 	/// The cache pool broadcasts under this origin charge their groups into. It flows

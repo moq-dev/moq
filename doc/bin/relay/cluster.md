@@ -111,10 +111,11 @@ max_hops = 6
 ```
 
 The same setting is `--cluster-max-hops` or `MOQ_CLUSTER_MAX_HOPS`. It covers
-moq-lite-03 and later, and moq-transport drafts 18 through 22 when the MoQ
-Cluster extension is negotiated. On moq-lite-07-wip it bounds the nodes a route
-crosses, the publishing node and this relay included. A forwarded path counts
-this relay's own hop even when its peer appends it on receipt. Older versions and peers
+moq-lite-03 through moq-lite-06 and moq-transport drafts 18 through 22 when
+the MoQ Cluster extension is negotiated. A moq-lite-07-wip route crosses at
+most 32 nodes whatever this is set to: it does not hunt for paths, so a lower
+cap would only hide a short path behind a cheaper long one. A forwarded path counts this relay's
+own hop even when its peer appends it on receipt. Older versions and peers
 without hop paths hide their depth, which this setting cannot bound.
 
 ## Upstream links
