@@ -27,7 +27,7 @@ const TOLERANCE: Duration = Duration::from_millis(1);
 
 /// A capture imported whole, with what keeps its broadcast up.
 struct Imported {
-	_passthrough: Passthrough,
+	_passthrough: crate::container::ts::passthrough::Finished,
 	_catalog: crate::catalog::Producer,
 	_broadcast: moq_net::broadcast::Producer,
 	consumer: moq_net::broadcast::Consumer,
@@ -41,7 +41,7 @@ async fn import(data: &[u8]) -> Imported {
 	let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve()).unwrap();
 	let name = passthrough.track().to_string();
 	passthrough.decode(data).unwrap();
-	passthrough.finish().unwrap();
+	let passthrough = passthrough.finish().unwrap();
 
 	let mut track = consumer
 		.track(&name)

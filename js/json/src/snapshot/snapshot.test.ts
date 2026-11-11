@@ -739,3 +739,13 @@ test("each state reads back with its frame's timestamp", async () => {
 	expect(head?.value.n).toBe(3);
 	expect(head?.at?.as(Time.Timescale.MILLI)).toBe(3_000);
 });
+
+// Mirrors the Rust `snapshot::Finished` doctest: the value `finish` returns takes no update, at
+// compile time and at run time.
+test("finishing returns a value that publishes nothing", () => {
+	const producer = new Producer<Value>({ track: new Track.Producer("test") });
+	producer.update({ value: { a: 1 } });
+	const finished = producer.finish();
+	// @ts-expect-error a finished value takes no update
+	expect(() => finished.update({ value: { a: 2 } })).toThrow();
+});

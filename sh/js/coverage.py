@@ -37,6 +37,8 @@ def report(root, directories):
                 found = lines.setdefault(source, {})
                 found[int(number)] = found.get(int(number), False) or int(count) > 0
     summary = {}
+    # Sources above are real paths; a symlinked root (macOS /var) must match them.
+    root = root.resolve()
     manifest = json.loads((root / "package.json").read_text())
     for directory in [root / "js/common", *(root / path for path in manifest["workspaces"] if path.startswith("js/"))]:
         sources = [

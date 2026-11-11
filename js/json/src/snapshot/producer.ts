@@ -5,6 +5,14 @@ import { MAX_FRAME_BYTES } from "../limits.ts";
 import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts";
 
 /**
+ * A value its producer finished: it takes no more updates. {@link Producer.finish} returns it,
+ * mirroring the Rust `snapshot::Finished`; the producer itself still refuses an update after the
+ * finish.
+ */
+// biome-ignore lint/suspicious/noEmptyInterface: nothing is left to call once the track is released.
+export interface Finished {}
+
+/**
  * Publishes a JSON value over a track, choosing snapshots and deltas automatically.
  *
  * An {@link Encoder} that owns its track: it writes each encoded frame and rolls a group whenever
@@ -182,9 +190,10 @@ export class Producer<T> {
 		this.update({ value, at });
 	}
 
-	/** Finish the track, closing any open group. */
-	finish(): void {
+	/** Finish the track, closing any open group, and return it as {@link Finished}. */
+	finish(): Finished {
 		this.#close();
+		return this;
 	}
 
 	#close(abort?: Error): void {

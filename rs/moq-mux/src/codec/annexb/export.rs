@@ -218,14 +218,14 @@ mod tests {
 			moving.a.write(marked_frame(0, 0xa1)).unwrap();
 			assert_eq!(marks(&next(&mut export).await), [0xa1]);
 			if finished {
-				moving.a.finish().unwrap();
+				moving.a.end_with(None).unwrap();
 				assert!(export.poll_next(&kio::Waiter::noop()).is_pending());
 			}
 			moving.b.write(marked_frame(30, 0xb1)).unwrap();
 			moving.b.write(marked_frame(60, 0xb2)).unwrap();
 			moving.point("b", None, SPS);
 			assert_eq!(marks(&next(&mut export).await), [0xb2]);
-			moving.b.finish().unwrap();
+			moving.b.end_with(None).unwrap();
 			moving.catalog.finish().unwrap();
 			assert!(export.next().await.unwrap().is_none());
 		}
