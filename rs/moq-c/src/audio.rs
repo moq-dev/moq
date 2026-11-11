@@ -540,18 +540,20 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 		let shared = State::lock().audio.producer(id)?;
 		let finished: Result<(), Error> = (|| {
 			let mut guard = shared.lock();
-			let AudioEncoder {
-				mut producer, children, ..
-			} = guard.take().ok_or(Error::MediaNotFound)?;
-			if let Err(err) = producer.finish() {
-				// Readers see the failure rather than `Dropped`, as a failed video drain does.
-				children.forget(crate::publish::Child::Audio(id));
-				producer.abort(moq_net::Error::Transport(err.to_string()));
-				return Err(err.into());
+			let AudioEncoder { producer, children, .. } = guard.take().ok_or(Error::MediaNotFound)?;
+			match producer.finish() {
+				// The broadcast keeps the finished track, so its finish still holds it.
+				Ok(finished) => {
+					children.keep(crate::publish::Child::Audio(id), finished);
+					Ok(())
+				}
+				// A failed finish already ended the track with an error, so readers see the
+				// failure rather than `Dropped`, as a failed video drain does.
+				Err(err) => {
+					children.forget(crate::publish::Child::Audio(id));
+					Err(err.into())
+				}
 			}
-			// The broadcast keeps the finished track, so its finish still holds it.
-			children.keep(crate::publish::Child::Audio(id), producer);
-			Ok(())
 		})();
 		// A racing close may have released the id already.
 		let _ = State::lock().audio.remove(id);

@@ -135,7 +135,7 @@ fn feed(data: &[u8], chunk: usize) -> (Option<anyhow::Error>, Vec<u8>) {
 			let mut rest = restart.remainder.to_vec();
 			rest.extend(data.chunks(chunk).skip(index + 1).flatten());
 			// The instance before the step ends cleanly.
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			return (Some(err), rest);
 		}
 	}

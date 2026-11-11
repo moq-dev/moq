@@ -15,10 +15,12 @@
 //! PCM, and symphonia for AAC-LC).
 
 mod backend;
+mod backpressure;
 mod consumer;
 mod decoded;
 mod decoder;
 
+pub use backpressure::Backpressure;
 pub use consumer::{Consumer, Delay, Options, Output, Read, Start};
 pub use decoded::Decoded;
 pub use decoder::{Config, Decoder, Kind};

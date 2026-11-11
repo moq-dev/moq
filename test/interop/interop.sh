@@ -1770,7 +1770,6 @@ run_finish_gst() {
     echo "finish tail frames=10 end=n/a"
 }
 
-# shellcheck disable=SC2329  # unreachable while finish is quarantined
 finish_ready() {
     local pid="$1" log="$2" marker="$3" deadline
     deadline=$(awk -v now="$SECONDS" -v t="$TIMEOUT" 'BEGIN { print int(now + t + 1) }')
@@ -1790,7 +1789,6 @@ run_finish_reader() {
 }
 
 # The line a finish reader prints once every check it can make has passed.
-# shellcheck disable=SC2329  # unreachable while finish is quarantined
 finish_marker() {
     if [[ "$1" == gst ]]; then
         echo 'finish tail frames=10 end=n/a'
@@ -1812,17 +1810,6 @@ run_finishes() {
         done
         return
     fi
-    # Quarantined: quest/m0/test-flakes-2/interop-finish.md. The cpp, go, and rust publishers'
-    # finish cases failed under a loaded host and passed on rerun.
-    for pub in "${PUB_LIST[@]}"; do
-        for sub in "${SUB_LIST[@]}"; do
-            echo "  SKIP  finish $pub -> $sub (quarantined)"
-            record skip case=finish publisher="$pub" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-finish.md"
-        done
-    done
-    return
-
-    # shellcheck disable=SC2317  # unreachable while quarantined
     for pub in "${PUB_LIST[@]}"; do
         name="finish-$pub"
         # The fixture and its .health sibling share a parent, so one prefix grant covers both:

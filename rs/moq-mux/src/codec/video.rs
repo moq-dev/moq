@@ -373,6 +373,6 @@ mod tests {
 		publishing.publish(&mut track, config).unwrap();
 		assert_ne!(track.name(), "video");
 		assert_ne!(track.name(), second);
-		track.finish().unwrap();
+		let _finished = track.finish().unwrap();
 	}
 }
