@@ -490,7 +490,8 @@ test("a refused credential replaced since its dial redials with the new one", as
 test("new tokens redial a URL that stopped on refusing the old ones", async () => {
 	using clock = manual();
 	const original = globalThis.WebTransport;
-	const { dialed, stub } = refusing("old", Promise.resolve());
+	const { promise: release, resolve } = Promise.withResolvers<void>();
+	const { dialed, stub } = refusing("old", release);
 	globalThis.WebTransport = stub;
 
 	const tokens = new Signal<readonly string[]>(["old"]);
@@ -502,6 +503,9 @@ test("new tokens redial a URL that stopped on refusing the old ones", async () =
 		delay: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
 	});
 	try {
+		// Refused only once a session is up: a URL's first attempt failing stops it whatever the cause.
+		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
+		resolve();
 		await clock.drive(waitFor(reload.error, (error) => error !== undefined));
 		expect(dialed.peek()).toEqual(["old"]);
 		tokens.set(["new"]);
@@ -541,6 +545,7 @@ test("an unauthorized session close during setup stops retrying", async () => {
 		enabled: true,
 		url,
 		websocket: { enabled: false },
+		tokens: ["old"],
 		// Unlimited retries prove that `closed` settles only because the rejection is terminal.
 		delay: { initial: Duration.millis(1), multiplier: 1, max: Duration.millis(1), timeout: null },
 	});
@@ -553,10 +558,15 @@ test("an unauthorized session close during setup stops retrying", async () => {
 		expect(attempts).toBe(1);
 		expect(reload.closed.peek()).toBeUndefined();
 
+		// The first attempt failing stops the URL, yet new credentials still earn a dial.
+		reload.tokens.set(["new"]);
+		await waitUntil(() => attempts === 2);
+		await waitUntil(() => reload.error.peek() !== undefined);
+
 		// A new URL starts another sequence on the same loop.
 		reload.url.set(new URL("https://example.com/changed"));
-		await waitUntil(() => attempts >= 2);
-		expect(attempts).toBeGreaterThanOrEqual(2);
+		await waitUntil(() => attempts >= 3);
+		expect(attempts).toBeGreaterThanOrEqual(3);
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
@@ -571,7 +581,15 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	const attempts = new Signal(0);
+	let dials = 0;
+	let first: Promise<{ abort(): void }> | undefined;
 	const stub = function StubWebTransport() {
+		// The first dial connects: a URL's first attempt failing stops it whatever the cause.
+		if (dials++ === 0) {
+			const pair = createMockTransportPair(Lite.ALPN_06);
+			first = accept(pair.server, url);
+			return pair.client;
+		}
 		// No ALPN, so the handshake exchanges SETUP over a bidi stream we can reset.
 		const pair = createMockTransportPair("");
 		void (async () => {
@@ -597,7 +615,10 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 	});
 
 	try {
+		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
+		(await first)?.abort();
 		await clock.drive(waitFor(attempts, (n) => n >= 2));
+		expect(reload.error.peek()).toBeUndefined();
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
@@ -1231,10 +1252,11 @@ async function elapse(clock: Manual, pred: () => boolean): Promise<number> {
 }
 
 // Stub WebTransport so each dial either hangs, as one placed on a dead target does, or
-// connects to a relay that accepts it.
-function dialPlan(plan: (dial: number) => "hang" | "ok", url: URL) {
+// connects to a relay that accepts it, which `drop` severs.
+function dialPlan(plan: (dial: number) => "hang" | "ok") {
 	const original = globalThis.WebTransport;
 	const origin = new OriginProducer();
+	const servers: Promise<{ abort(): void }>[] = [];
 	let dials = 0;
 	let hungCloses = 0;
 	class Hung {
@@ -1244,16 +1266,18 @@ function dialPlan(plan: (dial: number) => "hang" | "ok", url: URL) {
 			hungCloses++;
 		}
 	}
-	globalThis.WebTransport = function StubWebTransport() {
+	globalThis.WebTransport = function StubWebTransport(target: string | URL) {
 		const dial = dials++;
 		if (plan(dial) === "hang") return new Hung();
 		const pair = createMockTransportPair(Lite.ALPN_06);
-		void accept(pair.server, url, { publish: origin.consume() });
+		servers.push(accept(pair.server, new URL(target), { publish: origin.consume() }));
 		return pair.client;
 	} as unknown as typeof WebTransport;
 	return {
 		dials: () => dials,
 		hungCloses: () => hungCloses,
+		// Sever the latest accepted session from the server.
+		drop: async () => (await servers.at(-1))?.abort(),
 		restore: () => {
 			globalThis.WebTransport = original;
 			origin.close();
@@ -1261,24 +1285,71 @@ function dialPlan(plan: (dial: number) => "hang" | "ok", url: URL) {
 	};
 }
 
+// Connect, hold the session past the default healthy bar, then sever it from the server. A URL's
+// first attempt is never retried, so retrying needs a session first; ending a healthy one
+// leaves the backoff and the retry window fresh, both counting from the drop.
+async function outlive(clock: Manual, reload: Reload, plan: ReturnType<typeof dialPlan>) {
+	await waitUntil(() => reload.status.peek() === "connected");
+	await clock.advance(Duration.millis(1000));
+	await plan.drop();
+	await waitUntil(() => reload.status.peek() !== "connected");
+}
+
+test("a URL's first attempt failing stops it until the URL changes", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	const plan = dialPlan((dial) => (dial === 0 ? "hang" : "ok"));
+	const reload = new Reload({
+		url: new URL("https://relay.example/room"),
+		websocket: { enabled: false },
+		timeout: Duration.millis(30),
+		// An unbounded window and a short backoff, so only the first-attempt rule can stop it.
+		delay: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10), timeout: null },
+	});
+	try {
+		await waitUntil(() => plan.dials() === 1);
+		expect(await elapse(clock, () => reload.error.peek() !== undefined)).toBe(30);
+		expect(reload.error.peek()).toBeInstanceOf(ConnectTimeout);
+		expect(reload.status.peek()).toBe("disconnected");
+
+		await clock.advance(Duration.millis(1000));
+		expect(plan.dials()).toBe(1);
+		expect(plan.hungCloses()).toBe(1);
+
+		// A new URL needs its own first session, and dials it.
+		reload.url.set(new URL("https://relay.example/other"));
+		await waitUntil(() => reload.status.peek() === "connected");
+		expect(plan.dials()).toBe(2);
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		plan.restore();
+		warned.mockRestore();
+		installed.close();
+	}
+});
+
 test("an attempt that outlives the connect timeout is retried after the backoff", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const url = new URL("https://relay.example/room");
 	// Scaled down: the attempt times out before a WebTransport hedge would dial.
-	const plan = dialPlan((dial) => (dial === 0 ? "hang" : "ok"), url);
+	const plan = dialPlan((dial) => (dial === 1 ? "hang" : "ok"));
 	const statuses: string[] = [];
 	const reload = new Reload({
 		url,
 		websocket: { enabled: false },
 		timeout: Duration.millis(50),
-		delay: { initial: Duration.millis(20) },
+		delay: { initial: Duration.millis(20), multiplier: 1 },
 	});
 	const unsubscribe = reload.status.subscribe((status) => statuses.push(status));
 	try {
-		await waitUntil(() => plan.dials() === 1);
-		const waited = await elapse(clock, () => plan.dials() === 2);
-		// The 50 ms timeout, then the first backoff with its equal jitter (10 to 20 ms).
+		await outlive(clock, reload, plan);
+		await elapse(clock, () => plan.dials() === 2);
+		statuses.length = 0;
+		const waited = await elapse(clock, () => plan.dials() === 3);
+		// The 50 ms timeout, then the backoff with its equal jitter (10 to 20 ms).
 		expect(waited).toBeGreaterThanOrEqual(60);
 		expect(waited).toBeLessThanOrEqual(70);
 		expect(plan.hungCloses()).toBe(1);
@@ -1294,32 +1365,28 @@ test("an attempt that outlives the connect timeout is retried after the backoff"
 	}
 });
 
-// Every attempt hangs until its 30 ms connect timeout. The window counts from the first dial, as
-// moq-tokio's does, and no attempt starts once it has passed.
+// A healthy session ends at 0, then every attempt hangs until its 30 ms connect timeout. The
+// window counts from the end of that session, as moq-tokio's does, and no attempt starts once
+// it has passed.
 const windows: [string, ReloadDelay, number, number][] = [
-	// Dials at 0, 40, and 80; the last runs past the window and gives up when it fails.
+	// Dials at 10, 50, and 90; the last runs past the window and gives up when it fails.
 	[
 		"an attempt under way finishes past the window",
 		{ initial: Duration.millis(10), timeout: Duration.millis(100) },
-		110,
+		120,
 		3,
 	],
-	// The first failure at 30 ms leaves 30 ms, less than the 50 ms wait, so it gives up at the deadline.
+	// The first failure at 50 ms leaves 10 ms, less than the 20 ms wait, so it gives up at the deadline.
 	[
 		"a wait that reaches the deadline gives up there",
-		{ initial: Duration.millis(50), timeout: Duration.millis(60) },
+		{ initial: Duration.millis(20), timeout: Duration.millis(60) },
 		60,
 		1,
 	],
-	// Zero is a real bound, not "unlimited": the first failure at 30 ms gives up.
-	[
-		"a zero window gives up when the first attempt fails",
-		{ initial: Duration.millis(10), timeout: Duration.ZERO },
-		30,
-		1,
-	],
+	// Zero is a real bound, not "unlimited": the session's end gives up without a redial.
+	["a zero window gives up when the session ends", { initial: Duration.millis(10), timeout: Duration.ZERO }, 0, 0],
 ];
-for (const [name, delay, gaveUp, dials] of windows) {
+for (const [name, delay, gaveUp, hung] of windows) {
 	test(`retry window: ${name}`, async () => {
 		const clock = new Manual();
 		const installed = clock.install();
@@ -1327,7 +1394,7 @@ for (const [name, delay, gaveUp, dials] of windows) {
 		const random = spyOn(Math, "random").mockReturnValue(1);
 		const warned = spyOn(console, "warn").mockImplementation(() => {});
 		const url = new URL("https://relay.example/room");
-		const plan = dialPlan(() => "hang", url);
+		const plan = dialPlan((dial) => (dial === 0 ? "ok" : "hang"));
 		const reload = new Reload({
 			url,
 			websocket: { enabled: false },
@@ -1335,11 +1402,12 @@ for (const [name, delay, gaveUp, dials] of windows) {
 			delay: { multiplier: 1, max: Duration.millis(1000), ...delay },
 		});
 		try {
-			await waitUntil(() => plan.dials() === 1);
+			await outlive(clock, reload, plan);
 			expect(await elapse(clock, () => reload.error.peek() !== undefined)).toBe(gaveUp);
-			expect(reload.error.peek()).toBeInstanceOf(ConnectTimeout);
-			expect(plan.dials()).toBe(dials);
-			expect(plan.hungCloses()).toBe(plan.dials());
+			// The last failure: a hung attempt's timeout, or the session's own end.
+			expect(reload.error.peek() instanceof ConnectTimeout).toBe(hung > 0);
+			expect(plan.dials() - 1).toBe(hung);
+			expect(plan.hungCloses()).toBe(hung);
 		} finally {
 			reload.close();
 			plan.restore();
@@ -1358,7 +1426,7 @@ test("retry window: a backoff that fires past the window gives up", async () => 
 	const random = spyOn(Math, "random").mockReturnValue(1);
 	const warned = spyOn(console, "warn").mockImplementation(() => {});
 	const url = new URL("https://relay.example/room");
-	const plan = dialPlan(() => "hang", url);
+	const plan = dialPlan((dial) => (dial === 0 ? "ok" : "hang"));
 	const reload = new Reload({
 		url,
 		websocket: { enabled: false },
@@ -1371,15 +1439,17 @@ test("retry window: a backoff that fires past the window gives up", async () => 
 		},
 	});
 	try {
-		await waitUntil(() => plan.dials() === 1);
-		// The first attempt times out at 30 ms and schedules the next dial for 40 ms.
-		await clock.advance(Duration.millis(30));
+		// A healthy session ends at 0; the window closes at 100 ms.
+		await outlive(clock, reload, plan);
+		// The redial at 10 ms times out at 40 ms and schedules the next dial for 50 ms.
+		await clock.advance(Duration.millis(40));
 		for (let i = 0; i < 3; i++) await settle();
+		expect(plan.dials()).toBe(2);
 		expect(reload.error.peek()).toBeUndefined();
 		clock.jump(Duration.millis(200));
 		for (let i = 0; i < 3; i++) await settle();
 		expect(reload.error.peek()).toBeInstanceOf(ConnectTimeout);
-		expect(plan.dials()).toBe(1);
+		expect(plan.dials()).toBe(2);
 	} finally {
 		reload.close();
 		plan.restore();

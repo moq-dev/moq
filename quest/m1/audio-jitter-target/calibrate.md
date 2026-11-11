@@ -56,4 +56,3 @@ Native rows stay report-only; enforcing them belongs to
 ## Related
 
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - re-measures the AAC browser rows after the TS importer change; if it has not finished when the model lands, these seven nights serve both
-- [Chromium Opus stalled share](/quest/m1/audio-jitter-target/opus-stalled-share.md) - the one ceiling failing nightly today

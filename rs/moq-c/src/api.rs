@@ -1744,8 +1744,9 @@ unsafe fn connect_session(
 /// Returns a non-zero handle to the session on success, or a negative code on (immediate) failure.
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
-/// The session reconnects automatically with exponential backoff if the connection drops.
-/// Published broadcasts are re-announced and consumers re-subscribed on each reconnect,
+/// Once connected, the session reconnects automatically with exponential backoff if the
+/// connection drops. A first dial that reaches no session ends it instead, with that dial's
+/// error as the terminal snapshot's failure. Published broadcasts are re-announced and consumers re-subscribed on each reconnect,
 /// since the origins outlive the underlying connection.
 ///
 /// `on_state` receives a [moq_connection_state] whenever the lifecycle changes: each
@@ -1753,7 +1754,8 @@ unsafe fn connect_session(
 /// connect count. Changes that land together arrive as one snapshot.
 ///
 /// The last call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `data.closed.failure` zero after
-/// [moq_session_close] or the negative code that made reconnecting give up. By then the
+/// [moq_session_close], or the negative code of the failed first dial or of the failure that
+/// made reconnecting give up. By then the
 /// session handle is already released, and `on_state` and `user_data` are never touched
 /// again, so that terminal snapshot is the point to release `user_data`. It fires even
 /// after [moq_session_close], so do not free `user_data` on the close call itself.

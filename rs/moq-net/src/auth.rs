@@ -28,13 +28,11 @@
 //! that carried a token is held to that token's grant alone and ends with it; any other
 //! request is held to the session's scope, which a token carried by a request never joins.
 //!
-//! moq-transport carries the same exchange when both sides negotiate the MoQ Auth
-//! extension. Older moq-lite versions, and peers that do not negotiate it, carry no
-//! AUTH exchange: there the grant stays `None`. On moq-transport `add` still succeeds,
-//! with a grant that stays unknown, since a request that names the auth carries its
-//! token; on moq-lite without AUTH it fails with [`Error::Unsupported`]. Both wires carry
-//! a grant's patterns as they are, and refuse one too large for a single AUTH_OK rather
-//! than trim it.
+//! Older moq-lite versions and moq-transport carry no AUTH exchange: there the grant stays
+//! `None`. On moq-transport `add` still succeeds, with a grant that stays unknown, since a
+//! request that names the auth carries its token; on moq-lite without AUTH it fails with
+//! [`Error::Unsupported`]. moq-lite carries a grant's patterns as they are, and refuses one
+//! too large for a single AUTH_OK rather than trim it.
 
 use std::{
 	collections::{BTreeMap, VecDeque},
@@ -872,10 +870,10 @@ impl Link {
 		Self::bound(supported, false)
 	}
 
-	/// A moq-transport session: like [`new`](Self::new), but a request can carry a token
-	/// itself, so a token needs no AUTH to be presented.
-	pub(crate) fn ietf(supported: bool) -> Self {
-		Self::bound(supported, true)
+	/// A moq-transport session: it speaks no AUTH, but a request can carry a token itself,
+	/// so a token needs no AUTH to be presented.
+	pub(crate) fn ietf() -> Self {
+		Self::bound(false, true)
 	}
 
 	fn bound(supported: bool, requests: bool) -> Self {
@@ -968,12 +966,6 @@ impl Link {
 	/// Whether the session still takes new work: open, with no GOAWAY sent or received.
 	pub(crate) fn active(&self) -> bool {
 		self.read(|link, _| link.active())
-	}
-
-	/// Whether this side speaks AUTH: false on a version without it, on a side that does
-	/// not offer it, and once the peer turns out not to.
-	pub(crate) fn supported(&self) -> bool {
-		self.read(|link, _| link.supported)
 	}
 
 	/// Present a token: the session's own credential at setup, presented on this session
@@ -1429,43 +1421,6 @@ impl Link {
 			let (_, scope) = link.parts(direction);
 			scope.is_none_or(|scope| scope.matches(path))
 		})
-	}
-
-	/// The peer turned out not to negotiate AUTH, leaving the union unknown. On
-	/// moq-transport every token we presented stays, with an unknown grant, for the
-	/// requests that name it; elsewhere each fails as unsupported, which ends the handle's
-	/// tokens for good. The peer's tokens can still ride its requests, so their queue
-	/// stays open.
-	pub(crate) fn unsupported(&self) {
-		self.with_state(|state, link| {
-			let link = attached(&mut state.links, link);
-			link.supported = false;
-			link.opening.clear();
-			let requests = link.requests;
-			// Nothing will read a withdrawn slot again.
-			link.slots
-				.retain(|_, slot| !matches!(slot.phase, Phase::Withdrawn { .. }));
-			let mut answers = Vec::new();
-			for (id, slot) in &mut link.slots {
-				let answer = match requests {
-					true => Ok(()),
-					false => Err(Error::Unsupported),
-				};
-				// Called before any stream opens, so every slot not over is still queued.
-				if !matches!(slot.phase, Phase::Ended(_)) {
-					slot.phase = match requests {
-						true => Phase::Requests,
-						false => Phase::Ended(Error::Unsupported),
-					};
-				}
-				if !slot.setup {
-					answers.push((*id, answer));
-				}
-			}
-			for (id, answer) in answers {
-				state.answer(id, answer.map(|()| Answer::Requests));
-			}
-		});
 	}
 
 	/// Why the session ended, once it has.
@@ -3212,7 +3167,7 @@ mod tests {
 	/// could carry it.
 	#[test]
 	fn a_request_carries_an_auth_without_the_auth_stream() {
-		let ietf = Link::ietf(false);
+		let ietf = Link::ietf();
 		let auth = ietf.present(Bytes::from_static(b"jwt"), false).unwrap();
 		assert!(matches!(
 			auth.poll_answered(&kio::Waiter::noop()),
@@ -3233,28 +3188,13 @@ mod tests {
 		));
 	}
 
-	/// A peer that turns out not to speak AUTH leaves a moq-transport auth for its
-	/// requests rather than failing it.
-	#[test]
-	fn an_unsupported_peer_keeps_a_request_auth() {
-		let handle = Link::ietf(true);
-		let auth = handle.present(Bytes::from_static(b"jwt"), false).unwrap();
-		assert!(auth.poll_answered(&kio::Waiter::noop()).is_pending());
-		handle.unsupported();
-		assert!(matches!(
-			auth.poll_answered(&kio::Waiter::noop()),
-			Poll::Ready(Ok(Answer::Requests))
-		));
-		assert_eq!(handle.token(&auth).as_deref(), Some(b"jwt".as_slice()));
-	}
-
 	/// Only the handle that issued an auth carries it: a route naming another session's
 	/// auth goes out under this session's scope.
 	#[test]
 	fn another_handle_does_not_carry_an_auth() {
-		let issuer = Link::ietf(false);
+		let issuer = Link::ietf();
 		let auth = issuer.present(Bytes::from_static(b"jwt"), false).unwrap();
-		assert_eq!(Link::ietf(false).token(&auth), None);
+		assert_eq!(Link::ietf().token(&auth), None);
 	}
 
 	/// Every clone names one credential, which stays presented until the last drops.
@@ -3850,21 +3790,18 @@ mod request_token_tests {
 		);
 	}
 
-	/// A request-borne token is verified even without the MoQ Auth extension: it rides the
-	/// request message, not the AUTH stream, so `requests()` stays live on a session whose
-	/// `supported` is false, even once the peer turns out not to speak AUTH. This is the shape
-	/// a standard moq-transport peer presents when it does not negotiate the AUTH extension.
+	/// A request-borne token is verified without AUTH: it rides the request message, so
+	/// `requests()` stays live on a session that speaks no AUTH, as on moq-transport.
 	#[kio::test]
-	async fn a_request_token_is_verified_without_the_auth_extension() {
+	async fn a_request_token_is_verified_without_the_auth_stream() {
 		let handle = Link::new(false);
 		let mut requests = handle.handle().requests();
-		handle.unsupported();
 		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		let request = requests.next().await.expect("a request reaches the acceptor");
 		let _issued = request.accept(Grant::all());
 		assert!(
 			verdict.grant().await.expect("granted").publish.matches("room/alice"),
-			"admitted without the AUTH extension"
+			"admitted without AUTH"
 		);
 	}
 

@@ -27,10 +27,8 @@ enforces.
 
 Update the AUTH grant in `drafts/draft-lcurley-moq-lite.md` and run
 `just drafts check`. Rates target the next unpublished lite version after finalized lite-07,
-not lite-07 or its old wip identifier. Leave the
-negotiated IETF AUTH extension and `drafts/draft-lcurley-moq-auth.md`
-unchanged: extending cap reporting to IETF is outside this quest. Keeping
-that boundary avoids expanding the agreed lite-only wire change.
+not lite-07 or its old wip identifier. moq-transport carries no AUTH grant, so
+the rates are lite-only.
 
 A sending session also clamps the peer's PROBE target to the cap it enforces
 on that peer, as viewer targets decided rather than adding a constant: a target

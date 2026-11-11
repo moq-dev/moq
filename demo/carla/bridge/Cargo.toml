@@ -1,3 +1,7 @@
+# A workspace of its own, so the root workspace never compiles a demo. Its
+# moq crates still come from this checkout.
+[workspace]
+
 [package]
 name = "moq-carla-bridge"
 description = "CARLA video bridge: encodes Unreal render targets on the GPU and hands compressed frames to the demo's worker."
@@ -8,7 +12,7 @@ publish = false
 
 version = "0.1.0"
 edition = "2024"
-rust-version.workspace = true
+rust-version = "1.91"
 
 [lib]
 name = "carla_bridge"
@@ -16,28 +20,26 @@ name = "carla_bridge"
 # rlib: what the tests link.
 crate-type = ["cdylib", "rlib"]
 
-# Linux only: elsewhere the crate is empty, so the workspace still builds on a Mac.
+# Linux only: elsewhere the crate is empty, so it still builds on a Mac.
 [target.'cfg(target_os = "linux")'.dependencies]
-anyhow = { workspace = true }
-bytes = { workspace = true }
-moq-mux = { workspace = true }
-moq-net = { workspace = true }
+anyhow = "1"
+bytes = "1"
+moq-mux = { path = "../../../rs/moq-mux" }
+moq-net = { path = "../../../rs/moq-net" }
 # The NVIDIA encoder, which imports the plugin's Vulkan images. The encoder is
 # opened for the plugin's device, so no software fallback can take a frame.
-moq-video = { workspace = true, features = ["nvidia"] }
+moq-video = { path = "../../../rs/moq-video", default-features = false, features = ["nvidia"] }
 parking_lot = "0.13"
 # Blocking on a slot's GPU completion when a source closes, which is the one
 # place the bridge waits on the GPU.
-pollster = { workspace = true }
-tracing = { workspace = true }
-
-[dev-dependencies]
-workspace-hack = { path = "../../../rs/workspace-hack" }
+pollster = "1.0"
+tracing = "0.1"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # The stand-in producer: a native Vulkan renderer that hands the bridge
 # exportable slots exactly the way the CARLA plugin does.
-ash = { workspace = true }
+ash = "0.38"
 
-[lints]
-workspace = true
+[lints.clippy]
+# Every suppression says why, so the next lint audit can judge it.
+allow_attributes_without_reason = "warn"

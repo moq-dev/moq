@@ -10,7 +10,6 @@ pub(super) fn control(id: u64) -> crate::stats::Message {
 		TrackStatus::ID | SubscribeTracks::ID | PublishSkipped::ID => Class::TrackInfo,
 		Subscribe::ID | SubscribeOk::ID | Publish::ID | PublishOk::ID | PublishDone::ID => Class::Subscribe,
 		Fetch::ID | FetchOk::ID => Class::Fetch,
-		auth::Auth::ID | auth::AuthOk::ID | auth::AuthError::ID => Class::Auth,
 		GoAway::ID => Class::Goaway,
 		_ => Class::Other,
 	}
