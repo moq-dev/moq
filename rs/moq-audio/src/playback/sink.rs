@@ -598,7 +598,7 @@ mod tests {
 		let (retired, _rx) = std::sync::mpsc::sync_channel(8);
 		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, Default::default()).unwrap();
 		registration.attach(&commands);
-		let mut out = [0.0; 960];
+		let mut out = [0.0f32; 960];
 		mixer.fill(&mut out, Duration::from_millis(100), crate::ring::host());
 		let samples = [0.25f32; 123 * 2];
 		let bytes: Vec<_> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
@@ -719,7 +719,7 @@ mod tests {
 		};
 		let rms =
 			|samples: &[f32]| (samples.iter().map(|&s| s as f64 * s as f64).sum::<f64>() / samples.len() as f64).sqrt();
-		let mut out = [0.0; 960];
+		let mut out = [0.0f32; 960];
 		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 
 		// 100 ms of a quiet background, then a declared end.
@@ -797,7 +797,7 @@ mod tests {
 		let (retired, _rx) = std::sync::mpsc::sync_channel(8);
 		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, Default::default()).unwrap();
 		registration.attach(&commands);
-		let mut out = [0.0; 960];
+		let mut out = [0.0f32; 960];
 		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 
 		let bytes: Vec<_> = [0.25f32]

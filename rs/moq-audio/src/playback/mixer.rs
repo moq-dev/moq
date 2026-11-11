@@ -250,9 +250,19 @@ impl Mixer {
 		self.ledger.latency(latency);
 	}
 
-	/// Fill one device buffer, interleaved at the device's channel count, whose
-	/// first frame the device reads at `start` on the host clock.
-	pub(super) fn fill(&mut self, out: &mut [f32], played_at: Duration, start: ring::Instant) {
+	/// Fill one device buffer, interleaved at the device's channel count and in
+	/// its sample format, whose first frame the device reads at `start` on the
+	/// host clock.
+	///
+	/// The whole buffer in one call, converting as each chunk goes out, so a
+	/// buffer of any size is read against one clock reading rather than one per
+	/// staging pass.
+	pub(super) fn fill<T: cpal::Sample + cpal::FromSample<f32>>(
+		&mut self,
+		out: &mut [T],
+		played_at: Duration,
+		start: ring::Instant,
+	) {
 		loop {
 			match self.commands.try_recv() {
 				Ok(Command::Add {
@@ -426,7 +436,12 @@ impl Mixer {
 				reference.push(stereo);
 			}
 
-			out[done * channels..(done + frames) * channels].copy_from_slice(&bus[..samples]);
+			for (out, sample) in out[done * channels..(done + frames) * channels]
+				.iter_mut()
+				.zip(&bus[..samples])
+			{
+				*out = T::from_sample(*sample);
+			}
 
 			done += frames;
 		}
@@ -622,12 +637,14 @@ mod tests {
 			.flat_map(|i| [(i as f32 * std::f32::consts::TAU * 200.0 / RATE as f32).sin() * 0.25; STEREO])
 			.collect();
 		assert_eq!(prod.push(&tone), Push::Ok);
-		let callback = 2 * CHUNK;
+		// Four chunks to a callback, in a format the mixer converts to as it
+		// goes, so none of them restarts the clock.
+		let callback = 4 * CHUNK;
 		let mut now = start + Duration::from_millis(10);
 		prod.due(now + prod.buffered(), Duration::from_secs(2));
 
 		let period = Duration::from_secs_f64(callback as f64 / RATE as f64);
-		let mut out = vec![0.0f32; callback * STEREO];
+		let mut out = vec![0i16; callback * STEREO];
 		for _ in 0..10 {
 			harness.mixer.fill(&mut out, Duration::ZERO, now);
 			now += period;

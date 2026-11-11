@@ -59,10 +59,6 @@ const COMMAND_QUEUE: usize = 2 * mixer::MAX_SINKS;
 const SYNC_ATTEMPTS: u32 = 8;
 const SYNC_DELAY: Duration = Duration::from_millis(4);
 
-/// Frames the sample-format conversion buffer holds. Comfortably more than any
-/// host's period, so the loop over it almost always runs once.
-const SCRATCH_FRAMES: usize = 2048;
-
 /// State shared between the caller's [`Engine`](super::Engine) handles, their
 /// sinks, and the driver thread.
 ///
@@ -863,14 +859,8 @@ impl Driver {
 	where
 		T: cpal::SizedSample + cpal::FromSample<f32>,
 	{
-		// The mixer works in `f32`, so anything else needs a staging buffer.
-		// Allocated once and a whole number of frames long, so however big a
-		// buffer the device asks for, the callback loops over this rather than
-		// resizing (allocating on the audio thread is the one thing it must
-		// never do).
 		let channels = config.channels as usize;
 		let sample_rate = config.sample_rate as f64;
-		let mut scratch = vec![0.0f32; SCRATCH_FRAMES * channels];
 		let mut epoch = None;
 
 		device
@@ -884,22 +874,7 @@ impl Driver {
 						+ Duration::from_secs_f64((data.len() / channels) as f64 / sample_rate);
 					mixer.complete(now);
 					mixer.latency(timestamp.playback.checked_duration_since(timestamp.callback));
-					// One reading for the callback, each staging chunk starting as
-					// many frames past it as precede it.
-					let start = crate::ring::host();
-					let mut offset = 0;
-					for chunk in data.chunks_mut(scratch.len()) {
-						let scratch = &mut scratch[..chunk.len()];
-						mixer.fill(
-							scratch,
-							played_at,
-							start + Duration::from_secs_f64(offset as f64 / sample_rate),
-						);
-						offset += chunk.len() / channels;
-						for (out, sample) in chunk.iter_mut().zip(scratch.iter()) {
-							*out = T::from_sample(*sample);
-						}
-					}
+					mixer.fill(data, played_at, crate::ring::host());
 				},
 				move |error| {
 					failures.report(&error);
