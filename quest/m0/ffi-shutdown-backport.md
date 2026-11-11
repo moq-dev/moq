@@ -43,9 +43,21 @@ PR, [moq-dev/moq#8378](https://github.com/moq-dev/moq/pull/8378), merges
 (rejected: tag before #8378 merges; the maintainer pushes it). Then it checks
 that `release-dart.yml` succeeds and pub.dev lists 0.1.1, and deletes this
 quest. [moq-dev/moq#8378](https://github.com/moq-dev/moq/pull/8378) merged
-2026-11-11, so the tag push is ready.
+2026-11-11, so the agent pushed `moq-dart-v0.1.1`; `release-dart.yml`
+published nothing because pub.dev's automated publishing is not enabled for
+`moq-dev/moq`
+([run 43107848443](https://github.com/moq-dev/moq/actions/runs/43107848443)).
+Once the maintainer enables it, an agent re-runs that workflow; the tag
+already points at the right commit and pub.dev rejected the upload at
+authentication, so no version is burned.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: enable automated publishing for `moq` on pub.dev (repository
+  `moq-dev/moq`, tag pattern `moq-dart-v{{version}}`); only a package admin
+  signed in to pub.dev can. Check: re-running run 43107848443 publishes 0.1.1.
 
 ## Related
 

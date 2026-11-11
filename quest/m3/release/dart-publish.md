@@ -16,8 +16,10 @@ trusted publishing is still unproven.
 Trusted-publishing configuration and checks of already-published artifacts
 can proceed independently; cutting the tag cannot.
 
-- Confirm trusted publishing is configured for `moq` (repository
-  `moq-dev/moq`, tag pattern `moq-dart-v{{version}}`).
+- Configure trusted publishing for `moq` (repository `moq-dev/moq`, tag
+  pattern `moq-dart-v{{version}}`): the `moq-dart-v0.1.1` tag showed it is not
+  enabled for `moq-dev/moq`, likely still bound to the pre-org repository, as
+  [ffi-shutdown-backport](/quest/m0/ffi-shutdown-backport.md) waits on.
 - Raise `dart/moq/pubspec.yaml`'s `moq_ffi` floor to the release the wrapper now needs (the media namespace and codec types), since `^0.4.3` resolves bindings without them.
 - Cut the next `moq-dart-v*` release with the binding breaks and confirm the workflow publishes it.
 - Verify the published `moq_ffi` resolves its native asset from a clean
