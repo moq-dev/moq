@@ -27,9 +27,8 @@ are routing's confidence gates for finalizing lite-07.
 - Keep explicit-state runs tractable with `SYMMETRY` over interchangeable
   relays; run larger meshes with TLC's random simulation in Nightly
   ([nightly models](/quest/m1/model-checks-nightly.md)).
-- Count to infinity stays in its own open-finding config until
-  [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md) lands, so
-  the other rules still run on larger meshes.
+- Check `SimplePaths` and `NoCountToInfinity` on every mesh: a route names
+  the nodes it crossed since [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487).
 
 Replay every counterexample on `route::tests::Sim` before calling it a bug, as
 the `verify-route` skill says, and pin confirmed ones as `residual_*` tests.

@@ -119,10 +119,11 @@ const DOWN_ONLY: u8 = 0x1;
 /// ROUTE_START and ROUTE_UPDATE flag: an RTT follows.
 const RTT: u8 = 0x2;
 
-/// Encode a seqno, metric, flags, and RTT in milliseconds. No origin advertises the
-/// last seqno, which would leave no room for the successor a ROUTE_REQUEST names.
+/// Encode a seqno, metric, flags, RTT in milliseconds, and the hops the route
+/// crossed. No origin advertises the last seqno, which would leave no room for the
+/// successor a ROUTE_REQUEST names, and no relay forwards a route that crossed too many.
 fn encode_advert(w: &mut Encoder<'_>, advert: &Advert) -> Result<(), EncodeError> {
-	if advert.seqno == route::MAX {
+	if advert.seqno == route::MAX || advert.hops.len() > route::MAX_HOPS {
 		return Err(EncodeError::InvalidState);
 	}
 	w.varint(advert.seqno)?;
@@ -139,6 +140,10 @@ fn encode_advert(w: &mut Encoder<'_>, advert: &Advert) -> Result<(), EncodeError
 	w.u8(flags);
 	if let Some(rtt) = rtt {
 		w.varint(rtt)?;
+	}
+	w.varint(advert.hops.len() as u64)?;
+	for hop in advert.hops.iter() {
+		w.varint(*hop)?;
 	}
 	Ok(())
 }
@@ -157,11 +162,17 @@ fn decode_advert(r: &mut Decoder<'_>) -> Result<Advert, DecodeError> {
 		0 => None,
 		_ => Some(std::time::Duration::from_millis(r.varint()?)),
 	};
+	let count = r.varint()?;
+	if count > route::MAX_HOPS as u64 {
+		return Err(DecodeError::TooMany);
+	}
+	let hops = (0..count).map(|_| r.varint()).collect::<Result<_, _>>()?;
 	Ok(Advert {
 		seqno,
 		metric,
 		down_only: flags & DOWN_ONLY != 0,
 		rtt,
+		hops,
 	})
 }
 
@@ -1569,6 +1580,7 @@ mod tests {
 			metric,
 			down_only,
 			rtt: None,
+			hops: [].into(),
 		}
 	}
 
@@ -1614,6 +1626,7 @@ mod tests {
 				node: 0x7a40,
 				advert: Advert {
 					rtt: Some(std::time::Duration::ZERO),
+					hops: [5, route::MAX, 9].into(),
 					..advert(1, 0, false)
 				},
 			},
@@ -1621,6 +1634,7 @@ mod tests {
 				id: 1,
 				advert: Advert {
 					rtt: Some(std::time::Duration::from_millis(u64::MAX)),
+					hops: (1..=route::MAX_HOPS as u64).collect(),
 					..advert(2, 3, true)
 				},
 			},
@@ -1731,6 +1745,13 @@ mod tests {
 				id: 0,
 				advert: advert(route::MAX, 1, false),
 			},
+			AnnounceBroadcast::RouteUpdate {
+				id: 0,
+				advert: Advert {
+					hops: (0..=route::MAX_HOPS as u64).collect(),
+					..advert(0, 1, false)
+				},
+			},
 			// The last revision has no room for the offset.
 			AnnounceBroadcast::Floor {
 				id: 0,
@@ -1749,9 +1770,28 @@ mod tests {
 				w.varint(seqno).unwrap();
 				w.varint(metric).unwrap();
 				w.u8(down_only);
+				w.varint(0u64).unwrap();
 			}
 		};
+		// A route with `count` hops, naming `named` of them.
+		let hops = |count: u64, named: u64| {
+			move |w: &mut Encoder<'_>| {
+				for field in [1, 0, 1] {
+					w.varint(field as u64).unwrap();
+				}
+				w.u8(0);
+				w.varint(count).unwrap();
+				for hop in 0..named {
+					w.varint(hop + 1).unwrap();
+				}
+			}
+		};
+		let over = route::MAX_HOPS as u64 + 1;
 		let malformed = [
+			// More hops than a route may cross, hops missing, and one too many.
+			forge(ROUTE_START, hops(over, over)),
+			forge(ROUTE_START, hops(2, 1)),
+			forge(ROUTE_START, hops(1, 2)),
 			forge(ROUTE_START, advert(0, 0, 1, 0)),
 			forge(ROUTE_START, advert(1, route::MAX, 1, 0)),
 			// A flag no version defines, and an RTT flag without its field.

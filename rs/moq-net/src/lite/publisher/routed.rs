@@ -49,7 +49,7 @@ struct Sent {
 
 impl Sent {
 	fn reach(&self) -> Option<route::Reach> {
-		self.reach.values().next().copied()
+		self.reach.values().next().cloned()
 	}
 
 	/// The node's claim at `path` is now `claim`, which `link` may withhold.
@@ -345,12 +345,12 @@ impl Answer {
 		let Some(sent) = self.routes.get_mut(&id) else {
 			// Held only follows a route the node sent, and an end of one it did not is moot.
 			// The peer is sent the route with its first claim shown.
-			if let Some(reach @ route::Reach::Finite(advert)) = reach {
+			if let Some(route::Reach::Finite(advert)) = reach {
 				let sent = Sent {
 					wire: None,
-					advert,
+					advert: advert.clone(),
 					shown: 0,
-					reach: BTreeMap::from([(source, reach)]),
+					reach: BTreeMap::from([(source, route::Reach::Finite(advert))]),
 					claims: BTreeMap::new(),
 					withheld: 0,
 					floor: None,
@@ -407,14 +407,14 @@ impl Answer {
 			.get_mut(&id)
 			.expect("a route stands while a source carries it");
 		let after = sent.reach();
-		if let Some(route::Reach::Finite(advert)) = after {
-			sent.advert = advert;
+		if let Some(route::Reach::Finite(advert)) = &after {
+			sent.advert = advert.clone();
 		}
 		let Some(wire) = sent.wire else {
 			return Ok(());
 		};
 		match after {
-			_ if after == before => {}
+			after if after == before => {}
 			Some(route::Reach::Finite(advert)) => stream.writer.buffer(&Msg::RouteUpdate { id: wire, advert })?,
 			Some(route::Reach::Held) => stream.writer.buffer(&Msg::RouteHold { id: wire })?,
 			None => unreachable!("a route stands while a source carries it"),
@@ -436,7 +436,7 @@ impl Answer {
 		self.next_route += 1;
 		stream.writer.buffer(&Msg::RouteStart {
 			node: id,
-			advert: sent.advert,
+			advert: sent.advert.clone(),
 		})?;
 		if sent.reach() == Some(route::Reach::Held) {
 			stream.writer.buffer(&Msg::RouteHold { id: wire })?;
