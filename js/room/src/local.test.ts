@@ -54,25 +54,30 @@ function setup() {
 	return { local, bandwidth, screen: sources.at(-1) as FakeSource, broadcasts: { camera, screen: screenBroadcast } };
 }
 
-// Replays LeavingStopsPublishing in `verify/Room.tla`: the screen broadcast is enabled by a live
-// share alone, so a participant who never joined, or who left, still publishes their screen.
+// Replays LeavingStopsPublishing in `verify/Room.tla`: a participant who has not joined, or has
+// left, neither publishes nor encodes their screen, even with a live share.
 test("a screen share publishes only while joined", async () => {
 	const { local, screen, broadcasts } = setup();
+	// The screen's hd, sd, and audio encoders are constructed last.
+	const screenEncoders = () => encoders.slice(-3).map((e) => (e.enabled as Signal<boolean>).peek());
 	try {
 		local.screenEnabled.set(true);
 		screen.out.state.set({ kind: "live", media: { video: {} } });
 		await flush();
 		expect(broadcasts.camera.enabled.peek()).toBe(false);
 		expect(broadcasts.screen.enabled.peek()).toBe(false);
+		expect(screenEncoders()).toEqual([false, false, false]);
 
 		local.enabled.set(true);
 		await flush();
 		expect(broadcasts.screen.enabled.peek()).toBe(true);
+		expect(screenEncoders()).toEqual([true, true, true]);
 
 		local.enabled.set(false);
 		await flush();
 		expect(broadcasts.camera.enabled.peek()).toBe(false);
 		expect(broadcasts.screen.enabled.peek()).toBe(false);
+		expect(screenEncoders()).toEqual([false, false, false]);
 	} finally {
 		local.close();
 	}
