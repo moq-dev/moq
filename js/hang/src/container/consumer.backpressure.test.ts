@@ -280,7 +280,7 @@ test("Consumer stamps frames the max buffer held back with when they landed, not
 		});
 		expect(await consumer.next()).toMatchObject({
 			kind: "frame",
-			frame: { timestamp: Duration.micros(10_000), arrival: Instant.ZERO.add(Duration.millis(250)) },
+			frame: { timestamp: Duration.micros(10_000), arrival: Instant.ZERO.saturatingAdd(Duration.millis(250)) },
 		});
 	} finally {
 		consumer.close();

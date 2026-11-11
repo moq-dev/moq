@@ -270,5 +270,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [js/common's worklet dev-server test holds up under load](/quest/m0/test-flakes-2/worklet-dev-server.md) - the dev-server test passes on a loaded host, and its `test.skip` is removed
-- [The Go wrapper's cancelled-RecvGroup test holds up under load](/quest/m0/test-flakes-2/go-recv-cancel.md) - a `RecvGroup` after a cancelled one is woken by the next group, and its `t.Skip` is removed
+- [Kotlin's playout-delay smoke test holds up under load](/quest/m0/test-flakes-2/kt-playout-delay.md) - the audio playout-delay smoke test passes under load, and its `@Ignore` is removed
