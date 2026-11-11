@@ -278,7 +278,7 @@ Watch.assets("/moq/");
 ```
 
 The URL must end with `/` and have no query or fragment. Copy the files again
-on every upgrade: the worklet changes with the package. `@moq/room` and `@moq/boy` play through
+on every upgrade: the worklet changes with the package. `@moq/room` plays through
 `@moq/watch`, so this one call covers them.
 
 A browser without `AudioDecoder` decodes through the libav polyfill, which

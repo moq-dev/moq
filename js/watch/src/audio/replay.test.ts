@@ -231,7 +231,7 @@ describe("ingress diagnostics", () => {
 			trace.map((entry) => ({
 				kind: "frame" as const,
 				timestamp: Duration.millis(entry.timestamp),
-				arrival: Instant.ZERO.add(Duration.millis(entry.at)),
+				arrival: Instant.ZERO.saturatingAdd(Duration.millis(entry.at)),
 				late: false,
 			})),
 		);
