@@ -39,4 +39,4 @@
 export { Consumer, type ConsumerConfig } from "./consumer.ts";
 export { Decoder, type Event, type Group, type Span } from "./decoder.ts";
 export { type Config, type Encoded, Encoder, type Pending } from "./encoder.ts";
-export { Producer, type ProducerConfig } from "./producer.ts";
+export { type Finished, Producer, type ProducerConfig } from "./producer.ts";

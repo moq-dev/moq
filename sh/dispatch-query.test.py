@@ -307,7 +307,8 @@ class QueryTests(unittest.TestCase):
         cargo = self.bin / "cargo"
         cargo.write_text(
             "#!/usr/bin/env bash\n"
-            f"case \"$*\" in *--manifest-path*) echo '{json.dumps(bridge)}' ;; *) echo '{json.dumps(workspace)}' ;; esac\n"
+            f"case \"$*\" in *--manifest-path*) echo '{json.dumps(bridge)}' ;; "
+            f"*) echo '{json.dumps(workspace)}' ;; esac\n"
         )
         jq = self.bin / "jq"
         jq.unlink(missing_ok=True)

@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group};
-use moq_audio::encode::{Codec, Config, Input, Options, Producer};
+use moq_audio::encode::{Codec, Config, Finished, Input, Options, Producer};
 use moq_audio::{Frame, Layout};
 use moq_net::Timestamp;
 
@@ -205,7 +205,7 @@ impl Case {
 }
 
 /// Time individual writes only in the separate latency pass, outside instruction and throughput measurements.
-fn run<const TIMED: bool>(producers: &mut [Producer], input: &[Frame]) -> Duration {
+fn run<const TIMED: bool>(mut producers: Vec<Producer>, input: &[Frame]) -> (Duration, Vec<Finished>) {
 	let mut slowest = Duration::ZERO;
 	for frame in input {
 		for producer in producers.iter_mut() {
@@ -216,10 +216,11 @@ fn run<const TIMED: bool>(producers: &mut [Producer], input: &[Frame]) -> Durati
 			}
 		}
 	}
-	for producer in producers.iter_mut() {
-		producer.finish().unwrap();
-	}
-	slowest
+	let finished = producers
+		.into_iter()
+		.map(|producer| producer.finish().unwrap())
+		.collect();
+	(slowest, finished)
 }
 
 fn cases() -> Vec<Case> {
@@ -269,20 +270,20 @@ fn counts() {
 	);
 	for case in cases() {
 		let input = case.input();
-		let (broadcast, mut producers) = case.producers();
+		let (broadcast, producers) = case.producers();
 		ALLOCATIONS.store(0, Ordering::Relaxed);
 		ALLOCATED.store(0, Ordering::Relaxed);
 		COUNTING.store(true, Ordering::Relaxed);
 		if let Some(counter) = &mut counter {
 			counter.start();
 		}
-		run::<false>(&mut producers, &input);
+		let (_, finished) = run::<false>(producers, &input);
 		let instructions = counter.as_mut().map(instructions::Counter::stop);
 		COUNTING.store(false, Ordering::Relaxed);
-		drop((producers, broadcast));
-		let (broadcast, mut producers) = case.producers();
-		let slowest = run::<true>(&mut producers, &input);
-		drop((producers, broadcast));
+		drop((finished, broadcast));
+		let (broadcast, producers) = case.producers();
+		let (slowest, finished) = run::<true>(producers, &input);
+		drop((finished, broadcast));
 
 		let per_sample = match instructions {
 			Some(instructions) => format!("{:.1}", instructions as f64 / case.samples() as f64),
@@ -309,9 +310,9 @@ fn bench_batches(c: &mut Criterion) {
 		group.bench_function(BenchmarkId::from_parameter(case.name()), |b| {
 			b.iter_batched(
 				|| case.producers(),
-				|(broadcast, mut producers)| {
-					run::<false>(&mut producers, &input);
-					(broadcast, producers)
+				|(broadcast, producers)| {
+					let (_, finished) = run::<false>(producers, &input);
+					(broadcast, finished)
 				},
 				BatchSize::PerIteration,
 			);

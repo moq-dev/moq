@@ -258,7 +258,7 @@ mod timestamps {
 				assert_eq!(at.value(), ticks);
 				assert_eq!(at.scale(), scale);
 			}
-			producer.finish().unwrap();
+			let _finished = producer.finish().unwrap();
 			assert!(matches!(
 				consumer.poll_next(&kio::Waiter::noop()),
 				Poll::Ready(Ok(None))
@@ -310,7 +310,7 @@ mod timestamps {
 			panic!("missing new state")
 		};
 		assert_eq!(value.value["n"].as_u64().unwrap(), 3);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(None))));
 	}
 }
