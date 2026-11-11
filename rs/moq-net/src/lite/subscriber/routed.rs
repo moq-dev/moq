@@ -174,7 +174,7 @@ impl Routed {
 					id,
 					WireRoute {
 						node,
-						reach,
+						reach: reach.clone(),
 						claims: BTreeMap::new(),
 						pending: BTreeMap::new(),
 						committed: None,
@@ -264,7 +264,7 @@ impl Routed {
 
 	fn reach(&mut self, id: u64, reach: route::Reach) -> Result<(), Error> {
 		let route = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
-		route.reach = reach;
+		route.reach = reach.clone();
 		self.stream.route(route.node, Some(reach));
 		Ok(())
 	}
@@ -347,7 +347,7 @@ impl Routed {
 		ids.sort_unstable();
 		for id in &ids {
 			let route = &self.routes[id];
-			stream.route(route.node, Some(route.reach));
+			stream.route(route.node, Some(route.reach.clone()));
 		}
 		let certifies = self.certifies();
 		for id in &ids {

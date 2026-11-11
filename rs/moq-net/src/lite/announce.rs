@@ -116,13 +116,10 @@ pub enum AnnounceBroadcast {
 
 /// Encode a seqno, metric, down-only bit, and the hops the route crossed. No origin
 /// advertises the last seqno, which would leave no room for the successor a
-/// ROUTE_REQUEST names.
+/// ROUTE_REQUEST names, and no relay forwards a route that crossed too many.
 fn encode_advert(w: &mut Encoder<'_>, advert: &Advert) -> Result<(), EncodeError> {
-	if advert.seqno == route::MAX {
+	if advert.seqno == route::MAX || advert.hops.len() > route::MAX_HOPS {
 		return Err(EncodeError::InvalidState);
-	}
-	if advert.hops.len() > route::MAX_HOPS {
-		return Err(EncodeError::TooMany);
 	}
 	w.varint(advert.seqno)?;
 	w.varint(advert.metric)?;
@@ -1599,6 +1596,20 @@ mod tests {
 				id: 0,
 				advert: advert(42, 0, true),
 			},
+			AnnounceBroadcast::RouteStart {
+				node: 7,
+				advert: Advert {
+					hops: [5, route::MAX, 9].into(),
+					..advert(1, 3, false)
+				},
+			},
+			AnnounceBroadcast::RouteUpdate {
+				id: 1,
+				advert: Advert {
+					hops: (1..=route::MAX_HOPS as u64).collect(),
+					..advert(1, 40, false)
+				},
+			},
 			AnnounceBroadcast::RouteHold { id: 3 },
 			AnnounceBroadcast::RouteEnd { id: 0 },
 			AnnounceBroadcast::Floor {
@@ -1690,6 +1701,13 @@ mod tests {
 				id: 0,
 				advert: advert(route::MAX, 1, false),
 			},
+			AnnounceBroadcast::RouteUpdate {
+				id: 0,
+				advert: Advert {
+					hops: (0..=route::MAX_HOPS as u64).collect(),
+					..advert(0, 1, false)
+				},
+			},
 			// The last revision has no room for the offset.
 			AnnounceBroadcast::Floor {
 				id: 0,
@@ -1711,7 +1729,25 @@ mod tests {
 				w.varint(0u64).unwrap();
 			}
 		};
+		// A route with `count` hops, naming `named` of them.
+		let hops = |count: u64, named: u64| {
+			move |w: &mut Encoder<'_>| {
+				for field in [1, 0, 1] {
+					w.varint(field as u64).unwrap();
+				}
+				w.u8(0);
+				w.varint(count).unwrap();
+				for hop in 0..named {
+					w.varint(hop + 1).unwrap();
+				}
+			}
+		};
+		let over = route::MAX_HOPS as u64 + 1;
 		let malformed = [
+			// More hops than a route may cross, hops missing, and one too many.
+			forge(ROUTE_START, hops(over, over)),
+			forge(ROUTE_START, hops(2, 1)),
+			forge(ROUTE_START, hops(1, 2)),
 			forge(ROUTE_START, advert(0, 0, 1, 0)),
 			forge(ROUTE_START, advert(1, route::MAX, 1, 0)),
 			forge(ROUTE_START, advert(1, 0, 1, 2)),

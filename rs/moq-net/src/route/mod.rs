@@ -150,7 +150,8 @@ pub(crate) fn qualifier(key: [u8; 32]) -> Arc<dyn Fn(Id) -> Id + Send + Sync> {
 	})
 }
 
-/// The most relays a route crosses: the longest hop list a message carries.
+/// The most nodes a route crosses, its origin included: the longest hop list a
+/// message carries.
 pub(crate) const MAX_HOPS: usize = 32;
 
 /// What a node advertises for one identity.
@@ -159,8 +160,8 @@ pub(crate) struct Advert {
 	pub seqno: Seqno,
 	pub metric: Metric,
 	pub down_only: bool,
-	/// The relays the route crossed, by the hop id each names itself with, in order
-	/// from the origin node. The sender is last, and the origin node is left out.
+	/// The nodes the route crossed, by the hop id each names itself with: the origin
+	/// node first and the sender last.
 	pub hops: Arc<[Id]>,
 }
 
@@ -399,7 +400,7 @@ pub(crate) struct Router<N, A> {
 	/// How this node names itself in the hops of a route it forwards. A rotation
 	/// leaves it alone, so a route that crossed this node always says so.
 	hop: Id,
-	/// The most relays a route this node uses may cross, itself included.
+	/// The most nodes a route this node uses may cross, its origin and this node included.
 	pub max_hops: usize,
 	neighbors: BTreeMap<N, Peer>,
 	origins: BTreeMap<Id, Origin<A>>,
@@ -813,9 +814,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		// last view only for what it certified. An uncertified claim lives only
 		// while the stream carries it, and the restart's batch names only what it
 		// still carries, so one kept here would never be withdrawn.
-		if ended
-			&& let Some(heard) = self.heard.get_mut(&(id, from))
-		{
+		if ended && let Some(heard) = self.heard.get_mut(&(id, from)) {
 			let raw = std::mem::take(&mut heard.raw);
 			let kept = heard.kept.get_or_insert(raw);
 			let floors = &kept.floors;
@@ -1211,7 +1210,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 
 	/// This node's metric through `entry`, the route `next` sent, or `None` when it is
 	/// unreachable, never saturated: the metric overflows, or the route already
-	/// crossed as many relays as one may.
+	/// crossed as many nodes as one may.
 	fn through(&self, next: N, entry: &Entry) -> Option<Metric> {
 		if entry.advert.hops.len() >= self.max_hops {
 			return None;
@@ -1640,13 +1639,12 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	/// changed among the dirty claims, unless any could have.
 	fn advertise(&mut self, id: Id, peers: &[N], ctx: &Ctx<N>, dirty: &Dirty) {
 		let selected = self.selected(id);
-		// The selected route's hops, then this node; its own route crossed no relay.
-		let hops: Arc<[Id]> = match selected.and_then(|route| route.next) {
-			Some(next) => (self.rx[&id][&next].advert.hops.iter().copied())
-				.chain([self.hop])
-				.collect(),
-			None => Arc::default(),
-		};
+		// The selected route's hops, then this node: its own route starts with it.
+		let through = selected.and_then(|route| route.next);
+		let hops: Arc<[Id]> = (through.iter())
+			.flat_map(|next| self.rx[&id][next].advert.hops.iter().copied())
+			.chain([self.hop])
+			.collect();
 		let floors = self.adopted_floors(id).cloned().unwrap_or_default();
 		// Built only for a stream sent a whole snapshot, once per interest.
 		let mut adopted: Option<View<A>> = None;

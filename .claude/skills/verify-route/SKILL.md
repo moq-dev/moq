@@ -5,7 +5,7 @@ description: Model-check the lite-07 route layer (`rs/moq-net/src/route/`) with 
 
 # Verify the route layer
 
-`rs/moq-net/verify/route/RouteHandoff.tla` models one origin identity in `route::Router` as `route::tests::Sim` drives it: every router entry point is one atomic step ending in `update`, ROUTE, batches, and ROUTE_REQUEST share one FIFO per direction, and echoes travel on their own queue. TLC checks every ordering of those messages in a triangle of the origin and two relays, under the bounds in the config.
+`rs/moq-net/verify/route/RouteHandoff.tla` models one origin identity in `route::Router` as `route::tests::Sim` drives it: every router entry point is one atomic step ending in `update`, ROUTE, batches, and ROUTE_REQUEST share one FIFO per direction, and echoes travel on their own queue, free to overtake. TLC checks every ordering of those messages on the mesh and bounds each config names.
 
 ## Rules
 
@@ -20,24 +20,33 @@ Each rule is an INVARIANT; the harm says why it matters.
 | `NoRegression` | A reader never sees an UPDATE to an older item. | A stale announcement replaces a newer one. |
 | `LoopFree` | Selected next hops never cycle. | Requests loop between relays. |
 | `QuietIsSettled` | Once nothing is in flight, each relay reaching the origin shows its claims, available, and routes only while it has any; each cut-off relay shows nothing and keeps no route, distance, or request. | Routing never converges, or a dead origin stays shown. |
+| `SimplePaths` | Every route held or in flight names a loop-free path from the origin to its sender, at that path's cost. | A node took back a route that crossed it, the first step of a count to infinity. |
 | `NoCountToInfinity` | No relay selects a route longer than a loop-free path. | Stale routes bounce between relays with no bound. |
 
-The constraint `Bounded` stops exploring one hop past `NoCountToInfinity`, so a count to infinity shows up there instead of running TLC forever.
+`SimplePaths` needs no search to believe: a node sends a route only after adding itself to hops that did not name it. It holds whatever a node forgot, which is why `NoCountToInfinity` no longer rests on the echo.
 
 ## Run
 
 ```sh
 just rs tla moq-net/verify/route/RouteHandoff.tla
-just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/CountToInfinity.cfg
+just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/Behind.cfg
+just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/BehindDear.cfg
 ```
 
-The first checks every rule but `NoCountToInfinity`: about 3.7M states, two minutes on 32 cores, and it passes at the sync commit. The second fails at the sync commit on the open finding below.
+| Config | Mesh | Bounds | Distinct states |
+| --- | --- | --- | --- |
+| `RouteHandoff.cfg` | The origin and two relays in a triangle. | 2 claim changes, 2 session changes, 1 collection | TRIANGLE |
+| `Behind.cfg` | The origin behind relay 1, which sits in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 3,033,111 |
+| `BehindDear.cfg` | The same, with relay 3 nearer the origin than relay 2. | 1 claim change, 1 session change | 5,462,496 |
 
-Read a counterexample with `/statechart`, passing it the spec, a config, and `RouteHandoff.view.ts`, which labels each relay's route and each step as the message that arrives. It gives the shortest path to each broken rule in those words.
+All three pass at the sync commit. Each takes minutes on 4 workers, so run them last. First run what answers in seconds:
 
-## Open finding: an overtaking echo counts to infinity
+- `just rs test -p moq-net --lib -E 'test(/route::/)'`. `sweep_no_route_outgrows_a_loop_free_path` delivers every message and echo in a random order on random meshes with unequal costs, flaps, restarts, and collections, and checks the metric bound, loop freedom, and the quiet state. Raise its case count for a wider search: 40,000 cases run in 15 seconds in release.
+- TLC's simulation mode on the config in question, which samples deep runs the exhaustive bounds do not reach: add `-simulate num=3000 -depth 80`.
 
-`CountToInfinity.cfg` fails. A node drops its feasibility distance once every neighbour echoed its ROUTE_END (`update` in `mod.rs`), on the reasoning that no advertisement derived from its own can then still arrive. But an echo travels apart from the echoer's own routes (the answering stream carries it, per `node.rs`), so it can overtake an advertisement that neighbour derived from this node's and sent before the end. The node then accepts that advertisement as a fresh, longer route, and two relays can count up without end while each shows the broadcast available. `residual_an_overtaking_echo_counts_to_infinity` in `route/tests/routing.rs` replays it on the router. Once it is fixed, flip that test, move `NoCountToInfinity` into `RouteHandoff.cfg`, and delete `CountToInfinity.cfg`.
+Both behind-a-triangle configs fail `SimplePaths` within seconds if `Crossed` is made false, which is the count to infinity the hops fix: a relay drops its distance once its neighbours echoed, and takes back a copy of its own route that a third relay still held.
+
+Read a counterexample with `/statechart`, passing it the spec, a config, and `RouteHandoff.view.ts`, which labels each relay's route and each step as the message that arrives. It gives the shortest path to each broken rule in those words. The view names the triangle's sessions and assumes equal costs.
 
 ## Reading a failure
 
@@ -45,11 +54,11 @@ A counterexample is a path through the model, not yet a bug. Replay it on the ro
 
 ## Coverage
 
-Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/route/` to see what changed since. After a change to a covered function, mirror it in the model, rerun both configs, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/route/` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
 
 | Code (`rs/moq-net/src/route/`) | Model |
 | --- | --- |
-| `mod.rs` `feasible`, `selected`, `infeasible`, `recoverable`, `live`, `certifiers` | `Feasible`, `Selected`, `InfeasibleSet`, `Recoverable`, `Live`, `Certifiers` |
+| `mod.rs` `feasible`, `Entry::crossed`, `through`, `selected`, `infeasible`, `recoverable`, `live`, `certifiers` | `Feasible`, `Crossed`, `Through`, `Selected`, `InfeasibleSet`, `Recoverable`, `Live`, `Certifiers` |
 | `mod.rs` `certified`, `prune`, `adopted` | `Certified`, `Prune`, `Adopted` |
 | `mod.rs` `update`, `record`, `advertise`, `requests` | `Update`, `Record`, `Plan`, `Requests` |
 | `mod.rs` `show`, `shown_now` | `Events`, `ShownNow` |
@@ -60,4 +69,4 @@ Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07
 
 ## Not covered
 
-The model fixes every interest at the root, so it leaves out wildcards, `present`/`represent`/`retire`, interest changes, and the hidden `current` regions; prune's region bookkeeping reduces to "no certifier has a floor". It also leaves out scoped grants and qualified keys, GOAWAY, link priority, costs other than 1, upstream links, identity rotation and restart, and `node.rs`'s per-stream keys. A batch carries the sender's whole presentation, equal to applying its diff on a FIFO stream. The origin drops the ROUTEs and batches it hears for its own identity, which change nothing there. A pass covers one claim, two revisions, two session opens or closes, and one collection in that triangle. `sweep_handoff` and `sweep_scoped_handoff` still own the rest.
+The model fixes every interest at the root, so it leaves out wildcards, `present`/`represent`/`retire`, interest changes, and the hidden `current` regions; prune's region bookkeeping reduces to "no certifier has a floor". It also leaves out scoped grants and qualified keys, GOAWAY, link priority, costs other than 1 and 2, the hop limit, upstream links, identity rotation and restart, and `node.rs`'s per-stream keys. A batch carries the sender's whole presentation, equal to applying its diff on a FIFO stream. The origin drops the ROUTEs and batches it hears for its own identity, which change nothing there. A pass covers one claim at the bounds in the table above, and no mesh of more than three relays. `sweep_no_route_outgrows_a_loop_free_path`, `sweep_handoff`, and `sweep_scoped_handoff` still own the rest: larger meshes, more churn, restarts, and scoped grants.

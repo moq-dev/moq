@@ -98,7 +98,8 @@ impl Hop {
 #[non_exhaustive]
 pub struct Config {
 	/// The origin's identity on every wire: the hop id appended to broadcast hop chains
-	/// for loop detection, and the route identity it declares on moq-lite-07. Random by
+	/// for loop detection, and the route identity it declares on moq-lite-07, which also
+	/// names it in the hops of each route it forwards there. Random by
 	/// default, so each process is a fresh identity; one reused across a restart has its
 	/// lite-07 routes refused until a seqno request lifts them past the old process's.
 	pub hop: NonZeroU64,
@@ -7356,7 +7357,7 @@ impl Consumer {
 			timers: self.timers.clone(),
 		};
 		// Built before taking the lock, since opening a cursor takes it.
-		let node = crate::route::Node::origin(self.hop());
+		let node = crate::route::Node::origin(self.hop(), self.max_hops);
 		let claims = OwnClaims {
 			routes: own(false).routes(),
 			downstream: own(true).routes(),

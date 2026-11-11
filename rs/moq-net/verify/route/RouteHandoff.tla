@@ -11,10 +11,11 @@
 (* own queue. A session opens and closes atomically, dropping what was in  *)
 (* flight.                                                                 *)
 (*                                                                         *)
-(* Scope: every node watches the root, links cost 1 with equal priority,   *)
-(* no scoped grants, no GOAWAY, and the origin keeps its identity. Claims  *)
-(* are exact paths, and a claim's attributes are the revision that last    *)
-(* set them, standing in for a fresh Instance per announce.                *)
+(* Scope: every node watches the root, links have equal priority, no       *)
+(* scoped grants, no GOAWAY, no hop limit, and the origin keeps its        *)
+(* identity. Claims are exact paths, and a claim's attributes are the      *)
+(* revision that last set them, standing in for a fresh Instance per       *)
+(* announce.                                                               *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -23,12 +24,15 @@ CONSTANTS
     Origin,       \* the node that declares the identity
     Leaves,       \* nodes that send only identities they serve (`Sim::leaf`)
     Links,        \* sessions, as 2-element sets of nodes
+    Dear,         \* the links that add 2 to a metric; the rest add 1 (`Link::cost`)
     Claims,       \* claim paths
     MaxRev,       \* the origin's claim changes
     MaxFlaps,     \* session opens and closes
     MaxCollects   \* `collect` calls
 
 Relays == Nodes \ {Origin}
+
+Cost == [l \in Links |-> IF l \in Dear THEN 2 ELSE 1]
 
 \* A claim's attributes: the revision that last set it, or None when absent.
 None == -1
@@ -39,13 +43,14 @@ NoItems == [c \in Claims |-> None]
 EmptyView == [floor |-> None, items |-> NoItems]
 NoView == [floor |-> Absent, items |-> NoItems]
 
-\* `Reach` as sent on a stream: nothing, `Finite(Advert)`, or `Held`.
-NoReach == [kind |-> "none", seq |-> 0, met |-> 0]
-HeldReach == [kind |-> "held", seq |-> 0, met |-> 0]
-Finite(seq, met) == [kind |-> "fin", seq |-> seq, met |-> met]
+\* `Reach` as sent on a stream: nothing, `Finite(Advert)`, or `Held`. `hops` is
+\* the nodes the route crossed, the origin first and the sender last.
+NoReach == [kind |-> "none", seq |-> 0, met |-> 0, hops |-> <<>>]
+HeldReach == [kind |-> "held", seq |-> 0, met |-> 0, hops |-> <<>>]
+Finite(seq, met, hops) == [kind |-> "fin", seq |-> seq, met |-> met, hops |-> hops]
 
 \* `rx` entry, `fd`, `heard`, and `pending` when absent.
-NoEntry == [on |-> FALSE, seq |-> 0, met |-> 0, held |-> FALSE]
+NoEntry == [on |-> FALSE, seq |-> 0, met |-> 0, held |-> FALSE, hops |-> <<>>]
 NoFd == [on |-> FALSE, seq |-> 0, met |-> 0]
 NoHeard == [on |-> FALSE, raw |-> EmptyView, kept |-> NoView, ended |-> FALSE]
 NoPending == [on |-> FALSE, seq |-> 0, from |-> {}, asked |-> None]
@@ -85,31 +90,41 @@ Peers(n, ups) == {m \in Nodes : {n, m} \in ups}
 Serves(n) == n = Origin \/ n \notin Leaves
 
 -----------------------------------------------------------------------------
-(* Route selection on one node's state `s` (mod.rs: `feasible`, `selected`, *)
-(* `infeasible`, `recoverable`, `live`, `certifiers`). Every link costs 1.  *)
+(* Route selection on node `n`'s state `s` (mod.rs: `feasible`, `selected`,  *)
+(* `infeasible`, `recoverable`, `live`, `certifiers`).                      *)
 
-Feasible(s, e) ==
-    ~s.fd.on \/ e.seq > s.fd.seq \/ (e.seq = s.fd.seq /\ e.met < s.fd.met)
+\* `Entry::crossed`: the route's hops name this node.
+Crossed(n, e) == \E i \in DOMAIN e.hops : e.hops[i] = n
 
-UsableSet(s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].held /\ Feasible(s, s.rx[m])}
-InfeasibleSet(s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].held /\ ~Feasible(s, s.rx[m])}
-Certifiers(s) == {m \in Nodes : s.rx[m].on /\ Feasible(s, s.rx[m])}
-Recoverable(s) == \E m \in Certifiers(s) : s.rx[m].held
+Feasible(n, s, e) ==
+    /\ ~Crossed(n, e)
+    /\ ~s.fd.on \/ e.seq > s.fd.seq \/ (e.seq = s.fd.seq /\ e.met < s.fd.met)
+
+UsableSet(n, s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].held /\ Feasible(n, s, s.rx[m])}
+\* With no distance kept, no route waits on a seqno.
+InfeasibleSet(n, s) ==
+    {m \in Nodes : s.fd.on /\ s.rx[m].on /\ ~s.rx[m].held /\ ~Feasible(n, s, s.rx[m])}
+Certifiers(n, s) == {m \in Nodes : s.rx[m].on /\ Feasible(n, s, s.rx[m])}
+Recoverable(n, s) == \E m \in Certifiers(n, s) : s.rx[m].held
+
+\* This node's metric through the route `m` sent.
+Through(n, s, m) == s.rx[m].met + Cost[{n, m}]
 
 \* The lowest metric, then the lowest key: `selected`'s rank with equal priority.
-Best(s, S) ==
+Best(n, s, S) ==
     CHOOSE m \in S : \A k \in S :
-        s.rx[m].met < s.rx[k].met \/ (s.rx[m].met = s.rx[k].met /\ m <= k)
+        Through(n, s, m) < Through(n, s, k) \/ (Through(n, s, m) = Through(n, s, k) /\ m <= k)
 
-NoSel == [on |-> FALSE, next |-> None, seq |-> 0, met |-> 0]
+NoSel == [on |-> FALSE, next |-> None, seq |-> 0, met |-> 0, hops |-> <<>>]
 Selected(n, s, ov) ==
-    IF n = Origin THEN [on |-> TRUE, next |-> None, seq |-> ov.seq, met |-> 0]
-    ELSE IF UsableSet(s) = {} THEN NoSel
-    ELSE LET m == Best(s, UsableSet(s))
-         IN [on |-> TRUE, next |-> m, seq |-> s.rx[m].seq, met |-> s.rx[m].met + 1]
+    IF n = Origin THEN [on |-> TRUE, next |-> None, seq |-> ov.seq, met |-> 0, hops |-> <<n>>]
+    ELSE IF UsableSet(n, s) = {} THEN NoSel
+    ELSE LET m == Best(n, s, UsableSet(n, s))
+         IN [on |-> TRUE, next |-> m, seq |-> s.rx[m].seq, met |-> Through(n, s, m),
+             hops |-> Append(s.rx[m].hops, n)]
 
 Live(n, s) ==
-    n = Origin \/ UsableSet(s) # {} \/ InfeasibleSet(s) # {} \/ Recoverable(s)
+    n = Origin \/ UsableSet(n, s) # {} \/ InfeasibleSet(n, s) # {} \/ Recoverable(n, s)
 
 \* `Heard::view`: what it certified before its route ended, else the raw view.
 HeardView(h) == IF h.kept.floor # Absent THEN h.kept ELSE h.raw
@@ -117,9 +132,9 @@ HeardView(h) == IF h.kept.floor # Absent THEN h.kept ELSE h.raw
 \* `certified(id, held)` at the root interest: `ok` is FALSE where the code
 \* returns None (no route, or a certifier has not answered), and `root` says
 \* whether any counted certifier's view has a floor over the root.
-Certified(s, held) ==
-    [ok |-> (\E m \in Nodes : s.rx[m].on) /\ \A m \in Certifiers(s) : s.heard[m].on,
-     root |-> \E m \in Certifiers(s) :
+Certified(n, s, held) ==
+    [ok |-> (\E m \in Nodes : s.rx[m].on) /\ \A m \in Certifiers(n, s) : s.heard[m].on,
+     root |-> \E m \in Certifiers(n, s) :
                 (held \/ ~s.rx[m].held) /\ HeardView(s.heard[m]).floor >= 0]
 
 \* The view the node shows and forwards (`adopted`). Only certified claims
@@ -142,7 +157,7 @@ HasItems(v) == \E c \in Claims : v.items[c] # None
 \* `prune` at the root interest: once no certifier's view has a floor, the
 \* merged view is let go and rebuilt empty.
 Prune(n, s, ov) ==
-    LET c == Certified(s, TRUE) IN
+    LET c == Certified(n, s, TRUE) IN
     IF n # Origin /\ Selected(n, s, ov).on /\ c.ok /\ s.view.floor >= 0 /\ ~c.root
     THEN [s EXCEPT !.view = EmptyView]
     ELSE s
@@ -150,7 +165,7 @@ Prune(n, s, ov) ==
 \* What `advertise` decides for one peer.
 Plan(n, s, m, sel, live, av, ov) ==
     LET was == s.sent[m]
-        reach0 == IF sel.on /\ Serves(n) THEN Finite(sel.seq, sel.met)
+        reach0 == IF sel.on /\ Serves(n) THEN Finite(sel.seq, sel.met, sel.hops)
                   ELSE IF ~sel.on /\ Serves(n) /\ live /\ was.kind # "none" THEN HeldReach
                   ELSE NoReach
         \* A route starts again only once its last end was echoed.
@@ -183,7 +198,7 @@ Record(n, s, sel, av, ups) ==
 Requests(n, s, sel) ==
     IF n = Origin THEN [pending |-> NoPending, to |-> None, seq |-> 0]
     ELSE
-    LET starved == ~sel.on /\ InfeasibleSet(s) # {}
+    LET starved == ~sel.on /\ InfeasibleSet(n, s) # {}
         want == s.fd.seq + 1
         p0 == s.pending
         p1 == IF ~starved THEN p0
@@ -191,8 +206,8 @@ Requests(n, s, sel) ==
               ELSE IF p0.seq < want THEN [p0 EXCEPT !.seq = want, !.asked = None]
               ELSE p0
         answered == sel.on /\ sel.seq >= p1.seq
-        hasTarget == sel.on \/ InfeasibleSet(s) # {}
-        target == IF sel.on THEN sel.next ELSE Best(s, InfeasibleSet(s))
+        hasTarget == sel.on \/ InfeasibleSet(n, s) # {}
+        target == IF sel.on THEN sel.next ELSE Best(n, s, InfeasibleSet(n, s))
     IN IF ~p1.on THEN [pending |-> p1, to |-> None, seq |-> 0]
        ELSE IF answered \/ (p1.from = {} /\ ~starved) \/ ~hasTarget
             THEN [pending |-> NoPending, to |-> None, seq |-> 0]
@@ -202,7 +217,7 @@ Requests(n, s, sel) ==
 
 \* `shown_now`: how the reader sees each claim.
 ShownNow(n, s, sel, live, ov) ==
-    LET serving == Certified(s, FALSE)
+    LET serving == Certified(n, s, FALSE)
         avail == sel.on /\ (n = Origin \/ ~serving.ok \/ serving.root)
         v == Adopted(n, s, ov)
     IN [c \in Claims |->
@@ -211,7 +226,7 @@ ShownNow(n, s, sel, live, ov) ==
 \* `show`: the reader's events, as changes to `ended` and the counters.
 \* A claim leaving while live and certified is an END, else it went offline.
 Events(n, s, old, now, live, ov, eb) ==
-    LET c0 == Certified(s, TRUE)
+    LET c0 == Certified(n, s, TRUE)
         uncertified == (c0.ok /\ ~c0.root) \/ (n # Origin /\ s.view.floor < 0)
         isEnd(c) == old[c].item # None /\ now[c].item = None /\ live /\ ~uncertified
         isStart(c) == old[c].item = None /\ now[c].item # None
@@ -329,8 +344,8 @@ Certify(v) == IF v.floor >= 0 THEN v ELSE [floor |-> v.floor, items |-> NoItems]
 OnRoute(s, from, reach) ==
     LET h == s.heard[from]
         rx1 == CASE reach.kind = "fin" ->
-                      [s.rx EXCEPT ![from] = [on |-> TRUE, seq |-> reach.seq,
-                                              met |-> reach.met, held |-> FALSE]]
+                      [s.rx EXCEPT ![from] = [on |-> TRUE, seq |-> reach.seq, met |-> reach.met,
+                                              held |-> FALSE, hops |-> reach.hops]]
                  [] reach.kind = "held" ->
                       IF s.rx[from].on THEN [s.rx EXCEPT ![from].held = TRUE] ELSE s.rx
                  [] OTHER -> [s.rx EXCEPT ![from] = NoEntry]
@@ -504,17 +519,39 @@ Hop(n, k) == IF k = 0 THEN n ELSE Hop(NextHop(n), k - 1)
 \* Following selected next hops from any relay never cycles.
 LoopFree == \A n \in Relays : Hop(n, Cardinality(Nodes)) \notin Relays
 
-\* Every link costs 1, so a loop-free path to the origin has at most this metric.
-Longest == Cardinality(Nodes) - 1
+\* The loop-free paths from the origin over the configured links, each as the
+\* nodes it crosses in order, and what each costs its last node.
+RECURSIVE Extend(_, _)
+Extend(P, k) ==
+    IF k = 0 THEN P
+    ELSE Extend(P \cup {Append(p, n) : p \in P, n \in Relays}, k - 1)
+Last(p) == p[Len(p)]
+RECURSIVE Along(_)
+Along(p) ==
+    IF Len(p) = 1 THEN 0
+    ELSE LET before == SubSeq(p, 1, Len(p) - 1)
+         IN Along(before) + Cost[{Last(before), Last(p)}]
+Paths ==
+    {p \in Extend({<<Origin>>}, Cardinality(Relays)) :
+        /\ \A i, j \in DOMAIN p : i # j => p[i] # p[j]
+        /\ \A i \in DOMAIN p : i > 1 => {p[i - 1], p[i]} \in Links}
+
+\* A route's hops are a loop-free path from the origin to its sender, and its
+\* metric is that path's cost. Every route sent adds its sender to hops that did
+\* not name it, so this holds of every route held or in flight, whatever any
+\* node forgot.
+IsPath(from, r) == r.hops \in Paths /\ Last(r.hops) = from /\ r.met = Along(r.hops)
+SimplePaths ==
+    /\ \A n, m \in Nodes : st[n].rx[m].on => IsPath(m, st[n].rx[m])
+    /\ \A d \in Dirs : \A i \in DOMAIN q[d] :
+          q[d][i].type = "route" /\ q[d][i].reach.kind = "fin" => IsPath(d[1], q[d][i].reach)
 
 \* No relay selects a route longer than any loop-free path: a longer one is a
-\* stale route counting up as it bounces between relays (Babel's feasibility
-\* condition exists to rule this out).
+\* stale route counting up as it bounces between relays. It follows from
+\* SimplePaths, since no node selects a route that crossed it.
+Longest == LET costs == {Along(p) : p \in Paths}
+           IN CHOOSE c \in costs : \A k \in costs : k <= c
 NoCountToInfinity == \A n \in Relays : Selected(n, st[n], OV).met <= Longest
-
-\* Explore one step past NoCountToInfinity and no further, so a count to
-\* infinity is reported rather than explored forever.
-Bounded == \A n, m \in Nodes : st[n].rx[m].met <= Longest
 
 \* Nodes the origin reaches over open sessions, through nodes that forward.
 RECURSIVE Grow(_, _)

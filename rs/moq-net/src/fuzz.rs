@@ -682,7 +682,7 @@ impl RouteRelay {
 		let receive = (0..streams)
 			.map(|_| {
 				let receive = node.receive(crate::route::Link::default(), Path::empty()).unwrap();
-				receive.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert)));
+				receive.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert.clone())));
 				let snapshot = (0..claims)
 					.map(|i| (Self::path(i), Some(Self::claim(&instance, 0))))
 					.collect();
@@ -1590,8 +1590,8 @@ const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
 	(30, &[7, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
-	(5, &[6, 4, 1, 0, 1, 0]),
-	(5, &[7, 4, 0, 1, 2, 0]),
+	(5, &[6, 6, 1, 0, 1, 0, 1, 1]),
+	(5, &[7, 6, 0, 1, 2, 0, 1, 1]),
 	(5, &[8, 1, 0]),
 	(5, &[9, 2, 0, 1]),
 	(5, &[11, 1, 0]),

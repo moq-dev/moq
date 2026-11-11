@@ -128,6 +128,8 @@ pub(super) struct SimEvent {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Stats {
 	pub route_msgs: usize,
+	/// Route messages that changed nothing but the hops: what naming them costs.
+	pub hop_updates: usize,
 	pub claim_msgs: usize,
 	pub claim_items: usize,
 	pub requests: usize,
@@ -160,6 +162,8 @@ pub(super) struct Sim {
 	history: BTreeMap<Id, Vec<Change>>,
 	/// Every request sent, to spot a repeat.
 	requested: BTreeSet<(Node, Node, Id, Seqno)>,
+	/// The last finite route each node sent each neighbor, to spot a change of hops alone.
+	routed: BTreeMap<(Node, Node, Id), Advert>,
 	pub stats: Stats,
 	pub events: Vec<SimEvent>,
 }
@@ -167,7 +171,9 @@ pub(super) struct Sim {
 impl Sim {
 	pub fn new(nodes: usize) -> Self {
 		Self {
-			nodes: (0..nodes).map(|node| Router::new(hop(node, 0), node as u64 + 1)).collect(),
+			nodes: (0..nodes)
+				.map(|node| Router::new(hop(node, 0), node as u64 + 1))
+				.collect(),
 			leaf: vec![false; nodes],
 			watch: vec![Path::empty(); nodes],
 			restarts: vec![0; nodes],
@@ -180,6 +186,7 @@ impl Sim {
 			held: BTreeSet::new(),
 			history: BTreeMap::new(),
 			requested: BTreeSet::new(),
+			routed: BTreeMap::new(),
 			stats: Stats::default(),
 			events: Vec::new(),
 		}
@@ -478,13 +485,22 @@ impl Sim {
 			for out in self.nodes[node].drain() {
 				let (to, msg) = match out {
 					Out::Route { to, id, reach } => {
-						// A route names every relay it crossed once, the sender last.
+						// A route names every node it crossed once, the sender last.
 						if let Some(Reach::Finite(advert)) = &reach {
-							let own = self.nodes[node].origins.contains_key(&id);
 							let me = hop(node, self.restarts[node]);
-							assert_eq!(advert.hops.last().copied(), (!own).then_some(me), "node {node}'s hops for {id}");
+							assert_eq!(advert.hops.last(), Some(&me), "node {node}'s hops for {id}");
 							let named: BTreeSet<Id> = advert.hops.iter().copied().collect();
 							assert_eq!(named.len(), advert.hops.len(), "node {node} sent {id} round a loop");
+							let was = self.routed.insert((node, to, id), advert.clone());
+							let same = |was: Advert| {
+								Advert {
+									hops: advert.hops.clone(),
+									..was
+								} == *advert
+							};
+							self.stats.hop_updates += usize::from(was.is_some_and(same));
+						} else {
+							self.routed.remove(&(node, to, id));
 						}
 						self.stats.route_msgs += 1;
 						(to, Msg::Route { id, reach })

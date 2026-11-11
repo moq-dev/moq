@@ -399,7 +399,8 @@ impl Home {
 }
 
 impl Node {
-	/// A node declaring a fresh identity, `seed` keying its rotation.
+	/// A node declaring a fresh identity, which also names it in the hops of the routes
+	/// it forwards, `seed` keying its rotation.
 	pub fn new(id: Id, seed: u64) -> Self {
 		debug_assert!(
 			id != 0 && id & QUALIFIED == 0,
@@ -420,11 +421,14 @@ impl Node {
 
 	/// A node declaring the origin's hop id, so the origin has one identity on every
 	/// wire. A declared identity is never qualified, so an id carrying that marker
-	/// loses it, or is replaced by a random one if nothing is left.
-	pub fn origin(hop: std::num::NonZeroU64) -> Self {
+	/// loses it, or is replaced by a random one if nothing is left. It uses no route
+	/// that crossed `max_hops` relays, which it could not add itself to.
+	pub fn origin(hop: std::num::NonZeroU64, max_hops: std::num::NonZeroUsize) -> Self {
 		let mut rng = kio::clock::rng();
 		let id = declared_for(hop).unwrap_or_else(|| rng.random_range(1..=GENERATED));
-		Self::new(id, rng.random())
+		let node = Self::new(id, rng.random());
+		node.lock().router.max_hops = max_hops.get();
+		node
 	}
 
 	fn lock(&self) -> Locked<'_> {
