@@ -52,7 +52,3 @@ Native rows stay report-only; enforcing them belongs to
 ## Required
 
 - [Stretch model](/quest/m1/audio-jitter-target/stretch.md) - the player these ceilings measure
-
-## Related
-
-- [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - re-measures the AAC browser rows after the TS importer change; if it has not finished when the model lands, these seven nights serve both
