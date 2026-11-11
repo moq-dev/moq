@@ -35,7 +35,7 @@ The items below were decided 2026-11-10 (maintainer, /quest-plan on lite-07 rout
 
 18. ✅ Asked who is an origin node: **every publisher stays an origin node.** Its identity is for signing, for one node across several links (redundant publishers), and because browsers will forward ([browser mesh](/quest/m5/browser-mesh.md)). Rejected: a relay originating, under its own Node ID, the claims of any peer that sends no Node ID or holds a scoped publish grant, as it already does for lite-06 and moq-transport publishers. That would make route state follow relays rather than publishers and remove qualified Node IDs, the Route Key, and the echo, but a publisher would have no identity of its own. Accepted cost: routes, holds, and seqno requests scale with publishers, so a node must still forget dead identities, and the echo that makes forgetting safe has to be sound.
 19. ✅ Asked whether to keep them: **ROUTE_HOLD stays, and the newest floor wins per identity.** Rejected: dropping holds, where each stall takes every claim behind the node offline and re-sends them all; and claims that follow only the selected next hop, which re-pulls a node's whole claim table on each next-hop change and showed revivals and false ENDs in the sweeps below.
-20. ✅ Asked when an origin advances its seqno unprompted: **only when a route link changes**, which [the seqno bumps](/quest/m1/route-seqno-bumps.md) implements. Today every announce stream open or close bumps it. Rejected: only to answer a ROUTE_REQUEST; keeping the per-stream bump.
+20. ✅ Asked when an origin advances its seqno unprompted: **only when a route link changes**, implemented as a bump when a route link closes. Rejected: only to answer a ROUTE_REQUEST; keeping the per-stream bump.
 21. ✅ Asked how one side's routing messages travel so none overtakes another: **one unidirectional Announce Stream per side**, carrying its requests, its answers, and its echoes in order ([the route stream](/quest/m2/cluster-routing/routes/route-stream.md)). It replaces "There MAY be multiple Announce Streams". Rejected: one bidirectional Announce Stream per direction with the echo moved to the answering half; one bidirectional stream per session.
 22. ✅ **A side's interest is a set of prefixes edited in place.** The live set never nests, and one edit may swap prefixes for a wider or narrower one without re-sending what both cover ([the interest set](/quest/m2/cluster-routing/routes/interest-set.md)). A token-scope change is such an edit, with one prefix per region of the scope. This supersedes items 16 and 17, and the handoff contract's "An interest change opens a new stream" below, once the route stream lands.
 23. ✅ Asked what a floor covers with several prefixes on one stream: **one prefix, named by its id.** This amends item 10: the floor is still a marker and never a region list. Rejected: a floor over the whole set.
@@ -137,11 +137,13 @@ the bullets below are the contract it carries.
   stay unverified.
   Switching between paths resumes only across a matching explicit epoch.
   Keep administrative identity and broadcast epoch separate. The origin
-  advances its seqno whenever its own set of sessions changes: feasibility
-  distances held elsewhere otherwise refuse a restart that reuses an
-  identity, and starve the old neighbors of an origin that moved to a
-  farther attachment (`restart_reusing_identity_is_refused`,
-  `reconnect_without_restart_needs_a_seqno_advance`). A random identity alone
+  advances its seqno unprompted when a route link closes: a session whose
+  peer forwarded it a route, or any session carrying the route of a node
+  that forwards nothing. Feasibility distances held elsewhere otherwise
+  starve the old neighbors of an origin that moved to a farther attachment
+  until a ROUTE_REQUEST reaches it
+  (`reconnect_without_restart_needs_a_seqno_advance`). A new link lengthens
+  no path, and a client session that forwards nothing changes none. A random identity alone
   does not keep a dead incarnation away. What bounds it is ordered sessions,
   state scoped to the session that delivered it, never advertising an
   unreachable route, keeping the feasibility distance until every

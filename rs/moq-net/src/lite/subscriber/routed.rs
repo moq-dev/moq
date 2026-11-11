@@ -373,6 +373,7 @@ impl Routed {
 		if self.drained {
 			stream.goaway();
 		}
+		self.stream.replaced_by(&stream);
 		drop(std::mem::replace(&mut self.stream, stream));
 		self.previous = previous;
 		self.outputs(subscriber);
