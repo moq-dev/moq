@@ -168,11 +168,14 @@ lemma executable:
 // The same after resumption, over a WebTransport session.
 lemma executable_resumed_webtransport:
   exists-trace
-  "Ex a b ka ms n id r #i #k.
-      KeyOf(a, ka) @ #k & not (a = b)
-    & Accepted(r, b, a, ka, 'client',
+  "Ex a b ka kb ms n id r1 r2 #i #j #k #l.
+      KeyOf(a, ka) @ #k & KeyOf(b, kb) @ #l & not (a = b)
+    & Accepted(r1, a, b, kb, 'server',
         h(<'exporter', h(<'resumption', ms, n>), 'EXPORTER-WebTransport',
-           <id, 'EXPORTER-moq-lite-route-key'>>)) @ #i"
+           <id, 'EXPORTER-moq-lite-route-key'>>)) @ #i
+    & Accepted(r2, b, a, ka, 'client',
+        h(<'exporter', h(<'resumption', ms, n>), 'EXPORTER-WebTransport',
+           <id, 'EXPORTER-moq-lite-route-key'>>)) @ #j"
 
 // An honest key is never accepted on a session the attacker or an intermediary terminates,
 // even when it relays the proof live from its session with the key's holder.

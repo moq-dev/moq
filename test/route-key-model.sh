@@ -9,6 +9,7 @@ log=$(mktemp -d)
 trap 'rm -rf "$log"' EXIT
 
 failed=()
+base_names=""
 check() {
     local name=$1 breaks=$2
     shift 2
@@ -23,10 +24,21 @@ check() {
         failed+=("$name: not wellformed")
     fi
     local lemmas
-    lemmas=$(grep -E '^  [a-z_]+ \((all|exists)-traces?\): ' "$log/$name" || true)
+    lemmas=$(grep -E '^  [A-Za-z0-9_]+ \((all|exists)-traces?\): ' "$log/$name" || true)
     echo "== $name"
     echo "$lemmas"
     [ -n "$lemmas" ] || failed+=("$name: no lemma results")
+    local names
+    names=$(awk '{print $1}' <<<"$lemmas" | sort | tr '\n' ' ')
+    if [ -z "$base_names" ]; then
+        base_names=$names
+    elif [ "$names" != "$base_names" ]; then
+        failed+=("$name: lemmas are [$names], want the base's [$base_names]")
+    fi
+    local expected
+    for expected in $breaks; do
+        [[ " $names" == *" $expected "* ]] || failed+=("$name: breaks $expected, which has no result")
+    done
     while read -r lemma _ result _; do
         [ -n "$lemma" ] || continue
         local want=verified
@@ -36,9 +48,12 @@ check() {
 }
 
 check base ""
-while read -r variant _ breaks; do
+variants=$(sed -nE 's/^ \* ([A-Z_]+) +Breaks: (.*)$/\1 \2/p' "rs/$spec")
+[ -n "$variants" ] || failed+=("no variant has a Breaks: line")
+while read -r variant breaks; do
+    [ -n "$variant" ] || continue
     check "$variant" "$breaks" "-D=$variant"
-done < <(sed -nE 's/^ \* ([A-Z_]+) +Breaks: (.*)$/\1 Breaks: \2/p' "rs/$spec")
+done <<<"$variants"
 
 if [ ${#failed[@]} -ne 0 ]; then
     printf 'error: %s\n' "${failed[@]}" >&2
