@@ -1006,7 +1006,10 @@ describe("time stretch", () => {
 	it("skips a declared silence by the lag only after the staged window plays", () => {
 		const buffer = live(100, { bound: 1000 });
 		write(buffer, 0, frames(120), { value: 0.25 });
-		while (buffer.timestamp / 1000 <= 90) read(buffer, QUANTUM, 1);
+		while (buffer.timestamp / 1000 <= 90) {
+			buffer.clock(buffer.timestamp);
+			read(buffer, QUANTUM, 1);
+		}
 		const staged = buffer.length;
 		expect(staged).toBeGreaterThan(0);
 		expect(staged).toBeLessThan(frames(30));
@@ -1026,12 +1029,32 @@ describe("time stretch", () => {
 		expect(buffer.trimmed).toBe(0);
 	});
 
+	// Nothing trailing the clock was heard before the first read on it, so a join lands on the clock
+	// past a backlog the bound would otherwise keep.
+	it("joins on the clock past a backlog inside its bound", () => {
+		const buffer = live(100, { bound: 1000 });
+		write(buffer, 0, frames(800), { value: 0.5 });
+		buffer.clock(500_000);
+		read(buffer, QUANTUM, 1);
+		expect(buffer.skips).toBe(1);
+		expect(buffer.timestamp / 1000).toBeCloseTo(500 + (QUANTUM * 1000) / RATE, 6);
+
+		// A reset starts a new timeline, which joins again.
+		buffer.reset();
+		write(buffer, 2000, frames(800), { value: 0.5 });
+		buffer.clock(2_300_000);
+		read(buffer, QUANTUM, 1);
+		expect(buffer.skips).toBe(2);
+	});
+
 	// Audio the stretch could still catch up on plays; only what trails the clock past the bound and
 	// one window skips, back to the bound.
 	for (const bound of [0, 200]) {
 		it(`skips only audio trailing the clock past a ${bound} ms bound and a window`, () => {
 			const buffer = live(100, { bound });
 			write(buffer, 0, frames(800), { value: 0.5 });
+			// Joined on the clock.
+			buffer.clock(0);
 			read(buffer, QUANTUM, 1);
 
 			buffer.clock(buffer.timestamp + (bound + 30) * 1000);

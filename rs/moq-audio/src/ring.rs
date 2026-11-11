@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ringbuf::traits::{Consumer as _, Observer as _, Producer as _, Split as _};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
@@ -31,6 +31,17 @@ use rubato::{Async, FixedAsync, PolynomialDegree, Resampler as _};
 
 /// The most input frames resampled at once.
 pub(crate) const CHUNK: usize = 512;
+
+/// An instant on the host clock. The reader runs on the device thread, outside
+/// any runtime, so both ends count time on the clock its callbacks play on.
+#[expect(clippy::disallowed_types, reason = "the device thread runs on the host clock")]
+pub(crate) type Instant = std::time::Instant;
+
+/// The host clock's current instant.
+#[expect(clippy::disallowed_methods, reason = "the device thread runs on the host clock")]
+pub(crate) fn host() -> Instant {
+	Instant::now()
+}
 
 /// How a queue is sized and corrected, in time at the reader's rate.
 pub(crate) struct Config {
@@ -154,7 +165,7 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 		level: AtomicUsize::new(latency),
 		..Default::default()
 	});
-	let base = Instant::now();
+	let base = host();
 	let producer = Producer {
 		ring: prod,
 		channels,
@@ -186,6 +197,7 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 		comfort: crate::comfort::Comfort::new(output_rate, channels),
 		measure: config.comfort,
 		trim: config.trim,
+		joined: false,
 		skips: 0,
 		trimmed: 0,
 		accelerated: 0,
@@ -575,6 +587,10 @@ pub(crate) struct Consumer {
 	/// Without stretch, trim only after filling three quarters of the current
 	/// target's headroom. Stretch skips by the clock instead.
 	trim: bool,
+	/// Whether received audio has played on the clock. Until it has, nothing
+	/// trailing the clock was heard, so a join lands on it rather than at the
+	/// bound.
+	joined: bool,
 	/// Times [`Read::Trimmed`] was returned, ever.
 	skips: u64,
 	/// Received frames [`Read::Trimmed`] discarded, ever.
@@ -593,7 +609,7 @@ impl Consumer {
 
 	/// Fill `output` with queued interleaved frames, and silence past them.
 	pub(crate) fn read(&mut self, output: &mut [f32]) -> Read {
-		self.read_at(output, Instant::now())
+		self.read_at(output, host())
 	}
 
 	/// [`read`](Self::read), starting at `now`.
@@ -682,7 +698,9 @@ impl Consumer {
 
 	/// Skip what trails the clock by more than its bound plus one window, back
 	/// to the bound, returning the frames skipped. Less than that is the
-	/// stretch's to catch up. A finished or silenced stream plays as written.
+	/// stretch's to catch up. A join has the bound of nothing heard yet, so it
+	/// lands on the clock past whatever backlog it was handed. A finished or
+	/// silenced stream plays as written.
 	fn skip(&mut self) -> usize {
 		let Some(window) = self.stretch.as_ref().map(|stretch| stretch.window) else {
 			return 0;
@@ -691,11 +709,14 @@ impl Consumer {
 			return 0;
 		}
 		let inputs = self.inputs(0);
-		if inputs.lag <= inputs.bound + window as i64 {
+		let clocked = self.shared.clocked.load(Ordering::Acquire);
+		let bound = if self.joined || !clocked { inputs.bound } else { 0 };
+		self.joined |= clocked && self.prime == 0;
+		if inputs.lag <= bound + window as i64 {
 			return 0;
 		}
 		let available = self.available();
-		let pushed = self.discard((inputs.lag - inputs.bound) as usize);
+		let pushed = self.discard((inputs.lag - bound) as usize);
 		let skipped = available - self.available();
 		if skipped > 0 {
 			self.skips += 1;
@@ -1261,28 +1282,51 @@ mod tests {
 		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(10));
 		let base = prod.base;
 		let mut out = vec![0.0; 480 * 2];
-		// Two seconds queued behind the 10 ms prime, all due at 10 ms: the
-		// reader starts 2000 ms behind.
+		// Two seconds queued behind the 10 ms prime, played on time through the
+		// prime and the first 10 ms of audio, which joins the clock.
 		for _ in 0..100 {
 			assert_eq!(prod.push(&pcm), Push::Ok);
 		}
+		prod.due(base + Duration::from_millis(2010), Duration::from_millis(1970));
+		assert_eq!(cons.read_at(&mut out, base), Read::Ok);
+		assert_eq!(cons.read_at(&mut out, base + Duration::from_millis(10)), Read::Ok);
+		// Now all due at 10 ms: the reader trails by 2000 ms.
 		let due = base + Duration::from_millis(10);
 		prod.due(due, Duration::from_millis(1970));
-		assert_eq!(cons.read_at(&mut out, base), Read::Ok);
+		assert_eq!(cons.read_at(&mut out, base + Duration::from_millis(20)), Read::Ok);
 		assert_eq!(cons.skips(), 0, "a window past the bound is the stretch's");
 		prod.due(due, Duration::from_millis(1960));
-		let read = cons.read_at(&mut out, base + Duration::from_millis(10));
+		let read = cons.read_at(&mut out, base + Duration::from_millis(30));
 		assert_eq!(read, Read::Trimmed { frames: 1920 });
 		assert_eq!(cons.trimmed(), 1920, "back to the bound");
 		// A fixed delay has no bound: whatever trails the clock goes, here
 		// what is due before the second the end is due at.
 		prod.due(base + Duration::from_secs(1), Duration::ZERO);
-		let read = cons.read_at(&mut out, base + Duration::from_millis(20));
+		let read = cons.read_at(&mut out, base + Duration::from_millis(40));
 		assert!(matches!(read, Read::Trimmed { .. }), "{read:?}");
 		assert!(cons.inputs(0).lag <= 0);
 		assert_eq!(cons.skips(), 2);
 		let left = cons.available() as f64 * 1000.0 / rate as f64;
-		assert!((970.0..990.0).contains(&left), "{left} ms left");
+		assert!((940.0..960.0).contains(&left), "{left} ms left");
+	}
+
+	/// Nothing trailing the clock was heard before the first audio plays on
+	/// it, so a join lands on the clock past a backlog the bound would keep.
+	#[test]
+	fn a_join_lands_on_the_clock() {
+		let rate = 48_000;
+		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(10));
+		let base = prod.base;
+		let mut out = vec![0.0; 480 * 2];
+		for _ in 0..100 {
+			assert_eq!(prod.push(&pcm), Push::Ok);
+		}
+		// All due at 10 ms, inside a 1970 ms bound.
+		prod.due(base + Duration::from_millis(10), Duration::from_millis(1970));
+		let read = cons.read_at(&mut out, base);
+		assert!(matches!(read, Read::Trimmed { .. }), "{read:?}");
+		assert_eq!(cons.skips(), 1);
+		assert!(cons.inputs(0).lag <= 0);
 	}
 
 	#[test]

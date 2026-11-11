@@ -25,8 +25,10 @@ export type SyncInput = {
 	 *
 	 * Zero minimizes latency, the live default: playback re-anchors as soon as anything arrives
 	 * early. A larger value lets faster-than-real-time frames (a TTS response with future
-	 * timestamps) build up instead of being skipped. Always finite, so worst case the audio ring
-	 * drops its oldest samples rather than exhausting memory. With a nonzero lookahead, the first video
+	 * timestamps) build up instead of being skipped. Audio that falls behind, as after a stall,
+	 * catches up by playing faster, and skips only what trails by more than the lookahead. Always
+	 * finite, so worst case the audio ring drops its oldest samples rather than exhausting memory.
+	 * With a nonzero lookahead, the first video
 	 * frame is a poster until every enabled media track holds the resolved delay; `lookahead` is
 	 * the most held ahead, not the amount required to start.
 	 */

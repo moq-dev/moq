@@ -5,7 +5,7 @@
 `test/audio-quality/budgets.json` carries every browser and native row's
 ceilings re-measured, by the rule in its note, from seven scheduled Nightly
 runs on a `main` that includes
-[the stretch model](/quest/m1/audio-jitter-target/stretch.md). The rows budget
+[the stretch model](https://github.com/moq-dev/moq/pull/8507). The rows budget
 steady-state lag, the player's own trims and skips, and underruns as
 measured, and the note says the model is in them.
 
@@ -48,10 +48,6 @@ Native rows stay report-only; enforcing them belongs to
   schedule` and download each with `gh run download <id> -n
   audio-quality-run` as it lands, since artifacts expire after 7 days. Never
   dispatch the nightly by hand.
-
-## Required
-
-- [Stretch model](/quest/m1/audio-jitter-target/stretch.md) - the player these ceilings measure
 
 ## Related
 

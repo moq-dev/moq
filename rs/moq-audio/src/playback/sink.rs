@@ -292,7 +292,7 @@ impl Sink {
 	pub fn due(&mut self, at: Instant, late: Duration) {
 		// The device thread reads std's clock, so carry the distance from now
 		// over to it rather than the instant.
-		let (now, host) = (Instant::now(), std::time::Instant::now());
+		let (now, host) = (Instant::now(), crate::ring::host());
 		let at = match at.checked_duration_since(now) {
 			Some(ahead) => host + ahead,
 			None => host.checked_sub(now.duration_since(at)).unwrap_or(host),
@@ -428,8 +428,9 @@ pub(super) struct Registration {
 	channel: Arc<Mutex<Channel>>,
 	gain: Arc<Gain>,
 	/// The consumer waiting to be handed to a mixer. Taken once it is attached,
-	/// and refilled by [`rebuild`](Self::rebuild).
-	pending: Option<ring::Consumer>,
+	/// and refilled by [`rebuild`](Self::rebuild). Boxed, since it moves
+	/// through the mixer's command channel by value.
+	pending: Option<Box<ring::Consumer>>,
 }
 
 impl Registration {
@@ -476,7 +477,7 @@ impl Registration {
 		let (mut channel, cons) = channel(&input, rate, bus);
 		channel.prod.carry(&current.prod);
 		*current = channel;
-		self.pending = Some(cons);
+		self.pending = Some(Box::new(cons));
 	}
 }
 
@@ -518,7 +519,7 @@ pub(super) fn new(
 		input: sink.input.clone(),
 		channel,
 		gain,
-		pending: Some(cons),
+		pending: Some(Box::new(cons)),
 	};
 
 	Ok((sink, registration))
@@ -581,7 +582,7 @@ mod tests {
 			commands: super::super::driver::Commands::default(),
 		});
 		let (sink, mut registration) = new(0, output_rate, bus, input, shared, engine).unwrap();
-		(sink, registration.pending.take().unwrap())
+		(sink, *registration.pending.take().unwrap())
 	}
 
 	#[test]

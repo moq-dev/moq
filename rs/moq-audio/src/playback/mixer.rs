@@ -102,7 +102,7 @@ pub(super) enum Command {
 	/// Start mixing a sink.
 	Add {
 		id: u64,
-		cons: ring::Consumer,
+		cons: Box<ring::Consumer>,
 		gain: Arc<Gain>,
 		completion: Arc<super::sink::Completion>,
 	},
@@ -117,7 +117,7 @@ pub(super) enum Command {
 /// One sink being mixed, owned by the audio thread until it is retired.
 pub(super) struct Entry {
 	id: u64,
-	cons: ring::Consumer,
+	cons: Box<ring::Consumer>,
 	gain: Arc<Gain>,
 	completion: Arc<super::sink::Completion>,
 	/// Device deadline of the last period containing this sink's samples.
@@ -495,7 +495,7 @@ mod tests {
 			self.commands
 				.send(Command::Add {
 					id,
-					cons,
+					cons: Box::new(cons),
 					gain,
 					completion: Arc::new(super::super::sink::Completion::new(
 						super::super::driver::Commands::default(),

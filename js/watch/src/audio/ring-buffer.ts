@@ -29,6 +29,9 @@ export class AudioRingBuffer {
 	#skips = 0;
 	// Whether the last read skipped, so a run of reads skipping late audio counts once.
 	#skipping = false;
+	// Whether the ring has read on the clock since the last reset. Until it has, nothing trailing the
+	// clock was heard, so a join lands on it rather than at the bound.
+	#joined = false;
 	// Samples of media a skip dropped, and that the stretch removed by accelerating, gap zeros
 	// included and declared silence excluded, as moq-audio counts them.
 	#trimmed = 0;
@@ -426,6 +429,8 @@ export class AudioRingBuffer {
 		this.#received = undefined;
 		this.#level = 0;
 		this.#clock = undefined;
+		this.#joined = false;
+		this.#skipping = false;
 	}
 
 	/**
@@ -448,10 +453,13 @@ export class AudioRingBuffer {
 		}
 
 		// Skip what trails the clock past its bound and one window, back to the bound. Less than that
-		// is the stretch's to catch up. A finite tail plays as received.
+		// is the stretch's to catch up. A join has the bound of nothing heard yet, so it lands on the
+		// clock past whatever backlog it was handed. A finite tail plays as received.
 		const inputs = this.#inputs(0);
-		if (!this.#ending() && inputs.lag > inputs.bound + this.#stretch.window) {
-			const index = Math.min(this.#writeIndex, Math.ceil(this.#playhead() + inputs.lag - inputs.bound));
+		const bound = this.#joined || this.#clock === undefined ? inputs.bound : 0;
+		if (this.#clock !== undefined) this.#joined = true;
+		if (!this.#ending() && inputs.lag > bound + this.#stretch.window) {
+			const index = Math.min(this.#writeIndex, Math.ceil(this.#playhead() + inputs.lag - bound));
 			if (!this.#skipping) this.#skips++;
 			this.#skipping = true;
 			this.#skip(index, this.#writeIndex);
