@@ -4572,13 +4572,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-native"
-version = "0.20.0"
-dependencies = [
- "workspace-hack",
-]
-
-[[package]]
 name = "moq-net"
 version = "0.3.10"
 dependencies = [
@@ -4755,21 +4748,6 @@ dependencies = [
  "url",
  "usage-rs",
  "web-transport-proto",
- "workspace-hack",
-]
-
-[[package]]
-name = "moq-room"
-version = "0.2.11"
-dependencies = [
- "kio",
- "moq-auth",
- "moq-json",
- "moq-net",
- "moq-room",
- "moq-tokio",
- "thiserror 2.0.21",
- "tokio",
  "workspace-hack",
 ]
 
