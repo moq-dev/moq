@@ -80,10 +80,15 @@ export class Reader<T> {
 /** A bucket's newest frame, or the end of its run with no newer run listed yet. */
 export type BucketUpdate = { kind: "frame"; frame: BucketFrame } | { kind: "ended" };
 
+// Each pending read is tagged once, so a race that loses it adds no reaction to it, and never
+// rejects, so a failure is told apart by where it came from.
+type Listed = { listed: Broadcast.TracksEvent | undefined } | { listingFailed: unknown };
+type Read = { read: Timed<BucketFrame> | undefined } | { readFailed: unknown };
+
 interface Run {
 	name: string;
 	reader: Json.Snapshot.Consumer<BucketFrame>;
-	pending?: Promise<Timed<BucketFrame> | undefined>;
+	pending?: Promise<Read>;
 }
 
 /**
@@ -96,7 +101,7 @@ export class BucketReader {
 	#bucket: string;
 	#tracks: Broadcast.Tracks;
 	// Reads that lost a race stay pending and are taken up by the next call, so nothing is dropped.
-	#listing?: Promise<Broadcast.TracksEvent | undefined>;
+	#listing?: Promise<Listed>;
 	#run?: Run;
 	#closed = false;
 
@@ -113,37 +118,46 @@ export class BucketReader {
 	/**
 	 * The current run's newest frame, `ended` once that run ends with no newer one listed, or
 	 * `undefined` once the broadcast ends. Throws when a run's track fails, such as a frame too
-	 * large to cache; the next call waits for a newer run.
+	 * large to cache, and the next call waits for a newer run; throws when the listing fails, which
+	 * closes the reader.
 	 */
 	async next(): Promise<BucketUpdate | undefined> {
 		for (;;) {
 			if (this.#closed) return undefined;
-			this.#listing ??= this.#tracks.next();
+			this.#listing ??= this.#tracks.next().then(
+				(listed) => ({ listed }),
+				(listingFailed: unknown) => ({ listingFailed }),
+			);
 			const run = this.#run;
-			if (run) run.pending ??= run.reader.latest();
-
-			const listing = this.#listing.then((event) => ({ event }) as const);
-			let result: Awaited<typeof listing> | { frame: Timed<BucketFrame> | undefined };
-			try {
-				result = await (run?.pending ? race([listing, run.pending.then((frame) => ({ frame }))]) : listing);
-			} catch (err) {
-				// The listing never rejects, so the run failed.
-				if (run) this.#end(run);
-				throw err;
+			if (run) {
+				run.pending ??= run.reader.latest().then(
+					(read) => ({ read }),
+					(readFailed: unknown) => ({ readFailed }),
+				);
 			}
+
+			const result: Listed | Read = await (run?.pending ? race([this.#listing, run.pending]) : this.#listing);
 			if (this.#closed) return undefined;
 
-			if ("frame" in result) {
+			if ("readFailed" in result || "read" in result) {
 				if (!run || this.#run !== run) continue;
 				run.pending = undefined;
-				if (result.frame) return { kind: "frame", frame: result.frame.value };
+				if ("readFailed" in result) {
+					this.#end(run);
+					throw result.readFailed;
+				}
+				if (result.read) return { kind: "frame", frame: result.read.value };
 				// The run's track ended.
 				this.#end(run);
 				return { kind: "ended" };
 			}
 
 			this.#listing = undefined;
-			const event = result.event;
+			if ("listingFailed" in result) {
+				this.close();
+				throw result.listingFailed;
+			}
+			const event = result.listed;
 			if (!event) {
 				this.close();
 				return undefined;

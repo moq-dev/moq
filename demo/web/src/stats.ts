@@ -156,11 +156,10 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 				}
 				if (!update) break;
 				if (update.kind === "ended") {
-					// The run ended (unlisted, or aborted as too large): its counts are no longer live.
+					// The run ended (unlisted, or aborted as too large): its counts are no longer live,
+					// and the next run's must not splice onto its series.
 					epoch = undefined;
-					nodeStats.mutate((s) => {
-						if (s[node]) s[node] = nodeStatsOf();
-					});
+					reset();
 					continue;
 				}
 				if (epoch !== undefined && update.frame.epoch !== epoch) reset();
