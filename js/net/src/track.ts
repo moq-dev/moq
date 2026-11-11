@@ -1471,7 +1471,7 @@ export class Producer {
 	// also ends the groups still arriving in it with its error, so their readers settle now
 	// rather than once the stream's reset lands; one that finished here stays whole. A skip names
 	// nothing produced.
-	#drop(start: bigint, end: bigint, hole: Hole, open = false): Run[] {
+	#drop(start: bigint, end: bigint, hole: Hole, open = false, arrives = true): Run[] {
 		if (start >= end) return [];
 		const skipped = hole.skip ? [] : this.#state.drops.overlapping(start, end).filter((run) => run.skip);
 		let runs = runGaps(skipped, start, end);
@@ -1497,8 +1497,9 @@ export class Producer {
 			}
 		}
 		// A pending tail owes nothing the publisher gave up. A stale verdict is not receipt: new
-		// terms may supersede it, leaving those groups unknown again, as in Rust.
-		if (hole.stale === undefined) this.#arrive(start, end);
+		// terms may supersede it, leaving those groups unknown again, as in Rust. Nor is a failed
+		// fill answer (`arrives` unset), which the feed never delivered.
+		if (hole.stale === undefined && arrives) this.#arrive(start, end);
 		// Giving up the last sequences below the end reaches it, as writing them would.
 		this.#endLargest();
 		return runs;
@@ -1912,7 +1913,7 @@ export class Producer {
 			// A re-created group already replaced this one.
 			const current = this.#cached.get(group.sequence);
 			if (current && current.group !== group) return;
-			this.#drop(group.sequence, group.sequence + 1n, { error: closed });
+			this.#drop(group.sequence, group.sequence + 1n, { error: closed }, false, !fetched);
 		});
 		const sequence = group.sequence;
 		if (this.#unchecked()) {
