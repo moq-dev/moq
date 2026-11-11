@@ -111,7 +111,7 @@ discovery.run((effect) => {
 					delete s[node];
 				});
 				history.delete(node);
-				clusterMembership = "";
+				clusterMembership = undefined;
 				continue;
 			}
 			if (subs.has(node)) continue;
@@ -137,7 +137,7 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 				s[node] = nodeStatsOf();
 			});
 			history.delete(node);
-			clusterMembership = "";
+			clusterMembership = undefined;
 		};
 		reset();
 		if (!broadcast) return;
@@ -262,7 +262,7 @@ function pushSample(arr: Sample[], s: Sample): Sample[] {
 // The set of nodes in the most recent cluster-aggregate sample. The aggregate
 // sums cumulative per-node counters, so when membership changes the summed
 // baseline jumps; we reset the aggregate series rather than splice the jump in.
-let clusterMembership = "";
+let clusterMembership: string | undefined;
 
 const sampler = new Signals.Effect();
 sampler.run((effect) => {
@@ -272,7 +272,7 @@ sampler.run((effect) => {
 	if (effect.get(connection.status) !== "connected") {
 		history.clear();
 		cluster = [];
-		clusterMembership = "";
+		clusterMembership = undefined;
 		clock.update((n) => n + 1);
 		return;
 	}
