@@ -1333,15 +1333,22 @@ mod tests {
 			.build()
 	}
 
-	struct CatalogRun(super::super::MoqSink);
+	/// A sink whose dial hangs for the whole test: a first dial that failed would end the
+	/// session, and the broadcast with it.
+	struct CatalogRun(
+		super::super::MoqSink,
+		#[allow(dead_code, reason = "held so the dial hangs")] std::net::TcpListener,
+	);
 
 	impl CatalogRun {
 		fn new() -> Self {
 			gst::init().unwrap();
+			// The kernel completes the TCP handshake, but nothing ever answers the session's.
+			let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
 			let sink = sink();
-			sink.set_property("url", "tcp://127.0.0.1:1");
+			sink.set_property("url", format!("tcp://{}", silent.local_addr().unwrap()));
 			sink.set_property("broadcast", "catalog-test");
-			Self(sink)
+			Self(sink, silent)
 		}
 
 		fn pad(&self, name: &str) -> gst::Pad {

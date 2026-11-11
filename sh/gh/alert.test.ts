@@ -38,7 +38,7 @@ test("cron workflows only alert on scheduled failures", async () => {
 });
 
 test("ordinary CI never subscribes to Discord alerts", () => {
-	for (const name of ["Check", "Cache", "OBS", "Platform", "Quest"]) {
+	for (const name of ["Check", "OBS", "Platform", "Quest"]) {
 		expect(watched).not.toContain(name);
 	}
 });
@@ -53,7 +53,7 @@ test("alert coverage excludes CI-only workflows and retains release and nightly 
 			alert: { name: "Alert", on: { workflow_run: { workflows: ["Release", "Nightly"] } } },
 			check: { name: "Check", on: { pull_request: null } },
 			quest: { name: "Quest", on: { push: { branches: ["quest/**"] } } },
-			cache: { name: "Cache", on: { push: { branches: ["main"] } } },
+			obs: { name: "OBS", on: { push: { branches: ["main"] } } },
 			release: { name: "Release", on: { pull_request: null, push: null } },
 			nightly: { name: "Nightly", on: "schedule" },
 		};

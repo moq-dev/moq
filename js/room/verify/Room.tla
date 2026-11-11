@@ -2,8 +2,7 @@
 \* You and another participant, Bob, in a room, as you see it.
 \*
 \* Your side is js/room/src/local.ts: `enabled` joins by announcing `{you}/camera.hang`, and the
-\* screen broadcast `{you}/screen.hang` is announced while a share is live (`#screenLive`),
-\* whether or not you joined. Your view of Bob is js/room/src/room.ts: each announcement under
+\* screen broadcast `{you}/screen.hang` is announced while joined and a share is live. Your view of Bob is js/room/src/room.ts: each announcement under
 \* the room adds or removes one of Bob's broadcasts, and Bob is on your screen while one is.
 \* Announcements reach you one at a time. When your connection drops, the entries it fed retract
 \* at once (reload.ts), and the reconnect announces them again.
@@ -24,7 +23,7 @@ Init ==
     /\ seen = {}
 
 \* What you publish into the room.
-Yours == (IF joined THEN {"camera"} ELSE {}) \cup (IF sharing THEN {"screen"} ELSE {})
+Yours == (IF joined THEN {"camera"} ELSE {}) \cup (IF joined /\ sharing THEN {"screen"} ELSE {})
 
 \* You.
 Join == ~joined /\ joined' = TRUE /\ UNCHANGED <<sharing, conn, bob, seen>>

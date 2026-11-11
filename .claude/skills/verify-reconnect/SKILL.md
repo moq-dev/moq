@@ -9,7 +9,7 @@ description: Model-check the client connect policy (`rs/moq-net/src/reconnect.rs
 
 ## Rules
 
-Each rule is an INVARIANT; the harm says why it matters. All but `NoOrphan` and `RedirectFollowed` are checked only while `run` waits with the queue drained, which is when another task can read the handle.
+Each rule is an INVARIANT; the harm says why it matters. All but `NoOrphan`, `RedirectFollowed`, and `FirstWalkFailsFast` are checked only while `run` waits with the queue drained, which is when another task can read the handle.
 
 | Rule | Holds when | Harm if broken |
 | --- | --- | --- |
@@ -18,6 +18,7 @@ Each rule is an INVARIANT; the harm says why it matters. All but `NoOrphan` and 
 | `OfflineMeansNothingServes` | Disconnected is reported only when no predecessor still serves (`Action::Offline`: "nothing serves anymore"). | An app waiting on `established` stalls, and the UI says disconnected, while a session still carries its media. |
 | `NoOrphan` | Until the policy is done, every open session is the live one or the predecessor. | A transport and the peer's state stay open with nothing able to reach them. |
 | `PresenceBalanced` | `sessions_started - sessions_ended` is 1 while connected and 0 otherwise. | Presence counts drift on every migration. |
+| `FirstWalkFailsFast` | Nothing backs off before a session has been established: a failed first walk ends the policy (a refusal of since-replaced tokens is the exception, and tokens are not modeled). | A setup mistake (an untrusted certificate, no version in common) retries forever instead of surfacing. |
 | `RedirectFollowed` | A dial never goes elsewhere than a redirect, named to a session the policy still holds, that the policy never acted on. | The replacement lands back on the node that is leaving. |
 
 ## Run
@@ -54,6 +55,7 @@ Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07
 | Code | Model |
 | --- | --- |
 | `reconnect.rs` `Reconnect::poll` (queue, predecessor, phases) | `Pop`, `Retire`, `IdleClose`, `Dial`, `Abandon`, `BackoffEnds`, `LiveEnds`, `ProbeAsk`, `ProbeAbandon` |
+| `reconnect.rs` `established`, and `walk_failed` ending the first walk | `Established`, `Failed`, `Abandon` |
 | `reconnect.rs` `connected`, `fallback`, `failed`, `probed` | `Connected`, `Failed`, `ProbeFails`, `ProbeGetsThrough` |
 | `reconnect.rs` `end`, `closed`, `done`, `Predecessor` | `EndGoaway`, `EndClosed`, `Done`, `Retire`, `IdleClose` |
 | `reconnect.rs` `Restart::Wait` | `LiveEnds` with `Restart = "wait"` (`RestartWait.cfg`) |

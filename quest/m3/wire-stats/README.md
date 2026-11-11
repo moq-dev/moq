@@ -70,10 +70,3 @@ receive-side limitations.
 - **One source registry for sessions and embedders.** An embedder registers
   a gateway connection's wire source on a `stats::Session` from its stats
   handle's `session(label)`, the same path the relay's own sessions use.
-
-## Required
-
-- [qmux byte counters](/quest/m3/wire-stats/qmux.md) - a WebSocket session
-  reports its TCP bytes
-- [moq-srt wire source](/quest/m3/wire-stats/srt.md) - an SRT connection
-  reports its wire bytes

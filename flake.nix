@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/6a18b8a815c2d15d37d7433a619f961ec5a07165";
+      url = "github:moq-dev/quest/2572be9c459fc8831a400148c44626527ac32865";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -160,10 +160,10 @@
             cargo-bloat
             # The workspace-hack that gives every build one feature set per dependency.
             cargo-hakari
-            # Weekly mutation testing of the security-critical modules (`just rs mutants`).
-            cargo-mutants
             cargo-nextest
             cargo-codspeed
+            # Sets versions for a release cut; `sh/version.py` needs 0.4.1 or newer.
+            release-plz
             # Source-based test coverage (`just rs coverage`).
             # Its LLVM test helpers must read the compiler's profile format.
             (cargo-llvm-cov.override {
@@ -175,8 +175,6 @@
           ]
           ++ gstreamerDeps
           ++ pkgs.lib.optionals (!pkgs.stdenv.hostPlatform.isDarwin) [
-            # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
-            pkgs.release-plz
             # cpal's `alsa-sys` (moq-audio `capture` / `playback` features) links
             # libasound on Linux via pkg-config; macOS uses CoreAudio, so no dep
             # there. See `alsaPlugins` below for reaching the default device at

@@ -178,8 +178,7 @@ shaper_of() {
         near-zero | fixed-250) ;;
         mild) echo "--delay 5ms --jitter 5ms --jitter-model gaussian --shared" ;;
         wide) echo "--delay 40ms --jitter 40ms --jitter-model gaussian --shared" ;;
-        bursty | step) echo "--profile $1" ;;
-        congestion) echo "--profile $AQ_DIR/congestion.toml" ;;
+        bursty | step | congestion) echo "--profile $1" ;;
     esac
 }
 
