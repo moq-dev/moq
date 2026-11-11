@@ -6202,7 +6202,8 @@ enum NamespaceServeState {
 	Ok {
 		peer: cluster::Peer,
 		hidden: bool,
-		announced: crate::origin::Routes,
+		// Boxed: the routes cursor dwarfs every other state.
+		announced: Box<crate::origin::Routes>,
 		initial: Vec<crate::announce::Announce>,
 		/// Taken once buffered.
 		ok: Option<ietf::RequestOk>,
@@ -6243,7 +6244,7 @@ impl NamespaceServe {
 		self.state = NamespaceServeState::Ok {
 			peer,
 			hidden,
-			announced,
+			announced: Box::new(announced),
 			initial,
 			ok: Some(ietf::RequestOk {
 				largest: None,
@@ -6334,7 +6335,7 @@ impl NamespaceServe {
 							self.state = NamespaceServeState::Ok {
 								peer,
 								hidden,
-								announced,
+								announced: Box::new(announced),
 								initial: Vec::new(),
 								ok: Some(ietf::RequestOk {
 									largest: None,
@@ -6367,7 +6368,7 @@ impl NamespaceServe {
 					ns.gate = self.gate.take();
 					ns.hidden = hidden;
 					let prefix = self.prefix.clone();
-					let run = NamespaceLoop::new(&self.publisher, announced, prefix, ns, initial);
+					let run = NamespaceLoop::new(&self.publisher, *announced, prefix, ns, initial);
 					self.state = NamespaceServeState::Run(Box::new(run));
 				}
 				NamespaceServeState::Run(_) => unreachable!("run above"),
