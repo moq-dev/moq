@@ -55,7 +55,8 @@ const PROBE_MAX: Duration = Duration::from_secs(300);
 
 /// When to redial after a failure, and when to give up, once a session has been established.
 ///
-/// Before then nothing retries: the first walk ending without a session ends the policy.
+/// Before then nothing retries: the first walk ending without a session ends the policy,
+/// unless the peer refused credentials the tokens have replaced since.
 ///
 /// `initial` and `multiplier` set the wait before each retry, `max` caps it, and
 /// `healthy` decides which sessions count as failed attempts. The delays carry jitter,
