@@ -29,7 +29,7 @@ use crate::{Instance, Path};
 
 use rand::RngExt;
 
-use super::{Error, GENERATED, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno};
+use super::{Error, GENERATED, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno, view::ancestors};
 
 /// One announce stream in one direction.
 pub(crate) type Key = u64;
@@ -139,8 +139,9 @@ struct Outbox {
 	delivered: HashMap<Id, BTreeSet<Path>>,
 	/// Claim starts and restarts held back until a stream serving them confirms their
 	/// instance, by identity, with the identity's last floor, which certifies nothing
-	/// while any is held. Bounded like `pending`: one per claim.
-	withheld: HashMap<Id, (BTreeMap<Path, Claim>, Option<Rev>)>,
+	/// while any is held. Each waits on the shown claim serving it, which covers it when
+	/// presented at a narrower interest. Bounded like `pending`: one per claim.
+	withheld: HashMap<Id, (Held, Option<Rev>)>,
 	/// ROUTE_REQUESTs to send, by the identity as the peer advertised it. A higher
 	/// seqno subsumes a lower one, so a writer that stalls holds one per identity.
 	requests: BTreeMap<Id, Seqno>,
@@ -167,6 +168,9 @@ type Batch = (Changes, Option<Rev>);
 
 /// Each claim's last change, by path.
 type Changes = BTreeMap<Path, Option<Claim>>;
+
+/// Claims held back, by path, each with the shown claim it waits on.
+type Held = BTreeMap<Path, (Claim, Path)>;
 
 impl Outbox {
 	fn is_empty(&self) -> bool {
@@ -258,13 +262,13 @@ impl Outbox {
 	}
 
 	/// Queue a batch of `id`'s claim changes, closed by `floor`, holding back each start
-	/// or restart whose instance is not `advertised` yet.
+	/// or restart for as long as `awaits` names the shown claim it waits on.
 	fn batch(
 		&mut self,
 		id: Id,
 		changes: Vec<(Path, Option<Claim>)>,
 		floor: Option<Rev>,
-		advertised: impl Fn(&Path, &Claim) -> bool,
+		awaits: impl Fn(&Path, &Claim) -> Option<Path>,
 	) {
 		let ended = self.entry(id).ended;
 		let Self {
@@ -281,12 +285,12 @@ impl Outbox {
 			if let Some((held, _)) = withheld.get_mut(&id) {
 				held.remove(&path);
 			}
-			if let Some(claim) = &claim
-				&& !advertised(&path, claim)
+			if let Some(item) = &claim
+				&& let Some(shown) = awaits(&path, item)
 			{
 				// The reader keeps what it was sent until then.
 				merged.remove(&path);
-				withheld.entry(id).or_default().0.insert(path, claim.clone());
+				withheld.entry(id).or_default().0.insert(path, (item.clone(), shown));
 				continue;
 			}
 			// The reader holds nothing here once the entry reaches it.
@@ -302,25 +306,28 @@ impl Outbox {
 		}
 	}
 
-	/// A stream serves `claim` of `id` at `confirmed`: queue it, if held back at that.
+	/// A stream serves the shown `claim` of `id` at `confirmed`: queue what waits on it
+	/// at that instance.
 	fn release(&mut self, id: Id, claim: &Path, confirmed: &(Instance, u64)) {
 		let Some((held, floor)) = self.withheld.get_mut(&id) else {
 			return;
 		};
-		if !held
-			.get(claim)
-			.is_some_and(|held| held.instance == confirmed.0 && held.epoch == confirmed.1)
-		{
-			return;
-		}
-		let item = held.remove(claim).expect("just found");
+		let (released, kept): (Held, Held) = std::mem::take(held).into_iter().partition(|(_, (item, shown))| {
+			shown == claim && item.instance == confirmed.0 && item.epoch == confirmed.1
+		});
+		*held = kept;
 		let floor = *floor;
 		if held.is_empty() {
 			self.withheld.remove(&id);
 		}
+		if released.is_empty() {
+			return;
+		}
 		// A batch still queued closes with a newer floor.
 		let (merged, _) = self.entry(id).batch.get_or_insert_with(|| (Changes::new(), floor));
-		merged.insert(claim.clone(), Some(item));
+		for (path, (item, _)) in released {
+			merged.insert(path, Some(item));
+		}
 	}
 
 	fn pop(&mut self) -> Option<Output> {
@@ -727,8 +734,8 @@ impl State {
 					Out::Route { to, id, reach } => (to, Output::Route { id, reach }),
 					Out::Batch { to, id, changes, floor } => {
 						if let Some(queue) = self.queues.get(&to) {
-							let advertised = |claim: &Path, item: &Claim| self.advertised(id, claim, item);
-							queue.lock().batch(id, changes, floor, advertised);
+							let awaits = |claim: &Path, item: &Claim| self.awaits(id, claim, item);
+							queue.lock().batch(id, changes, floor, awaits);
 						}
 						continue;
 					}
@@ -773,17 +780,23 @@ impl State {
 		}
 	}
 
-	/// Whether `item`, a claim of `id` at `claim`, may go to other streams: a stream
-	/// serving it confirmed its instance, or none serves it here to wait for.
-	fn advertised(&self, id: Id, claim: &Path, item: &Claim) -> bool {
-		let Some(home) = self.homes.get(&(id, claim.clone())) else {
-			return true;
-		};
-		home.keys.is_empty()
-			|| (home.keys.values()).any(|slot| {
-				(slot.confirmed.as_ref())
-					.is_some_and(|(instance, epoch)| *instance == item.instance && *epoch == item.epoch)
-			})
+	/// The shown claim `item`, presented for `id` at `claim`, waits on before it goes to
+	/// other streams: the one there or, for a claim presented at a narrower interest, the
+	/// one covering it that serves the same instance. `None` once a stream serving it
+	/// confirmed that instance, or when none serves it here to wait for.
+	fn awaits(&self, id: Id, claim: &Path, item: &Claim) -> Option<Path> {
+		let same = |served: &Claim| served.instance == item.instance && served.epoch == item.epoch;
+		let (shown, home) = ancestors(claim).rev().find_map(|shown| {
+			let home = self.homes.get(&(id, shown.clone()))?;
+			(home.keys.values())
+				.any(|slot| same(&slot.served.claim))
+				.then_some((shown, home))
+		})?;
+		let confirmed = (home.keys.values()).any(|slot| {
+			(slot.confirmed.as_ref())
+				.is_some_and(|(instance, epoch)| *instance == item.instance && *epoch == item.epoch)
+		});
+		(!confirmed).then_some(shown)
 	}
 
 	/// Serve each shown claim of `id` through every stream with a usable feasible
@@ -1416,7 +1429,8 @@ mod tests {
 
 	/// A relay sends another stream a claim only once a stream serving it confirmed
 	/// its instance, so a request naming that instance always finds a route: first when
-	/// the claim starts, again when it restarts at a new instance.
+	/// the claim starts, again when it restarts at a new instance, and also where a
+	/// narrower interest is shown the claim covering it.
 	#[test]
 	fn a_claim_goes_on_only_once_served() {
 		let (old, new) = (Instance::random(), Instance::random());
@@ -1425,10 +1439,10 @@ mod tests {
 		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
 		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let edge = relay.answer(Link::default(), Path::empty()).unwrap();
-		outputs(&edge);
+		let narrow = relay.answer(Link::default(), p("live/x")).unwrap();
 		type Batch = (Vec<(Path, Option<Instance>)>, Option<Rev>);
-		let claims = |read: Vec<Output>| -> Vec<Batch> {
-			(read.into_iter())
+		let claims = |stream: &Stream| -> Vec<Batch> {
+			(outputs(stream).into_iter())
 				.filter_map(|output| match output {
 					Output::Batch { id: 1, changes, floor } => {
 						let changes = (changes.into_iter())
@@ -1440,29 +1454,36 @@ mod tests {
 				})
 				.collect()
 		};
+		let both = || [claims(&edge), claims(&narrow)];
 
-		origin.own(p("live/x"), Some(claim(&old, 0)));
+		origin.own(p("live"), Some(claim(&old, 0)));
 		pump(&answer, &receive);
-		assert_eq!(claims(outputs(&edge)), [(vec![], None)], "held until served");
-		receive.serving(1, &p("live/x"), &claim(&old, 0));
+		assert_eq!(both(), [[(vec![], None)], [(vec![], None)]], "held until served");
+		receive.serving(1, &p("live"), &claim(&old, 0));
 		assert_eq!(
-			claims(outputs(&edge)),
-			[(vec![(p("live/x"), Some(old.clone()))], Some(1))]
+			both(),
+			[
+				[(vec![(p("live"), Some(old.clone()))], Some(1))],
+				[(vec![(p("live/x"), Some(old.clone()))], Some(1))]
+			]
 		);
 
-		origin.own(p("live/x"), Some(claim(&new, 0)));
+		origin.own(p("live"), Some(claim(&new, 0)));
 		pump(&answer, &receive);
 		assert_eq!(
-			claims(outputs(&edge)),
-			[(vec![], None)],
+			both(),
+			[[(vec![], None)], [(vec![], None)]],
 			"the old instance stays until the new one is served, the floor certifying nothing"
 		);
-		receive.serving(1, &p("live/x"), &claim(&old, 0));
-		assert_eq!(claims(outputs(&edge)), [], "a stale confirmation releases nothing");
-		receive.serving(1, &p("live/x"), &claim(&new, 0));
+		receive.serving(1, &p("live"), &claim(&old, 0));
+		assert_eq!(both(), [[], []], "a stale confirmation releases nothing");
+		receive.serving(1, &p("live"), &claim(&new, 0));
 		assert_eq!(
-			claims(outputs(&edge)),
-			[(vec![(p("live/x"), Some(new.clone()))], Some(2))]
+			both(),
+			[
+				[(vec![(p("live"), Some(new.clone()))], Some(2))],
+				[(vec![(p("live/x"), Some(new.clone()))], Some(2))]
+			]
 		);
 	}
 
