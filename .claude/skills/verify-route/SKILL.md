@@ -37,7 +37,7 @@ just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/rout
 | --- | --- | --- | --- |
 | `RouteHandoff.cfg` | The origin and two relays in a triangle. | 2 claim changes, 2 session changes, 1 collection | 3,545,311 |
 | `Behind.cfg` | The origin behind relay 1, which sits in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 3,033,111 |
-| `BehindDear.cfg` | The same, with relay 3 nearer the origin than relay 2. | 1 claim change, 1 session change | 5,297,593 |
+| `BehindDear.cfg` | The same, with relay 3 nearer the origin than relay 2. | 1 claim change, 1 session change | 5,377,597 |
 
 All three pass at the sync commit. Each takes minutes on 4 workers, so run them last. First run what answers in seconds:
 
@@ -58,9 +58,9 @@ Sync commit: `c916855d163ff5641ad18cfb8e14b76dababd99a`, plus the change that ad
 
 | Code (`rs/moq-net/src/route/`) | Model |
 | --- | --- |
-| `mod.rs` `feasible`, `Entry::crossed`, `eligible`, `metric`, `selected`, `infeasible`, `advertised`, `recoverable`, `live`, `certifiers` | `Feasible`, `Crossed`, `Eligible`, `Through`, `Selected`, `InfeasibleSet`, `adv` and `Extends`, `Recoverable`, `Live`, `Certifiers` |
+| `mod.rs` `feasible`, `Entry::crossed`, `eligible`, `metric`, `selected`, `infeasible`, `recoverable`, `live`, `certifiers` | `Feasible`, `Crossed`, `Eligible`, `Through`, `Selected`, `InfeasibleSet`, `Recoverable`, `Live`, `Certifiers` |
 | `mod.rs` `certified`, `prune`, `adopted` | `Certified`, `Prune`, `Adopted` |
-| `mod.rs` `update`, `record`, `advertise`, `requests` | `Update`, `Record`, `Plan`, `Requests` |
+| `mod.rs` `update`, `recompute`, `record`, `advertise`, `requests` | `Update` and its `prune`, `Record`, `Plan`, `Requests` |
 | `mod.rs` `show`, `shown_now` | `Events`, `ShownNow` |
 | `mod.rs` `route`, `batch`, `request`, `echo` | `OnRoute`, `OnBatch`, `OnRequest`, `Deliver`, `DeliverAck` |
 | `mod.rs` `connect`, `peer_interest`, `disconnect`, `collect`, `change` | `Connect`, `Opened`, `Disconnect`, `Closed`, `Collect`, `ChangeClaim` |
@@ -69,4 +69,4 @@ Sync commit: `c916855d163ff5641ad18cfb8e14b76dababd99a`, plus the change that ad
 
 ## Not covered
 
-The model fixes every interest at the root, so it leaves out wildcards, `present`/`represent`/`retire`, interest changes, and the hidden `current` regions; prune's region bookkeeping reduces to "no certifier has a floor". It also leaves out scoped grants and qualified keys, GOAWAY, link priority, costs other than 1 and 2, the hop limit, the informational RTT, upstream links, identity rotation and restart, and `node.rs`'s per-stream keys. A batch carries the sender's whole presentation, equal to applying its diff on a FIFO stream. The origin drops the ROUTEs and batches it hears for its own identity, which change nothing there. A pass covers one claim at the bounds in the table above, and no mesh of more than three relays. `sweep_no_route_outgrows_a_loop_free_path`, `sweep_handoff`, and `sweep_scoped_handoff` still own the rest: larger meshes, more churn, restarts, and scoped grants.
+The model fixes every interest at the root, so it leaves out wildcards, `present`/`represent`/`retire`, interest changes, and the hidden `current` regions; prune's region bookkeeping reduces to "no certifier has a floor". It also leaves out scoped grants and qualified keys (so `advertised`, which only they read), GOAWAY, link priority, costs other than 1 and 2, the hop limit, the informational RTT, upstream links, identity rotation and restart, and `node.rs`'s per-stream keys. A batch carries the sender's whole presentation, equal to applying its diff on a FIFO stream. The origin drops the ROUTEs and batches it hears for its own identity, which change nothing there. A pass covers one claim at the bounds in the table above, and no mesh of more than three relays. `sweep_no_route_outgrows_a_loop_free_path`, `sweep_handoff`, and `sweep_scoped_handoff` still own the rest: larger meshes, more churn, restarts, and scoped grants.

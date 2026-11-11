@@ -515,7 +515,8 @@ A route is feasible when no feasibility distance is kept for its Node ID yet, wh
 A node selects, per Node ID, among its feasible routes that are not held: a session that has not received a GOAWAY, then the highest local priority, then the lowest metric.
 It MUST NOT select an infeasible route, and a distance only ever falls within a Seqno, so advertising a longer route never raises it.
 It MUST NOT select a route whose Hops name it either, feasible or not: that is a copy of a route the node sent, which no distance refuses once the node dropped it.
-Such a route counts among the node's routes below only while it is infeasible and its Hops begin with those of the route the node last sent to that origin node: its sender then routes through the node, and moves once it hears the node has no route.
+Such a route counts below as an infeasible route where the feasibility condition refuses it, and as no route where it does not: its sender routes through the node, and moves once it hears the node has no route.
+Under a qualified Node ID it counts only if its Hops also begin with those of the route the node last sent under that Node ID: otherwise a relay past the node derived the Node ID from the node's route under another, and that copy stands whatever the node does.
 A node MAY mark a session upstream.
 A route is down-only when it arrived on an upstream session or with its down-only flag set; a node sends a down-only route with the flag set, and never on an upstream session.
 

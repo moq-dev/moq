@@ -103,15 +103,10 @@ Feasible(s, e) ==
 \* did not cross it.
 Eligible(n, s, e) == ~Crossed(n, e) /\ Feasible(s, e)
 
-\* Whether hops `h` extend `a`, the hops of the route this node last sent.
-Extends(a, h) == a # <<>> /\ Len(a) <= Len(h) /\ SubSeq(h, 1, Len(a)) = a
-
 UsableSet(n, s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].held /\ Eligible(n, s, s.rx[m])}
-\* `infeasible`: a crossed route counts only while it extends the route this
-\* node last sent, so its sender moves once it hears this node has none.
-InfeasibleSet(n, s) ==
-    {m \in Nodes : /\ s.rx[m].on /\ ~s.rx[m].held /\ ~Feasible(s, s.rx[m])
-                   /\ ~Crossed(n, s.rx[m]) \/ Extends(s.adv, s.rx[m].hops)}
+\* `infeasible`: a route that crossed this node counts like any other. No key
+\* is qualified here, so its sender routes through this node's own route.
+InfeasibleSet(s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].held /\ ~Feasible(s, s.rx[m])}
 Certifiers(n, s) == {m \in Nodes : s.rx[m].on /\ Eligible(n, s, s.rx[m])}
 Recoverable(n, s) == \E m \in Certifiers(n, s) : s.rx[m].held
 
@@ -132,7 +127,7 @@ Selected(n, s, ov) ==
              hops |-> Append(s.rx[m].hops, n)]
 
 Live(n, s) ==
-    n = Origin \/ UsableSet(n, s) # {} \/ InfeasibleSet(n, s) # {} \/ Recoverable(n, s)
+    n = Origin \/ UsableSet(n, s) # {} \/ InfeasibleSet(s) # {} \/ Recoverable(n, s)
 
 \* `Heard::view`: what it certified before its route ended, else the raw view.
 HeardView(h) == IF h.kept.floor # Absent THEN h.kept ELSE h.raw
@@ -206,7 +201,7 @@ Record(n, s, sel, av, ups) ==
 Requests(n, s, sel) ==
     IF n = Origin THEN [pending |-> NoPending, to |-> None, seq |-> 0]
     ELSE
-    LET starved == ~sel.on /\ InfeasibleSet(n, s) # {}
+    LET starved == ~sel.on /\ InfeasibleSet(s) # {}
         want == s.fd.seq + 1
         p0 == s.pending
         p1 == IF ~starved THEN p0
@@ -214,8 +209,8 @@ Requests(n, s, sel) ==
               ELSE IF p0.seq < want THEN [p0 EXCEPT !.seq = want, !.asked = None]
               ELSE p0
         answered == sel.on /\ sel.seq >= p1.seq
-        hasTarget == sel.on \/ InfeasibleSet(n, s) # {}
-        target == IF sel.on THEN sel.next ELSE Best(n, s, InfeasibleSet(n, s))
+        hasTarget == sel.on \/ InfeasibleSet(s) # {}
+        target == IF sel.on THEN sel.next ELSE Best(n, s, InfeasibleSet(s))
     IN IF ~p1.on THEN [pending |-> p1, to |-> None, seq |-> 0]
        ELSE IF answered \/ (p1.from = {} /\ ~starved) \/ ~hasTarget
             THEN [pending |-> NoPending, to |-> None, seq |-> 0]
@@ -246,25 +241,22 @@ Events(n, s, old, now, live, ov, eb) ==
 
 \* `update` on node n's state `s0`, with the origin's view `ov`, the open
 \* sessions `ups`, and `eb`, the items n's reader saw END for. A prune forgets.
-Update(n, s0, ov, ups, eb) ==
-    LET s1 == Prune(n, s0, ov)
+Update(n, s0, ov, ups, eb, prune) ==
+    LET s1 == IF prune THEN Prune(n, s0, ov) ELSE s0
         eb1 == IF s1 # s0 THEN [c \in Claims |-> None] ELSE eb
         sel == Selected(n, s1, ov)
         s2 == Record(n, s1, sel, Adopted(n, s1, ov), ups)
         live == Live(n, s2)
         av == Adopted(n, s2, ov)
         plans == [m \in Peers(n, ups) |-> Plan(n, s2, m, sel, live, av, ov)]
-        \* `advertised`: the hops of the last route this node started or changed anywhere.
-        sends == \E m \in Peers(n, ups) : plans[m].sent.kind = "fin" /\ plans[m].sent # s2.sent[m]
         s3 == [s2 EXCEPT
-                 !.adv = IF sends THEN sel.hops ELSE @,
                  !.sent = [m \in Nodes |-> IF m \in Peers(n, ups) THEN plans[m].sent ELSE s2.sent[m]],
                  !.sentV = [m \in Nodes |-> IF m \in Peers(n, ups) THEN plans[m].sentV ELSE s2.sentV[m]],
                  !.unacked = [m \in Nodes |-> IF m \in Peers(n, ups) THEN plans[m].unacked ELSE s2.unacked[m]]]
         \* Drop the feasibility distance once nothing routes, advertises, or awaits an echo.
         drained == n # Origin
                    /\ \A m \in Nodes : ~s3.rx[m].on /\ s3.sent[m].kind = "none" /\ s3.unacked[m] = 0
-        s4 == IF drained THEN [s3 EXCEPT !.fd = NoFd, !.adv = <<>>] ELSE s3
+        s4 == IF drained THEN [s3 EXCEPT !.fd = NoFd] ELSE s3
         req == Requests(n, s4, sel)
         s5 == [s4 EXCEPT !.pending = req.pending]
         now == ShownNow(n, s5, sel, live, ov)
@@ -302,7 +294,6 @@ Commit(rs, q0) ==
 InitNode == [
     rx |-> [m \in Nodes |-> NoEntry],
     fd |-> NoFd,
-    adv |-> <<>>,
     heard |-> [m \in Nodes |-> NoHeard],
     view |-> NoView,
     sent |-> [m \in Nodes |-> NoReach],
@@ -337,7 +328,7 @@ ChangeClaim(c, item) ==
     IN /\ rev' = rev + 1
        /\ own' = own1
        /\ hist' = Append(hist, own1)
-       /\ Commit([n \in {Origin} |-> Update(Origin, st[Origin], ov1, up, ended[Origin])], q)
+       /\ Commit([n \in {Origin} |-> Update(Origin, st[Origin], ov1, up, ended[Origin], TRUE)], q)
        /\ UNCHANGED <<up, acks, seqno, flaps, collects>>
 
 \* A new claim, or new attributes for one, under a fresh revision.
@@ -399,6 +390,12 @@ Deliver(d) ==
         sel == Selected(n, st[n], OV)
         \* Already advertised to the requester: `request` returns before `update`.
         skip == n # Origin /\ msg.type = "request" /\ sel.on /\ sel.seq >= msg.seq
+        \* Only the route's hops changed: `route` then lets go of nothing.
+        was == st[n].rx[m]
+        same == /\ msg.type = "route" /\ msg.reach.kind = "fin"
+                /\ was.on /\ ~was.held
+                /\ was.seq = msg.reach.seq /\ was.met = msg.reach.met
+                /\ Crossed(n, was) = Crossed(n, msg.reach)
         \* The origin's own identity merges nothing it hears.
         s1 == IF n = Origin THEN st[n]
               ELSE CASE msg.type = "route" -> OnRoute(st[n], m, msg.reach)
@@ -411,7 +408,7 @@ Deliver(d) ==
        /\ IF skip
           THEN /\ q' = q0
                /\ UNCHANGED <<st, ended, revivals, falseEnds, regressions>>
-          ELSE Commit([x \in {n} |-> Update(n, s1, ov1, up, ended[n])], q0)
+          ELSE Commit([x \in {n} |-> Update(n, s1, ov1, up, ended[n], ~same)], q0)
        /\ UNCHANGED <<up, rev, own, hist, flaps, collects>>
 
 \* `echo`: an echoed ROUTE_END comes back (`Sim::deliver_ack`).
@@ -423,7 +420,7 @@ DeliverAck(d) ==
        /\ IF st[n].unacked[m] = 0
           THEN UNCHANGED <<st, q, ended, revivals, falseEnds, regressions>>
           ELSE Commit([x \in {n} |->
-                  Update(n, [st[n] EXCEPT !.unacked[m] = @ - 1], OV, up, ended[n])], q)
+                  Update(n, [st[n] EXCEPT !.unacked[m] = @ - 1], OV, up, ended[n], TRUE)], q)
        /\ UNCHANGED <<up, rev, own, seqno, hist, flaps, collects>>
 
 -----------------------------------------------------------------------------
@@ -450,7 +447,7 @@ Connect(l) ==
        /\ flaps' = flaps + 1
        /\ Commit([x \in l |->
                LET y == CHOOSE y \in l : y # x
-               IN Update(x, Opened(st[x], y), OV, up1, ended[x])], q)
+               IN Update(x, Opened(st[x], y), OV, up1, ended[x], TRUE)], q)
        /\ UNCHANGED <<acks, rev, own, seqno, hist, collects>>
 
 Disconnect(l) ==
@@ -463,7 +460,7 @@ Disconnect(l) ==
        /\ acks' = [d \in Dirs |-> IF {d[1], d[2]} = l THEN 0 ELSE acks[d]]
        /\ Commit([x \in l |->
                LET y == CHOOSE y \in l : y # x
-               IN Update(x, Closed(st[x], y), OV, up1, ended[x])], q0)
+               IN Update(x, Closed(st[x], y), OV, up1, ended[x], TRUE)], q0)
        /\ UNCHANGED <<rev, own, seqno, hist, collects>>
 
 \* `collect`, allowed once the node holds no route (`Sim::holds`). It
@@ -476,7 +473,7 @@ Collect(n) ==
             Update(n, [st[n] EXCEPT !.view = NoView,
                                     !.heard = [m \in Nodes |-> NoHeard],
                                     !.pending = NoPending],
-                   OV, up, [c \in Claims |-> None])], q)
+                   OV, up, [c \in Claims |-> None], TRUE)], q)
     /\ UNCHANGED <<up, acks, rev, own, seqno, hist, flaps>>
 
 Quiet == \A d \in Dirs : q[d] = <<>> /\ acks[d] = 0
