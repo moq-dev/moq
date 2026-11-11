@@ -1538,8 +1538,14 @@ export class Publisher {
 			for (;;) {
 				if (startSequence !== undefined && skipped.length > 0) {
 					for (const range of skipped) {
-						// What was given up below the start is never named, so a wider budget may serve it.
-						if (range.start < startSequence) record?.untell(range.start, min(range.end, startSequence));
+						// A stale run below the start is never named, so a wider budget may serve it. A
+						// final one is named all the same: no budget brings it back, and a subscriber
+						// filling below the start (a relay whose reader reaches lower) must still learn
+						// its fate. Mirrors the Rust `TrackRun::resolve`.
+						const below = min(range.end, startSequence);
+						if (range.stale !== undefined) {
+							if (range.start < below) record?.untell(range.start, below);
+						} else if (!(await forward(range.start, below, range))) return false;
 						if (!(await forward(max(range.start, startSequence), range.end, range))) return false;
 					}
 					skipped.length = 0;

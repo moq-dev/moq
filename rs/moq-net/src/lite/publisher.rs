@@ -5924,10 +5924,18 @@ impl TrackRun {
 			starts: self.starts(start),
 		}))?;
 		// The subscriber now owes itself everything from the start, so a range given up
-		// above it is named as it would have been after the start. What was given up below it is
-		// never named, so a wider budget may still serve it.
+		// above it is named as it would have been after the start. A stale run below it is
+		// never named, so a wider budget may still serve it. A final one is named all the same:
+		// no budget brings it back, and a subscriber filling below the start (a relay whose
+		// reader reaches lower) must still learn its fate.
 		for (range, hole) in skipped.iter() {
-			self.track.record_mut().untell(range.start..range.end.min(start));
+			let below = range.start..range.end.min(start);
+			match hole.stale_budget() {
+				Some(_) => self.track.record_mut().untell(below),
+				None => {
+					self.forward_range(below, hole, writer)?;
+				}
+			}
 			self.forward_range(range.start.max(start)..range.end, hole, writer)?;
 		}
 		Ok(())

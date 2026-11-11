@@ -21,6 +21,7 @@ mod control_stats;
 mod datagram;
 mod dial_split_horizon;
 mod drained_claim;
+mod drop_record;
 mod empty_group;
 mod errored_end;
 mod extensions;
