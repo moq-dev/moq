@@ -889,12 +889,17 @@ export class Decoder {
 			const pending = inner.get(read);
 			const network = inner.get(consumer.buffered);
 			let newest = pending.newest;
+			// What the consumer holds has arrived too, so its newest end is how far the received audio
+			// reaches, though the gate keeps it encoded.
+			let arrived: Duration | undefined;
 			for (const { end } of network) {
 				const micro = end.asMicros();
 				if (newest === undefined || micro > newest) newest = micro;
+				if (arrived === undefined || end.gt(arrived)) arrived = end;
 			}
 			inner.set(this.#queued, Container.mergeBufferedRanges(network, pending.buffered));
 			ring.queued(newest);
+			if (arrived !== undefined) ring.received(arrived);
 		});
 
 		// Feed the arrival estimate into the playout target. It outlives this consumer, so the target

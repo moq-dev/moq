@@ -727,7 +727,10 @@ ahead to `bound` behind it, dropping the staged window and the audio it passes.
 Less than that is the stretch's to catch up. A join is the exception: until
 the player has read once on the clock, its bound is zero, so the backlog a
 subscription opens on is skipped rather than played out at the stretch's pace,
-and playback starts on the clock. Only those skips and a ring
+and playback starts on the clock. A target that falls moves the clock ahead by
+as much, which is the stretch's to catch up however small the bound, so the
+skip also waits past whatever of that fall the stretch has yet to remove. Only
+those skips and a ring
 overflowing its fixed capacity drop received audio; each counts as a skip in
 the player's stats. A finite tail before a declared end plays as received, and
 a playhead behind the clock skips a declared silence by its lag rather than

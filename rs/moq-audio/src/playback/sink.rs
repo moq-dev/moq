@@ -286,7 +286,9 @@ impl Sink {
 	/// Behind it, it speeds up once it holds more than its latency; ahead of
 	/// it, it slows down. Its buffer running low slows it down too, falling
 	/// behind the clock by at most `late`, and audio trailing the clock by more
-	/// than `late` plus one 30 ms window is skipped. Call it after each write
+	/// than `late` plus one 30 ms window is skipped. A lower latency moves the
+	/// clock ahead, which it catches up on by speeding up rather than a skip,
+	/// however small `late` is. Call it after each write
 	/// and whenever the clock moves; until the first call, or after the device
 	/// changes, the latency alone is the clock.
 	pub fn due(&mut self, at: Instant, late: Duration) {

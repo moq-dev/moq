@@ -32,6 +32,9 @@ export class AudioRingBuffer {
 	// Whether the ring has read on the clock since the last reset. Until it has, nothing trailing the
 	// clock was heard, so a join lands on it rather than at the bound.
 	#joined = false;
+	// Lag a falling target left, which moved the clock ahead by as much. The stretch catches it up
+	// however small the bound, so the skip waits past it too, and what the stretch removes spends it.
+	#retarget = 0;
 	// Samples of media a skip dropped, and that the stretch removed by accelerating, gap zeros
 	// included and declared silence excluded, as moq-audio counts them.
 	#trimmed = 0;
@@ -182,7 +185,10 @@ export class AudioRingBuffer {
 		if (latencySamples <= 0) throw new Error("empty buffer");
 		if (latencySamples > this.capacity) throw new Error("latency exceeds capacity");
 		this.#latencySamples = latencySamples;
-		this.#target = this.#samples(terms?.target ?? latency);
+		const target = this.#samples(terms?.target ?? latency);
+		// A target that falls moves the clock ahead by as much, which audio follows by speeding up.
+		if (this.#joined) this.#retarget += Math.max(0, this.#target - target);
+		this.#target = target;
 		this.#bound = this.#samples(terms?.bound ?? 0);
 
 		// Start a ring that the buffer already covers, which `write` would only notice on the next
@@ -430,6 +436,7 @@ export class AudioRingBuffer {
 		this.#level = 0;
 		this.#clock = undefined;
 		this.#joined = false;
+		this.#retarget = 0;
 		this.#skipping = false;
 	}
 
@@ -452,11 +459,12 @@ export class AudioRingBuffer {
 			return 0;
 		}
 
-		// Skip what trails the clock past its bound and one window, back to the bound. Less than that
-		// is the stretch's to catch up. A join has the bound of nothing heard yet, so it lands on the
-		// clock past whatever backlog it was handed. A finite tail plays as received.
+		// Skip what trails the clock past its bound, any fall in the target still to catch up, and one
+		// window, back to that. Less than that is the stretch's to catch up. A join has the bound of
+		// nothing heard yet, so it lands on the clock past whatever backlog it was handed. A finite
+		// tail plays as received.
 		const inputs = this.#inputs(0);
-		const bound = this.#joined || this.#clock === undefined ? inputs.bound : 0;
+		const bound = this.#joined || this.#clock === undefined ? inputs.bound + this.#retarget : 0;
 		if (this.#clock !== undefined) this.#joined = true;
 		if (!this.#ending() && inputs.lag > bound + this.#stretch.window) {
 			const index = Math.min(this.#writeIndex, Math.ceil(this.#playhead() + inputs.lag - bound));
@@ -553,7 +561,9 @@ export class AudioRingBuffer {
 		const stretch = this.#stretch;
 		stretch.process(frames, enabled && frames === window ? this.#inputs(elapsed) : undefined);
 		this.#level -= frames - stretch.length;
-		this.#accelerated += Math.max(0, frames - stretch.length);
+		const removed = Math.max(0, frames - stretch.length);
+		this.#accelerated += removed;
+		this.#retarget = Math.max(0, this.#retarget - removed);
 		this.#readIndex += frames;
 		this.#window = frames;
 		this.#windowQuiet = quiet;

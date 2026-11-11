@@ -160,6 +160,8 @@ pub(super) struct Mixer {
 	/// Channels the device takes, which is also the bus layout's: every sink
 	/// remixes into it on its way here.
 	channels: usize,
+	/// The device's rate, which every sink is resampled to.
+	rate: u32,
 	/// Per-frame gain step, so any change spans [`RAMP`] regardless of rate.
 	step: f32,
 	/// Accumulator for one chunk, in the device's layout.
@@ -205,6 +207,7 @@ impl Mixer {
 			commands,
 			retired,
 			channels,
+			rate,
 			step: 1.0 / (rate as f32 * RAMP),
 			bus: vec![0.0; CHUNK * channels],
 			scratch: vec![0.0; CHUNK * channels],
@@ -249,6 +252,11 @@ impl Mixer {
 
 	/// Fill one device buffer, interleaved at the device's channel count.
 	pub(super) fn fill(&mut self, out: &mut [f32], played_at: Duration) {
+		self.fill_at(out, played_at, ring::host());
+	}
+
+	/// [`fill`](Self::fill), for a callback that starts at `start`.
+	fn fill_at(&mut self, out: &mut [f32], played_at: Duration, start: ring::Instant) {
 		loop {
 			match self.commands.try_recv() {
 				Ok(Command::Add {
@@ -304,6 +312,7 @@ impl Mixer {
 		let Self {
 			entries,
 			channels,
+			rate,
 			step,
 			bus,
 			scratch,
@@ -319,10 +328,14 @@ impl Mixer {
 		let channels = *channels;
 
 		let total = out.len() / channels;
+		// Each chunk starts as many frames past the callback's start as precede
+		// it, so a later chunk is not read as ahead of the clock by the chunks
+		// before it.
 		let mut done = 0;
 		while done < total {
 			let frames = (total - done).min(CHUNK);
 			let samples = frames * channels;
+			let now = start + Duration::from_secs_f64(done as f64 / *rate as f64);
 
 			bus[..samples].fill(0.0);
 
@@ -344,7 +357,7 @@ impl Mixer {
 				// stays on the timeline instead of queueing up and jumping when
 				// it unmutes. The status only reports under/overflow, which the
 				// channel has already corrected for.
-				let status = entry.cons.read(&mut scratch[..samples]);
+				let status = entry.cons.read_at(&mut scratch[..samples], now);
 				if !matches!(status, Read::NotReady | Read::Underflow { frames: 0 }) {
 					entry.played_at = played_at;
 				}
@@ -572,6 +585,60 @@ mod tests {
 	/// Push `frames` stereo frames of a constant sample.
 	fn push(prod: &mut ring::Producer, value: f32, frames: usize) {
 		prod.push(&vec![value; frames * STEREO]);
+	}
+
+	/// A callback longer than a chunk reads each chunk where it starts, so a
+	/// stretched sink anchored exactly on its clock stays there with nothing
+	/// to correct, rather than reading every later chunk as ahead of it.
+	#[test]
+	fn each_chunk_of_a_callback_reads_the_clock_where_it_starts() {
+		let mut harness = Harness::new(Layout::Stereo);
+		let (mut prod, mut cons) = ring::channel(
+			STEREO,
+			RATE,
+			RATE,
+			ring::Config {
+				latency: Duration::from_millis(10),
+				capacity: Duration::from_secs(2),
+				pad: false,
+				trim: false,
+				comfort: true,
+			},
+		);
+		cons.stretch(RATE);
+		harness
+			.commands
+			.send(Command::Add {
+				id: 0,
+				cons: Box::new(cons),
+				gain: Arc::new(Gain::new()),
+				completion: Arc::new(super::super::sink::Completion::new(
+					super::super::driver::Commands::default(),
+				)),
+			})
+			.unwrap();
+
+		// One read marks the sink ready, then a second of tone is due exactly
+		// as it would play from the next callback on.
+		let start = ring::host();
+		harness.mixer.fill_at(&mut [0.0; 128 * STEREO], Duration::ZERO, start);
+		let tone: Vec<f32> = (0..RATE as usize)
+			.flat_map(|i| [(i as f32 * std::f32::consts::TAU * 200.0 / RATE as f32).sin() * 0.25; STEREO])
+			.collect();
+		assert_eq!(prod.push(&tone), Push::Ok);
+		let callback = 2 * CHUNK;
+		let mut now = start + Duration::from_millis(10);
+		prod.due(now + prod.buffered(), Duration::from_secs(2));
+
+		let period = Duration::from_secs_f64(callback as f64 / RATE as f64);
+		let mut out = vec![0.0f32; callback * STEREO];
+		for _ in 0..10 {
+			harness.mixer.fill_at(&mut out, Duration::ZERO, now);
+			now += period;
+		}
+		let entry = &harness.mixer.entries[0];
+		assert_eq!(entry.cons.accelerated(), 0);
+		assert_eq!(entry.cons.skips(), 0);
 	}
 
 	#[test]

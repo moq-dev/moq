@@ -1016,6 +1016,28 @@ for (const cmaf of [false, true]) {
 	});
 }
 
+// The gate keeps what the ring does not need yet encoded in the consumer, and that audio has arrived
+// all the same, so the level the stretch steers on reaches past it.
+it("counts the audio the consumer holds encoded toward the level", async () => {
+	const received = spyOn(AudioRingBuffer.prototype, "received");
+	const playback = await play(Duration.millis(1000));
+	try {
+		await playback.play(12);
+		const reached = () => Math.max(...received.mock.calls.map(([end]) => end as number));
+		// Past everything pushed, so only the consumer's ranges can reach this far.
+		const held = frameTimestamp + 100_000;
+		playback.queued([{ start: Duration.micros(frameTimestamp), end: Duration.micros(held) }]);
+		await microtasks();
+		const before = reached();
+		playback.queued([{ start: Duration.micros(frameTimestamp), end: Duration.micros(held + 500_000) }]);
+		await microtasks();
+		expect(reached() - before).toBe(500_000);
+	} finally {
+		playback.close();
+		await microtasks();
+	}
+});
+
 describe("Decoder stalls", () => {
 	// Play a quantum, so the rendition is playing, then end it the given way and run the ring dry.
 	async function stopAfterPlaying(stop: (playback: Awaited<ReturnType<typeof play>>) => void) {
