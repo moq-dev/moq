@@ -357,7 +357,7 @@ impl Muxer {
 			&& last.duration.is_none()
 			// Quantized at the output scale like the gaps between samples, so any end gap is
 			// whole ticks; one within a tick falls back like a sample with no successor.
-			&& let Ok(Some(duration)) = timestamp_gap(last.timestamp, end, self.timescale)
+			&& let Some(duration) = timestamp_gap(last.timestamp, end, self.timescale)?
 		{
 			last.duration = Some(duration);
 		}

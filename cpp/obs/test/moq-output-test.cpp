@@ -1008,8 +1008,9 @@ int main()
 	}
 	printf("names the failure while reconnecting: ok\n");
 
-	// While the first dial keeps failing, the dock names why instead of a bare
-	// "Connecting…". The relay is gone before the start, so nothing answers.
+	// A first dial that reaches no session fails the start for good rather than
+	// retrying: nothing has ever connected, so the cause is likely setup. The relay
+	// is gone before the start, so nothing answers.
 	{
 		std::string url;
 		{
@@ -1019,21 +1020,21 @@ int main()
 		reset(url);
 		MoQOutput o(nullptr, OUTPUT);
 		CHECK(o.Start());
-		std::string reason;
-		CHECK(WaitFor([&] {
-			int code = 0;
-			o.CopyLastFailure(&code, &reason);
-			return !reason.empty();
-		}));
-		// Still retrying rather than failed, so this is the first-dial path.
-		CHECK(!o.IsLiveSession());
-		CHECK(signalCount() == 0);
-		o.Stop();
+		CHECK(WaitFor([] { return signalCount() == 1; }));
+		// Never reached the server, so OBS must not retry the endpoint.
+		CHECK(signalAt(0).code == OBS_OUTPUT_CONNECT_FAILED);
+		CHECK(signalAt(0).begin_capture_at == 1);
+		CHECK(!signalAt(0).last_error.empty());
 		int code = 0;
+		std::string reason;
 		o.CopyLastFailure(&code, &reason);
-		CHECK(reason.empty());
+		CHECK(reason == signalAt(0).last_error);
+		CHECK(!o.IsLiveSession());
+		// The failure retired the attempt, so nothing it queued can report again.
+		MoQOutputStatsTest::Drain(o);
+		CHECK(signalCount() == 1);
 	}
-	printf("names the failure while the first dial retries: ok\n");
+	printf("a failing first dial fails the start: ok\n");
 
 	// Stopping while the connect is still pending cancels it: nothing but the stop
 	// reaches OBS, then or later.

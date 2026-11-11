@@ -438,9 +438,8 @@ impl Session {
 	/// The handle passed to [`Client::with_auth`](crate::Client::with_auth), or else one
 	/// this session created for itself, which ends with it.
 	///
-	/// On moq-lite-07-wip, and on moq-transport when both sides negotiate the MoQ Auth
-	/// extension, each side presents its connection's credential right after setup.
-	/// Older versions, and peers that do not negotiate it, leave the grant `None`.
+	/// On moq-lite-07-wip each side presents its connection's credential right after setup.
+	/// Older versions and moq-transport leave the grant `None`.
 	pub fn auth(&self) -> auth::Handle {
 		self.auth.clone()
 	}

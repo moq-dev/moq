@@ -21,7 +21,7 @@ for every address, stay.
 Decided 2026-11-10 (maintainer, `/quest-import` of
 [moq-dev/moq#8451](https://github.com/moq-dev/moq/issues/8451)):
 ✅ delete the error-kind matching (rejected: keep it). AGENTS.md says never
-match on errors, and with [first-dial fail-fast](/quest/m1/reconnect-fail-fast.md)
+match on errors, and with first-dial fail-fast (`Reconnect::established`)
 a setup mistake already ends the client before any session.
 
 If what remains of `Verdict` no longer distinguishes anything the walk
@@ -41,7 +41,3 @@ update the model with the new rule.
 
 Public API: breaking (`Verdict` loses `Refused` and `Fatal`, and
 `From<&Error> for Verdict` goes). Wire: none.
-
-## Required
-
-- [A client's first dial fails fast](/quest/m1/reconnect-fail-fast.md) - the first-session rule that makes classifying errors unnecessary
