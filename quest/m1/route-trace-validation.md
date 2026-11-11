@@ -43,4 +43,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [The route model certifies claims by path](/quest/m2/cluster-routing/routes/certify-model.md) - replaces the certification rule and adds two prefixes and a scoped relay, so traces are validated against the rule that stays
+- [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - replaces who a relay believes and adds two prefixes and a scoped relay, so traces are validated against the rule that stays

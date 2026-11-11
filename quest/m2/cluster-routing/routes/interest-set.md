@@ -72,11 +72,12 @@ Work:
   that PR's first commit (`81c0698295`) did: with one stream per side nothing
   overtakes anything.
 - The model has two prefixes and a scoped relay since
-  [it certifies by path](/quest/m2/cluster-routing/routes/certify-model.md).
+  [it has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md).
   Give it edits in flight: add, remove, widen, narrow, and an edit that
   crosses a claim change, a route change, a ROUTE_END, and its echo. Keep it
-  tractable by bounding edits as it bounds flaps. Where a rule below says the
-  merge rule is unchanged, read it as that quest's rule.
+  tractable by bounding edits as it bounds flaps. Where Settled item 1 says
+  the merge rule is unchanged, read it as that quest's rule: a floor names
+  its route's prefix, and the newest floor wins among one publisher's routes.
 - In the router, `Peer::asked` and `Peer::watch` become sets with a floor and
   a synced flag per prefix, `batch` takes the prefix its floor names, and a
   neighbour is one key for both directions, as `Sim` already has it. The
@@ -102,8 +103,9 @@ Public API: none (the router is crate-private). Wire: none.
 
 ## Required
 
-- [The route model certifies claims by path](/quest/m2/cluster-routing/routes/certify-model.md) - the two prefixes and the certification rule that an edit must preserve
+- [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - the two prefixes and the rule for whose claims a relay believes, which an edit must preserve
 
 ## Related
 
-- [The router certifies claims by path](/quest/m2/cluster-routing/routes/certify.md) - rewrites how the router keeps a floor per prefix; whichever lands second adapts
+- [The router keeps a route per scope](/quest/m2/cluster-routing/routes/scope.md) - rewrites how the router keeps a floor per prefix; whichever lands second adapts
+- [Widening an interest ends no live claim](/quest/m2/cluster-routing/routes/widen-false-end.md) - a false END on an interest change today, which the edit in place may remove

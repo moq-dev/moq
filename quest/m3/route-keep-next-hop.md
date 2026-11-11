@@ -7,9 +7,9 @@ on it when another neighbour offers a route of the same rank: the same drain
 state, priority, and metric. Today the lower key wins, so a relay moves for
 nothing, and since routes name the nodes they crossed
 ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)) every relay
-downstream is sent a ROUTE_UPDATE for it. A test counts route messages for a
-link coming up beside an equal one and holds the count where it was before
-the link.
+downstream is sent a ROUTE_UPDATE for it. A test brings a link up beside an
+equal one and counts the route messages sent on every other session: none.
+The new link's own first advertisements do not count.
 
 ## Plan
 
@@ -33,8 +33,15 @@ selection.
   keep the current next hop per identity and prefer it among equals. Mirror
   it in `RouteHandoff.tla`, whose `Best` picks the lowest key, as the
   `verify-route` skill says.
+- Two routes of the same rank can still differ in whether they are
+  down-only, which decides whether an upstream neighbour is sent the route
+  at all. Stay put only among routes that agree on it, so a relay on a
+  down-only route still moves to an equal one it may export, and test that.
 - Check that every router test that names the next hop it expects still
   means what it says, rather than editing expectations to match.
+- [The prototype](/quest/m2/cluster-routing/routes/stale-copies.md) may
+  replace how a route is selected. If it has, apply this to the rule that
+  stands.
 - Measure with `Sim`'s `hop_updates` count and, if it has landed,
   `mesh_sweep.rs`'s benchmark, before and after.
 
