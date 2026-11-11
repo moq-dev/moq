@@ -1157,7 +1157,7 @@ export class Producer {
 	// Give up `[start, end)` as `hole` says, or forget it without one, billing the drop set to the
 	// track's account and dating each run against the pool's idle window. Mirrors the Rust
 	// `TrackState::change_drops`.
-	#setDrops(start: bigint, end: bigint, hole?: Hole): void {
+	#setDrops(start: bigint, end: bigint, hole?: Hole & { fill?: boolean }): void {
 		this.#state.drops.set(start, end, hole);
 		const pool = this.#account.pool;
 		const window = pool.expiryTicks;
@@ -1193,7 +1193,7 @@ export class Producer {
 			const billed = this.#dropsBilled;
 			const end = min(run.end, kept);
 			this.#setDrops(run.start, end);
-			this.#forgot([{ start: run.start, end }]);
+			if (!run.fill) this.#forgot([{ start: run.start, end }]);
 			paid += billed - this.#dropsBilled;
 		}
 		return paid;
@@ -1239,10 +1239,17 @@ export class Producer {
 			.map(({ start, end }) => ({ start, end: min(end, kept) }));
 		// In one pass: runs given up in the same quarter of the window expire together.
 		if (expired.length > 0) {
+			// A failed fill answer's run accounts nothing: the feed never delivered it.
+			const accounted = expired.flatMap(({ start, end }) =>
+				this.#state.drops
+					.overlapping(start, end)
+					.filter((run) => !run.fill)
+					.map((run) => ({ start: max(run.start, start), end: min(run.end, end) })),
+			);
 			this.#state.drops.clear(expired);
 			this.#dropsBorn.clear(expired);
 			this.#billDrops();
-			this.#forgot(expired);
+			this.#forgot(accounted);
 		}
 		this.#dropsOldest = undefined;
 		for (const run of this.#dropsBorn.all) {
@@ -1471,7 +1478,7 @@ export class Producer {
 	// also ends the groups still arriving in it with its error, so their readers settle now
 	// rather than once the stream's reset lands; one that finished here stays whole. A skip names
 	// nothing produced.
-	#drop(start: bigint, end: bigint, hole: Hole, open = false, arrives = true): Run[] {
+	#drop(start: bigint, end: bigint, hole: Hole & { fill?: boolean }, open = false): Run[] {
 		if (start >= end) return [];
 		const skipped = hole.skip ? [] : this.#state.drops.overlapping(start, end).filter((run) => run.skip);
 		let runs = runGaps(skipped, start, end);
@@ -1498,8 +1505,8 @@ export class Producer {
 		}
 		// A pending tail owes nothing the publisher gave up. A stale verdict is not receipt: new
 		// terms may supersede it, leaving those groups unknown again, as in Rust. Nor is a failed
-		// fill answer (`arrives` unset), which the feed never delivered.
-		if (hole.stale === undefined && arrives) this.#arrive(start, end);
+		// fill answer (`fill`), which the feed never delivered.
+		if (hole.stale === undefined && !hole.fill) this.#arrive(start, end);
 		// Giving up the last sequences below the end reaches it, as writing them would.
 		this.#endLargest();
 		return runs;
@@ -1913,7 +1920,11 @@ export class Producer {
 			// A re-created group already replaced this one.
 			const current = this.#cached.get(group.sequence);
 			if (current && current.group !== group) return;
-			this.#drop(group.sequence, group.sequence + 1n, { error: closed }, false, !fetched);
+			this.#drop(
+				group.sequence,
+				group.sequence + 1n,
+				fetched ? { error: closed, fill: true } : { error: closed },
+			);
 		});
 		const sequence = group.sequence;
 		if (this.#unchecked()) {

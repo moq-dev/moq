@@ -591,6 +591,27 @@ test("a forgotten stale run is asked of a fill", async () => {
 	});
 });
 
+// A failed fill answer's drop accounts nothing the feed owes, even once the pool forgets it: the gap
+// stays owed until the feed delivers it or the tail's grace passes, as Rust records no drop for it.
+test("a forgotten failed fill answer leaves its gap owed", async () => {
+	await withClock(async (clock) => {
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
+		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
+		for (const sequence of [0n, 2n]) hooks.receiveGroup(producer, { sequence, start: 0 }).finish();
+		hooks.receiveGroup(producer, { sequence: 1n, start: 0, fill: true }).abort(new Error("archive failed"));
+		hooks.endTrack(producer, { group: 3n, frame: 0 });
+		await yieldNow();
+		expect(dropsHeld(producer).length).toBe(1);
+
+		await clock.advance(3_000);
+		expect(dropsHeld(producer)).toEqual([]);
+		expect(producer.closed.peek()).toBeUndefined();
+		reader.close();
+	});
+});
+
 // A received copy that reached its end through a skip stays ended once the pool forgets the skip,
 // since the forgotten run stays accounted for. Mirrors Rust
 // `a_reached_end_outlives_its_expired_drops`.

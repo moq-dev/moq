@@ -3932,6 +3932,44 @@ mod test {
 		assert_eq!(sub.reoffer_stale(), Vec::<std::ops::Range<u64>>::new());
 	}
 
+	/// A stale run the logical record queued and has yet to report is taken back by an update
+	/// too, as a plain cursor's is: the new terms judge it anew, rather than an old verdict going
+	/// out under the new update number.
+	#[kio::test]
+	async fn a_resumed_reader_takes_back_its_queued_stale_runs() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let budget = Duration::from_secs(1);
+		let mut sub = subscribe(&logical, budget);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		a.give_up(2..3, track::Hole::stale(budget));
+		assert_eq!(dropped(&mut sub), [(2..3, StreamError::Old)]);
+
+		// The new route's stale run around the one already reported goes out in parts once the
+		// old route can no longer deliver it: the part below it first, with the rest queued.
+		let b = copy();
+		routes.serve(b.consume());
+		b.give_up(1..5, track::Hole::stale(budget));
+		write(&b, 5);
+		assert_eq!(drain(&mut sub, false), [5]);
+		kio::clock::sleep(budget).await;
+		let Poll::Ready((first, _)) = sub.poll_drop(&kio::Waiter::noop()) else {
+			panic!("the new route's stale run goes out");
+		};
+		assert_eq!(first, 1..2);
+		assert!(sub.record_mut().pending.contains_key(&3), "the rest waits its turn");
+
+		let taken: RangeSet<u64> = sub.reoffer_stale().into_iter().collect();
+		assert!(taken.contains(&3) && taken.contains(&4), "{taken:?}");
+		assert!(
+			sub.record_mut().pending.is_empty(),
+			"nothing queued goes out under the new terms"
+		);
+	}
+
 	/// A stale run one route reported is still taken back once another serves: the update
 	/// reopened it downstream, and the new route's copy knows nothing of it, so the groups it
 	/// delivers there afterwards are owed rather than kept reported.
