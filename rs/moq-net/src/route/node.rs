@@ -781,9 +781,8 @@ impl State {
 		};
 		home.keys.is_empty()
 			|| (home.keys.values()).any(|slot| {
-				(slot.confirmed.as_ref()).is_some_and(|(instance, epoch)| {
-					*instance == item.instance && *epoch == item.epoch
-				})
+				(slot.confirmed.as_ref())
+					.is_some_and(|(instance, epoch)| *instance == item.instance && *epoch == item.epoch)
 			})
 	}
 
@@ -1427,7 +1426,8 @@ mod tests {
 		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let edge = relay.answer(Link::default(), Path::empty()).unwrap();
 		outputs(&edge);
-		let claims = |read: Vec<Output>| -> Vec<(Vec<(Path, Option<Instance>)>, Option<Rev>)> {
+		type Batch = (Vec<(Path, Option<Instance>)>, Option<Rev>);
+		let claims = |read: Vec<Output>| -> Vec<Batch> {
 			(read.into_iter())
 				.filter_map(|output| match output {
 					Output::Batch { id: 1, changes, floor } => {
@@ -1445,7 +1445,10 @@ mod tests {
 		pump(&answer, &receive);
 		assert_eq!(claims(outputs(&edge)), [(vec![], None)], "held until served");
 		receive.serving(1, &p("live/x"), &claim(&old, 0));
-		assert_eq!(claims(outputs(&edge)), [(vec![(p("live/x"), Some(old.clone()))], Some(1))]);
+		assert_eq!(
+			claims(outputs(&edge)),
+			[(vec![(p("live/x"), Some(old.clone()))], Some(1))]
+		);
 
 		origin.own(p("live/x"), Some(claim(&new, 0)));
 		pump(&answer, &receive);
@@ -1457,7 +1460,10 @@ mod tests {
 		receive.serving(1, &p("live/x"), &claim(&old, 0));
 		assert_eq!(claims(outputs(&edge)), [], "a stale confirmation releases nothing");
 		receive.serving(1, &p("live/x"), &claim(&new, 0));
-		assert_eq!(claims(outputs(&edge)), [(vec![(p("live/x"), Some(new.clone()))], Some(2))]);
+		assert_eq!(
+			claims(outputs(&edge)),
+			[(vec![(p("live/x"), Some(new.clone()))], Some(2))]
+		);
 	}
 
 	#[test]
