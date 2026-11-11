@@ -26,8 +26,10 @@ Decided 2026-11-10 (maintainer, /quest-plan of the follow-ups from
 - ✅ m4, after the whole-session targets exist, since stateful targets gain
   the most from long runs.
 
-Nightly gives each of its 22 targets five minutes. That finds shallow bugs
-and replays the corpus; it rarely reaches deep states.
+Nightly gives each of its 22 codec targets five minutes and the two
+whole-session targets (`session_lite`, `session_ietf`) fifteen. That finds
+shallow bugs and replays the corpus; it rarely reaches deep states, and the
+session targets' coverage still climbs when their run ends.
 
 - The OSS-Fuzz project files (`project.yaml`, `Dockerfile`, `build.sh`) live
   in google/oss-fuzz. The build script calls `cargo fuzz build` per crate
@@ -42,10 +44,6 @@ and replays the corpus; it rarely reaches deep states.
   handled: reproduce, fix on `main`, commit the input, backport when serious.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [A hostile peer's session cannot panic, leak, or disturb another broadcast](/quest/m1/session-fuzz.md) - the stateful targets that gain most from continuous fuzzing
 
 ## Related
 

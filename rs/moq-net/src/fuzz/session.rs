@@ -449,7 +449,11 @@ impl Bystander {
 		let [c, d] = connect(client, server(), version).await;
 
 		let read = Rc::<RefCell<Vec<Vec<Bytes>>>>::default();
-		let reader = sim::spawn(read_track(subscriber.consume(), crate::Path::from_static(BYSTANDER), read.clone()));
+		let reader = sim::spawn(read_track(
+			subscriber.consume(),
+			crate::Path::from_static(BYSTANDER),
+			read.clone(),
+		));
 
 		let bystander = Self {
 			track,
@@ -480,9 +484,7 @@ impl Bystander {
 			let mut payload = sequence.to_be_bytes().repeat(8);
 			payload.push(frame);
 			let payload = Bytes::from(payload);
-			group
-				.write_frame(None, payload.clone())
-				.expect("the bystander's frame");
+			group.write_frame(None, payload.clone()).expect("the bystander's frame");
 			frames.push(payload);
 		}
 		group.finish().expect("the bystander's group finish");
@@ -557,7 +559,7 @@ struct Relay {
 /// The relay's session with the peer, and what the relay runs alongside it.
 struct Victim {
 	task: JoinHandle<()>,
-	accepted: Rc<RefCell<bool>>,
+	accepted: Rc<std::cell::Cell<bool>>,
 	held: memory::Held,
 	/// Reads every broadcast the peer announces, as the relay's other sessions would.
 	watcher: JoinHandle<()>,
@@ -608,14 +610,14 @@ impl Relay {
 			.with_subscriber(publish);
 
 		let held = transport.held();
-		let accepted = Rc::new(RefCell::new(false));
+		let accepted = Rc::new(std::cell::Cell::new(false));
 		let task = {
 			let accepted = accepted.clone();
 			sim::spawn(async move {
 				let Ok((session, driver)) = server.accept(kio::clock::now(), transport).await else {
 					return;
 				};
-				*accepted.borrow_mut() = true;
+				accepted.set(true);
 				let mut driver = driver;
 				futures::join!(
 					async move {
@@ -697,8 +699,7 @@ impl Relay {
 			sent.len(),
 		);
 
-		let accepted = *victim.accepted.borrow();
-		accepted
+		victim.accepted.get()
 	}
 }
 
@@ -770,9 +771,7 @@ fn record(version: Version, scenario: Scenario) -> Vec<Action> {
 						.create_track(TRACK, track::Info::default())
 						.expect("the client's track");
 					route.announce().expect("the client's announce");
-					let subscribed = async {
-						while let Ok(None) = track.subscription_changed().await {}
-					};
+					let subscribed = async { while let Ok(None) = track.subscription_changed().await {} };
 					let _ = kio::clock::timeout(timeout, subscribed).await;
 					let mut group = track.append_group().expect("the client's group");
 					group.write_frame(None, Bytes::from_static(b"frame")).expect("a frame");
@@ -801,8 +800,8 @@ fn record(version: Version, scenario: Scenario) -> Vec<Action> {
 		}
 
 		relay.check(victim).await;
-		let actions = std::mem::take(&mut log.lock().expect("the log").actions);
-		actions
+
+		std::mem::take(&mut log.lock().expect("the log").actions)
 	})
 }
 
@@ -905,7 +904,11 @@ impl poll::Session for Recorder {
 		None
 	}
 
-	fn send_datagram(&self, payload: Bytes, options: poll::SendOptions<'_, poll::Ungrouped>) -> Result<(), Self::Error> {
+	fn send_datagram(
+		&self,
+		payload: Bytes,
+		options: poll::SendOptions<'_, poll::Ungrouped>,
+	) -> Result<(), Self::Error> {
 		log(&self.log).push(Action::Datagram { data: payload.to_vec() });
 		self.inner.send_datagram(payload, options)
 	}
