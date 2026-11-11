@@ -1879,15 +1879,16 @@ impl Play {
 							Err(_) => return,
 						}
 					}
-					// The track stopping with its instance is that instance's end, which idles the
-					// pad for the next one rather than ending the rendition.
-					Ok(None) | Err(_) if instance.is_closed() => return,
-					// Recorded before the actor takes the next play,
-					// so a reshape on this instance does not replay it.
+					// Recorded before the actor takes the next play, so a reshape on this instance
+					// does not replay it, even when the instance closed before the end was read: the
+					// same instance announced again would hand a new subscription its last group.
 					Ok(None) => {
 						finished.insert(rendition, &shape.track, attached, false);
 						return;
 					}
+					// The track failing with its instance is that instance's end, which idles the
+					// pad for the next one rather than ending the rendition.
+					Err(_) if instance.is_closed() => return,
 					// The instance may still hand a new subscription the groups already played,
 					// such as a relay's copy cut off by its publisher's session closing.
 					Err(err) => {
@@ -4703,7 +4704,6 @@ mod session_tests {
 	/// The same sibling instance announced again resumes its state, whether or not its end reached
 	/// the follower first: a track it finished does not replay on its pad.
 	#[test]
-	#[ignore = "flaky: replayed a finished track once under host load; owned by /quest/m0/test-flakes-2/README.md"]
 	fn a_reannounced_sibling_instance_does_not_replay_its_finish() {
 		let _pad_ids = pad_ids();
 		let element = element();

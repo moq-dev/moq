@@ -43,4 +43,3 @@ ignore moq-tokio::datagram_tracks::datagram_tracks_javascript /quest/m2/cluster-
 recipe test::datagram-tracks /quest/m2/cluster-routing/routes/js.md
 
 # Flaked under a loaded `just check`; disabled until fixed at its cause.
-ignore moq-gst::source::imp::session_tests::a_reannounced_sibling_instance_does_not_replay_its_finish /quest/m0/test-flakes-2/README.md
