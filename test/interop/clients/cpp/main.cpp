@@ -30,6 +30,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -268,13 +269,20 @@ int publish(
         ok(track->finish(), "health finish");
         ok(health_route->announce(), "health announce");
         // Only teardown waits on the FIFO; linger has already completed on its own clock.
-        std::ifstream ack(finish_ack);
-        std::string line;
-        if (!std::getline(ack, line) || line != "complete" || session->state().connects != 1) {
+        // stdio, not ifstream: libc++'s filebuf fills its whole buffer, so it would wait for an EOF
+        // that never comes while this process inherits a writer of the FIFO.
+        std::FILE *ack = std::fopen(finish_ack.c_str(), "r");
+        char line[16] = {};
+        const bool complete = ack && std::fgets(line, sizeof(line), ack) && std::string_view(line) == "complete\n";
+        if (ack) {
+            std::fclose(ack);
+        }
+        if (!complete || session->state().connects != 1) {
             fail("finish acknowledgement or session continuity failed");
         }
         ok(health->close(), "health close");
         std::puts("finish acknowledged");
+        std::fflush(stdout);
     } else {
         ok(broadcast->close(), "broadcast close");
     }
