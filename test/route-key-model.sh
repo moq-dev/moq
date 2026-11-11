@@ -32,7 +32,7 @@ check() {
         local want=verified
         [[ " $breaks " != *" $lemma "* ]] || want=falsified
         [ "$result" = "$want" ] || failed+=("$name: $lemma is $result, want $want")
-    done <<< "$lemmas"
+    done <<<"$lemmas"
 }
 
 check base ""
