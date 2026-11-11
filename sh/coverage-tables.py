@@ -23,8 +23,9 @@ ITEM = r"\b(?:fn|struct|enum|trait|type|mod|const|static|union)\s+{}\b"
 # Where a type's members live: its definition, and each `impl` whose header `implements` names it.
 DEFINITION = r"\b(?:struct|enum|union|trait)\s+{}\b[^;{{]*\{{"
 IMPL = re.compile(r"\bimpl\b([^;{]*)\{")
-# A field or variant: `name: T`, `Name,`, `Name(..)`, `Name {{`, or `Name` alone.
-MEMBER = r"^\s*(?:pub(?:\([^)]*\))?\s+)?{}\s*(?::|,|\(|\{{|$)"
+# A field `name: T`, or a variant `Name,`, `Name(..)`, `Name {{`, or `Name` alone; a call such as `name(..)` is neither.
+FIELD = r"^\s*(?:pub(?:\([^)]*\))?\s+)?{}\s*:(?!:)"
+VARIANT = r"^\s*{}\s*(?:,|\(|\{{|$)"
 
 
 def rows(skill: Path):
@@ -44,7 +45,8 @@ def rows(skill: Path):
 
 def defines(source: str, name: str) -> bool:
     escaped = re.escape(name)
-    return bool(re.search(ITEM.format(escaped), source) or re.search(MEMBER.format(escaped), source, re.MULTILINE))
+    member = VARIANT if name[:1].isupper() else FIELD
+    return bool(re.search(ITEM.format(escaped), source) or re.search(member.format(escaped), source, re.MULTILINE))
 
 
 def implements(header: str) -> str:
@@ -89,14 +91,14 @@ def check(root: Path) -> list[str]:
                     path = root / token
                     if not token.endswith(".rs") or not path.is_file():
                         errors.append(f"{where}:{number}: `{token}` is not a Rust file in the tree")
-                        source = ""
+                        source = False
                     else:
                         source = path.read_text()
                     continue
                 if source is None:
                     errors.append(f"{where}:{number}: the Code cell must start with a repo-relative path")
                     break
-                if not source:
+                if source is False:
                     continue
                 segments = token.split("::")
                 for index, segment in enumerate(segments):

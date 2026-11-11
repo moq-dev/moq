@@ -12,7 +12,8 @@
 //! - unique: random single-segment paths and random two-hop chains, where no path
 //!   is shared and every START pays the two zero base/keep bytes.
 //!
-//! The hop chains travel only on lite-06; lite-07 names each claim's route instead.
+//! The hop chains travel only on lite-06; lite-07 names each claim's route instead, so
+//! its streams carry none.
 //!
 //! The byte counts print once before the timings.
 //!
@@ -109,18 +110,19 @@ fn id(seed: u64) -> u64 {
 	((z ^ (z >> 31)) & ((1 << 62) - 1)).max(1)
 }
 
+/// Start route `n`, with its hop chain only on lite-06: a lite-07 claim names its route
+/// instead, and carries a chain only when it was learned over lite-06.
+fn start(route: fn(u64) -> (Path, Vec<u64>), n: u64, compress: bool) -> Announced {
+	let (path, hops) = route(n);
+	Announced::Start(path, if compress { Vec::new() } else { hops })
+}
+
 /// Announce `routes` routes, then replace `churn` of them, oldest first.
-fn stream(routes: u64, churn: u64, route: impl Fn(u64) -> (Path, Vec<u64>)) -> Vec<Announced> {
-	let mut announced: Vec<_> = (0..routes)
-		.map(|n| {
-			let (path, hops) = route(n);
-			Announced::Start(path, hops)
-		})
-		.collect();
+fn stream(routes: u64, churn: u64, route: fn(u64) -> (Path, Vec<u64>), compress: bool) -> Vec<Announced> {
+	let mut announced: Vec<_> = (0..routes).map(|n| start(route, n, compress)).collect();
 	for n in 0..churn {
 		announced.push(Announced::End(n));
-		let (path, hops) = route(routes + n);
-		announced.push(Announced::Start(path, hops));
+		announced.push(start(route, routes + n, compress));
 	}
 	announced
 }
@@ -150,9 +152,8 @@ fn report() {
 	eprintln!("announce stream bytes (lite-06 literal -> lite-07 compressed):");
 	for (name, route) in WORKLOADS {
 		for (routes, churn) in SHAPES {
-			let announced = stream(routes, churn, route);
-			let literal = encode_announces(&announced, false).len();
-			let compressed = encode_announces(&announced, true).len();
+			let literal = encode_announces(&stream(routes, churn, route, false), false).len();
+			let compressed = encode_announces(&stream(routes, churn, route, true), true).len();
 			let starts = routes + churn;
 			eprintln!(
 				"  {name:>6} routes={routes:>5} churn={churn:>5}: {literal:>8} -> {compressed:>8} bytes, {:.1} -> {:.1} per START ({:+.0}%)",
@@ -171,17 +172,12 @@ fn bench(c: &mut Criterion) {
 		let mut group = c.benchmark_group(format!("announce_{name}"));
 
 		for routes in LIVE {
-			// A ring twice the live set, so the route started never collides with one
-			// still live.
-			let ring: Vec<_> = (0..2 * routes)
-				.map(|n| {
-					let (path, hops) = route(n);
-					Announced::Start(path, hops)
-				})
-				.collect();
 			group.throughput(Throughput::Elements(2));
 
 			for compress in [false, true] {
+				// A ring twice the live set, so the route started never collides with one
+				// still live.
+				let ring: Vec<_> = (0..2 * routes).map(|n| start(route, n, compress)).collect();
 				let version = if compress { "lite07" } else { "lite06" };
 				group.bench_function(BenchmarkId::new(format!("churn_{version}"), routes), |b| {
 					let mut writer = AnnounceWriter::new(compress);
@@ -201,9 +197,9 @@ fn bench(c: &mut Criterion) {
 		}
 
 		for (routes, churn) in SHAPES {
-			let announced = stream(routes, churn, route);
-			group.throughput(Throughput::Elements(announced.len() as u64));
 			for compress in [false, true] {
+				let announced = stream(routes, churn, route, compress);
+				group.throughput(Throughput::Elements(announced.len() as u64));
 				let version = if compress { "lite07" } else { "lite06" };
 				let encoded = encode_announces(&announced, compress);
 				group.bench_with_input(

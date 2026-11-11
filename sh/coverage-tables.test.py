@@ -81,6 +81,14 @@ class CoverageTablesTests(unittest.TestCase):
         self.write(".claude/skills/verify-x/SKILL.md", SKILL.replace("`src/lib.rs` `Reader", "`Reader"))
         self.assertIn("must start with a repo-relative path", self.check().stderr)
 
+    def test_a_call_is_not_a_definition(self):
+        self.write("src/lib.rs", SOURCE.replace("pub fn sync(&mut self) {}", "pub fn other(&mut self) {\n        sync();\n    }"))
+        self.assertIn("`Reader::sync`: no `sync` defined", self.check().stderr)
+
+    def test_an_empty_file_fails(self):
+        self.write("src/other.rs", "")
+        self.assertIn("`run`: no `run` defined", self.check().stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

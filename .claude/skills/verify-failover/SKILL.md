@@ -46,7 +46,7 @@ A counterexample is a path through the model, not yet a bug. Replay it on the re
 
 ## Coverage
 
-Sync commit: `88572c583e2f64c7f5fc9bfa59df90706308497e`. Run `git log 88572c583e.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `88572c583e2f64c7f5fc9bfa59df90706308497e`. Run `git log 88572c583e.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs rs/moq-net/src/model/track.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
 
 | Code | Model |
 | --- | --- |

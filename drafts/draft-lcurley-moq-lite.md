@@ -38,6 +38,7 @@ normative:
 
 informative:
   I-D.lcurley-moq-cluster:
+  RFC7627:
   RFC8966:
   moqflate:
     title: "DEFLATE Compressed Tracks for MoQ"
@@ -1091,8 +1092,10 @@ The sender's Ed25519 public key.
 The key's Ed25519 signature over the ASCII bytes `moq-lite route key`, then one byte naming the sender's side of the session (0 for the client, 1 for the server), then 32 bytes of keying material exported from the session with the label `EXPORTER-moq-lite-route-key` and an empty context.
 
 Binding 1 exports with the TLS exporter (Section 7.5 of [RFC8446]), and binding 2 with the WebTransport session's exporter [webtrans-h3] (see [Transports](#transports)).
-An endpoint MUST NOT send the parameter on a session that provides no exporter.
-The exported material and the sender's side keep a proof from being replayed on another session or reflected back to its sender.
+The exporter MUST yield material that only the session's two endpoints know and no other session shares.
+TLS 1.3's exporter provides this, after resumption too; its early exporter does not, since a replayed 0-RTT ClientHello reproduces it on another connection, nor does TLS 1.2 without the extended master secret [RFC7627], which lets an attacker give two of its sessions one secret.
+An endpoint MUST NOT send the parameter on a session that provides no such exporter.
+The exported material and the sender's side keep a proof from being replayed on another session, relayed by an attacker or an intermediary that terminates TLS, or reflected back to its sender.
 
 Either endpoint MAY send it. A receiver MUST close the session with a PROTOCOL_VIOLATION if the value is not 96 bytes.
 A receiver that relies on the key MUST verify the signature first, closing the session with a PROTOCOL_VIOLATION if it does not verify; without an exporter on the session, it cannot rely on the key.
