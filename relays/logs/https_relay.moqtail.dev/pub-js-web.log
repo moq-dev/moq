@@ -1,18 +1,29 @@
-publishing smoke-js-web-4248-13498.hang (fake camera, vite) to https://relay.moqtail.dev
+publishing smoke-js-web-4246-22632.hang (fake camera, vite) to https://relay.moqtail.dev
 [page] negotiated protocol: moqt-22
+[page] announced: broadcast=dogtail/groups/za811a30 active=true
+[page] announced: broadcast=dogtail/falcon-582/z3bea8c2 active=true
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=moqtail/ch07_all active=true
+[page] announced: broadcast=dogtail/demo/zef92ed1 active=true
 [page] announced: broadcast=moqtail/ch06 active=true
+[page] announced: broadcast=moqtail/ch00 active=true
+[page] announced: broadcast=dogtail/demo/zef92ed2 active=true
+[page] announced: broadcast=moqtail/ch07_all active=true
+[page] announced: broadcast=dogtail/falcon-582/z3bea8c1 active=true
+[page] announced: broadcast=dogtail/falcon-582/3bea8c active=true
 [page] announced: broadcast=moqtail/ch07_vod active=true
-[page] announced: broadcast=moqtail/ch07 active=true
-[page] announced: broadcast=moqtail/ch02 active=true
+[page] announced: broadcast=dogtail/groups/a811a3 active=true
 [page] announced: broadcast=moqtail/testsrc active=true
-[page] announced: broadcast=moqtail/ch03 active=true
+[page] announced: broadcast=dogtail/test/728fe4 active=true
 [page] announced: broadcast=moqtail/ch01 active=true
 [page] announced: broadcast=moqtail/ch00_all active=true
+[page] announced: broadcast=dogtail/demo/zef92ed0 active=true
+[page] announced: broadcast=dogtail/demo/ef92ed active=true
+[page] announced: broadcast=dogtail/falcon-582/z3bea8c0 active=true
+[page] announced: broadcast=moqtail/ch03 active=true
 [page] announced: broadcast=moqtail/ch04 active=true
+[page] announced: broadcast=moqtail/ch07 active=true
+[page] announced: broadcast=moqtail/ch02 active=true
 [page] announced: broadcast=moqtail/ch05 active=true
-[page] announced: broadcast=moqtail/ch00 active=true
-[page] publish ok: broadcast=smoke-js-web-4248-13498.hang track=catalog.json
-[page] publish done: broadcast=smoke-js-web-4248-13498.hang track=catalog.json
-[page] publish error: broadcast=smoke-js-web-4248-13498.hang track=catalog.json error=remote error: 0
+[page] publish ok: broadcast=smoke-js-web-4246-22632.hang track=catalog.json
+[page] publish done: broadcast=smoke-js-web-4246-22632.hang track=catalog.json
+[page] publish error: broadcast=smoke-js-web-4246-22632.hang track=catalog.json error=remote error: 0

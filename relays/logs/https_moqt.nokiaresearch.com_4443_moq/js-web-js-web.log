@@ -1,14 +1,11 @@
-[page] negotiated protocol: moqt-22
-[page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=demo active=true
-[page] announced: broadcast=video active=true
-[page] announced: broadcast=simulcast active=true
-[page] announced: broadcast=smoke-js-web-4248-7195.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4248-7195.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-js-web-4248-7195.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4248-7195.hang track=catalog.json
-[page] received catalog hang smoke-js-web-4248-7195.hang {video: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-js-web-4248-7195.hang track=video
-[page] subscribe written: id=4 broadcast=smoke-js-web-4248-7195.hang track=video
-[page] subscribe ok: id=4 broadcast=smoke-js-web-4248-7195.hang track=video
-decoded 3 frames from smoke-js-web-4248-7195.hang (vite)
+[page] Failed to establish a connection to https://moqt.nokiaresearch.com:4443/moq: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002097us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] connection error: AggregateError: All promises were rejected
+[page] Failed to establish a connection to https://moqt.nokiaresearch.com:4443/moq: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001862us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] connection error: AggregateError: All promises were rejected
+[page] Failed to establish a connection to https://moqt.nokiaresearch.com:4443/moq: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002612us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] connection error: AggregateError: All promises were rejected
+[page] Failed to establish a connection to https://moqt.nokiaresearch.com:4443/moq: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002585us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] connection error: AggregateError: All promises were rejected
+[page] Failed to establish a connection to https://moqt.nokiaresearch.com:4443/moq: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002589us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] connection error: AggregateError: All promises were rejected
+decoded 0 frames from smoke-js-web-4246-15118.hang (vite)

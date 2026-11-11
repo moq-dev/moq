@@ -2,22 +2,22 @@ https://aiomoqt-relay.marzresearch.net:4443/ connected via WebTransport
 https://aiomoqt-relay.marzresearch.net:4443/ negotiated ALPN: moqt-22
 connected version=moq-transport-22
 subscribe_namespace written: requestId=0
-announced: broadcast=smoke-rust-4248-8164.hang active=true
-subscribe start: id=2 broadcast=smoke-rust-4248-8164.hang track=catalog.json
+announced: broadcast=smoke-rust-4246-29041.hang active=true
+subscribe start: id=2 broadcast=smoke-rust-4246-29041.hang track=catalog.json
 announced: broadcast=gm/abr/src active=true
-announced: broadcast=gm/abr/cmaf active=true
 announced: broadcast=gm/abr/cymedia active=true
-subscribe written: id=2 broadcast=smoke-rust-4248-8164.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-rust-4248-8164.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-rust-4248-8164.hang track=0.avc3
-subscribe written: id=4 broadcast=smoke-rust-4248-8164.hang track=0.avc3
-subscribe ok: id=4 broadcast=smoke-rust-4248-8164.hang track=0.avc3
-received 6709 bytes from smoke-rust-4248-8164.hang
+announced: broadcast=gm/abr/cmaf active=true
+subscribe written: id=2 broadcast=smoke-rust-4246-29041.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-rust-4246-29041.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-rust-4246-29041.hang track=0.avc3
+subscribe written: id=4 broadcast=smoke-rust-4246-29041.hang track=0.avc3
+subscribe ok: id=4 broadcast=smoke-rust-4246-29041.hang track=0.avc3
+received 6709 bytes from smoke-rust-4246-29041.hang
 subscribe_namespace error: connection error: closed (source=session)
-announced: broadcast=smoke-rust-4248-8164.hang active=false
+announced: broadcast=smoke-rust-4246-29041.hang active=false
 announced: broadcast=gm/abr/src active=false
-announced: broadcast=gm/abr/cmaf active=false
 announced: broadcast=gm/abr/cymedia active=false
+announced: broadcast=gm/abr/cmaf active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
@@ -51,5 +51,5 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=2 broadcast=smoke-rust-4248-8164.hang track=catalog.json error=remote error: 0 (connection error: closed)
-subscribe error: id=4 broadcast=smoke-rust-4248-8164.hang track=0.avc3 error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-rust-4246-29041.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-rust-4246-29041.hang track=0.avc3 error=remote error: 0 (connection error: closed)
