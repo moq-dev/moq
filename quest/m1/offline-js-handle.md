@@ -36,4 +36,3 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A scoped cursor reports a lost route as offline when a broader route takes over](/quest/m1/offline-cursor-fallback.md) - the same misreport in the Rust cursor

@@ -1754,7 +1754,7 @@ impl TableCursor {
 						self.under.rejoin(presented),
 						previous.meta,
 						previous.captures,
-						Gone::End,
+						gone,
 					);
 					state.apply_announce(self.under.rejoin(presented), meta, captures);
 				}
@@ -10398,6 +10398,26 @@ mod tests {
 		};
 		assert_eq!(replacement.prefix.as_str(), "");
 		assert_eq!(replacement.captures, None);
+	}
+
+	/// A forwarded route lost with its session retracts its identity as offline,
+	/// even when a broader route takes over the presented prefix.
+	#[kio::test]
+	async fn capture_change_reports_a_lost_route_offline() {
+		let producer = origin(1).produce();
+		let _broad = producer.announce("room", RouteInfo::new()).unwrap();
+		let exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
+		let mut announced = producer
+			.consume()
+			.scope("room/alice", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.covering()
+			.routes();
+		announced.expect_next_active("").await;
+
+		drop(exact);
+		announced.expect_next_offline("").await;
+		announced.expect_next_active("").await;
 	}
 
 	#[test]
