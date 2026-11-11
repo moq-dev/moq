@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.23](https://github.com/moq-dev/moq/compare/moq-net-v0.3.22...moq-net-v0.3.23) - 2026-11-11
+
+### Fixed
+
+- *(net)* a refused replacement never ends a track a withdrawn copy still feeds
+
+### Other
+
+- *(net)* cover a refused replacement attached over a live serving copy
+
 ## [0.3.22](https://github.com/moq-dev/moq/compare/moq-net-v0.3.21...moq-net-v0.3.22) - 2026-11-08
 
 ### Fixed

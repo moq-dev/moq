@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.36](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.35...moq-tokio-v0.19.36) - 2026-11-11
+
+### Fixed
+
+- *(net)* GOAWAY local check decodes every IPv4 spelling (backport)
+
 ## [0.19.35](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.34...moq-tokio-v0.19.35) - 2026-11-08
 
 ### Other
