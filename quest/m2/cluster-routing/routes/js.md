@@ -49,7 +49,7 @@ the cheapest one; fix it with the route-selection rework here.
 - The Announce Stream becomes one one-way stream per side with a set of
   prefixes ([the route stream](/quest/m2/cluster-routing/routes/route-stream.md)).
   Whichever of the two lands second adapts: JS then shares one stream across
-  its `announced()` calls, with the covering-prefix logic Rust's `Discovery`
+  its `routes()` calls, with the covering-prefix logic Rust's `Discovery`
   has, instead of one stream per call.
 
 ## Related

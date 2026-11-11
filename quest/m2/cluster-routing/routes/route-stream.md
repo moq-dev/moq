@@ -9,7 +9,7 @@ peer's prefixes, its ROUTE_END echoes, and its route requests. No routing
 message can overtake another, so production is the route model's one FIFO per
 direction by construction, and a ROUTE_END echo always arrives behind the
 routes its sender sent first. A change of token scope edits the prefix set
-instead of reopening a request. `announced()` keeps its API in Rust and JS,
+instead of reopening a request. `announced()` in Rust and `routes()` in JS keep their APIs,
 and lite-06 and older and moq-transport are untouched.
 
 ## Plan
@@ -94,8 +94,8 @@ Code this replaces, for lite-07 only:
 - `Routed` (`lite/subscriber/routed.rs`) and `Answer`
   (`lite/publisher/routed.rs`) become one per session, holding the prefixes.
   `Answer` already reads several node streams (one per mount).
-- `route::Node` registers one neighbour per session for both directions.
-- `js/net`: each `announced()` call opens its own stream today
+- `route::Node` registers one neighbour per session for both directions. Today `receive` and `answer` each take a fresh key (`route/node.rs`), so one session is two neighbours in the router; the interest set makes the router accept one key for both and this makes the sessions use it.
+- `js/net`: each `routes()` call opens its own stream today
   (`js/net/src/lite/subscriber.ts`), so JS gains the covering-prefix logic
   `Discovery` has. [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443)
   ports the route layer with per-stream state; whichever lands second

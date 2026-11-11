@@ -91,8 +91,11 @@ Work:
 - Update the `verify-route` skill's coverage table, its "Not covered" list,
   and its sync commit.
 
-The session layer keeps one prefix per neighbour until the route stream
-lands, so this changes no behaviour on its own.
+The session layer keeps one prefix per neighbour, and `route::Node` keeps
+registering each announce stream under its own key, until the route stream
+lands. The router here only gains the ability to hold both directions under
+one key, which `Sim` and the tests use, so this changes no behaviour on its
+own.
 
 Public API: none (the router is crate-private). Wire: none.
 
