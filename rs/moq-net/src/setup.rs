@@ -206,7 +206,18 @@ impl Client {
 			.find(|v| supported.contains(v));
 		match version {
 			Some(Version::Lite(version)) => Ok(version),
-			_ => Err(crate::Error::Version),
+			_ => {
+				// The client only learns that the session closed, so this is the one place
+				// that can name both sides of the mismatch.
+				let offered: Vec<String> = self
+					.versions
+					.iter()
+					.map(|v| Version::try_from(*v).map_or_else(|_| format!("{v:?}"), |v| v.to_string()))
+					.collect();
+				let accepted: Vec<String> = supported.iter().map(ToString::to_string).collect();
+				tracing::warn!(?offered, ?accepted, "client shares no MoQ version with this server");
+				Err(crate::Error::Version)
+			}
 		}
 	}
 }

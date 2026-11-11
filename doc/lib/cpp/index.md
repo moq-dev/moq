@@ -255,7 +255,7 @@ Set `ClientConfig::tokens` instead of putting the credential in the URL. The fir
 
 ## Stats
 
-`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its first-dial failures and reconnects; independent watchers keep their own revisions.
+`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its reconnects (a first dial that reaches no session ends the session with that error rather than retrying); independent watchers keep their own revisions.
 
 ## Shutdown
 

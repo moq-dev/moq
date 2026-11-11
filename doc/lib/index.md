@@ -66,7 +66,7 @@ The wrapped bindings share one feature set, so the language pages only show
 how it looks in that language:
 
 - **Connect** to a relay with TLS options and a JWT in the URL, or **serve** sessions yourself and accept or reject each request by path.
-- **Reconnect** automatically with backoff when the transport drops.
+- **Reconnect** automatically with backoff when the transport drops. The first dial fails fast instead: a relay that never answered with a session ends the connection with its error, for the app to retry.
 - **Discover** broadcasts by prefix, wait for a specific one, or request one by path. Advertise an exact path (a created broadcast is invisible until announced), or claim a prefix and serve requests beneath it on demand.
 - **Publish and subscribe to media** with the hang catalog filled in from the bitstream, or hand over raw pixels and PCM and let the binding encode and decode (VideoToolbox, Media Foundation, NVENC, openh264, Opus). The built-in video encoder can follow the connection's send estimate. The audio decoder reports the playout delay to buffer ahead of the playhead, fixed or estimated from arrivals, so read each frame as soon as the last is handled rather than pacing reads to the speaker.
 - **Raw stream tracks** of arbitrary bytes, with per-subscriber priority and max delay, and separate live datagram tracks without groups or caching.

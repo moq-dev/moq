@@ -7243,12 +7243,13 @@ async fn wait_phase(
 	Ok(state)
 }
 
-/// The session exposes repeated first-dial failures even after its Client is released.
+/// A failing first dial ends the session with its error, even after its Client is released,
+/// rather than retrying: nothing has ever connected, so the cause is likely setup.
 #[tokio::test]
 async fn session_state_names_a_failing_first_dial() {
 	let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
 	let addr = silent.local_addr().unwrap();
-	let client = MoqClient::new(MoqClientConfig {
+	let config = || MoqClientConfig {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
 		timeout: Some(Duration::from_millis(100)),
@@ -7258,26 +7259,31 @@ async fn session_state_names_a_failing_first_dial() {
 		},
 		backoff: fast_backoff(),
 		..Default::default()
-	})
-	.unwrap();
+	};
+	let client = MoqClient::new(config()).unwrap();
 	let session = client.connect(format!("https://{addr}")).await.unwrap();
-	let mut state = session.state();
+	let state = session.state();
 	assert!(matches!(state.phase, MoqConnectionPhase::Connecting { .. }));
 	assert_eq!(state.connects, 0);
 	drop(client);
-	for _ in 0..2 {
-		state = kio::clock::timeout(TIMEOUT, session.state_changed(state.revision))
-			.await
-			.unwrap()
-			.unwrap();
-		assert!(matches!(
+	let state = kio::clock::timeout(TIMEOUT, session.state_changed(state.revision))
+		.await
+		.unwrap()
+		.unwrap();
+	assert!(
+		matches!(
 			state.phase,
-			MoqConnectionPhase::Connecting {
+			MoqConnectionPhase::Closed {
 				failure: Some(MoqError::Connect { .. })
 			}
-		));
-		assert_eq!(state.connects, 0);
-	}
+		),
+		"{:?}",
+		state.phase
+	);
+	assert_eq!(state.connects, 0);
+	assert!(matches!(session.closed().await, Err(MoqError::Connect { .. })));
+
+	// The accepting side of a session reports its own lifecycle.
 	drop(silent);
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some(addr.to_string()),
@@ -7286,6 +7292,8 @@ async fn session_state_names_a_failing_first_dial() {
 	})
 	.unwrap();
 	server.listen().await.unwrap();
+	let client = MoqClient::new(config()).unwrap();
+	let session = client.connect(format!("https://{addr}")).await.unwrap();
 	let request = server.accept().await.unwrap().unwrap();
 	let accepted = request.accept(None, None).await.unwrap();
 	let connected = kio::clock::timeout(
