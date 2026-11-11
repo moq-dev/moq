@@ -4,23 +4,23 @@ Running interop tests...
   Relay:  ghcr.io/englishm/moq-interop-runner-imquic-moq-relay:latest
   Client: ghcr.io/englishm/moq-interop-runner-moq-dev-js-client:latest
   URL:    https://relay:4443
-time="2026-11-11T13:07:10Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-11T13:07:10Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-11T13:07:10Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-11T13:07:10Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-11-11T13:07:10Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-11T16:15:28Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-11T16:15:28Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-11T16:15:28Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-11T16:15:28Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-11T16:15:28Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-relay-1 Recreate 
  Container runner-upstream-relay-1 Recreated 
  Container runner-upstream-test-client-1 Recreate 
  Container runner-upstream-test-client-1 Recreated 
 Attaching to relay-1, test-client-1
  Container runner-upstream-relay-1 Starting 
+ Container runner-upstream-relay-1 Started 
+ Container runner-upstream-relay-1 Waiting 
 relay-1  | Starting imquic-moq-relay on port 4443
 relay-1  |   Cert: /certs/cert.pem
 relay-1  |   Key:  /certs/priv.key
 relay-1  |   Mlog: /mlog
- Container runner-upstream-relay-1 Started 
- Container runner-upstream-relay-1 Waiting 
 relay-1  | imquic version 0.0.3/alpha
 relay-1  |   -- 55fec0e977f2a39b5f9bf4e236686a7a44d1853f (commit hash)
 relay-1  |   -- Fri Nov  6 22:43:55 UTC 2026 (build time)
@@ -56,7 +56,7 @@ test-client-1  | TAP version 14
 test-client-1  | # moq-dev-js-client v0.1.0 (@moq/net 0.4.7)
 test-client-1  | # Relay: https://relay:4443
 test-client-1  | 1..8
-relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/1] Error opening QLOG file '/mlog/861501fa5a957e6fb9c94099cd60160137868c04.server.imquic.sqlog' for writing: 13 (Permission denied)
+relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/1] Error opening QLOG file '/mlog/17d73738cabd5d0c22089aedf9c09487cef6099c.server.imquic.sqlog' for writing: 13 (Permission denied)
 relay-1        | [moq-relay/1] Connection established (ALPN=h3)
 relay-1        | [moq-relay/1] New MoQ connection (configuring parameters)
 relay-1        | [moq-relay/1]   -- WebTransport (moqt-22)
@@ -73,9 +73,9 @@ relay-1        | [moq-relay/1] Connection closed by peer: 91141958510811 (no rea
 relay-1        | [moq-relay/1] MoQ connection gone
 test-client-1  | ok 1 - setup-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 136
+test-client-1  |   duration_ms: 210
 test-client-1  |   ...
-relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/2] Error opening QLOG file '/mlog/9ab879922f8e8b27bf1d1b1cb192e3909d53a69e.server.imquic.sqlog' for writing: 13 (Permission denied)
+relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/2] Error opening QLOG file '/mlog/8f82652e3c171a3bf7065d92c25484e0d880928f.server.imquic.sqlog' for writing: 13 (Permission denied)
 relay-1        | [moq-relay/2] Connection established (ALPN=h3)
 relay-1        | [moq-relay/2] New MoQ connection (configuring parameters)
 relay-1        | [moq-relay/2]   -- WebTransport (moqt-22)
@@ -95,9 +95,9 @@ relay-1        | Removing publisher 'moq-relay/2'
 relay-1        | Removing namespace 'moq.2dtest-interop'
 test-client-1  | ok 2 - announce-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 608
+test-client-1  |   duration_ms: 610
 test-client-1  |   ...
-relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/3] Error opening QLOG file '/mlog/f86ed4c73e17f6ebc235104141233e64cfef6cd3.server.imquic.sqlog' for writing: 13 (Permission denied)
+relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/3] Error opening QLOG file '/mlog/36942ae293a59d86956565b001df940262039b5a.server.imquic.sqlog' for writing: 13 (Permission denied)
 relay-1        | [moq-relay/3] Connection established (ALPN=h3)
 relay-1        | [moq-relay/3] New MoQ connection (configuring parameters)
 relay-1        | [moq-relay/3]   -- WebTransport (moqt-22)
@@ -121,9 +121,9 @@ relay-1        | [moq-relay/3] MoQ connection gone
 relay-1        | Removing publisher 'moq-relay/3'
 test-client-1  | ok 3 - publish-namespace-done
 test-client-1  |   ---
-test-client-1  |   duration_ms: 806
+test-client-1  |   duration_ms: 808
 test-client-1  |   ...
-relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/4] Error opening QLOG file '/mlog/cd0e2db22835689b126033bfd766afc2e4e7f017.server.imquic.sqlog' for writing: 13 (Permission denied)
+relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/4] Error opening QLOG file '/mlog/988228fb78f1356af08f07794cde0f5f82cc7aba.server.imquic.sqlog' for writing: 13 (Permission denied)
 relay-1        | [moq-relay/4] Connection established (ALPN=h3)
 relay-1        | [moq-relay/4] New MoQ connection (configuring parameters)
 relay-1        | [moq-relay/4]   -- WebTransport (moqt-22)
@@ -136,11 +136,11 @@ relay-1        | [33m[WARN][0m [moq-relay/4][MoQ] Unsupported parameter '26505
 relay-1        | [moq-relay/4] MoQ connection ready
 relay-1        | [moq-relay/4]   -- draft-ietf-moq-transport-22
 relay-1        | [moq-relay/4]   -- moq-lite-js
-relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/5] Error opening QLOG file '/mlog/63223ef8d582dd2c45d731f0d4558b3be0b73fbe.server.imquic.sqlog' for writing: 13 (Permission denied)
-relay-1        | [moq-relay/5] Connection established (ALPN=h3)
 test-client-1  | subscribe_namespace written: requestId=0
-relay-1        | [moq-relay/4] Incoming subscribe for namespace prefix 'moq.2dtest-interop-subscribe.2dnamespace.2dlifecycle-45fc15dce82755cfdd7d76a7c8dba7ab'
+relay-1        | [moq-relay/4] Incoming subscribe for namespace prefix 'moq.2dtest-interop-subscribe.2dnamespace.2dlifecycle-84b65cb64062caab93b176fab7cd069e'
 relay-1        | [moq-relay/4]   -- Subscriber wants to know about 'NAMESPACE'
+relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/5] Error opening QLOG file '/mlog/f5500a3848bc3445d1e4931260e9833705ef3b8b.server.imquic.sqlog' for writing: 13 (Permission denied)
+relay-1        | [moq-relay/5] Connection established (ALPN=h3)
 relay-1        | [moq-relay/5] New MoQ connection (configuring parameters)
 relay-1        | [moq-relay/5]   -- WebTransport (moqt-22)
 relay-1        | [moq-relay/5] Waiting for MoQ connection to be ready (SETUP)...
@@ -152,18 +152,18 @@ relay-1        | [33m[WARN][0m [moq-relay/5][MoQ] Unsupported parameter '26505
 relay-1        | [moq-relay/5] MoQ connection ready
 relay-1        | [moq-relay/5]   -- draft-ietf-moq-transport-22
 relay-1        | [moq-relay/5]   -- moq-lite-js
-relay-1        | [moq-relay/5] Incoming published namespace: 'moq.2dtest-interop-subscribe.2dnamespace.2dlifecycle-45fc15dce82755cfdd7d76a7c8dba7ab'
-relay-1        | [moq-relay/5] New namespace 'moq.2dtest-interop-subscribe.2dnamespace.2dlifecycle-45fc15dce82755cfdd7d76a7c8dba7ab' matches 1 monitors
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/45fc15dce82755cfdd7d76a7c8dba7ab active=true
+relay-1        | [moq-relay/5] Incoming published namespace: 'moq.2dtest-interop-subscribe.2dnamespace.2dlifecycle-84b65cb64062caab93b176fab7cd069e'
+relay-1        | [moq-relay/5] New namespace 'moq.2dtest-interop-subscribe.2dnamespace.2dlifecycle-84b65cb64062caab93b176fab7cd069e' matches 1 monitors
+test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/84b65cb64062caab93b176fab7cd069e active=true
 relay-1        | [moq-relay/5] Stream 4 has been reset by the peer
 relay-1        | [moq-relay/5][MoQ] Got RESET_STREAM for STREAM 4: 91141958510811 ((null))
 relay-1        | [moq-relay/5][MoQ]   -- Getting rid of PUBLISH_NAMESPACE '0'
 relay-1        | [moq-relay/5] Publish Namespace done: 0
-relay-1        | [moq-relay/5] Done namespace 'moq.2dtest-interop-subscribe.2dnamespace.2dlifecycle-45fc15dce82755cfdd7d76a7c8dba7ab' matches 1 monitors
-relay-1        | Removing namespace 'moq.2dtest-interop-subscribe.2dnamespace.2dlifecycle-45fc15dce82755cfdd7d76a7c8dba7ab'
-relay-1        | [moq-relay/5] Done namespace 'moq.2dtest-interop-subscribe.2dnamespace.2dlifecycle-45fc15dce82755cfdd7d76a7c8dba7ab' matches 1 monitors
+relay-1        | [moq-relay/5] Done namespace 'moq.2dtest-interop-subscribe.2dnamespace.2dlifecycle-84b65cb64062caab93b176fab7cd069e' matches 1 monitors
+relay-1        | Removing namespace 'moq.2dtest-interop-subscribe.2dnamespace.2dlifecycle-84b65cb64062caab93b176fab7cd069e'
+relay-1        | [moq-relay/5] Done namespace 'moq.2dtest-interop-subscribe.2dnamespace.2dlifecycle-84b65cb64062caab93b176fab7cd069e' matches 1 monitors
 relay-1        | [33m[WARN][0m [moq-relay/4][MoQ] Namespace '' not known, or notified already
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/45fc15dce82755cfdd7d76a7c8dba7ab active=false
+test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/84b65cb64062caab93b176fab7cd069e active=false
 relay-1        | [moq-relay/4][MoQ]   -- Getting rid of SUBSCRIBE_NAMESPACE '0'
 relay-1        | [moq-relay/4] Incoming unsubscribe for namespace via ID 0
 relay-1        | [moq-relay/5] Connection closed by peer: 91141958510811 (no reason)
@@ -173,10 +173,10 @@ relay-1        | [moq-relay/4] Connection closed by peer: 91141958510811 (no rea
 relay-1        | [moq-relay/4] MoQ connection gone
 test-client-1  | ok 4 - subscribe-namespace-lifecycle
 test-client-1  |   ---
-test-client-1  |   duration_ms: 216
+test-client-1  |   duration_ms: 217
 test-client-1  |   test_spec_revision: 1
 test-client-1  |   ...
-relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/6] Error opening QLOG file '/mlog/d41f9a917d6a6013fe87a18113745e62cf390a86.server.imquic.sqlog' for writing: 13 (Permission denied)
+relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/6] Error opening QLOG file '/mlog/5400db15d6299afce4f170b7fd31d5b675bedb24.server.imquic.sqlog' for writing: 13 (Permission denied)
 relay-1        | [moq-relay/6] Connection established (ALPN=h3)
 relay-1        | [moq-relay/6] New MoQ connection (configuring parameters)
 relay-1        | [moq-relay/6]   -- WebTransport (moqt-22)
@@ -191,11 +191,11 @@ relay-1        | [moq-relay/6]   -- draft-ietf-moq-transport-22
 relay-1        | [moq-relay/6]   -- moq-lite-js
 test-client-1  | subscribe start: id=2 broadcast=nonexistent/namespace track=test-track
 test-client-1  | subscribe_namespace written: requestId=0
-test-client-1  | subscribe written: id=2 broadcast=nonexistent/namespace track=test-track
 relay-1        | [moq-relay/6] Incoming subscribe for namespace prefix ''
 relay-1        | [moq-relay/6]   -- Subscriber wants to know about 'NAMESPACE'
 relay-1        | [moq-relay/6] Incoming subscribe for 'nonexistent-namespace--test.2dtrack' (ID 2)
 relay-1        | [33m[WARN][0m [moq-relay/6] Namespace not found
+test-client-1  | subscribe written: id=2 broadcast=nonexistent/namespace track=test-track
 test-client-1  | subscribe error: id=2 broadcast=nonexistent/namespace track=test-track error=SUBSCRIBE error: does_not_exist (code=16) Namespace not found
 relay-1        | [moq-relay/6] Stream 8 has been reset by the peer
 relay-1        | [33m[WARN][0m [moq-relay/6][MoQ] Got RESET_STREAM for unknown STREAM 8: 91141958510811 ((null))
@@ -218,9 +218,9 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 5 - subscribe-error
 test-client-1  |   ---
-test-client-1  |   duration_ms: 411
+test-client-1  |   duration_ms: 416
 test-client-1  |   ...
-relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/7] Error opening QLOG file '/mlog/f73f02fec56067d5a86e6e57a1cc786c8c7cb94b.server.imquic.sqlog' for writing: 13 (Permission denied)
+relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/7] Error opening QLOG file '/mlog/c8edeaefce24f4692cf649cbb037f0752e49dbe4.server.imquic.sqlog' for writing: 13 (Permission denied)
 relay-1        | [moq-relay/7] Connection established (ALPN=h3)
 relay-1        | [moq-relay/7] New MoQ connection (configuring parameters)
 relay-1        | [moq-relay/7]   -- WebTransport (moqt-22)
@@ -234,7 +234,7 @@ relay-1        | [moq-relay/7] MoQ connection ready
 relay-1        | [moq-relay/7]   -- draft-ietf-moq-transport-22
 relay-1        | [moq-relay/7]   -- moq-lite-js
 relay-1        | [moq-relay/7] Incoming published namespace: 'moq.2dtest-interop'
-relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/8] Error opening QLOG file '/mlog/c0de890f4b222dd84d9a689ed525cc32bf503ed6.server.imquic.sqlog' for writing: 13 (Permission denied)
+relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/8] Error opening QLOG file '/mlog/7f85289b0beb55a577b5367389f31a686e65743a.server.imquic.sqlog' for writing: 13 (Permission denied)
 relay-1        | [moq-relay/8] Connection established (ALPN=h3)
 relay-1        | [moq-relay/8] New MoQ connection (configuring parameters)
 relay-1        | [moq-relay/8]   -- WebTransport (moqt-22)
@@ -252,10 +252,10 @@ relay-1        | [moq-relay/8] Incoming subscribe for namespace prefix ''
 relay-1        | [moq-relay/8]   -- Subscriber wants to know about 'NAMESPACE'
 test-client-1  | not ok 6 - announce-subscribe
 test-client-1  |   ---
-test-client-1  |   duration_ms: 1809
+test-client-1  |   duration_ms: 1812
 test-client-1  |   message: "timeout after 1500ms waiting for broadcast"
 test-client-1  |   ...
-relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/9] Error opening QLOG file '/mlog/9fec14bcbc4efdb2a9912a1654386326f8e7eab8.server.imquic.sqlog' for writing: 13 (Permission denied)
+relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/9] Error opening QLOG file '/mlog/957470e85d6a9db7992ced2947c024bbd3045ce4.server.imquic.sqlog' for writing: 13 (Permission denied)
 relay-1        | [moq-relay/9] Connection established (ALPN=h3)
 relay-1        | [moq-relay/9] New MoQ connection (configuring parameters)
 relay-1        | [moq-relay/9]   -- WebTransport (moqt-22)
@@ -271,7 +271,7 @@ relay-1        | [moq-relay/9]   -- moq-lite-js
 test-client-1  | subscribe_namespace written: requestId=0
 relay-1        | [moq-relay/9] Incoming subscribe for namespace prefix ''
 relay-1        | [moq-relay/9]   -- Subscriber wants to know about 'NAMESPACE'
-relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/10] Error opening QLOG file '/mlog/67d14c3e5c9e312b935d3871c7c9b87927aae4f1.server.imquic.sqlog' for writing: 13 (Permission denied)
+relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/10] Error opening QLOG file '/mlog/c49826d8139794329add907bbdac25ea78825db0.server.imquic.sqlog' for writing: 13 (Permission denied)
 relay-1        | [moq-relay/10] Connection established (ALPN=h3)
 relay-1        | [moq-relay/10] New MoQ connection (configuring parameters)
 relay-1        | [moq-relay/10]   -- WebTransport (moqt-22)
@@ -310,9 +310,9 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 7 - subscribe-before-announce
 test-client-1  |   ---
-test-client-1  |   duration_ms: 2712
+test-client-1  |   duration_ms: 2718
 test-client-1  |   ...
-relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/11] Error opening QLOG file '/mlog/4652c02389417a0f262b30195eb6fb3a0ff9a099.server.imquic.sqlog' for writing: 13 (Permission denied)
+relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/11] Error opening QLOG file '/mlog/75067a2387c2a2b1b0d6cb492eb135dba31c944e.server.imquic.sqlog' for writing: 13 (Permission denied)
 relay-1        | [moq-relay/11] Connection established (ALPN=h3)
 relay-1        | [moq-relay/11] New MoQ connection (configuring parameters)
 relay-1        | [moq-relay/11]   -- WebTransport (moqt-22)
@@ -325,11 +325,11 @@ relay-1        | [33m[WARN][0m [moq-relay/11][MoQ] Unsupported parameter '2650
 relay-1        | [moq-relay/11] MoQ connection ready
 relay-1        | [moq-relay/11]   -- draft-ietf-moq-transport-22
 relay-1        | [moq-relay/11]   -- moq-lite-js
-relay-1        | [moq-relay/11] Incoming published namespace: 'moq.2dtest-data.2dsubgroup.2dbasic-53c8c7551ae848cbb3a7d80831b7dac6'
-relay-1        | [moq-relay/11] New namespace 'moq.2dtest-data.2dsubgroup.2dbasic-53c8c7551ae848cbb3a7d80831b7dac6' matches 1 monitors
-relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/12] Error opening QLOG file '/mlog/83dbe0521d35f2cf9d20b64346bc0d71ab046373.server.imquic.sqlog' for writing: 13 (Permission denied)
+relay-1        | [moq-relay/11] Incoming published namespace: 'moq.2dtest-data.2dsubgroup.2dbasic-80ffa062dae61e05f801e640bce446e2'
+relay-1        | [moq-relay/11] New namespace 'moq.2dtest-data.2dsubgroup.2dbasic-80ffa062dae61e05f801e640bce446e2' matches 1 monitors
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/80ffa062dae61e05f801e640bce446e2 active=true
+relay-1        | [31m[ERR][0m [qlog.c:imquic_qlog_create:55] [moq-relay/12] Error opening QLOG file '/mlog/9e3010c32126275758ea5d8f2007f316eb73c936.server.imquic.sqlog' for writing: 13 (Permission denied)
 relay-1        | [moq-relay/12] Connection established (ALPN=h3)
-test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/53c8c7551ae848cbb3a7d80831b7dac6 active=true
 relay-1        | [moq-relay/12] New MoQ connection (configuring parameters)
 relay-1        | [moq-relay/12]   -- WebTransport (moqt-22)
 relay-1        | [moq-relay/12] Waiting for MoQ connection to be ready (SETUP)...
@@ -341,25 +341,25 @@ relay-1        | [33m[WARN][0m [moq-relay/12][MoQ] Unsupported parameter '2650
 relay-1        | [moq-relay/12] MoQ connection ready
 relay-1        | [moq-relay/12]   -- draft-ietf-moq-transport-22
 relay-1        | [moq-relay/12]   -- moq-lite-js
-relay-1        | [moq-relay/12] Incoming subscribe for namespace prefix 'moq.2dtest-data.2dsubgroup.2dbasic-53c8c7551ae848cbb3a7d80831b7dac6'
+relay-1        | [moq-relay/12] Incoming subscribe for namespace prefix 'moq.2dtest-data.2dsubgroup.2dbasic-80ffa062dae61e05f801e640bce446e2'
 relay-1        | [moq-relay/12]   -- Subscriber wants to know about 'NAMESPACE'
-relay-1        | [moq-relay/11] New namespace 'moq.2dtest-data.2dsubgroup.2dbasic-53c8c7551ae848cbb3a7d80831b7dac6' matches 2 monitors
-relay-1        | [moq-relay/7] New namespace 'moq.2dtest-interop' matches 1 monitors
-relay-1        | [moq-relay/11] New namespace 'moq.2dtest-data.2dsubgroup.2dbasic-53c8c7551ae848cbb3a7d80831b7dac6' matches 2 monitors
-relay-1        | [moq-relay/11] New namespace 'moq.2dtest-data.2dsubgroup.2dbasic-53c8c7551ae848cbb3a7d80831b7dac6' matches 2 monitors
 test-client-1  | subscribe_namespace written: requestId=0
+relay-1        | [moq-relay/11] New namespace 'moq.2dtest-data.2dsubgroup.2dbasic-80ffa062dae61e05f801e640bce446e2' matches 2 monitors
+relay-1        | [moq-relay/7] New namespace 'moq.2dtest-interop' matches 1 monitors
 test-client-1  | announced: broadcast=moq-test/interop active=true
-test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/53c8c7551ae848cbb3a7d80831b7dac6 active=true
-test-client-1  | subscribe start: id=2 broadcast=moq-test/data-subgroup-basic/53c8c7551ae848cbb3a7d80831b7dac6/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-relay-1        | [moq-relay/12] Incoming subscribe for 'moq.2dtest-data.2dsubgroup.2dbasic-53c8c7551ae848cbb3a7d80831b7dac6-moq.2dtest.2d00-0-0-0-2-4-5-64-32-2-1-1-0-.2d1-.2d1-0--track' (ID 2)
-test-client-1  | subscribe written: id=2 broadcast=moq-test/data-subgroup-basic/53c8c7551ae848cbb3a7d80831b7dac6/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+relay-1        | [moq-relay/11] New namespace 'moq.2dtest-data.2dsubgroup.2dbasic-80ffa062dae61e05f801e640bce446e2' matches 2 monitors
+relay-1        | [moq-relay/11] New namespace 'moq.2dtest-data.2dsubgroup.2dbasic-80ffa062dae61e05f801e640bce446e2' matches 2 monitors
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/80ffa062dae61e05f801e640bce446e2 active=true
+test-client-1  | subscribe start: id=2 broadcast=moq-test/data-subgroup-basic/80ffa062dae61e05f801e640bce446e2/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe written: id=2 broadcast=moq-test/data-subgroup-basic/80ffa062dae61e05f801e640bce446e2/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+relay-1        | [moq-relay/12] Incoming subscribe for 'moq.2dtest-data.2dsubgroup.2dbasic-80ffa062dae61e05f801e640bce446e2-moq.2dtest.2d00-0-0-0-2-4-5-64-32-2-1-1-0-.2d1-.2d1-0--track' (ID 2)
 relay-1        | [moq-relay/12]  -- Object forwarding enabled
 relay-1        | [moq-relay/12]  -- Requested filter type 'Relative Start'
 relay-1        | [moq-relay/12]  -- -- Start location: [0/0] --> [4611686018427387903/4611686018427387903]
-test-client-1  | publish ok: broadcast=moq-test/data-subgroup-basic/53c8c7551ae848cbb3a7d80831b7dac6/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | publish ok: broadcast=moq-test/data-subgroup-basic/80ffa062dae61e05f801e640bce446e2/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
 relay-1        | [moq-relay/11] Subscription 1 accepted (expires=0; Ascending order; 3 properties)
-relay-1        | [moq-relay/11] New track 'moq.2dtest-data.2dsubgroup.2dbasic-53c8c7551ae848cbb3a7d80831b7dac6--track' matches 2 monitors
-test-client-1  | subscribe ok: id=2 broadcast=moq-test/data-subgroup-basic/53c8c7551ae848cbb3a7d80831b7dac6/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+relay-1        | [moq-relay/11] New track 'moq.2dtest-data.2dsubgroup.2dbasic-80ffa062dae61e05f801e640bce446e2--track' matches 2 monitors
+test-client-1  | subscribe ok: id=2 broadcast=moq-test/data-subgroup-basic/80ffa062dae61e05f801e640bce446e2/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
 relay-1        | [moq-relay/11] Incoming object: reqid=0, alias=1, group=0, subgroup=0 (first=1), id=0, priority=128 (set), payload=64 bytes, properties=1, delivery=STREAM_HEADER_SUBGROUP, status=NORMAL_OBJECT, eos=0
 relay-1        | [moq-relay/11] Relaying to 1 subscribers
 relay-1        | [moq-relay/11] Incoming object: reqid=0, alias=1, group=0, subgroup=0 (first=1), id=1, priority=128 (set), payload=32 bytes, properties=1, delivery=STREAM_HEADER_SUBGROUP, status=NORMAL_OBJECT, eos=0
@@ -396,7 +396,7 @@ relay-1        | [moq-relay/11] Incoming object: reqid=0, alias=1, group=2, subg
 relay-1        | [moq-relay/11] Relaying to 1 subscribers
 relay-1        | [moq-relay/11] Incoming object: reqid=0, alias=1, group=2, subgroup=0 (first=0), id=0, priority=0 (omitted), payload=0 bytes, properties=0, delivery=STREAM_HEADER_SUBGROUP, status=NORMAL_OBJECT, eos=1
 relay-1        | [moq-relay/11] Relaying to 1 subscribers
-test-client-1  | publish done: broadcast=moq-test/data-subgroup-basic/53c8c7551ae848cbb3a7d80831b7dac6/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | publish done: broadcast=moq-test/data-subgroup-basic/80ffa062dae61e05f801e640bce446e2/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
 relay-1        | [moq-relay/11] Incoming object: reqid=0, alias=1, group=3, subgroup=0 (first=1), id=0, priority=128 (set), payload=0 bytes, properties=0, delivery=STREAM_HEADER_SUBGROUP, status=END_OF_TRACK, eos=0
 relay-1        | [moq-relay/11] Relaying to 1 subscribers
 relay-1        | [moq-relay/11] Incoming object: reqid=0, alias=1, group=3, subgroup=0 (first=0), id=0, priority=0 (omitted), payload=0 bytes, properties=0, delivery=STREAM_HEADER_SUBGROUP, status=NORMAL_OBJECT, eos=1
@@ -404,26 +404,26 @@ relay-1        | [moq-relay/11] Relaying to 1 subscribers
 relay-1        | [moq-relay/11] Subscription via ID 1 is done, using 4 streams: status 2 (track ended)
 relay-1        | Removing track 'track'
 relay-1        | [moq-relay/11][MoQ]   -- Getting rid of SUBSCRIBE '1'
-test-client-1  | subscribe close: id=2 broadcast=moq-test/data-subgroup-basic/53c8c7551ae848cbb3a7d80831b7dac6/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe close: id=2 broadcast=moq-test/data-subgroup-basic/80ffa062dae61e05f801e640bce446e2/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
 relay-1        | [moq-relay/11] Stream 4 has been reset by the peer
 relay-1        | [moq-relay/11][MoQ] Got RESET_STREAM for STREAM 4: 91141958510811 ((null))
 relay-1        | [moq-relay/11][MoQ]   -- Getting rid of PUBLISH_NAMESPACE '0'
 relay-1        | [moq-relay/11] Publish Namespace done: 0
-relay-1        | [moq-relay/11] Done namespace 'moq.2dtest-data.2dsubgroup.2dbasic-53c8c7551ae848cbb3a7d80831b7dac6' matches 2 monitors
-relay-1        | Removing namespace 'moq.2dtest-data.2dsubgroup.2dbasic-53c8c7551ae848cbb3a7d80831b7dac6'
-relay-1        | [moq-relay/11] Done namespace 'moq.2dtest-data.2dsubgroup.2dbasic-53c8c7551ae848cbb3a7d80831b7dac6' matches 2 monitors
-relay-1        | [33m[WARN][0m [moq-relay/8][MoQ] Namespace 'moq.2dtest-data.2dsubgroup.2dbasic-53c8c7551ae848cbb3a7d80831b7dac6' not known, or notified already
+relay-1        | [moq-relay/11] Done namespace 'moq.2dtest-data.2dsubgroup.2dbasic-80ffa062dae61e05f801e640bce446e2' matches 2 monitors
+relay-1        | Removing namespace 'moq.2dtest-data.2dsubgroup.2dbasic-80ffa062dae61e05f801e640bce446e2'
+relay-1        | [moq-relay/11] Done namespace 'moq.2dtest-data.2dsubgroup.2dbasic-80ffa062dae61e05f801e640bce446e2' matches 2 monitors
+relay-1        | [33m[WARN][0m [moq-relay/8][MoQ] Namespace 'moq.2dtest-data.2dsubgroup.2dbasic-80ffa062dae61e05f801e640bce446e2' not known, or notified already
 relay-1        | [33m[WARN][0m [moq-relay/12][MoQ] Namespace '' not known, or notified already
-test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/53c8c7551ae848cbb3a7d80831b7dac6 active=false
-test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/53c8c7551ae848cbb3a7d80831b7dac6 active=false
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/80ffa062dae61e05f801e640bce446e2 active=false
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/80ffa062dae61e05f801e640bce446e2 active=false
 relay-1        | [moq-relay/11] Connection closed by peer: 91141958510811 (no reason)
 relay-1        | [moq-relay/11] MoQ connection gone
 relay-1        | Removing publisher 'moq-relay/11'
+test-client-1  | subscribe_namespace error: session error: connection error: closed
 relay-1        | [moq-relay/12] Connection closed by peer: 91141958510811 (no reason)
 relay-1        | [moq-relay/12] MoQ connection gone
 relay-1        | Removing subscriber 'moq-relay/12'
 relay-1        |   -- Removing subscription '2/0'
-test-client-1  | subscribe_namespace error: session error: connection error: closed
 test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
 test-client-1  | 173 |             return false;
 test-client-1  | 174 |         }
@@ -440,7 +440,7 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 8 - data-subgroup-basic
 test-client-1  |   ---
-test-client-1  |   duration_ms: 254
+test-client-1  |   duration_ms: 306
 test-client-1  |   test_spec_revision: 2
 test-client-1  |   ...
 [Ktest-client-1 exited with code 1
@@ -450,13 +450,12 @@ test-client-1  |   ...
  Container runner-upstream-relay-1 Stopping 
 relay-1        | Stopping relay, please wait...
 relay-1        | [moq-relay] Shutting down server
+relay-1        | [moq-relay/8] Connection closed: 0 (no reason)
+relay-1        | [moq-relay/8] MoQ connection gone
 relay-1        | [moq-relay/7] Connection closed: 0 (no reason)
 relay-1        | [moq-relay/7] MoQ connection gone
 relay-1        | Removing publisher 'moq-relay/7'
 relay-1        | Removing namespace 'moq.2dtest-interop'
-relay-1        | [(null)] Done namespace 'moq.2dtest-interop' matches 1 monitors
-relay-1        | [moq-relay/8] Connection closed: 0 (no reason)
-relay-1        | [moq-relay/8] MoQ connection gone
 relay-1        | Bye!
  Container runner-upstream-relay-1 Stopped 
 [Krelay-1 exited with code 0

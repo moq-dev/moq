@@ -78,7 +78,7 @@
       "status": "pass",
       "exit_code": 0,
       "negotiated_versions": [
-        "draft-18"
+        "draft-22"
       ]
     },
     {
@@ -329,5 +329,5 @@
     }
   ],
   "target_version": "draft-18",
-  "timestamp": "2026-11-11T13:03:13Z"
+  "timestamp": "2026-11-11T16:11:26Z"
 }
