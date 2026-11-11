@@ -549,9 +549,8 @@ int main(void)
 	moq_route_free(route);
 	moq_origin_producer_free(origin);
 
-	/* A first dial that keeps failing still returns the session, whose state names each failed
-     * attempt while it retries, then ends closed once cancelled; the server is gone, so every
-     * dial fails. */
+	/* A first dial that fails still returns the session, whose state ends closed with the
+     * dial's error rather than retrying; the server is gone, so the dial fails. */
 	moq_client_config retry_config = moq_client_config_default();
 	retry_config.timeout.has_value = true;
 	retry_config.timeout.value = 100000000; /* 100ms */
@@ -561,20 +560,15 @@ int main(void)
 	ok(moq_client_new(&retry_config, &retrying), "client new");
 	result dialing = {0};
 	task = moq_client_connect(retrying, url, on_session, &dialing);
-	moq_session *redialing = await(&dialing, "retrying connect");
+	moq_session *redialing = await(&dialing, "failing connect");
 	moq_task_free(task);
 	moq_connection_state *state = moq_session_state(redialing);
-	CHECK(state->phase.tag == MOQ_CONNECTION_PHASE_CONNECTING);
-	while (!state->phase.connecting.failure) {
-		state = next_state(redialing, state);
-		CHECK(state->phase.tag == MOQ_CONNECTION_PHASE_CONNECTING);
-	}
-	CHECK(state->phase.connecting.failure->tag == MOQ_ERROR_CONNECT);
-	CHECK(state->connects == 0);
-	moq_session_cancel(redialing, 0);
 	while (state->phase.tag != MOQ_CONNECTION_PHASE_CLOSED) {
+		CHECK(state->phase.tag == MOQ_CONNECTION_PHASE_CONNECTING);
 		state = next_state(redialing, state);
 	}
+	CHECK(state->phase.closed.failure);
+	CHECK(state->phase.closed.failure->tag == MOQ_ERROR_CONNECT);
 	CHECK(state->connects == 0);
 	moq_connection_state_free(state);
 	moq_session_free(redialing);

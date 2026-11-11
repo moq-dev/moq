@@ -14,6 +14,7 @@ use crate::{
 	Error, Path,
 	lite::{self, AnnounceReply},
 	route::{self, node},
+	transport::{Metrics as _, poll::Session as _},
 };
 
 use super::{AnnouncedRoute, Subscriber};
@@ -96,6 +97,12 @@ pub(super) struct Routed {
 	ready: kio::Queue<(route::Id, Path)>,
 	/// The peer sent a GOAWAY: every claim served here ranks last.
 	drained: bool,
+	/// The link's min RTT, which the peer's routes add.
+	rtt: route::LinkRtt,
+	/// When to read the link's RTT next, or `None` once it stopped reading.
+	read_rtt: Option<crate::time::Deadline>,
+	/// Whether the peer has a route here, so the link's RTT is read.
+	sampling: bool,
 }
 
 impl Routed {
@@ -150,6 +157,9 @@ impl Routed {
 			previous: HashMap::new(),
 			ready: Default::default(),
 			drained: false,
+			rtt: Default::default(),
+			read_rtt: None,
+			sampling: false,
 		})
 	}
 
@@ -174,7 +184,7 @@ impl Routed {
 					id,
 					WireRoute {
 						node,
-						reach,
+						reach: reach.clone(),
 						claims: BTreeMap::new(),
 						pending: BTreeMap::new(),
 						committed: None,
@@ -264,7 +274,7 @@ impl Routed {
 
 	fn reach(&mut self, id: u64, reach: route::Reach) -> Result<(), Error> {
 		let route = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
-		route.reach = reach;
+		route.reach = reach.clone();
 		self.stream.route(route.node, Some(reach));
 		Ok(())
 	}
@@ -340,6 +350,7 @@ impl Routed {
 			.node
 			.receive(scoped(&self.link, &self.regions, key), self.prefix.clone())
 			.map_err(refused)?;
+		stream.rtt(self.rtt.reported());
 		// What the old stream served stays in the origin until the new one serves it
 		// again, or lets go after.
 		let previous = std::mem::take(&mut self.served);
@@ -347,7 +358,7 @@ impl Routed {
 		ids.sort_unstable();
 		for id in &ids {
 			let route = &self.routes[id];
-			stream.route(route.node, Some(route.reach));
+			stream.route(route.node, Some(route.reach.clone()));
 		}
 		let certifies = self.certifies();
 		for id in &ids {
@@ -393,6 +404,7 @@ impl Routed {
 	/// Act on everything the node queued for the stream: serve the claims it hands
 	/// over.
 	pub(super) fn outputs(&mut self, subscriber: &Subscriber) {
+		self.sample(subscriber);
 		while let Some(output) = self.stream.try_output() {
 			self.output(subscriber, output);
 		}
@@ -458,7 +470,8 @@ impl Routed {
 			.with_via(subscriber.via(None))
 			.with_node(Some(id))
 			.with_draining(self.drained)
-			.with_available(served.available);
+			.with_available(served.available)
+			.with_rtt(served.rtt);
 		if let Some(entry) = self.previous.remove(&key) {
 			self.served.insert(key.clone(), entry);
 		}
@@ -488,6 +501,38 @@ impl Routed {
 		}
 	}
 
+	/// Start or stop reading the link's min RTT as the peer's routes come and go.
+	///
+	/// Only a route the peer sent adds the link's min RTT, so a peer sending none costs
+	/// no timer. Starting reads at once, so the first claims served already carry it,
+	/// and in a fresh window, so a pause never keeps a reading older than the window.
+	fn sample(&mut self, subscriber: &Subscriber) {
+		match (self.routes.is_empty(), self.sampling) {
+			(true, true) => {
+				self.sampling = false;
+				self.rtt = Default::default();
+				self.read_rtt = None;
+				self.stream.rtt(None);
+			}
+			(false, false) => {
+				self.sampling = true;
+				self.read_link(subscriber);
+			}
+			_ => {}
+		}
+	}
+
+	/// Read the link's smoothed RTT once and schedule the next read.
+	fn read_link(&mut self, subscriber: &Subscriber) {
+		let last = self.rtt.reported();
+		let now = self.rtt.read(subscriber.session.metrics().rtt());
+		if now != last {
+			self.stream.rtt(now);
+		}
+		self.read_rtt =
+			(self.rtt.reading()).then(|| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
+	}
+
 	/// Write the queued replies, and serve requests on every claim whose queue woke.
 	pub(super) fn poll(
 		&mut self,
@@ -495,6 +540,12 @@ impl Routed {
 		writer: &mut crate::coding::Writer<impl crate::transport::poll::SendStream, lite::Version>,
 		waiter: &kio::Waiter,
 	) -> Result<(), Error> {
+		self.sample(subscriber);
+		while let Some(read_rtt) = &mut self.read_rtt
+			&& read_rtt.poll(waiter).is_ready()
+		{
+			self.read_link(subscriber);
+		}
 		while let Poll::Ready(output) = self.stream.poll_output(waiter) {
 			self.output(subscriber, output);
 		}
@@ -585,11 +636,15 @@ mod tests {
 	use crate::lite::{AnnounceBroadcast as Msg, AnnounceDecoder, PathRef, test_transport::SinkSession};
 	use crate::{Instance, Path, auth::Permit, origin::Cost, route::Advert};
 
-	const ADVERT: Advert = Advert {
-		seqno: 0,
-		metric: 0,
-		down_only: false,
-	};
+	fn advert() -> Advert {
+		Advert {
+			seqno: 0,
+			metric: 0,
+			down_only: false,
+			rtt: None,
+			hops: [].into(),
+		}
+	}
 
 	fn start(path: &'static str) -> Msg {
 		Msg::Active {
@@ -631,7 +686,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -670,7 +725,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [
 			route,
@@ -713,7 +768,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -749,7 +804,7 @@ mod tests {
 			};
 			let route = Msg::RouteStart {
 				node: 7,
-				advert: ADVERT,
+				advert: advert(),
 			};
 			for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
 				routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -779,14 +834,14 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 
 		for (id, node) in [(0, 7), (1, 8)] {
-			let route = Msg::RouteStart { node, advert: ADVERT };
+			let route = Msg::RouteStart { node, advert: advert() };
 			routed.receive(&prefix, route, &mut decoder).unwrap();
 			routed.receive(&prefix, Msg::RouteEnd { id }, &mut decoder).unwrap();
 			routed.poll(&subscriber, &mut writer, &waiter).unwrap();
 		}
 		let route = Msg::RouteStart {
 			node: 9,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		assert!(
 			routed.receive(&prefix, route, &mut decoder).is_err(),
@@ -807,7 +862,7 @@ mod tests {
 		let prefix = Path::empty();
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		routed.receive(&prefix, route, decoder)?;
 		for path in paths {
@@ -905,7 +960,7 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		routed.receive(&prefix, route, &mut decoder).unwrap();
 		let downstream = (subscriber.origin.route_node())
@@ -940,6 +995,98 @@ mod tests {
 		);
 	}
 
+	/// A transport that reports its first RTT only after the stream opened, such as
+	/// qmux before its first ping returns, still gets its link measured.
+	#[kio::test]
+	async fn a_late_rtt_is_still_read() {
+		let session = SinkSession::new(Default::default());
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(session.clone());
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		feed(&mut routed, &mut decoder, &[]).unwrap();
+		let mut writer = crate::coding::Writer::new(
+			crate::lite::test_transport::SinkSend::new(Default::default()),
+			crate::lite::Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		kio::clock::sim::advance(super::route::LinkRtt::INTERVAL).await;
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(routed.rtt.reported(), None);
+
+		let rtt = std::time::Duration::from_millis(20);
+		session.set_stats(crate::lite::test_transport::SinkStats::default().with_rtt(rtt));
+		kio::clock::sim::advance(super::route::LinkRtt::INTERVAL).await;
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(routed.rtt.reported(), Some(rtt));
+	}
+
+	/// Claims served when the peer reports Synced, before the stream is first polled,
+	/// already carry the link's RTT.
+	#[kio::test]
+	async fn the_first_claims_served_carry_the_rtt() {
+		use crate::lite::test_transport::SinkStats;
+		let ms = std::time::Duration::from_millis;
+		let session = SinkSession::new(Default::default()).with_stats(SinkStats::default().with_rtt(ms(10)));
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(session);
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: Advert {
+				rtt: Some(ms(5)),
+				..advert()
+			},
+		};
+		let floor = Msg::Floor {
+			id: 0,
+			revision: Some(0),
+		};
+		for msg in [route, start("live"), floor] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		routed.outputs(&subscriber);
+		let rtts: Vec<_> = routed.served.values().map(|entry| entry.route.route.rtt()).collect();
+		assert_eq!(rtts, [Some(ms(15))]);
+	}
+
+	/// A stream whose peer ends every route stops reading, and starts a fresh window
+	/// once one returns, so a reading from before the pause never stays reported.
+	#[kio::test]
+	async fn a_pause_restarts_the_window() {
+		use crate::lite::test_transport::SinkStats;
+		let ms = std::time::Duration::from_millis;
+		let session = SinkSession::new(Default::default()).with_stats(SinkStats::default().with_rtt(ms(10)));
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(session.clone());
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let mut writer = crate::coding::Writer::new(
+			crate::lite::test_transport::SinkSend::new(Default::default()),
+			crate::lite::Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		feed(&mut routed, &mut decoder, &[]).unwrap();
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(routed.rtt.reported(), Some(ms(10)));
+
+		routed.receive(&prefix, Msg::RouteEnd { id: 0 }, &mut decoder).unwrap();
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert!(routed.read_rtt.is_none(), "no route, no timer");
+		session.set_stats(SinkStats::default().with_rtt(ms(100)));
+		kio::clock::sim::advance(std::time::Duration::from_secs(60)).await;
+
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: advert(),
+		};
+		routed.receive(&prefix, route, &mut decoder).unwrap();
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(routed.rtt.reported(), Some(ms(100)));
+	}
+
 	/// What the stream keeps between floors is the net change to its committed claims,
 	/// however many messages the peer sends without one.
 	#[kio::test]
@@ -954,7 +1101,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [route, start("room/host"), floor] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();

@@ -5,6 +5,7 @@ import * as Json from "@moq/json";
 import { Instance, Origin, Path, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Mint from "../../net/src/mint.ts";
+import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
 import { Source } from "./video/source";
 
@@ -103,6 +104,8 @@ it("opens a listed include only on selection, keeping its rendition IDs its own"
 
 it("reads an unavailable include as offline without touching the parent", async () => {
 	const origin = new Origin.Producer();
+	// A session that could announce the include, so its absence reads offline.
+	wireOf(origin).attach(true);
 	publish(origin, "room/main.hang");
 	const claim = origin.claim(Path.from("room/absent.hang"));
 	const requests = claim.requested();
@@ -220,6 +223,8 @@ it("tracks the include entry without reopening it on unrelated catalog updates",
 
 it("follows a restarted contributor only for an entry that names no instance", async () => {
 	const origin = new Origin.Producer();
+	// A session that could announce the include, so its absence reads offline.
+	wireOf(origin).attach(true);
 	publish(origin, "room/main.hang");
 	const [oldInstance, newInstance] = [Instance.random(), Instance.random()];
 	const old = publish(origin, "room/extra.hang", oldInstance);

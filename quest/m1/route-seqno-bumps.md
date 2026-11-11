@@ -45,12 +45,11 @@ new link lengthens no path) also keeps them passing.
 
 Mirror any change to `bump`'s callers in `RouteHandoff.tla` as the
 `verify-route` skill says, and state the ROUTE budget per session event so
-[the mesh sweep](/quest/m1/route-mesh-sweep.md) can assert it.
+the mesh sweep (`rs/moq-net/tests/integration/mesh_sweep.rs`) can assert it.
 
 Public API: none. Wire: none.
 
 ## Related
 
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the contract's seqno rule this narrows
-- [Seeded lite-07 meshes hold the route rules and an announce budget](/quest/m1/route-mesh-sweep.md) - the budget that would have caught this
 - [Each side says everything about routing on one stream](/quest/m2/cluster-routing/routes/route-stream.md) - registers one neighbour per session, which changes where the bump is called

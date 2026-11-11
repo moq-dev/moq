@@ -26,7 +26,7 @@ async function connect() {
 	await transport.ready;
 	// Moxygen's pinned HTTP/3 server predates subprotocol negotiation. This fixture's
 	// server offers draft 18 alone, so exchange that SETUP directly on its WebTransport.
-	const extensions = offered({ auth: false, solicit: false });
+	const extensions = offered({ solicit: false });
 	const setup = await exchangeSetup(transport, Version.DRAFT_18, "interop-ranges", { client: true, extensions });
 	return new Connection({ url, quic: transport, version: Version.DRAFT_18, client: true, extensions, ...setup });
 }

@@ -952,6 +952,58 @@ async fn announce_lifecycle_test(version: &str) {
 		.expect("server task failed");
 }
 
+/// A lite-07 route carries the publisher's RTT, 0 at its own node, and the subscriber
+/// adds its own link's.
+#[tokio::test]
+async fn broadcast_moq_lite_07_route_rtt() {
+	let version = "moq-lite-07-wip";
+	let pub_origin = moq_tokio::origin::spawn();
+	let _route = pub_origin
+		.route("room/first", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec![version.parse().unwrap()];
+	let server = server_config.init(Default::default()).expect("init server");
+	let mut server = server.listen().await.expect("failed to listen");
+	let addr = server.local_addr().expect("local addr");
+
+	let sub_origin = moq_tokio::origin::spawn();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
+	client_config.version = vec![version.parse().unwrap()];
+	let client = client_config.init(Default::default()).expect("init client");
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("accept");
+		let session = request.with_publisher(&pub_origin).ok().await?;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_subscriber(sub_origin);
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
+		.await
+		.expect("connect timeout")
+		.expect("connect failed");
+	let (update, active) = next_announce(&mut announcements).await;
+	assert_eq!(update.prefix.as_str(), "room/first");
+	assert!(active, "expected the initial announce");
+
+	drop(connection);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+	let rtt = update.route.rtt().expect("QUIC reports an RTT");
+	assert!(rtt > std::time::Duration::ZERO, "rounded up to a whole millisecond");
+}
+
 /// Read `count` groups (one frame each) off the subscriber, returning the sorted
 /// payloads. Sorted because delivery order across groups isn't guaranteed.
 async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Vec<String> {
@@ -1692,13 +1744,7 @@ async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Dura
 
 #[tokio::test]
 async fn broadcast_max_age() {
-	for version in [
-		"moq-lite-05",
-		"moq-lite-06",
-		"moq-lite-07-wip",
-		"moq-transport-18",
-		"moq-transport-22",
-	] {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		for age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
 			assert_eq!(max_age_test(version, age).await, age, "{version}");
 		}
@@ -1706,8 +1752,9 @@ async fn broadcast_max_age() {
 }
 
 #[tokio::test]
-async fn broadcast_max_age_legacy_omits_property() {
-	for version in ["moq-lite-01"] {
+async fn broadcast_max_age_omitted() {
+	// moq-transport's MAX_CACHE_DURATION would expire the newest group too, so it is never sent.
+	for version in ["moq-lite-01", "moq-transport-18", "moq-transport-22"] {
 		assert_eq!(
 			max_age_test(version, Some(Duration::from_secs(30))).await,
 			None,

@@ -8,6 +8,7 @@ type Vars = {
 	loop: "serving" | "migrating" | "dialing" | "waiting" | "stopped";
 	pin: number;
 	path: "ok" | "lost";
+	heard: boolean;
 	handle: boolean;
 	media: "playing" | "waiting";
 };
@@ -27,7 +28,11 @@ const connection = (v: Vars) => {
 	}
 };
 
-const screen = (v: Vars) => (!v.handle ? "OFFLINE" : v.media === "waiting" ? "spinner" : "playing");
+const screen = (v: Vars) => {
+	if (v.handle) return v.media === "waiting" ? "spinner" : "playing";
+	if (v.on && v.heard) return "OFFLINE";
+	return v.loop === "stopped" ? "could not connect, and why" : "CONNECTING";
+};
 
 export const title = "Relay failover, from the viewer's side";
 
@@ -61,8 +66,8 @@ export const step = (action: string, from: Vars, to: Vars) => {
 			return "the redial connects";
 		case "DialFails":
 			return "the redial fails";
-		case "Announced":
-			return "the broadcast's announcement arrives";
+		case "Initial":
+			return "the relay's announcements arrive";
 		case "Frames":
 			return "frames arrive";
 		case "Reroute":
