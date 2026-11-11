@@ -96,7 +96,7 @@ impl Imported {
 	fn all(data: &[u8]) -> Self {
 		let mut imported = Self::new();
 		imported.import.decode(data).unwrap();
-		imported.import.finish().unwrap();
+		imported.import.finish_in_place().unwrap();
 		imported
 	}
 
