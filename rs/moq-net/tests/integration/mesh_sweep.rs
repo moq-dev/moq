@@ -538,17 +538,13 @@ impl Mesh {
 		let attached: BTreeMap<usize, usize> = (self.clients.iter().enumerate())
 			.filter_map(|(c, client)| Some((c, client.as_ref()?.relay)))
 			.collect();
-		let mut readers: Vec<(String, Option<usize>, &mut Reader)> = Vec::new();
+		let mut readers: Vec<(String, usize, &mut Reader)> = Vec::new();
 		for (r, relay) in self.relays.iter_mut().enumerate() {
-			readers.push((format!("relay {r}"), Some(components[r]), &mut relay.reader));
+			readers.push((format!("relay {r}"), components[r], &mut relay.reader));
 		}
 		for (c, client) in self.clients.iter_mut().enumerate() {
 			if let Some(client) = client {
-				readers.push((
-					format!("client {c}"),
-					Some(components[client.relay]),
-					&mut client.reader,
-				));
+				readers.push((format!("client {c}"), components[client.relay], &mut client.reader));
 			}
 		}
 
@@ -563,7 +559,7 @@ impl Mesh {
 				.filter(|(_, publication)| publication.live)
 				.filter(|(_, publication)| {
 					let relay = attached[&publication.client];
-					component == Some(components[relay])
+					component == components[relay]
 				})
 				.map(|(instance, publication)| (publication.path.as_str(), instance))
 				.collect();
