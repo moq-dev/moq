@@ -404,6 +404,7 @@ impl Routed {
 	/// Act on everything the node queued for the stream: serve the claims it hands
 	/// over.
 	pub(super) fn outputs(&mut self, subscriber: &Subscriber) {
+		self.sample(subscriber);
 		while let Some(output) = self.stream.try_output() {
 			self.output(subscriber, output);
 		}
@@ -500,16 +501,12 @@ impl Routed {
 		}
 	}
 
-	/// Write the queued replies, and serve requests on every claim whose queue woke.
-	pub(super) fn poll(
-		&mut self,
-		subscriber: &Subscriber,
-		writer: &mut crate::coding::Writer<impl crate::transport::poll::SendStream, lite::Version>,
-		waiter: &kio::Waiter,
-	) -> Result<(), Error> {
-		// Only a route the peer sent adds the link's min RTT, so a peer sending none
-		// costs no timer. Reading restarts its window on resuming, so a pause never
-		// keeps a reading older than the window.
+	/// Start or stop reading the link's min RTT as the peer's routes come and go.
+	///
+	/// Only a route the peer sent adds the link's min RTT, so a peer sending none costs
+	/// no timer. Starting reads at once, so the first claims served already carry it,
+	/// and in a fresh window, so a pause never keeps a reading older than the window.
+	fn sample(&mut self, subscriber: &Subscriber) {
 		match (self.routes.is_empty(), self.sampling) {
 			(true, true) => {
 				self.sampling = false;
@@ -519,23 +516,35 @@ impl Routed {
 			}
 			(false, false) => {
 				self.sampling = true;
-				self.read_rtt = Some(crate::time::Deadline::after(
-					&subscriber.runtime,
-					std::time::Duration::ZERO,
-				));
+				self.read_link(subscriber);
 			}
 			_ => {}
 		}
+	}
+
+	/// Read the link's smoothed RTT once and schedule the next read.
+	fn read_link(&mut self, subscriber: &Subscriber) {
+		let last = self.rtt.reported();
+		let now = self.rtt.read(subscriber.session.metrics().rtt());
+		if now != last {
+			self.stream.rtt(now);
+		}
+		self.read_rtt = (self.rtt.reading())
+			.then(|| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
+	}
+
+	/// Write the queued replies, and serve requests on every claim whose queue woke.
+	pub(super) fn poll(
+		&mut self,
+		subscriber: &Subscriber,
+		writer: &mut crate::coding::Writer<impl crate::transport::poll::SendStream, lite::Version>,
+		waiter: &kio::Waiter,
+	) -> Result<(), Error> {
+		self.sample(subscriber);
 		while let Some(read_rtt) = &mut self.read_rtt
 			&& read_rtt.poll(waiter).is_ready()
 		{
-			let last = self.rtt.reported();
-			let now = self.rtt.read(subscriber.session.metrics().rtt());
-			if now != last {
-				self.stream.rtt(now);
-			}
-			self.read_rtt = (self.rtt.reading())
-				.then(|| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
+			self.read_link(subscriber);
 		}
 		while let Poll::Ready(output) = self.stream.poll_output(waiter) {
 			self.output(subscriber, output);
@@ -1008,6 +1017,36 @@ mod tests {
 		kio::clock::sim::advance(super::route::LinkRtt::INTERVAL).await;
 		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
 		assert_eq!(routed.rtt.reported(), Some(rtt));
+	}
+
+	/// Claims served when the peer reports Synced, before the stream is first polled,
+	/// already carry the link's RTT.
+	#[kio::test]
+	async fn the_first_claims_served_carry_the_rtt() {
+		use crate::lite::test_transport::SinkStats;
+		let ms = std::time::Duration::from_millis;
+		let session = SinkSession::new(Default::default()).with_stats(SinkStats::default().with_rtt(ms(10)));
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(session);
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: Advert {
+				rtt: Some(ms(5)),
+				..ADVERT
+			},
+		};
+		let floor = Msg::Floor {
+			id: 0,
+			revision: Some(0),
+		};
+		for msg in [route, start("live"), floor] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		routed.outputs(&subscriber);
+		let rtts: Vec<_> = routed.served.values().map(|entry| entry.route.route.rtt()).collect();
+		assert_eq!(rtts, [Some(ms(15))]);
 	}
 
 	/// A stream whose peer ends every route stops reading, and starts a fresh window
