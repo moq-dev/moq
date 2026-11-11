@@ -422,7 +422,7 @@ impl Node {
 	/// A node declaring the origin's hop id, so the origin has one identity on every
 	/// wire. A declared identity is never qualified, so an id carrying that marker
 	/// loses it, or is replaced by a random one if nothing is left. It uses no route
-	/// that crossed `max_hops` relays, which it could not add itself to.
+	/// that crossed `max_hops` nodes, which it could not add itself to.
 	pub fn origin(hop: std::num::NonZeroU64, max_hops: std::num::NonZeroUsize) -> Self {
 		let mut rng = kio::clock::rng();
 		let id = declared_for(hop).unwrap_or_else(|| rng.random_range(1..=GENERATED));

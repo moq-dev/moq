@@ -35,7 +35,7 @@ just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/rout
 
 | Config | Mesh | Bounds | Distinct states |
 | --- | --- | --- | --- |
-| `RouteHandoff.cfg` | The origin and two relays in a triangle. | 2 claim changes, 2 session changes, 1 collection | TRIANGLE |
+| `RouteHandoff.cfg` | The origin and two relays in a triangle. | 2 claim changes, 2 session changes, 1 collection | 3,545,311 |
 | `Behind.cfg` | The origin behind relay 1, which sits in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 3,033,111 |
 | `BehindDear.cfg` | The same, with relay 3 nearer the origin than relay 2. | 1 claim change, 1 session change | 5,462,496 |
 
@@ -54,7 +54,7 @@ A counterexample is a path through the model, not yet a bug. Replay it on the ro
 
 ## Coverage
 
-Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/route/` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `f7b47f1eed201b1f5339beb3073f06cbd5f1bc6e`. Run `git log f7b47f1eed.. -- rs/moq-net/src/route/` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
 
 | Code (`rs/moq-net/src/route/`) | Model |
 | --- | --- |

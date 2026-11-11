@@ -1218,9 +1218,10 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		entry.advert.metric.checked_add(self.neighbors[&next].link.cost)
 	}
 
-	/// The usable but infeasible routes for `id`, with their metrics: the ones a newer
-	/// seqno would lift past this node's distance. With no distance kept there are
-	/// none, since the only routes refused then are its own, come back.
+	/// The usable but infeasible routes for `id`, with their metrics: while it has
+	/// one, this node holds the identity and asks for a newer seqno. With no distance
+	/// kept there are none, since the only routes refused then are its own, come back,
+	/// which no seqno makes feasible.
 	fn infeasible(&self, id: Id) -> impl Iterator<Item = (Metric, N)> + '_ {
 		let kept = self.fd.contains_key(&id);
 		(self.rx.get(&id).into_iter().flatten())
@@ -1654,8 +1655,8 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		for &to in peers {
 			let peer = &self.neighbors[&to];
 			let serves = self.serves(peer, id);
-			let was = self.sent.get(&(id, to)).cloned();
-			if !serves && was.is_none() {
+			let started = self.sent.contains_key(&(id, to));
+			if !serves && !started {
 				continue;
 			}
 			let reach = match selected {
@@ -1665,12 +1666,12 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 					down_only: route.down_only,
 					hops: hops.clone(),
 				})),
-				None if serves && ctx.live && was.is_some() => Some(Reach::Held),
+				None if serves && ctx.live && started => Some(Reach::Held),
 				_ => None,
 			};
 			// A route starts again only once the neighbor echoed its last end there, so
 			// one that withholds echoes holds at most one end per identity.
-			let reach = reach.filter(|_| was.is_some() || !self.unacked.contains_key(&(id, to)));
+			let reach = reach.filter(|_| started || !self.unacked.contains_key(&(id, to)));
 			let watch = peer.watch.as_ref().expect("a watching peer");
 			let sent = self.sent_views.get(&(id, to));
 			let (changes, meets) = match (&reach, sent) {
@@ -1725,16 +1726,16 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 				check.apply(changes.clone(), floors.clone());
 				assert_eq!(check, adopted.present(watch), "incremental presentation to {to:?}");
 			}
-			plans.push((to, was, reach, meets, changes, floors, watch.clone()));
+			plans.push((to, started, reach, meets, changes, floors, watch.clone()));
 		}
 
-		for (to, was, reach, meets, changes, floors, watch) in plans {
+		for (to, started, reach, meets, changes, floors, watch) in plans {
 			let key = (id, to);
-			let (reaching, started) = (reach.is_some(), was.is_some());
+			let reaching = reach.is_some();
 			let send = reach.filter(|_| meets);
 			let sending = send.is_some();
 			if let Some(send) = send
-				&& was.as_ref() != Some(&send)
+				&& self.sent.get(&key) != Some(&send)
 			{
 				self.sent.insert(key, send.clone());
 				self.out.push(Out::Route {
