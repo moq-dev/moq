@@ -42,6 +42,7 @@ mod implementation;
 mod instance;
 mod late_lower_group;
 mod lazy_discovery;
+mod mesh_sweep;
 mod mesh_withdraw;
 mod model;
 mod mount;

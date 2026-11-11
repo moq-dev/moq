@@ -47,7 +47,6 @@ moves what remains of them once their claims merge.
 - [A screen share publishes only while joined](/quest/m1/room-screen-joined.md) - `@moq/room` publishes no screen share before joining or after leaving
 - [The TLA+ models run nightly and reviews resync them](/quest/m1/model-checks-nightly.md) - every model config runs in Nightly, open findings must still fail, and review reruns a model whose covered code changed
 - [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - every ordering on 4-5 relay meshes with two origins and clients, with an announce budget and convergence
-- [Seeded lite-07 meshes hold the route rules and an announce budget](/quest/m1/route-mesh-sweep.md) - the route rules and message budget checked on real sessions over random meshes
 - [A model of a relay chain's failover delivers every group once](/quest/m1/failover-chain-model.md) - route, resume, and subscribe composed across a relay chain whose hops fail
 - [A reused moq-transport alias refuses its track at once](/quest/m1/ietf-alias-refuse.md) - a SUBSCRIBE_OK on an alias already bound fails its readers and removes its entry without waiting on the peer's FIN acknowledgement
 - [Unused crates, scripts, and files are deleted](/quest/m1/unused-code.md) - moq-room, the moq-native tombstone, demo/throttle, sh/dart/publish.sh, demo/web's Solid deps, and unpublished packages' release notes go

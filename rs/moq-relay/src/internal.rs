@@ -762,7 +762,7 @@ impl Scrape {
 		Ok(())
 	}
 
-	/// The per-tier session counters, plus control bytes split by message class.
+	/// The per-tier session counters, plus control bytes and messages split by message class.
 	fn encode_sessions(&self, encoder: &mut DescriptorEncoder) -> std::fmt::Result {
 		use moq_net::stats::{Presence, Totals};
 
@@ -835,6 +835,16 @@ impl Scrape {
 				"moq_relay_control_rx_bytes",
 				"Control-message bytes decoded, including codec prefixes; excludes transport overhead.",
 				|b| b.rx,
+			),
+			(
+				"moq_relay_control_tx_messages",
+				"Control messages encoded for sending.",
+				|b| b.tx_messages,
+			),
+			(
+				"moq_relay_control_rx_messages",
+				"Control messages decoded.",
+				|b| b.rx_messages,
 			),
 		] {
 			let rows = control
@@ -2083,7 +2093,9 @@ mod tests {
 # TYPE moq_relay_announces_started_total counter
 # TYPE moq_relay_bytes_total counter
 # TYPE moq_relay_control_rx_bytes_total counter
+# TYPE moq_relay_control_rx_messages_total counter
 # TYPE moq_relay_control_tx_bytes_total counter
+# TYPE moq_relay_control_tx_messages_total counter
 # TYPE moq_relay_datagrams_total counter
 # TYPE moq_relay_draining_sessions gauge
 # TYPE moq_relay_fetches_total counter

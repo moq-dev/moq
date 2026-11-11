@@ -15,7 +15,7 @@ use futures::channel::mpsc;
 
 use moq_net::{Version, cache, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_with_latency};
-use support::{Kind, drain, watch};
+use support::{Kind, Rng, drain, watch};
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	produce(hop, origin::Config::default().update_hold)
@@ -526,24 +526,6 @@ async fn assert_capped_withdrawal(edges: &[Link], publisher: usize, watcher: usi
 	assert_eq!(client.last(), Some(&Kind::End));
 	for kinds in relays {
 		assert_eq!(kinds.last(), Some(&Kind::End));
-	}
-}
-
-/// splitmix64, so every platform builds the same meshes.
-struct Rng(u64);
-
-impl Rng {
-	fn next(&mut self) -> u64 {
-		self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-		let mut z = self.0;
-		z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-		z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-		z ^ (z >> 31)
-	}
-
-	/// A value in `lo..=hi`.
-	fn range(&mut self, lo: u64, hi: u64) -> u64 {
-		lo + self.next() % (hi - lo + 1)
 	}
 }
 
