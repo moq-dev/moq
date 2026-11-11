@@ -1141,7 +1141,11 @@ impl OriginConsumerState {
 			// one identity (captures and instance); otherwise the later reason is for a
 			// route never delivered.
 			Some(PendingUpdate::UnannounceAnnounce { old, gone: prior, new }) => {
-				let gone = if old.1 == new.1 && old.0.3 == new.0.3 { gone } else { prior };
+				let gone = if old.1 == new.1 && old.0.3 == new.0.3 {
+					gone
+				} else {
+					prior
+				};
 				self.put(prefix, PendingUpdate::Unannounce(old, gone));
 			}
 		}
