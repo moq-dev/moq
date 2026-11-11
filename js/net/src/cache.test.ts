@@ -4,6 +4,7 @@ import * as cache from "./cache.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
 import { RUN_OVERHEAD as ARRIVAL_OVERHEAD } from "./ledger.ts";
+import { Tail } from "./tail.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 // Run `fn` on a manual clock, stepped in milliseconds.
@@ -376,6 +377,30 @@ for (const stale of [false, true]) {
 		reader.close();
 	});
 }
+
+// A subscription's tail, recording a fragmented run of finished streams between updates, bills it to
+// its track's account. Under the pool's debt it forgets them and stays within the pool. Mirrors Rust
+// `a_tail_forgets_its_finished_streams_under_debt`.
+test("a tail forgets its finished streams under debt", () => {
+	const runs = 4000n;
+	const pool = new cache.Pool({ capacity: 1 << 30 });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const tail = new Tail({ bill: hooks.billTrack(producer) });
+	for (let run = 0n; run < runs; run++) tail.finish(2n * run);
+	expect(tail.unfinished(0n, 2n * runs).length).toBe(Number(runs));
+	expect(pool.used).toBeGreaterThanOrEqual(Number(runs) * cache.READER_RUN_OVERHEAD);
+
+	// The pool shrinks, and groups written above them accrue the track's debt, which its own groups
+	// cannot pay: the tail pays it by forgetting what finished.
+	const capacity = 64 * cache.RUN_OVERHEAD;
+	pool.resize(capacity);
+	for (let i = 0; i < 64; i++) finished(producer, 16 * 1024);
+	tail.finish(2n * runs);
+	expect(tail.unfinished(0n, 2n * runs + 1n).length).toBeLessThanOrEqual(2);
+	expect(pool.used).toBeLessThanOrEqual(capacity + 2 * (16 * 1024 + cache.ENTRY_OVERHEAD));
+	tail.close();
+});
 
 // A peer fragmenting its arrivals under a grace that never folds a gap bills each run to the pool,
 // which folds the oldest gaps early to stay within it. Mirrors Rust `an_arrival_flood_stays_within_the_pool`.

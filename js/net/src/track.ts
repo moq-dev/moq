@@ -1301,14 +1301,7 @@ export class Producer {
 		};
 		hooks.arrivalRuns = (producer) => producer.#arrivals.size;
 		accountOf = (producer) => producer.#account;
-		hooks.billTrack = (producer) => {
-			let billed = 0;
-			return (bytes) => {
-				if (bytes > billed) producer.#account.bill(bytes - billed);
-				else producer.#account.unbill(billed - bytes);
-				billed = bytes;
-			};
-		};
+		hooks.billTrack = (producer) => producer.#account.reader();
 		hooks.subscribing = (producer) => producer.#subscribing;
 		hooks.requested = (producer) => producer.#state.update;
 		resubscribe = (producer) => producer.#updateSubscription();
@@ -3068,7 +3061,8 @@ export class Subscriber {
 			this.#skipped.size +
 			this.#pending.length +
 			this.#reported.size +
-			this.#givenUp.length
+			this.#givenUp.length +
+			this.#state.refused.peek().length
 		);
 	}
 
@@ -3147,6 +3141,9 @@ export class Subscriber {
 		this.#pending = this.#pending.flatMap((run) => removeRun([run], 0n, floor));
 		this.#reported.set(0n, floor);
 		this.#givenUp = removeRun(this.#givenUp, 0n, floor);
+		// The fills it refused, as the Rust `Misses::given_up` is forgotten below the floor.
+		if (this.#state.refused.peek().some((run) => run.start < floor))
+			this.#state.refused.update((runs) => removeRun(runs, 0n, floor));
 	}
 
 	// Owe again every run this cursor gave up as stale, reported or not: an update reopens the

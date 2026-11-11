@@ -4016,19 +4016,30 @@ pub struct Producer {
 	stats: stats::Scope,
 }
 
-/// Bytes a session keeps for a track beside its cache, billed to the track's account and
-/// released on drop.
-pub(crate) struct Bill(cache::Extra);
+/// Bytes a session keeps for a track beside its cache, billed to the track's account as a
+/// reader's record is, so the pool can hand it debt, and released on drop.
+pub(crate) struct Bill(cache::Reader);
 
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 impl Bill {
 	/// Bill `bytes` in all.
-	pub(crate) fn set(&self, bytes: u64) {
-		let size = self.0.size();
-		match bytes > size {
-			true => self.0.add(bytes - size),
-			false => self.0.sub(size - bytes),
-		}
+	pub(crate) fn set(&mut self, bytes: u64) {
+		self.0.set(bytes);
+	}
+
+	/// What this bill holds.
+	pub(crate) fn size(&self) -> u64 {
+		self.0.size()
+	}
+
+	/// The debt the track left its readers, which this bill pays by shrinking.
+	pub(crate) fn debt(&self) -> u64 {
+		self.0.debt()
+	}
+
+	/// Pay up to `bytes` of that debt, as a bill that shrank by that much.
+	pub(crate) fn pay(&self, bytes: u64) {
+		self.0.pay(bytes);
 	}
 }
 
@@ -4934,7 +4945,7 @@ impl Producer {
 	/// cache, such as its tail's record of finished streams.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn bill(&self) -> Bill {
-		Bill(self.state.read().cache.extra())
+		Bill(self.state.read().cache.reader())
 	}
 
 	/// How long a subscriber session's tail waits for a late group: `budget`, bounded by how
@@ -24248,6 +24259,44 @@ mod test {
 			"{}",
 			pool.used()
 		);
+	}
+
+	/// A subscription's tail, recording a fragmented run of finished streams between updates,
+	/// bills it to its track's account. Under the pool's debt it forgets them, which leaves a
+	/// stale drop under the update to stand as the publisher judged it, and stays within the
+	/// pool.
+	#[cfg(feature = "async")]
+	#[kio::test]
+	async fn a_tail_forgets_its_finished_streams_under_debt() {
+		const RUNS: u64 = 4000;
+		let (producer, pool) = pooled_producer(1 << 30);
+		producer.received();
+		let tail = kio::Producer::new(crate::tail::Tail::default());
+		if let Ok(mut state) = tail.write() {
+			state.bill(producer.bill());
+		}
+		let now = crate::time::sim().now();
+		let finish = |sequence: u64| crate::tail::Reading::open(&tail, Some(sequence), now).finish();
+		for run in 0..RUNS {
+			finish(2 * run);
+		}
+		assert_eq!(tail.read().finished(0..2 * RUNS).count() as u64, RUNS);
+		assert!(pool.used() >= RUNS * 16, "the finished streams are billed");
+
+		// The pool shrinks, and groups written above them accrue the track's debt, which its own
+		// groups cannot pay: the tail pays it by forgetting what finished.
+		let capacity = 64 * (RUN_OVERHEAD + BORN_OVERHEAD);
+		pool.resize(capacity);
+		let mut producer = producer;
+		for _ in 0..64 {
+			finished_group(&mut producer, 16 * 1024);
+		}
+		finish(2 * RUNS);
+		assert!(
+			tail.read().finished(0..2 * RUNS + 1).count() <= 1,
+			"forgotten under debt"
+		);
+		assert!(pool.used() <= capacity, "within the pool: {}", pool.used());
 	}
 
 	/// A flood a reader reported, fragmented into runs alternating with upstream skips,

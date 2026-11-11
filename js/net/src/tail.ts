@@ -1,6 +1,6 @@
 import { type Duration, now, sleep } from "@moq/clock";
 import { type GetPromise, Signal } from "@moq/signals";
-import { READER_RUN_OVERHEAD } from "./cache.ts";
+import { READER_RUN_OVERHEAD, type Reader } from "./cache.ts";
 import { insertRun, type Run, runGaps } from "./internal.ts";
 import { GRACE, Ledger } from "./ledger.ts";
 
@@ -8,8 +8,8 @@ import { GRACE, Ledger } from "./ledger.ts";
 export interface TailOptions {
 	/** How long to wait for a group that cannot be accounted for. Read each time it is needed. */
 	grace?: () => Duration;
-	/** Bill the bytes the tail keeps, in all, to the subscription's copy's account. */
-	bill?: (bytes: number) => void;
+	/** Bills the bytes the tail keeps to the subscription's copy's account, as a reader's record. */
+	bill?: Reader;
 }
 
 /**
@@ -39,21 +39,33 @@ export class Tail {
 	#finished: Run[] = [];
 	// What `#finished` bills, `READER_RUN_OVERHEAD` per run, so a publisher fragmenting the
 	// streams it finishes between updates costs what the cache would hold.
-	#bill?: (bytes: number) => void;
+	#bill?: Reader;
 
 	constructor(options: TailOptions = {}) {
 		this.#grace = options.grace ?? (() => GRACE);
 		this.#bill = options.bill;
 	}
 
+	// Bill what `#finished` keeps, and under the pool's debt forget all but its newest run: a stale
+	// drop under this update then stands as the publisher judged it, which a wider budget still
+	// reverses. The newest run stays, so streams finishing in sequence grow nothing to charge again.
+	// Mirrors the Rust `Tail::rebill`.
 	#rebill(): void {
-		this.#bill?.(this.#finished.length * READER_RUN_OVERHEAD);
+		const bill = this.#bill;
+		if (!bill) return;
+		bill.set(this.#finished.length * READER_RUN_OVERHEAD);
+		if (bill.debt > 0 && this.#finished.length > 1) {
+			const freed = bill.size - READER_RUN_OVERHEAD;
+			this.#finished = this.#finished.slice(-1);
+			bill.set(READER_RUN_OVERHEAD);
+			bill.pay(freed);
+		}
 	}
 
 	/** Release what the tail bills, once its subscription ended. */
 	close(): void {
 		this.#finished = [];
-		this.#rebill();
+		this.#bill?.close();
 	}
 
 	/** Group streams whose header arrived, whether they finished or were reset. */

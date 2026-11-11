@@ -2070,6 +2070,15 @@ export class Subscriber {
 		};
 		const left = new AbortController();
 		const signal = consumed.valid ? AbortSignal.any([consumed.valid, left.signal]) : left.signal;
+		// Setup stops once nobody wants the run, as a FETCH's does: a stalled exchange (no stream
+		// credit, or a blocked write) never sends a subscription nobody asked for anymore.
+		const leaving = new Promise<void>((resolve) =>
+			left.signal.addEventListener("abort", () => resolve(), { once: true }),
+		);
+		void (async () => {
+			while (!left.signal.aborted && owes()) await race([fillChanged(fill), leaving]);
+			left.abort();
+		})();
 		let failed: Error = new StreamError(StreamCode.Cancel, { message: "fill subscription ended" });
 		let draining = Promise.resolve();
 		this.#subscribes.set(id, entry);

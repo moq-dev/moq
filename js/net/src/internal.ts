@@ -8,7 +8,7 @@
 import type { Duration, Instant } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import type { Charge, Pool } from "./cache.ts";
+import type { Reader as CacheReader, Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
@@ -750,10 +750,10 @@ export const hooks: {
 	wire: (subscriber: Subscriber) => WireRecord;
 	/**
 	 * Open a bill against a track's cache account for what a session keeps for it beside the
-	 * cache, such as its tail's record of finished streams: each call bills that many bytes in
-	 * all. Mirrors the Rust crate-private `track::Producer::bill`.
+	 * cache, such as its tail's record of finished streams, billed as a reader's record is, so
+	 * the pool can hand it debt. Mirrors the Rust crate-private `track::Producer::bill`.
 	 */
-	billTrack: (producer: Producer) => (bytes: number) => void;
+	billTrack: (producer: Producer) => CacheReader;
 	/**
 	 * Re-offer what a subscriber gave up as stale through dispositions, as a wire whose every update
 	 * reopens its stale drops does: each run is judged again under the new terms. Returns the runs

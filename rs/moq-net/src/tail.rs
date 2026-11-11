@@ -69,9 +69,24 @@ impl Tail {
 		self.rebill();
 	}
 
-	fn rebill(&self) {
-		if let Some(bill) = &self.bill {
-			bill.set(self.finished.len() as u64 * FINISHED_OVERHEAD);
+	/// Bill what `finished` keeps, and under the pool's debt forget all but its newest run: a
+	/// stale drop under this update then stands as the publisher judged it, which a wider budget
+	/// still reverses. The newest run stays, so streams finishing in sequence grow nothing to
+	/// charge again.
+	fn rebill(&mut self) {
+		let Some(bill) = &mut self.bill else {
+			return;
+		};
+		bill.set(self.finished.len() as u64 * FINISHED_OVERHEAD);
+		if bill.debt() > 0
+			&& self.finished.len() > 1
+			&& let Some(newest) = self.finished.iter().next_back().cloned()
+		{
+			let freed = bill.size() - FINISHED_OVERHEAD;
+			self.finished = RangeSet::new();
+			self.finished.insert(newest);
+			bill.set(FINISHED_OVERHEAD);
+			bill.pay(freed);
 		}
 	}
 
