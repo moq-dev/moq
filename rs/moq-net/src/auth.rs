@@ -2484,9 +2484,8 @@ impl Gate {
 	}
 
 	/// Hold the request to the peer's grant alone, once its own token authorized it.
-	pub(crate) fn named(mut self) -> Self {
+	pub(crate) fn name(&mut self) {
 		self.part = Part::Granted;
-		self
 	}
 
 	/// Filter a discovery request by the token rather than requiring its whole prefix.

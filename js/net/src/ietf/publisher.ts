@@ -404,9 +404,6 @@ export class Publisher {
 	// Holds every incoming request to that grant from dispatch to its end.
 	#gate: Gate;
 
-	// Resolves once the tokens this session presented at setup are answered, so nothing is
-	// advertised before the grant it would be checked against.
-
 	// The bytes a request carries for a route's token, for only the tokens this session issued.
 	#auth?: Carrier;
 

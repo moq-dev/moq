@@ -16,8 +16,7 @@ The bridge is the root `Cargo.toml`'s first `members` entry. Give it its own
 workspace and lock file, keep its check in the dispatch for `demo/carla/**`
 changes, and keep the files where they are: moq.pro reads
 `demo/carla/sim/trucks.json` from its pin. Check the GPU end-to-end test in
-[vendor-free CARLA bridge](/quest/m5/carla-bridge.md) and
-[macOS check](/quest/m0/macos-check.md), which touch the bridge, still find
-it.
+[vendor-free CARLA bridge](/quest/m5/carla-bridge.md), which touches the
+bridge, still finds it.
 
 Public API: none. Wire: none.

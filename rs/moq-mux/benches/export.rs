@@ -60,18 +60,20 @@ async fn prepare(tracks: usize, frames: usize, live: bool) -> (moq_mux::Source, 
 				})
 				.unwrap();
 		}
-		if !live {
-			track.finish().unwrap();
+	}
+	let tracks: Box<dyn std::any::Any> = match live {
+		true => Box::new(publishers),
+		false => {
+			let finished: Vec<_> = publishers.into_iter().map(|track| track.finish().unwrap()).collect();
+			catalog.finish().unwrap();
+			Box::new(finished)
 		}
-	}
-	if !live {
-		catalog.finish().unwrap();
-	}
+	};
 	broadcast.announce().unwrap();
 	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let fixture = Fixture {
-		_published: Box::new((broadcast, catalog, publishers)),
+		_published: Box::new((broadcast, catalog, tracks)),
 		_origin: origin,
 		driver,
 	};
@@ -289,7 +291,7 @@ async fn prepare_video(
 			})
 			.unwrap();
 	}
-	video.finish().unwrap();
+	let video = video.finish().unwrap();
 	catalog.finish().unwrap();
 	broadcast.announce().unwrap();
 	let resolved = origin.consume().request("bench", None).await.unwrap();

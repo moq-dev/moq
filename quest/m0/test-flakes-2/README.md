@@ -273,10 +273,3 @@ session as publishing outside its grant once in
 passed on rerun. It is quarantined until its child fixes it.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Interop's python -> go media cell holds up](/quest/m0/test-flakes-2/interop-python-go.md) - the cell passes reliably, and its quarantine is removed
-
-- [Interop's finish cases hold up under load](/quest/m0/test-flakes-2/interop-finish.md) - every publisher's finish cells pass under load, and the scenario's quarantine is removed
-- [Kotlin's playout-delay smoke test holds up under load](/quest/m0/test-flakes-2/kt-playout-delay.md) - the audio playout-delay smoke test passes under load, and its `@Ignore` is removed

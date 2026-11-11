@@ -2359,7 +2359,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 			duration: None,
 		})
 		.unwrap();
-	media.finish().unwrap();
+	let _finished = media.finish().unwrap();
 
 	let fetched = MoqMediaGroupConsumer::fetch(
 		&consumer,
@@ -2437,7 +2437,7 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 			})
 			.unwrap();
 	}
-	media.finish().unwrap();
+	let _finished = media.finish().unwrap();
 
 	let fetched = kio::clock::timeout(
 		TIMEOUT,

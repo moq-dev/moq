@@ -245,6 +245,10 @@ def bump(root, config, target):
                 sections.append(f'[[package]]\nname = "{p.name}"\nchangelog_path = {json.dumps(str(changelog))}\n')
             config_path.write_text("\n".join(sections))
             if rust:
+                # Older release-plz, such as a non-Nix one ahead on PATH, leaves versions unset without failing.
+                found = run(root, "release-plz", "--version").split()[-1]
+                if version(found) < (0, 4, 1):
+                    raise ValueError(f"release-plz {found} is older than 0.4.1; use the Nix dev shell's")
                 run(
                     root,
                     "release-plz",
