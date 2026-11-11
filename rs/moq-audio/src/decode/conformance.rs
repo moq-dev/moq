@@ -149,14 +149,12 @@ fn import(
 		Container::Ts(bytes) => {
 			let mut importer = moq_mux::container::ts::Import::new(broadcast, catalog.reserve());
 			importer.decode(bytes).unwrap();
-			importer.finish().unwrap();
-			Box::new(importer)
+			Box::new(importer.finish().unwrap())
 		}
 		Container::Cmaf(bytes) => {
 			let mut importer = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve());
 			importer.decode(bytes).unwrap();
-			importer.finish().unwrap();
-			Box::new(importer)
+			Box::new(importer.finish().unwrap())
 		}
 	};
 	let snapshot = catalog.snapshot();

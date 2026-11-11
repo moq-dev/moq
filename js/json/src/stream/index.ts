@@ -23,4 +23,4 @@
 export { Consumer, Rolled } from "./consumer.ts";
 export { Decoder } from "./decoder.ts";
 export { type Config, Encoder, type Pending } from "./encoder.ts";
-export { Producer } from "./producer.ts";
+export { type Finished, Producer } from "./producer.ts";

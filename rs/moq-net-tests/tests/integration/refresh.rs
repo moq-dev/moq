@@ -143,7 +143,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		let received = current.latest().await.unwrap().unwrap();
 		assert_eq!((received.value, received.at), (value(n + 1), Some(at(n + 1))));
 		assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		drop((current, fresh, late, joins, original, baseline, links));
 	}
 }

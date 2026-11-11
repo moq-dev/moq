@@ -26,10 +26,6 @@ Open, for when the port starts:
 - What stays in the plugin: the MoQ Source and the dock may remain a plugin
   even once the output is native.
 
-## Required
-
-- [obs-studio maintainers agree](/quest/m3/obs-studio/maintainers.md) - condition: agreement in principle to a native MoQ output and service
-
 ## Related
 
 - [First C++ package release](/quest/m3/release/cpp-release.md) - the published C++ package the port would build on
