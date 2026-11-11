@@ -24,7 +24,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	pub async fn run(mut self) -> Result<(), Error> {
 		loop {
-			let mut stream = Stream::accept(&self.session).await?;
+			let mut stream = tokio::select! {
+				res = Stream::accept(&self.session) => res?,
+				// Discard updates: each ANNOUNCE_PLEASE gets its own consumer seeded with the active set.
+				// Otherwise this unbounded queue pins every (un)announced broadcast until the session closes.
+				Some(_) = self.origin.announced() => continue,
+			};
 
 			// To avoid cloning the origin, we process each control stream in received order.
 			// This adds some head-of-line blocking but it delays an expensive clone.
