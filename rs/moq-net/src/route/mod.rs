@@ -424,8 +424,8 @@ pub(crate) struct Router<N, A> {
 	filed: BTreeMap<(Id, N), Id>,
 	/// Babel's feasibility distance per identity.
 	fd: BTreeMap<Id, (Seqno, Metric)>,
-	/// The hops of the route this node last sent for an identity, kept as long as its
-	/// distance: a route that extends them came through this node's own.
+	/// The hops of the route this node last sent under a qualified key, kept as long
+	/// as its distance: a route that extends them came through this node's own.
 	advertised: BTreeMap<Id, Arc<[Id]>>,
 	sent: BTreeMap<(Id, N), Reach>,
 	/// ROUTE_ENDs sent to each neighbor and not yet echoed back. Until they all
@@ -819,9 +819,17 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			};
 		}
 		let routes = self.rx.entry(id).or_default();
+		// Whether only the route's hops or RTT changed, which moves no route here.
+		let mut same = false;
 		match reach {
 			Some(Reach::Finite(advert)) => {
 				let crossed = advert.hops.contains(&self.hop);
+				same = routes.get(&from).is_some_and(|was| {
+					let (old, new) = (&was.advert, &advert);
+					!was.held
+						&& was.crossed == crossed
+						&& (old.seqno, old.metric, old.down_only) == (new.seqno, new.metric, new.down_only)
+				});
 				let entry = Entry {
 					advert,
 					held: false,
@@ -855,7 +863,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			// What it drops lay outside every floor, so nothing it differed in.
 			heard.ended = true;
 		}
-		self.update([id]);
+		self.recompute([id], !same);
 	}
 
 	/// A batch of announcement changes for `named` from `from`, closed by its
@@ -1268,15 +1276,21 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	}
 
 	/// The usable but infeasible routes for `id`, with their metrics: this node holds
-	/// the identity while it has one. A route that crossed this node counts only if it
-	/// extends the route this node last sent, since its sender then routes through this
-	/// node and moves once it hears this node has none. Any other one that crossed it
-	/// stays as it is whatever this node does, and waiting on it would never end.
+	/// the identity while it has one. One that crossed this node counts like any other:
+	/// its sender routes through this node, and moves once it hears this node has no
+	/// route. Under a qualified key that holds only if the route extends the one this
+	/// node last sent under the key. Otherwise a relay past this node derived the key
+	/// from this node's route to another identity, which stands whatever happens to
+	/// this one, and waiting on it would never end.
 	fn infeasible(&self, id: Id) -> impl Iterator<Item = (Metric, N)> + '_ {
 		let sent = self.advertised.get(&id);
+		let derived = move |entry: &Entry| match id & QUALIFIED {
+			0 => true,
+			_ => sent.is_some_and(|sent| entry.advert.hops.starts_with(sent)),
+		};
 		(self.rx.get(&id).into_iter().flatten())
 			.filter(move |(_, entry)| !entry.held && !self.feasible(id, &entry.advert))
-			.filter(move |(_, entry)| !entry.crossed || sent.is_some_and(|sent| entry.advert.hops.starts_with(sent)))
+			.filter(move |(_, entry)| !entry.crossed || derived(entry))
 			.filter_map(move |(&next, entry)| Some((self.metric(next, entry)?, next)))
 	}
 
@@ -1354,23 +1368,6 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		let Some(regions) = self.certified(id, true) else {
 			return;
 		};
-		// A certifier whose view the merged one lags was not one when its regions were
-		// let go below, and sends nothing more now it certifies again: take its view back.
-		let merged = self.views.get(&id);
-		let lags = |view: &View<A>| {
-			(view.floors.iter()).any(|(region, &rev)| merged.and_then(|merged| merged.as_of(region)) < Some(rev))
-		};
-		let back: Vec<N> = (self.certifiers(id).into_iter())
-			.filter(|next| lags(self.heard[&(id, *next)].view()))
-			.collect();
-		if !back.is_empty() {
-			let merged = self.views.entry(id).or_default();
-			for next in back {
-				merged.merge(self.heard[&(id, next)].view());
-			}
-			self.resync(id);
-			self.mark_all(id);
-		}
 		let Some(merged) = self.views.get(&id) else {
 			return;
 		};
@@ -1533,6 +1530,13 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	/// this node advertises, what each neighbor is sent, its seqno request, and
 	/// what the reader sees.
 	fn update(&mut self, ids: impl IntoIterator<Item = Id>) {
+		self.recompute(ids, true);
+	}
+
+	/// [`Self::update`], letting go of what no neighbor certifies only when `prune`. A
+	/// neighbor's change of hops or RTT alone moves no certifier, so it lets go of
+	/// nothing: only a message that could have cost a region its certifier does.
+	fn recompute(&mut self, ids: impl IntoIterator<Item = Id>, prune: bool) {
 		let peers: Vec<N> = self
 			.neighbors
 			.iter()
@@ -1548,7 +1552,9 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			self.changed.entry(id).or_default();
 		}
 		for id in ids {
-			self.prune(id);
+			if prune {
+				self.prune(id);
+			}
 			self.record(id, &peers);
 			let ctx = self.ctx(id, self.selected(id));
 			let mut dirty = self.dirty.remove(&id).unwrap_or_default();
@@ -1807,7 +1813,9 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			if let Some(send) = send
 				&& self.sent.get(&key) != Some(&send)
 			{
-				if let Reach::Finite(advert) = &send {
+				if id & QUALIFIED != 0
+					&& let Reach::Finite(advert) = &send
+				{
 					self.advertised.insert(id, advert.hops.clone());
 				}
 				self.sent.insert(key, send.clone());

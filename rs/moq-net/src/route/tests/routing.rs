@@ -1344,3 +1344,32 @@ fn sweep_no_route_outgrows_a_loop_free_path() {
 		"{flaps} flaps, {collected} collects, {cut} cut, {restarts} restarts"
 	);
 }
+
+/// A relay restarts with no memory and hands node 4 a reflection of the route 4 sent
+/// before its last one. It crossed 4 and is infeasible there, so 4 waits on it like
+/// any infeasible route, and its readers see the claim unavailable, never gone.
+#[test]
+fn a_relay_restart_keeps_the_claim_unavailable() {
+	let origin = 6;
+	let mut sim = Sim::new(7);
+	sim.join(origin, 1, 1);
+	sim.join(1, 3, 1);
+	sim.link(1, 4, SimLink::cost(1), SimLink::cost(2));
+	sim.link(1, 5, SimLink::cost(1).priority(1), SimLink::cost(3).priority(-1));
+	sim.join(3, 4, 1);
+	sim.join(4, 5, 1);
+	originate(&mut sim, origin, 7, 0);
+	assert!(sim.run());
+
+	let before = sim.events.len();
+	sim.kill(1);
+	sim.reconnect(1);
+	assert!(sim.run());
+	for node in [4, 5] {
+		let seen: Vec<Kind> = (sim.events[before..].iter())
+			.filter(|event| event.node == node)
+			.map(|event| event.kind)
+			.collect();
+		assert_eq!(seen, [Kind::Unavailable, Kind::Available], "node {node}");
+	}
+}
