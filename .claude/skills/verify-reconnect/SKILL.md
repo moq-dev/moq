@@ -23,10 +23,10 @@ Each rule is an INVARIANT; the harm says why it matters. All but `NoOrphan` and 
 ## Run
 
 ```sh
-just rs tla moq-net/verify/reconnect/Handover.tla
-just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/RestartWait.cfg
-just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/RedirectLost.cfg
-just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/OfflineWhileServing.cfg
+quest gate just rs tla moq-net/verify/reconnect/Handover.tla
+quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/RestartWait.cfg
+quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/RedirectLost.cfg
+quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/OfflineWhileServing.cfg
 ```
 
 The first checks every rule but the two with open findings, over four sessions: about 1.2M distinct states, under a minute on 32 cores. The second checks the same rules under `Restart::Wait` over three sessions: about 240k states. Both pass at the sync commit. The last two fail at the sync commit, each on its finding below, within seconds. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.

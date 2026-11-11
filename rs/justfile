@@ -19,9 +19,12 @@ default:
     just check
 
 # Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/route/RouteHandoff.tla`.
-# Pass `-config rs/<path>.cfg` for a config not named after the spec.
+# Pass `-config rs/<path>.cfg` for a config not named after the spec, and
+# `../<path>.tla` for a spec outside `rs/`, such as a generated one in `.tmp/`.
+# TLC runs at the lowest priority with a 4 GB heap, which no model here outgrows:
+# the JVM otherwise takes a quarter of RAM per run.
 tla spec *args:
-    nix shell --inputs-from . nixpkgs#tlaplus --command tlc -workers auto -cleanup -metadir "$(mktemp -d)" {{ args }} rs/{{ spec }}
+    JAVA_TOOL_OPTIONS=-Xmx4g nice -n 19 nix shell --inputs-from . nixpkgs#tlaplus18 --command tlc -workers auto -cleanup -noGenerateSpecTE -metadir "$(mktemp -d)" {{ args }} rs/{{ spec }}
 
 # Default features for the selected packages; `features` covers the feature
 # matrix nightly and on release PRs. No `cargo check` pass: clippy is a

@@ -21,8 +21,8 @@ Each rule is an INVARIANT; the harm says why it matters.
 ## Run
 
 ```sh
-just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla
-just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/StreamWins.cfg
+quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla
+quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/StreamWins.cfg
 ```
 
 The first checks every rule but `StreamWins`: about 3.0M states, 20 to 30 seconds on 32 cores, and it passes at the sync commit. The second fails at the sync commit on the open finding below. One group is enough: groups share only the order of the Subscribe Stream, and a second group multiplies the states (60M and more) without adding a race.

@@ -27,8 +27,8 @@ The constraint `Bounded` stops exploring one hop past `NoCountToInfinity`, so a 
 ## Run
 
 ```sh
-just rs tla moq-net/verify/route/RouteHandoff.tla
-just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/CountToInfinity.cfg
+quest gate just rs tla moq-net/verify/route/RouteHandoff.tla
+quest gate just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/CountToInfinity.cfg
 ```
 
 The first checks every rule but `NoCountToInfinity`: about 3.7M states, two minutes on 32 cores, and it passes at the sync commit. The second fails at the sync commit on the open finding below.
