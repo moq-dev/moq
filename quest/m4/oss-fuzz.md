@@ -7,15 +7,6 @@ clock, keeping its own corpus. A crash it finds reaches the maintainer
 privately, and its reproducer lands in the target's `regressions/` so
 `just check` replays it.
 
-## Waiting
-
-- Maintainer: approve the application PR to
-  [google/oss-fuzz](https://github.com/google/oss-fuzz) and name the contact
-  address it lists. An agent cannot take this: it posts outside the
-  `kixelated` and `moq-dev` orgs, the address receives private security
-  reports, and accepting commits the project to OSS-Fuzz's 90-day disclosure
-  deadline. Done when the application PR is open.
-
 ## Plan
 
 Decided 2026-11-10 (maintainer, /quest-plan of the follow-ups from
@@ -25,6 +16,13 @@ Decided 2026-11-10 (maintainer, /quest-plan of the follow-ups from
   time and stay far short of continuous; dropping it).
 - ✅ m4, after the whole-session targets exist, since stateful targets gain
   the most from long runs.
+
+Decided 2026-11-11 (maintainer, /quest-unblock): ✅ the project files list
+`security@moq.dev`, the address in `SECURITY.md` (rejected: a personal
+address), and ✅ the agent opens the google/oss-fuzz PR from the
+maintainer's account once the maintainer has reviewed its draft files and PR
+text (rejected: waiting to decide). The maintainer accepts OSS-Fuzz's 90-day
+disclosure deadline.
 
 Nightly gives each of its 22 codec targets five minutes and the two
 whole-session targets (`session_lite`, `session_ietf`) fifteen. That finds
