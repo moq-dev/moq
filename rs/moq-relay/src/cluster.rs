@@ -60,13 +60,13 @@ pub struct Cluster {
 	noop: moq_lite::Produce<BroadcastProducer, BroadcastConsumer>,
 
 	// Broadcasts announced by local clients (users).
-	pub primary: Arc<moq_lite::Produce<OriginProducer, OriginConsumer>>,
+	pub primary: Arc<OriginProducer>,
 
 	// Broadcasts announced by remote servers (cluster).
-	pub secondary: Arc<moq_lite::Produce<OriginProducer, OriginConsumer>>,
+	pub secondary: Arc<OriginProducer>,
 
 	// Broadcasts announced by local clients and remote servers.
-	pub combined: Arc<moq_lite::Produce<OriginProducer, OriginConsumer>>,
+	pub combined: Arc<OriginProducer>,
 }
 
 impl Cluster {
@@ -75,9 +75,9 @@ impl Cluster {
 			config,
 			client,
 			noop: Broadcast::produce(),
-			primary: Arc::new(Origin::produce()),
-			secondary: Arc::new(Origin::produce()),
-			combined: Arc::new(Origin::produce()),
+			primary: Arc::new(Origin::produce().producer),
+			secondary: Arc::new(Origin::produce().producer),
+			combined: Arc::new(Origin::produce().producer),
 		}
 	}
 
@@ -92,7 +92,7 @@ impl Cluster {
 		};
 
 		// Scope the origin to our root.
-		let subscribe_origin = subscribe_origin.producer.with_root(&token.root)?;
+		let subscribe_origin = subscribe_origin.with_root(&token.root)?;
 		subscribe_origin.consume_only(&token.subscribe)
 	}
 
@@ -104,15 +104,15 @@ impl Cluster {
 			false => &self.primary,
 		};
 
-		let publish_origin = publish_origin.producer.with_root(&token.root)?;
+		let publish_origin = publish_origin.with_root(&token.root)?;
 		publish_origin.publish_only(&token.publish)
 	}
 
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
 		self.primary
-			.consumer
+			.consume()
 			.consume_broadcast(broadcast)
-			.or_else(|| self.secondary.consumer.consume_broadcast(broadcast))
+			.or_else(|| self.secondary.consume().consume_broadcast(broadcast))
 	}
 
 	pub async fn run(self) -> anyhow::Result<()> {
@@ -131,7 +131,6 @@ impl Cluster {
 		// Use with_root to automatically strip the prefix from announced paths.
 		let origins = self
 			.secondary
-			.producer
 			.with_root(&self.config.prefix)
 			.context("no authorized origins")?;
 
@@ -169,8 +168,8 @@ impl Cluster {
 
 	// Shovel broadcasts from the primary and secondary origins into the combined origin.
 	async fn run_combined(self) -> anyhow::Result<()> {
-		let mut primary = self.primary.consumer.consume();
-		let mut secondary = self.secondary.consumer.consume();
+		let mut primary = self.primary.consume();
+		let mut secondary = self.secondary.consume();
 
 		loop {
 			let (name, broadcast) = tokio::select! {
@@ -181,7 +180,7 @@ impl Cluster {
 			};
 
 			if let Some(broadcast) = broadcast {
-				self.combined.producer.publish_broadcast(&name, broadcast);
+				self.combined.publish_broadcast(&name, broadcast);
 			}
 		}
 	}
@@ -270,8 +269,8 @@ impl Cluster {
 			.await
 			.context("failed to connect to remote")?;
 
-		let publish = Some(self.primary.consumer.consume());
-		let subscribe = Some(self.secondary.producer.clone());
+		let publish = Some(self.primary.consume());
+		let subscribe = Some((*self.secondary).clone());
 
 		let session = moq_lite::Session::connect(conn, publish, subscribe)
 			.await
