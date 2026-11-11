@@ -189,7 +189,8 @@ typealias RouteOptions = uniffi.moq.MoqRouteOptions
 
 /**
  * The read-only facts on a received route: the [Instance] of the stream it serves, relay hop ids
- * (oldest first), and static production and link cost (lower wins).
+ * (oldest first), static production and link cost (lower wins), and its informational `rtt` to the
+ * origin node.
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo
 

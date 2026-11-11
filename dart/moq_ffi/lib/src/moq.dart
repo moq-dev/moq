@@ -3010,10 +3010,12 @@ class MoqRouteInfo {
   final int cost;
   final MoqInstance instance;
   final bool available;
+  final Duration? rtt;
   MoqRouteInfo({
     required this.cost,
     required this.instance,
     required this.available,
+    this.rtt,
   });
 }
 
@@ -3039,8 +3041,18 @@ class FfiConverterMoqRouteInfo {
     );
     final available = available_lifted.value;
     new_offset += available_lifted.bytesRead;
+    final rtt_lifted = FfiConverterOptionalDuration.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final rtt = rtt_lifted.value;
+    new_offset += rtt_lifted.bytesRead;
     return LiftRetVal(
-      MoqRouteInfo(cost: cost, instance: instance, available: available),
+      MoqRouteInfo(
+        cost: cost,
+        instance: instance,
+        available: available,
+        rtt: rtt,
+      ),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -3050,6 +3062,7 @@ class FfiConverterMoqRouteInfo {
         FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterMoqInstance.allocationSize(value.instance) +
         FfiConverterBool.allocationSize(value.available) +
+        FfiConverterOptionalDuration.allocationSize(value.rtt) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -3070,6 +3083,10 @@ class FfiConverterMoqRouteInfo {
       value.available,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalDuration.write(
+      value.rtt,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -3077,6 +3094,7 @@ class FfiConverterMoqRouteInfo {
     return FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterMoqInstance.allocationSize(value.instance) +
         FfiConverterBool.allocationSize(value.available) +
+        FfiConverterOptionalDuration.allocationSize(value.rtt) +
         0;
   }
 }
