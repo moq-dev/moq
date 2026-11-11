@@ -573,7 +573,7 @@ It carries the sender's `Serves` and its `Warm Cost`, the price it pays for its 
 The sender sends a WARM_UPDATE when either changes, and a WARM_END once it no longer pulls the broadcast.
 A change that narrows whom the copy serves, from Alone to a Relay, from one Relay to another, or to no warm route at all, waits until the sender has kept the copy without the old demand for as long as it keeps any copy whose demand is gone, so a neighbor that just joined it does not move straight back.
 
-A receiver counts a neighbor warm for a broadcast when the receiver's own pull does not serve Unknown, and the neighbor's warm route serves Alone or serves a Relay that is neither the receiver nor the root of the receiver's own pull.
+A receiver counts a neighbor warm for a broadcast when the neighbor's warm route serves Alone, or serves a Relay that is neither the receiver nor the root of the receiver's own pull while that pull does not serve Unknown.
 Demand a receiver causes, through any number of relays, then never warms a neighbor toward it.
 The receiver prices a pull through each neighbor as:
 
