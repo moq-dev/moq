@@ -151,6 +151,10 @@ async function receiveSetup(
 
 	await reader.u53(); // the SETUP type, peeked above
 	const setup = await Ietf.Setup.decode(reader, version);
+	// Option types and varint values, but only lengths for byte options: no credential.
+	const vars = [...setup.parameters.vars].map(([kind, value]) => `0x${kind.toString(16)}=${value}`);
+	const bytes = [...setup.parameters.bytes].map(([kind, value]) => `0x${kind.toString(16)}:${value.length}B`);
+	console.debug(`peer SETUP options: vars=[${vars.join(", ")}] bytes=[${bytes.join(", ")}]`);
 
 	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if (client && setup.parameters.getBytes(Ietf.SetupOption.Path) !== undefined) {

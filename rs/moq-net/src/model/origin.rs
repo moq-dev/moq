@@ -15065,6 +15065,74 @@ mod tests {
 		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
 	}
 
+	/// The serving route is withdrawn while its copy of the track is still open, and the
+	/// next route for the same publisher no longer has the broadcast: its refusal must not
+	/// end the track, which takes the incumbent's remaining groups and clean end.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_refused_replacement_keeps_a_withdrawn_incumbent_open() {
+		// The incumbent arrives from relay 2, a stale standby from relay 3, both for
+		// publisher 9, so withdrawing relay 2 leaves the standby standing.
+		let producer = origin(1).produce();
+		let server = producer
+			.forward(
+				"room",
+				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[9, 2])),
+			)
+			.unwrap();
+		let standby = producer
+			.forward(
+				"room",
+				RouteInfo::new()
+					.with_instance(instance(), 0)
+					.with_hops(hops(&[9, 5, 3])),
+			)
+			.unwrap();
+		let pending = producer.consume().request("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		let old = upstream.create_track("video", crate::track::Info::timed()).unwrap();
+		queued(&server).await.serve(&upstream);
+		let resolved = pending.await.expect("resolves");
+		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = old.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = next_group(&mut subscription).await.unwrap().expect("first group");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
+
+		// The peer withdraws the broadcast: the route retracts and its source closes,
+		// while the subscription already in flight stays open.
+		server.withdrawn();
+		upstream.close();
+
+		let successor = broadcast::Info::new().produce();
+		let mut handler = successor.requests();
+		queued(&standby).await.serve(&successor);
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front asked the standby")
+			.expect("request");
+		request.reject(Error::Unroutable);
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+
+		let mut group = old.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = next_group(&mut subscription)
+			.await
+			.expect("the incumbent keeps serving")
+			.expect("track open");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"last");
+
+		let _old = old.finish().unwrap();
+		let end = next_group(&mut subscription)
+			.await
+			.map(|group| group.map(|group| group.sequence));
+		assert!(matches!(end, Ok(None)), "the incumbent's clean end, not {end:?}");
+	}
+
 	/// The newcomer answers "video" with matching metadata, the front reads that answer,
 	/// and only then does the newcomer abort, before its first group: still a refusal, so
 	/// the incumbent keeps serving.
