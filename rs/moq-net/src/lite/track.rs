@@ -6,6 +6,7 @@ use crate::{
 };
 
 use super::{Message, Version};
+use crate::track::Compression;
 
 // Older JS readers use safe integer milliseconds; larger legacy ages mean no limit.
 const LEGACY_UNLIMITED: u64 = (1u64 << 53) - 1;
@@ -89,10 +90,9 @@ pub struct TrackInfo {
 	/// Lite07 encodes `None` as zero; Lite05/06 have no untimed encoding, so `None`
 	/// goes out as milliseconds (see [`Version::wire_timescale`]).
 	pub timescale: Option<Timescale>,
-	/// Whether FRAME payloads and datagrams are DEFLATE compressed per group, the only codec
-	/// the wire's `Compression` id names. Lite07+ only: an earlier peer is served the frames
-	/// inflated, so it is never set.
-	pub compress: bool,
+	/// How FRAME payloads and datagrams are compressed per group. Lite07+ only: an earlier
+	/// peer is served the frames inflated, so it is always [`Compression::None`] there.
+	pub compression: Compression,
 }
 
 impl TrackInfo {
@@ -104,7 +104,10 @@ impl TrackInfo {
 			max_age: info.max_age,
 			timescale: info.timescale,
 			// An older peer is served the frames inflated.
-			compress: info.compress && version.has_compression(),
+			compression: match version.has_compression() {
+				true => info.compression,
+				false => Compression::None,
+			},
 		}
 	}
 }
@@ -116,14 +119,9 @@ impl From<TrackInfo> for crate::track::Info {
 			.with_max_age(info.max_age)
 			.with_priority(info.priority)
 			.with_refresh(info.refresh)
-			.with_compress(info.compress)
+			.with_compression(info.compression)
 	}
 }
-
-/// TRACK_INFO `Compression`: no codec.
-const COMPRESSION_NONE: u64 = 0;
-/// TRACK_INFO `Compression`: per-group DEFLATE (draft-lcurley-moq-flate).
-const COMPRESSION_DEFLATE: u64 = 1;
 
 /// What reading a track's groups and datagrams needs from its TRACK_INFO and, with the
 /// `ietf` extension, TRACK_PROPERTIES.
@@ -145,7 +143,7 @@ impl Framing {
 		Self {
 			timescale: version.wire_timescale(info.timescale),
 			ietf: info.ietf(),
-			compressed: info.compress,
+			compressed: info.compressed(),
 		}
 	}
 }
@@ -179,13 +177,13 @@ impl<'a> Message<'a> for TrackInfo {
 				.map_err(|_| DecodeError::InvalidValue)?,
 			false => None,
 		};
-		let compress = match version.has_compression() {
+		let compression = match version.has_compression() {
 			true => match r.varint()? {
-				COMPRESSION_NONE => false,
-				COMPRESSION_DEFLATE => true,
+				0 => Compression::None,
+				1 => Compression::Deflate,
 				_ => return Err(DecodeError::InvalidValue),
 			},
-			false => false,
+			false => Compression::None,
 		};
 
 		Ok(Self {
@@ -193,7 +191,7 @@ impl<'a> Message<'a> for TrackInfo {
 			refresh,
 			max_age,
 			timescale,
-			compress,
+			compression,
 		})
 	}
 
@@ -216,11 +214,8 @@ impl<'a> Message<'a> for TrackInfo {
 			w.varint(self.refresh.map_or(0, |ratio| u64::from(ratio) + 1))?;
 		}
 		if version.has_compression() {
-			w.varint(match self.compress {
-				true => COMPRESSION_DEFLATE,
-				false => COMPRESSION_NONE,
-			})?;
-		} else if self.compress {
+			w.varint(self.compression as u64)?;
+		} else if self.compression != Compression::None {
 			// The frames would arrive compressed with nothing saying so.
 			return Err(EncodeError::Version);
 		}
@@ -238,7 +233,7 @@ mod test {
 			priority: 7,
 			max_age: Some(Duration::from_millis(2000)),
 			timescale: Some(Timescale::MICRO),
-			compress: false,
+			compression: Compression::None,
 		}
 	}
 
@@ -399,20 +394,20 @@ mod test {
 
 	#[test]
 	fn lite07_carries_the_compression_codec() {
-		for compress in [false, true] {
+		for compression in [Compression::None, Compression::Deflate] {
 			let info = TrackInfo {
-				compress,
+				compression,
 				..info_sample()
 			};
 			let buf = info.encode_bytes(Version::Lite07).unwrap();
-			assert_eq!(buf.last(), Some(&u8::from(compress)));
-			assert_eq!(info_roundtrip(Version::Lite07, &info).compress, compress);
+			assert_eq!(buf.last(), Some(&(compression as u8)));
+			assert_eq!(info_roundtrip(Version::Lite07, &info).compression, compression);
 		}
 
 		// The message body, without its length prefix, ends in the codec id.
 		let mut buf = Vec::new();
 		TrackInfo {
-			compress: true,
+			compression: Compression::Deflate,
 			..info_sample()
 		}
 		.encode_msg(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
@@ -430,7 +425,7 @@ mod test {
 	#[test]
 	fn compression_needs_lite07() {
 		let info = TrackInfo {
-			compress: true,
+			compression: Compression::Deflate,
 			..info_sample()
 		};
 		for version in [Version::Lite05, Version::Lite06] {
@@ -439,10 +434,10 @@ mod test {
 				"{version}"
 			);
 			let plain = TrackInfo {
-				compress: false,
+				compression: Compression::None,
 				..info_sample()
 			};
-			assert!(!info_roundtrip(version, &plain).compress);
+			assert_eq!(info_roundtrip(version, &plain).compression, Compression::None);
 		}
 	}
 
@@ -463,7 +458,7 @@ mod test {
 			priority: i8::MIN,
 			max_age: None,
 			timescale: Some(Timescale::new((1u64 << 62) - 1).unwrap()),
-			compress: false,
+			compression: Compression::None,
 		};
 		let got = info_roundtrip(Version::Lite05, &info);
 		assert_eq!(got.priority, i8::MIN);
@@ -483,7 +478,7 @@ mod test {
 			priority: 0,
 			max_age: Some(Duration::from_nanos(999_999)),
 			timescale: Some(Timescale::MILLI),
-			compress: false,
+			compression: Compression::None,
 		};
 		let got = info_roundtrip(Version::Lite05, &info);
 		assert_eq!(got.max_age, Some(Duration::ZERO));
@@ -497,7 +492,7 @@ mod test {
 			priority: 7,
 			max_age: Some(Duration::from_millis(u64::MAX)),
 			timescale: Some(Timescale::MILLI),
-			compress: false,
+			compression: Compression::None,
 		};
 		// The partial bytes are the Writer's to drop; see `a_failed_encode_leaves_no_partial_bytes`.
 		assert!(matches!(
@@ -517,8 +512,8 @@ mod test {
 			track: Cow::Borrowed("v"),
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
-		// Length, the path, an empty instance, the node, then the track name.
-		assert_eq!(&buf[..], [9, 4, b'r', b'o', b'o', b'm', 0, 5, 1, b'v']);
+		// Length, the path, an empty unminted instance, the node, then the track name.
+		assert_eq!(&buf[..], [10, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 1, b'v']);
 		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, 5);
 
 		let buf = msg.encode_bytes(Version::Lite06).unwrap();

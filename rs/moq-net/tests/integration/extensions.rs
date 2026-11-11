@@ -18,13 +18,10 @@ const SETTLE: Duration = Duration::from_secs(1);
 /// Every moq-transport draft, each of which carries the SOLICIT option.
 const MOQT: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
 
-/// The oldest draft we speak, which negotiates MoQ Auth, and the newest.
-const AUTH: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
-
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn declined(f: impl FnOnce(&mut Extensions)) -> Extensions {
@@ -44,12 +41,19 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 	let mut live = false;
 	while let Some(event) = announced.try_next() {
 		match event {
-			moq_net::origin::RouteEvent::Start(update)
-			| moq_net::origin::RouteEvent::Update(update)
-			| moq_net::origin::RouteEvent::Restart(update) => {
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: update,
+			} => {
 				live |= update.prefix.as_str() == path;
 			}
-			moq_net::origin::RouteEvent::End(update) => {
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+				announce: update,
+			} => {
 				live &= update.prefix.as_str() != path;
 			}
 		}
@@ -92,52 +96,6 @@ async fn a_side_that_declines_solicit_takes_unsolicited_announces() {
 			kio::clock::sleep(SETTLE).await;
 
 			assert!(announced(&subscriber, "room/cam"), "{context}: never announced");
-			assert_open(&pair, &context);
-		}
-	}
-}
-
-/// A side that declines MoQ Auth leaves it un-negotiated whichever side declines:
-/// neither side holds a grant, and a token is kept for the requests that name it
-/// rather than presented on an AUTH stream.
-#[kio::test]
-async fn a_declined_auth_extension_is_not_negotiated() {
-	for name in AUTH {
-		let version: Version = name.parse().unwrap();
-
-		// Control: offered by both, the client's connection credential earns a grant.
-		let pair = connect_mock(MockConnectOptions::new(version)).await;
-		let mut grant = pair.client.auth().grant();
-		kio::clock::timeout(SETTLE, async {
-			while grant.peek().is_none() {
-				grant.changed().await.expect("grant watch ended");
-			}
-		})
-		.await
-		.unwrap_or_else(|_| panic!("{name}: no grant with both offering"));
-
-		for server_declines in [true, false] {
-			let context = format!("{name}, server declines: {server_declines}");
-			let no_auth = declined(|e| e.auth = false);
-			let mut options = MockConnectOptions::new(version);
-			match server_declines {
-				true => options.server_extensions = no_auth,
-				false => options.client_extensions = no_auth,
-			}
-			let pair = connect_mock(options).await;
-			kio::clock::sleep(SETTLE).await;
-
-			for session in [&pair.client, &pair.server] {
-				assert_eq!(session.auth().grant().peek(), None, "{context}");
-				// Only a request that names it can carry the token, so it resolves at once with
-				// a grant that stays unknown.
-				let added = kio::clock::timeout(SETTLE, session.auth().add("token"))
-					.await
-					.unwrap_or_else(|_| panic!("{context}: add never resolved"))
-					.unwrap_or_else(|err| panic!("{context}: {err:?}"));
-				assert_eq!(added.grant().peek(), None, "{context}");
-				assert_eq!(session.auth().grant().peek(), None, "{context}");
-			}
 			assert_open(&pair, &context);
 		}
 	}

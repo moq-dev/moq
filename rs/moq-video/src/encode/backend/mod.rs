@@ -8,9 +8,9 @@
 //! the right importer.
 //!
 //! Output is stamped with the timestamp of the frame it was encoded from, not
-//! whichever frame happened to be going in. A backend that flushes each frame
-//! before returning just echoes the input timestamp; one that buffers (Media
-//! Foundation, MediaCodec) correlates through the codec's own sample clock.
+//! whichever frame happened to be going in. A backend that readies each frame's
+//! output as it is submitted just echoes the input timestamp; one that buffers
+//! (Media Foundation, MediaCodec) correlates through the codec's own sample clock.
 //!
 //! [`open`] picks the best backend for a [`Codec`](super::Codec) +
 //! [`Kind`](super::Kind): only candidates that support the requested codec are
@@ -45,12 +45,15 @@ mod v4l2;
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
 mod vaapi;
 
-/// An opened video encoder. Feed it frames at the configured resolution; get
-/// back zero or more access units in the codec's wire framing, each stamped with
-/// the timestamp of the frame it came from and marked when it is a keyframe,
-/// whether forced by `cut` or placed by the backend's own GOP cadence.
+/// An opened video encoder. Submit frames at the configured resolution, then
+/// receive zero or more access units in the codec's wire framing, each stamped
+/// with the timestamp of the frame it came from and marked when it is a
+/// keyframe, whether forced by `cut` or placed by the backend's own GOP cadence.
+///
+/// A backend that readies output synchronously holds it in a reused queue, so
+/// no call allocates to hand it back.
 pub(crate) trait Backend {
-	/// Encode one frame, opening a group at it (an IDR) when `cut` is set.
+	/// Submit one frame, opening a group at it (an IDR) when `cut` is set.
 	/// Backends place group boundaries on their own every
 	/// [`Config::keyframe_interval`] frames, so this is only the encoder's extra
 	/// request: a caller's [`Encoder::cut`](super::Encoder::cut), or a
@@ -58,10 +61,13 @@ pub(crate) trait Backend {
 	/// arrives only on a backend whose [`can_cut`](Self::can_cut) said yes. A
 	/// backend that drops the frame carries the cut to the next one it encodes,
 	/// or the group waits a whole join for its keyframe.
-	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error>;
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error>;
 
-	/// Return every access unit the codec is still holding, leaving the encoder
-	/// usable for the frames that follow.
+	/// Pop the oldest ready access unit, or `None` while the codec holds the rest.
+	fn receive(&mut self) -> Result<Option<Encoded>, Error>;
+
+	/// Mark the end of input, so [`receive`](Self::receive) returns every access
+	/// unit the codec still holds. The next frame submitted starts new input.
 	///
 	/// The caller reaches for this at a boundary the output has to respect, which
 	/// on a live track is a group: a codec that pipelines would otherwise carry the
@@ -71,10 +77,40 @@ pub(crate) trait Backend {
 	/// No default, even though most backends have nothing to hold: a pipelined one
 	/// that inherited an empty implementation would drop frames at every boundary
 	/// and look like it worked.
-	fn flush(&mut self) -> Result<Vec<Encoded>, Error>;
+	fn flush(&mut self) -> Result<(), Error>;
 
-	/// Flush the encoder for the last time, returning any buffered access units.
-	fn finish(&mut self) -> Result<Vec<Encoded>, Error>;
+	/// Submit one frame and collect everything it readied.
+	#[cfg(all(
+		test,
+		any(
+			feature = "openh264",
+			apple,
+			all(target_os = "android", feature = "mediacodec"),
+			all(target_os = "linux", feature = "vaapi"),
+		)
+	))]
+	fn encode_all(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+		self.encode(frame, cut)?;
+		self.receive_all()
+	}
+
+	/// Flush and collect the tail.
+	#[cfg(test)]
+	#[allow(dead_code, reason = "only the platform backends' tests use it")]
+	fn flush_all(&mut self) -> Result<Vec<Encoded>, Error> {
+		self.flush()?;
+		self.receive_all()
+	}
+
+	/// Collect everything ready.
+	#[cfg(test)]
+	fn receive_all(&mut self) -> Result<Vec<Encoded>, Error> {
+		let mut encoded = Vec::new();
+		while let Some(unit) = self.receive()? {
+			encoded.push(unit);
+		}
+		Ok(encoded)
+	}
 
 	/// Retune the live encoder to `bitrate` bits per second, taking effect from
 	/// roughly the next frame. Called as the congestion controller's estimate
@@ -577,16 +613,16 @@ mod tests {
 	}
 
 	impl Backend for Stub {
-		fn encode(&mut self, _frame: &Frame, _cut: bool) -> Result<Vec<Encoded>, Error> {
-			Ok(Vec::new())
+		fn encode(&mut self, _frame: &Frame, _cut: bool) -> Result<(), Error> {
+			Ok(())
 		}
 
-		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-			Ok(Vec::new())
+		fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+			Ok(None)
 		}
 
-		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-			Ok(Vec::new())
+		fn flush(&mut self) -> Result<(), Error> {
+			Ok(())
 		}
 
 		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
@@ -616,7 +652,7 @@ mod tests {
 	const REFUSING: Candidate = Candidate {
 		name: "driverless",
 		codecs: &[Codec::H264],
-		open: |_| Err(Error::Codec(anyhow::anyhow!("driver libraries not found"))),
+		open: |_| Err(Error::codec(anyhow::anyhow!("driver libraries not found"))),
 		cuts: true,
 		#[cfg(target_os = "linux")]
 		vulkan: false,

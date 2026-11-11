@@ -14,6 +14,5 @@ from [moq-dev/moq#6633](https://github.com/moq-dev/moq/pull/6633).
 - Decided 2026-10-25 (recommendation, maintainer delegated): a library reads
   no environment; the binaries that link it declare their settings and pass
   them in. moq-video's half (`MOQ_VAAPI_DEVICE`, `MOQ_V4L2_*`, and the public
-  `moq_video::ENV`) moved to [video-devices](/quest/m2/video-devices.md) on
-  2026-11-07 (maintainer, /quest-plan from the API shape audit), because
-  `ENV` is new public API the cut would otherwise ship.
+  `moq_video::ENV`) landed separately as `vaapi` and `v4l2` config fields
+  before the cut (maintainer, 2026-11-07), so `ENV` never shipped.

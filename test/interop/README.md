@@ -76,7 +76,9 @@ publisher and subscriber. Each reader fetches group 1 of a finished track, requi
 its three objects, each with its own bytes, and closes under the relay idle-out check. Each native JS runtime also serves
 that FETCH to all three subscribers from history (`CLI FETCH history`): its publisher writes only group 3 live and answers
 groups 0 through 2, which it never cached, from an in-memory responder on `track.requests()`.
-This runs on moq-lite and every supported IETF draft.
+Both lanes run on moq-lite and every supported IETF draft, except that a native JS
+publisher's cells are skipped on moq-transport: the relay fills its miss with an upstream
+FETCH, which a JS publisher refuses there by design.
 
 A late-join lane runs Rust-to-Rust and Rust/Node/Bun in both directions. The publisher
 writes the first two objects of group 0 before any subscriber exists and leaves the group
@@ -239,14 +241,14 @@ implementation unique to the run, the relay records it when it admits the
 session, and its `moq_net::lite::setup` debug line on that connection shows the
 proof verified. The lane prints each browser build.
 
-Chromium 158 and later must prove. Firefox's exporter writes the session ID as
-a varint rather than the draft's 64 bits, so `@moq/net` sends no proof from
-Firefox, and the tab must connect unproven. A build that cannot prove yet skips,
-or fails under `CI_STRICT`, which release PRs set, so the lite-07 cut waits for
-both browsers to prove. A build the table says cannot prove but that does fails,
-so the table follows the browsers. Until
-[routes/js.md](../../quest/m2/cluster-routing/routes/js.md) ports `js/net` to the
-route layer, the lane records a skip naming it.
+Chromium 158 and later must prove; an older Chromium skips, or fails under
+`CI_STRICT`, which release PRs set, so the lite-07 cut waits for it to prove.
+Firefox's exporter writes the session ID as a varint rather than the draft's 64
+bits, so `@moq/net` sends no proof from Firefox, and the tab passes when it
+connects unproven, a supported state the cut does not wait on. A build the
+table says cannot prove but that does fails, so the table follows the browsers.
+Until [routes/js.md](../../quest/m2/cluster-routing/routes/js.md) ports `js/net`
+to the route layer, the lane records a skip naming it.
 
 ## moq-transport
 
@@ -292,10 +294,8 @@ Some cases change shape on moq-transport:
   so a tail reader started before the publisher's groups may begin past group 0.
   The tails take any contiguous run of groups through group 3, each verified
   byte for byte, and still require the clean end at 4.
-- The AUTH extension carries prefixes alone, and a relay refuses a
-  grant narrower than a subtree, closing the session as Unauthorized. Pinned
-  passes mint `name/**` for both roles instead of the exact and `**/name`
-  patterns above.
+- Requests name prefixes alone, so pinned passes mint `name/**` for both roles
+  instead of the exact and `**/name` patterns above.
 
 The browser pins through the `versions` attribute on `<moq-watch>` and
 `<moq-publish>`, and GStreamer through the `versions` property on `moqsrc`.
@@ -555,11 +555,14 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-Firefox's replacement case is quarantined from the default run after intermittent
-audio-tone failures. Investigate the missing tone samples alongside
-[the audio playout work](https://github.com/moq-dev/moq/pull/8058), then restore it.
-Run it explicitly with `just test media --media-engines firefox --media-cases replacement`;
-its content, sync, switch, and fallback assertions remain active.
+The replacement case is quarantined from the default run on every engine until
+[the JS route-layer port](../../quest/m2/cluster-routing/routes/js.md) lands,
+because both publishers use lite-07. Firefox also has a separate quarantine for
+intermittent audio-tone failures; investigate those alongside
+[the audio playout work](https://github.com/moq-dev/moq/pull/8058) before restoring
+Firefox's default case. Run replacement explicitly with
+`just test media --media-cases replacement` (add `--media-engines firefox` for
+Firefox); its content, sync, switch, and fallback assertions remain active.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media

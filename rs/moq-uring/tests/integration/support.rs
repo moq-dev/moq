@@ -31,65 +31,30 @@ pub fn certs() -> anyhow::Result<Certs> {
 	Ok(Certs { dir, cert, key })
 }
 
-/// A CA-signed server certificate plus a root file holding two CAs, only the
-/// second of which signed it.
-pub struct Bundle {
-	pub dir: tempfile::TempDir,
-	pub cert: std::path::PathBuf,
-	pub key: std::path::PathBuf,
-	/// Both CAs concatenated, in that order.
-	pub roots: std::path::PathBuf,
+impl Certs {
+	/// A server TLS policy presenting this certificate and speaking `alpn`.
+	pub fn server(&self, alpn: &[&str]) -> std::sync::Arc<rustls::ServerConfig> {
+		let mut tls = moq_tokio::tls::Listen::default();
+		tls.cert = vec![self.cert.clone()];
+		tls.key = vec![self.key.clone()];
+		tls.server_config(alpn.iter().map(|proto| proto.as_bytes().to_vec()).collect())
+			.expect("server tls")
+	}
 }
 
-/// Build one, for a test that a root file is loaded whole rather than to its
-/// first certificate.
-pub fn bundle() -> anyhow::Result<Bundle> {
-	let ca = |name: &str| -> anyhow::Result<rcgen::CertifiedIssuer<'static, rind_rcgen::KeyPair>> {
-		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-		let mut params = rcgen::CertificateParams::new(Vec::new()).map(|mut params| {
-			params.serial_number = Some(1u64.into());
-			params
-		})?;
-		params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-		params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
-		params.distinguished_name.push(rcgen::DnType::CommonName, name);
-		Ok(rcgen::CertifiedIssuer::self_signed(params, key)?)
-	};
-	let unrelated = ca("moq unrelated ca")?;
-	let signer = ca("moq signing ca")?;
-
-	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-	let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).map(|mut params| {
-		params.serial_number = Some(1u64.into());
-		params
-	})?;
-	params.use_authority_key_identifier_extension = true;
-	let cert = params.signed_by(&key, &signer)?;
-
-	let dir = tempfile::tempdir()?;
-	let cert_path = dir.path().join("cert.pem");
-	let key_path = dir.path().join("key.pem");
-	let roots_path = dir.path().join("roots.pem");
-	std::fs::write(&cert_path, cert.pem())?;
-	std::fs::write(
-		&key_path,
-		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
-	)?;
-	// The signer is second on purpose: reading only the first certificate
-	// leaves the store unable to verify anything this server presents.
-	std::fs::write(&roots_path, format!("{}{}", unrelated.pem(), signer.pem()))?;
-	Ok(Bundle {
-		dir,
-		cert: cert_path,
-		key: key_path,
-		roots: roots_path,
-	})
+/// A client TLS policy offering `alpn` and trusting whatever certificate the server presents.
+pub fn client_tls(alpn: &[&str]) -> std::sync::Arc<rustls::ClientConfig> {
+	let mut tls = moq_tokio::tls::Connect::default();
+	tls.insecure = Some(true);
+	let mut tls = tls.build().expect("client tls");
+	tls.alpn_protocols = alpn.iter().map(|proto| proto.as_bytes().to_vec()).collect();
+	std::sync::Arc::new(tls)
 }
 
 /// Open a WebTransport session to `request` from tokio, through the driver's
 /// own `connect`, trusting whatever certificate the server presents.
 pub async fn web_connect(
-	request: moq_tokio::quic::web::proto::ConnectRequest,
+	request: web_transport_proto::ConnectRequest,
 	transport: moq_tokio::quic::driver::transport::Config,
 ) -> Result<moq_tokio::quic::web::Session, moq_tokio::quic::web::Error> {
 	use moq_tokio::quic::{driver, web};

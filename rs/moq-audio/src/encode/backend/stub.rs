@@ -3,6 +3,7 @@
 //! real tiers.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::sync::{Arc, Weak};
 
 use bytes::Bytes;
@@ -49,10 +50,16 @@ impl Drop for Installed {
 }
 
 /// Emits each frame's index as its payload, and cannot retune.
+///
+/// Pipelines like a platform encoder: it holds every other frame and releases
+/// it with the next, so submissions alternate between readying no packet and two,
+/// and a tail waits for [`flush`](Backend::flush).
 pub(crate) struct Stub {
 	_resource: Arc<()>,
 	bitrate: u64,
 	frames: u64,
+	held: Option<Encoded>,
+	ready: VecDeque<Encoded>,
 }
 
 impl Stub {
@@ -61,19 +68,36 @@ impl Stub {
 			_resource: INSTALLED.with(|installed| installed.borrow().upgrade().unwrap()),
 			bitrate: config.bitrate.map_or(128_000, |rate| rate.as_bps()),
 			frames: 0,
+			held: None,
+			ready: VecDeque::new(),
 		}))
 	}
 }
 
 impl Backend for Stub {
-	fn encode(&mut self, _pcm: &[f32]) -> Result<Encoded, Error> {
-		let payload = Bytes::copy_from_slice(&self.frames.to_be_bytes());
+	fn encode(&mut self, _pcm: &[f32]) -> Result<(), Error> {
+		let packet = Encoded::new(Bytes::copy_from_slice(&self.frames.to_be_bytes()));
 		self.frames += 1;
-		Ok(Encoded::new(payload))
+		match self.held.take() {
+			Some(held) => self.ready.extend([held, packet]),
+			None => self.held = Some(packet),
+		}
+		Ok(())
+	}
+
+	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
+		self.ready.extend(self.held.take());
+		Ok(())
 	}
 
 	fn reset(&mut self) {
 		self.frames = 0;
+		self.held = None;
+		self.ready.clear();
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {

@@ -89,8 +89,8 @@ export const Cost = {
 };
 
 /**
- * The stream a received route serves, the path it took through the mesh, and what using it
- * costs: read-only facts on an announcement. Mirrors `RouteInfo` in rs/moq-net.
+ * The stream a received route serves and what using it costs: read-only facts on an
+ * announcement. Mirrors `RouteInfo` in rs/moq-net.
  *
  * Carried by an announce event. Applications never build one: an origin `Route` takes
  * `RouteOptions`, and the origin and the relays fill in the rest.
@@ -102,39 +102,35 @@ export interface RouteInfo {
 	 * pin this stream.
 	 */
 	readonly instance?: Instance.Valid;
-	/**
-	 * The hop ids of the origins the route has traversed, oldest first. A 0 entry is the
-	 * anonymous mark; see {@link anonymous}. A route announced on this origin has none.
-	 */
-	readonly hops: readonly bigint[];
 	/** What pulling content via this route costs; lower wins. */
 	readonly cost: Cost;
 	/**
-	 * Whether the route passed through an anonymous hop (id 0) at any depth. An anonymous route
-	 * ranks below every fully identified one, whatever the costs say. An empty chain is a local
-	 * announcement, not the anonymous mark.
+	 * Whether a usable path reaches the route's origin. An unavailable route is held: the
+	 * network lost every path to it but may recover one, so the announcement stays. It ranks
+	 * with a draining route, below every available one, and requests through it may fail until
+	 * it recovers: request again once it turns available.
 	 */
-	readonly anonymous: boolean;
+	readonly available: boolean;
 }
 
 /**
- * The read-only facts an announcement shows of `route`, leaving its epoch and credential internal.
+ * The read-only facts an announcement shows of `route`, leaving its epoch, hop chain,
+ * credential, and drain state internal.
  *
  * @internal
  */
 export function routeInfo(route: WireRoute): RouteInfo {
 	return {
 		instance: route.instance,
-		hops: [...route.hops],
 		cost: route.cost,
-		anonymous: isAnonymous(route),
+		available: route.available ?? true,
 	};
 }
 
 /**
  * A route as the origin and sessions carry it: the {@link RouteInfo} facts plus the epoch that
- * orders an instance's incarnations and the credential that advertises it, which applications
- * never see.
+ * orders an instance's incarnations, the hop chain it took, the credential that advertises it,
+ * and whether it drains, which applications never see.
  *
  * @internal
  */
@@ -161,6 +157,14 @@ export interface WireRoute {
 	 * Swapping it renews the request with REQUEST_UPDATE. Local: a relay never forwards it.
 	 */
 	readonly auth?: Credential;
+	/**
+	 * The session it arrived on is going away (the peer sent a GOAWAY): it ranks below every
+	 * other eligible route, whatever its cost, yet still serves when nothing else does. A
+	 * preference state, never a saturated cost. Local: never forwarded, and readers never see it.
+	 */
+	readonly draining?: boolean;
+	/** See {@link RouteInfo.available}; unset means available. */
+	readonly available?: boolean;
 }
 
 /** Constructors and helpers for {@link WireRoute}. @internal */
@@ -180,6 +184,8 @@ export const WireRoute = {
 			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			cost: cost > max ? max : cost,
 			auth: route.auth,
+			draining: route.draining,
+			available: route.available,
 		};
 	},
 };
@@ -197,7 +203,8 @@ export function isAnonymous(route: WireRoute): boolean {
 }
 
 /**
- * Whether two routes name the same instance, epoch, hop chain, cost, and auth.
+ * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state, and
+ * availability.
  *
  * @internal
  */
@@ -209,6 +216,8 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 		a.epoch === b.epoch &&
 		a.cost === b.cost &&
 		a.auth === b.auth &&
+		(a.draining ?? false) === (b.draining ?? false) &&
+		(a.available ?? true) === (b.available ?? true) &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])
 	);

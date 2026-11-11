@@ -4,23 +4,23 @@
  * @module
  */
 
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { routesEqual, type WireRoute } from "../hop.ts";
 import { coveringPrefixes } from "../internal.ts";
-import type { Producer as OriginProducer, Route } from "../origin.ts";
+import type { Claim, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { after } from "../util/timer.ts";
 import { type RequestSlot, wireOf } from "../wire.ts";
-import type { Established } from "./established.ts";
+import type { Session } from "./session.ts";
 
 /** Why a connection refuses the removed `discovery` option rather than ignoring it. */
 export const DISCOVERY_REMOVED =
 	"the discovery option is removed: a session asks only about watched prefixes and turns blind if the relay refuses";
 
 /** How long an announce request outlives its last watcher, so a watcher torn down and rebuilt reuses it. */
-const LINGER = Milli(2000);
+const LINGER = Duration.millis(2000);
 
 /** One announce request open on the session, and the routes it currently reports. */
 interface Interest {
@@ -39,7 +39,7 @@ interface Interest {
  * request handing over to another never retracts it. The first reporter drives it.
  */
 interface Reported {
-	handle: Route;
+	handle: Claim;
 	/** Each request's latest route for the prefix. */
 	readonly reporters: Map<Interest, WireRoute>;
 }
@@ -75,7 +75,7 @@ interface Reported {
  *
  * @internal
  */
-export function forwardAnnounced(conn: Established, origin: OriginProducer): void {
+export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 	const originWire = wireOf(origin);
 	const exclusive = wireOf(conn).exclusive;
 	// Reassigned on a downgrade, so the origin stops counting this session as discovering.
@@ -91,8 +91,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 
 	const report = (interest: Interest, event: Announce.RouteEvent) => {
 		const { prefix, route } = event;
-		if (event.kind === "end") {
-			unreport(interest, prefix);
+		if (event.kind === "end" || event.kind === "offline") {
+			unreport(interest, prefix, event.kind === "end");
 			return;
 		}
 		interest.reported.add(prefix);
@@ -132,7 +132,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		}
 	};
 
-	const unreport = (interest: Interest, prefix: Path.Valid) => {
+	/** Stop `interest` reporting `prefix`, which its peer `ended` rather than lost. */
+	const unreport = (interest: Interest, prefix: Path.Valid, ended = false) => {
 		interest.reported.delete(prefix);
 		const existing = routes.get(prefix);
 		if (!existing) return;
@@ -142,7 +143,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		const next = existing.reporters.values().next();
 		if (next.done) {
 			routes.delete(prefix);
-			existing.handle.close();
+			if (ended) wireOf(existing.handle).end();
+			else existing.handle.close();
 		} else if (driving) {
 			// The next request takes over driving. Without an instance nothing proves it reports
 			// the stream the handle serves, so the route restarts rather than stitch two together.
@@ -240,7 +242,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 			return;
 		}
 		interest.linger?.();
-		interest.linger = after(Nano.fromMilli(LINGER), () => {
+		interest.linger = after(LINGER, () => {
 			// Forgotten now rather than once its stream winds down, so a watch arriving
 			// meanwhile opens a fresh request instead of reviving this one.
 			interests.delete(prefix);
@@ -290,7 +292,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 }
 
 /** Answer the requests under a received route by consuming them from the session. */
-async function drive(handle: Route, conn: Established): Promise<void> {
+async function drive(handle: Claim, conn: Session): Promise<void> {
 	const session = wireOf(conn);
 	try {
 		for await (const request of handle.requested()) {
@@ -312,7 +314,7 @@ async function drive(handle: Route, conn: Established): Promise<void> {
  * A path the table already routes is left alone. A request resolves to the table's route over
  * any blind answer, so answering one would only park a handle nothing reads.
  */
-async function serveRequests(conn: Established, origin: OriginProducer): Promise<void> {
+async function serveRequests(conn: Session, origin: OriginProducer): Promise<void> {
 	const table = wireOf(origin);
 	const session = wireOf(conn);
 	// The withdraws for the answers this session provided, so a dead session only takes
@@ -329,7 +331,7 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 
 	for (;;) {
 		const map = table.requests.peek();
-		if (!map || dead) break;
+		if (origin.closed.peek() !== undefined || dead) break;
 
 		for (const [path, slot] of map) {
 			if (!table.blind(slot)) continue;

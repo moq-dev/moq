@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { Duration, Manual, now, yieldNow } from "@moq/clock";
 import { Once } from "@moq/signals";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
@@ -21,18 +21,15 @@ import { wireOf } from "./wire.ts";
 
 const url = new URL("https://relay.example/room");
 
-// Same ceiling Rust stamps as Cost::DRAIN, and the lite cost varint saturates at.
-const DRAIN = 2n ** 62n - 1n;
-
 async function settle() {
 	await yieldNow();
 }
 
 async function waitUntil(pred: () => boolean): Promise<void> {
-	const deadline = Instant.add(now(), Nano.fromMilli(Milli(2000)));
+	const deadline = now().saturatingAdd(Duration.millis(2000));
 	for (;;) {
 		if (pred()) return;
-		if (now() > deadline) throw new Error("timed out waiting for condition");
+		if (now().gt(deadline)) throw new Error("timed out waiting for condition");
 		await settle();
 	}
 }
@@ -164,9 +161,11 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		else await sendLiteGoaway(pair.server);
 		await client.draining;
 
+		// The route ranks last, at its real cost.
 		const update = await announced.next();
 		expect(update?.kind).toBe("update");
-		expect(update?.route.cost).toBe(DRAIN);
+		expect(update?.route.draining).toBe(true);
+		expect(update?.route.cost).toBe(start?.route.cost);
 		// Still the only route, so the subscription already open keeps its front.
 		expect(request.active.peek()).toBe(front);
 
@@ -185,10 +184,10 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		expect(await group.readString()).toBe("one");
 		group.close();
 
-		// A new announce-interest opens too, and sees the route at the drain cost.
+		// A new announce-interest opens too, and sees the route draining.
 		const interest = client.routes();
 		const drained = await interest.next();
-		expect(drained?.route.cost).toBe(DRAIN);
+		expect(drained?.route.draining).toBe(true);
 		interest.close();
 
 		expect(pair.client.sendStreams.bidi.length).toBeGreaterThan(opened);
@@ -357,7 +356,7 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 
 		// A draining close of a session still serving a live track gives up after its drain.
 		const closing = server.close().catch(() => {});
-		await clock.advance(Nano.fromMilli(Milli(1000)));
+		await clock.advance(Duration.millis(1000));
 		await closing;
 		await expect(
 			(async () => {

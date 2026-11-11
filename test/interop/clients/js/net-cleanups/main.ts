@@ -1,6 +1,6 @@
 /** Public net consumers and native browser streams, plus the shared fan-out sweep. @module */
 
-import { Manual, Milli } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import * as Net from "@moq/net";
 import { fanout } from "../../../../../js/net/bench/compression-fanout";
 import { createMockTransportPair } from "../../../../../js/net/src/mock";
@@ -40,7 +40,12 @@ export async function run() {
 		const url = new URL("https://example.com");
 		const [client, server] = await Promise.all([
 			Net.Connection.connect({ url, transport: pair.client }),
-			Net.Connection.accept({ url, transport: pair.server, timeout: Milli(1_000), signal: controller.signal }),
+			Net.Connection.accept({
+				url,
+				transport: pair.server,
+				timeout: Duration.millis(1_000),
+				signal: controller.signal,
+			}),
 		]);
 		const dispose = client.probe.subscribe(() => {});
 		try {
@@ -51,7 +56,7 @@ export async function run() {
 					while (client.probe.peek().estimatedRecvRate === undefined) await client.probe.changed();
 				})(),
 			);
-			probes.push({ rate: client.probe.peek().estimatedRecvRate, rtt: client.probe.peek().rtt });
+			probes.push({ rate: client.probe.peek().estimatedRecvRate, rtt: client.probe.peek().rtt?.asMillis() });
 		} finally {
 			dispose();
 			client.abort();

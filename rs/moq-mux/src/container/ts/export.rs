@@ -126,6 +126,8 @@ where
 	active_program: u64,
 	follow_until: Option<kio::clock::Instant>,
 	follow_timer: Option<std::pin::Pin<Box<kio::clock::Sleep>>>,
+	/// When a read last found nothing more due: the output had caught up then ([`Self::shed`]).
+	caught_up: Option<kio::clock::Instant>,
 }
 
 /// Input and mux state belonging to one publisher instance. The release clock
@@ -135,23 +137,18 @@ where
 	S::Ext: catalog::Catalog,
 {
 	id: u64,
-	retired: bool,
-	/// Why the publisher left, reported once the output it buffered has gone out.
-	left: Option<crate::Error>,
 	expected: Vec<TrackKey>,
 	expected_changed: bool,
 	source: crate::Source,
+	/// Kept once read no further, for its format, which a follower subscribes a return with,
+	/// until a follow runs out on it: a replacement is then selected, and the subscription goes.
 	catalog: Option<S>,
-	/// Keep the concrete follower's format after EOF without polling an ended stream again.
-	catalog_ended: bool,
 	/// A snapshot arrived on `catalog` since it was subscribed.
 	cataloged: bool,
+	feed: Feed,
 	/// The instance of the broadcast being exported, `None` for one not resolved through an
 	/// origin.
 	instance: Option<moq_net::Instance>,
-	/// Tracks [`Export::follow`] left on the ended broadcast, resubscribed as the returned
-	/// catalog lists them.
-	stale: HashSet<String>,
 	/// The PMT `version_number` the program's first tables go out at, advanced by each switch to
 	/// another instance so a demux that caches tables by version reads the new ones.
 	version: VersionNumber,
@@ -237,6 +234,17 @@ where
 	/// Each elementary stream's access units and silence on the PCR returned ([`Export::stats`]).
 	liveness: super::import::Liveness,
 }
+/// Where a program's input stands.
+enum Feed {
+	/// Reading catalog updates.
+	Live,
+	/// The publisher ended the catalog.
+	Ended,
+	/// The input stopped ([`Export::retire`]), with why the publisher left if it did, reported
+	/// once the output it buffered has gone out.
+	Retired(Option<crate::Error>),
+}
+
 /// What a queued output frame tells [`Export::stats`], applied only once the frame is
 /// returned: a rewind drops the queue unwritten.
 struct Tally {
@@ -323,16 +331,13 @@ struct Track {
 	steps: u64,
 	/// The highest PTS read on the track's timeline, and the marker count it was read under.
 	high: Option<(u64, Timestamp)>,
-	finished: bool,
+	read: Read,
 	pid: u16,
 	/// The PMT lists it: from its first frame out until its last has gone and the catalog has
 	/// dropped it. Its PID, kind and descriptors stay as listed.
 	listed: bool,
 	/// The catalog lists it.
 	cataloged: bool,
-	/// Read no further because the catalog withdrew it before the PMT listed it. A return
-	/// under the same name reads it on.
-	withdrawn: bool,
 	/// Frames released while its PID still carries the stream before it, which go out once
 	/// that stream's last has.
 	parked: VecDeque<Queued>,
@@ -380,6 +385,19 @@ struct Track {
 	released: Option<(Timestamp, Timestamp, Option<PesStart>)>,
 }
 
+/// Whether a track still reads its source.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Read {
+	Live,
+	/// Read to its end: the source ended, the program retired, or a track listed on its PID
+	/// replaced it.
+	Ended,
+	/// The catalog withdrew it before the PMT listed it. A return under the same name reads it on.
+	Withdrawn,
+	/// [`Export::follow`] left it on the ended broadcast. The returned catalog resubscribes it.
+	Stale,
+}
+
 /// Shared program state needed while reading one track.
 struct Input<'a> {
 	waiting_for_header: bool,
@@ -402,11 +420,10 @@ impl Track {
 			base: (0, 0, 0),
 			steps: 0,
 			high: None,
-			finished: false,
+			read: Read::Live,
 			pid: 0,
 			listed: false,
 			cataloged: true,
-			withdrawn: false,
 			parked: VecDeque::new(),
 			kind,
 			descriptors: Vec::new(),
@@ -569,7 +586,7 @@ impl Track {
 		if self.key.name.is_empty() {
 			self.key.name = name.to_string();
 		}
-		if self.pending.is_some() || self.finished {
+		if self.pending.is_some() || self.read != Read::Live {
 			return Ok(());
 		}
 		let is_video = matches!(self.kind, Kind::Video(_));
@@ -631,7 +648,7 @@ impl Track {
 				Poll::Ready(Some(Event::GroupEnd)) => self.settle = true,
 				Poll::Ready(Some(Event::FrameEnd { .. })) => {}
 				Poll::Ready(None) => {
-					self.finished = true;
+					self.read = Read::Ended;
 					break;
 				}
 				Poll::Pending => {
@@ -643,7 +660,7 @@ impl Track {
 			}
 		}
 		// Nothing more can come in below the frames still held for their DTS.
-		if self.finished && !input.waiting_for_header {
+		if self.read == Read::Ended && !input.waiting_for_header {
 			self.release(name, input.jitter, true)?;
 		}
 		Ok(())
@@ -795,7 +812,7 @@ impl Track {
 					let Some((mut pending, description)) = item else {
 						continue;
 					};
-					if !self.finished {
+					if self.read == Read::Live {
 						pending.arrived = pending.arrived.max(self.latest);
 					}
 					self.push(name, pending, Some(dts), description, jitter)?;
@@ -817,7 +834,7 @@ impl Track {
 			let Some(((mut pending, description), dts)) = self.clock.pop(lookahead, delay, settle) else {
 				break;
 			};
-			if !self.finished {
+			if self.read == Read::Live {
 				pending.arrived = pending.arrived.max(self.latest);
 			}
 			self.push(name, pending, Some(dts.into()), description, jitter)?;
@@ -880,8 +897,8 @@ impl Track {
 		let ahead = ahead.min(arrived.duration_since(kio::clock::Instant::ZERO));
 		let ahead = ahead.min(read.duration_since(kio::clock::Instant::ZERO));
 		let arrival = Arrival {
-			arrived: arrived - ahead,
-			read: read - ahead,
+			arrived: arrived.saturating_sub(ahead),
+			read: read.saturating_sub(ahead),
 			decode: key.into(),
 			restart,
 			sync,
@@ -1555,16 +1572,13 @@ where
 		let instance = source.broadcast().info().instance.clone();
 		Self {
 			id: 0,
-			retired: false,
-			left: None,
 			expected: Vec::new(),
 			expected_changed: false,
 			source,
 			catalog: Some(catalog),
-			catalog_ended: false,
 			cataloged: false,
+			feed: Feed::Live,
 			instance,
-			stale: HashSet::new(),
 			version: VersionNumber::default(),
 			pat_version: VersionNumber::default(),
 			flagged: None,
@@ -1649,6 +1663,7 @@ where
 			active_program: 0,
 			follow_until: None,
 			follow_timer: None,
+			caught_up: None,
 		}
 	}
 
@@ -1692,6 +1707,14 @@ where
 	/// muxer has no use for it.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
+		let poll = self.poll_frame(waiter);
+		if poll.is_pending() {
+			self.caught_up = Some(kio::clock::now());
+		}
+		poll
+	}
+
+	fn poll_frame(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		if self.pending.is_some() {
 			self.stop_old(waiter)?;
 		}
@@ -1703,7 +1726,10 @@ where
 				if let Err(err) = self.prepare_pending(waiter) {
 					// A replacement that leaves before it commits is no switch: the old program
 					// plays on, and a later replacement gets its own follow window.
-					if self.jitter.is_committed() || self.program.retired || !super::follower::left(&err) {
+					if self.jitter.is_committed()
+						|| matches!(self.program.feed, Feed::Retired(_))
+						|| !super::follower::left(&err)
+					{
 						return Poll::Ready(Err(err));
 					}
 					tracing::warn!(%err, "replacement left before it went out, keeping the old program");
@@ -1779,11 +1805,18 @@ where
 					.program
 					.tracks
 					.values_mut()
-					.all(|track| track.finished || track.source.poll_received(waiter).is_ready()),
+					.all(|track| track.read != Read::Live || track.source.poll_received(waiter).is_ready()),
 		);
 
 		// 4. Mux each frame the jitter buffer lets go (the first carries the buffered
 		// PAT/PMT), then lay out every grid slot whose time has come ([`Self::lay_due`]).
+		// A shed makes room in each source's jitter window, so read them again.
+		if self.program.queue.is_empty()
+			&& self.shed()
+			&& let Err(err) = self.fill(waiter)
+		{
+			self.leave(err)?;
+		}
 		loop {
 			if let Some(out) = self.pop() {
 				return Poll::Ready(Ok(Some(out)));
@@ -1873,7 +1906,7 @@ where
 				// Releasing a due frame opens room in its source. Read it before parking:
 				// a zero-delay slot may need another frame to prove the slot is complete.
 				let track = self.program.tracks.get_mut(&name).expect("the released frame's track");
-				let finished = track.finished;
+				let live = track.read == Read::Live;
 				let filled = track.fill(
 					&name,
 					waiter,
@@ -1884,16 +1917,16 @@ where
 						trimmed: &mut self.program.trimmed,
 					},
 				);
-				let ended = !finished && track.finished;
+				let ended = live && track.read != Read::Live;
 				if let Err(err) = filled {
 					self.leave(err)?;
 				}
-				if ended || self.program.retired {
+				if ended || matches!(self.program.feed, Feed::Retired(_)) {
 					self.program.schedule.set_ended(
 						self.program
 							.tracks
 							.values_mut()
-							.all(|track| track.finished || track.source.poll_received(waiter).is_ready()),
+							.all(|track| track.read != Read::Live || track.source.poll_received(waiter).is_ready()),
 					);
 				}
 			}
@@ -1915,7 +1948,11 @@ where
 		// independent of the catalog: a retained track finishes while the broadcast stays
 		// live, and holding its tail until the catalog closed would strand it indefinitely.
 		let drained = !self.program.tracks.is_empty()
-			&& self.program.tracks.values().all(|t| t.finished && t.parked.is_empty())
+			&& self
+				.program
+				.tracks
+				.values()
+				.all(|t| t.read != Read::Live && t.parked.is_empty())
 			&& self.jitter.is_empty()
 			&& self.held.is_none();
 		if drained {
@@ -1930,7 +1967,7 @@ where
 			}
 			// SI emission rides media frames, so a snapshot that arrived behind the
 			// last one gets one trailing flush before the stream ends.
-			if self.program.catalog_ended && !self.program.si_flushed {
+			if !matches!(self.program.feed, Feed::Live) && !self.program.si_flushed {
 				self.program.si_flushed = true;
 				if let Some(out) = self.write_si_tail()? {
 					return Poll::Ready(Ok(Some(out)));
@@ -1940,8 +1977,8 @@ where
 
 		let pending_ended = !self.jitter.is_committed()
 			&& self.pending.as_ref().is_some_and(|pending| {
-				let finished = pending.catalog_ended
-					&& (pending.tracks.is_empty() || pending.tracks.values().all(|track| track.finished));
+				let finished = !matches!(pending.feed, Feed::Live)
+					&& (pending.tracks.is_empty() || pending.tracks.values().all(|track| track.read != Read::Live));
 				let no_video_start = pending.video_out.is_none()
 					&& pending
 						.tracks
@@ -1963,8 +2000,14 @@ where
 		}
 
 		// End of stream once the catalog is closed too: nothing more can appear.
-		if self.pending.is_none() && self.program.catalog_ended && (drained || self.program.tracks.is_empty()) {
-			return Poll::Ready(self.program.left.take().map_or(Ok(None), Err));
+		if self.pending.is_none()
+			&& !matches!(self.program.feed, Feed::Live)
+			&& (drained || self.program.tracks.is_empty())
+		{
+			return Poll::Ready(match &mut self.program.feed {
+				Feed::Retired(left) => left.take().map_or(Ok(None), Err),
+				Feed::Live | Feed::Ended => Ok(None),
+			});
 		}
 
 		Poll::Pending
@@ -2044,24 +2087,22 @@ where
 	}
 
 	fn prepare(&mut self, waiter: &kio::Waiter) -> crate::Result<bool> {
-		if self.program.retired || (self.program.id == self.active_program && self.jitter.is_committed()) {
+		if matches!(self.program.feed, Feed::Retired(_))
+			|| (self.program.id == self.active_program && self.jitter.is_committed())
+		{
 			return Ok(true);
 		}
 		// 1. Drain catalog updates, discovering the track layout.
-		while !self.program.catalog_ended {
-			match self
-				.program
-				.catalog
-				.as_mut()
-				.expect("an open catalog")
-				.poll_next(waiter)?
-			{
+		while matches!(self.program.feed, Feed::Live)
+			&& let Some(catalog) = self.program.catalog.as_mut()
+		{
+			match catalog.poll_next(waiter)? {
 				Poll::Ready(Some(snapshot)) => {
 					self.program.cataloged = true;
 					self.update_catalog(snapshot)?
 				}
 				Poll::Ready(None) => {
-					self.program.catalog_ended = true;
+					self.program.feed = Feed::Ended;
 					break;
 				}
 				Poll::Pending => break,
@@ -2105,10 +2146,6 @@ where
 		// packets instead, letting the leading PAT/PMT inherit a real timestamp.
 		if self.program.psi.is_none() {
 			if self.program.tracks.is_empty() {
-				// No tracks yet. If the catalog is also done, the broadcast is empty.
-				if self.program.catalog_ended {
-					return Ok(false);
-				}
 				return Ok(false);
 			}
 			if !self.header_ready() || !self.video_ready() {
@@ -2116,10 +2153,6 @@ where
 				// and, when the program has a video rendition, its first keyframe is
 				// buffered: the stream must begin on that keyframe so the in-band
 				// parameter sets lead it. An audio-only program has nothing to wait for.
-				// If every track finished without producing a config, it can't be muxed.
-				if self.program.catalog_ended && self.program.tracks.values().all(|t| t.finished) {
-					return Ok(false);
-				}
 				return Ok(false);
 			}
 			self.build_psi()?;
@@ -2178,16 +2211,14 @@ where
 			return Err(err);
 		}
 		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "left", now = ?kio::clock::now(), program = self.program.id, committed = self.jitter.is_committed(), %err);
-		if self.pending.is_none() {
-			self.program.left = Some(err);
-		}
+		let left = self.pending.is_none().then_some(err);
 		self.follow_timer = None;
 		self.follow_until = None;
-		self.retire()
+		self.retire(left)
 	}
 
 	fn stop_old(&mut self, waiter: &kio::Waiter) -> crate::Result<()> {
-		if self.program.retired {
+		if matches!(self.program.feed, Feed::Retired(_)) {
 			return Ok(());
 		}
 
@@ -2208,21 +2239,20 @@ where
 		self.follow_timer = None;
 		self.follow_until = None;
 		self.program.catalog = None;
-		self.retire()
+		self.retire(None)
 	}
 
-	/// Stop the program's input. What it already buffered still goes out, unless a
-	/// committed replacement's switch drops it.
-	fn retire(&mut self) -> crate::Result<()> {
-		self.program.retired = true;
-		self.program.catalog_ended = true;
+	/// Stop the program's input, reporting `left` once what it already buffered has gone out,
+	/// unless a committed replacement's switch drops it.
+	fn retire(&mut self, left: Option<crate::Error>) -> crate::Result<()> {
+		self.program.feed = Feed::Retired(left);
 		for (name, track) in &mut self.program.tracks {
-			if !track.finished {
+			if track.read == Read::Live {
 				if !self.jitter.is_committed() {
 					track.release(name, &mut self.jitter, true)?;
 				}
 				track.source.stop();
-				track.finished = true;
+				track.read = Read::Ended;
 			}
 		}
 		for si in self.program.si.values_mut() {
@@ -2385,9 +2415,7 @@ where
 		}
 
 		if self.program.psi.is_some() {
-			if !self.program.stale.is_empty() {
-				self.resubscribe(&catalog, &mpegts)?;
-			}
+			self.resubscribe(&catalog, &mpegts)?;
 			self.rebind(&catalog)?;
 			// A listed track keeps its PID, kind and descriptors, which its packets went out
 			// under, even when the catalog moves it to another track: a stream the source
@@ -2407,13 +2435,13 @@ where
 			// name that returns before that is gone is the same stream, so it is read on.
 			for (name, track) in self.program.tracks.iter_mut() {
 				track.cataloged = active.contains_key(name);
-				if track.cataloged && std::mem::take(&mut track.withdrawn) {
-					track.finished = false;
-				}
-				if !track.cataloged && !track.listed && !track.finished {
-					track.release(name, &mut self.jitter, true)?;
-					track.finished = true;
-					track.withdrawn = true;
+				match track.read {
+					Read::Withdrawn if track.cataloged => track.read = Read::Live,
+					Read::Live if !track.cataloged && !track.listed => {
+						track.release(name, &mut self.jitter, true)?;
+						track.read = Read::Withdrawn;
+					}
+					_ => {}
 				}
 			}
 			self.revise()?;
@@ -2497,8 +2525,13 @@ where
 				.filter(|track| track.source.reads(&self.program.source, name, config));
 			let mut track = match reused {
 				Some(track) => track,
-				None => match ExportSource::for_video(&self.program.source, name, config, self.budget())?
-					.map(|s| at_edge(s, self.program.replay))
+				None => match ExportSource::for_video(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(self.budget()),
+				)?
+				.map(|s| at_edge(s, self.program.replay))
 				{
 					Some(source) => Track::new(source, kind.clone()),
 					None => continue,
@@ -2518,8 +2551,13 @@ where
 				.filter(|track| track.source.reads(&self.program.source, name, config));
 			let mut track = match reused {
 				Some(track) => track,
-				None => match ExportSource::for_audio(&self.program.source, name, config, self.budget())?
-					.map(|s| at_edge(s, self.program.replay))
+				None => match ExportSource::for_audio(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(self.budget()),
+				)?
+				.map(|s| at_edge(s, self.program.replay))
 				{
 					Some(source) => Track::new(source, kind.clone()),
 					None => continue,
@@ -2546,7 +2584,11 @@ where
 				Some(track) => track,
 				None => Track::new(
 					stream_edge(
-						ExportSource::for_stream(&self.program.source, name, self.budget())?,
+						ExportSource::for_stream(
+							&self.program.source,
+							name,
+							moq_net::track::Delay::default().with_max(self.budget()),
+						)?,
 						&kind,
 						self.program.replay,
 					),
@@ -2566,7 +2608,7 @@ where
 			.program
 			.tracks
 			.iter()
-			.filter(|(_, track)| !track.finished)
+			.filter(|(_, track)| track.read == Read::Live)
 			.filter(|(_, track)| track.kind.class() != super::stats::Class::Data || track.buffer.is_some());
 		self.program.expected = continuous.map(|(_, track)| track.key.clone()).collect();
 		self.program.expected_changed = true;
@@ -2584,27 +2626,41 @@ where
 	/// Point each stale track this snapshot lists at the returned broadcast.
 	///
 	/// The PIDs and PMT stay as announced. A track the returned catalog does not list stays
-	/// finished, silent on its PID. The new subscription's playhead jumped from wherever the
+	/// stale, silent on its PID. The new subscription's playhead jumped from wherever the
 	/// old one stopped, so its first frame counts as a skip: late frames drop, and a leap
 	/// ahead opens a new generation.
 	fn resubscribe(&mut self, catalog: &Catalog<S::Ext>, mpegts: &catalog::Mpegts) -> anyhow::Result<()> {
 		let budget = self.budget();
 		for (name, track) in self.program.tracks.iter_mut() {
-			if !self.program.stale.contains(name) {
+			if track.read != Read::Stale {
 				continue;
 			}
 			let source = if let Some(config) = catalog.video.renditions.get(name) {
-				ExportSource::for_video(&self.program.source, name, config, budget)?
-					.map(|s| at_edge(s, self.program.replay))
+				ExportSource::for_video(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(budget),
+				)?
+				.map(|s| at_edge(s, self.program.replay))
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
-				ExportSource::for_audio(&self.program.source, name, config, budget)?
-					.map(|s| at_edge(s, self.program.replay))
+				ExportSource::for_audio(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(budget),
+				)?
+				.map(|s| at_edge(s, self.program.replay))
 			} else if mpegts
 				.tracks
 				.get(name)
 				.is_some_and(|t| t.verbatim.is_some() || t.pes_packet.is_some())
 			{
-				let source = ExportSource::for_stream(&self.program.source, name, budget)?;
+				let source = ExportSource::for_stream(
+					&self.program.source,
+					name,
+					moq_net::track::Delay::default().with_max(budget),
+				)?;
 				Some(stream_edge(source, &track.kind, self.program.replay))
 			} else {
 				None
@@ -2612,14 +2668,13 @@ where
 			let Some(source) = source else {
 				continue;
 			};
-			self.program.stale.remove(name);
 			// The new subscription counts as cutting whatever group the old one was reading.
 			track.base.0 += track.source.markers();
 			track.base.1 += track.source.skips() + 1;
 			track.base.2 += track.source.cuts() + 1;
 			track.source = source;
 			track.subscribed = kio::clock::now();
-			track.finished = false;
+			track.read = Read::Live;
 		}
 		Ok(())
 	}
@@ -2639,13 +2694,23 @@ where
 				if track.source.reads(&self.program.source, name, config) {
 					continue;
 				}
-				let source = ExportSource::for_video(&self.program.source, name, config, budget)?;
+				let source = ExportSource::for_video(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(budget),
+				)?;
 				(source, video_kind(config, name)?)
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
 				if track.source.reads(&self.program.source, name, config) {
 					continue;
 				}
-				let source = ExportSource::for_audio(&self.program.source, name, config, budget)?;
+				let source = ExportSource::for_audio(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(budget),
+				)?;
 				(source, audio_kind(config, name)?)
 			} else {
 				continue;
@@ -2665,7 +2730,7 @@ where
 			track.clock = DecodeClock::default();
 			track.declared = None;
 			track.source = source.continuing(&track.source);
-			track.finished = false;
+			track.read = Read::Live;
 			track.subscribed = kio::clock::now();
 		}
 		Ok(())
@@ -2773,7 +2838,8 @@ where
 	/// every source has finished and the tail runs out.
 	#[cfg(test)]
 	pub(super) fn next_due(&self) -> Option<kio::clock::Instant> {
-		let finished = !self.program.tracks.is_empty() && self.program.tracks.values().all(|track| track.finished);
+		let finished =
+			!self.program.tracks.is_empty() && self.program.tracks.values().all(|track| track.read != Read::Live);
 		let slot = self
 			.slot_due()
 			.filter(|_| self.program.schedule.queued() || self.packing() || finished)
@@ -2844,7 +2910,8 @@ where
 			self.cancel_pending();
 			let next = self.replacement(self.program.source.switched(broadcast), catalog);
 			self.pending = Some(Box::new(next));
-			self.follow_until.get_or_insert_with(|| kio::clock::now() + follow);
+			self.follow_until
+				.get_or_insert_with(|| kio::clock::now().saturating_add(follow));
 			return Ok(());
 		}
 		if let Some(mut pending) = self.pending.take() {
@@ -2908,19 +2975,15 @@ where
 
 	fn resume(&mut self, catalog: S) -> Result<(), crate::Error> {
 		self.program.catalog = Some(catalog);
-		self.program.catalog_ended = false;
 		self.program.cataloged = false;
-		self.program.retired = false;
-		self.program.left = None;
+		self.program.feed = Feed::Live;
 		self.program.si_flushed = false;
 		for si in self.program.si.values_mut() {
 			si.track.clear();
 		}
 		for (name, track) in &mut self.program.tracks {
 			track.release(name, &mut self.jitter, true)?;
-			track.finished = true;
-			track.withdrawn = false;
-			self.program.stale.insert(name.clone());
+			track.read = Read::Stale;
 		}
 		Ok(())
 	}
@@ -3022,7 +3085,7 @@ where
 			.tracks
 			.values()
 			.filter(|t| matches!(t.kind, Kind::Video(_)))
-			.all(|t| t.pending.is_some() || t.finished)
+			.all(|t| t.pending.is_some() || t.read != Read::Live)
 	}
 
 	/// The smallest timestamp among the video tracks' buffered frames: the first
@@ -3325,14 +3388,11 @@ where
 			.iter_mut()
 			.find(|(other, track)| track.listed && track.pid == pid && other.as_str() != name)
 		{
-			if !track.finished {
+			if track.read == Read::Live {
 				track.release(holder, &mut self.jitter, true)?;
-				track.finished = true;
 			}
-			// Replaced, so a return of its name no longer reads it on.
-			track.withdrawn = false;
-			// A same-instance return that put another track on its PID replaced it.
-			self.program.stale.remove(holder.as_str());
+			// Replaced, so neither a return of its name nor a same-instance return reads it on.
+			track.read = Read::Ended;
 			return Ok(false);
 		}
 		self.program.tracks.get_mut(name).expect("checked above").listed = true;
@@ -3347,27 +3407,26 @@ where
 		if self.program.psi.is_none() {
 			return Ok(());
 		}
-		let gone: Vec<String> =
-			self.program
-				.tracks
-				.iter()
-				.filter(|(name, track)| {
-					// A track the same instance's return has yet to resubscribe stays, silent on its PID.
-					!track.cataloged
-						&& !self.program.stale.contains(name.as_str())
-						&& track.finished && track.pack.is_none()
-						&& track.parked.is_empty()
-						&& !self.jitter.holds(&track.key)
-						&& self.held.as_ref().is_none_or(|held| held.track != track.key)
-						&& !(track.listed && self.program.schedule.holds(track.pid))
-				})
-				.map(|(name, _)| name.clone())
-				.collect();
+		let gone: Vec<String> = self
+			.program
+			.tracks
+			.iter()
+			.filter(|(_, track)| {
+				// A track the same instance's return has yet to resubscribe stays, silent on its PID.
+				!track.cataloged
+					&& matches!(track.read, Read::Ended | Read::Withdrawn)
+					&& track.pack.is_none()
+					&& track.parked.is_empty()
+					&& !self.jitter.holds(&track.key)
+					&& self.held.as_ref().is_none_or(|held| held.track != track.key)
+					&& !(track.listed && self.program.schedule.holds(track.pid))
+			})
+			.map(|(name, _)| name.clone())
+			.collect();
 		let mut changed = false;
 		for name in gone {
 			let track = self.program.tracks.remove(&name).expect("collected above");
 			self.jitter.forget(&TrackKey::new(self.program.id, &name));
-			self.program.stale.remove(&name);
 			if track.listed {
 				self.program.liveness.retire(track.pid);
 				self.program.schedule.forget(track.pid);
@@ -3844,6 +3903,35 @@ where
 	/// frames are only read then, so with the whole delay they would arrive at their deadline.
 	fn budget(&self) -> Duration {
 		self.program.delay / 2
+	}
+
+	/// Shed what a padded output fell more than [`Self::budget`] behind on, as when its sink
+	/// blocks or drains slower than the multiplex rate. Every slot it missed would otherwise go
+	/// out at once, and the frames it left unread would reach the jitter buffer as late as a
+	/// source clock running far slow. Instead it drops what is due by now and resumes the grid
+	/// on the media still to come, flagging the jump as a PCR discontinuity.
+	///
+	/// It is behind by how long the jitter buffer's front has been overdue since a read last
+	/// caught up: a frame held back while the output keeps up (for the program's tables, or a
+	/// generation still going out) is no lag of the sink's, and a source that fell silent leaves
+	/// nothing overdue.
+	/// Returns whether it shed.
+	fn shed(&mut self) -> bool {
+		// Once every source has ended, the tail goes out late if it must.
+		if self.program.mux_rate.is_none() || self.held.is_some() || self.program.schedule.ended() {
+			return false;
+		}
+		let (Some(due), Some(caught_up)) = (self.jitter.front_deadline(), self.caught_up) else {
+			return false;
+		};
+		let behind = kio::clock::now().saturating_duration_since(due.max(caught_up));
+		if behind <= self.budget() {
+			return false;
+		}
+		tracing::warn!(?behind, "MPEG-TS output fell behind its multiplex rate, shedding");
+		self.jitter.shed(kio::clock::now());
+		self.rewind();
+		true
 	}
 
 	/// Lay out every grid slot whose time has come, and wake when the next one is due.
@@ -5111,7 +5199,12 @@ mod tests {
 		let publisher = broadcast.create_track("video", hang::container::track_info(0)).unwrap();
 		let _publisher = Producer::new(publisher, Container::Legacy(MediaKind::Video));
 		let source = crate::source::announced(&broadcast.consume()).await;
-		let source = super::ExportSource::for_stream(&source, "video", Duration::from_secs(2)).unwrap();
+		let source = super::ExportSource::for_stream(
+			&source,
+			"video",
+			moq_net::track::Delay::default().with_max(Duration::from_secs(2)),
+		)
+		.unwrap();
 		let mut track = super::Track::new(source, Kind::Video(mpeg2ts::es::StreamType::H264));
 		let arrived = kio::clock::now();
 		for &(at, keyframe) in frames {
@@ -5226,7 +5319,12 @@ mod tests {
 				(1, "video", Kind::Video(mpeg2ts::es::StreamType::H264)),
 				(2, "audio", Kind::Mp2 { sample_rate: 48_000 }),
 			] {
-				let source = super::ExportSource::for_stream(&source, name, Duration::from_secs(2)).unwrap();
+				let source = super::ExportSource::for_stream(
+					&source,
+					name,
+					moq_net::track::Delay::default().with_max(Duration::from_secs(2)),
+				)
+				.unwrap();
 				let mut track = super::Track::new(source, kind);
 				track.pid = pid;
 				tracks.push(track);
@@ -5272,7 +5370,7 @@ mod tests {
 				for at in (40..=end).step_by(40) {
 					publisher.write(frame(at)).unwrap();
 				}
-				publisher.finish().unwrap();
+				publisher.end_with(None).unwrap();
 			}
 			let waiter = kio::Waiter::noop();
 			for index in order {
@@ -5293,7 +5391,11 @@ mod tests {
 			// The last available audio frame, including its scheduling lead, anchors both orders.
 			let (decode, key, _) = tracks[1].released.unwrap();
 			assert_eq!(decode.as_micros(), 800_000);
-			assert_eq!(jitter.at(0, key), Some(start + Duration::from_millis(500)), "{order:?}");
+			assert_eq!(
+				jitter.at(0, key),
+				Some(start.saturating_add(Duration::from_millis(500))),
+				"{order:?}"
+			);
 			tokio::time::advance(Duration::from_millis(500)).await;
 			let video = std::iter::from_fn(|| match jitter.poll_next(&waiter) {
 				std::task::Poll::Ready(ready) => Some(ready),

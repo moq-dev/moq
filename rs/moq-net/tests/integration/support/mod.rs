@@ -27,10 +27,8 @@ pub async fn unwanted(mut demand: track::Demand) -> moq_net::Result<()> {
 /// nobody reads it.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub async fn datagram_priority(producer: &datagram::Producer, want: Option<i8>) {
-	let mut priority = producer.priority();
-	while priority != want {
-		priority = moq_net::kio::wait(|waiter| producer.poll_priority(waiter, priority)).await;
-	}
+	let mut watch = producer.clone();
+	while watch.priority_changed().await != want {}
 }
 
 /// Wait until `consumer` sees a route announced at exactly `path`, and return it.
@@ -39,11 +37,10 @@ pub async fn announced(consumer: &origin::Consumer, path: &str) -> origin::Route
 	let mut announced = consumer.routes();
 	loop {
 		match announced.next().await.expect("the origin closed") {
-			origin::RouteEvent::Start(announce)
-			| origin::RouteEvent::Update(announce)
-			| origin::RouteEvent::Restart(announce)
-				if announce.prefix.as_str() == path =>
-			{
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
+				announce,
+			} if announce.prefix.as_str() == path => {
 				return announce.route;
 			}
 			_ => {}
@@ -59,6 +56,7 @@ pub enum Kind {
 	Update,
 	Restart,
 	End,
+	Offline,
 }
 
 /// Every update per prefix the watcher has seen. Await [`kio::clock::sim::idle`]
@@ -81,10 +79,26 @@ pub fn watch(mut announced: origin::Routes) -> mpsc::UnboundedReceiver<(String, 
 	kio::clock::sim::spawn(async move {
 		while let Some(event) = announced.next().await {
 			let (kind, announce) = match event {
-				origin::RouteEvent::Start(announce) => (Kind::Start, announce),
-				origin::RouteEvent::Update(announce) => (Kind::Update, announce),
-				origin::RouteEvent::Restart(announce) => (Kind::Restart, announce),
-				origin::RouteEvent::End(announce) => (Kind::End, announce),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Start,
+					announce,
+				} => (Kind::Start, announce),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Update,
+					announce,
+				} => (Kind::Update, announce),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Restart,
+					announce,
+				} => (Kind::Restart, announce),
+				origin::RouteEvent {
+					kind: origin::RouteKind::End,
+					announce,
+				} => (Kind::End, announce),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Offline,
+					announce,
+				} => (Kind::Offline, announce),
 			};
 			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
 				break;
@@ -106,23 +120,45 @@ pub trait Draining {
 
 impl Draining for goaway::Consumer {
 	fn peek(&self) -> Option<goaway::Goaway> {
-		match self.poll(&moq_net::kio::Waiter::noop()) {
+		match self.poll(&kio::Waiter::noop()) {
 			std::task::Poll::Ready(Ok(goaway)) => Some(goaway),
 			_ => None,
 		}
 	}
 
 	async fn recv(&self) -> Option<goaway::Goaway> {
-		moq_net::kio::wait(|waiter| self.poll(waiter)).await.ok()
+		kio::wait(|waiter| self.poll(waiter)).await.ok()
 	}
 }
 
-/// Every version this crate speaks, found by wire code, including the opt-in `-wip`
-/// drafts that [`moq_net::Versions::all`] leaves out.
+/// Every version this crate speaks, including the opt-in `-wip` drafts that
+/// [`moq_net::Versions::all`] leaves out.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub fn every_version() -> Vec<moq_net::Version> {
-	(0xff0dad00..=0xff0dadff)
-		.chain(0xff000000..=0xff0000ff)
-		.filter_map(moq_net::Version::from_code)
-		.collect()
+	moq_net::Version::ALL.to_vec()
+}
+
+/// splitmix64, so every platform builds the same seeded cases.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub struct Rng(pub u64);
+
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+impl Rng {
+	pub fn next(&mut self) -> u64 {
+		self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+		let mut z = self.0;
+		z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+		z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+		z ^ (z >> 31)
+	}
+
+	/// A value in `lo..=hi`.
+	pub fn range(&mut self, lo: u64, hi: u64) -> u64 {
+		lo + self.next() % (hi - lo + 1)
+	}
+
+	/// An index into a slice of `len` items.
+	pub fn pick(&mut self, len: usize) -> usize {
+		(self.next() % len as u64) as usize
+	}
 }

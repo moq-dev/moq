@@ -6,8 +6,6 @@
 
 use std::{sync::Arc, time::Duration};
 
-use moq_tokio::moq_net;
-
 /// What the server saw on one handshake.
 #[derive(Debug, PartialEq)]
 struct Seen {
@@ -161,9 +159,7 @@ async fn an_unchanged_refused_credential_is_terminal() {
 #[tokio::test]
 async fn an_unchanged_refused_credential_without_auth_is_terminal() {
 	refused_credential_is_terminal(config("moq-lite-05", &["old"])).await;
-	let mut config = config("moq-transport-22", &["old"]);
-	config.extensions.auth = false;
-	refused_credential_is_terminal(config).await;
+	refused_credential_is_terminal(config("moq-transport-22", &["old"])).await;
 }
 
 async fn refused_credential_is_terminal(config: moq_tokio::connect::Config) {

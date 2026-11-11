@@ -1,11 +1,9 @@
 /**
  * In-band authorization: present tokens to the peer and learn what they grant.
  *
- * Each side of a moq-lite-07 session, and of a moq-transport draft-18+ session when both
- * sides negotiate MoQ Auth, presents the credential its connection already carried (the
- * URL, or nothing) right after setup, and learns the {@link Grant} it earned. Older
- * versions, and peers that do not negotiate it, carry no AUTH exchange: the grant stays
- * undefined. There {@link Handle.add} rejects with {@link Unsupported} on moq-lite, and on
+ * Each side of a moq-lite-07 session presents the credential its connection already carried
+ * (the URL, or nothing) right after setup, and learns the {@link Grant} it earned. Older
+ * versions and moq-transport carry no AUTH exchange: the grant stays undefined. There {@link Handle.add} rejects with {@link Unsupported} on moq-lite, and on
  * moq-transport keeps the token, with no grant, for the announcements whose route names it.
  * {@link Handle.grant} is the union of every token this side presented, and {@link Handle.add}
  * presents another without reconnecting, returning its {@link Credential}.
@@ -18,6 +16,7 @@
  * @module
  */
 
+import type { Wall } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import type { SessionCode } from "./error.ts";
 import type * as Path from "./path.ts";
@@ -34,8 +33,8 @@ export interface Grant {
 	publish: Path.Patterns;
 	/** The broadcasts this side may subscribe to from the peer. */
 	subscribe: Path.Patterns;
-	/** When the grant lapses, as `@moq/clock` wall time in Unix milliseconds, or undefined for never. */
-	expires?: number;
+	/** When the grant lapses on the `@moq/clock` wall clock, or undefined for never. */
+	expires?: Wall;
 }
 
 /**

@@ -1,6 +1,6 @@
 //! Socket interop peer; stdin acknowledges that the other process drained its half.
 use anyhow::{Context, ensure};
-use moq_tokio::moq_net::{self, socket::Endpoint};
+use moq_net::socket::Endpoint;
 use std::future::Future;
 use std::task::Poll;
 use tokio::io::AsyncBufReadExt;
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
 				}
 				group.finish()?;
 			}
-			producer.finish()?;
+			let _producer = producer.finish()?;
 			for sequence in 0..3 {
 				let mut next = consumer.next_group().await?.context("short track")?;
 				ensure!(next.sequence == sequence, "wrong group order");

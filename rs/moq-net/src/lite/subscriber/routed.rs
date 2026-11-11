@@ -6,7 +6,7 @@
 //! the origin, minting a source per request that names the claim's origin node.
 
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap},
+	collections::{BTreeMap, HashMap},
 	task::Poll,
 };
 
@@ -14,6 +14,7 @@ use crate::{
 	Error, Path,
 	lite::{self, AnnounceReply},
 	route::{self, node},
+	transport::{Metrics as _, poll::Session as _},
 };
 
 use super::{AnnouncedRoute, Subscriber};
@@ -22,8 +23,8 @@ use super::{AnnouncedRoute, Subscriber};
 struct WireRoute {
 	node: route::Id,
 	reach: route::Reach,
-	/// The Announce IDs of its live claims.
-	claims: BTreeSet<u64>,
+	/// The Announce ID of each of its live claims, by path.
+	claims: BTreeMap<Path, u64>,
 	/// How its claims differ from `committed`, by path, so what the stream keeps
 	/// between floors is bounded by its claims rather than the messages it read.
 	pending: BTreeMap<Path, Option<node::Claim>>,
@@ -96,6 +97,12 @@ pub(super) struct Routed {
 	ready: kio::Queue<(route::Id, Path)>,
 	/// The peer sent a GOAWAY: every claim served here ranks last.
 	drained: bool,
+	/// The link's min RTT, which the peer's routes add.
+	rtt: route::LinkRtt,
+	/// When to read the link's RTT next, or `None` once it stopped reading.
+	read_rtt: Option<crate::time::Deadline>,
+	/// Whether the peer has a route here, so the link's RTT is read.
+	sampling: bool,
 }
 
 impl Routed {
@@ -150,6 +157,9 @@ impl Routed {
 			previous: HashMap::new(),
 			ready: Default::default(),
 			drained: false,
+			rtt: Default::default(),
+			read_rtt: None,
+			sampling: false,
 		})
 	}
 
@@ -174,8 +184,8 @@ impl Routed {
 					id,
 					WireRoute {
 						node,
-						reach,
-						claims: BTreeSet::new(),
+						reach: reach.clone(),
+						claims: BTreeMap::new(),
 						pending: BTreeMap::new(),
 						committed: None,
 					},
@@ -186,7 +196,7 @@ impl Routed {
 			Msg::RouteHold { id } => self.reach(id, route::Reach::Held)?,
 			Msg::RouteEnd { id } => {
 				let route = self.routes.remove(&id).ok_or(Error::ProtocolViolation)?;
-				for claim in route.claims {
+				for claim in route.claims.into_values() {
 					decoder.end(claim)?;
 					self.claims.remove(&claim);
 					self.held.pop();
@@ -219,16 +229,17 @@ impl Routed {
 				route,
 				instance,
 				epoch,
+				hops,
 				cost,
-				..
 			} => {
 				let path = self.path(prefix, &decoder.start(suffix)?)?;
-				let claim = claim(instance, epoch, cost)?;
+				let claim = claim(instance, epoch, cost, hops)?;
 				self.start(decoder.last(), route, path, claim)?;
 			}
-			Msg::Update { id, cost, .. } => {
+			Msg::Update { id, hops, cost } => {
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				claim.claim.cost = cost.value();
+				claim.claim.chain = hops;
 				let change = (claim.path.clone(), Some(claim.claim.clone()));
 				self.pending(id, change)?;
 			}
@@ -237,8 +248,9 @@ impl Routed {
 				instance,
 				epoch,
 				cost,
+				hops,
 			} => {
-				let fresh = self::claim(instance, epoch, cost)?;
+				let fresh = self::claim(instance, epoch, cost, hops)?;
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				claim.claim = fresh;
 				let change = (claim.path.clone(), Some(claim.claim.clone()));
@@ -262,24 +274,19 @@ impl Routed {
 
 	fn reach(&mut self, id: u64, reach: route::Reach) -> Result<(), Error> {
 		let route = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
-		route.reach = reach;
+		route.reach = reach.clone();
 		self.stream.route(route.node, Some(reach));
 		Ok(())
 	}
 
 	/// A claim the peer started under `route`, assigned Announce ID `id`.
 	fn start(&mut self, id: u64, route: u64, path: Path, claim: node::Claim) -> Result<(), Error> {
-		let claims = &self.claims;
 		let wire = self.routes.get_mut(&route).ok_or(Error::ProtocolViolation)?;
-		if wire
-			.claims
-			.iter()
-			.any(|other| claims.get(other).is_some_and(|other| other.path == path))
-		{
+		if wire.claims.contains_key(&path) {
 			return Err(Error::ProtocolViolation);
 		}
 		self.held.push(self.slots.acquire()?);
-		wire.claims.insert(id);
+		wire.claims.insert(path.clone(), id);
 		wire.change(path.clone(), Some(claim.clone()));
 		self.claims.insert(id, WireClaim { route, path, claim });
 		Ok(())
@@ -290,7 +297,7 @@ impl Routed {
 		let claim = self.claims.remove(&id).ok_or(Error::ProtocolViolation)?;
 		self.held.pop();
 		let route = self.routes.get_mut(&claim.route).ok_or(Error::ProtocolViolation)?;
-		route.claims.remove(&id);
+		route.claims.remove(&claim.path);
 		route.change(claim.path, None);
 		Ok(())
 	}
@@ -300,6 +307,18 @@ impl Routed {
 		let route = self.routes.get_mut(&route).ok_or(Error::ProtocolViolation)?;
 		route.change(change.0, change.1);
 		Ok(())
+	}
+
+	/// Move what the stream holds onto a budget of its own with the session's cap, while a
+	/// request replacing it takes the same claims over on the session's. The session's
+	/// count is then the replacement's alone, and a peer flooding this stream fails it
+	/// on its own budget: at most twice the cap, during one handover.
+	pub(super) fn hand_over(&mut self) {
+		let slots = self.slots.split();
+		for slot in self.held.iter_mut().chain(&mut self.echoing) {
+			*slot = slots.hold();
+		}
+		self.slots = slots;
 	}
 
 	/// The peer sent a GOAWAY: its routes rank below every other. Idempotent.
@@ -331,6 +350,7 @@ impl Routed {
 			.node
 			.receive(scoped(&self.link, &self.regions, key), self.prefix.clone())
 			.map_err(refused)?;
+		stream.rtt(self.rtt.reported());
 		// What the old stream served stays in the origin until the new one serves it
 		// again, or lets go after.
 		let previous = std::mem::take(&mut self.served);
@@ -338,7 +358,7 @@ impl Routed {
 		ids.sort_unstable();
 		for id in &ids {
 			let route = &self.routes[id];
-			stream.route(route.node, Some(route.reach));
+			stream.route(route.node, Some(route.reach.clone()));
 		}
 		let certifies = self.certifies();
 		for id in &ids {
@@ -353,12 +373,12 @@ impl Routed {
 		if self.drained {
 			stream.goaway();
 		}
+		self.stream.replaced_by(&stream);
 		drop(std::mem::replace(&mut self.stream, stream));
 		self.previous = previous;
 		self.outputs(subscriber);
-		for (_, served) in std::mem::take(&mut self.previous) {
-			served.route.dynamic.withdrawn();
-		}
+		// What the new stream no longer serves is let go here, not ended by its origin.
+		self.previous.clear();
 		Ok(())
 	}
 
@@ -385,6 +405,7 @@ impl Routed {
 	/// Act on everything the node queued for the stream: serve the claims it hands
 	/// over.
 	pub(super) fn outputs(&mut self, subscriber: &Subscriber) {
+		self.sample(subscriber);
 		while let Some(output) = self.stream.try_output() {
 			self.output(subscriber, output);
 		}
@@ -398,8 +419,11 @@ impl Routed {
 				claim,
 				served,
 			} => self.serve(subscriber, id, named, claim, served),
-			node::Output::Unserve { id, claim } => {
-				if let Some(served) = self.served.remove(&(id, claim)) {
+			node::Output::Unserve { id, claim, ended } => {
+				// Dropped, a claim the node let go of goes offline rather than ending.
+				if let Some(served) = self.served.remove(&(id, claim))
+					&& ended
+				{
 					served.route.dynamic.withdrawn();
 				}
 			}
@@ -422,17 +446,33 @@ impl Routed {
 		if !self.permit.within_limit(path.as_str()) {
 			return;
 		}
-		let cost = match self.drained || !served.available {
-			true => crate::origin::Cost::DRAIN,
-			false => crate::origin::Cost::new(served.claim.cost.saturating_add(served.metric)),
-		};
-		let route = crate::origin::RouteInfo::default()
-			.with_instance(served.claim.instance.clone(), served.claim.epoch)
-			.with_hops(hops(id))
-			.with_cost(cost)
-			.with_via(subscriber.via(None))
-			.with_node(Some(id));
 		let key = (id, claim);
+		// The chain a claim of `id` travels to a lite-06 peer: the one it crossed into
+		// lite-07 with, then its origin node, so a relay it reaches back through
+		// recognizes it. A chain already naming this node looped back across lite-06,
+		// and the hop limit bounds the whole path across both versions.
+		let mut hops = served.claim.chain.clone();
+		if hops.push(route::node::hop(id)).is_err()
+			|| subscriber.names_self(&hops)
+			|| hops.len() > self.origin.max_hops().get()
+		{
+			tracing::debug!(route = %subscriber.log_path(&path), node = id, "dropping looped claim");
+			for entry in self.previous.remove(&key).into_iter().chain(self.served.remove(&key)) {
+				entry.route.dynamic.withdrawn();
+			}
+			return;
+		}
+		// A route held without a path to it is unavailable: it serves only as a last
+		// resort, like a draining peer's, at its real cost.
+		let route = crate::origin::RouteInfo::new()
+			.with_instance(served.claim.instance.clone(), served.claim.epoch)
+			.with_hops(hops)
+			.with_cost(served.claim.cost.saturating_add(served.metric))
+			.with_via(subscriber.via(None))
+			.with_node(Some(id))
+			.with_draining(self.drained)
+			.with_available(served.available)
+			.with_rtt(served.rtt);
 		if let Some(entry) = self.previous.remove(&key) {
 			self.served.insert(key.clone(), entry);
 		}
@@ -462,6 +502,38 @@ impl Routed {
 		}
 	}
 
+	/// Start or stop reading the link's min RTT as the peer's routes come and go.
+	///
+	/// Only a route the peer sent adds the link's min RTT, so a peer sending none costs
+	/// no timer. Starting reads at once, so the first claims served already carry it,
+	/// and in a fresh window, so a pause never keeps a reading older than the window.
+	fn sample(&mut self, subscriber: &Subscriber) {
+		match (self.routes.is_empty(), self.sampling) {
+			(true, true) => {
+				self.sampling = false;
+				self.rtt = Default::default();
+				self.read_rtt = None;
+				self.stream.rtt(None);
+			}
+			(false, false) => {
+				self.sampling = true;
+				self.read_link(subscriber);
+			}
+			_ => {}
+		}
+	}
+
+	/// Read the link's smoothed RTT once and schedule the next read.
+	fn read_link(&mut self, subscriber: &Subscriber) {
+		let last = self.rtt.reported();
+		let now = self.rtt.read(subscriber.session.metrics().rtt());
+		if now != last {
+			self.stream.rtt(now);
+		}
+		self.read_rtt =
+			(self.rtt.reading()).then(|| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
+	}
+
 	/// Write the queued replies, and serve requests on every claim whose queue woke.
 	pub(super) fn poll(
 		&mut self,
@@ -469,6 +541,12 @@ impl Routed {
 		writer: &mut crate::coding::Writer<impl crate::transport::poll::SendStream, lite::Version>,
 		waiter: &kio::Waiter,
 	) -> Result<(), Error> {
+		self.sample(subscriber);
+		while let Some(read_rtt) = &mut self.read_rtt
+			&& read_rtt.poll(waiter).is_ready()
+		{
+			self.read_link(subscriber);
+		}
 		while let Poll::Ready(output) = self.stream.poll_output(waiter) {
 			self.output(subscriber, output);
 		}
@@ -512,22 +590,20 @@ fn refused(_: route::Error) -> Error {
 }
 
 /// A claim off the wire. Lite-07 names every claim's instance.
-fn claim(instance: Option<crate::Instance>, epoch: u64, cost: crate::origin::Cost) -> Result<node::Claim, Error> {
+fn claim(
+	instance: Option<crate::Instance>,
+	epoch: u64,
+	cost: crate::origin::Cost,
+	chain: crate::Hops,
+) -> Result<node::Claim, Error> {
 	Ok(node::Claim {
 		instance: instance.ok_or(Error::ProtocolViolation)?,
 		epoch,
 		cost: cost.value(),
 		upstream: false,
 		learned: false,
+		chain,
 	})
-}
-
-/// The hop chain a claim of `id` travels to a lite-06 peer, so a relay it reaches
-/// back through recognizes it.
-fn hops(id: route::Id) -> crate::Hops {
-	let mut hops = crate::Hops::new();
-	hops.push(route::node::hop(id)).expect("one hop fits any chain");
-	hops
 }
 
 /// Whether `permit`'s limit admits the peer's claim at the absolute `path`.
@@ -561,11 +637,15 @@ mod tests {
 	use crate::lite::{AnnounceBroadcast as Msg, AnnounceDecoder, PathRef, test_transport::SinkSession};
 	use crate::{Instance, Path, auth::Permit, origin::Cost, route::Advert};
 
-	const ADVERT: Advert = Advert {
-		seqno: 0,
-		metric: 0,
-		down_only: false,
-	};
+	fn advert() -> Advert {
+		Advert {
+			seqno: 0,
+			metric: 0,
+			down_only: false,
+			rtt: None,
+			hops: [].into(),
+		}
+	}
 
 	fn start(path: &'static str) -> Msg {
 		Msg::Active {
@@ -607,7 +687,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -646,7 +726,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [
 			route,
@@ -689,7 +769,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -725,7 +805,7 @@ mod tests {
 			};
 			let route = Msg::RouteStart {
 				node: 7,
-				advert: ADVERT,
+				advert: advert(),
 			};
 			for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
 				routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -755,14 +835,14 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 
 		for (id, node) in [(0, 7), (1, 8)] {
-			let route = Msg::RouteStart { node, advert: ADVERT };
+			let route = Msg::RouteStart { node, advert: advert() };
 			routed.receive(&prefix, route, &mut decoder).unwrap();
 			routed.receive(&prefix, Msg::RouteEnd { id }, &mut decoder).unwrap();
 			routed.poll(&subscriber, &mut writer, &waiter).unwrap();
 		}
 		let route = Msg::RouteStart {
 			node: 9,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		assert!(
 			routed.receive(&prefix, route, &mut decoder).is_err(),
@@ -772,6 +852,93 @@ mod tests {
 		*budget.write().ok().expect("the budget is open") = usize::MAX;
 		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
 		assert_eq!(subscriber.announces.available(), 2);
+	}
+
+	/// The route and claims a peer sends one stream, its Route ID 0.
+	fn feed(
+		routed: &mut super::Routed,
+		decoder: &mut AnnounceDecoder,
+		paths: &[&'static str],
+	) -> Result<(), crate::Error> {
+		let prefix = Path::empty();
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: advert(),
+		};
+		routed.receive(&prefix, route, decoder)?;
+		for path in paths {
+			routed.receive(&prefix, start(path), decoder)?;
+		}
+		Ok(())
+	}
+
+	/// A request handed over keeps what it holds on a budget of its own, so the claims
+	/// arriving on both it and its replacement during the handover count once against the
+	/// session's cap: a session that fits its claims stays open.
+	#[kio::test]
+	async fn a_handover_counts_the_replacement_alone() {
+		let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		// One route and three claims.
+		subscriber.announces = crate::session::Slots::new(4);
+		let prefix = Path::empty();
+		let mut old = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut old_decoder = AnnounceDecoder::default();
+		feed(&mut old, &mut old_decoder, &["x", "y"]).unwrap();
+
+		old.hand_over();
+		assert_eq!(
+			subscriber.announces.available(),
+			4,
+			"the session's count is the replacement's"
+		);
+		let mut new = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut new_decoder = AnnounceDecoder::default();
+		feed(&mut new, &mut new_decoder, &["x", "y"]).unwrap();
+
+		// A claim the peer starts during the handover reaches both requests.
+		old.receive(&prefix, start("z"), &mut old_decoder)
+			.expect("the old request fits it on its own budget");
+		new.receive(&prefix, start("z"), &mut new_decoder)
+			.expect("the session fits it");
+		assert_eq!(subscriber.announces.available(), 0);
+
+		drop(old);
+		assert_eq!(
+			subscriber.announces.available(),
+			0,
+			"the old request held none of the session's"
+		);
+		drop(new);
+		assert_eq!(subscriber.announces.available(), 4);
+	}
+
+	/// A peer flooding a request handed over fails it on its own budget, the session's cap,
+	/// so the session holds at most twice the cap during one handover.
+	#[kio::test]
+	async fn a_handover_caps_the_old_request() {
+		let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		subscriber.announces = crate::session::Slots::new(3);
+		let prefix = Path::empty();
+		let mut old = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut old_decoder = AnnounceDecoder::default();
+		feed(&mut old, &mut old_decoder, &["x"]).unwrap();
+
+		old.hand_over();
+		let mut new = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut new_decoder = AnnounceDecoder::default();
+		feed(&mut new, &mut new_decoder, &["x", "y"]).unwrap();
+		assert_eq!(subscriber.announces.available(), 0);
+
+		old.receive(&prefix, start("y"), &mut old_decoder)
+			.expect("the old request's budget has room for one more");
+		assert!(
+			old.receive(&prefix, start("z"), &mut old_decoder).is_err(),
+			"the old request is capped on its own budget"
+		);
+		assert!(
+			new.receive(&prefix, start("z"), &mut new_decoder).is_err(),
+			"the replacement is capped on the session's"
+		);
 	}
 
 	/// A downstream peer raising its ROUTE_REQUEST seqno while this stream's peer
@@ -794,7 +961,7 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		routed.receive(&prefix, route, &mut decoder).unwrap();
 		let downstream = (subscriber.origin.route_node())
@@ -829,6 +996,98 @@ mod tests {
 		);
 	}
 
+	/// A transport that reports its first RTT only after the stream opened, such as
+	/// qmux before its first ping returns, still gets its link measured.
+	#[kio::test]
+	async fn a_late_rtt_is_still_read() {
+		let session = SinkSession::new(Default::default());
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(session.clone());
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		feed(&mut routed, &mut decoder, &[]).unwrap();
+		let mut writer = crate::coding::Writer::new(
+			crate::lite::test_transport::SinkSend::new(Default::default()),
+			crate::lite::Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		kio::clock::sim::advance(super::route::LinkRtt::INTERVAL).await;
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(routed.rtt.reported(), None);
+
+		let rtt = std::time::Duration::from_millis(20);
+		session.set_stats(crate::lite::test_transport::SinkStats::default().with_rtt(rtt));
+		kio::clock::sim::advance(super::route::LinkRtt::INTERVAL).await;
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(routed.rtt.reported(), Some(rtt));
+	}
+
+	/// Claims served when the peer reports Synced, before the stream is first polled,
+	/// already carry the link's RTT.
+	#[kio::test]
+	async fn the_first_claims_served_carry_the_rtt() {
+		use crate::lite::test_transport::SinkStats;
+		let ms = std::time::Duration::from_millis;
+		let session = SinkSession::new(Default::default()).with_stats(SinkStats::default().with_rtt(ms(10)));
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(session);
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: Advert {
+				rtt: Some(ms(5)),
+				..advert()
+			},
+		};
+		let floor = Msg::Floor {
+			id: 0,
+			revision: Some(0),
+		};
+		for msg in [route, start("live"), floor] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		routed.outputs(&subscriber);
+		let rtts: Vec<_> = routed.served.values().map(|entry| entry.route.route.rtt()).collect();
+		assert_eq!(rtts, [Some(ms(15))]);
+	}
+
+	/// A stream whose peer ends every route stops reading, and starts a fresh window
+	/// once one returns, so a reading from before the pause never stays reported.
+	#[kio::test]
+	async fn a_pause_restarts_the_window() {
+		use crate::lite::test_transport::SinkStats;
+		let ms = std::time::Duration::from_millis;
+		let session = SinkSession::new(Default::default()).with_stats(SinkStats::default().with_rtt(ms(10)));
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(session.clone());
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let mut writer = crate::coding::Writer::new(
+			crate::lite::test_transport::SinkSend::new(Default::default()),
+			crate::lite::Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		feed(&mut routed, &mut decoder, &[]).unwrap();
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(routed.rtt.reported(), Some(ms(10)));
+
+		routed.receive(&prefix, Msg::RouteEnd { id: 0 }, &mut decoder).unwrap();
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert!(routed.read_rtt.is_none(), "no route, no timer");
+		session.set_stats(SinkStats::default().with_rtt(ms(100)));
+		kio::clock::sim::advance(std::time::Duration::from_secs(60)).await;
+
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: advert(),
+		};
+		routed.receive(&prefix, route, &mut decoder).unwrap();
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(routed.rtt.reported(), Some(ms(100)));
+	}
+
 	/// What the stream keeps between floors is the net change to its committed claims,
 	/// however many messages the peer sends without one.
 	#[kio::test]
@@ -843,7 +1102,7 @@ mod tests {
 		};
 		let route = Msg::RouteStart {
 			node: 7,
-			advert: ADVERT,
+			advert: advert(),
 		};
 		for msg in [route, start("room/host"), floor] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();

@@ -41,7 +41,7 @@ m1 quest on 2026-10-22.
   and possibly moq-audio and moq-video), because their breaks predate the
   backfill's merge base. The [compression migration](https://github.com/moq-dev/moq/pull/7046)
   deleted moq-flate before this cut: audit the migration from its published
-  API to ordinary tracks with `compress`, rather than promising a new
+  API to ordinary tracks with `compression`, rather than promising a new
   moq-flate transition release.
 - Each version-transition section, starting from the `## Unreleased`
   entries already on `main`, says how to migrate from the published

@@ -26,7 +26,7 @@ const ANNOUNCE: u8 = 1;
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// A server publishing `a/x` and `b/y`, and a client fed into `subscriber` asking
@@ -95,7 +95,10 @@ impl Lazy {
 		let mut announced = consumer.routes();
 		matches!(
 			announced.poll_next(&kio::Waiter::noop()),
-			std::task::Poll::Ready(Some(origin::RouteEvent::Start(_)))
+			std::task::Poll::Ready(Some(origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				..
+			}))
 		)
 	}
 }
@@ -103,17 +106,24 @@ impl Lazy {
 /// Read until the stream syncs, returning the prefixes it then holds.
 async fn synced(announced: &mut origin::Routes) -> Vec<String> {
 	let mut seen = Vec::new();
-	while !announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready() {
+	while !announced.poll_synced(&kio::Waiter::noop()).is_ready() {
 		let event = kio::clock::timeout(SETTLE, announced.next())
 			.await
 			.expect("synced in time")
 			.expect("the stream stays open");
 		match event {
-			origin::RouteEvent::Start(announce) | origin::RouteEvent::Restart(announce) => {
-				seen.push(announce.prefix.to_string())
-			}
-			origin::RouteEvent::End(announce) => seen.retain(|prefix| *prefix != announce.prefix.as_str()),
-			origin::RouteEvent::Update(_) => {}
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start | origin::RouteKind::Restart,
+				announce,
+			} => seen.push(announce.prefix.to_string()),
+			origin::RouteEvent {
+				kind: origin::RouteKind::End | origin::RouteKind::Offline,
+				announce,
+			} => seen.retain(|prefix| *prefix != announce.prefix.as_str()),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Update,
+				..
+			} => {}
 		}
 	}
 	seen.sort();
@@ -423,14 +433,21 @@ async fn settled(announced: &mut origin::Routes, held: &mut Vec<String>) -> bool
 	let mut ended = false;
 	while let Some(event) = announced.try_next() {
 		match event {
-			origin::RouteEvent::Start(announce) | origin::RouteEvent::Restart(announce) => {
-				held.push(announce.prefix.to_string())
-			}
-			origin::RouteEvent::End(announce) => {
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start | origin::RouteKind::Restart,
+				announce,
+			} => held.push(announce.prefix.to_string()),
+			origin::RouteEvent {
+				kind: origin::RouteKind::End | origin::RouteKind::Offline,
+				announce,
+			} => {
 				ended = true;
 				held.retain(|prefix| *prefix != announce.prefix.as_str())
 			}
-			origin::RouteEvent::Update(_) => {}
+			origin::RouteEvent {
+				kind: origin::RouteKind::Update,
+				..
+			} => {}
 		}
 	}
 	held.sort();

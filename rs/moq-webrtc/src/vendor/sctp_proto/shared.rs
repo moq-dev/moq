@@ -53,11 +53,8 @@ pub type AssociationId = u32;
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum EcnCodepoint {
-	#[doc(hidden)]
 	Ect0 = 0b10,
-	#[doc(hidden)]
 	Ect1 = 0b01,
-	#[doc(hidden)]
 	Ce = 0b11,
 }
 

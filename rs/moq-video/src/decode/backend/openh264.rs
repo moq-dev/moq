@@ -5,7 +5,7 @@
 //! I420.
 
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
 
 use bytes::Bytes;
 use moq_net::Timestamp;
@@ -88,6 +88,7 @@ pub(crate) struct Openh264 {
 	/// Access units the decoder has refused since the last picture came out, so
 	/// a run of them logs once rather than once per picture.
 	lost: u64,
+	ready: VecDeque<Frame>,
 }
 
 /// Builds an openh264 decoder configured the way this backend needs one.
@@ -103,7 +104,7 @@ pub(crate) struct Openh264 {
 fn new_decoder() -> Result<Decoder, Error> {
 	let config = DecoderConfig::new().flush_after_decode(Flush::NoFlush);
 	Decoder::with_api_config(OpenH264API::from_source(), config)
-		.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 decoder init: {e}")))
+		.map_err(|e| Error::codec(anyhow::anyhow!("openh264 decoder init: {e}")))
 }
 
 impl Openh264 {
@@ -118,7 +119,7 @@ impl Openh264 {
 	/// drain it through a method the [`Backend`] trait does not carry.
 	fn new(codec: Codec, _config: &Config) -> Result<Self, Error> {
 		if codec != Codec::H264 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"openh264 cannot decode {}",
 				codec.label()
 			)));
@@ -141,22 +142,23 @@ impl Openh264 {
 			decoder,
 			pending: BinaryHeap::new(),
 			lost: 0,
+			ready: VecDeque::new(),
 		})
 	}
 
 	/// Records an access unit the decoder refused.
 	///
-	/// Returns no frames for a state that describes the picture, so playback
-	/// carries on and recovers at the next keyframe, and the error itself for a
-	/// state that describes the decoder.
+	/// Succeeds with no picture for a state that describes the picture, so
+	/// playback carries on and recovers at the next keyframe, and returns the
+	/// error itself for a state that describes the decoder.
 	///
 	/// Only a state in [`DECODER_RESET`] takes the outstanding timestamps with
 	/// it. After the others the decoder still holds the pictures those
 	/// timestamps belong to.
-	fn picture_lost(&mut self, timestamp: Timestamp, err: &openh264::Error) -> Result<Vec<Frame>, Error> {
+	fn picture_lost(&mut self, timestamp: Timestamp, err: &openh264::Error) -> Result<(), Error> {
 		let state = i32::try_from(err.native_code()).unwrap_or(dsErrorFree);
 		if state == dsErrorFree || state & !PICTURE_LOST != 0 {
-			return Err(Error::Codec(anyhow::anyhow!("openh264 decode: {err}")));
+			return Err(Error::codec(anyhow::anyhow!("openh264 decode: {err}")));
 		}
 
 		if state & DECODER_RESET != 0 {
@@ -185,7 +187,7 @@ impl Openh264 {
 		} else {
 			tracing::trace!(decoder = NAME, state = format_args!("{state:#06x}"), "picture lost");
 		}
-		Ok(Vec::new())
+		Ok(())
 	}
 
 	/// Takes the timestamp the next picture out belongs to, reporting a recovery
@@ -213,41 +215,47 @@ impl Openh264 {
 		}
 	}
 
-	/// The pictures the decoder still holds, each stamped with its access unit's
-	/// timestamp.
-	fn drain_tail(&mut self) -> Result<Vec<Frame>, Error> {
+	/// Queue the pictures the decoder still holds, each stamped with its access
+	/// unit's timestamp.
+	fn drain_tail(&mut self) -> Result<(), Error> {
 		let tail = self
 			.decoder
 			.flush_remaining()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 flush: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("openh264 flush: {e}")))?;
 		// `tail` borrows the decoder, so copy the pictures before taking their
 		// timestamps. The placeholder is replaced before any frame reaches a
 		// caller; an unstamped picture is dropped below.
-		let decoded: Vec<Frame> = tail
-			.iter()
-			.map(|yuv| picture(yuv, Timestamp::ZERO))
-			.collect::<Result<_, _>>()?;
-		drop(tail);
-
-		let mut frames = Vec::with_capacity(decoded.len());
-		let mut unstamped = 0usize;
-		for mut frame in decoded {
-			match self.picture_out() {
-				Some(timestamp) => {
-					frame.timestamp = timestamp;
-					frames.push(frame);
+		let start = self.ready.len();
+		for yuv in tail.iter() {
+			match picture(yuv, Timestamp::ZERO) {
+				Ok(frame) => self.ready.push_back(frame),
+				Err(err) => {
+					self.ready.truncate(start);
+					return Err(err);
 				}
-				None => unstamped += 1,
 			}
 		}
+		drop(tail);
+
+		// Once the timestamps run out they stay out, so the unstamped pictures are
+		// the trailing ones.
+		let mut stamped = start;
+		while stamped < self.ready.len()
+			&& let Some(timestamp) = self.picture_out()
+		{
+			self.ready[stamped].timestamp = timestamp;
+			stamped += 1;
+		}
+		let unstamped = self.ready.len() - stamped;
 		if unstamped > 0 {
+			self.ready.truncate(stamped);
 			tracing::warn!(
 				decoder = NAME,
 				dropped = unstamped,
 				"flushed pictures had no timestamp waiting for them"
 			);
 		}
-		Ok(frames)
+		Ok(())
 	}
 }
 
@@ -255,7 +263,7 @@ impl Openh264 {
 fn picture(yuv: &impl YUVSource, timestamp: Timestamp) -> Result<Frame, Error> {
 	let (width, height) = yuv.dimensions();
 	if width % 2 != 0 || height % 2 != 0 {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"decoded frame has odd dimensions {width}x{height}, expected 4:2:0"
 		)));
 	}
@@ -273,7 +281,7 @@ fn picture(yuv: &impl YUVSource, timestamp: Timestamp) -> Result<Frame, Error> {
 }
 
 impl Backend for Openh264 {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
 		self.picture_in(timestamp);
 
 		// `None` means the decoder took the access unit but has no picture yet:
@@ -285,19 +293,21 @@ impl Backend for Openh264 {
 			Err(err) => return self.picture_lost(timestamp, &err),
 		};
 
-		match decoded {
-			Some(mut frame) => {
-				if let Some(timestamp) = self.picture_out() {
-					frame.timestamp = timestamp;
-				}
-				Ok(vec![frame])
+		if let Some(mut frame) = decoded {
+			if let Some(timestamp) = self.picture_out() {
+				frame.timestamp = timestamp;
 			}
-			None => Ok(Vec::new()),
+			self.ready.push_back(frame);
 		}
+		Ok(())
 	}
 
-	/// Return the reordered pictures still buffered at the end of the stream.
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	/// Queue the reordered pictures still buffered at the end of the stream.
+	fn flush(&mut self) -> Result<(), Error> {
 		let tail = self.drain_tail();
 		self.pending.clear();
 		self.lost = 0;
@@ -397,11 +407,11 @@ mod tests {
 			};
 			frames.extend(
 				decoder
-					.decode(payload, at(index), keyframe)
+					.decode_all(payload, at(index), keyframe)
 					.unwrap_or_else(|e| panic!("access unit {index} ended the stream: {e}")),
 			);
 		}
-		frames.extend(decoder.flush().expect("the drain works"));
+		frames.extend(decoder.flush_all().expect("the drain works"));
 		frames
 	}
 
@@ -419,11 +429,11 @@ mod tests {
 			let mut decoded = 0;
 			for (index, (payload, keyframe)) in access_units().into_iter().enumerate() {
 				decoded += decoder
-					.decode(payload, at(index), keyframe)
+					.decode_all(payload, at(index), keyframe)
 					.unwrap_or_else(|e| panic!("round {round} access unit {index}: {e}"))
 					.len();
 			}
-			decoded += decoder.flush().expect("the drain works").len();
+			decoded += decoder.flush_all().expect("the drain works").len();
 			assert_eq!(decoded, PICTURES, "round {round} lost pictures");
 		}
 	}
@@ -437,11 +447,11 @@ mod tests {
 		let mut decoder = open();
 		let mut timestamps = Vec::new();
 		for (index, (payload, keyframe)) in access_units().into_iter().enumerate() {
-			for frame in decoder.decode(payload, at(index), keyframe).expect("decodes") {
+			for frame in decoder.decode_all(payload, at(index), keyframe).expect("decodes") {
 				timestamps.push(frame.timestamp.as_micros());
 			}
 		}
-		for frame in decoder.flush().expect("the drain works") {
+		for frame in decoder.flush_all().expect("the drain works") {
 			timestamps.push(frame.timestamp.as_micros());
 		}
 
@@ -465,7 +475,7 @@ mod tests {
 				payload
 			};
 			let frames = decoder
-				.decode(payload, at(index), keyframe)
+				.decode_all(payload, at(index), keyframe)
 				.unwrap_or_else(|e| panic!("access unit {index} ended the stream: {e}"))
 				.len();
 			decoded += frames;

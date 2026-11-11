@@ -84,7 +84,7 @@ async fn import_onto(
 	for chunk in data.chunks(chunk) {
 		passthrough.decode(chunk)?;
 	}
-	passthrough.finish()?;
+	let _finished = passthrough.finish()?;
 
 	let mut track = consumer
 		.track(&name)?
@@ -510,7 +510,7 @@ async fn the_section_goes_with_the_importer() {
 		if abort {
 			passthrough.abort(moq_net::Error::Cancel);
 		} else {
-			passthrough.finish().unwrap();
+			let passthrough = passthrough.finish().unwrap();
 			assert!(catalog.snapshot().m2ts.is_some(), "a finished track is still described");
 			drop(passthrough);
 		}
@@ -842,17 +842,4 @@ async fn an_overriding_clock_paces_on_its_own_pcrs() {
 		!imported.section().random_access,
 		"a clock no program names marks no program's decoding boundary"
 	);
-}
-
-/// Input after finish is refused, as every importer refuses it.
-#[test]
-fn input_after_finish_is_refused() {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let mut passthrough = Passthrough::new(broadcast, catalog.reserve()).unwrap();
-	passthrough.finish().unwrap();
-	passthrough.finish().unwrap();
-
-	let err = passthrough.decode(KYRION_H264).unwrap_err();
-	assert!(matches!(err, crate::Error::Finished), "{err:?}");
 }

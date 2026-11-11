@@ -22,8 +22,8 @@ and incarnation that shares it. Two instances are two independent streams,
 never stitched together. An instance names a run, not who publishes it: it is
 no credential, and auth decides who may publish the path.
 
-- **A new stream takes a new instance.** Every broadcast mints a random one
-  when it is created and keeps it while it is withdrawn and announced again or
+- **A new stream takes a new instance.** A broadcast that names no instance
+  generates a random one when it is created and keeps it while it is withdrawn and announced again or
   reconnects, since its numbering continues. A restarted process, or anything
   that starts its group numbers over, is a new broadcast with a new instance.
   Replaying a recording is a new stream too: [`moq import archive`](/bin/cli#archive)
@@ -32,8 +32,8 @@ no credential, and auth decides who may publish the path.
   keeps its instance on every route, which is what lets a subscription move
   between them.
 - **A stable instance is a promise.** A publisher may name its own instance
-  (`Route::with_instance(instance, epoch)` in Rust, `announce({ instance, epoch })`
-  in JavaScript) only if it continues the sequence space across restarts and
+  (`RouteOptions::with_instance(instance, epoch)` in Rust,
+  `origin.route(path, { instance: { id, epoch } })` in JavaScript) only if it continues the sequence space across restarts and
   announces a higher **epoch** each time, for example a counter persisted on
   disk. Breaking the promise splices unrelated groups into every reader's
   tracks. Two encoders with identical settings fed the same source still
@@ -56,7 +56,7 @@ one is, so it fences out an older run. Nothing assumes it is a clock.
 
 | Situation | Instance | What readers see |
 | --- | --- | --- |
-| One broadcast, reconnecting | The one it minted | The same stream; subscriptions resume |
+| One broadcast, reconnecting | The one it generated | The same stream; subscriptions resume |
 | One stream carried by several relays or CDNs | Shared by every route | Failover resumes from the first missing frame |
 | A restarted or replaced publisher | A fresh one | A restart, then the new stream from its start |
 | A publisher that continues its sequences across restarts | Stable, with a higher epoch each run | The same stream; readers continue without a seam |
@@ -71,7 +71,10 @@ A route resolving a path is chosen in this order:
 2. Within one instance, only its highest epoch is eligible, even over a
    cheaper route. Readers continue across an epoch change without a seam,
    because the sequence space continues.
-3. Among different instances: the preferred link, then an identified chain
+3. Among eligible routes: a route from a peer that has not sent GOAWAY
+   (a draining peer's routes rank below every other, whatever their preference
+   or cost, and serve only as a last resort), then the preferred link, then an
+   identified chain
    over an anonymous one, then the lowest cost, then a broadcast published on
    this origin, then the shortest hop chain, then a hash of the full requested
    path with the route's origin node, which moq-lite 07 carries, or else with
@@ -89,11 +92,11 @@ order, and so does every relay deciding what to advertise.
 Instances and epochs travel only over moq-lite 07 (`moq-lite-07-wip`,
 opt-in). Older moq-lite versions and moq-transport carry neither, so the
 receiving session mints an instance for each announcement it receives, with
-epoch 0. A minted instance starts with `~`, so a publisher naming a stable
-instance should not start it with `~`: nothing refuses one, since a relay
-forwarding a route keeps the instance it received, but every node then treats
-it as minted. A minted instance names the announcement, not the publisher's
-stream, so:
+epoch 0. Whether an instance was minted is a flag beside it
+(`Instance::is_minted` in Rust, `Instance.isMinted` in JavaScript) that only a
+session sets: parsing text always names an instance, whatever the text, and
+moq-lite 07 carries the flag, so a relay forwarding a route keeps it. A minted
+instance names the announcement, not the publisher's stream, so:
 
 - An announcement ending and starting again, such as a job re-announced on one
   session, is a new stream, never spliced to the earlier one.
@@ -102,6 +105,9 @@ stream, so:
   an older hop.
 - A catalog reference naming an instance cannot be checked against a minted
   one, so there it is best effort.
+- To pin a request to a minted instance, pass back the instance the route
+  reported. Its text parses to a different, named instance, which never
+  resolves to that route.
 - A pool reached through an older-lite relay hop can pick different winners
   per relay, since each relay mints its own instances. Use moq-lite 07
   between relays.
@@ -131,9 +137,12 @@ goes offline; JavaScript `origin.follow(path)`, whose `active` is undefined
 between instances; the moq-ffi bindings `follow(path)`, whose `available()`
 returns null once the path goes offline; and C `moq_origin_follow`, whose
 callback reports `MOQ_FOLLOW_EVENT_OFFLINE`.
-An announcement listing (`announced()`) only reports a path becoming present or
-absent: an instance change keeps it present, so a reader that needs one holds a
-follower. `@moq/watch`, `moq play`, and `moqsrc` follow this way, and
+An announcement listing (`announced()`) reports a path becoming present,
+unavailable while the network holds its route without a path to it, available
+again once it recovers one, and finally absent once the origin withdraws it or
+offline once this side lets go of it, which says nothing of whether the origin
+still serves it. An instance change keeps it present, so a reader that needs
+one holds a follower. `@moq/watch`, `moq play`, and `moqsrc` follow this way, and
 `moq export ts --stitch` can splice a replacement as a marked program switch. A
 request failing is never the signal to restart; the follower handing out a new
 broadcast is. Nor is a track's error kind: a track withdrawn
@@ -169,10 +178,10 @@ demand, whose instance changes each time its job restarts.
 
 A worker can advertise a prefix it serves on demand and answer with a
 broadcast it already holds. This announces no exact route: the answer belongs
-to the prefix route's instance at that path. Every answer there must continue
+to the claim's instance at that path. Every answer there must continue
 one sequence space with the same bytes. To serve different content at a path
-already served, start a new prefix route. Its first subscription stays on
-the prefix route without a restart.
+already served, start a new claim. Its first subscription stays on
+the claim without a restart.
 
 A job that may restart independently, such as a transcoder claiming
 `transcode`, instead creates each requested path's own exact route. A claim
@@ -180,7 +189,7 @@ promises capability, not content. Each requested path is a separate job,
 announced at its exact path.
 
 ```rust
-let claim = origin.route_prefix("transcode", RouteOptions::default())?;
+let claim = origin.claim("transcode", RouteOptions::default())?;
 while let Some(request) = claim.requested().await {
     // Takes the claim's instance, so readers resolved through the claim continue.
     // Hidden until its tracks exist.
@@ -200,7 +209,7 @@ earlier when its instance is first read, as a signer built from it does. Read
 first, the job announces under it or not at all: if another job under the claim
 ends in between, moving the claim to a fresh instance, `announce` fails with
 `Unroutable` and the request reaches the worker again. Ending a job's route withdraws its path, and the
-prefix route keeps answering later requests.
+claim keeps answering later requests.
 
 A lazy job's lifecycle, as a viewer of `transcode/alice` sees it through a relay:
 

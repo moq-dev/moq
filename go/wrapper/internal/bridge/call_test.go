@@ -25,6 +25,7 @@ func (s *stubHandle) Destroy() {
 //
 // The call parks until the context is cancelled, so the deadline branch wins
 // without a race, and only then produces the handle nobody is left to receive.
+// Only an object-owned call is abandoned this way; one without cancel waits.
 func TestRunHandleReleasesAResultNobodyReceived(t *testing.T) {
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	started := make(chan struct{})
@@ -36,7 +37,7 @@ func TestRunHandleReleasesAResultNobodyReceived(t *testing.T) {
 		cancelCtx()
 	}()
 
-	val, err := CallHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
+	val, err := CallHandle(ctx, func() {}, func(context.Context) (*stubHandle, error) {
 		close(started)
 		<-finish
 		return stub, nil
@@ -73,7 +74,7 @@ func TestRunHandleIgnoresAResultThatIsNoHandle(t *testing.T) {
 	// own goroutine, so a nil dereference there takes the process down rather
 	// than failing here.
 	released := make(chan struct{})
-	_, err := CallRelease(ctx, nil, func(context.Context) (*stubHandle, error) {
+	_, err := run(ctx, func() {}, func() (*stubHandle, error) {
 		close(started)
 		<-finish
 		return nil, nil
@@ -87,6 +88,27 @@ func TestRunHandleIgnoresAResultThatIsNoHandle(t *testing.T) {
 
 	close(finish)
 	<-released
+}
+
+// A cancelled read without an object cancel returns only once the call has: the
+// generated binding owns that cancellation, and a read left running would take
+// the next item from the stream and lose it.
+func TestRunWaitsForACallWithoutObjectCancel(t *testing.T) {
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	returned := false
+
+	_, err := Call(ctx, nil, func(callCtx context.Context) (int, error) {
+		cancelCtx()
+		<-callCtx.Done()
+		returned = true
+		return 0, callCtx.Err()
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if !returned {
+		t.Fatal("Call returned before the cancelled call did")
+	}
 }
 
 // A context that is already done starts no call at all, so a request that would
@@ -213,5 +235,39 @@ func TestRunHandleReturnsAResultThatWon(t *testing.T) {
 	case <-stub.destroyed:
 		t.Fatal("a handle handed to the caller was destroyed")
 	default:
+	}
+}
+
+// A range loop whose context ends cancels the stream; one that ends on a
+// stream error leaves it alone.
+func TestSeqCancelsOnlyWhenContextEnds(t *testing.T) {
+	failed := errors.New("failed")
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+		err    error
+	}{
+		{"context", true, context.Canceled},
+		{"stream", false, failed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, stop := context.WithCancel(context.Background())
+			defer stop()
+			cancelled := false
+			next := func(context.Context) (*int, error) {
+				if tc.cancel {
+					stop()
+				}
+				return nil, tc.err
+			}
+			for _, err := range Seq(ctx, func() { cancelled = true }, next) {
+				if !errors.Is(err, tc.err) {
+					t.Fatalf("err = %v, want %v", err, tc.err)
+				}
+			}
+			if cancelled != tc.cancel {
+				t.Fatalf("cancelled = %v, want %v", cancelled, tc.cancel)
+			}
+		})
 	}
 }

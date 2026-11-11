@@ -5,7 +5,8 @@ use std::task::{Poll, ready};
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
-use crate::ffi::{Background, Polled};
+use crate::ffi::{Background, OneShot, Polled};
+use crate::instance::MoqInstance;
 use crate::producer::MoqBroadcastProducer;
 
 /// Config used when creating an origin.
@@ -38,7 +39,7 @@ pub struct MoqAnnounceConfig {
 /// claim relay hops it never took.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqRouteOptions {
-	/// Create the route hidden: it exists for nobody until [`MoqRoute::announce`]. For a
+	/// Create the route or claim hidden: it exists for nobody until it announces. For a
 	/// publisher that fills its catalog first.
 	#[uniffi(default = false)]
 	pub hidden: bool,
@@ -50,11 +51,12 @@ pub struct MoqRouteOptions {
 	/// A stable instance for the stream, or `None` to mint a fresh one.
 	///
 	/// Set one only for a publisher that continues its group sequences across restarts and
-	/// raises `epoch` on each: readers stitch every route of one instance together, so
-	/// restarting the sequences under an old instance splices unrelated groups into their
-	/// tracks. Naming an instance grants nothing: publishing still needs the path's grant.
+	/// raises `epoch` on each, or to forward an observed route's stream as is: readers stitch
+	/// every route of one instance together, so restarting the sequences under an old instance
+	/// splices unrelated groups into their tracks. Naming an instance grants nothing:
+	/// publishing still needs the path's grant.
 	#[uniffi(default = None)]
-	pub instance: Option<String>,
+	pub instance: Option<Arc<MoqInstance>>,
 	/// Which run of a stable `instance` this is: only its highest epoch is eligible, cheaper
 	/// or not. Ignored without one.
 	#[uniffi(default = 0)]
@@ -71,39 +73,39 @@ impl TryFrom<MoqRouteOptions> for moq_net::origin::RouteOptions {
 		}
 		.with_cost(options.cost);
 		if let Some(instance) = options.instance {
-			out = out.with_instance(instance.parse()?, options.epoch);
+			out = out.with_instance(instance.0.clone(), options.epoch);
 		}
 		Ok(out)
 	}
 }
 
-/// The read-only facts on a received route: hops, a static cost, and the stream's instance.
+/// The read-only facts on a received route: a static cost, the stream's instance, and
+/// whether a usable path reaches it.
 ///
 /// Carried by `MoqAnnounceConsumer` events. A route claims capability, not
 /// inventory: by convention a publisher creates each broadcast's exact route,
-/// so subscribers can enumerate broadcasts, while a service creates a prefix route
-/// with `MoqOriginProducer::route_prefix` and answers whatever is requested beneath it.
+/// so subscribers can enumerate broadcasts, while a service claims a prefix
+/// with `MoqOriginProducer::claim` and answers whatever is requested beneath it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MoqRouteInfo {
-	/// Hop ids of the relay hops the route traversed, oldest first. 0 is the
-	/// anonymous mark.
-	pub hops: Vec<u64>,
 	/// Preference among routes covering the same prefix: lower wins.
 	pub cost: u64,
-	/// Whether the chain holds a 0 anywhere. An anonymous route ranks below every
-	/// fully identified one, whatever the costs say.
-	pub anonymous: bool,
 	/// The stream the route serves: routes with one instance are one continuous stream.
-	pub instance: String,
+	pub instance: Arc<MoqInstance>,
+	/// Whether a usable path reaches the route's origin; requests may fail while it is not.
+	pub available: bool,
+	/// The round trip to the route's origin node over moq-lite-07, absent while any link
+	/// has no measurement. Informational; it never ranks a route.
+	pub rtt: Option<std::time::Duration>,
 }
 
 impl From<moq_net::origin::RouteInfo> for MoqRouteInfo {
 	fn from(route: moq_net::origin::RouteInfo) -> Self {
 		Self {
-			hops: route.hops().collect(),
 			cost: route.cost().value(),
-			anonymous: route.is_anonymous(),
-			instance: route.instance().to_string(),
+			instance: MoqInstance::wrap(route.instance().clone()),
+			available: route.available(),
+			rtt: route.rtt(),
 		}
 	}
 }
@@ -140,27 +142,40 @@ pub struct MoqAnnounceConsumer {
 	reads: Polled<moq_net::announce::Consumer>,
 }
 
-/// A route on an origin: an exact route owning one broadcast, or a prefix route yielding
-/// the requests beneath it.
+/// An exact route on an origin, owning one broadcast.
 ///
-/// Dropping or cancelling it retracts the route, as does closing an exact route's
-/// broadcast; a broadcast handle alone does not keep it announced. It keeps its
-/// origin running after every `MoqOriginProducer` is gone.
+/// Dropping or cancelling it retracts the route, as does closing its broadcast; a broadcast
+/// handle alone does not keep it announced. It keeps its origin running after every
+/// `MoqOriginProducer` is gone.
 #[derive(uniffi::Object)]
 pub struct MoqRoute {
 	/// The route itself, released on cancel.
 	reads: Polled<moq_net::origin::Route>,
-	/// An exact route's broadcast, wrapped once so every caller shares its catalog.
-	broadcast: Option<Arc<MoqBroadcastProducer>>,
+	/// The route's broadcast, wrapped once so every caller shares its catalog.
+	broadcast: Arc<MoqBroadcastProducer>,
 	/// The instance last read, reported once the route is cancelled.
-	instance: std::sync::Mutex<String>,
+	instance: std::sync::Mutex<Option<moq_net::Instance>>,
+	driver: Background,
+}
+
+/// A prefix route on an origin: a claim that every path beneath a prefix can be served,
+/// yielding each request as it arrives.
+///
+/// Dropping or cancelling it retracts the claim and rejects the requests still waiting. It
+/// keeps its origin running after every `MoqOriginProducer` is gone.
+#[derive(uniffi::Object)]
+pub struct MoqClaim {
+	/// The claim itself, released on cancel.
+	reads: Polled<moq_net::origin::Claim>,
+	/// The instance last read, reported once the claim is cancelled.
+	instance: std::sync::Mutex<moq_net::Instance>,
 	driver: Background,
 }
 
 #[derive(uniffi::Object)]
-/// A pending broadcast request on a prefix route, answered by serving, routing, or rejecting it.
+/// A pending broadcast request on a claim, answered by serving, routing, or rejecting it.
 pub struct MoqBroadcastRequest {
-	inner: std::sync::Mutex<Option<moq_net::origin::Request>>,
+	inner: OneShot<moq_net::origin::Request>,
 	driver: Background,
 }
 
@@ -175,7 +190,7 @@ pub struct MoqAnnounce {
 	pub prefix: String,
 	/// What each wildcard matched, empty when the filter has no wildcards.
 	pub captures: Vec<String>,
-	/// The route serving the prefix: its instance, hops, and a static cost.
+	/// The route serving the prefix: its instance and a static cost.
 	pub route: MoqRouteInfo,
 }
 
@@ -194,7 +209,8 @@ impl From<moq_net::announce::Announce> for MoqAnnounce {
 	}
 }
 
-/// What a [`MoqAnnounceConsumer`] yields: a path becoming present or absent.
+/// What a [`MoqAnnounceConsumer`] yields: a path becoming present, absent, or offline, or
+/// its availability changing.
 ///
 /// Another publisher instance taking a path over keeps it present: follow it with
 /// `MoqOriginConsumer::follow` to see the broadcast change.
@@ -205,8 +221,27 @@ pub enum MoqAnnounceEvent {
 		/// The announcement that made the path present.
 		announce: MoqAnnounce,
 	},
-	/// No route covers the path any more. Carries its last advertised route.
+	/// The present path lost every usable path to its origin but may recover one: it stays
+	/// present while requests for it may fail.
+	Unavailable {
+		/// The announcement, now unavailable.
+		announce: MoqAnnounce,
+	},
+	/// The present path recovered a usable path: request it again.
+	Available {
+		/// The announcement, available again.
+		announce: MoqAnnounce,
+	},
+	/// The origin withdrew the path: no route covers it any more. Carries its last
+	/// advertised route.
 	Absent {
+		/// The announcement that went.
+		announce: MoqAnnounce,
+	},
+	/// This origin let go of the path, and no route covers it any more: the session it
+	/// arrived on closed, or the network lost every path to it. Its origin may still serve
+	/// it. Carries its last advertised route.
+	Offline {
 		/// The announcement that went.
 		announce: MoqAnnounce,
 	},
@@ -219,7 +254,16 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 			Event::Present(announce) => Self::Present {
 				announce: announce.into(),
 			},
+			Event::Unavailable(announce) => Self::Unavailable {
+				announce: announce.into(),
+			},
+			Event::Available(announce) => Self::Available {
+				announce: announce.into(),
+			},
 			Event::Absent(announce) => Self::Absent {
+				announce: announce.into(),
+			},
+			Event::Offline(announce) => Self::Offline {
 				announce: announce.into(),
 			},
 		}
@@ -320,27 +364,27 @@ impl MoqOriginProducer {
 	/// [`MoqBroadcastProducer::close`] ends both.
 	pub fn route(&self, path: String, options: MoqRouteOptions) -> Result<Arc<MoqRoute>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let (options, visible) = MoqRoute::exact_options(options)?;
+		let (options, visible) = MoqRoute::options(options)?;
 		self.inner.driver.check()?;
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
 		let result = self.inner.route(path.as_str(), options);
 		self.inner.driver.check()?;
-		Ok(Arc::new(MoqRoute::exact(result?, self.inner.driver.clone(), visible)?))
+		Ok(Arc::new(MoqRoute::new(result?, self.inner.driver.clone(), visible)?))
 	}
 
-	/// Create a route over `prefix` that yields the requests beneath it.
+	/// Claim `prefix` and yield the requests beneath it.
 	///
-	/// A route claims `prefix` and every path beneath it (the empty prefix
+	/// A claim covers `prefix` and every path beneath it (the empty prefix
 	/// claims every path). A service that only serves some of them advertises
 	/// the covering prefix and rejects the rest as they are requested. Answer each
-	/// [`MoqRoute::requested`] request; hold the route while it should stay advertised.
-	pub fn route_prefix(&self, prefix: String, options: MoqRouteOptions) -> Result<Arc<MoqRoute>, MoqError> {
+	/// [`MoqClaim::requested`] request; hold the claim while it should stay advertised.
+	pub fn claim(&self, prefix: String, options: MoqRouteOptions) -> Result<Arc<MoqClaim>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let options = options.try_into()?;
 		self.inner.driver.check()?;
-		let result = self.inner.route_prefix(prefix, options);
+		let result = self.inner.claim(prefix, options);
 		self.inner.driver.check()?;
-		Ok(Arc::new(MoqRoute::prefix(result?, self.inner.driver.clone())))
+		Ok(Arc::new(MoqClaim::new(result?, self.inner.driver.clone())))
 	}
 }
 
@@ -371,10 +415,10 @@ impl MoqOriginConsumer {
 	/// one. Pass an `instance` to follow only that stream: another one taking over ends it,
 	/// and the stream is handed out again if it returns.
 	#[uniffi::method(default(instance = None))]
-	pub fn follow(&self, path: String, instance: Option<String>) -> Result<Arc<MoqFollowing>, MoqError> {
+	pub fn follow(&self, path: String, instance: Option<Arc<MoqInstance>>) -> Result<Arc<MoqFollowing>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
-		let instance: Option<moq_net::Instance> = instance.as_deref().map(str::parse).transpose()?;
+		let instance = instance.map(|instance| instance.0.clone());
 		// Following checks the permission eagerly, so an unreachable path fails here rather
 		// than surfacing later as a `Closed` the caller can't tell from the origin ending.
 		let inner = self.inner.follow(path.as_str(), instance)?;
@@ -396,8 +440,12 @@ impl MoqOriginConsumer {
 	/// announcement stream is needed. Pass an `instance` to refuse any other stream. Drop the
 	/// returned future to cancel.
 	#[uniffi::method(default(instance = None))]
-	pub async fn request(&self, path: String, instance: Option<String>) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		let instance: Option<moq_net::Instance> = instance.as_deref().map(str::parse).transpose()?;
+	pub async fn request(
+		&self,
+		path: String,
+		instance: Option<Arc<MoqInstance>>,
+	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		let instance = instance.map(|instance| instance.0.clone());
 		let broadcast = self
 			.driver
 			.watch(async { Ok(self.inner.request(path.as_str(), instance).await?) })
@@ -413,9 +461,9 @@ impl MoqOriginConsumer {
 // ---- MoqRoute ----
 
 impl MoqRoute {
-	/// An exact route's native options, always hidden so [`Self::exact`] attaches the catalog
+	/// An exact route's native options, always hidden so [`Self::new`] attaches the catalog
 	/// track before anyone can find the route, and whether the caller asked it visible.
-	fn exact_options(options: MoqRouteOptions) -> Result<(moq_net::origin::RouteOptions, bool), MoqError> {
+	fn options(options: MoqRouteOptions) -> Result<(moq_net::origin::RouteOptions, bool), MoqError> {
 		let visible = !options.hidden;
 		let options = MoqRouteOptions {
 			hidden: true,
@@ -425,34 +473,22 @@ impl MoqRoute {
 		Ok((options, visible))
 	}
 
-	/// Wrap an exact route created hidden, attaching the catalog track every FFI broadcast
+	/// Wrap a route created hidden, attaching the catalog track every FFI broadcast
 	/// carries, then announce it when `visible`, so a reader that finds it finds the catalog.
-	fn exact(route: moq_net::origin::Route, driver: Background, visible: bool) -> Result<Self, MoqError> {
+	fn new(route: moq_net::origin::Route, driver: Background, visible: bool) -> Result<Self, MoqError> {
 		let broadcast = MoqBroadcastProducer::from_inner(route.broadcast().clone(), driver.clone())?;
 		if visible {
 			route.announce()?;
 		}
-		Ok(Self::new(route, Some(Arc::new(broadcast)), driver))
-	}
-
-	fn prefix(route: moq_net::origin::Route, driver: Background) -> Self {
-		Self::new(route, None, driver)
-	}
-
-	fn new(route: moq_net::origin::Route, broadcast: Option<Arc<MoqBroadcastProducer>>, driver: Background) -> Self {
 		// Reading a hidden job's instance binds it, so one is cached only once it announces or
 		// is read.
-		let instance = if route.is_announced() || broadcast.is_none() {
-			route.instance().to_string()
-		} else {
-			String::new()
-		};
-		Self {
+		let instance = route.is_announced().then(|| route.instance().clone());
+		Ok(Self {
 			instance: std::sync::Mutex::new(instance),
 			reads: Polled::new(route).supervised(driver.clone()),
-			broadcast,
+			broadcast: Arc::new(broadcast),
 			driver,
-		}
+		})
 	}
 
 	/// Run `f` against the route, refused with `Cancelled` once it was cancelled.
@@ -467,33 +503,28 @@ impl MoqRoute {
 
 #[uniffi::export]
 impl MoqRoute {
-	/// The broadcast this exact route owns, to fill with tracks.
-	///
-	/// Errors on a prefix route, which owns none: answer its requests instead.
-	pub fn broadcast(&self) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
-		self.broadcast.clone().ok_or_else(|| MoqError::Internal {
-			reason: "a prefix route owns no broadcast; answer its requests".into(),
-		})
+	/// The broadcast this route owns, to fill with tracks.
+	pub fn broadcast(&self) -> Arc<MoqBroadcastProducer> {
+		self.broadcast.clone()
 	}
 
 	/// The stream this route serves now, or once cancelled, the last one it reported or
-	/// announced under (empty for a hidden route that did neither).
+	/// announced under (`None` for a hidden route that did neither).
 	///
-	/// Named options keep one instance. Unnamed, a prefix route moves to a fresh one each
-	/// time a job holding its current one ends. A job's route takes its prefix route's current
-	/// one when it first announces or when this first reads it. Read first, the job announces
-	/// under it, and [`MoqRoute::announce`] fails with `Unroutable` once the prefix route has
-	/// moved past it, so a signer built from it stays valid.
+	/// Named options keep one instance. A job's route takes its claim's current one when it
+	/// first announces or when this first reads it. Read first, the job announces under it,
+	/// and [`MoqRoute::announce`] fails with `Unroutable` once the claim has moved past it, so
+	/// a signer built from it stays valid.
 	///
 	/// Named `instance_id` rather than `instance` because the generated C and C++
 	/// objects keep their handle in a private field named `instance`; the wrappers
 	/// expose it as `instance`.
-	pub fn instance_id(&self) -> String {
+	pub fn instance_id(&self) -> Option<Arc<MoqInstance>> {
 		let mut last = self.instance.lock().unwrap();
-		if let Some(current) = self.reads.peek(|route| route.instance().to_string()) {
-			*last = current;
+		if let Some(current) = self.reads.peek(|route| route.instance().clone()) {
+			*last = Some(current);
 		}
-		last.clone()
+		last.clone().map(MoqInstance::wrap)
 	}
 
 	/// Make the route visible, or keep it so.
@@ -501,13 +532,13 @@ impl MoqRoute {
 	/// A route created by [`MoqBroadcastRequest::route`] also answers the requesters waiting
 	/// on its path. Errors with `Closed` once its broadcast closed, and with a protocol
 	/// `Unroutable` when a request's route can never announce because the request was
-	/// released or its prefix route retracted meanwhile.
+	/// released or its claim retracted meanwhile.
 	pub fn announce(&self) -> Result<(), MoqError> {
 		let instance = self.with(|route| {
 			route.announce()?;
-			Ok(route.instance().to_string())
+			Ok(route.instance().clone())
 		})?;
-		*self.instance.lock().unwrap() = instance;
+		*self.instance.lock().unwrap() = Some(instance);
 		Ok(())
 	}
 
@@ -527,24 +558,95 @@ impl MoqRoute {
 		self.with(|route| route.set_cost(cost))
 	}
 
-	/// Wait for the next broadcast a consumer requests beneath this prefix route.
+	/// Retract the route and release it here, not when the handle is.
+	///
+	/// Terminal: later calls fail with `Cancelled`. The broadcast lives on for its other
+	/// handles until [`MoqBroadcastProducer::close`].
+	pub fn cancel(&self) {
+		self.reads.cancel();
+	}
+}
+
+// ---- MoqClaim ----
+
+impl MoqClaim {
+	fn new(claim: moq_net::origin::Claim, driver: Background) -> Self {
+		Self {
+			instance: std::sync::Mutex::new(claim.instance().clone()),
+			reads: Polled::new(claim).supervised(driver.clone()),
+			driver,
+		}
+	}
+
+	/// Run `f` against the claim, refused with `Cancelled` once it was cancelled.
+	fn with<R>(&self, f: impl FnOnce(&moq_net::origin::Claim) -> Result<R, moq_net::Error>) -> Result<R, MoqError> {
+		let _guard = crate::ffi::enter();
+		self.driver.check()?;
+		let result = self.reads.peek(f).ok_or(MoqError::Cancelled)?;
+		self.driver.check()?;
+		Ok(result?)
+	}
+}
+
+#[uniffi::export]
+impl MoqClaim {
+	/// The stream this claim serves now, or once cancelled, the last one it reported or
+	/// announced under.
+	///
+	/// Named options keep one instance. Unnamed, the claim moves to a fresh one each time a
+	/// job holding its current one ends.
+	///
+	/// Named `instance_id` rather than `instance` for the reason [`MoqRoute::instance_id`]
+	/// gives.
+	pub fn instance_id(&self) -> Arc<MoqInstance> {
+		let mut last = self.instance.lock().unwrap();
+		if let Some(current) = self.reads.peek(|claim| claim.instance().clone()) {
+			*last = current;
+		}
+		MoqInstance::wrap(last.clone())
+	}
+
+	/// Make the claim visible, or keep it so.
+	pub fn announce(&self) -> Result<(), MoqError> {
+		let instance = self.with(|claim| {
+			claim.announce()?;
+			Ok(claim.instance().clone())
+		})?;
+		*self.instance.lock().unwrap() = instance;
+		Ok(())
+	}
+
+	/// Hide the claim from everyone, keeping its instance: `announce` brings it back.
+	/// Requests beneath it are rejected meanwhile.
+	pub fn withdraw(&self) -> Result<(), MoqError> {
+		self.with(|claim| {
+			claim.withdraw();
+			Ok(())
+		})
+	}
+
+	/// Re-price the claim in place: lower wins among routes covering the same prefix. A
+	/// hidden claim keeps the price for when it next announces.
+	pub fn set_cost(&self, cost: u64) -> Result<(), MoqError> {
+		self.with(|claim| claim.set_cost(cost))
+	}
+
+	/// Wait for the next broadcast a consumer requests beneath this claim.
 	///
 	/// Serve a held broadcast, route a new one, or reject the returned request; the requesting
-	/// consumer stays pending until then. Returns `None` once the origin closes, and at once on
-	/// an exact route, which yields no requests.
+	/// consumer stays pending until then. Returns `None` once the claim is retracted or the
+	/// origin closes.
 	pub async fn requested(&self) -> Result<Option<Arc<MoqBroadcastRequest>>, MoqError> {
 		let request = self
 			.reads
-			.wait(|route, waiter| Poll::Ready(Ok(ready!(route.poll_requested(waiter)))))
+			.wait(|claim, waiter| Poll::Ready(Ok(ready!(claim.poll_requested(waiter)))))
 			.await?;
 		Ok(request.map(|request| Arc::new(MoqBroadcastRequest::new(request, self.driver.clone()))))
 	}
 
-	/// Retract the route and release it here, not when the handle is.
+	/// Retract the claim and release it here, not when the handle is.
 	///
-	/// Terminal: pending requests are rejected and later calls fail with `Cancelled`. An exact
-	/// route's broadcast lives on for its other handles until
-	/// [`MoqBroadcastProducer::close`].
+	/// Terminal: pending requests are rejected and later calls fail with `Cancelled`.
 	pub fn cancel(&self) {
 		self.reads.cancel();
 	}
@@ -555,13 +657,9 @@ impl MoqRoute {
 impl MoqBroadcastRequest {
 	fn new(request: moq_net::origin::Request, driver: Background) -> Self {
 		Self {
-			inner: std::sync::Mutex::new(Some(request)),
+			inner: OneShot::new(request),
 			driver,
 		}
-	}
-
-	fn take(&self) -> Result<moq_net::origin::Request, MoqError> {
-		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)
 	}
 }
 
@@ -569,51 +667,52 @@ impl MoqBroadcastRequest {
 impl MoqBroadcastRequest {
 	/// The requested broadcast path.
 	pub fn path(&self) -> Result<String, MoqError> {
-		let guard = self.inner.lock().unwrap();
-		let request = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(request.path().to_string())
+		self.inner.peek(|request| request.path().to_string())
 	}
 
 	/// Answer with the path's own exact route, owning a new broadcast.
 	///
-	/// Unless `options` names an instance, the route takes the one its prefix route lends
-	/// when it first announces or [`MoqRoute::instance_id`] first reads it, so readers that resolved the path through the prefix route
-	/// continue on it; its end then moves the prefix route to a fresh instance, so a job that
-	/// restarts is a new stream. A prefix route that names its instance lends none, and the
+	/// Unless `options` names an instance, the route takes the one its claim lends when it
+	/// first announces or [`MoqRoute::instance_id`] first reads it, so readers that resolved
+	/// the path through the claim continue on it; its end then moves the claim to a fresh
+	/// instance, so a job that restarts is a new stream. A claim that names its instance lends none, and the
 	/// route mints its own. Created visible, it announces now and answers the waiting
 	/// requesters; created hidden, they wait until [`MoqRoute::announce`], so the job can
 	/// fill its catalog first, and cancelling the route before then refuses them. Ending the
 	/// route withdraws only this path.
 	pub fn route(&self, options: MoqRouteOptions) -> Result<Arc<MoqRoute>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let (options, visible) = MoqRoute::exact_options(options)?;
+		let (options, visible) = MoqRoute::options(options)?;
 		self.driver.check()?;
-		let request = self.take()?;
-		let result = request.route(options);
-		self.driver.check()?;
-		Ok(Arc::new(MoqRoute::exact(result?, self.driver.clone(), visible)?))
+		self.inner.answer(|request| {
+			let result = request.route(options);
+			self.driver.check()?;
+			Ok(Arc::new(MoqRoute::new(result?, self.driver.clone(), visible)?))
+		})
 	}
 
-	/// Serve a held broadcast under the prefix route's instance without announcing an exact route.
+	/// Serve a held broadcast under the claim's instance without announcing an exact route.
 	///
 	/// Every answer at this path must continue the same sequences and bytes. Start a new
-	/// prefix route for different content, or route a job, whose end moves the prefix route
-	/// to another instance.
+	/// claim for different content, or route a job, whose end moves the claim to another
+	/// instance.
 	pub fn serve(&self, broadcast: &Arc<MoqBroadcastConsumer>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
 		broadcast.driver.check()?;
-		self.take()?.serve(&broadcast.inner);
-		self.driver.check()?;
-		Ok(())
+		self.inner.answer(|request| {
+			request.serve(&broadcast.inner);
+			self.driver.check()
+		})
 	}
 
 	/// Reject the request with an application error code.
 	pub fn reject(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let request = self.take()?;
-		request.reject(moq_net::Error::App(error_code));
-		Ok(())
+		self.inner.answer(|request| {
+			request.reject(moq_net::Error::App(error_code));
+			Ok(())
+		})
 	}
 }
 
@@ -685,14 +784,14 @@ mod supervision_tests {
 	#[tokio::test]
 	async fn serving_held_content_consumes_only_the_request() {
 		let origin = MoqOriginProducer::new(Default::default());
-		let requests = origin.route_prefix("room".into(), Default::default()).unwrap();
-		let source = origin.route("source".into(), hidden()).unwrap().broadcast().unwrap();
+		let requests = origin.claim("room".into(), Default::default()).unwrap();
+		let source = origin.route("source".into(), hidden()).unwrap().broadcast();
 		let held = source.consume().unwrap();
 		let consumer = origin.consume();
 		let (resolved, ()) = tokio::join!(consumer.request("room/camera".into(), None), async {
 			let request = requests.requested().await.unwrap().unwrap();
 			request.serve(&held).unwrap();
-			assert!(matches!(request.serve(&held), Err(MoqError::Closed)));
+			assert!(matches!(request.serve(&held), Err(MoqError::AlreadyResponded)));
 		});
 		assert!(resolved.is_ok());
 		assert!(!held.inner.is_closed(), "serving leaves the caller's consumer usable");
@@ -724,7 +823,7 @@ mod supervision_tests {
 			driver: completion.clone(),
 		});
 		let route = origin.route("retained".into(), hidden()).unwrap();
-		let dynamic = route.broadcast().unwrap().requests().unwrap();
+		let dynamic = route.broadcast().requests().unwrap();
 		drop(origin);
 		*trigger
 			.write()
@@ -744,7 +843,7 @@ mod supervision_tests {
 			inner,
 			driver: completion.clone(),
 		});
-		let broadcast = origin.route("retained".into(), hidden()).unwrap().broadcast().unwrap();
+		let broadcast = origin.route("retained".into(), hidden()).unwrap().broadcast();
 		// A dynamic handle outlives the consumed producer, so only an explicit close ends it.
 		let _dynamic = broadcast.requests().unwrap();
 		let consumer = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.consume();
@@ -771,7 +870,7 @@ mod supervision_tests {
 		// The route owns the broadcast, and it is the only handle that keeps the origin
 		// running once the producer is gone.
 		let route = origin.route("retained".into(), hidden()).unwrap();
-		let broadcast = route.broadcast().unwrap();
+		let broadcast = route.broadcast();
 		// One importer shares a timebase and one doesn't, so both reservation paths carry the driver.
 		let timebase = MoqMediaTimebase::new(broadcast.clone()).unwrap();
 		let container = MoqMediaContainerProducer::new(
@@ -816,7 +915,7 @@ mod supervision_tests {
 			driver: completion.clone(),
 		});
 		let route = origin.route("routed".into(), Default::default()).unwrap();
-		let broadcast = route.broadcast().unwrap();
+		let broadcast = route.broadcast();
 		let track = broadcast.publish_track("data".into(), None).unwrap();
 		let open = track.append_group().unwrap();
 		let consumer = origin.consume().request("routed".into(), None).await.unwrap();

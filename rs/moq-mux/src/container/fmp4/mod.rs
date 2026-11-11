@@ -21,17 +21,13 @@ pub use fragmenter::*;
 pub use import::*;
 pub use muxer::*;
 
-/// Re-export of the [`mp4_atom`] crate, whose types appear in this module's public API.
-/// A major version bump of `mp4_atom` is a breaking change for moq-mux.
-pub use mp4_atom;
-
 /// The largest text sample [`Import`] holds whole.
 ///
 /// A text sample is rewritten only once its last byte arrives, so a larger one is refused before
-/// any of it is staged. It matches the transport's per-group bound,
-/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), which the rewritten sample must fit.
+/// any of it is staged. It matches moq-net's 32 MiB frame bound,
+/// which the rewritten sample must fit.
 /// Media samples stream into their frames and have no such bound.
-const MAX_HELD_BYTES: usize = moq_net::group::MAX_CACHE_BYTES as usize;
+const MAX_HELD_BYTES: usize = 32 * 1024 * 1024;
 
 /// The largest metadata box body parsed on import or from received CMAF.
 ///
@@ -93,7 +89,7 @@ pub enum Error {
 
 	/// Parsing or encoding an MP4 atom failed.
 	#[error("mp4: {0}")]
-	Mp4(std::sync::Arc<mp4_atom::Error>),
+	Mp4(#[source] std::sync::Arc<dyn std::error::Error + Send + Sync>),
 
 	/// A MoQ transport operation failed.
 	#[error("moq: {0}")]
@@ -175,9 +171,9 @@ pub enum Error {
 	#[error("multiple codecs")]
 	MultipleCodecs,
 
-	/// The sample entry has an unrecognized codec four-character code.
-	#[error("unknown codec: {0:?}")]
-	UnknownCodec(mp4_atom::FourCC),
+	/// The sample entry has an unrecognized codec, named by its four-character code.
+	#[error("unknown codec: {0}")]
+	UnknownCodec(String),
 
 	/// A `colr` box code point past H.273's 255.
 	#[error("invalid colr code point: {0}")]
@@ -187,9 +183,9 @@ pub enum Error {
 	#[error("unsupported spherical video: {0}")]
 	UnsupportedSpatial(&'static str),
 
-	/// The sample entry declares an unsupported codec.
-	#[error("unsupported codec: {0:?}")]
-	UnsupportedCodec(Box<mp4_atom::Codec>),
+	/// The sample entry declares a codec moq-mux does not carry, named by its four-character code.
+	#[error("unsupported codec: {0}")]
+	UnsupportedCodec(String),
 
 	/// The sample entry declares unsupported MPEG-2 media.
 	#[error("unsupported codec: MPEG2")]
@@ -234,14 +230,14 @@ pub enum Error {
 	/// A metadata body over 2 MiB is refused before parsing.
 	#[error("{kind} declares {size} bytes, more than the {MAX_METADATA_BYTES} a metadata parser accepts")]
 	MetadataTooLarge {
-		/// The box type.
-		kind: mp4_atom::FourCC,
+		/// The box type's four-character code.
+		kind: String,
 		/// The body size its header declares.
 		size: usize,
 	},
 
-	/// A text sample is rewritten whole, so one larger than the transport's per-group bound,
-	/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), is refused before any of its bytes
+	/// A text sample is rewritten whole, so one larger than moq-net's 32 MiB frame bound
+	/// is refused before any of its bytes
 	/// are staged.
 	#[error("text sample of {0} bytes is more than the {MAX_HELD_BYTES} an importer holds")]
 	TextSampleTooLarge(usize),
@@ -400,9 +396,21 @@ pub enum Error {
 	Unrepairable(&'static str),
 }
 
-impl From<mp4_atom::Error> for Error {
-	fn from(err: mp4_atom::Error) -> Self {
+impl Error {
+	/// An mp4 atom error, kept opaque so an mp4-atom bump is no moq-mux break.
+	pub(crate) fn mp4(err: mp4_atom::Error) -> Self {
 		Error::Mp4(std::sync::Arc::new(err))
+	}
+
+	/// A sample entry this crate does not carry, named by the four-character code it encodes with.
+	pub(crate) fn unsupported_codec(codec: &mp4_atom::Codec) -> Self {
+		use mp4_atom::Encode;
+		let mut buf = Vec::new();
+		let name = match codec.encode(&mut buf) {
+			Ok(()) if buf.len() >= 8 => String::from_utf8_lossy(&buf[4..8]).into_owned(),
+			_ => "?".to_string(),
+		};
+		Error::UnsupportedCodec(name)
 	}
 }
 
@@ -437,11 +445,10 @@ impl Kind {
 
 /// CMAF container: encodes/decodes a single track's moof+mdat fragments.
 ///
-/// Build from a CMAF init segment with [`Wire::from_init`], or wrap a
-/// pre-extracted [`mp4_atom::Trak`] directly with [`Wire::new`]. Either refuses a track
-/// that is neither audio nor video.
+/// Build from a CMAF init segment with [`Wire::from_init`], which refuses a track that is
+/// neither audio nor video.
 ///
-/// The [`mp4_atom::Trak`] is heap-allocated so that embedding `Wire`
+/// The parsed track is heap-allocated so that embedding `Wire`
 /// in other enums (e.g. [`catalog::hang::Container`](crate::catalog::hang::Container))
 /// doesn't bloat unrelated variants.
 pub struct Wire {
@@ -452,7 +459,8 @@ pub struct Wire {
 
 impl Wire {
 	/// Wrap an already-parsed track, with no `trex` for its samples to fall back to.
-	pub fn new(trak: mp4_atom::Trak) -> Result<Self> {
+	#[cfg(test)]
+	pub(crate) fn new(trak: mp4_atom::Trak) -> Result<Self> {
 		Ok(Self {
 			kind: Kind::from_handler(trak.mdia.hdlr.handler)?,
 			trak: Box::new(trak),
@@ -466,7 +474,7 @@ impl Wire {
 		use mp4_atom::DecodeMaybe;
 
 		let mut cursor = std::io::Cursor::new(init_data);
-		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).map_err(crate::container::fmp4::Error::mp4)? {
 			if let mp4_atom::Any::Moov(mut moov) = atom {
 				let trak = match moov.trak.len() {
 					1 => moov.trak.remove(0),
@@ -485,7 +493,8 @@ impl Wire {
 	}
 
 	/// Borrow the MP4 track atom describing this wire container.
-	pub fn trak(&self) -> &mp4_atom::Trak {
+	#[cfg(test)]
+	pub(crate) fn trak(&self) -> &mp4_atom::Trak {
 		&self.trak
 	}
 
@@ -596,7 +605,7 @@ pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) ->
 
 	loop {
 		let start = cursor.position() as usize;
-		let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? else {
+		let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).map_err(crate::container::fmp4::Error::mp4)? else {
 			break;
 		};
 		match atom {
@@ -805,15 +814,19 @@ pub(super) fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> 
 
 	// First pass to learn the moof size.
 	let mut buf = Vec::new();
-	build_moof(0).encode(&mut buf)?;
+	build_moof(0)
+		.encode(&mut buf)
+		.map_err(crate::container::fmp4::Error::mp4)?;
 	let moof_size = buf.len();
 
 	// Second pass with data_offset = moof_size + 8 (mdat header).
 	buf.clear();
-	build_moof((moof_size + 8) as i32).encode(&mut buf)?;
+	build_moof((moof_size + 8) as i32)
+		.encode(&mut buf)
+		.map_err(crate::container::fmp4::Error::mp4)?;
 
 	let mdat = mp4_atom::Mdat { data: mdat_data };
-	mdat.encode(&mut buf)?;
+	mdat.encode(&mut buf).map_err(crate::container::fmp4::Error::mp4)?;
 
 	Ok((Bytes::from(buf), dts))
 }
@@ -945,7 +958,7 @@ fn color_colr(color: Option<&hang::catalog::Color>) -> Option<mp4_atom::Colr> {
 		colour_primaries: color.primaries.unwrap_or(2).into(),
 		transfer_characteristics: color.transfer.unwrap_or(2).into(),
 		matrix_coefficients: color.matrix.unwrap_or(2).into(),
-		full_range_flag: color.range == Some(hang::catalog::Range::Full),
+		full_range_flag: color.range == Some(hang::catalog::ColorRange::Full),
 	})
 }
 
@@ -959,7 +972,7 @@ fn vpcc_color(mut vpcc: mp4_atom::VpcC, color: Option<&hang::catalog::Color>) ->
 	vpcc.color_primaries = color.primaries.unwrap_or(2);
 	vpcc.transfer_characteristics = color.transfer.unwrap_or(2);
 	vpcc.matrix_coefficients = color.matrix.unwrap_or(2);
-	vpcc.video_full_range_flag = color.range == Some(hang::catalog::Range::Full);
+	vpcc.video_full_range_flag = color.range == Some(hang::catalog::ColorRange::Full);
 	vpcc
 }
 
@@ -1005,7 +1018,7 @@ pub(crate) fn synthesize_video_trak(
 	let sample_entry = match &config.codec {
 		VideoCodec::H264(h264) => {
 			let mut cursor = std::io::Cursor::new(require_description()?);
-			let avcc = mp4_atom::Avcc::decode_body(&mut cursor).map_err(Error::from)?;
+			let avcc = mp4_atom::Avcc::decode_body(&mut cursor).map_err(Error::mp4)?;
 			// Empty parameter-set lists are the in-band sample entry. A record that
 			// still carries them, including one built from the first keyframe, stays avc1.
 			if h264.inline && avcc.sequence_parameter_sets.is_empty() && avcc.picture_parameter_sets.is_empty() {
@@ -1026,7 +1039,7 @@ pub(crate) fn synthesize_video_trak(
 		}
 		VideoCodec::H265(h265) => {
 			let mut cursor = std::io::Cursor::new(require_description()?);
-			let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).map_err(Error::from)?;
+			let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).map_err(Error::mp4)?;
 			// `in_band` (catalog) ↔ hev1 sample entry; otherwise hvc1.
 			if h265.in_band {
 				mp4_atom::Codec::from(mp4_atom::Hev1 {
@@ -1152,7 +1165,8 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 				.as_ref()
 				.ok_or_else(|| Error::MissingAudioDescription(config.codec.to_string()))?;
 			let mut cursor = std::io::Cursor::new(description.as_ref());
-			let dec_specific = mp4_atom::esds::DecoderSpecific::decode(&mut cursor)?;
+			let dec_specific =
+				mp4_atom::esds::DecoderSpecific::decode(&mut cursor).map_err(crate::container::fmp4::Error::mp4)?;
 
 			// Safari and AVFoundation reject an AAC track whose DecoderConfigDescriptor is all
 			// zeros: they endOfStream("decode") on the *init* append, which leaves the
@@ -1330,8 +1344,8 @@ pub(crate) fn encode_init(
 	};
 
 	let mut buf = Vec::new();
-	ftyp.encode(&mut buf)?;
-	moov.encode(&mut buf)?;
+	ftyp.encode(&mut buf).map_err(crate::container::fmp4::Error::mp4)?;
+	moov.encode(&mut buf).map_err(crate::container::fmp4::Error::mp4)?;
 	Ok(Bytes::from(buf))
 }
 

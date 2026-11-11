@@ -25,7 +25,7 @@ pub async fn request_device(
 	adapter
 		.request_device(&descriptor)
 		.await
-		.map_err(|e| Error::Render(anyhow::Error::new(e).context("open the GPU")))
+		.map_err(|e| Error::render(anyhow::Error::new(e).context("open the GPU")))
 }
 
 /// Open a Vulkan device with `VK_KHR_external_semaphore_fd` added, or `None`
@@ -64,11 +64,11 @@ fn vulkan(
 			})),
 		)
 	}
-	.map_err(|e| Error::Render(anyhow::Error::new(e).context("open the Vulkan device")))?;
+	.map_err(|e| Error::render(anyhow::Error::new(e).context("open the Vulkan device")))?;
 	drop(hal);
 	// SAFETY: `open` came from this adapter with exactly the descriptor's
 	// features.
 	let opened = unsafe { adapter.create_device_from_hal(open, descriptor) }
-		.map_err(|e| Error::Render(anyhow::Error::new(e).context("open the GPU")))?;
+		.map_err(|e| Error::render(anyhow::Error::new(e).context("open the GPU")))?;
 	Ok(Some(opened))
 }

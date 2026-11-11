@@ -84,6 +84,8 @@ pub(crate) struct MediaFoundation {
 	/// more access units than we fed it frames. Repeating a time is far kinder to a
 	/// consumer than the jump to zero the alternative would produce.
 	last_timestamp: Option<Timestamp>,
+	/// Access units the MFT handed back and `receive` has not popped yet.
+	ready: VecDeque<Encoded>,
 	/// Kept alive for the MFT's lifetime once a texture frame binds a device.
 	_manager: Option<IMFDXGIDeviceManager>,
 	_com: ComGuard,
@@ -96,8 +98,7 @@ enum Phase {
 	/// frame itself.
 	Unstarted,
 	Streaming(Stream),
-	/// The stream ended for the last time ([`Backend::finish`]), or the MFT
-	/// failed to start, drain, or restart, so it takes no more frames.
+	/// The MFT failed to start, drain, or restart, so it takes no more frames.
 	Ended,
 }
 
@@ -164,6 +165,7 @@ impl MediaFoundation {
 			sample_index: 0,
 			pending: VecDeque::new(),
 			last_timestamp: None,
+			ready: VecDeque::new(),
 			_manager: None,
 			_com: com,
 		}))
@@ -228,10 +230,10 @@ impl MediaFoundation {
 	fn stream(&mut self) -> Result<&mut Stream, Error> {
 		match &mut self.phase {
 			Phase::Streaming(stream) => Ok(stream),
-			Phase::Unstarted => Err(Error::Codec(anyhow::anyhow!(
+			Phase::Unstarted => Err(Error::codec(anyhow::anyhow!(
 				"the mediafoundation encoder has not started"
 			))),
-			Phase::Ended => Err(Error::Codec(anyhow::anyhow!(
+			Phase::Ended => Err(Error::codec(anyhow::anyhow!(
 				"the mediafoundation encoder has ended its stream and takes no more frames"
 			))),
 		}
@@ -389,7 +391,7 @@ impl MediaFoundation {
 				reason = "the other surfaces exist only on some platforms and features"
 			)]
 			_ => {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"unsupported frame for mediafoundation encoder"
 				)));
 			}
@@ -449,27 +451,27 @@ impl MediaFoundation {
 		Ok(buffer)
 	}
 
-	/// Block on events until the MFT is ready for input, collecting any output
+	/// Block on events until the MFT is ready for input, queueing any output
 	/// that arrives meanwhile. Runs on the dedicated encode thread (see
 	/// `encode::sink`), so this blocking wait never parks a tokio worker.
-	fn wait_for_input(&mut self, out: &mut Vec<Encoded>) -> Result<(), Error> {
+	fn wait_for_input(&mut self) -> Result<(), Error> {
 		while !self.stream()?.needs_input {
 			let event = unsafe {
 				self.events
 					.GetEvent(MF_EVENT_FLAG_NONE)
 					.map_err(|e| mf_err("GetEvent", e))?
 			};
-			self.handle_event(&event, out)?;
+			self.handle_event(&event)?;
 		}
 		Ok(())
 	}
 
 	/// Drain events already queued without blocking (called after feeding input).
-	fn drain_ready(&mut self, out: &mut Vec<Encoded>) -> Result<(), Error> {
+	fn drain_ready(&mut self) -> Result<(), Error> {
 		loop {
 			match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
 				Ok(event) => {
-					self.handle_event(&event, out)?;
+					self.handle_event(&event)?;
 				}
 				Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => return Ok(()),
 				Err(e) => return Err(mf_err("GetEvent (drain)", e)),
@@ -480,7 +482,7 @@ impl MediaFoundation {
 	/// Act on one event from the MFT, returning whether it reported a drain
 	/// complete, which is how a drain knows the tail is out rather than still
 	/// coming.
-	fn handle_event(&mut self, event: &IMFMediaEvent, out: &mut Vec<Encoded>) -> Result<bool, Error> {
+	fn handle_event(&mut self, event: &IMFMediaEvent) -> Result<bool, Error> {
 		// Surface an async failure (e.g. an MEError event) instead of looping in
 		// `wait_for_input` forever for an input request that will never come.
 		unsafe { event.GetStatus() }
@@ -496,7 +498,7 @@ impl MediaFoundation {
 			NEED_INPUT => self.stream()?.needs_input = true,
 			HAVE_OUTPUT => {
 				if let Some(packet) = self.process_output()? {
-					out.push(packet);
+					self.ready.push_back(packet);
 				}
 			}
 			DRAIN_COMPLETE => return Ok(true),
@@ -555,7 +557,7 @@ impl MediaFoundation {
 		Ok(Some(Encoded::new(payload, self.take_timestamp(sample_time), keyframe)))
 	}
 
-	/// End the stream and wait the MFT's tail out, returning everything it was
+	/// End the stream and wait the MFT's tail out, queueing everything it was
 	/// still holding.
 	///
 	/// The blocking wait is the point. A hardware encoder holds a frame or two, and
@@ -570,8 +572,7 @@ impl MediaFoundation {
 	/// set that up are checked for the same reason: the wait is only bounded by an
 	/// MFT that accepted the drain, so failing to reach that state has to be an
 	/// error here rather than a block later.
-	fn drain(&mut self) -> Result<Vec<Encoded>, Error> {
-		let mut out = Vec::new();
+	fn drain(&mut self) -> Result<(), Error> {
 		unsafe {
 			self.transform
 				.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0)
@@ -583,8 +584,8 @@ impl MediaFoundation {
 		loop {
 			let event =
 				unsafe { self.events.GetEvent(MF_EVENT_FLAG_NONE) }.map_err(|e| mf_err("GetEvent (drain)", e))?;
-			if self.handle_event(&event, &mut out)? {
-				return Ok(out);
+			if self.handle_event(&event)? {
+				return Ok(());
 			}
 		}
 	}
@@ -594,23 +595,22 @@ impl MediaFoundation {
 	/// A drain cut short leaves the MFT somewhere between streams, with its
 	/// completion perhaps still queued for the next drain to mistake for its own,
 	/// so nothing after one can be trusted.
-	fn cycle(&mut self) -> Result<Vec<Encoded>, Error> {
-		let cycled = self.drain().and_then(|out| {
+	fn cycle(&mut self) -> Result<(), Error> {
+		let cycled = self.drain().and_then(|()| {
 			// A drain leaves the MFT stopped: it stops asking for input until a new
 			// stream starts.
 			unsafe {
 				self.transform
 					.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-					.map_err(|e| mf_err("start of stream", e))?;
+					.map_err(|e| mf_err("start of stream", e))
 			}
-			Ok(out)
 		});
 		match cycled {
-			Ok(out) => {
+			Ok(()) => {
 				let stream = self.stream()?;
 				stream.needs_input = false;
 				stream.discontinuity = true;
-				Ok(out)
+				Ok(())
 			}
 			Err(err) => {
 				self.phase = Phase::Ended;
@@ -659,13 +659,12 @@ impl MediaFoundation {
 }
 
 impl Backend for MediaFoundation {
-	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
 		if let Phase::Unstarted = self.phase {
 			self.start(&frame.surface)?;
 		}
 
-		let mut out = Vec::new();
-		self.wait_for_input(&mut out)?;
+		self.wait_for_input()?;
 
 		if cut {
 			self.set_codec(&CODECAPI_AVEncVideoForceKeyFrame, variant_u32(1))?;
@@ -695,29 +694,20 @@ impl Backend for MediaFoundation {
 		self.pending.push_back((sample_time, frame.timestamp));
 		self.sample_index += 1;
 
-		self.drain_ready(&mut out)?;
-		Ok(out)
+		self.drain_ready()
 	}
 
-	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
 		if let Phase::Unstarted = self.phase {
-			return Ok(Vec::new());
+			return Ok(());
 		}
 		// An ended encoder fails here rather than being sent a drain.
 		self.stream()?;
 		self.cycle()
-	}
-
-	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-		if let Phase::Unstarted = self.phase {
-			self.phase = Phase::Ended;
-			return Ok(Vec::new());
-		}
-		// An ended encoder fails here rather than being sent a drain.
-		self.stream()?;
-		let out = self.drain();
-		self.phase = Phase::Ended;
-		out
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
@@ -776,7 +766,7 @@ fn enumerate_encoder(subtype: GUID) -> Result<IMFTransform, Error> {
 		.map_err(|e| mf_err("MFTEnumEx", e))?;
 	}
 	if count == 0 {
-		return Err(Error::Codec(anyhow::anyhow!("no hardware encoder found")));
+		return Err(Error::codec(anyhow::anyhow!("no hardware encoder found")));
 	}
 
 	let entries = unsafe { std::slice::from_raw_parts_mut(activates, count as usize) };
@@ -793,7 +783,7 @@ fn enumerate_encoder(subtype: GUID) -> Result<IMFTransform, Error> {
 		windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const std::ffi::c_void));
 	}
 
-	transform.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to activate encoder MFT")))
+	transform.ok_or_else(|| Error::codec(anyhow::anyhow!("failed to activate encoder MFT")))
 }
 
 /// The Media Foundation output type for a codec: the format subtype enumerated
@@ -830,7 +820,7 @@ fn device_manager(device: &ID3D11Device) -> Result<IMFDXGIDeviceManager, Error> 
 	unsafe {
 		MFCreateDXGIDeviceManager(&mut token, &mut manager).map_err(|e| mf_err("MFCreateDXGIDeviceManager", e))?;
 	}
-	let manager = manager.ok_or_else(|| Error::Codec(anyhow::anyhow!("MFCreateDXGIDeviceManager returned null")))?;
+	let manager = manager.ok_or_else(|| Error::codec(anyhow::anyhow!("MFCreateDXGIDeviceManager returned null")))?;
 	unsafe {
 		manager
 			.ResetDevice(device, token)

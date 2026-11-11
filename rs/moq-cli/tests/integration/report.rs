@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::time::Duration;
 
-use hang::moq_net;
 use moq_mux::container::ts;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout};
@@ -100,7 +99,7 @@ fn written(clip: &[u8]) -> (BTreeMap<String, hang::stats::Rendition>, ts::stats:
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 	let mut import = ts::Import::new(broadcast, catalog.reserve());
 	import.decode(clip).unwrap();
-	import.finish().unwrap();
+	let import = import.finish().unwrap();
 	(catalog.stats(), import.stats())
 }
 

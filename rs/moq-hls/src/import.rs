@@ -53,6 +53,21 @@ const ANCHOR_SEGMENTS: usize = 3;
 /// genuinely dead variant leaves the catalog within a few seconds.
 const MAX_RENDITION_FAILURES: usize = 3;
 
+/// The largest playlist held, since one must be whole to parse.
+///
+/// A live playlist lists its whole window, and an `EVENT` playlist every segment since it began:
+/// a day of 2 s segments with long signed URIs is about 15 MiB.
+const MAX_PLAYLIST_BYTES: usize = 16 * 1024 * 1024;
+
+/// The largest init segment held, since one is fetched whole before it replaces a generation.
+///
+/// Room for the largest `moov` the fMP4 importer accepts (2 MiB) beside an `ftyp` and any
+/// boxes it skips. Real init segments are a few kilobytes.
+const MAX_INIT_BYTES: usize = 4 * 1024 * 1024;
+
+/// How much of a local file one read takes.
+const FILE_CHUNK_BYTES: usize = 64 * 1024;
+
 /// Configuration for the HLS import loop.
 #[derive(Clone)]
 #[non_exhaustive]
@@ -242,15 +257,14 @@ impl Fetcher {
 
 	/// Fetch a playlist, with the URL its relative URIs resolve against: where any redirects ended.
 	async fn playlist(&self, url: Url) -> Result<(Bytes, Url)> {
-		self.get(&Resource { url, range: None }).await
+		let body = self.open(&Resource { url, range: None }).await?;
+		let served = body.url.clone();
+		Ok((body.hold(MAX_PLAYLIST_BYTES).await?, served))
 	}
 
-	async fn fetch(&self, resource: &Resource) -> Result<Bytes> {
-		Ok(self.get(resource).await?.0)
-	}
-
-	/// Fetch `resource`, with the URL that finally served it after any redirects.
-	async fn get(&self, resource: &Resource) -> Result<(Bytes, Url)> {
+	/// Open `resource` for reading a chunk at a time, refusing it if an HTTP origin answered
+	/// with anything but its content.
+	async fn open(&self, resource: &Resource) -> Result<Body> {
 		let url = &resource.url;
 		if !same_origin(&self.entry, url) {
 			return Err(Error::ResourceRefused);
@@ -258,57 +272,37 @@ impl Fetcher {
 		// Same origin, so a file URL exactly when the entry is one.
 		let Some(client) = &self.client else {
 			let path = url.to_file_path().map_err(|_| Error::InvalidFileUrl)?;
-			let Some(range) = resource.range else {
-				let bytes = tokio::fs::read(&path).await.map(Bytes::from).map_err(Error::from)?;
-				return Ok((bytes, url.clone()));
+			let mut file = tokio::fs::File::open(&path).await?;
+			let source = match resource.range {
+				Some(range) => {
+					file.seek(SeekFrom::Start(range.start)).await?;
+					Source::File(file.take(range.length))
+				}
+				None => Source::File(file.take(u64::MAX)),
 			};
-
-			let mut file = tokio::fs::File::open(&path).await.map_err(Error::from)?;
-			file.seek(SeekFrom::Start(range.start)).await.map_err(Error::from)?;
-			let mut bytes = Vec::new();
-			file.take(range.length)
-				.read_to_end(&mut bytes)
-				.await
-				.map_err(Error::from)?;
-			return Ok((
-				Self::validate_range_length(url, range, Bytes::from(bytes))?,
-				url.clone(),
-			));
+			return Ok(Body::new(url.clone(), resource.range, source));
 		};
 		let response = Self::request(client, resource).send().await?;
 		if response.status().is_redirection() {
 			return Err(Error::ResourceRefused);
 		}
-		let mut response = response.error_for_status()?;
-		let served = response.url().clone();
-		let Some(range) = resource.range else {
-			return Ok((response.bytes().await?, served));
-		};
-
-		// An origin that ignores `Range` sends the whole resource, which would cost every
-		// earlier byte of the file for each segment.
-		if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-			return Err(Error::ByteRangeIgnored {
-				url: redact(url),
-				status: response.status().as_u16(),
-			});
-		}
-		Self::validate_content_range(url, range, response.headers())?;
-
-		// Stream the body so an overrun fails without buffering the excess.
-		let mut body = BytesMut::new();
-		while let Some(chunk) = response.chunk().await? {
-			let read = body.len() + chunk.len();
-			if !u64::try_from(read).is_ok_and(|read| read <= range.length) {
-				return Err(Error::ByteRangeLengthMismatch {
+		let response = response.error_for_status()?;
+		if let Some(range) = resource.range {
+			// An origin that ignores `Range` sends the whole resource, which would cost every
+			// earlier byte of the file for each segment.
+			if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+				return Err(Error::ByteRangeIgnored {
 					url: redact(url),
-					expected: range.length,
-					actual: read,
+					status: response.status().as_u16(),
 				});
 			}
-			body.extend_from_slice(&chunk);
+			Self::validate_content_range(url, range, response.headers())?;
 		}
-		Ok((Self::validate_range_length(url, range, body.freeze())?, served))
+		Ok(Body::new(
+			response.url().clone(),
+			resource.range,
+			Source::Http(response),
+		))
 	}
 
 	fn request(client: &Client, resource: &Resource) -> reqwest::RequestBuilder {
@@ -318,17 +312,6 @@ impl Fetcher {
 			request = request.header(reqwest::header::RANGE, format!("bytes={}-{}", range.start, end));
 		}
 		request
-	}
-
-	fn validate_range_length(url: &Url, range: ResolvedRange, bytes: Bytes) -> Result<Bytes> {
-		if u64::try_from(bytes.len()).ok() != Some(range.length) {
-			return Err(Error::ByteRangeLengthMismatch {
-				url: redact(url),
-				expected: range.length,
-				actual: bytes.len(),
-			});
-		}
-		Ok(bytes)
 	}
 
 	fn validate_content_range(url: &Url, range: ResolvedRange, headers: &reqwest::header::HeaderMap) -> Result<()> {
@@ -351,6 +334,76 @@ impl Fetcher {
 			});
 		}
 		Ok(())
+	}
+}
+
+/// Where a [`Body`] reads from.
+enum Source {
+	Http(reqwest::Response),
+	/// A local file, limited to its byte range if it has one.
+	File(tokio::io::Take<tokio::fs::File>),
+}
+
+/// A fetched resource's body, read as it arrives so nothing holds more of it than it needs.
+struct Body {
+	/// The URL that served the body, after any redirects.
+	url: Url,
+	/// The byte range requested, which the body must fill exactly.
+	range: Option<ResolvedRange>,
+	source: Source,
+	/// Bytes read so far.
+	read: usize,
+}
+
+impl Body {
+	fn new(url: Url, range: Option<ResolvedRange>, source: Source) -> Self {
+		Self {
+			url,
+			range,
+			source,
+			read: 0,
+		}
+	}
+
+	/// The next chunk of the body, or `None` once it has ended with every byte its range asked for.
+	async fn chunk(&mut self) -> Result<Option<Bytes>> {
+		let chunk = match &mut self.source {
+			Source::Http(response) => response.chunk().await?,
+			Source::File(file) => {
+				let mut chunk = BytesMut::with_capacity(FILE_CHUNK_BYTES);
+				file.read_buf(&mut chunk).await?;
+				Some(chunk.freeze()).filter(|chunk| !chunk.is_empty())
+			}
+		};
+		let read = self.read + chunk.as_ref().map_or(0, Bytes::len);
+		if let Some(range) = self.range {
+			let length = u64::try_from(read).unwrap_or(u64::MAX);
+			// An overrun fails as it arrives, and a short body once it ends.
+			if length > range.length || (chunk.is_none() && length != range.length) {
+				return Err(Error::ByteRangeLengthMismatch {
+					url: redact(&self.url),
+					expected: range.length,
+					actual: read,
+				});
+			}
+		}
+		self.read = read;
+		Ok(chunk)
+	}
+
+	/// Read the whole body, refusing it once it passes `limit` bytes.
+	async fn hold(mut self, limit: usize) -> Result<Bytes> {
+		let mut body = BytesMut::new();
+		while let Some(chunk) = self.chunk().await? {
+			if body.len() + chunk.len() > limit {
+				return Err(Error::ResourceTooLarge {
+					url: redact(&self.url),
+					limit,
+				});
+			}
+			body.extend_from_slice(&chunk);
+		}
+		Ok(body.freeze())
 	}
 }
 
@@ -402,6 +455,8 @@ struct TrackState {
 	sink: Sink,
 	/// The current init segment's importer, minted by [`Self::ensure_map`].
 	generation: Option<Generation>,
+	/// The last generation's tracks once [`Import::finish`] ended them, kept servable while held.
+	finished: Option<moq_mux::container::fmp4::Finished>,
 	next_sequence: Option<u64>,
 	media_range: RangeCursor,
 	/// Consecutive failed ingest attempts, reset by any successful one. See
@@ -431,6 +486,7 @@ impl TrackState {
 			select,
 			sink,
 			generation: None,
+			finished: None,
 			next_sequence: None,
 			media_range: RangeCursor::default(),
 			failures: 0,
@@ -610,7 +666,8 @@ impl TrackState {
 			return Ok(());
 		}
 
-		let bytes = fetcher.fetch(&resource).await?;
+		// Held whole, so a transfer that fails part way leaves the current generation untouched.
+		let bytes = fetcher.open(&resource).await?.hold(MAX_INIT_BYTES).await?;
 		let mut importer = self.sink.importer(&self.select);
 
 		// The importer buffers internally, so a fully-parsed init segment leaves it
@@ -620,8 +677,8 @@ impl TrackState {
 
 		// The old generation must finish before retiring its catalog entries, so a subscriber
 		// draining its final group sees a clean end instead of a dropped producer.
-		if let Some(previous) = self.generation.as_mut() {
-			previous.importer.finish()?;
+		if let Some(previous) = self.generation.take() {
+			drop(previous.importer.finish()?);
 		}
 		self.generation = Some(Generation {
 			map: resource,
@@ -647,7 +704,7 @@ impl TrackState {
 		let url = resolve_uri(base, &segment.uri)?;
 		let mut range = self.media_range.clone();
 		let resource = range.resolve(url, segment.byte_range.as_ref())?;
-		let bytes = fetcher.fetch(&resource).await?;
+		let mut body = fetcher.open(&resource).await?;
 
 		// HLS media sequence names the live window, while discontinuity sequence names a
 		// new media timeline. Whenever we join, skip ahead, or cross a discontinuity, anchor
@@ -677,30 +734,62 @@ impl TrackState {
 		// carries no styp. Every rendition declares the same ones; the HLS segmenter drops a cut
 		// that would land inside its minimum segment duration, so the duplicates cost nothing.
 		importer.cut()?;
-		let decoded = importer.decode(&bytes);
-		if decoded.is_ok() {
-			generation.discontinuity = Some(discontinuity_sequence);
-		}
-		decoded.map_err(|err| match err {
-			// Timestamp resets are unsupported: the published tracks never rewind, and no later
-			// pass can import this segment, so it is refused rather than retried.
-			moq_mux::Error::TimestampRewind(_)
-			| moq_mux::Error::Cmaf(moq_mux::container::fmp4::Error::NonMonotonicDecodeTime { .. }) => Error::Rewind {
-				rendition: self.label.clone(),
-				source: err,
-			},
-			err => {
-				// A decode error is terminal. Retire this generation now instead of fetching
-				// another segment for an importer that cannot read it.
-				self.evict();
-				err.into()
+		// Each chunk decodes before the next is read, so a large or endless segment costs no more
+		// memory than a chunk, and a slow importer slows the transfer.
+		//
+		// Once the importer has read part of a segment it cannot take that segment again from the
+		// start, so a failure past that point retires the generation and the next pass rejoins
+		// with a gap. A rewind keeps it instead: it ends the import, and the tracks are aborted
+		// with the cause rather than dropped.
+		let mut evict = false;
+		let streamed = loop {
+			let chunk = match body.chunk().await {
+				Ok(Some(chunk)) => chunk,
+				Ok(None) => break Ok(()),
+				Err(err) => break Err(err),
+			};
+			evict = true;
+			if let Err(err) = importer.decode(&chunk) {
+				break Err(match err {
+					// Timestamp resets are unsupported: the published tracks never rewind, and no
+					// later pass can import this segment, so it is refused rather than retried.
+					moq_mux::Error::TimestampRewind(_)
+					| moq_mux::Error::Cmaf(moq_mux::container::fmp4::Error::NonMonotonicDecodeTime { .. }) => {
+						evict = false;
+						Error::Rewind {
+							rendition: self.label.clone(),
+							source: err,
+						}
+					}
+					err => err.into(),
+				});
 			}
-		})?;
+		};
+		if let Err(err) = streamed {
+			if evict {
+				self.evict();
+			}
+			return Err(err);
+		}
+		generation.discontinuity = Some(discontinuity_sequence);
 
 		self.media_range = range;
 		self.next_sequence = Some(sequence + 1);
 
 		Ok(())
+	}
+}
+
+/// An [`Import`] whose tracks and catalog finished, keeping them servable while held.
+#[must_use = "dropping it releases the finished tracks and catalog"]
+pub struct Finished {
+	import: Import,
+}
+
+impl Finished {
+	/// Abort every finished track and the catalog with `err`.
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
 	}
 }
 
@@ -773,7 +862,7 @@ impl Import {
 	/// amount of waiting changes either.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
-		let mut deadline = kio::clock::now() + STEP_RETRY_BUDGET;
+		let mut deadline = kio::clock::now().saturating_add(STEP_RETRY_BUDGET);
 
 		loop {
 			// A step where *nothing* ingested while a rendition was failing is a failed pass wearing
@@ -797,7 +886,7 @@ impl Import {
 				Ok(outcome) => {
 					// The source is alive, so the earlier failures no longer describe it.
 					delay = STEP_RETRY_MIN;
-					deadline = kio::clock::now() + STEP_RETRY_BUDGET;
+					deadline = kio::clock::now().saturating_add(STEP_RETRY_BUDGET);
 					outcome
 				}
 				Err(err @ Error::ResourceRefused) => return Err(err),
@@ -846,14 +935,25 @@ impl Import {
 	///
 	/// The finished tracks stay servable while the import is held, so hand it and the
 	/// broadcast to a [`moq_mux::Linger`] to keep them up for late subscribers.
-	pub fn finish(&mut self) -> Result<()> {
-		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
-			if let Some(generation) = &mut track.generation {
-				generation.importer.finish()?;
+	///
+	/// A rendition that fails to finish fails the whole import: every other track and the catalog
+	/// end with that error instead of a clean finish.
+	pub fn finish(mut self) -> Result<Finished> {
+		let result = (|| {
+			for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
+				if let Some(generation) = track.generation.take() {
+					track.finished = Some(generation.importer.finish()?);
+				}
+			}
+			self.sink.catalog.finish()
+		})();
+		match result {
+			Ok(()) => Ok(Finished { import: self }),
+			Err(err) => {
+				self.abort(moq_net::Error::Transport(format!("{err:#}")));
+				Err(err.into())
 			}
 		}
-		self.sink.catalog.finish()?;
-		Ok(())
 	}
 
 	/// Abort every rendition's importer and the catalog with `err` so subscribers see the real
@@ -863,15 +963,13 @@ impl Import {
 	/// [`Import`] instead lets its tracks end as [`moq_net::Error::Dropped`]. Consumes
 	/// the import: every rendition is dead afterwards.
 	pub fn abort(mut self, err: moq_net::Error) {
-		for track in &mut self.video {
+		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
 			if let Some(generation) = track.generation.take() {
 				generation.importer.abort(err.clone());
 			}
-		}
-		if let Some(track) = &mut self.audio
-			&& let Some(generation) = track.generation.take()
-		{
-			generation.importer.abort(err.clone());
+			if let Some(finished) = track.finished.take() {
+				finished.abort(err.clone());
+			}
 		}
 		self.sink.catalog.clone().abort(err);
 	}
@@ -1339,6 +1437,13 @@ mod tests {
 			select_muxed(),
 			sink(),
 		)
+	}
+
+	impl Fetcher {
+		/// Read `resource` whole, with no bound.
+		async fn fetch(&self, resource: &Resource) -> Result<Bytes> {
+			self.open(resource).await?.hold(usize::MAX).await
+		}
 	}
 
 	fn fetcher(entry: &Url) -> Fetcher {
@@ -2068,7 +2173,7 @@ mod tests {
 			.expect("an ended playlist ends the import")
 			.unwrap();
 		assert_eq!(import.video[0].next_sequence, Some(4), "the final segment was imported");
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let mut listed = consumer.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			listed.recv_group().await.unwrap().is_some(),
@@ -2146,9 +2251,85 @@ mod tests {
 			let snapshot = catalog.snapshot();
 			assert_eq!(snapshot.video.renditions.len(), 1);
 			assert_ne!(*snapshot.video.renditions.keys().next().unwrap(), previous);
-			import.finish().unwrap();
+			drop(import.finish().unwrap());
 			std::fs::remove_dir_all(dir).unwrap();
 		}
+	}
+
+	/// A segment that fails before the importer reads any of it leaves the generation to retry,
+	/// while one that fails part way retires it, and the next pass rejoins through a new importer.
+	#[tokio::test]
+	async fn a_segment_cut_short_retires_its_generation() {
+		let dir = temp_dir();
+		write_synth(&dir, &synth(true), "video", &[5_000_000, 7_000_000]);
+		let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"videoinit.mp4\"\n#EXTINF:1,\nvideo0.m4s\n";
+		std::fs::write(dir.join("media.m3u8"), playlist).unwrap();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let cfg = Config::new(Url::from_file_path(dir.join("media.m3u8")).unwrap());
+		let mut import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
+		import.init().await.unwrap();
+
+		let segment = std::fs::read(dir.join("video1.m4s")).unwrap();
+		std::fs::remove_file(dir.join("video1.m4s")).unwrap();
+		std::fs::write(dir.join("media.m3u8"), format!("{playlist}#EXTINF:1,\nvideo1.m4s\n")).unwrap();
+		let step = import.step(OnError::Warn).await.unwrap();
+		assert!(matches!(step.failed, Some(Error::Io(_))));
+		assert!(
+			import.video[0].generation.is_some(),
+			"nothing was read, so the importer is intact"
+		);
+
+		// The range asks for more than the file holds, so the body ends short after the importer
+		// has read all of it.
+		std::fs::write(dir.join("video1.m4s"), &segment).unwrap();
+		let cut = format!(
+			"{playlist}#EXTINF:1,\n#EXT-X-BYTERANGE:{}@0\nvideo1.m4s\n",
+			segment.len() + 1
+		);
+		std::fs::write(dir.join("media.m3u8"), cut).unwrap();
+		let step = import.step(OnError::Warn).await.unwrap();
+		assert!(matches!(step.failed, Some(Error::ByteRangeLengthMismatch { .. })));
+		assert!(
+			import.video[0].generation.is_none(),
+			"a half-read segment retires the importer"
+		);
+
+		std::fs::write(dir.join("media.m3u8"), format!("{playlist}#EXTINF:1,\nvideo1.m4s\n")).unwrap();
+		let step = import.step(OnError::Warn).await.unwrap();
+		assert!(step.failed.is_none());
+		assert!(import.video[0].generation.is_some());
+		drop(import.finish().unwrap());
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	/// A playlist or init segment, which must be held whole, is refused once it passes its bound.
+	#[tokio::test]
+	async fn oversized_playlist_and_init_are_refused() {
+		let dir = temp_dir();
+		let path = dir.join("big.m3u8");
+		std::fs::write(&path, vec![b'#'; MAX_PLAYLIST_BYTES + 1]).unwrap();
+		let url = Url::from_file_path(&path).unwrap();
+		let err = fetcher(&url).playlist(url.clone()).await.unwrap_err();
+		assert!(matches!(
+			err,
+			Error::ResourceTooLarge {
+				limit: MAX_PLAYLIST_BYTES,
+				..
+			}
+		));
+
+		let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\"\n#EXTINF:1,\nmedia.mp4\n";
+		let (mut import, _catalog) = write_import(&dir, &vec![0; MAX_INIT_BYTES + 1], playlist);
+		let err = import.init().await.unwrap_err();
+		assert!(matches!(
+			err,
+			Error::ResourceTooLarge {
+				limit: MAX_INIT_BYTES,
+				..
+			}
+		));
+		std::fs::remove_dir_all(dir).unwrap();
 	}
 
 	/// An ended rendition is never fetched again, so losing its playlist while its siblings
@@ -2543,7 +2724,6 @@ mod tests {
 	/// since the first placed the clock. A fresh offset would shift it by its own arrival.
 	#[tokio::test(start_paused = true)]
 	async fn a_replacement_importer_keeps_the_offset() {
-		kio::clock::host_time();
 		let (init, fragments) = fmp4_parts(2);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();

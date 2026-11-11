@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { FrameTooLarge, StreamCode, StreamError } from "./error.ts";
 import { encodable } from "./flate/group.ts";
@@ -78,23 +78,23 @@ test("a frame read late keeps the instant it landed, plain, compressed, or resum
 		hooks.bindGroupCompression(compressed, true);
 		const first = clock.now();
 		plain.writeFrame(textFrame("a"));
-		clock.jump(Nano.fromMilli(Milli(10)));
+		clock.jump(Duration.millis(10));
 		const second = clock.now();
 		plain.writeFrame(textFrame("b"));
 		compressed.writeFrame(textFrame("b"));
-		clock.jump(Nano.fromMilli(Milli(1000)));
+		clock.jump(Duration.millis(1000));
 
 		const reader = plain.consume();
-		expect(reader.tryReadFrame()?.arrived).toBe(first);
-		expect((await reader.readFrameSequence())?.arrived).toBe(second);
+		expect(reader.tryReadFrame()?.arrived).toEqual(first);
+		expect((await reader.readFrameSequence())?.arrived).toEqual(second);
 		const stored = compressed.consume();
-		expect((await hooks.readGroupFrame(stored, true))?.frame.arrived).toBe(first);
-		expect((await stored.readFrame())?.arrived).toBe(second);
+		expect((await hooks.readGroupFrame(stored, true))?.frame.arrived).toEqual(first);
+		expect((await stored.readFrame())?.arrived).toEqual(second);
 
 		// A frame written in with a stamp of its own still gets this node's.
 		const forwarded = new Producer(0n);
 		forwarded.writeFrame({ payload: new Uint8Array([1]), arrived: first });
-		expect(forwarded.consume().tryReadFrame()?.arrived).toBe(clock.now());
+		expect(forwarded.consume().tryReadFrame()?.arrived).toEqual(clock.now());
 
 		// A resumed read takes the stamp the replacement copy holds, not when it was adopted.
 		const failing = new Producer(0n);
@@ -115,9 +115,9 @@ test("a frame read late keeps the instant it landed, plain, compressed, or resum
 		});
 		failing.writeFrame(textFrame("a"));
 		await resumed.readFrame();
-		clock.jump(Nano.fromMilli(Milli(1000)));
+		clock.jump(Duration.millis(1000));
 		failing.abort(new Error("copy failed"));
-		expect((await resumed.readFrame())?.arrived).toBe(landed);
+		expect((await resumed.readFrame())?.arrived).toEqual(landed);
 
 		for (const producer of [plain, compressed, forwarded, replacement]) producer.finish();
 	} finally {
@@ -135,16 +135,16 @@ test("a group read late keeps the instant it joined, alone, on a track, or resum
 		const subscriber = track.subscribe();
 		const live = track.createGroup(0n);
 		live.writeFrame(textFrame("a"));
-		clock.jump(Nano.fromMilli(Milli(1000)));
+		clock.jump(Duration.millis(1000));
 
-		expect(alone.consume().arrived).toBe(created);
-		expect((await subscriber.recvGroup())?.arrived).toBe(created);
+		expect(alone.consume().arrived).toEqual(created);
+		expect((await subscriber.recvGroup())?.arrived).toEqual(created);
 
 		// A resumed read keeps the original group's arrival, not the replacement copy's.
 		const original = clock.now();
 		const failing = new Producer(0n);
 		const resumed = failing.mirror();
-		clock.jump(Nano.fromMilli(Milli(1000)));
+		clock.jump(Duration.millis(1000));
 		const replacement = new Producer(0n);
 		replacement.writeFrame(textFrame("a"));
 		replacement.writeFrame(textFrame("b"));
@@ -162,7 +162,7 @@ test("a group read late keeps the instant it joined, alone, on a track, or resum
 		await resumed.readFrame();
 		failing.abort(new Error("copy failed"));
 		expect((await resumed.readFrame())?.payload).toEqual(textFrame("b").payload);
-		expect(resumed.arrived).toBe(original);
+		expect(resumed.arrived).toEqual(original);
 
 		for (const producer of [alone, live, replacement]) producer.finish();
 		subscriber.close();
@@ -535,6 +535,8 @@ test("a plain frame has no size cap, while a compressed one keeps its whole-fram
 	compressed.finish();
 });
 
+// The bound's soundness for incompressible input lives in flate/codec.test.ts; deflating 32 MiB of
+// noise here would cost seconds under load.
 test("a compressed frame is refused unless its worst-case slice fits a peer's frame cap", async () => {
 	const MAX = 32 * 1024 * 1024;
 	let largest = MAX;
@@ -542,14 +544,11 @@ test("a compressed frame is refused unless its worst-case slice fits a peer's fr
 	const compressed = new Producer(0n);
 	hooks.bindGroupCompression(compressed, true);
 	const reader = compressed.consume();
-	// High-entropy input expands under DEFLATE, so even the cap itself may not encode within it.
+	// Refused by size alone, even though zeros would compress far below the cap.
 	expect(() => compressed.writeFrame({ payload: new Uint8Array(largest + 1) })).toThrow(FrameTooLarge);
 	expect(() => compressed.createFrame({ size: largest + 1 })).toThrow(FrameTooLarge);
-	const payload = new Uint8Array(largest);
-	for (let i = 0; i < largest; i += 65536) crypto.getRandomValues(payload.subarray(i, i + 65536));
-	compressed.writeFrame({ payload });
+	compressed.writeFrame({ payload: new Uint8Array(largest) });
 	const read = await hooks.readGroupFrame(reader, true);
-	expect(read?.frame.payload.byteLength).toBeGreaterThan(largest);
 	expect(read?.frame.payload.byteLength).toBeLessThanOrEqual(MAX);
 	compressed.finish();
 
@@ -885,77 +884,6 @@ test("a drained unfinished group fails with Old when its budget gives up", async
 	await expect(consumer.readFrame()).rejects.toBe(err);
 	expect(consumer.done).toBe(true);
 	expect(await consumer.closed).toBe(err as StreamError);
-});
-
-// Metadata waits use the same recovery and reader verdict as payload reads, without
-// consuming the frames a later FETCH must still deliver.
-test.each([undefined, 2].flatMap((until) => [false, true].map((stalled) => ({ until, stalled }))))(
-	"a group end wait recovers before selecting its end (cap $until, stalled $stalled)",
-	async ({ until, stalled }) => {
-		const source = new Producer(0n);
-		source.writeFrame(textFrame("zero"));
-		const reader = source.consume();
-		const replacement = new Producer(0n);
-		replacement.writeFrame(textFrame("zero"));
-		replacement.writeFrame(textFrame("one"));
-		replacement.finish();
-		const newer = new Signal(false);
-		hooks.recoverGroup(reader, {
-			changed: newer,
-			wants: (failed) => failed !== undefined || newer.peek(),
-			replace: async (index) => {
-				expect(index).toBe(0);
-				return {
-					group: replacement.consume(),
-					expiry: { expired: () => false, changed: [] },
-					adopt: () => newer.set(false),
-					discard: () => {},
-				};
-			},
-		});
-		const end = hooks.groupEnd(reader, until);
-		if (stalled) newer.set(true);
-		else source.abort(new Error("route failed"));
-		expect(await end).toEqual({ end: 2, complete: true });
-		expect(await reader.readString()).toBe("zero");
-		expect(await reader.readString()).toBe("one");
-		reader.close();
-		source.finish();
-	},
-);
-
-// The requested headers are already buffered: a copy failing afterwards reaches the payload
-// reads, which drain them first, rather than refusing an answer that can still be served.
-test("a bounded group end wait is met by buffered headers despite a failed copy", async () => {
-	const source = new Producer(0n);
-	source.writeFrame(textFrame("zero"));
-	const reader = source.consume();
-	const cause = new Error("route failed");
-	const end = hooks.groupEnd(reader, 2);
-	await yieldNow();
-	// Both land before the parked wait looks again.
-	source.writeFrame(textFrame("one"));
-	source.abort(cause);
-	expect(await end).toEqual({ end: 2, complete: false });
-	expect(await reader.readString()).toBe("zero");
-	expect(await reader.readString()).toBe("one");
-	await expect(reader.readFrame()).rejects.toBe(cause);
-});
-
-test.each(["eviction", "expiry"] as const)("a group end wait observes reader %s", async (failure) => {
-	const source = new Producer(0n);
-	source.writeFrame(textFrame("zero"));
-	const reader = source.consume();
-	const expired = new Signal(false);
-	hooks.expireGroup(reader, { expired: () => expired.peek(), changed: [expired] });
-	const end = hooks.groupEnd(reader);
-	if (failure === "eviction") hooks.evictGroup(reader, new StreamError(StreamCode.Evicted));
-	else expired.set(true);
-	await expect(end).rejects.toMatchObject({
-		code: failure === "eviction" ? StreamCode.Evicted : StreamCode.Old,
-	});
-	source.finish();
-	reader.close();
 });
 
 // Rust's `GroupState::shed` keeps an open group's newest committed frame even while a newer

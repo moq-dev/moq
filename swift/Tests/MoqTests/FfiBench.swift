@@ -73,7 +73,7 @@ final class FfiBench: XCTestCase {
         defer { withExtendedLifetime(origin) {} }
         let route = try origin.route(path: "bench", hidden: true)
         defer { withExtendedLifetime(route) {} }
-        let broadcast = try route.broadcast
+        let broadcast = route.broadcast
         let tracks = try (0..<c.publishers).map {
             try broadcast.publishTrack(name: "\($0)", info: TrackInfo(timescale: 1_000_000))
         }

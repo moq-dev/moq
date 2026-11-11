@@ -7,6 +7,7 @@
 
 mod handoff;
 mod routing;
+mod rtt;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -51,6 +52,11 @@ fn fnv(label: &str, ids: &[u64]) -> u64 {
 		hash = hash.wrapping_mul(0x0100_0000_01b3);
 	}
 	hash
+}
+
+/// How `node` names itself in a route's hops, fresh for each restart like its process.
+pub(super) fn hop(node: Node, restarts: u32) -> Id {
+	1_000 * (u64::from(restarts) + 1) + node as u64
 }
 
 /// One side's configuration of a link.
@@ -123,6 +129,8 @@ pub(super) struct SimEvent {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Stats {
 	pub route_msgs: usize,
+	/// Route messages that changed nothing but the hops: what naming them costs.
+	pub hop_updates: usize,
 	pub claim_msgs: usize,
 	pub claim_items: usize,
 	pub requests: usize,
@@ -155,6 +163,8 @@ pub(super) struct Sim {
 	history: BTreeMap<Id, Vec<Change>>,
 	/// Every request sent, to spot a repeat.
 	requested: BTreeSet<(Node, Node, Id, Seqno)>,
+	/// The last finite route each node sent each neighbor, to spot a change of hops alone.
+	routed: BTreeMap<(Node, Node, Id), Advert>,
 	pub stats: Stats,
 	pub events: Vec<SimEvent>,
 }
@@ -162,7 +172,9 @@ pub(super) struct Sim {
 impl Sim {
 	pub fn new(nodes: usize) -> Self {
 		Self {
-			nodes: (0..nodes).map(|node| Router::new(node as u64 + 1)).collect(),
+			nodes: (0..nodes)
+				.map(|node| Router::new(hop(node, 0), node as u64 + 1))
+				.collect(),
 			leaf: vec![false; nodes],
 			watch: vec![Path::empty(); nodes],
 			restarts: vec![0; nodes],
@@ -175,6 +187,7 @@ impl Sim {
 			held: BTreeSet::new(),
 			history: BTreeMap::new(),
 			requested: BTreeSet::new(),
+			routed: BTreeMap::new(),
 			stats: Stats::default(),
 			events: Vec::new(),
 		}
@@ -257,7 +270,9 @@ impl Sim {
 		}
 		self.restarts[node] += 1;
 		self.declared[node] = None;
-		self.nodes[node] = Router::new(fnv("restart", &[node as u64, u64::from(self.restarts[node])]));
+		let restarts = self.restarts[node];
+		let seed = fnv("restart", &[node as u64, u64::from(restarts)]);
+		self.nodes[node] = Router::new(hop(node, restarts), seed);
 		let watch = self.watch[node].clone();
 		self.nodes[node].watch(watch);
 		self.flush();
@@ -284,8 +299,14 @@ impl Sim {
 		self.flush();
 	}
 
+	/// `node` advertises `id` as if serving it, claiming the root.
 	pub fn forge(&mut self, node: Node, id: Id, seqno: Seqno) {
-		self.nodes[node].forge(id, seqno);
+		let item = Item {
+			seed: 0,
+			epoch: None,
+			since: 0,
+		};
+		self.nodes[node].forge(id, seqno, Path::empty(), item);
 		self.flush();
 	}
 
@@ -366,6 +387,22 @@ impl Sim {
 	pub fn collect(&mut self, node: Node, id: Id) {
 		self.nodes[node].collect(id);
 		self.flush();
+	}
+
+	/// `node` measures its link to `peer` at `ms`, or nothing.
+	pub fn rtt(&mut self, node: Node, peer: Node, ms: Option<u64>) {
+		self.nodes[node].rtt(peer, ms.map(std::time::Duration::from_millis));
+		self.flush();
+	}
+
+	/// What `node` last sent `peer` for `id`.
+	pub fn sent(&self, node: Node, peer: Node, id: Id) -> Option<Reach> {
+		self.nodes[node].sent.get(&(id, peer)).cloned()
+	}
+
+	/// The streams `node` sends a route for `id` on.
+	pub fn sending(&self, node: Node, id: Id) -> usize {
+		Router::<Node, Item>::of(&self.nodes[node].sent, id).count()
 	}
 
 	pub fn hold(&mut self, from: Node, to: Node) {
@@ -465,6 +502,23 @@ impl Sim {
 			for out in self.nodes[node].drain() {
 				let (to, msg) = match out {
 					Out::Route { to, id, reach } => {
+						// A route names every node it crossed once, the sender last.
+						if let Some(Reach::Finite(advert)) = &reach {
+							let me = hop(node, self.restarts[node]);
+							assert_eq!(advert.hops.last(), Some(&me), "node {node}'s hops for {id}");
+							let named: BTreeSet<Id> = advert.hops.iter().copied().collect();
+							assert_eq!(named.len(), advert.hops.len(), "node {node} sent {id} round a loop");
+							let was = self.routed.insert((node, to, id), advert.clone());
+							let same = |was: Advert| {
+								Advert {
+									hops: advert.hops.clone(),
+									..was
+								} == *advert
+							};
+							self.stats.hop_updates += usize::from(was.is_some_and(same));
+						} else {
+							self.routed.remove(&(node, to, id));
+						}
 						self.stats.route_msgs += 1;
 						(to, Msg::Route { id, reach })
 					}

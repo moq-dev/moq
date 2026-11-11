@@ -13,7 +13,7 @@ pub(crate) struct Export<S: Stream, C: Codec> {
 	codec: std::marker::PhantomData<C>,
 	source: crate::Source,
 	catalog: Option<S>,
-	max_delay: std::time::Duration,
+	delay: moq_net::track::Delay,
 	track: Option<Track>,
 	/// The latest presentation time written. A switch to another rendition resumes at its first
 	/// keyframe past it: a new subscription starts at the rendition's latest group, which for
@@ -49,19 +49,19 @@ impl<S: Stream, C: Codec> Export<S, C> {
 			codec: std::marker::PhantomData,
 			source,
 			catalog: Some(catalog),
-			max_delay: std::time::Duration::ZERO,
+			delay: moq_net::track::Delay::default(),
 			track: None,
 			playhead: None,
 		}
 	}
 
-	/// Set the max delay for the per-track source.
+	/// Set how far behind the live edge the per-track source plays: [`Delay::min`](moq_net::track::Delay::min) is where it
+	/// starts, and [`Delay::max`](moq_net::track::Delay::max) how late a group may fall before it is skipped.
 	///
-	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
-	/// Defaults to
-	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip aggressively).
-	pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
-		self.max_delay = max_delay;
+	/// See [`Consumer`](crate::container::Consumer) for the per-track start and skip behavior.
+	/// Defaults to zero for both (start at the live edge, skip aggressively).
+	pub fn with_delay(mut self, delay: moq_net::track::Delay) -> Self {
+		self.delay = delay;
 		self
 	}
 
@@ -153,7 +153,7 @@ impl<S: Stream, C: Codec> Export<S, C> {
 			return Ok(());
 		}
 
-		let Some(source) = ExportSource::for_video_raw(&self.source, name, config, self.max_delay)? else {
+		let Some(source) = ExportSource::for_video_raw(&self.source, name, config, self.delay)? else {
 			unreachable!("invalid broadcast references were removed above");
 		};
 		let convert = C::convert(name, config)?;
@@ -214,18 +214,18 @@ mod tests {
 		for finished in [false, true] {
 			let mut moving = Moving::new();
 			let mut export = Export::new(moving.source().await, moving.catalog_stream().await)
-				.with_max_delay(std::time::Duration::from_secs(10));
+				.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(10)));
 			moving.a.write(marked_frame(0, 0xa1)).unwrap();
 			assert_eq!(marks(&next(&mut export).await), [0xa1]);
 			if finished {
-				moving.a.finish().unwrap();
+				moving.a.end_with(None).unwrap();
 				assert!(export.poll_next(&kio::Waiter::noop()).is_pending());
 			}
 			moving.b.write(marked_frame(30, 0xb1)).unwrap();
 			moving.b.write(marked_frame(60, 0xb2)).unwrap();
 			moving.point("b", None, SPS);
 			assert_eq!(marks(&next(&mut export).await), [0xb2]);
-			moving.b.finish().unwrap();
+			moving.b.end_with(None).unwrap();
 			moving.catalog.finish().unwrap();
 			assert!(export.next().await.unwrap().is_none());
 		}

@@ -49,7 +49,7 @@ impl<T: Clone + PartialEq> Settle<T> {
 	/// Wake an event-driven source even if its final resized frame was static.
 	#[cfg(any(target_os = "windows", test))]
 	pub fn deadline(&self) -> Option<Instant> {
-		self.pending.as_ref().map(|(_, since)| *since + HOLD)
+		self.pending.as_ref().map(|(_, since)| since.saturating_add(HOLD))
 	}
 
 	/// Feed the geometry observed at `now`.
@@ -87,10 +87,16 @@ mod tests {
 		let mut settle = Settle::new((800, 600));
 		assert_eq!(settle.deadline(), None);
 		assert_eq!(settle.observe(&(900, 600), now), Settled::Waiting);
-		assert_eq!(settle.deadline(), Some(now + HOLD));
-		assert_eq!(settle.observe(&(902, 600), now + HOLD / 2), Settled::Waiting);
-		assert_eq!(settle.deadline(), Some(now + HOLD + HOLD / 2));
-		assert_eq!(settle.observe(&(800, 600), now + HOLD), Settled::Open);
+		assert_eq!(settle.deadline(), Some(now.saturating_add(HOLD)));
+		assert_eq!(
+			settle.observe(&(902, 600), now.saturating_add(HOLD / 2)),
+			Settled::Waiting
+		);
+		assert_eq!(
+			settle.deadline(),
+			Some(now.saturating_add(HOLD).saturating_add(HOLD / 2))
+		);
+		assert_eq!(settle.observe(&(800, 600), now.saturating_add(HOLD)), Settled::Open);
 		assert_eq!(settle.deadline(), None);
 	}
 
@@ -99,7 +105,10 @@ mod tests {
 		let start = Instant::now();
 		let mut settle = Settle::new((1920u32, 1080u32));
 		assert_eq!(settle.observe(&(1920, 1080), start), Settled::Open);
-		assert_eq!(settle.observe(&(1920, 1080), start + HOLD * 4), Settled::Open);
+		assert_eq!(
+			settle.observe(&(1920, 1080), start.saturating_add(HOLD * 4)),
+			Settled::Open
+		);
 	}
 
 	#[test]
@@ -107,8 +116,14 @@ mod tests {
 		let start = Instant::now();
 		let mut settle = Settle::new((1920u32, 1080u32));
 		assert_eq!(settle.observe(&(1280, 720), start), Settled::Waiting);
-		assert_eq!(settle.observe(&(1280, 720), start + HOLD / 2), Settled::Waiting);
-		assert_eq!(settle.observe(&(1280, 720), start + HOLD), Settled::Changed);
+		assert_eq!(
+			settle.observe(&(1280, 720), start.saturating_add(HOLD / 2)),
+			Settled::Waiting
+		);
+		assert_eq!(
+			settle.observe(&(1280, 720), start.saturating_add(HOLD)),
+			Settled::Changed
+		);
 	}
 
 	#[test]
@@ -119,13 +134,13 @@ mod tests {
 		// settles while the pointer is moving.
 		let mut now = start;
 		for step in 1..=(2 * HOLD.as_millis() / 10) as u32 {
-			now = start + Duration::from_millis(u64::from(step) * 10);
+			now = start.saturating_add(Duration::from_millis(u64::from(step) * 10));
 			assert_eq!(settle.observe(&(1920 - step * 2, 1080), now), Settled::Waiting);
 		}
 		// The pointer stops: the last size settles one window later.
 		let last = (1920 - (2 * HOLD.as_millis() / 10) as u32 * 2, 1080);
-		assert_eq!(settle.observe(&last, now + HOLD / 2), Settled::Waiting);
-		assert_eq!(settle.observe(&last, now + HOLD), Settled::Changed);
+		assert_eq!(settle.observe(&last, now.saturating_add(HOLD / 2)), Settled::Waiting);
+		assert_eq!(settle.observe(&last, now.saturating_add(HOLD)), Settled::Changed);
 	}
 
 	#[test]
@@ -133,9 +148,18 @@ mod tests {
 		let start = Instant::now();
 		let mut settle = Settle::new((1920u32, 1080u32));
 		assert_eq!(settle.observe(&(1280, 720), start), Settled::Waiting);
-		assert_eq!(settle.observe(&(1920, 1080), start + HOLD / 2), Settled::Open);
+		assert_eq!(
+			settle.observe(&(1920, 1080), start.saturating_add(HOLD / 2)),
+			Settled::Open
+		);
 		// The earlier change is forgotten, so the wait starts over.
-		assert_eq!(settle.observe(&(1280, 720), start + HOLD), Settled::Waiting);
-		assert_eq!(settle.observe(&(1280, 720), start + HOLD * 2), Settled::Changed);
+		assert_eq!(
+			settle.observe(&(1280, 720), start.saturating_add(HOLD)),
+			Settled::Waiting
+		);
+		assert_eq!(
+			settle.observe(&(1280, 720), start.saturating_add(HOLD * 2)),
+			Settled::Changed
+		);
 	}
 }

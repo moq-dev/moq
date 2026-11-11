@@ -93,7 +93,7 @@ void ok(moq::expected<void> result) {
 // Subscribe.
 auto client = ok(moq::Client::init({}));   // a moq::ClientConfig; {} takes every default
 auto session = ok(client->connect("https://relay.example.com").get());
-auto announced = ok(session->consume()->follow("my-stream.hang", std::nullopt));
+auto announced = ok(session->consume()->follow("my-stream.hang", nullptr));
 auto broadcast = ok(announced->available().get());   // the first call is never null
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
@@ -140,7 +140,7 @@ A raw `moq::Frame` with `std::nullopt` is untimed.
 moq::RouteOptions options;
 options.hidden = true; // fill tracks before anyone finds it; hold the route to stay announced
 auto route = ok(session->publish()->route("my-stream.hang", options));
-auto broadcast = ok(route->broadcast());
+auto broadcast = route->broadcast();
 auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
 ok(audio->write_frame({packet, moq::Timestamp{960, 48'000}}));   // 20 ms
 
@@ -233,7 +233,7 @@ screen.reset();              // stopped watching: its share returns to camera
 
 ## Compressed tracks
 
-`moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+`moq::TrackInfo::compression` set to DEFLATE on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 
 ## Subscription defaults
 
@@ -249,13 +249,13 @@ A producer publishes everything you write, subscribed or not, so a late subscrib
 
 ## Authorization
 
-On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `session->grants()` returns a `GrantConsumer`: `grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects, and `changed()` waits for the next one until `cancel()`.
+On `moq-lite-07-wip` (opt in with `ClientConfig::versions`), `session->grants()` returns a `GrantConsumer`: `grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects, and `changed()` waits for the next one until `cancel()`.
 
 Set `ClientConfig::tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session->tokens()->set(...)` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `answered()` resolves once the relay accepts them, or to an `Error` carrying its refusal code. A server-accepted session's `tokens()` is null. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 
 ## Stats
 
-`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its first-dial failures and reconnects; independent watchers keep their own revisions.
+`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its reconnects (a first dial that reaches no session ends the session with that error rather than retrying); independent watchers keep their own revisions.
 
 ## Shutdown
 

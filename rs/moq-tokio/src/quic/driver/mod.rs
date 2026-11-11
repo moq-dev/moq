@@ -58,18 +58,14 @@ pub mod recv;
 mod runtime;
 pub mod send;
 #[cfg(feature = "sim")]
-#[doc(hidden)]
 pub mod sim;
 mod work_limiter;
 
 pub(crate) use kio::clock::Instant;
 pub(crate) use std::time::Duration;
 
-pub use moq_quic::{
-	ApplicationClose, ConfigError, ConnectionClose, ConnectionId, ConnectionIdGenerator, EcnCodepoint, FrameType,
-	InvalidCid, Limits, LimitsError, Rate, Transmit, TransportErrorCode, VarInt, VarIntBoundsExceeded, Version, client,
-	crypto, server, stream, transport,
-};
+pub use moq_quic::{ConfigError, Limits, LimitsError, Rate, VarInt, client, crypto, server, stream, transport};
+pub(crate) use moq_quic::{EcnCodepoint, Transmit};
 
 #[cfg(feature = "quic")]
 pub(crate) use crate::quic::driver::runtime::{Slot, wrap_udp_socket};

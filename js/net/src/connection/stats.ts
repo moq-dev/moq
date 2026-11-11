@@ -1,5 +1,5 @@
-import { Milli } from "@moq/clock";
-import type { Established } from "./established.ts";
+import { Duration } from "@moq/clock";
+import type { Session } from "./session.ts";
 import { transportOf } from "./transport.ts";
 /**
  * Connection statistics: what the local transport counts, and what the peer reports.
@@ -31,7 +31,7 @@ export interface Stats {
 	 * Usually absent: browsers don't report an RTT yet even though the W3C dictionary
 	 * has the field. Use {@link Probe.rtt}, which the peer measures.
 	 */
-	rtt?: Milli;
+	rtt?: Duration;
 
 	/** Estimated send bandwidth from the congestion controller, in bits per second. */
 	estimatedSendRate?: number;
@@ -80,7 +80,7 @@ export interface Probe {
 	 * Measured through the peer's application layer, so it reads higher than a
 	 * transport-level RTT would.
 	 */
-	rtt?: Milli;
+	rtt?: Duration;
 
 	/** The peer's send-rate estimate toward us, so our receive rate, in bits per second. */
 	estimatedRecvRate?: number;
@@ -150,7 +150,7 @@ export async function transportStats(quic: WebTransport): Promise<Stats> {
 	try {
 		const stats = await getStats();
 		return {
-			rtt: stats.smoothedRtt !== undefined ? Milli(stats.smoothedRtt) : undefined,
+			rtt: stats.smoothedRtt !== undefined ? Duration.millis(stats.smoothedRtt) : undefined,
 			estimatedSendRate: stats.estimatedSendRate ?? undefined,
 			bytesSent: stats.bytesSent,
 			bytesReceived: stats.bytesReceived,
@@ -176,10 +176,10 @@ export function canEstimate(quic: WebTransport): boolean {
 }
 
 // The sessions whose transport can report a send-rate estimate.
-const estimating = new WeakSet<Established>();
+const estimating = new WeakSet<Session>();
 
 /** Record whether `session`'s transport `quic` can report a send-rate estimate. @internal */
-export function detect(session: Established, quic: WebTransport): void {
+export function detect(session: Session, quic: WebTransport): void {
 	if (canEstimate(quic)) estimating.add(session);
 }
 
@@ -188,6 +188,6 @@ export function detect(session: Established, quic: WebTransport): void {
  *
  * @internal
  */
-export function estimates(session: Established): boolean {
+export function estimates(session: Session): boolean {
 	return estimating.has(session);
 }

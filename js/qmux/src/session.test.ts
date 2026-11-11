@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { type Installed, Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { Duration, type Installed, Manual, now, yieldNow } from "@moq/clock";
 import { SessionError, StreamError } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
 import * as QMux from "./index.ts";
-import Session, { type Config } from "./session.ts";
+import { type Config, Session } from "./session.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
 import type { WebSocketLike, WebSocketStreamLike } from "./web-socket-stream.ts";
@@ -177,9 +177,9 @@ class FakeServerSocket implements WebSocketLike {
 
 /** Poll an observable condition with a bounded timeout (no fixed-yield sleeps). */
 async function waitFor(check: () => boolean, timeoutMs = 1000): Promise<void> {
-	const deadline = Instant.add(now(), Nano.fromMilli(Milli(timeoutMs)));
+	const deadline = now().saturatingAdd(Duration.millis(timeoutMs));
 	while (!check()) {
-		if (now() > deadline) throw new Error("timed out waiting for condition");
+		if (now().gt(deadline)) throw new Error("timed out waiting for condition");
 		await yieldNow();
 	}
 }
@@ -877,7 +877,7 @@ describe("Session integration (scripted peer)", () => {
 		const clock = new Manual();
 		const installed = clock.install();
 		try {
-			const { session, peer } = connect({ idleTimeout: 300 });
+			const { session, peer } = connect({ idleTimeout: Duration.millis(300) });
 			await started(peer);
 			await waitFor(() => peer.has("transport_parameters"));
 			peer.send({ type: "transport_parameters", params: peerParams() });
@@ -887,7 +887,7 @@ describe("Session integration (scripted peer)", () => {
 			// every keep-alive tick finds our send side silent.
 			peer.blockWrites();
 			for (let i = 0; i < 40; i++) {
-				await clock.advance(Nano.fromMilli(Milli(50)));
+				await clock.advance(Duration.millis(50));
 				peer.send({ type: "ping_response", sequence: 0n });
 				await settle();
 			}
@@ -950,7 +950,12 @@ describe("Session integration (scripted peer)", () => {
 	});
 
 	test("disabled config uses null and invalid durations fail before opening", () => {
-		for (const value of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+		// A plain number is the old millisecond config, refused rather than misread.
+		for (const value of [
+			Duration.ZERO,
+			Duration.millis(Number.MAX_SAFE_INTEGER + 1),
+			30_000 as unknown as Duration,
+		]) {
 			expect(() => new Session("https://example/test", { config: { idleTimeout: value } })).toThrow(
 				"idleTimeout",
 			);
@@ -1191,7 +1196,7 @@ describe("Session integration (scripted peer)", () => {
 			const before = await wedge(session, peer);
 
 			session.close({ closeCode: 42, reason: "bye" });
-			await clock.advance(Nano.fromMilli(Milli(1000)));
+			await clock.advance(Duration.millis(1000));
 			await settle();
 			expect(peer.closeInfo).toBeUndefined();
 
@@ -1208,11 +1213,11 @@ describe("Session integration (scripted peer)", () => {
 			await wedge(session, peer);
 
 			session.close({ closeCode: 42, reason: "bye" });
-			await clock.advance(Nano.fromMilli(Milli(2999)));
+			await clock.advance(Duration.millis(2999));
 			await settle();
 			expect(peer.closeInfo).toBeUndefined();
 
-			await clock.advance(Nano.fromMilli(Milli(1)));
+			await clock.advance(Duration.millis(1));
 			await settle();
 			expect(peer.closeInfo).toBeDefined();
 			expect(peer.has("application_close")).toBe(false);
@@ -1245,13 +1250,46 @@ describe("Session integration (scripted peer)", () => {
 			expect(await session.closed).toEqual({ closeCode: 1002, reason: "bye" });
 		});
 
+		test("a peer APPLICATION_CLOSE ends the incoming readables cleanly", async () => {
+			const { session, peer } = connect();
+			await started(peer);
+
+			peer.send({ type: "application_close", code: VarInt.from(42), reason: "bye" });
+			await session.closed;
+			expect(await session.incomingBidirectionalStreams.getReader().read()).toEqual({
+				done: true,
+				value: undefined,
+			});
+			expect(await session.incomingUnidirectionalStreams.getReader().read()).toEqual({
+				done: true,
+				value: undefined,
+			});
+			expect(await session.datagrams.readable.getReader().read()).toEqual({ done: true, value: undefined });
+		});
+
+		test("a peer CONNECTION_CLOSE errors the incoming readables with its cause", async () => {
+			const { session, peer } = connect();
+			await started(peer);
+
+			peer.send({ type: "connection_close", code: VarInt.from(1002), reason: "bad" });
+			await expectSessionFailure(session);
+			for (const readable of [
+				session.incomingBidirectionalStreams,
+				session.incomingUnidirectionalStreams,
+				session.datagrams.readable,
+			] as ReadableStream<unknown>[]) {
+				const err = await settleTo(readable.getReader().read());
+				expect((err as Error).message).toBe("Connection closed: 1002 bad");
+			}
+		});
+
 		test("a peer CONNECTION_CLOSE rejects closed", async () => {
 			const { session, peer } = connect();
 			await started(peer);
 
 			// The peer detected a protocol violation / transport error and sent a
 			// CONNECTION_CLOSE (0x1c) - abnormal, so `closed` rejects rather than
-			// fulfilling. Mirrors the frame we emit from #abort.
+			// fulfilling. Mirrors the frame we emit on a violation we detect.
 			peer.send({
 				type: "connection_close",
 				code: VarInt.from(1002),
@@ -1294,7 +1332,7 @@ describe("Session integration (scripted peer)", () => {
 			const clock = new Manual();
 			const installed = clock.install();
 			try {
-				const { session, peer } = connect({ idleTimeout: 150 });
+				const { session, peer } = connect({ idleTimeout: Duration.millis(150) });
 				await started(peer);
 				await waitFor(() => peer.has("transport_parameters"));
 				// A successfully written keep-alive is send activity under QMux. Block the
@@ -1314,10 +1352,10 @@ describe("Session integration (scripted peer)", () => {
 				);
 
 				// Exactly at the deadline the session is still open; one tick past it closes.
-				await clock.advance(Nano.fromMilli(Milli(150)));
+				await clock.advance(Duration.millis(150));
 				await settle();
 				expect(settled).toBe(false);
-				await clock.advance(Nano.fromMilli(Milli(50)));
+				await clock.advance(Duration.millis(50));
 
 				const err = await expectSessionFailure(session);
 				expect(err.message).toContain("idle timeout");
@@ -1331,11 +1369,11 @@ describe("Session integration (scripted peer)", () => {
 			const clock = new Manual();
 			const installed = clock.install();
 			try {
-				const { session, peer } = connect({ idleTimeout: 150 });
+				const { session, peer } = connect({ idleTimeout: Duration.millis(150) });
 				await started(peer);
 				await waitFor(() => peer.has("transport_parameters"));
 
-				await clock.advance(Nano.fromMilli(Milli(200)));
+				await clock.advance(Duration.millis(200));
 				const err = await expectSessionFailure(session);
 				expect(err.message).toContain("idle timeout");
 				expect(peer.has("ping_request")).toBe(false);
@@ -1348,14 +1386,14 @@ describe("Session integration (scripted peer)", () => {
 			const clock = new Manual();
 			const installed = clock.install();
 			try {
-				const { session, peer } = connect({ idleTimeout: 120 });
+				const { session, peer } = connect({ idleTimeout: Duration.millis(120) });
 				peer.send({ type: "transport_parameters", params: peerParams() });
 				await session.ready;
 
 				const writable = await session.createUnidirectionalStream();
 				const writer = writable.getWriter();
 				for (let i = 0; i < 6; i++) {
-					await clock.advance(Nano.fromMilli(Milli(45)));
+					await clock.advance(Duration.millis(45));
 					await writer.write(new Uint8Array([i]));
 					// The peer answers every other write, as a live peer responding to the
 					// keep-alive would. A send restarts the deadline only once per receive
@@ -1382,7 +1420,7 @@ describe("Session integration (scripted peer)", () => {
 			const clock = new Manual();
 			const installed = clock.install();
 			try {
-				const { session, peer } = connect({ idleTimeout: 120 });
+				const { session, peer } = connect({ idleTimeout: Duration.millis(120) });
 				peer.send({ type: "transport_parameters", params: peerParams() });
 				await session.ready;
 
@@ -1390,7 +1428,7 @@ describe("Session integration (scripted peer)", () => {
 				const writer = writable.getWriter();
 				try {
 					for (let i = 0; i < 12; i++) {
-						await clock.advance(Nano.fromMilli(Milli(45)));
+						await clock.advance(Duration.millis(45));
 						await writer.write(new Uint8Array([i]));
 						await settle();
 					}
@@ -1756,7 +1794,7 @@ describe("Session integration (scripted peer)", () => {
 		await session.ready;
 
 		const reader = session.datagrams.readable.getReader();
-		session.close(); // graceful: no #closeReason, so the readable must not error
+		session.close(); // graceful, so the readable must not error
 		const { done } = await reader.read();
 		expect(done).toBe(true);
 	});
@@ -2504,8 +2542,7 @@ describe("Session integration (scripted peer)", () => {
 		const { session, peer } = connect();
 		await started(peer);
 
-		// Graceful app-initiated close leaves #closeReason unset, so the synchronous
-		// already-closed throw must fall back to #closed's "Connection closed: <code> <reason>",
+		// A graceful close still throws the descriptive "Connection closed: <code> <reason>",
 		// not a generic "Connection closed".
 		session.close({ closeCode: 5, reason: "done" });
 
@@ -2723,14 +2760,17 @@ describe("STREAM frame size", () => {
 		const clock = new Manual();
 		const installed = clock.install();
 		try {
-			const { session, peer } = accept({ protocol: "qmux-00", config: { handshakeTimeout: 150 } });
+			const { session, peer } = accept({
+				protocol: "qmux-00",
+				config: { handshakeTimeout: Duration.millis(150) },
+			});
 			await started(peer);
 			const ready = settleTo(session.ready);
 
-			await clock.advance(Nano.fromMilli(Milli(150)));
+			await clock.advance(Duration.millis(150));
 			await settle();
 			expect(peer.has("connection_close")).toBe(false);
-			await clock.advance(Nano.fromMilli(Milli(50)));
+			await clock.advance(Duration.millis(50));
 
 			const err = await expectSessionFailure(session);
 			expect(err.message).toContain("handshake timeout");

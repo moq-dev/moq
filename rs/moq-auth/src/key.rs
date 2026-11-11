@@ -399,12 +399,6 @@ impl Key {
 		std::fs::read_to_string(&path)?.parse()
 	}
 
-	/// Async version of [`from_file`](Self::from_file), using `tokio::fs`.
-	#[cfg(any(feature = "client", feature = "serve"))]
-	pub async fn from_file_async<P: AsRef<StdPath>>(path: P) -> crate::Result<Self> {
-		tokio::fs::read_to_string(path).await?.parse()
-	}
-
 	/// Encode the key as base64url-encoded JSON.
 	pub fn to_str(&self) -> crate::Result<String> {
 		let json = serde_json::to_string(self)?;
@@ -569,8 +563,8 @@ impl Key {
 
 				// rind refuses a `d` whose public key is not this `x` and `y`.
 				let point = [&[0x04][..], x.as_slice(), y.as_slice()].concat();
-				let pair = EcdsaKeyPair::from_private_key_and_public_key(algorithm, d, &point)
-					.map_err(crate::Error::crypto)?;
+				let pair =
+					EcdsaKeyPair::from_scalar_and_public_key(algorithm, d, &point).map_err(crate::Error::crypto)?;
 				EncodingKey::from_ec_der(pair.to_pkcs8().as_ref())
 			}
 			KeyMaterial::OKP {

@@ -8,7 +8,7 @@ use std::{
 	time::Duration,
 };
 
-use moq_tokio::{Client, Connection, moq_net};
+use moq_tokio::{Client, Connection};
 use tokio::{net::UdpSocket, sync::mpsc};
 
 const DIAL: Duration = Duration::from_secs(1);
@@ -40,8 +40,8 @@ async fn peer() -> (SocketAddr, mpsc::UnboundedReceiver<(SocketAddr, moq_net::Se
 	(addr, recv)
 }
 
-/// The first source starts blocked; other sources get independent upstream sockets,
-/// as in the relay's cluster_fresh_port test. Report each source only once.
+/// Each source gets an independent upstream socket, as in the relay's cluster_fresh_port
+/// test, and a blocked source is black-holed. Report each source only once.
 struct Proxy {
 	addr: SocketAddr,
 	sources: mpsc::UnboundedReceiver<SocketAddr>,
@@ -61,9 +61,6 @@ async fn proxy(upstream: SocketAddr) -> Proxy {
 		loop {
 			let (len, source) = front.recv_from(&mut buf).await.unwrap();
 			if heard.insert(source) {
-				if heard.len() == 1 {
-					drop_sources.lock().unwrap().insert(source);
-				}
 				send.send(source).unwrap();
 			}
 			if drop_sources.lock().unwrap().contains(&source) {
@@ -114,13 +111,29 @@ fn connect(client: &Client, addr: SocketAddr) -> Connection {
 	client.connect(format!("moqt://{addr}/").parse::<url::Url>().unwrap())
 }
 
+/// Black-hole `source` and end the session it carried, waiting until `connection` sees it go.
+///
+/// A first dial that fails ends the loop rather than retrying, so a test of how the loop
+/// redials starts from an established session and drops its flow with this.
+async fn drop_flow(proxy: &Proxy, source: SocketAddr, session: moq_net::Session, connection: &Connection) {
+	proxy.blocked.lock().unwrap().insert(source);
+	let monitor = connection.monitor();
+	let revision = monitor.state().revision;
+	drop(session);
+	socket_step(monitor.state_changed(revision)).await.unwrap();
+}
+
 /// Advance one failed dial and wait until the reconnect loop observes it.
 async fn fail(connection: &Connection) {
 	let monitor = connection.monitor();
 	let before = monitor.state().revision;
 	tokio::time::advance(DIAL).await;
 	let state = monitor.state_changed(before).await.unwrap();
-	assert!(state.failure.is_some());
+	assert!(matches!(
+		state.phase,
+		moq_tokio::connection::Phase::Connecting { failure: Some(_) }
+			| moq_tokio::connection::Phase::Disconnected { failure: Some(_) }
+	));
 }
 
 #[tokio::test(start_paused = true)]
@@ -130,9 +143,11 @@ async fn a_dropped_flow_recovers_without_moving_a_healthy_connection() {
 	let healthy = socket_step(connect(&client, peer).established()).await.unwrap();
 	let (healthy_addr, healthy_session) = socket_step(sessions.recv()).await.unwrap();
 	let mut proxy = proxy(peer).await;
-	let reconnect = connect(&client, proxy.addr);
+	let reconnect = socket_step(connect(&client, proxy.addr).established()).await.unwrap();
 	let first = socket_step(proxy.sources.recv()).await.unwrap();
 	assert_eq!(first, healthy_addr);
+	let (_, session) = socket_step(sessions.recv()).await.unwrap();
+	drop_flow(&proxy, first, session, &reconnect).await;
 
 	fail(&reconnect).await;
 	assert!(proxy.sources.try_recv().is_err(), "one failed dial changed the port");
@@ -142,7 +157,11 @@ async fn a_dropped_flow_recovers_without_moving_a_healthy_connection() {
 	let reconnect = socket_step(reconnect.established()).await.unwrap();
 	let (_, recovered_session) = socket_step(sessions.recv()).await.unwrap();
 	assert_eq!(healthy.connects(), 1);
-	assert_eq!(healthy.monitor().state().phase, moq_tokio::connection::Phase::Connected);
+	assert_eq!(reconnect.connects(), 2);
+	assert!(matches!(
+		healthy.monitor().state().phase,
+		moq_tokio::connection::Phase::Connected { .. }
+	));
 
 	// The original client still owns and closes endpoints created by its reconnect loops.
 	socket_step(client.close()).await;
@@ -162,27 +181,25 @@ async fn a_successful_dial_resets_the_failure_count() {
 	let (peer, mut sessions) = peer().await;
 	let client = client("127.0.0.1:0".parse().unwrap());
 	let mut proxy = proxy(peer).await;
-	let reconnect = connect(&client, proxy.addr);
+	let mut reconnect = socket_step(connect(&client, proxy.addr).established()).await.unwrap();
 	let first = socket_step(proxy.sources.recv()).await.unwrap();
-	fail(&reconnect).await;
-	proxy.blocked.lock().unwrap().remove(&first);
-	let reconnect = socket_step(reconnect.established()).await.unwrap();
-	let (_, session) = socket_step(sessions.recv()).await.unwrap();
+	let (_, mut session) = socket_step(sessions.recv()).await.unwrap();
 
-	proxy.blocked.lock().unwrap().insert(first);
-	drop(session);
-	let monitor = reconnect.monitor();
-	let revision = monitor.state().revision;
-	socket_step(monitor.state_changed(revision)).await.unwrap();
-	fail(&reconnect).await;
-	proxy.blocked.lock().unwrap().remove(&first);
-	let reconnect = socket_step(reconnect.established()).await.unwrap();
-	let (_, _session) = socket_step(sessions.recv()).await.unwrap();
+	// One failed walk each time, so only a count the session in between failed to reset
+	// reaches the second failure that moves to a fresh port.
+	for _ in 0..2 {
+		drop_flow(&proxy, first, session, &reconnect).await;
+		fail(&reconnect).await;
+		proxy.blocked.lock().unwrap().remove(&first);
+		reconnect = socket_step(reconnect.established()).await.unwrap();
+		(_, session) = socket_step(sessions.recv()).await.unwrap();
+	}
 	assert!(
 		proxy.sources.try_recv().is_err(),
 		"success did not reset the failed-dial count"
 	);
-	assert_eq!(reconnect.connects(), 2);
+	assert_eq!(reconnect.connects(), 3);
+	drop(session);
 	socket_step(client.close()).await;
 }
 
@@ -219,8 +236,10 @@ fn a_failed_socket_allocation_keeps_the_old_port_available_for_redial() {
 			let (peer, mut sessions) = peer().await;
 			let client = client("127.0.0.1:0".parse().unwrap());
 			let mut proxy = proxy(peer).await;
-			let reconnect = connect(&client, proxy.addr);
+			let reconnect = socket_step(connect(&client, proxy.addr).established()).await.unwrap();
 			let first = socket_step(proxy.sources.recv()).await.unwrap();
+			let (_, session) = socket_step(sessions.recv()).await.unwrap();
+			drop_flow(&proxy, first, session, &reconnect).await;
 
 			let mut limit = libc::rlimit {
 				rlim_cur: 0,
@@ -240,26 +259,28 @@ fn a_failed_socket_allocation_keeps_the_old_port_available_for_redial() {
 			let reconnect = socket_step(reconnect.established()).await.unwrap();
 			let (_, _session) = socket_step(sessions.recv()).await.unwrap();
 			assert!(proxy.sources.try_recv().is_err(), "the old socket was replaced");
-			assert_eq!(reconnect.connects(), 1);
+			assert_eq!(reconnect.connects(), 2);
 			socket_step(client.close()).await;
 		});
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_fixed_bind_port_survives_consecutive_failed_dials() {
-	let (peer, _sessions) = peer().await;
+	let (peer, mut sessions) = peer().await;
 	let reserved = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
 	let bind = reserved.local_addr().unwrap();
 	drop(reserved);
 	let client = client(bind);
 	let mut proxy = proxy(peer).await;
-	let reconnect = connect(&client, proxy.addr);
+	let reconnect = socket_step(connect(&client, proxy.addr).established()).await.unwrap();
 	assert_eq!(socket_step(proxy.sources.recv()).await.unwrap(), bind);
+	let (_, session) = socket_step(sessions.recv()).await.unwrap();
+	drop_flow(&proxy, bind, session, &reconnect).await;
 	for _ in 0..4 {
 		fail(&reconnect).await;
 	}
 	assert!(proxy.sources.try_recv().is_err(), "a fixed bind port changed");
-	assert_eq!(reconnect.connects(), 0);
+	assert_eq!(reconnect.connects(), 1);
 	drop(reconnect);
 	socket_step(client.close()).await;
 }

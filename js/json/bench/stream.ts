@@ -8,7 +8,7 @@ for (const records of [64, 1024]) {
 		for (const compress of [false, true]) {
 			const samples: number[] = [];
 			for (let sample = 0; sample < 6; sample++) {
-				const track = new Track.Producer("stream-bench").accept({ compress });
+				const track = new Track.Producer("stream-bench").accept({ compression: compress ? "deflate" : "none" });
 				const producer = new Producer<{ n: number; text: string }>({ track });
 				const text = "x".repeat(bytes);
 				for (let n = 0; n < records; n++) producer.append({ value: { n, text } });

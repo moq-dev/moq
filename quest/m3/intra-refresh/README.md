@@ -46,12 +46,3 @@ make these presentation guarantees true even when sweep lengths change.
   a true IDR needs none.
 - H.264 and H.265 only. AV1 and VP9 have no standard gradual refresh signal.
   WebCodecs has no intra-refresh option, so js/publish is consumer-only.
-
-## Required
-
-- [Dual decoder](/quest/m3/intra-refresh/dual-decoder.md) - js/watch's two decoders open on an H.264 recovery point in Firefox and Safari, as they now do in Chromium
-- [Plan: recovery boundaries](/quest/m2/intra-refresh-boundary.md) - settle publication ordering for a later, longer sweep
-- [Consumer warmup](/quest/m3/intra-refresh/consumer-warmup.md) - the transcoder decodes the groups covering `warmup` as history before each group, except at a true IDR
-- [H.264 import](/quest/m3/intra-refresh/h264-import.md) - the splitter keeps `recovery_frame_cnt` and import publishes `warmup` from it
-- [H.265 import](/quest/m3/intra-refresh/h265-import.md) - the splitter reads the recovery-point SEI so an HEVC intra-refresh stream forms groups and publishes `warmup`
-- [Export sync flags](/quest/m3/intra-refresh/export-sync-flags.md) - fmp4, MKV, and HLS stop advertising a refresh group start as a sync sample

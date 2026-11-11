@@ -43,6 +43,11 @@ never filled from a `Host` header or a WebTransport authority. The client still 
 the relay serves, so a hostname-scoped server binds the tenant to the
 credential, not to `server_name` alone.
 
+`host` is the host the client dialed, without its port: the `Host` header or
+URL authority on HTTP, WebSocket, and WebTransport, and the SNI on raw QUIC and
+`tls://`. Unlike `server_name` it is present over plaintext, so a server that
+scopes tenants by hostname can read `host`; it is just as client-chosen.
+
 **Connect.** A 2xx with a grant admits. A 403 can carry JSON such as
 `{"reason":"expired","root":"rooms/123","tier":"edge"}`. The reason is
 `refused`, `forbidden`, `expired`, or `malformed` (the token does not parse);
@@ -163,9 +168,9 @@ key can itself be **scoped** at generation (`--root`, `--publish`,
 
 ### In-band renewal
 
-On moq-lite-07-wip or moq-transport draft-18 and later with MoQ Auth negotiated,
-a client can present another JWT without reconnecting. Present its replacement
-before the current grant expires and keep the returned token handle alive.
+On moq-lite-07-wip a client can present another JWT without reconnecting.
+Present its replacement before the current grant expires and keep the returned
+token handle alive.
 The auth handle a reconnecting connection owns (native `Connection::auth()`,
 JavaScript `connection.auth`) presents its tokens again on every reconnect.
 A native client can instead replace its configured tokens through its
@@ -497,7 +502,7 @@ patterns: `--auth-public 'PREFIX/**'`.
 | `--auth-mtls-tier LABEL` | `--tier LABEL` (one tier per server) |
 | `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` |
 | `--auth-api` (token or proxy mode), `Cache-Control` | `--auth-url` pointed at any server answering the contract; `revalidate` and `expires` in the grant |
-| `--auth-domain` | your server reads `server_name` and decides |
+| `--auth-domain` | your server reads `host` (present over plaintext too) and decides |
 
 Both on one host:
 

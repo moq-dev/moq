@@ -1,5 +1,5 @@
 /** Sweep retained groups, unrelated tracks, and joined readers for a refresh crossing one lite hop. */
-import { Manual, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
 import { ALPN_07_WIP } from "../src/lite/version.ts";
@@ -83,7 +83,7 @@ for (const retained of [1, 64, 1024])
 				destination.close();
 				source.close();
 				for (const peer of peers) peer.abort();
-				await clock.advance(Nano(0));
+				await clock.advance(Duration.nanos(0));
 				installed.close();
 			}
 		}

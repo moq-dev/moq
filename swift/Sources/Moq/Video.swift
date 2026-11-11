@@ -1,3 +1,4 @@
+import Foundation
 import MoqFFI
 
 /// Native video encoding, publication, and decoding.
@@ -15,7 +16,64 @@ public enum Video {
     public typealias Frame = VideoFrame
     /// One item a `Consumer` reads, in delivery order: a decoded `.frame`, a `.gap`
     /// where media was lost, or an `.end` where the publisher stopped its encoder.
-    public typealias Read = MoqVideoRead
+    public enum Read: Sendable {
+        /// A decoded picture; release it promptly, since held frames stall the decoder.
+        case frame(DecodedFrame)
+        /// Media after `timestamp` was lost; what follows resumes within `duration` and does not continue it.
+        case gap(timestamp: Timestamp, duration: TimeInterval)
+        /// The publisher stopped its encoder at `end`; what follows comes from a fresh encoder.
+        case end(Timestamp)
+
+        init(_ read: MoqVideoRead) {
+            switch read {
+            case .frame(let frame): self = .frame(DecodedFrame(frame))
+            case .gap(let timestamp, let duration): self = .gap(timestamp: timestamp, duration: duration)
+            case .end(let end): self = .end(end)
+            }
+        }
+    }
+
+    /// One decoded picture, owning the decoder's surface until released;
+    /// `pixels(format:)` converts it to packed CPU pixels.
+    public final class DecodedFrame: Sendable {
+        let ffi: MoqVideoDecodedFrame
+
+        init(_ ffi: MoqVideoDecodedFrame) {
+            self.ffi = ffi
+        }
+
+        /// The presentation timestamp.
+        public func timestamp() -> Timestamp { ffi.timestamp() }
+
+        /// The decoded width in pixels; `resize` is only a hint.
+        public func width() -> UInt32 { ffi.width() }
+
+        /// The decoded height in pixels.
+        public func height() -> UInt32 { ffi.height() }
+
+        /// The picture converted to tightly packed CPU pixels in `format`.
+        public func pixels(format: PixelFormat) throws -> Data { try ffi.pixels(format: format) }
+
+        /// The decoder's platform surface, or `nil` when the frame is in CPU memory.
+        public func surface() -> Surface? { ffi.surface().map(Surface.init) }
+    }
+
+    /// The platform image backing a `DecodedFrame`, when `DecoderOutput` asked for one.
+    public enum Surface: Sendable, Equatable {
+        /// A borrowed `CVPixelBufferRef` address, valid while its frame lives.
+        case pixelBuffer(pointer: UInt64)
+        /// A surface kind this version of the package does not know yet.
+        case unknown
+
+        init(_ surface: MoqVideoSurface) {
+            // `if case` rather than `switch`, so a variant this package predates maps to `.unknown`.
+            if case .pixelBuffer(let pointer) = surface {
+                self = .pixelBuffer(pointer: pointer)
+            } else {
+                self = .unknown
+            }
+        }
+    }
     /// One encoded access unit from an `Encoder`.
     public typealias Packet = MoqVideoPacket
     /// A video codec identifier (H.264 or H.265).
@@ -127,7 +185,7 @@ public enum Video {
 
         /// The next frame, gap, or end, or `nil` once the track ends or is closed.
         public func next() async throws -> Read? {
-            try await ffi.next()
+            try await ffi.next().map(Read.init)
         }
 
         /// Cancel all current and future reads.
@@ -139,7 +197,7 @@ public enum Video {
         public func makeAsyncIterator() -> AsyncThrowingStream<Read, Swift.Error>.Iterator {
 
             moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
-                try await ffi.next()
+                try await ffi.next().map(Read.init)
             }.makeAsyncIterator()
         }
     }
@@ -153,8 +211,11 @@ public enum Video {
             ffi = try MoqVideoEncoder(input: input, output: output)
         }
 
-        /// Encode one picture, returning any access units now available.
-        public func encode(_ frame: Frame) throws -> [Packet] { try ffi.encode(frame: frame) }
+        /// Submit one picture, whose access units `receive` returns.
+        public func encode(_ frame: Frame) throws { try ffi.encode(frame: frame) }
+
+        /// Pop the oldest ready access unit, or nil while the codec holds the rest; call until nil.
+        public func receive() throws -> Packet? { try ffi.receive() }
 
         /// Force the next encoded picture to start a new group.
         public func cut() throws { try ffi.cut() }
@@ -162,10 +223,7 @@ public enum Video {
         /// Retune the live encoder in bits per second.
         public func setBitrate(_ bitrate: UInt64) throws { try ffi.setBitrate(bitrate: bitrate) }
 
-        /// Drain buffered access units and keep the encoder open.
-        public func flush() throws -> [Packet] { try ffi.flush() }
-
-        /// Drain and close the encoder.
-        public func finish() throws -> [Packet] { try ffi.finish() }
+        /// Mark the end of input, so `receive` returns every access unit the codec still holds, without closing the encoder.
+        public func flush() throws { try ffi.flush() }
     }
 }

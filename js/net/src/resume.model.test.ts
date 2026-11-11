@@ -12,7 +12,7 @@
  */
 
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import fc from "fast-check";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, StreamCode, StreamError, TooFarBehind } from "./error.ts";
@@ -32,13 +32,13 @@ const GROUPS = 12;
 /** Routes per instance, cheaper the higher the slot. */
 const SLOTS = 3;
 /** The first instance, then one whose routes all undercut it. */
-const INSTANCES = [Instance.parse("first"), Instance.parse("second")];
+const INSTANCES: readonly Instance.Valid[] = [Instance.parse("first"), Instance.parse("second")];
 const READERS = 4;
 const PATH = Path.from("room/alice");
 /** A budget nothing in a case outlives. */
-const HOUR = Milli(3_600_000);
+const HOUR = Duration.millis(3_600_000);
 /** A budget spanning about three groups. */
-const SHORT = Milli(30);
+const SHORT = Duration.millis(30);
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -400,10 +400,10 @@ class Model {
 				this.end(op.instance, op.slot);
 				break;
 			case "advance":
-				await this.clock.advance(Nano.fromMilli(Milli(op.ms)));
+				await this.clock.advance(Duration.millis(op.ms));
 				break;
 			case "expire":
-				await this.clock.advance(Nano.fromMilli(Milli(60_000)));
+				await this.clock.advance(Duration.millis(60_000));
 				for (const instance of this.instances) instance.expired = instance.newest();
 				for (const reader of this.readers) {
 					if (reader) reader.floor = this.instances[reader.instance].newest();
@@ -553,7 +553,7 @@ class Model {
 				request.close();
 				throw fail(index, `request failed: ${closed ?? "never resolved"}`);
 			}
-			await this.clock.advance(Nano.zero);
+			await this.clock.advance(Duration.ZERO);
 		}
 		const broadcast = request.active.peek();
 		const instance = broadcast?.instance === undefined ? -1 : INSTANCES.indexOf(broadcast.instance);
@@ -725,7 +725,7 @@ class Model {
 		let quiet = 0;
 		for (let round = 0; round < 10_000; round++) {
 			const progress = this.progress;
-			await this.clock.advance(Nano.zero);
+			await this.clock.advance(Duration.ZERO);
 			if (this.failure) throw this.failure;
 			let woken = this.progress !== progress;
 			for (let index = 0; index < READERS; index++) {
@@ -842,7 +842,7 @@ class Model {
 			}
 		}
 		this.origin.close();
-		await this.clock.advance(Nano.zero);
+		await this.clock.advance(Duration.ZERO);
 	}
 }
 

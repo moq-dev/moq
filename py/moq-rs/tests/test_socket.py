@@ -74,7 +74,7 @@ async def test_refusal_and_cancelled_wait_leave_endpoint_usable():
     incoming.reject()
     with pytest.raises(moq.Error.NotFound):
         await dial
-    with pytest.raises(moq.Error.Closed):
+    with pytest.raises(moq.Error.AlreadyResponded):
         incoming.reject()
     client, server = await tcp(a, b)
     assert client.session == server.session
@@ -108,10 +108,7 @@ async def test_tcp_rst_and_endpoint_close_are_errors():
     assert reset.value.details.code == 64 + 17
     client, server = await tcp(a, b)
     a.close()
-    # The stream's reset and the endpoint's retraction race, so either shutdown error can
-    # reach the reader. The contract promises no clean EOF here, not a cause.
-    shutdown: tuple[type[BaseException], ...] = (moq.Error.Cancelled, moq.Error.Closed)
-    with pytest.raises(shutdown):
+    with pytest.raises(moq.Error.Closed):
         await server.consumer.read_frame()
     b.close()
 
@@ -254,6 +251,6 @@ async def test_tcp_ready_paces_a_writer_behind_a_slow_reader():
 
 
 if __name__ == "__main__":
-    from moq.testing import Clock
+    from clock import Clock
 
     asyncio.run(late_peer(Clock()))

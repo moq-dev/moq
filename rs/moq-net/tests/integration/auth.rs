@@ -1,8 +1,8 @@
 #![cfg(feature = "async")]
 
 //! In-band AUTH over the in-memory mock transport: both sides learn their grant,
-//! tokens union, and a publication outside the grant fails loud. Every case runs on
-//! moq-lite-07-wip and on moq-transport with the MoQ Auth extension.
+//! tokens union, and a publication outside the grant fails loud, on moq-lite-07-wip.
+//! moq-transport carries tokens only on the requests that name them.
 
 use crate::support;
 
@@ -31,21 +31,15 @@ const LITE_07: &str = "moq-lite-07-wip";
 const LITE_06: &str = "moq-lite-06";
 /// The lite Auth Stream's type byte.
 const AUTH_STREAM: u8 = 0x7;
-/// The oldest draft we speak, which negotiates MoQ Auth, and the newest.
+/// The oldest draft we speak, and the newest.
 const MOQT_18: &str = "moq-transport-18";
 const MOQT_22: &str = "moq-transport-22";
 
-/// Run each case on every version that exchanges AUTH.
+/// Run each case on the version that exchanges AUTH.
 macro_rules! cases {
 	($($case:ident),* $(,)?) => {
 		mod lite_07 {
 			$(#[kio::test] async fn $case() { super::$case(super::LITE_07).await })*
-		}
-		mod moqt_18 {
-			$(#[kio::test] async fn $case() { super::$case(super::MOQT_18).await })*
-		}
-		mod moqt_22 {
-			$(#[kio::test] async fn $case() { super::$case(super::MOQT_22).await })*
 		}
 	};
 }
@@ -80,26 +74,24 @@ cases!(
 	a_wildcard_grant_is_enforced,
 );
 
-/// moq-transport's AUTH_ERROR carries no code that may pass, so only lite retries.
 #[kio::test]
 async fn lite_07_presents_a_transiently_refused_token_again() {
 	a_transient_refusal_is_presented_again(LITE_07).await
 }
 
-/// moq-transport's u16 message size is the one a test can overflow quickly.
-#[kio::test]
-async fn moqt_18_a_grant_too_large_for_one_message_is_unsupported() {
-	a_grant_too_large_for_one_message_is_unsupported(MOQT_18).await
-}
-
-#[kio::test]
-async fn moqt_22_a_grant_too_large_for_one_message_is_unsupported() {
-	a_grant_too_large_for_one_message_is_unsupported(MOQT_22).await
-}
-
 #[kio::test]
 async fn lite_06_has_no_grant() {
 	older_versions_have_no_grant(LITE_06).await
+}
+
+#[kio::test]
+async fn moqt_18_has_no_grant() {
+	older_versions_have_no_grant(MOQT_18).await
+}
+
+#[kio::test]
+async fn moqt_22_has_no_grant() {
+	older_versions_have_no_grant(MOQT_22).await
 }
 
 /// The control for the lite versions without AUTH: on the same barrier, lite-07 has
@@ -119,6 +111,22 @@ async fn lite_07_opens_an_auth_stream_per_side() {
 	})
 	.await
 	.expect("timed out");
+}
+
+/// Floors certify withdrawals only on lite-07.
+#[kio::test]
+async fn lite_07_a_scoped_withdrawal_ends() {
+	a_scoped_withdrawal_ends(LITE_07).await
+}
+
+#[kio::test]
+async fn lite_07_a_scope_change_reopens_without_letting_go() {
+	a_scope_change_reopens_without_letting_go(LITE_07).await
+}
+
+#[kio::test]
+async fn lite_07_a_scope_change_at_the_announce_cap_keeps_the_session() {
+	a_scope_change_at_the_announce_cap_keeps_the_session(LITE_07).await
 }
 
 #[kio::test]
@@ -230,50 +238,9 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 	.expect("timed out");
 }
 
-/// A route auth the peer revokes on its AUTH stream is no longer carried, so its request is
-/// made again without it, even while another token keeps the session's grant unchanged.
-#[kio::test]
-async fn moqt_22_a_revoked_route_auth_remakes_its_announce() {
-	within(async {
-		let client_origin = produce_origin(2);
-		let server_origin = produce_origin(1);
-		let mut extensions = moq_net::setup::Extensions::default();
-		extensions.solicit = false;
-		let mut pair = connect(Options {
-			version: Some(MOQT_22),
-			client_publish: Some(client_origin.clone()),
-			server_subscribe: Some(server_origin.clone()),
-			server_requests: true,
-			server_extensions: Some(extensions),
-			..Default::default()
-		})
-		.await;
-		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
-		let (token, _setup) = tokens.next().await.expect("the setup token");
-		assert!(token.is_empty());
-
-		let first = pair.client.auth().add("first").await.expect("granted");
-		let (token, presented) = tokens.next().await.expect("the AUTH stream's token");
-		assert_eq!(token, b"first");
-		let _route = client_origin
-			.route("room/x", origin::RouteOptions::default().with_auth(first))
-			.unwrap();
-		let (token, carried) = tokens.next().await.expect("the announce's token");
-		assert_eq!(token, b"first");
-		wait_announced(&server_origin.consume(), "room/x", true).await;
-
-		presented.revoke(SessionError::Unauthorized, "revoked");
-		carried.closed().await;
-		wait_announced(&server_origin.consume(), "room/x", true).await;
-		assert_eq!(pair.client_transport.close_reason(), None);
-	})
-	.await
-	.expect("timed out");
-}
-
-/// A pair where the client declines MoQ Auth, so every token the server sees rode a
-/// request, and the server declines MoQ Solicit, so the client announces with
-/// PUBLISH_NAMESPACE rather than answering a SUBSCRIBE_NAMESPACE.
+/// A moq-transport pair: every token the server sees rode a request, and the server
+/// declines MoQ Solicit, so the client announces with PUBLISH_NAMESPACE rather than
+/// answering a SUBSCRIBE_NAMESPACE.
 async fn connect_route_auth(version: &'static str) -> (Pair, origin::Producer, origin::Producer) {
 	let client_origin = produce_origin(2);
 	let server_origin = produce_origin(1);
@@ -288,18 +255,16 @@ async fn connect_route_auth_on(
 	server_origin: &origin::Producer,
 	client_auth: Option<auth::Handle>,
 ) -> Pair {
-	let declined = |f: fn(&mut moq_net::setup::Extensions)| {
-		let mut extensions = moq_net::setup::Extensions::default();
-		f(&mut extensions);
-		Some(extensions)
-	};
 	connect(Options {
 		version: Some(version),
 		client_publish: Some(client_origin.clone()),
 		server_subscribe: Some(server_origin.clone()),
 		server_requests: true,
-		client_extensions: declined(|e| e.auth = false),
-		server_extensions: declined(|e| e.solicit = false),
+		server_extensions: Some({
+			let mut extensions = moq_net::setup::Extensions::default();
+			extensions.solicit = false;
+			extensions
+		}),
 		client_auth,
 		..Default::default()
 	})
@@ -365,7 +330,7 @@ async fn a_route_auth_renews_its_announce(version: &'static str) {
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn patterns(prefixes: &[&str]) -> Patterns {
@@ -376,11 +341,15 @@ fn patterns(prefixes: &[&str]) -> Patterns {
 }
 
 fn grant(publish: &[&str], subscribe: &[&str]) -> Grant {
-	Grant {
-		publish: patterns(publish),
-		subscribe: patterns(subscribe),
-		expires: None,
-	}
+	grant_of(patterns(publish), patterns(subscribe))
+}
+
+/// A grant of exactly these paths that never expires.
+fn grant_of(publish: Patterns, subscribe: Patterns) -> Grant {
+	let mut grant = Grant::default();
+	grant.publish = publish;
+	grant.subscribe = subscribe;
+	grant
 }
 
 /// Wait for a watch to hold a grant satisfying `f`.
@@ -404,12 +373,17 @@ async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 	let mut announced = origin.routes();
 	let mut live = std::collections::HashSet::new();
 	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::origin::RouteEvent| match event {
-		moq_net::origin::RouteEvent::Start(update)
-		| moq_net::origin::RouteEvent::Update(update)
-		| moq_net::origin::RouteEvent::Restart(update) => {
+		moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: update,
+		} => {
 			live.insert(update.prefix.to_string());
 		}
-		moq_net::origin::RouteEvent::End(update) => {
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+			announce: update,
+		} => {
 			live.remove(update.prefix.as_str());
 		}
 	};
@@ -434,14 +408,15 @@ struct Options {
 	server_subscribe: Option<origin::Producer>,
 	/// Take the server's AUTH requests before its driver runs.
 	server_requests: bool,
-	/// Each side's extensions, when not the defaults.
-	client_extensions: Option<moq_net::setup::Extensions>,
+	/// The server's extensions, when not the defaults.
 	server_extensions: Option<moq_net::setup::Extensions>,
 	version: Option<&'static str>,
 	/// The connection credential the client's SETUP presents.
 	client_token: Option<&'static [u8]>,
 	/// The handle the client builds its session on, when not its own.
 	client_auth: Option<auth::Handle>,
+	/// The server's session limits, when not the defaults.
+	server_limits: Option<moq_net::session::Limits>,
 }
 
 struct Pair {
@@ -469,9 +444,6 @@ async fn connect(opts: Options) -> Pair {
 			value: token.to_vec(),
 		});
 	}
-	if let Some(extensions) = opts.client_extensions {
-		client = client.with_extensions(extensions);
-	}
 	if let Some(publish) = &opts.client_publish {
 		client = client.with_publisher(publish);
 	}
@@ -491,6 +463,9 @@ async fn connect(opts: Options) -> Pair {
 	}
 	if let Some(subscribe) = opts.server_subscribe {
 		server = server.with_subscriber(subscribe);
+	}
+	if let Some(limits) = opts.server_limits {
+		server = server.with_limits(limits);
 	}
 
 	let observe = client_transport.clone();
@@ -802,6 +777,128 @@ async fn tokens_union_and_withdrawing_one_shrinks_it(version: &'static str) {
 	.expect("timed out");
 }
 
+/// The route events `routes` delivered for `path` so far.
+fn kinds(routes: &mut origin::Routes, path: &str) -> Vec<origin::RouteKind> {
+	let mut kinds = Vec::new();
+	while let Some(event) = futures::FutureExt::now_or_never(routes.next()).flatten() {
+		if event.announce.prefix.as_str() == path {
+			kinds.push(event.kind);
+		}
+	}
+	kinds
+}
+
+/// A relay that limits its publisher to one prefix asks it for that prefix alone, not
+/// for everything, so the publisher's floors certify a withdrawal: it ends rather than
+/// going offline.
+async fn a_scoped_withdrawal_ends(version: &'static str) {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			..Default::default()
+		})
+		.await;
+		pair.server.auth().authorize(&grant(&["a"], &[]));
+
+		let mut routes = relay.consume().routes();
+		let route = publisher.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		route.announce().unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::Start]);
+
+		route.withdraw();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::End]);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// Widening the limit to a second prefix reopens the relay's request above both, and
+/// narrowing it reopens the request at the first again, each without letting go of what
+/// the limit kept: the old request serves until the new one is synced.
+async fn a_scope_change_reopens_without_letting_go(version: &'static str) {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			..Default::default()
+		})
+		.await;
+		pair.server.auth().authorize(&grant(&["a"], &[]));
+
+		let mut routes = relay.consume().routes();
+		let a = publisher.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		a.announce().unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::Start]);
+
+		// Widened past what the first request asked for: the new one carries `b`.
+		pair.server.auth().authorize(&grant(&["a", "b"], &[]));
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		let b = publisher.route("b/y", moq_net::origin::RouteOptions::hidden()).unwrap();
+		b.announce().unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "b/y"), [origin::RouteKind::Start]);
+		assert_eq!(kinds(&mut routes, "a/x"), [], "the widening let go of a/x");
+
+		// Narrowed back to `a`, where a withdrawal is certified again.
+		pair.server.auth().authorize(&grant(&["a"], &[]));
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [], "the narrowing let go of a/x");
+		a.withdraw();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::End]);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A session holding all the announce slots it may has no room to hear its peer's claims
+/// twice, so the old request gives its slots to the new one during a scope change,
+/// rather than the handover running the peer past its cap.
+async fn a_scope_change_at_the_announce_cap_keeps_the_session(version: &'static str) {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let mut limits = moq_net::session::Limits::default();
+		// One route and its two claims.
+		limits.announces = 3;
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			server_limits: Some(limits),
+			..Default::default()
+		})
+		.await;
+		pair.server.auth().authorize(&grant(&["a"], &[]));
+
+		let x = publisher.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		x.announce().unwrap();
+		let y = publisher.route("a/y", moq_net::origin::RouteOptions::hidden()).unwrap();
+		y.announce().unwrap();
+		wait_announced(&relay.consume(), "a/y", true).await;
+		let mut routes = relay.consume().routes();
+		kinds(&mut routes, "a/x");
+
+		pair.server.auth().authorize(&grant(&["a", "b"], &[]));
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [], "the handover let go of a/x");
+		assert_eq!(pair.server_transport.close_reason(), None);
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
 /// An update replaces one token's grant and leaves the other alone.
 async fn an_update_replaces_one_tokens_grant(version: &'static str) {
 	within(async {
@@ -1040,9 +1137,8 @@ async fn an_issued_grant_ends_with_its_session(version: &'static str) {
 	.expect("timed out");
 }
 
-/// A peer that takes no tokens in band says so (lite resets the stream, moq-transport
-/// answers NOT_SUPPORTED), which reads as unsupported rather than a refusal: the same as
-/// a peer that predates AUTH.
+/// A peer that takes no tokens in band says so by resetting the stream, which reads as
+/// unsupported rather than a refusal: the same as a peer that predates AUTH.
 async fn a_reset_auth_stream_reports_unsupported(version: &'static str) {
 	within(async {
 		let pair = connect(Options {
@@ -1306,22 +1402,17 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			}
 		};
 		// The relay's own reader learns the peer's code across the origin's splice, not a
-		// generic drop. moq-transport reports it in PUBLISH_DONE instead.
-		if version == LITE_07 {
-			assert!(matches!(err, Error::Stream(StreamError::Unauthorized)), "{err:?}");
-		}
+		// generic drop.
+		assert!(matches!(err, Error::Stream(StreamError::Unauthorized)), "{err:?}");
 		assert_eq!(pair.client_transport.close_reason(), None);
 
-		// Neither stream claims the session closed. moq-lite resets both with UNAUTHORIZED;
-		// moq-transport has no such stream code and reports it on the request instead.
+		// Neither stream claims the session closed: both reset with UNAUTHORIZED.
 		let resets = pair.client_transport.resets();
 		let closed = StreamError::Session(SessionError::Unauthorized).to_code();
 		assert!(!resets.contains(&closed), "{resets:x?}");
-		if version == LITE_07 {
-			let unauthorized = StreamError::Unauthorized.to_code();
-			let count = resets.iter().filter(|&&code| code == unauthorized).count();
-			assert_eq!(count, 2, "both subscriptions reset with UNAUTHORIZED: {resets:x?}");
-		}
+		let unauthorized = StreamError::Unauthorized.to_code();
+		let count = resets.iter().filter(|&&code| code == unauthorized).count();
+		assert_eq!(count, 2, "both subscriptions reset with UNAUTHORIZED: {resets:x?}");
 	})
 	.await
 	.expect("timed out");
@@ -1403,44 +1494,6 @@ async fn lite_07_a_revoked_grant_cancels_its_datagram_subscriptions() {
 /// A grant that fits no single AUTH_OK is withheld, never trimmed: the presenter is told
 /// it is unsupported, nothing of the message reaches the wire, and the session and the
 /// token that did fit are untouched.
-async fn a_grant_too_large_for_one_message_is_unsupported(version: &'static str) {
-	// Past the u16 message size. The moq-lite ceiling is 64 MiB, too slow to build here;
-	// `lite::auth` tests it on the encoder.
-	let (count, len) = (20, 4_000);
-	within(async {
-		let mut pair = connect(Options {
-			version: Some(version),
-			client_publish: Some(produce_origin(2)),
-			server_subscribe: Some(produce_origin(1)),
-			server_requests: true,
-			..Default::default()
-		})
-		.await;
-		let huge: Patterns = (0..count)
-			.map(|i| Pattern::subtree(&format!("{i}{}", "x".repeat(len))).unwrap())
-			.collect();
-		let mut issued = serve(pair.requests.take().unwrap(), move |token| match token {
-			b"" => Some(grant(&["a"], &[])),
-			b"huge" => Some(Grant {
-				publish: huge.clone(),
-				subscribe: Patterns::new(),
-				expires: None,
-			}),
-			_ => None,
-		});
-		let (_, _setup) = issued.next().await.unwrap();
-		assert_eq!(granted(&pair.client).await, grant(&["a"], &[]));
-
-		let err = pair.client.auth().add("huge").await.expect_err("too large");
-		assert!(matches!(err, Error::Unsupported), "{err:?}");
-		// No AUTH_OK for it reached the wire: the union is still just the setup grant.
-		assert_eq!(pair.client.auth().grant().peek(), Some(grant(&["a"], &[])));
-		assert_eq!(pair.client_transport.close_reason(), None);
-	})
-	.await
-	.expect("timed out");
-}
-
 async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'static str) {
 	within(async {
 		let mut pair = connect(Options {
@@ -1461,11 +1514,7 @@ async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'stat
 		let huge: Patterns = (0..20)
 			.map(|i| Pattern::subtree(&format!("{i}{}", "x".repeat(4000))).unwrap())
 			.collect();
-		updated.update(Grant {
-			publish: huge,
-			subscribe: Patterns::new(),
-			expires: None,
-		});
+		updated.update(grant_of(huge, Patterns::new()));
 		let err = token.closed().await;
 		assert!(matches!(err, Error::Unsupported), "{err:?}");
 		assert_eq!(token.grant().peek(), None);
@@ -1501,11 +1550,7 @@ async fn pattern_grants_arrive_exactly(version: &'static str) {
 				b"root" => (pattern_set(&[""]), pattern_set(&["**"])),
 				_ => return None,
 			};
-			Some(Grant {
-				publish,
-				subscribe,
-				expires: None,
-			})
+			Some(grant_of(publish, subscribe))
 		};
 		let mut issued = serve(pair.requests.take().unwrap(), table);
 		let (_, _setup) = issued.next().await.unwrap();
@@ -1688,7 +1733,7 @@ async fn lite_07_narrowing_resets_a_fetch_in_flight() {
 
 /// Whether `version` exchanges AUTH, so the peer also hears of a narrowing.
 fn speaks_auth(version: &str) -> bool {
-	matches!(version, LITE_07 | MOQT_18 | MOQT_22)
+	version == LITE_07
 }
 
 /// A revocation as the reader sees it: the local gate's own error, or the peer's

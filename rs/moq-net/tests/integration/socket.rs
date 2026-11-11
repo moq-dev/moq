@@ -11,7 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_net::broadcast::TracksEvent;
 use moq_net::socket::{Endpoint, TcpStream, TrackStream};
-use moq_net::{Error, Version, frame, group, origin, track};
+use moq_net::{Error, StreamError, Version, frame, group, origin, track};
 
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, spawn};
 
@@ -26,7 +26,7 @@ const IETF: &str = "moq-transport-18";
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 /// A relay and the clients connected to it.
@@ -405,7 +405,7 @@ async fn a_peer_reset_after_fin_resets_the_session() {
 		if reset {
 			half.abort(Error::Cancel).unwrap();
 		} else {
-			half.finish().unwrap();
+			let _half = half.finish().unwrap();
 		}
 		kio::clock::sleep(SETTLE).await;
 		let late = accepted.producer.write_frame(None, &b"late"[..]);
@@ -441,7 +441,7 @@ async fn track_sessions_carry_messages_both_ways() {
 		assert_eq!(recv(&mut replies).await.unwrap().unwrap(), b"pong");
 
 		// Finishing a half closes the pipe that way.
-		dialed.producer.finish().unwrap();
+		let _finished = dialed.producer.finish().unwrap();
 		assert_eq!(recv(&mut reader).await.unwrap(), None);
 	}
 }
@@ -583,7 +583,7 @@ async fn a_dial_waits_for_its_peer() {
 	let (dialed, accepted) = kio::clock::timeout(TIMEOUT, async { futures::join!(dial, accept) })
 		.await
 		.expect("connect timeout");
-	let (mut dialed, accepted) = (dialed.unwrap(), accepted.unwrap());
+	let (dialed, accepted) = (dialed.unwrap(), accepted.unwrap());
 	assert_eq!(dialed.session(), accepted.session());
 	dialed.producer.finish().unwrap();
 }
@@ -807,9 +807,12 @@ async fn closing_an_endpoint_ends_its_sessions() {
 	let (track_dialed, track_accepted) = connect_track(&alice, &bob).await;
 
 	bob.close();
+	// Through the relay, bob's close reaches alice as a SESSION_CLOSED reset, as it would
+	// on one origin.
+	let ended = read(&mut tcp_dialed.consumer).await;
 	assert!(
-		read(&mut tcp_dialed.consumer).await.is_err(),
-		"bob's tcp half outlived his endpoint"
+		matches!(ended, Err(Error::Stream(StreamError::Session(_)))),
+		"bob's tcp half outlived his endpoint: {ended:?}"
 	);
 	// Both halves of bob's own tcp session end.
 	assert!(read(&mut tcp_accepted.consumer).await.is_err());
@@ -894,7 +897,7 @@ async fn an_endpoint_announces_only_its_roles() {
 	let (dialed, accepted) = kio::clock::timeout(TIMEOUT, async { futures::join!(dial, accept) })
 		.await
 		.expect("connect timeout");
-	let (mut dialed, accepted) = (dialed.unwrap(), accepted.unwrap());
+	let (dialed, accepted) = (dialed.unwrap(), accepted.unwrap());
 	assert_eq!(dialed.session(), accepted.session());
 	dialed.producer.finish().unwrap();
 	let found = kio::clock::timeout(TIMEOUT, eve.consume().request("room/.server/bob", None)).await;
@@ -917,12 +920,12 @@ async fn the_first_burst_survives_a_late_subscribe_answer() {
 		for payload in [b"one", b"two", b"six"] {
 			send(&stream.producer, payload);
 		}
-		stream.producer.finish().unwrap();
+		let _finished = stream.producer.clone().finish().unwrap();
 		stream
 	};
 	let (dialed, accepted) = futures::join!(dial, accept);
 	let dialed = dialed.unwrap();
-	dialed.producer.finish().unwrap();
+	let _finished = dialed.producer.clone().finish().unwrap();
 	let mut reader = dialed.consumer.ordered();
 	for payload in [b"one", b"two", b"six"] {
 		assert_eq!(recv(&mut reader).await.unwrap().unwrap(), payload);
@@ -944,18 +947,17 @@ async fn the_first_tcp_writes_survive_a_late_subscribe_answer() {
 			for payload in [b"first".as_slice(), b"", b"last"] {
 				stream.producer.write_frame(None, payload).unwrap();
 			}
-			stream.producer.finish().unwrap();
-			stream
+			(stream.producer.finish().unwrap(), stream.consumer)
 		};
 		let (dialed, accepted) = futures::join!(dial, accept);
 		let mut dialed = dialed.unwrap();
-		let mut accepted = accepted;
+		let (_finished, mut accepted) = accepted;
 		for payload in [b"first".as_slice(), b"", b"last"] {
 			assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), payload, "{version}");
 		}
 		assert_eq!(read(&mut dialed.consumer).await.unwrap(), None);
 		dialed.producer.finish().unwrap();
-		assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
+		assert_eq!(read(&mut accepted).await.unwrap(), None);
 	}
 }
 
@@ -1036,7 +1038,7 @@ async fn an_older_hop_opted_into_hidden_connects() {
 		.await;
 	let alice = Endpoint::new(&client, "room", "alice").unwrap();
 	let bob = fixture.endpoint(LITE, "bob").await;
-	let (mut dialed, accepted) = connect_tcp(&alice, &bob).await;
+	let (dialed, accepted) = connect_tcp(&alice, &bob).await;
 	assert_eq!(dialed.session(), accepted.session());
 	dialed.producer.finish().unwrap();
 }

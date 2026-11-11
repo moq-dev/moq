@@ -34,7 +34,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::task::{Poll, ready};
 
-use crate::{Error, Path};
+use crate::{Error, Path, SessionError, StreamError};
 
 use super::WeakEntry;
 use super::origin::{self, RouteOptions};
@@ -72,10 +72,21 @@ fn endpoint_path(prefix: &Path, role: Role, id: &str) -> Result<Path, Error> {
 	Ok(prefix.join(&Path::from_static(role.segment()))?.join(&Path::new(id)?)?)
 }
 
-/// A fresh session id: 128 random bits as hex, so nobody can guess a session's tracks.
+/// Whether `path` is an endpoint's broadcast, which only routes sessions and carries no
+/// media, so a worker that acts on every announced broadcast can skip it.
+pub fn is_endpoint(path: &Path) -> bool {
+	let parent = path.as_str().rsplit('/').nth(1);
+	[Role::Server, Role::Client]
+		.into_iter()
+		.any(|role| parent == Some(role.segment()))
+}
+
+/// A fresh session id: 128 random bits as hex, so nobody can guess a session's tracks. Drawn
+/// from the ambient generator, the thread's outside a simulated run, so a simulated run
+/// replays them.
 fn session_id() -> Arc<str> {
 	use rand::RngExt;
-	format!("{:032x}", rand::rng().random::<u128>()).into()
+	format!("{:032x}", kio::clock::rng().random::<u128>()).into()
 }
 
 /// The track name of a session: `<protocol>/<dialer>/<acceptor>/<session>`, the same in
@@ -660,12 +671,13 @@ impl Shared {
 		let routes = [state.client.take(), state.server.take()];
 		drop(guard);
 
+		// Reset outside the lock, as the session closing, and before retracting the
+		// broadcasts: a peer reading through a retracted route sees `Unroutable` instead.
+		for stream in streams {
+			stream.abort(Error::Stream(StreamError::Session(SessionError::Cancel)));
+		}
 		for route in routes.iter().flatten() {
 			route.broadcast().close();
-		}
-		// Reset outside the lock.
-		for stream in streams {
-			stream.abort(Error::Cancel);
 		}
 		for request in queued {
 			request.reject(Error::Cancel);
@@ -1230,7 +1242,7 @@ impl Pump {
 			match outcome {
 				Ok(()) => {
 					if let Some(track) = &self.track {
-						let _ = track.finish();
+						let _ = track.finish_shared();
 					}
 				}
 				Err(err) => {
@@ -1299,7 +1311,7 @@ impl Pump {
 			// Finished without a group: an empty half.
 			if !self.received
 				&& self.subscriber.is_none()
-				&& let Some(mut local) = self.local.take()
+				&& let Some(local) = self.local.take()
 			{
 				let _ = local.finish();
 			}
@@ -1322,8 +1334,7 @@ impl Pump {
 				Poll::Pending => return Ok(()),
 				Poll::Ready(Ok(Some(frame))) => self.pending = Some(frame),
 				Poll::Ready(Ok(None)) => {
-					local.finish()?;
-					self.local = None;
+					self.local.take().expect("checked above").finish()?;
 					self.remote = None;
 					return Ok(());
 				}
@@ -1397,9 +1408,19 @@ mod tests {
 			"room/.client/alice"
 		);
 		for role in [Role::Server, Role::Client] {
+			assert!(is_endpoint(&endpoint_path(&prefix, role, "alice").unwrap()));
 			assert!(endpoint_path(&prefix, role, "a/b").is_err());
 			assert!(endpoint_path(&prefix, role, "").is_err());
 			assert!(endpoint_path(&prefix, role, "a\\b").is_err());
+		}
+		for path in [
+			"room/alice",
+			".server",
+			"room/.server",
+			"room/.server/alice/cam",
+			"room/server/alice",
+		] {
+			assert!(!is_endpoint(&Path::new(path).unwrap()), "{path}");
 		}
 	}
 

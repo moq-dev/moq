@@ -63,10 +63,7 @@ use std::time::Duration;
 mod dial;
 mod error;
 mod flv;
-// Not part of the public API: compiled only for the crate's own tests and for the `fuzz/`
-// harness.
 #[cfg(any(test, feature = "fuzz"))]
-#[doc(hidden)]
 pub mod fuzz;
 mod metadata;
 // Vendored forks of rml_rtmp and rml_amf0; see the module docs.
@@ -79,9 +76,3 @@ const DEFAULT_DELAY: Duration = Duration::from_millis(500);
 pub use dial::Client;
 pub use error::{Error, Result};
 pub use server::{Conn, PUBLISH_IDLE_TIMEOUT, Play, Publish, Request, Server, Stream, accept_stream, configure_socket};
-
-/// Re-export of the `rustls` version [`Server::with_tls`] takes,
-/// so consumers construct a matching [`rustls::ServerConfig`] (a major `rustls`
-/// bump is a breaking change). Only available with the `tls` feature.
-#[cfg(feature = "tls")]
-pub use rustls;

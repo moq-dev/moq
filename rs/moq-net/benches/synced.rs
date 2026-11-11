@@ -9,7 +9,7 @@
 //! - land: a snapshot starts and lands under one prefix, releasing its one consumer.
 //! - register: a consumer of one prefix registers, counting the snapshots it waits on.
 //!
-//! The snapshot is crate-private, so this reaches it through the hidden `fuzz` module.
+//! The snapshot is crate-private, so this reaches it through the `fuzz` module.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench synced`.
 
@@ -60,9 +60,9 @@ fn bench_land(c: &mut Criterion) {
 			let watcher = scoped(&table.producer, "room/incoming").routes();
 			b.iter(|| {
 				let snapshot = fuzz::snapshot(&table.producer, "room/incoming");
-				assert!(!watcher.poll_synced(&moq_net::kio::Waiter::noop()).is_ready());
+				assert!(!watcher.poll_synced(&kio::Waiter::noop()).is_ready());
 				drop(snapshot);
-				assert!(watcher.poll_synced(&moq_net::kio::Waiter::noop()).is_ready());
+				assert!(watcher.poll_synced(&kio::Waiter::noop()).is_ready());
 			});
 		});
 	}
@@ -79,7 +79,7 @@ fn bench_register(c: &mut Criterion) {
 			let _held = fuzz::snapshot(&table.producer, "room/incoming");
 			b.iter(|| {
 				let watcher = incoming.routes();
-				assert!(!watcher.poll_synced(&moq_net::kio::Waiter::noop()).is_ready());
+				assert!(!watcher.poll_synced(&kio::Waiter::noop()).is_ready());
 			});
 		});
 	}

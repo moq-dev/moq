@@ -610,10 +610,10 @@ mod tests {
 	/// default out when serialized.
 	#[test]
 	fn extensions_default_on_and_parse_off() {
-		let config: Config = toml::from_str("[extensions]\nauth = false\n").expect("parse");
-		assert!(!config.extensions.auth);
-		assert!(config.extensions.solicit);
-		assert!(toml::to_string(&config).expect("serialize").contains("auth = false"));
+		let config: Config = toml::from_str("[extensions]\nsolicit = false\n").expect("parse");
+		assert!(!config.extensions.solicit);
+		assert!(!config.extensions.ietf);
+		assert!(toml::to_string(&config).expect("serialize").contains("solicit = false"));
 		assert!(
 			!toml::to_string(&Config::default())
 				.expect("serialize")
@@ -1036,6 +1036,7 @@ pub struct Forward {
 
 impl Forward {
 	/// Whether any forwarding setting is present.
+	#[cfg(feature = "_transport")]
 	pub(crate) fn configured(&self) -> bool {
 		self.bind.is_some() || self.key.is_some() || self.peers.is_some()
 	}

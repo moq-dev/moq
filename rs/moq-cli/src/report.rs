@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::Context;
-use hang::moq_net;
 use moq_mux::catalog::{CatalogFormat, Stream};
 use moq_mux::container::ts;
 use moq_tokio::connection::Monitor;
@@ -49,7 +48,7 @@ impl<T: serde::Serialize> ReportTrack<T> {
 		// once they outweigh eight snapshots.
 		let info = moq_net::track::Info::default()
 			.with_priority(PRIORITY)
-			.with_compress(true)
+			.with_compression(moq_net::track::Compression::Deflate)
 			.with_refresh(8);
 		let track = broadcast.create_track(name, info)?;
 		Ok(Self {
@@ -77,7 +76,7 @@ impl<T: serde::Serialize> ReportTrack<T> {
 		let Some(track) = &mut self.track else {
 			return;
 		};
-		let refreshed = match track.poll_refresh(&moq_net::kio::Waiter::noop()) {
+		let refreshed = match track.poll_refresh(&kio::Waiter::noop()) {
 			std::task::Poll::Ready(Err(err)) => Err(err),
 			_ => Ok(()),
 		};
@@ -91,8 +90,9 @@ impl<T: serde::Serialize> ReportTrack<T> {
 
 	/// End the track cleanly, keeping the last snapshot.
 	fn finish(&mut self) {
-		if let Some(track) = &mut self.track
-			&& let Err(err) = track.finish()
+		// A clone, so the track stays to abort, refusing writes now that it finished.
+		if let Some(track) = &self.track
+			&& let Err(err) = track.clone().finish()
 		{
 			tracing::warn!(%err, "failed to finish a report");
 		}
@@ -325,7 +325,7 @@ impl Echo {
 			}
 			let prefix = prefix?;
 			let name = format!("{}{}", self.target.name.0, hang::echo::SUFFIX);
-			hang::moq_net::Path::new(&name)
+			moq_net::Path::new(&name)
 				.and_then(|name| prefix.join(&name))
 				.inspect_err(|err| tracing::warn!(%err, path = %echo.path.as_str(), "the feedback path is too long"))
 				.ok()
@@ -490,7 +490,9 @@ async fn write_echo(
 				let event = event.context("announcements ended")?;
 				let (announce, active) = match event {
 					moq_net::announce::Event::Present(announce) => (announce, true),
-					moq_net::announce::Event::Absent(announce) => (announce, false),
+					moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => (announce, false),
+					// A reader rides out its path being held.
+					moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
 				};
 				let path = announce.prefix;
 				if !path.has_prefix(&prefix) || !hang::echo::is_echo(&path) {
@@ -689,7 +691,7 @@ mod tests {
 		tokio::spawn(write_echo(origin.consume(), String::new(), out));
 
 		let claim = origin
-			.route_prefix("viewer.echo", moq_net::origin::RouteOptions::default())
+			.claim("viewer.echo", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		kio::clock::timeout(Duration::from_secs(1), claim.requested())
 			.await

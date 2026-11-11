@@ -3,8 +3,9 @@
 ## Goal
 
 Every change that would need a semver-breaking release if it landed right
-after the next cut of `main` into `release`, plus the [cut
-gate](/quest/m2/cut-gate/README.md). The cut waits on this milestone alone;
+after the next cut of `main` into `release`, plus the cut
+gate, which the [release cut](/quest/m3/release/cut.md) re-creates here each
+cycle. The cut waits on this milestone alone;
 complete it before cutting main into release.
 
 ## Plan
@@ -23,7 +24,8 @@ unbounded-groups epic, whose additive compressed-stream child rides with it.
 
 The cut gates that break nothing (main no slower than release, vendored
 fixes, and moq-c parity) live under the recurring
-[cut gate](/quest/m2/cut-gate/README.md), decided the same day.
+cut gate, decided the same day; the [release cut](/quest/m3/release/cut.md)
+holds its template.
 
 Held by open claims: the m1 epics and quests marked below stay where they
 are until their claims merge, and the [probe epic](/quest/m2/probe/README.md)
@@ -93,8 +95,8 @@ lite-07 stream type here. Both moved to m3 on 2026-11-06 (maintainer,
 Added 2026-10-22 (maintainer, clustering audit): three interim fixes for
 announce churn on today's hop-list mesh, shipping with the next cut from
 `main` (not backported to `release`), so deployments get relief before the
-route layer ships; and stats groups as
-tracks, so per-group stats stop costing cluster announces.
+route layer ships; and stats buckets as
+tracks, so per-bucket stats stop costing cluster announces.
 
 Added 2026-10-22 (maintainer, security audit of the relay, auth, stats,
 ACME, and WebRTC): a clean close misreported as a revocation, injectable
@@ -130,6 +132,9 @@ divergences, under one epic; its redesign proposals went to m2.
 Changed 2026-10-26 (maintainer): pure-Rust crypto moved to m3 until upstream
 graviola and ACME releases make it cheap, so the cut ships on aws-lc-rs.
 Dropping the `rsa` crate from moq-auth's production graph stays in m1.
+
+Changed 2026-11-08: the rind epic finished in m1, so the cut ships on rind
+with no C crypto; aws-lc-rs is out of the workspace.
 
 Added 2026-10-25 (maintainer): the studio's
 GPU encode and source import quests are in m1 so
@@ -186,29 +191,5 @@ quests that require them.
 
 ## Required
 
-- [Drop set](/quest/m1/drop-set.md) - the drop set's track and cursor runs are billed to the cache pool, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind` (held in m1 by an open claim)
-- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH for multi-group reads (single-group FETCH stays); merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
-- [Address groups by timestamp](/quest/m2/time-addressing/README.md) - group start timestamps replace sequence numbers in the moq-net API and lite-07 wire, while old subscribers, old publishers, and published JS clients keep working
-- [Cluster routing](/quest/m2/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
-- [A route's role is its type](/quest/m2/route-roles.md) - no route method panics, throws, or errors because the other constructor made the route; prototypes of a single prefix route and an exact/prefix split decide the shape
-- [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - the wire names every abandoned group and the drop signal is public, so readers count losses instead of stalling
+- [Drop set](/quest/m1/drop-set.md) - each cursor's disposition record is billed to the cache pool, as the track's drop runs are, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind` (held in m1 by an open claim)
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out (held in m1 by an open claim)
-- [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
-- [Unbounded groups](/quest/m2/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
-- [moq-quic drops inherited surfaces with no consumer](/quest/m2/moq-quic-unused-surface.md) - unused accept, connection, and stream-id surfaces leave moq-quic's public API before the cut
-- [No sentinel values in public API](/quest/m2/no-sentinels.md) - receive windows, cache durations, reconnect timeouts, and the FFI test clock use `Option` instead of a huge value or zero
-- [moq-video takes devices, not environment variables](/quest/m2/video-devices.md) - VA-API and V4L2 device paths are config fields, and `moq_video::ENV` never ships
-- [Gateways share one ingest config and one rate cap](/quest/m2/gateway-ingest.md) - `moq_mux::Ingest` replaces 18 per-gateway setters, and the live rate cap moves to `moq_net::bandwidth`
-- [Native playout sync keeps tracks decoupled](/quest/m2/mux-sync.md) - `moq_mux::timeline` becomes `moq_mux::sync`, and one slow track no longer stalls or moves another
-- [JS time values are types, not numbers](/quest/m2/js-time-types.md) - every public JS duration and instant is a `Clock.Duration` or `Clock.Instant` object, so a unit mistake fails to compile
-- [Small API fixes before the cut](/quest/m2/api-shape/README.md) - one path and one spelling per item, names by role, and no dead or wrong-role public surface across net, transport, media, native, apps, JS, and bindings
-- [Public constructors spawn nothing, or say why](/quest/m2/spawn-constructors.md) - each public library entry point that spawns returns a driver its caller polls, or is listed as kept
-- [moq-audio codecs return zero or more outputs](/quest/m2/audio-codec-seam.md) - `encode` and `decode` return any number of outputs and gain `flush`, as moq-video's do
-- [A mix-minus removes several sources](/quest/m2/bus-minus-several.md) - a guest's return feed drops every copy of their own sound
-- [Plan: recovery boundaries](/quest/m2/intra-refresh-boundary.md) - the catalog's new `warmup` contract is settled before the cut publishes it
-- [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
-- [Finishing a producer returns a Finished handle](/quest/m2/finished-handle.md) - `finish(self)` consumes moq-net's and the media crates' producers, so appending after finish doesn't compile
-- [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, and moq-c at parity
-- [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; browser padding is parked in m3 (held in m2 by open claims; moves to m3)
-- [Finish the milestone re-cut](/quest/m2/recut-held.md) - claim-held epics move to the milestone their kind and priority give them once their claims merge
-- [Nix clusters authenticate leaves with mTLS](/quest/m2/nix-cluster-mtls.md) - a clustered NixOS relay authenticates leaves with cluster-CA client certificates and `--mtls-link peer`, and the module stops minting an unbounded cluster JWT

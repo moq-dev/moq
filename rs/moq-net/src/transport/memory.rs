@@ -30,10 +30,7 @@
 use std::{
 	collections::VecDeque,
 	pin::Pin,
-	sync::{
-		Arc,
-		atomic::{AtomicBool, Ordering},
-	},
+	sync::Arc,
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -216,9 +213,6 @@ type Credit = Arc<Opened>;
 #[derive(Default)]
 struct Open {
 	count: usize,
-	/// Whether an open pended since a stream last returned its credit. Atomic, so a pending
-	/// open's read-only check sets it without waking itself.
-	blocked: AtomicBool,
 }
 
 /// Counted in an open-stream total until dropped.
@@ -228,7 +222,6 @@ impl Drop for Opened {
 	fn drop(&mut self) {
 		let mut open = self.0.lock();
 		open.count -= 1;
-		*open.blocked.get_mut() = false;
 	}
 }
 
@@ -248,25 +241,12 @@ fn poll_credit(
 		if open.count < max {
 			return Poll::Ready(());
 		}
-		open.blocked.store(true, Ordering::Relaxed);
 		Poll::Pending
 	}) else {
 		return closed.map(Err);
 	};
 	taken.count += 1;
 	Poll::Ready(Ok(Some(Arc::new(Opened(open.clone())))))
-}
-
-/// What is left of `max` streams beyond those in `open`, unbounded without a `max`.
-fn stream_credit(open: &kio::Shared<Open>, max: Option<usize>) -> super::StreamCredit {
-	let Some(max) = max else {
-		return super::StreamCredit::new(u64::MAX, false);
-	};
-	let open = open.read();
-	super::StreamCredit::new(
-		max.saturating_sub(open.count) as u64,
-		open.blocked.load(Ordering::Relaxed),
-	)
 }
 
 /// Streams and datagrams one side has yet to accept.
@@ -363,6 +343,42 @@ impl Session {
 	}
 }
 
+/// What one side of a pair still holds, read without keeping it alive, for the session fuzz
+/// target's leak check.
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub(crate) struct Held {
+	side: std::sync::Weak<Side>,
+	conn: Arc<Conn>,
+	local: usize,
+}
+
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+impl Held {
+	/// Whether any handle to this side's session is alive.
+	pub(crate) fn session(&self) -> bool {
+		self.side.strong_count() > 0
+	}
+
+	/// Streams the peer opened toward this side that this side is not done with, counted only
+	/// under [`Config::max_concurrent_uni_streams`] and [`Config::max_concurrent_bi_streams`].
+	pub(crate) fn streams(&self) -> usize {
+		let incoming = &self.conn.incoming[self.local];
+		incoming.uni_open.read().count + incoming.bi_open.read().count
+	}
+}
+
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+impl Session {
+	/// Watch what this side holds; see [`Held`].
+	pub(crate) fn held(&self) -> Held {
+		Held {
+			side: Arc::downgrade(&self.side),
+			conn: self.side.conn.clone(),
+			local: self.side.local,
+		}
+	}
+}
+
 impl poll::Session for Session {
 	type SendStream = SendStream;
 	type RecvStream = RecvStream;
@@ -445,19 +461,7 @@ impl poll::Session for Session {
 
 	/// Streams share no connection window, and one holds at most its buffer.
 	fn receive_window(&self) -> Option<super::ReceiveWindow> {
-		Some(super::ReceiveWindow::new(
-			u64::MAX,
-			self.conn().config.stream_buffer as u64,
-		))
-	}
-
-	fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
-		let outgoing = self.side.outgoing();
-		let config = &self.conn().config;
-		Some(match dir {
-			super::Dir::Uni => stream_credit(&outgoing.uni_open, config.max_concurrent_uni_streams),
-			super::Dir::Bi => stream_credit(&outgoing.bi_open, config.max_concurrent_bi_streams),
-		})
+		Some(super::ReceiveWindow::new(None, self.conn().config.stream_buffer as u64))
 	}
 
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
@@ -494,7 +498,7 @@ struct Message {
 
 /// When something a writer sent `latency` ago reaches the reader: `None` at once.
 fn landing(latency: Duration) -> Option<kio::clock::Instant> {
-	(!latency.is_zero()).then(|| kio::clock::now() + latency)
+	(!latency.is_zero()).then(|| kio::clock::now().saturating_add(latency))
 }
 
 #[derive(Clone, Copy)]
@@ -821,7 +825,6 @@ mod tests {
 		task::{Wake, Waker},
 	};
 
-	use super::super::{Dir, StreamCredit};
 	use super::*;
 	use poll::{RecvStream as _, SendStream as _, Session as _};
 
@@ -948,19 +951,14 @@ mod tests {
 			..Default::default()
 		});
 		let open = |a: &Session, waiter: &kio::Waiter| a.poll_open_uni(waiter, Default::default());
-		let credit = |a: &Session| a.stream_credit(Dir::Uni).unwrap();
-		assert_eq!(credit(&a), StreamCredit::new(2, false));
 
 		// Streams the peer has not accepted yet hold credit too.
 		let mut finished = ready(open(&a, &noop())).unwrap();
 		let _reset = ready(open(&a, &noop())).unwrap();
-		assert_eq!(credit(&a), StreamCredit::new(0, false), "none refused yet");
 		let count = Arc::new(Count::default());
 		let waiter = kio::Waiter::new(Waker::from(count.clone()));
 		assert!(open(&a, &waiter).is_pending());
 		assert_eq!(count.0.load(Ordering::Relaxed), 0, "being blocked wakes nobody");
-		assert_eq!(credit(&a), StreamCredit::new(0, true));
-		assert!(!credit(&b).blocked, "each side blocks alone");
 
 		// Credit is per direction.
 		let _back = ready(open(&b, &noop())).unwrap();
@@ -973,7 +971,6 @@ mod tests {
 		assert!(open(&a, &waiter).is_pending(), "an unread FIN keeps the credit");
 		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap(), None);
 		assert!(count.0.load(Ordering::Relaxed) > 0);
-		assert_eq!(credit(&a), StreamCredit::new(1, false), "returned credit unblocks");
 		let _third = ready(open(&a, &noop())).unwrap();
 		assert!(open(&a, &noop()).is_pending());
 

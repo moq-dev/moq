@@ -20,6 +20,7 @@ pub mod datagram;
 pub mod demand;
 pub mod error;
 mod ffi;
+pub mod instance;
 pub mod json;
 mod log;
 pub mod media;
@@ -35,8 +36,9 @@ uniffi::setup_scaffolding!("moq");
 
 /// Stop the runtime workers before the host runtime goes away.
 ///
-/// Every task is dropped, so a call parked on the runtime resolves `Cancelled` and so does any
-/// later one; the handles stay safe to use and drop. This is for process exit, not a reset.
+/// Every task is dropped, so a call parked on the runtime resolves `Cancelled`, and so does any
+/// later call that needs the runtime or a background task it ran; the handles stay safe to use
+/// and drop. This is for process exit, not a reset.
 ///
 /// It exists because the runtime workers call back into the host to wake an awaiting future,
 /// and CPython (before 3.14) terminates a foreign thread that touches the interpreter once
@@ -72,13 +74,23 @@ pub extern "C" fn moq_ffi_test_clock_advance(nanos: u64) -> bool {
 	ffi::test_clock().is_some_and(|clock| clock.advance(std::time::Duration::from_nanos(nanos)).is_some())
 }
 
-/// The test clock's nanoseconds since it started, or `u64::MAX` without one.
+/// Write the test clock's nanoseconds since it started to `nanos`.
+///
+/// False, writing nothing, without a test clock.
+///
+/// # Safety
+///
+/// `nanos` must be valid for a `u64` write.
 #[cfg(feature = "testing")]
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_ffi_test_clock_now() -> u64 {
-	ffi::test_clock().map_or(u64::MAX, |clock| {
-		clock.now().duration_since(kio::clock::Instant::ZERO).as_nanos() as u64
-	})
+pub unsafe extern "C" fn moq_ffi_test_clock_now(nanos: *mut u64) -> bool {
+	let Some(clock) = ffi::test_clock() else {
+		return false;
+	};
+	let elapsed = clock.now().duration_since(kio::clock::Instant::ZERO).as_nanos();
+	// SAFETY: the caller guarantees `nanos` is valid for a write.
+	unsafe { nanos.write(elapsed as u64) };
+	true
 }
 
 // The test suite drives a native relay over a tokio runtime.

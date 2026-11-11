@@ -65,7 +65,7 @@ fn path<S: ObjectStore>(store: &Store<S>, track: &str, name: &str) -> Path {
 async fn finish(tracks: &mut [track::Producer]) {
 	for track in tracks {
 		while track.subscription_changed().await.unwrap().is_none() {}
-		track.finish().unwrap();
+		drop(track.clone().finish().unwrap());
 	}
 }
 
@@ -253,6 +253,8 @@ struct Server {
 
 impl Server {
 	async fn new() -> Self {
+		// The S3 client is reqwest on rustls, which has no provider of its own.
+		moq_crypto::provider::install_default().unwrap();
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::create_dir(dir.path().join("archive")).unwrap();
 		let service = S3ServiceBuilder::new(s3s_fs::FileSystem::new(dir.path()).unwrap()).build();

@@ -70,13 +70,6 @@ pub struct Client<S = TcpStream> {
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping.
 	delay: Duration,
-	/// Max age declared on the media tracks [`pull`](Self::pull) publishes, or `None` for
-	/// no publisher limit.
-	max_age: Option<Duration>,
-	/// Connection allocator each track [`pull`](Self::pull) ingests claims its peak-hold bitrate on.
-	bandwidth: moq_net::bandwidth::Allocator,
-	/// How long a broadcast [`pull`](Self::pull) finished stays up.
-	linger: Duration,
 	/// Script data [`pull`](Self::pull) discards, including any sent before Play.Start.
 	metadata: crate::metadata::Dropped,
 }
@@ -176,9 +169,6 @@ impl<S: Stream> Client<S> {
 			work,
 			app: app.to_string(),
 			delay: crate::DEFAULT_DELAY,
-			max_age: Some(hang::container::MAX_AGE),
-			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
-			linger: moq_mux::Linger::DEFAULT,
 			metadata: Default::default(),
 		})
 	}
@@ -186,49 +176,10 @@ impl<S: Stream> Client<S> {
 	/// Set the FLV release delay and stalled-group budget for [`publish`](Self::publish).
 	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
 	///
-	/// The publish (egress) direction only; [`pull`](Self::pull) takes
-	/// [`with_max_age`](Self::with_max_age) instead.
+	/// The publish (egress) direction only; [`pull`](Self::pull) takes a
+	/// [`moq_mux::Ingest`] instead.
 	pub fn with_delay(mut self, delay: Duration) -> Self {
 		self.delay = delay;
-		self
-	}
-
-	/// Set how long a superseded group of the media tracks [`pull`](Self::pull) publishes
-	/// stays fresh, or `None` for no publisher limit. Defaults to
-	/// [`MAX_AGE`](hang::container::MAX_AGE).
-	///
-	/// A freshness bound, not a delivery one: it never makes a subscriber play further
-	/// behind live, it caps how far back a FETCH can still reach. The default suits a
-	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history.
-	///
-	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a broadcast
-	/// someone else declared, and takes [`with_delay`](Self::with_delay) instead.
-	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
-		self.max_age = max_age.into();
-		self
-	}
-
-	/// Claim each ingested track's peak-hold catalog bitrate on `bandwidth`.
-	///
-	/// A passthrough import has no configured ceiling, so it reserves the measured
-	/// maximum instead. A co-resident encoder then targets what is left of the
-	/// uplink. Unlimited (the default) claims nothing a sender can follow.
-	///
-	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a
-	/// broadcast someone else declared.
-	pub fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
-		self.bandwidth = bandwidth;
-		self
-	}
-
-	/// Keep the broadcast [`pull`](Self::pull) publishes up for `linger` after the remote
-	/// completes the play, so a subscriber that arrives after the end still gets the tail.
-	/// Defaults to [`moq_mux::Linger::DEFAULT`]; zero closes it at once.
-	///
-	/// The pull (ingest) direction only.
-	pub fn with_linger(mut self, linger: Duration) -> Self {
-		self.linger = linger;
 		self
 	}
 
@@ -261,7 +212,11 @@ impl<S: Stream> Client<S> {
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
-		let mut export = FlvExport::new(source, catalog).with_delay(self.delay);
+		let mut export = FlvExport::new(source, catalog).with_delay(
+			moq_net::track::Delay::default()
+				.with_min(self.delay)
+				.with_max(self.delay),
+		);
 		let mut tags = flv::TagReader::new();
 		let mut buffer = [0u8; READ_BUFFER];
 
@@ -314,21 +269,22 @@ impl<S: Stream> Client<S> {
 	}
 
 	/// Pull a remote stream into `origin`: request `play` on `stream_key`, receive
-	/// its FLV tags, demux them, and publish the result at `path` until the remote
+	/// its FLV tags, demux them, and publish the result at `path` as `ingest` says until the remote
 	/// stops or the connection drops.
 	///
 	/// This future resolves when the remote stream ends, so callers usually run it
 	/// on its own task.
 	///
 	/// A remote that completes the play (`NetStream.Play.Complete` or `NetStream.Play.Stop`)
-	/// ends cleanly: the finished broadcast stays up for the [linger](Self::with_linger), and
-	/// the future resolves after that. Dropping the future ends the linger early. A
-	/// connection that drops first closes the broadcast at once.
+	/// ends cleanly: the finished broadcast stays up for the ingest's
+	/// [linger](moq_mux::Ingest::linger), and the future resolves after that. Dropping the
+	/// future ends the linger early. A connection that drops first closes the broadcast at once.
 	pub async fn pull(
 		mut self,
 		stream_key: &str,
 		origin: &origin::Producer,
 		path: impl Into<moq_net::Path>,
+		ingest: &moq_mux::Ingest,
 	) -> Result<()> {
 		let path: moq_net::Path = path.into();
 		let request = self
@@ -339,10 +295,7 @@ impl<S: Stream> Client<S> {
 		self.metadata = crate::metadata::Dropped::new(path.as_str());
 		self.await_event(Direction::Play).await?;
 
-		let config = moq_mux::catalog::Config::default()
-			.with_max_age(self.max_age)
-			.with_bandwidth(self.bandwidth.clone());
-		let mut publisher = Publisher::new(origin, path.as_str(), config)?;
+		let mut publisher = Publisher::new(origin, path.as_str(), ingest.catalog())?;
 
 		// The stream key is the ingest credential (`rtmp://host/<app>/<key>`), so the
 		// app and broadcast path stand in for it.
@@ -353,7 +306,7 @@ impl<S: Stream> Client<S> {
 			// A clean end: serve the finished broadcast for the linger, so a subscriber that
 			// arrives after the end still gets the tail. The remote is done, so hang up first.
 			Ok(true) => {
-				let linger = self.linger;
+				let linger = ingest.linger;
 				drop(self);
 				match publisher.finish(linger) {
 					Ok(publisher) => {
@@ -608,27 +561,35 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			catalog,
-			media_deadline: kio::clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT,
+			media_deadline: kio::clock::Instant::now().saturating_add(crate::server::PUBLISH_IDLE_TIMEOUT),
 			route,
 		})
 	}
 
 	fn push(&mut self, tag_type: u8, timestamp: u32, body: &Bytes) -> anyhow::Result<()> {
-		self.media_deadline = kio::clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT;
+		self.media_deadline = kio::clock::Instant::now().saturating_add(crate::server::PUBLISH_IDLE_TIMEOUT);
 		flv::import(&mut self.importer, tag_type, timestamp, body)
 	}
 
 	/// Flush any buffered media and finish every track, the catalog included, keeping the
 	/// finished broadcast up for `linger`.
-	fn finish(mut self, linger: Duration) -> anyhow::Result<moq_mux::Linger<Self>> {
-		self.importer.finish()?;
-		self.catalog.finish()?;
-		Ok(moq_mux::Linger::new([self.route.broadcast().clone()], self, linger))
+	fn finish(self, linger: Duration) -> anyhow::Result<moq_mux::Linger<impl Sized>> {
+		let Self {
+			importer,
+			mut catalog,
+			route,
+			..
+		} = self;
+		let importer = importer.finish()?;
+		catalog.finish()?;
+		let broadcast = route.broadcast().clone();
+		Ok(moq_mux::Linger::new([broadcast], (importer, catalog, route), linger))
 	}
 
 	/// Flush any buffered media and finish the catalog, then end the broadcast so the origin unannounces it at once.
 	fn close(mut self) -> anyhow::Result<()> {
-		self.importer.finish()?;
+		// Held until the broadcast closes, so the route retracts before the tracks drop.
+		let _importer = self.importer.finish()?;
 		self.catalog.finish()?;
 		self.route.broadcast().close();
 		Ok(())
@@ -667,9 +628,6 @@ mod tests {
 				work: VecDeque::new(),
 				app: "live".into(),
 				delay: crate::DEFAULT_DELAY,
-				max_age: None,
-				bandwidth: Default::default(),
-				linger: Duration::ZERO,
 				metadata: Default::default(),
 			};
 			let start = kio::clock::Instant::now();
@@ -713,9 +671,6 @@ mod tests {
 			work,
 			app: "live".into(),
 			delay: crate::DEFAULT_DELAY,
-			max_age: None,
-			bandwidth: Default::default(),
-			linger: Duration::ZERO,
 			metadata: crate::metadata::Dropped::new("metadata"),
 		};
 		let origin = moq_tokio::origin::spawn();
@@ -748,7 +703,13 @@ mod tests {
 
 	/// A broadcast with one AVC keyframe at `live/cam0` and its tracks finished, with the
 	/// importer that keeps them listed and the catalog to finish it with.
-	fn source(origin: &origin::Producer) -> (moq_net::origin::Route, moq_mux::catalog::Producer, FlvImport) {
+	fn source(
+		origin: &origin::Producer,
+	) -> (
+		moq_net::origin::Route,
+		moq_mux::catalog::Producer,
+		moq_mux::container::flv::Finished,
+	) {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
@@ -765,8 +726,7 @@ mod tests {
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
-		importer.finish().unwrap();
-		(broadcast, catalog, importer)
+		(broadcast, catalog, importer.finish().unwrap())
 	}
 
 	/// Resolve `live/cam0` on `origin` to push it.
@@ -782,6 +742,11 @@ mod tests {
 	async fn a_finished_broadcast_lingers_across_rtmp() {
 		let peer = "127.0.0.1:1935".parse().unwrap();
 		let linger = Duration::from_secs(10);
+		let lingering = |linger| {
+			let mut ingest = moq_mux::Ingest::default();
+			ingest.linger = linger;
+			ingest
+		};
 		for push in [true, false] {
 			let upstream = moq_tokio::origin::spawn();
 			let downstream = moq_tokio::origin::spawn();
@@ -794,8 +759,7 @@ mod tests {
 			let server = tokio::spawn(async move {
 				match accept_stream(server_io, peer).await.unwrap().unwrap() {
 					Request::Publish(publish) => publish
-						.with_linger(linger)
-						.accept(&ingest, moq_net::Path::from_static("live/cam0"))
+						.accept(&ingest, moq_net::Path::from_static("live/cam0"), &lingering(linger))
 						.await
 						.unwrap(),
 					Request::Play(play) => play
@@ -810,8 +774,12 @@ mod tests {
 				match push {
 					true => client.publish("cam0", exported(origin).await).await.unwrap(),
 					false => client
-						.with_linger(linger)
-						.pull("cam0", &pulled, moq_net::Path::from_static("live/cam0"))
+						.pull(
+							"cam0",
+							&pulled,
+							moq_net::Path::from_static("live/cam0"),
+							&lingering(linger),
+						)
 						.await
 						.unwrap(),
 				}
@@ -868,7 +836,12 @@ mod tests {
 				}
 				false => {
 					client
-						.pull("cam0", &upstream, moq_net::Path::from_static("live/cam0"))
+						.pull(
+							"cam0",
+							&upstream,
+							moq_net::Path::from_static("live/cam0"),
+							&Default::default(),
+						)
 						.await
 				}
 			}
@@ -930,7 +903,9 @@ mod tests {
 			else {
 				panic!("expected a publish request");
 			};
-			let _ = publish.accept(&ingest, moq_net::Path::from_static("live/cam0")).await;
+			let _ = publish
+				.accept(&ingest, moq_net::Path::from_static("live/cam0"), &Default::default())
+				.await;
 		});
 		let origin = upstream.consume();
 		let pushed = tokio::spawn(async move {
@@ -1014,7 +989,7 @@ mod tests {
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		// Run the crate's own server, serving the one play request from that origin.
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -1037,7 +1012,12 @@ mod tests {
 		let pull = tokio::spawn(async move {
 			let client = Client::connect(addr, "live").await.unwrap();
 			client
-				.pull("cam0", &pull_origin, moq_net::Path::from_static("pulled/cam0"))
+				.pull(
+					"cam0",
+					&pull_origin,
+					moq_net::Path::from_static("pulled/cam0"),
+					&Default::default(),
+				)
 				.await
 				.unwrap();
 		});

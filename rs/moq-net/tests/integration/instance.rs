@@ -13,7 +13,7 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) -> MockPair {
@@ -30,7 +30,10 @@ async fn started(announced: &mut origin::Routes) -> Instance {
 		.expect("announce hung")
 		.expect("announce ended")
 	{
-		origin::RouteEvent::Start(announce) => announce.route.instance().clone(),
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			announce,
+		} => announce.route.instance().clone(),
 		other => panic!("expected a start, got {other:?}"),
 	}
 }
@@ -41,7 +44,10 @@ async fn ended(announced: &mut origin::Routes) {
 		.expect("announce hung")
 		.expect("announce ended")
 	{
-		origin::RouteEvent::End(_) => {}
+		origin::RouteEvent {
+			kind: origin::RouteKind::End | origin::RouteKind::Offline,
+			..
+		} => {}
 		other => panic!("expected an end, got {other:?}"),
 	}
 }
@@ -54,7 +60,8 @@ async fn job_reannounced(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let relay = produce_origin(2);
-	let instance: Instance = "job".parse().unwrap();
+	// Text like the mark minted instances once carried, which names an instance like any other.
+	let instance: Instance = "~job".parse().unwrap();
 	let job = publisher
 		.route(
 			"job",
@@ -99,6 +106,21 @@ async fn moq_transport_mints_per_announcement() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		job_reannounced(version).await;
 	}
+}
+
+/// A session mints an instance for a route an older wire delivered, and lite-07 forwards it
+/// still minted, so every hop past it names the same stream.
+#[kio::test]
+async fn lite07_forwards_a_minted_instance() {
+	let publisher = produce_origin(1);
+	let relay = produce_origin(2);
+	let viewer = produce_origin(3);
+	let _route = publisher.route("job", Default::default()).unwrap();
+	let _older = link("moq-lite-06".parse().unwrap(), &publisher, &relay).await;
+	let _newer = link("moq-lite-07-wip".parse().unwrap(), &relay, &viewer).await;
+	let minted = started(&mut relay.consume().routes()).await;
+	assert!(minted.is_minted());
+	assert_eq!(started(&mut viewer.consume().routes()).await, minted);
 }
 
 /// One publisher reaches a relay through two neighbors, and the one the relay prefers
@@ -146,7 +168,10 @@ async fn next_hop_lost(version: &str) {
 				.expect("the standby serves the claim");
 		}
 		_ => match event.expect("announce hung").expect("announce ended") {
-			origin::RouteEvent::Restart(announce) => {
+			origin::RouteEvent {
+				kind: origin::RouteKind::Restart,
+				announce,
+			} => {
 				assert_ne!(
 					announce.route.instance(),
 					&first,

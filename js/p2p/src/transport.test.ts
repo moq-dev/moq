@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Channel } from "./channel.ts";
 import { peers } from "./mock.ts";
 import { Transport } from "./transport.ts";
@@ -104,7 +104,7 @@ test("an accepted channel whose dialer stays silent closes at the handshake dead
 		right.incoming.open();
 		// The session starts on open, so its 10 s handshake deadline runs while its first write
 		// waits on the silent dialer's parameters.
-		await clock.advance(Nano.fromMilli(Milli(11_000)));
+		await clock.advance(Duration.millis(11_000));
 		await expect(server.closed).rejects.toThrow("handshake timeout");
 		expect(right.incoming.records).toEqual([]);
 		expect(right.incoming.listeners.size).toBe(0);

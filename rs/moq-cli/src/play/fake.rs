@@ -49,7 +49,7 @@ impl Recorder {
 	}
 
 	/// Present the newest due frame, just as the window does on a redraw.
-	pub fn present(&self, media: &super::media::Media<Self>) -> Option<hang::moq_net::Timestamp> {
+	pub fn present(&self, media: &super::media::Media<Self>) -> Option<moq_net::Timestamp> {
 		self.present_frame(media).map(|frame| frame.timestamp)
 	}
 
@@ -127,7 +127,7 @@ impl Speaker for Recorder {
 			queued: Duration::ZERO,
 			// A real sink's ring starts out holding its latency in silence, which is
 			// why the first sample written sounds that much later.
-			end: Instant::now() + input.latency,
+			end: Instant::now().saturating_add(input.latency),
 		})
 	}
 }
@@ -176,7 +176,7 @@ impl Sink for FakeSink {
 		// models its emergency recovery: no synthetic padding, and no PCM
 		// heard until fresh writes refill the target after a genuine gap.
 		if let Some(prime) = self.prime.take() {
-			self.end = now + prime;
+			self.end = now.saturating_add(prime);
 			// The opening silence already holds the first utterance one latency out.
 			if std::mem::take(&mut self.next) {
 				self.declared = false;
@@ -190,7 +190,7 @@ impl Sink for FakeSink {
 			}
 			self.declared = false;
 			let ahead = self.end.saturating_duration_since(now);
-			self.end = self.end.max(now) + self.latency.saturating_sub(ahead);
+			self.end = self.end.max(now).saturating_add(self.latency.saturating_sub(ahead));
 		} else if self.end < now {
 			// Comfort noise filled a declared silence, so this plays as it lands.
 			if self.declared {
@@ -246,9 +246,9 @@ impl FakeSink {
 			utterance: self.utterance,
 			sample,
 			from: self.end,
-			to: self.end + duration,
+			to: self.end.saturating_add(duration),
 		});
-		self.end += duration;
+		self.end = self.end.saturating_add(duration);
 	}
 
 	fn resume(&mut self) {
@@ -315,7 +315,7 @@ mod tests {
 		sink.finish().await;
 		let played = recorder.played();
 		assert_eq!(played[1].from, now);
-		assert_eq!(played[1].to, now + Duration::from_millis(20));
+		assert_eq!(played[1].to, now.saturating_add(Duration::from_millis(20)));
 		assert!(Instant::now() >= played[1].to);
 	}
 }

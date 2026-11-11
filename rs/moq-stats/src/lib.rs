@@ -21,17 +21,17 @@
 //! [`parse_node_path`]. Each announcement carries a fresh [`Instance`](moq_net::Instance) on its
 //! route, so a restarted node is a new broadcast at the same path; a reader
 //! tells them apart by the announced route's instance. The broadcast carries a
-//! `totals.json` track of each [`Tier`]'s [`Totals`] for the instance, and a
+//! `totals.json` track of each [`Tier`](moq_net::stats::Tier)'s [`Totals`] for the instance, and a
 //! reader may request any stats label's `<label>/presence.json` track and any
 //! broadcast prefix's `<path>/prefix.json` track of [`Prefix`] counters. Each
 //! is a compressed [`moq_json::snapshot`] track; compute names with
 //! [`totals_track`], [`presence_track`], and [`prefix_track`].
 //!
-//! Each group of leading broadcast-path segments is a compressed
-//! `<group>/group.json` track of [`GroupFrame`]s carrying the group's per-path
+//! Each bucket of leading broadcast-path segments is a compressed
+//! `<bucket>/bucket.<epoch>.json` track of [`BucketFrame`]s, one per counter run, carrying the bucket's per-path
 //! [`Traffic`] and per-label [`Presence`], listed through the broadcast's
-//! track listing while the group is live; compute and parse names with
-//! [`group_track`] and [`parse_group_track`]. The full contract (paths,
+//! track listing while the bucket is live; compute and parse names with
+//! [`bucket_track`] and [`parse_bucket_track`]. The full contract (paths,
 //! tracks, and counter semantics) is at
 //! <https://doc.moq.dev/concept/stats>.
 //!
@@ -50,11 +50,8 @@ pub use produce::{Producer, Publisher};
 
 use std::collections::BTreeMap;
 
-/// Counter collection, re-exported from [`moq_net::stats`] so stats consumers
-/// can depend on this crate alone.
-pub use moq_net::stats::{Failure, Failures, Handle, Presence, RefusalKind, Refusals, Registry, Role, Tier, Traffic};
-
 use moq_net::Path;
+use moq_net::stats::{Presence, Traffic};
 
 /// One frame off the totals track: each tier's [`Totals`], keyed by tier label
 /// (`""` for the default tier).
@@ -68,8 +65,8 @@ pub type PresenceFrame = BTreeMap<String, Presence>;
 /// keyed by tier label (`""` for the default tier).
 pub type PrefixFrame = BTreeMap<String, Prefix>;
 
-/// One tier's cumulative counters for a whole group: everything its entries
-/// sent, received, and connected since the group's epoch began, including
+/// One tier's cumulative counters for a whole bucket: everything its entries
+/// sent, received, and connected since the bucket's epoch began, including
 /// entries that have since ended.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -79,7 +76,7 @@ pub struct Totals {
 	pub publisher: Traffic,
 	/// Ingress: what this node received.
 	pub subscriber: Traffic,
-	/// Sessions connected under the group's stats labels.
+	/// Sessions connected under the bucket's stats labels.
 	pub sessions: Presence,
 }
 
@@ -129,32 +126,32 @@ pub struct Prefix {
 	pub children: BTreeMap<String, Usage>,
 }
 
-/// One frame off a group track: its counter epoch and counters.
+/// One frame off a bucket track: its counter epoch and counters.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
-pub struct GroupFrame {
-	/// Minted each time the group's track is created, as the text of a UUIDv7. Every
+pub struct BucketFrame {
+	/// Minted each time the bucket's track is created, as the text of a UUIDv7. Every
 	/// counter in a frame with a new epoch starts from zero, so a reader keeps each
 	/// epoch's counters apart rather than diffing across them.
 	pub epoch: Epoch,
-	/// Each tier's [`Group`] counters, keyed by tier label (`""` for the default
+	/// Each tier's [`Bucket`] counters, keyed by tier label (`""` for the default
 	/// tier).
 	#[serde(default)]
-	pub tiers: BTreeMap<String, Group>,
+	pub tiers: BTreeMap<String, Bucket>,
 }
 
-/// One tier's counters on a group track: the group's totals for the track's
+/// One tier's counters on a bucket track: the bucket's totals for the track's
 /// epoch, then its live per-path traffic and per-label sessions. The totals sit
 /// at the top level, so a [`Totals`] reader parses them unchanged.
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 #[non_exhaustive]
-pub struct Group {
-	/// Egress: everything the group's paths sent this epoch.
+pub struct Bucket {
+	/// Egress: everything the bucket's paths sent this epoch.
 	pub publisher: Traffic,
-	/// Ingress: everything the group's paths received this epoch.
+	/// Ingress: everything the bucket's paths received this epoch.
 	pub subscriber: Traffic,
-	/// Sessions connected under the group's stats labels this epoch.
+	/// Sessions connected under the bucket's stats labels this epoch.
 	pub sessions: Presence,
 	/// Each live broadcast path's [`Usage`], from its first moved counter until
 	/// the relay drops its counters. A side that never moved is left off the
@@ -174,8 +171,9 @@ const PRESENCE: &str = "presence.json";
 /// The last segment of a prefix track's name.
 const PREFIX: &str = "prefix.json";
 
-/// The last segment of a group track's name.
-const GROUP: &str = "group.json";
+/// The last segment of a bucket track's name is `bucket.<epoch>.json`.
+const BUCKET_PREFIX: &str = "bucket.";
+const BUCKET_SUFFIX: &str = ".json";
 
 /// The totals track name: `totals.json`.
 pub fn totals_track() -> String {
@@ -194,16 +192,50 @@ pub fn prefix_track(path: impl Into<Path>) -> String {
 	keyed_track(&path.into(), PREFIX)
 }
 
-/// The group track name for a group: `<group>/group.json`, or `group.json` for
-/// the empty group.
-pub fn group_track(group: impl Into<Path>) -> String {
-	keyed_track(&group.into(), GROUP)
+/// The track name for one counter run of a bucket: `<bucket>/bucket.<epoch>.json`,
+/// or `bucket.<epoch>.json` for the empty bucket.
+///
+/// Each run has its own name, so no name is ever reused and its MoQ group 0 is
+/// where the run's counters start, for every reader and every relay cache. A
+/// reader finds the current run through the broadcast's track listing.
+pub fn bucket_track(bucket: impl Into<Path>, epoch: &Epoch) -> String {
+	keyed_track(&bucket.into(), &format!("{BUCKET_PREFIX}{epoch}{BUCKET_SUFFIX}"))
 }
 
-/// The group a group track name carries; `None` for any other name. The
-/// inverse of [`group_track`], for reading a stats broadcast's track listing.
-pub fn parse_group_track(name: &str) -> Option<Path> {
-	parse_keyed_track(name, GROUP)
+/// The bucket and counter run a bucket track name carries; `None` for any other
+/// name. The inverse of [`bucket_track`], for reading a stats broadcast's track
+/// listing.
+pub fn parse_bucket_track(name: &str) -> Option<(Path, Epoch)> {
+	let (key, kind) = match name.rsplit_once('/') {
+		Some((key, kind)) if !key.is_empty() => (key, kind),
+		Some(_) => return None,
+		None => ("", name),
+	};
+	let epoch = kind.strip_prefix(BUCKET_PREFIX)?.strip_suffix(BUCKET_SUFFIX)?;
+	Some((Path::new(key).ok()?, epoch.parse().ok()?))
+}
+
+/// The name of `bucket`'s run that `broadcast` lists now, or a name it does not
+/// list, whose subscription fails like any unlisted track's.
+#[cfg(test)]
+pub(crate) async fn listed_bucket_track(broadcast: &moq_net::broadcast::Consumer, bucket: &Path) -> String {
+	use moq_net::broadcast::TracksEvent;
+	let mut listed = None;
+	if let Ok(mut tracks) = broadcast.tracks() {
+		while let Ok(Some(event)) = tracks.next().await {
+			match event {
+				TracksEvent::Added { name, .. } if parse_bucket_track(&name).is_some_and(|(b, _)| b == *bucket) => {
+					listed = Some(name.to_string());
+				}
+				TracksEvent::Removed { name } | TracksEvent::Finished { name } if listed.as_deref() == Some(&*name) => {
+					listed = None;
+				}
+				TracksEvent::Synced => break,
+				_ => {}
+			}
+		}
+	}
+	listed.unwrap_or_else(|| bucket_track(bucket.clone(), &"unlisted".parse().expect("an epoch")))
 }
 
 /// `<key>/<kind>`, or `<kind>` for the empty key.
@@ -279,11 +311,11 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn group_epoch_wire_values() {
+	fn bucket_epoch_wire_values() {
 		// Readers keep the text opaque, including values that are not UUIDs.
-		for text in ["0192f4e6-7b8a-7c3d-9e1f-2a3b4c5d6e7f", "legacy", "~minted", "é/\0"] {
+		for text in ["0192f4e6-7b8a-7c3d-9e1f-2a3b4c5d6e7f", "legacy", "~minted", "é.\0"] {
 			let json = serde_json::json!({ "epoch": text, "tiers": {} });
-			let frame: GroupFrame = serde_json::from_value(json.clone()).unwrap();
+			let frame: BucketFrame = serde_json::from_value(json.clone()).unwrap();
 			assert_eq!(frame.epoch.as_str(), text);
 			assert_eq!(serde_json::to_value(frame).unwrap(), json);
 			assert_eq!(Epoch::try_from(text.to_string()).unwrap(), text.parse().unwrap());
@@ -291,14 +323,16 @@ mod tests {
 
 		for epoch in [
 			serde_json::json!(""),
+			// An epoch names a track segment, so it holds no `/`.
+			serde_json::json!("a/b"),
 			serde_json::json!(null),
 			serde_json::json!(1),
 			serde_json::json!([]),
 			serde_json::json!({}),
 		] {
-			assert!(serde_json::from_value::<GroupFrame>(serde_json::json!({ "epoch": epoch })).is_err());
+			assert!(serde_json::from_value::<BucketFrame>(serde_json::json!({ "epoch": epoch })).is_err());
 		}
-		assert!(serde_json::from_value::<GroupFrame>(serde_json::json!({})).is_err());
+		assert!(serde_json::from_value::<BucketFrame>(serde_json::json!({})).is_err());
 		assert!("".parse::<Epoch>().is_err());
 		assert!(Epoch::try_from(String::new()).is_err());
 	}
@@ -396,6 +430,33 @@ mod tests {
 			"prefix.json.z",
 		] {
 			assert_eq!(parse_prefix_track(name), None, "{name}");
+		}
+	}
+
+	#[test]
+	fn bucket_track_names_round_trip() {
+		for (bucket, epoch) in [
+			("", "0192f4e6-7b8a-7c3d-9e1f-2a3b4c5d6e7f"),
+			("acme", "legacy"),
+			("acme/live", "é.\0"),
+		] {
+			let epoch: Epoch = epoch.parse().unwrap();
+			let name = bucket_track(Path::new(bucket).unwrap(), &epoch);
+			assert_eq!(
+				parse_bucket_track(&name),
+				Some((Path::new(bucket).unwrap(), epoch)),
+				"{name}"
+			);
+		}
+		for name in [
+			"bucket.json",
+			"acme/bucket.json",
+			"acme/bucket..json",
+			"/bucket.x.json",
+			"acme/group.x.json",
+			"acme/totals.json",
+		] {
+			assert_eq!(parse_bucket_track(name), None, "{name}");
 		}
 	}
 

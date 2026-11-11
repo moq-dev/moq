@@ -6,6 +6,7 @@ import 'package:moq/audio.dart' as moq_audio;
 import 'package:moq/media.dart' as moq_media;
 import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
+import 'package:moq/src/surface.dart' show surfaceFrom;
 import 'package:moq/video.dart' as moq_video;
 import 'package:test/test.dart';
 
@@ -230,6 +231,64 @@ void main() {
     // The client drains first: cancelling the server session would fail its shutdown.
     await client.close();
     serverSession.cancel(code: 0);
+    server.cancel();
+  });
+
+  test('an announced instance pins request and follow', () async {
+    // moq-lite-06 carries no instance, so the session mints one for the route.
+    const version = ['moq-lite-06'];
+    final origin = MoqOriginProducer(config: MoqOriginConfig());
+    final server = MoqServer(
+      config: MoqServerConfig(
+        bind: '127.0.0.1:0',
+        versions: version,
+        tls: MoqServerTls(generate: ['localhost']),
+        quic: MoqQuicConfig(),
+        publish: origin,
+      ),
+    );
+    final address = await server.listen().timeout(timeout);
+    final accepted = () async {
+      final request = await server.accept().timeout(timeout);
+      if (request == null) throw StateError('server closed before accept');
+      return request.accept().timeout(timeout);
+    }();
+    final route = origin.route(path: 'live', options: RouteOptions());
+
+    final client = await Moq.connect(
+      'https://$address',
+      options: ConnectOptions(
+        tls: ClientTls(insecure: true),
+        bind: '127.0.0.1:0',
+        versions: version,
+        once: true,
+      ),
+    ).timeout(timeout);
+    final serverSession = await accepted;
+
+    final announced = client.announced();
+    final present = await nextRoute(announced) as AnnounceEventPresent;
+    final minted = present.announce.route.instance;
+    expect(minted.isMinted(), isTrue);
+
+    await client.request('live', instance: minted).timeout(timeout);
+    final following = client.follow('live', instance: minted);
+    expect(await following.available().timeout(timeout), isNotNull);
+
+    // The same text, parsed, names another instance that nothing serves.
+    final named = Instance.parse(text: minted.text());
+    expect(named.isMinted(), isFalse);
+    expect(named, isNot(minted));
+    await expectLater(
+      client.request('live', instance: named).timeout(timeout),
+      throwsA(isA<ProtocolMoqException>()),
+    );
+
+    following.cancel();
+    announced.cancel();
+    await client.close();
+    serverSession.cancel(code: 0);
+    route.cancel();
     server.cancel();
   });
 
@@ -547,7 +606,7 @@ void main() {
     final first = await nextRoute(announced);
     expect(first, isA<AnnounceEventPresent>());
     expect((first as AnnounceEventPresent).announce.prefix, 'live');
-    expect(first.announce.route.instance, route.instanceId());
+    expect(first.announce.route.instance, route.instance());
 
     route.withdraw();
     final retracted = await nextRoute(announced);
@@ -561,7 +620,7 @@ void main() {
     // Announcing again continues the same stream.
     route.announce();
     final again = await nextRoute(announced) as AnnounceEventPresent;
-    expect(again.announce.route.instance, route.instanceId());
+    expect(again.announce.route.instance, route.instance());
     await consumer.request(path: 'live').timeout(timeout);
 
     // Disposing the broadcast handle keeps the route; cancelling the route retracts it,
@@ -615,27 +674,26 @@ void main() {
     final first = origin.route(path: 'instance', options: RouteOptions());
 
     final present = await nextRoute(announced) as AnnounceEventPresent;
-    expect(present.announce.route.instance, first.instanceId());
+    expect(present.announce.route.instance, first.instance());
     (await following.available().timeout(timeout))!.dispose();
 
+    final camera = Instance.parse(text: 'camera');
+    expect(camera.isMinted(), isFalse);
     final second = origin.route(
       path: 'instance',
-      options: RouteOptions(instance: 'camera', epoch: 1),
+      options: RouteOptions(instance: camera, epoch: 1),
     );
-    expect(second.instanceId(), 'camera');
+    expect(second.instance(), camera);
     (await following.available().timeout(timeout))!.dispose();
 
     // The takeover was not listed, so the next event is the path going absent.
     first.withdraw();
     second.withdraw();
     final absent = await nextRoute(announced) as AnnounceEventAbsent;
-    expect(absent.announce.route.instance, 'camera');
+    expect(absent.announce.route.instance, camera);
 
     expect(
-      () => origin.route(
-        path: 'refused',
-        options: RouteOptions(instance: ''),
-      ),
+      () => Instance.parse(text: ''),
       throwsA(isA<InvalidInstanceMoqException>()),
     );
     first.cancel();
@@ -687,20 +745,19 @@ void main() {
 
   test('dynamic serves a request under a prefix', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final dynamic = origin.routePrefix(prefix: 'live', options: RouteOptions());
+    final dynamic = origin.claim(prefix: 'live', options: RouteOptions());
     final pending = origin.consume().request(path: 'live/cam');
     final request = (await dynamic.requested().timeout(timeout))!;
     expect(request.path(), 'live/cam');
     // A hidden job route answers nobody until it announces, under the instance its
-    // prefix route lends.
+    // claim lends.
     final served = request.route(options: RouteOptions(hidden: true));
-    expect(served.instanceId(), dynamic.instanceId());
+    expect(served.instance(), dynamic.instance());
     served.announce();
     await pending.timeout(timeout);
     // Closing the job's broadcast ends its route.
     served.broadcast().close();
     expect(() => served.announce(), throwsA(isA<ClosedMoqException>()));
-    expect(() => dynamic.broadcast(), throwsA(isA<InternalMoqException>()));
     dynamic.cancel();
     await expectLater(
       dynamic.requested(),
@@ -716,7 +773,10 @@ void main() {
       broadcast: broadcast,
       track: broadcast.publishTrack(
         name: 'status',
-        info: MoqTrackInfo(timescale: 1000000, compress: true),
+        info: MoqTrackInfo(
+          timescale: 1000000,
+          compression: MoqCompression.deflate,
+        ),
       ),
       config: moq_json.SnapshotConfig(),
     );
@@ -752,7 +812,10 @@ void main() {
     final producer = moq_json.WindowProducer(
       track: broadcast.publishTrack(
         name: 'log',
-        info: MoqTrackInfo(timescale: 1000000, compress: true),
+        info: MoqTrackInfo(
+          timescale: 1000000,
+          compression: MoqCompression.deflate,
+        ),
       ),
       config: moq_json.WindowConfig(),
     );
@@ -877,6 +940,14 @@ void main() {
     broadcast.close();
   });
 
+  // A surface kind the package predates maps to the fallback arm instead of failing.
+  test('video surface maps an unknown kind', () {
+    expect(surfaceFrom(null), isNull);
+    final pixels = surfaceFrom(PixelBufferMoqVideoSurface(7));
+    expect((pixels as moq_video.PixelBuffer).pointer, 7);
+    expect(surfaceFrom(_FutureSurface()), isA<moq_video.UnknownSurface>());
+  });
+
   // A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
   test('audio consumer reports its playout delay', () async {
     final broadcast = BroadcastProducer();
@@ -968,4 +1039,16 @@ void main() {
     producer.finish();
     broadcast.close();
   });
+}
+
+/// Stands in for a generated surface variant this package predates.
+final class _FutureSurface extends MoqVideoSurface {
+  @override
+  RustBuffer lower() => throw UnimplementedError();
+
+  @override
+  int allocationSize() => throw UnimplementedError();
+
+  @override
+  int write(Uint8List buf) => throw UnimplementedError();
 }

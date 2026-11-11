@@ -1,5 +1,5 @@
 import { expect, jest, onTestFinished, test } from "bun:test";
-import { Instant, Manual, Milli, Nano, now } from "@moq/clock";
+import { Duration, Manual, now } from "@moq/clock";
 import * as Connection from "../connection/index.ts";
 import { StreamCode } from "../error.ts";
 import { hooks } from "../internal.ts";
@@ -51,7 +51,7 @@ async function nextStream(transport: WebTransport, version: IetfVersion = VERSIO
 }
 
 /** Whether the subscriber opens a bidi stream before `clock` advances `duration`. */
-async function opens(transport: WebTransport, clock: Manual, duration = Milli(200)): Promise<boolean> {
+async function opens(transport: WebTransport, clock: Manual, duration = Duration.millis(200)): Promise<boolean> {
 	const reader = transport.incomingBidirectionalStreams.getReader();
 	try {
 		return await settlesWithin(reader.read(), clock, duration);
@@ -312,7 +312,7 @@ test("a joining FETCH has no deadline of its own", async () => {
 
 	const tail = subscriber.handleGroup(...liveStream(GROUP, 2, ["t2"]));
 	// Well past any request deadline: the FETCH is still out, and nothing else was sent.
-	expect(await opens(client, clock, Milli(60_000))).toBe(false);
+	expect(await opens(client, clock, Duration.millis(60_000))).toBe(false);
 
 	await accept(fetching);
 	await subscriber.handleFetch(await head(fetch.requestId, ["h0", "h1"]));
@@ -342,7 +342,7 @@ test("a joining FETCH reset after FETCH_OK costs only the head", async () => {
 	expect(group?.sequence).toBe(GROUP + 1n);
 	expect(await consumer.recvGroup()).toBeUndefined();
 	expect(await consumer.closed).toBeNull();
-	expect(Nano.toMilli(Instant.durationSince(now(), started))).toBeLessThan(GRACE);
+	expect(now().since(started).lt(GRACE)).toBe(true);
 });
 
 test("SUBSCRIPTION_ENDED cancels a head nothing claimed", async () => {
@@ -553,7 +553,7 @@ for (const version of VERSIONS) {
 		expect(await frames(group)).toEqual(["catalog"]);
 		expect(await consumer.recvGroup()).toBeUndefined();
 		expect(await consumer.closed).toBeNull();
-		expect(Nano.toMilli(Instant.durationSince(now(), started))).toBeLessThan(GRACE);
+		expect(now().since(started).lt(GRACE)).toBe(true);
 	});
 }
 
@@ -564,7 +564,7 @@ test("a clean end finishes a head nothing claimed", () => {
 	expect(j.open(() => producer)).toBe(producer);
 	producer.writeFrame({ payload: text("c") });
 	j.wrote();
-	j.finish();
+	j.finish(producer);
 	expect(j.outstanding).toBe(true);
 	j.end();
 	expect(producer.closed.peek()).toBeNull();
@@ -654,7 +654,7 @@ test("an evicted joined group is fetched again as standalone history", async () 
 	first?.close();
 	await subscriber.handleGroup(...liveStream(GROUP + 1n, 0, ["new"]));
 	// Twice the model's 30-second idle cache window, with deterministic time.
-	await clock.advance(Nano.fromMilli(Milli(60_000)));
+	await clock.advance(Duration.millis(60_000));
 	expect(hooks.cachedGroup(consumer, GROUP)).toBeUndefined();
 	const broadcast = subscriber.consume(Path.from("room"));
 	onTestFinished(() => broadcast.close());
@@ -670,4 +670,30 @@ test("an evicted joined group is fetched again as standalone history", async () 
 	expect(await frames(group)).toEqual(["h0", "h1", "t2"]);
 	group.close();
 	consumer.close();
+});
+
+test("a second fetch stream after the track ended leaves the first head to its own stream", () => {
+	const j = new Join(0n, new Tail());
+	j.end();
+	const first = new track.Producer("catalog").createGroup(0n);
+	expect(j.open(() => first)).toBe(first);
+	const second = new track.Producer("catalog").createGroup(0n);
+	expect(j.open(() => second)).toBeUndefined();
+	// The second stream, discarding, ends first: the head is still the first stream's.
+	j.finish(undefined);
+	expect(first.closed.peek()).toBeUndefined();
+	first.writeFrame({ payload: text("c") });
+	j.finish(first);
+	expect(first.closed.peek()).toBeNull();
+});
+
+test("a discarding second fetch stream leaves a head being written alone", () => {
+	const j = new Join(0n, new Tail());
+	const first = new track.Producer("catalog").createGroup(0n);
+	expect(j.open(() => first)).toBe(first);
+	expect(j.open(() => new track.Producer("catalog").createGroup(0n))).toBeUndefined();
+	j.fail(new Error("reset"), undefined);
+	expect(first.closed.peek()).toBeUndefined();
+	expect(j.pending).toBe(false);
+	expect(j.outstanding).toBe(true);
 });

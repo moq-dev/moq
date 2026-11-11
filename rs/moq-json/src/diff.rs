@@ -13,9 +13,10 @@ use std::cell::{Cell, RefCell};
 
 use serde::Serialize;
 use serde::ser::{Impossible, SerializeMap, SerializeSeq, SerializeStruct, Serializer};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 /// The result of diffing a value into an RFC 7396 merge patch.
+#[cfg(any(test, feature = "bench"))]
 pub struct Diff {
 	/// A merge patch that transforms the old value into the new one.
 	pub patch: Value,
@@ -31,6 +32,7 @@ pub struct Diff {
 ///
 /// Only object roots produce a recursive patch; any other root forces a snapshot. A merge patch that
 /// would delete a key it shouldn't (a value genuinely set to null) also forces a snapshot.
+#[cfg(any(test, feature = "bench"))]
 pub fn diff<T: Serialize>(old: &Value, new: &T) -> Diff {
 	let result = bytes(old, new, &RefCell::new(Scratch::default())).unwrap_or(PatchBytes {
 		patch: Vec::new(),
@@ -38,7 +40,7 @@ pub fn diff<T: Serialize>(old: &Value, new: &T) -> Diff {
 	});
 	Diff {
 		patch: if result.patch.is_empty() {
-			Value::Object(Map::new())
+			Value::Object(serde_json::Map::new())
 		} else {
 			serde_json::from_slice(&result.patch).expect("the diff serializer emits JSON")
 		},
@@ -1219,7 +1221,7 @@ impl Serializer for KeySer<'_> {
 #[cfg(test)]
 mod test {
 	use super::*;
-	use serde_json::json;
+	use serde_json::{Map, json};
 
 	/// A straightforward Value-vs-Value merge-patch diff, used only as a test oracle: the production
 	/// `diff` (the serializer) must agree with it on every case.

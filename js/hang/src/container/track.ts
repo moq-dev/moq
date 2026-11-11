@@ -7,7 +7,7 @@
  * @module
  */
 
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Time, type Track } from "@moq/net";
 
 /**
@@ -19,7 +19,7 @@ import { Time, type Track } from "@moq/net";
  * target durations behind live, and a recorder absorbs reordering. `@moq/net`'s default of zero
  * would leave those addressing groups that are already stale.
  */
-export const MAX_AGE = Milli(30_000);
+export const MAX_AGE = Duration.millis(30_000);
 
 /**
  * Track properties for a track carrying media frames, for `Request.accept`.
@@ -58,5 +58,5 @@ export type TrackInfoOptions = {
 	 * and lowering it does not reduce latency: it only shortens how far back a fetch can reach.
 	 * It keeps no bytes either; the cache decides how long a group's payload stays held.
 	 */
-	maxAge?: Milli | null;
+	maxAge?: Duration | null;
 };

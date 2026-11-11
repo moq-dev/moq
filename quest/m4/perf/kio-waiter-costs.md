@@ -24,4 +24,4 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [kio channel contention](/quest/m4/perf/kio-channel-contention/README.md) - the append-only log design that would pay `kio::log`'s cost per stream
+- [kio channel contention](/quest/m4/kio-channel-contention/README.md) - the append-only log design that would pay `kio::log`'s cost per stream

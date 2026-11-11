@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { Manual, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { TimeoutError, withTimeout } from "./timeout.ts";
 
 test("withTimeout: resolves before deadline", async () => {
-	const result = await withTimeout(Promise.resolve(42), Nano(100), "should not fire");
+	const result = await withTimeout(Promise.resolve(42), Duration.nanos(100), "should not fire");
 	expect(result).toBe(42);
 });
 
@@ -14,10 +14,10 @@ test("withTimeout: rejects with TimeoutError after deadline", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
-		const timed = withTimeout(pending, Nano(10), "timed out").catch((err: unknown) => err);
-		await clock.advance(Nano(9));
+		const timed = withTimeout(pending, Duration.nanos(10), "timed out").catch((err: unknown) => err);
+		await clock.advance(Duration.nanos(9));
 		expect(await Promise.race([timed, "pending"])).toBe("pending");
-		await clock.advance(Nano(1));
+		await clock.advance(Duration.nanos(1));
 		expect(await timed).toBeInstanceOf(TimeoutError);
 	} finally {
 		installed.close();
@@ -26,5 +26,5 @@ test("withTimeout: rejects with TimeoutError after deadline", async () => {
 
 test("withTimeout: passes through promise rejection", async () => {
 	const failure = Promise.reject(new Error("boom"));
-	await expect(withTimeout(failure, Nano(100), "should not fire")).rejects.toThrow("boom");
+	await expect(withTimeout(failure, Duration.nanos(100), "should not fire")).rejects.toThrow("boom");
 });

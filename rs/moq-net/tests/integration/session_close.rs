@@ -23,7 +23,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
 		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// The payloads the server read, then how the track ended.
@@ -155,7 +155,7 @@ async fn close_delivers_a_finished_track_for(version: &str) {
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
 	group.finish().unwrap();
-	track.finish().unwrap();
+	let _track = track.finish().unwrap();
 
 	let started = kio::clock::now();
 	kio::clock::timeout(TIMEOUT, pair.client.close())
@@ -299,7 +299,7 @@ async fn close_tail_for(version: &str) {
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
 	group.finish().unwrap();
-	track.finish().unwrap();
+	let _track = track.finish().unwrap();
 	let close = kio::clock::sim::spawn(pair.client.close());
 	kio::clock::sleep(Duration::from_millis(100)).await;
 	assert!(
@@ -337,7 +337,7 @@ async fn close_requires_subscriber_fin_for(version: &str) {
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
 	group.finish().unwrap();
-	track.finish().unwrap();
+	let _track = track.finish().unwrap();
 	let started = kio::clock::now();
 	let res = pair.client.close().await;
 	assert!(matches!(res, Err(Error::Timeout)), "{version}: {res:?}");
@@ -370,7 +370,7 @@ async fn peer_close_reads_buffered_tail(version: &str) {
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
 	group.finish().unwrap();
-	track.finish().unwrap();
+	let _track = track.finish().unwrap();
 	pair.client.close().await.expect("released draft still drains on ACKs");
 	let (got, _) = reader.await.unwrap();
 	assert_eq!(got, vec![b"last".to_vec()], "{version}");
@@ -396,7 +396,7 @@ async fn peer_close_before_receiver_poll_keeps_buffered_tail() {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
 		group.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let res = pair.client.close().await;
 		// From lite-05 the close waits for the subscriber's FIN, which the gate holds back.
 		match version {
@@ -462,7 +462,7 @@ async fn ended(version: &str, close: impl FnOnce(&MockPair)) -> (Error, moq_net:
 	let mut options = MockConnectOptions::new(version.parse().unwrap());
 	options.server_stats = registry
 		.tier(Default::default())
-		.session(moq_net::Path::from_static("room"));
+		.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("room")));
 	let pair = connect_mock(options).await;
 	close(&pair);
 	let err = kio::clock::timeout(TIMEOUT, pair.server.closed())

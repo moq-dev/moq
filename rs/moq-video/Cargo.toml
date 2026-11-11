@@ -144,7 +144,7 @@ tracing = { workspace = true }
 # GPU rendering behind the `render` feature. `wgpu::hal` is re-exported by wgpu
 # itself, so the zero-copy import paths reach the platform handles without a
 # separate wgpu-hal dependency that could drift to a different version.
-wgpu = { version = "30", optional = true }
+wgpu = { workspace = true, optional = true }
 # RGBA -> I420 color conversion (replaces ffmpeg swscale).
 yuv = "0.8.14"
 
@@ -275,6 +275,7 @@ cfg_aliases = "0.2.2"
 [dev-dependencies]
 # Native Vulkan producer for the opt-in Vulkan/CUDA interop hardware exercise.
 ash = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
 futures = { workspace = true }
 # `Manual::install`, a clock the capture-loop tests move while the encoder thread works.
@@ -288,6 +289,11 @@ pollster = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
+
+[[bench]]
+name = "openh264"
+harness = false
+required-features = ["openh264"]
 
 [lints]
 workspace = true

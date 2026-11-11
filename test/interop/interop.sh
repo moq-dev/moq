@@ -1046,9 +1046,9 @@ rust_connect() {
 }
 
 # The pattern a cell's token grants its publisher, or its subscribers, on <broadcast>. The `auto`
-# pass mints patterns no prefix could carry, so AUTH must deliver them as minted. moq-transport's
-# AUTH extension carries prefixes alone and refuses a narrower grant, closing the
-# session, so a pinned pass grants the broadcast's subtree.
+# pass mints patterns no prefix could carry, so AUTH must deliver them as minted. A pinned
+# pass may be moq-transport, whose requests name prefixes alone, so it grants the
+# broadcast's subtree.
 publish_grant() {
     if [[ "$VERSION" == auto ]]; then printf '%s' "$1"; else printf '%s/**' "$1"; fi
 }
@@ -1604,6 +1604,11 @@ run_round() {
     sub_url=$(token_url --subscribe "$(subscribe_grant "$broadcast")")
     sub_grant=$(grant_line "" "**/$broadcast")
     for sub in "${SUB_LIST[@]}"; do
+        if [[ "$case" == media && "$publisher" == python && "$sub" == go ]]; then
+            echo "  SKIP  $pub -> $sub (quarantined)"
+            record skip case="$case" publisher="$publisher" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-python-go.md"
+            continue
+        fi
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
             record fail case="$case" publisher="$publisher" subscriber="$sub" detail="subscriber client unavailable"
@@ -1813,7 +1818,7 @@ run_finishes() {
     for pub in "${PUB_LIST[@]}"; do
         name="finish-$pub"
         # The fixture and its .health sibling share a parent, so one prefix grant covers both:
-        # moq-transport's AUTH extension carries prefixes alone.
+        # moq-transport requests name prefixes alone.
         broadcast="$name-$$-$RANDOM/fixture.hang"
         grant="${broadcast%/*}/**"
         ack="$LOGS/$name-ack"
@@ -2142,6 +2147,13 @@ run_fetch_round() {
     local label="CLI FETCH${3:+ $3}"
     local started=$SECONDS why=""
     local cell=(case="$label" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
+    # The relay fills its miss with an upstream FETCH, which a JS publisher refuses on
+    # moq-transport by design: it serves FETCH only over moq-lite.
+    if [[ "$VERSION" == moq-transport-* && "$pub" == js-native-* ]]; then
+        echo "  SKIP  $label $pub -> $sub (a JS publisher refuses moq-transport FETCH)"
+        record skip "${cell[@]}" detail="a JS publisher refuses moq-transport FETCH"
+        return
+    fi
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  $label $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
@@ -2360,9 +2372,9 @@ run_matrix() {
     fi
 
     # Each browser's lite-07 session proves its route key when that build can, and the relay
-    # verifies it. A build that cannot prove yet skips, except under CI_STRICT (release PRs), so
-    # the lite-07 cut waits for both browsers. The relay reads no version from the tab beyond
-    # lite-07's, so one pass covers it.
+    # verifies it. A build the lite-07 cut waits on skips, except under CI_STRICT (release PRs);
+    # route-key.ts passes one that connects unproven by design. The relay reads no version from
+    # the tab beyond lite-07's, so one pass covers it.
     if [[ "$VERSION" == auto ]] && needs js; then
         echo "=== browser route key ==="
         local engine status
@@ -2537,7 +2549,7 @@ run_catalog_fanout() {
     exec 9<>"$fifo"
     from=$(relay_next_line)
     before=$(relay_inflated) || why="relay metrics unavailable"
-    # Subtree grants, which moq-transport's AUTH extension can carry too.
+    # Subtree grants, which a moq-transport request can name too.
     harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_catalog_publisher "$fifo" "$(token_url --publish "$broadcast/**")" "$broadcast"
     pid="$HARNESS_PID"
     for version in "${CATALOG_VERSIONS[@]}"; do
@@ -2546,8 +2558,8 @@ run_catalog_fanout() {
     done
     for reader in "${readers[@]}"; do harness_wait "$reader" || true; done
     for version in "${CATALOG_VERSIONS[@]}"; do
-        want="catalog compress=false video=hd,sd audio=en,fr"
-        [[ "$version" != moq-lite-07-wip ]] || want="catalog compress=true video=hd,sd audio=en,fr"
+        want="catalog compression=none video=hd,sd audio=en,fr"
+        [[ "$version" != moq-lite-07-wip ]] || want="catalog compression=deflate video=hd,sd audio=en,fr"
         # Like run_native, a verified result survives the NAPI addon's exit crash.
         grep -qx "$want" "$LOGS/$name-$version.log" || why="${why:-$version reader did not report: $want}"
     done

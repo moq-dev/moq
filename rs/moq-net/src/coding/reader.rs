@@ -603,7 +603,9 @@ mod tests {
 			stats::{Message, Registry, Tier, Totals},
 		};
 		let registry = Registry::new(Default::default());
-		let session = registry.tier(Tier::default()).session(crate::Path::from_static(""));
+		let session = registry
+			.tier(Tier::default())
+			.session(crate::stats::SessionInfo::new(crate::Path::from_static("")));
 		let version = lite::Version::Lite07;
 		let msg = lite::Probe {
 			bitrate: Some(123),
@@ -613,7 +615,17 @@ mod tests {
 		let size = bytes.len() as u64;
 		let (head, tail) = bytes.split_at(2);
 		let counted = || registry.snapshot().control();
-		let probes = |n: u64| vec![(Tier::default(), Message::Probe, Totals { tx: 0, rx: size * n })];
+		let probes = |n: u64| {
+			vec![(
+				Tier::default(),
+				Message::Probe,
+				Totals {
+					rx: size * n,
+					rx_messages: n,
+					..Default::default()
+				},
+			)]
+		};
 
 		let mut reader = queue(&[bytes, head], version).with_stats(&session);
 		let waiter = &kio::Waiter::noop();
@@ -648,8 +660,9 @@ mod tests {
 			Tier::default(),
 			Message::Auth,
 			Totals {
-				tx: 0,
 				rx: reply.len() as u64,
+				rx_messages: 1,
+				..Default::default()
 			},
 		);
 		assert_eq!(counted(), [vec![auth.clone()], probes(2)].concat());

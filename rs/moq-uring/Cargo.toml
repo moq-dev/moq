@@ -21,7 +21,7 @@ doc = false
 [features]
 default = ["quic"]
 # QUIC and WebTransport on moq-quic, with TLS through rustls.
-quic = ["dep:moq-congestion", "dep:moq-crypto", "dep:moq-quic", "dep:rustls", "dep:rustls-platform-verifier"]
+quic = ["dep:moq-congestion", "dep:moq-crypto", "dep:moq-quic", "dep:rustls"]
 # Capture qlog traces (`quic::Transport::qlog`). Off by default: it compiles the
 # qlog crate and its serde_json encoder into moq-quic, which a production build has
 # no use for.
@@ -49,9 +49,6 @@ moq-quic = { workspace = true, features = [], optional = true }
 moq-sock = { workspace = true }
 rustc-hash = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
-# OS-native server-cert verifier for the rustls backends. Version matched to
-# the copy moq-tokio pulls in, to avoid duplication.
-rustls-platform-verifier = { version = "0.7", optional = true }
 # Runtime thread checks for the session moq-transport's `Send` drivers capture.
 send_wrapper = { workspace = true }
 slab = "0.4"

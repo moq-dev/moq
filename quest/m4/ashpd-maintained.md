@@ -19,4 +19,4 @@ so the portal capture client compiles against the new API.
 
 ## Related
 
-- [Dependency audit](/quest/m3/audit-deps.md) - recheck the rest of the dependency graph
+- [Cost audit](/quest/m3/audit-cost.md) - recheck the rest of the dependency graph

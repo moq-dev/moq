@@ -5,7 +5,7 @@
  *
  * @module
  */
-import { type Instant, Milli } from "@moq/clock";
+import type { Duration, Instant } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Charge, Pool } from "./cache.ts";
@@ -15,7 +15,7 @@ import { StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as FrameConsumer } from "./frame.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type WireRoute } from "./hop.ts";
-import type * as Instance from "./instance.ts";
+import * as Instance from "./instance.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
@@ -36,21 +36,26 @@ import * as Varint from "./varint.ts";
 import type { Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
-/** What a null {@link Delay.max} goes out as: the largest value every peer can read, as Rust sends for `None`. */
-export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
+/** What a null {@link Delay.max} goes out as, in milliseconds: the largest value every peer can read, as Rust sends for `None`. */
+export const NO_MAX_DELAY = Varint.MAX_U53;
 
-/** A subscription's {@link Delay.max} as the wire carries it: null for no limit, omitted for zero. */
-export function maxDelayOf(subscription: Pick<Subscription, "delay">): Milli {
-	const max = subscription.delay?.max;
-	if (max === null) return NO_MAX_DELAY;
-	return max ?? Milli.zero;
+/** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
+export function datagramTrackInfo(info: datagram.Info): Info {
+	return { compression: "none", timescale: info.timescale, maxAge: null, priority: info.priority, refresh: null };
 }
 
-/** A subscription's {@link Delay.min} as the wire carries it: undefined when not stated, omitted for zero. */
-export function minDelayOf(subscription: Pick<Subscription, "delay">): Milli | undefined {
+/** A subscription's {@link Delay.max} in milliseconds as the wire carries it: null for no limit, omitted for zero. */
+export function maxDelayOf(subscription: Pick<Subscription, "delay">): number {
+	const max = subscription.delay?.max;
+	if (max === null) return NO_MAX_DELAY;
+	return max?.asMillis() ?? 0;
+}
+
+/** A subscription's {@link Delay.min} in milliseconds as the wire carries it: undefined when not stated, omitted for zero. */
+export function minDelayOf(subscription: Pick<Subscription, "delay">): number | undefined {
 	const min = subscription.delay?.min;
 	if (min === null) return undefined;
-	return min ?? Milli.zero;
+	return min?.asMillis() ?? 0;
 }
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
@@ -223,7 +228,7 @@ export interface DropRun extends Run, Hole {
 }
 
 /** Whether two runs say the same thing, so they may merge. */
-function sameHole(a: DropRun, b: DropRun): boolean {
+export function sameHole(a: DropRun, b: DropRun): boolean {
 	return (
 		toStreamCode(a.error) === toStreamCode(b.error) &&
 		!a.skip === !b.skip &&
@@ -373,7 +378,7 @@ export interface Land {
 	/** Whether the feed was asked to start at `start`: otherwise only from its first arrival. */
 	floor: boolean;
 	/** How long a gap a later arrival opened is waited for. */
-	grace: Milli;
+	grace: Duration;
 	/** When given, only a group it lacks counts. */
 	delivered?: Delivered;
 }
@@ -530,6 +535,8 @@ export const hooks: {
 	releaseTrack: (producer: Producer) => void;
 	/** Cache a new track's groups into its broadcast's `pool`, before it caches any. Assigned by `track.ts`. */
 	poolTrack: (producer: Producer, pool: Pool) => void;
+	/** How many runs a track's arrivals hold, for tests. Assigned by `track.ts`. */
+	arrivalRuns: (producer: Producer) => number;
 	/**
 	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
 	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
@@ -621,7 +628,7 @@ export const hooks: {
 	 * How long a session's tail waits for a late group: the subscribers' max delay, bounded by
 	 * the track's max age; assigned by `track.ts`.
 	 */
-	tailGrace: (producer: Producer) => Milli;
+	tailGrace: (producer: Producer) => Duration;
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => bigint | undefined;
 	/**
@@ -724,7 +731,7 @@ export const hooks: {
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
 	holdsGroup: (subscriber: Subscriber, sequence: bigint) => boolean;
 	/** The error the subscriber's track gave `sequence` up with, if it did, and what changes it. */
-	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown> };
+	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
 	 * The parts of `[start, end)` the subscriber's track still holds as a received stale run: one
 	 * new terms superseded is gone. Mirrors the Rust crate-private `track::Subscriber::stale_held`.
@@ -745,7 +752,7 @@ export const hooks: {
 	/** Wake once a subscriber's group cursor may read differently, including when the track declares its end; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
-	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
+	fetchBudget: (subscriber: Subscriber, maxDelay: Duration | undefined) => void;
 	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
 	subscribing: (producer: Producer) => Getter<boolean>;
 	/** The aggregate across every reader, one-shot fetches included: what the wire asks for. */
@@ -820,8 +827,6 @@ export const hooks: {
 	/** The next absolute frame this reader can serve. Assigned by `group.ts`. */
 	groupIndex: (group: GroupConsumer) => number;
 	groupStarted: (group: GroupConsumer) => boolean;
-	/** Wait for the selected headers or this reader's group end, without retaining payloads. */
-	groupEnd: (group: GroupConsumer, until?: number) => Promise<{ end: number; complete: boolean }>;
 	/** Watch the error a group's copy closes with, ignoring readers' verdicts, without holding the consumer. */
 	groupFate: (group: GroupConsumer) => () => Error | undefined;
 	/** Record when a track's mirror of a group joined that track at this hop. */
@@ -903,6 +908,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	poolTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	arrivalRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
 	trackReleased: () => {
@@ -1160,9 +1168,6 @@ export const hooks: {
 	groupStarted: () => {
 		throw new Error("group.ts not loaded");
 	},
-	groupEnd: () => {
-		throw new Error("group.ts not loaded");
-	},
 	groupFate: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1303,9 +1308,17 @@ export class Epochs {
 	}
 }
 
-/** Prefer identified publishers, then lower static cost. */
+/**
+ * Prefer a route that is neither draining (a peer that sent GOAWAY) nor unavailable (held),
+ * which rank below every other, then identified publishers, then lower static cost.
+ */
 export function compareRoutes(a: WireRoute, b: WireRoute): number {
-	return Number(isAnonymous(a)) - Number(isAnonymous(b)) || (a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0);
+	const last = (route: WireRoute) => Number((route.draining ?? false) || route.available === false);
+	return (
+		last(a) - last(b) ||
+		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
+		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
+	);
 }
 
 /**
@@ -1319,8 +1332,8 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
 	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
 	if (order !== 0 || path === prefix) return order;
-	const ha = spreadHash(path, a.instance ?? "");
-	const hb = spreadHash(path, b.instance ?? "");
+	const ha = spreadHash(path, a.instance ? Instance.text(a.instance) : "");
+	const hb = spreadHash(path, b.instance ? Instance.text(b.instance) : "");
 	if (ha !== hb) return ha < hb ? -1 : 1;
 	const ca = chainHash(path, a.hops);
 	const cb = chainHash(path, b.hops);

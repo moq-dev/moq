@@ -23,11 +23,12 @@ mod linux {
 	type Dial<'a> = Pin<Box<dyn Future<Output = Result<quic::Connection, quic::Error>> + 'a>>;
 
 	fn dial_config() -> quic::client::Config {
-		let mut config = quic::client::Config::default();
-		config.alpn = vec!["moq-uring-bench".to_string()];
-		config.verify = false;
-		config.system_roots = false;
-		config
+		// Nothing ever answers, so nothing is verified.
+		let mut tls = moq_tokio::tls::Connect::default();
+		tls.insecure = Some(true);
+		let mut tls = tls.build().expect("tls");
+		tls.alpn_protocols = vec![b"moq-uring-bench".to_vec()];
+		quic::client::Config::new(std::sync::Arc::new(tls))
 	}
 
 	/// An IPv6-only socket, which Linux refuses to send to a v4-mapped address

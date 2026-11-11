@@ -12,8 +12,7 @@ Today nothing measures encoded quality: the only check is a manual PSNR/SSIM
 recipe in `rs/moq-video/examples/encode-presets.rs`. moq-boy's encoding looks
 bad, and nobody knows how each backend or GPU compares on the same input.
 
-Non-goals: per-viewer adaptation and live bitrate control, which belong to the
-[ladder](/quest/m5/ladder/README.md); browser playback quality, which belongs to
+Non-goals: per-viewer adaptation and live bitrate control, which nothing plans; browser playback quality, which belongs to
 `just test media`.
 
 ## Plan
@@ -68,11 +67,3 @@ Decided in planning (2026-10-28):
 - The moq-boy clip is generated, not stored. The emulator is deterministic,
   so the harness renders it from a public homebrew ROM on `rom.moq.dev` plus
   scripted input (✅ "Generate it" over "Store captures").
-
-## Required
-
-- [Harness](/quest/m3/video-quality/harness.md) - `just test video-quality` scores OpenH264 rows with per-frame VMAF and boundary pops against floors, nightly
-- [On-demand pops](/quest/m3/video-quality/on-demand.md) - cold starts, resubscribes, and fetch-encoded groups spliced with live ones stay under the pop ceiling
-- [moq-boy quality](/quest/m3/video-quality/moq-boy.md) - moq-boy's encode is measured on generated clips and fixed
-- [GPU runners](/quest/m3/video-quality/gpu-runners.md) - `nixos2` and the desktop host self-hosted runners for the nightly job
-- [Hardware rows](/quest/m3/video-quality/hardware.md) - NVENC and VA-API rows from three GPU hosts gate the nightly and compare side by side

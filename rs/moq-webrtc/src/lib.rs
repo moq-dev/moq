@@ -1,5 +1,4 @@
-//! WebRTC for MoQ: a WHIP/WHEP gateway, and with the `p2p` feature, MoQ sessions over a
-//! data channel with a browser peer (the `p2p` module).
+//! WebRTC for MoQ: a WHIP/WHEP gateway.
 //!
 //! The gateway bridges WHIP (RFC 9725) and WHEP between WebRTC peers and
 //! [`moq_net`] broadcasts. The crate is split along two orthogonal axes
@@ -30,6 +29,12 @@
 //! the `axum` re-export sit behind the default `server` feature, so such an
 //! embedder can drop them with `default-features = false`.
 //!
+//! ## Runtime
+//!
+//! The crate is a tokio edge, built on `moq-tokio`, axum, and tokio sockets. The bundled
+//! routers spawn session drivers on the current tokio runtime; `accept` callers run
+//! [`Response::run`] themselves.
+//!
 //! ## Bitstream gotcha
 //!
 //! The WebRTC ↔ MoQ shape conversion for H.264 and H.265 is handled by
@@ -42,7 +47,7 @@
 pub mod client;
 #[cfg(feature = "p2p")]
 pub mod p2p;
-pub mod rate;
+mod rate;
 pub mod server;
 
 // Implementation detail modules: these carry the WebRTC/str0m plumbing (str0m
@@ -59,19 +64,6 @@ mod session;
 // str0m, dimpl, `is`, and sctp-proto, vendored and trimmed; see the module docs.
 mod vendor;
 
-/// Re-export of the HTTP router stack, so consumers can merge the [`axum::Router`]
-/// returned by [`Server::publish_router`] / [`Server::subscribe_router`] into their
-/// own app without adding their own axum dependency (and risking a version mismatch). A major axum bump is therefore
-/// a breaking change for this crate. Only with the `server` feature.
-#[cfg(feature = "server")]
-pub use axum;
-
-/// Re-export of the URL type, so consumers can build the [`url::Url`] that
-/// [`Client::subscribe`] / [`Client::publish`] dial without adding their own url
-/// dependency (and risking a version mismatch). A major url bump is therefore a
-/// breaking change for this crate.
-pub use url;
-
 pub use client::Client;
 pub use error::*;
 pub use server::{Response, Server, whep, whip};
@@ -82,9 +74,14 @@ mod tests {
 
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-		match announced.next().await? {
-			moq_net::announce::Event::Present(route) => Some((route, true)),
-			moq_net::announce::Event::Absent(route) => Some((route, false)),
+		loop {
+			return match announced.next().await? {
+				moq_net::announce::Event::Present(route) => Some((route, true)),
+				moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => {
+					Some((route, false))
+				}
+				moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
+			};
 		}
 	}
 
@@ -209,9 +206,12 @@ mod tests {
 				let origin = whep_origin.clone();
 				let sessions = sessions_tx.clone();
 				async move {
-					let response = server::whep::accept(&server, &origin, moq_net::Path::from_static("source"), &offer)
-						.await
-						.unwrap();
+					let response = server::whep::accept(
+						&server,
+						server::whep::Request::new(&origin, moq_net::Path::from_static("source"), &offer),
+					)
+					.await
+					.unwrap();
 					let answer = response.answer.clone();
 					sessions.send(tokio::spawn(response.run())).await.unwrap();
 					answer
@@ -228,7 +228,7 @@ mod tests {
 		let client = Client::new(client::Config::default()).unwrap();
 		let url = format!("http://{address}/whep/source").parse().expect("WHEP URL");
 		let fill = output.broadcast().clone();
-		let viewer = tokio::spawn(async move { client.subscribe(url, fill).await });
+		let viewer = tokio::spawn(async move { client.subscribe(url, fill, Default::default()).await });
 		let session = kio::clock::timeout(TIMEOUT, sessions.recv())
 			.await
 			.expect("WHEP negotiation timed out")
@@ -321,7 +321,7 @@ mod tests {
 
 	/// Serve WHIP at `/whip/ingested` under `rate`, sending each session's task out.
 	async fn serve_capped_whip(
-		rate: crate::rate::Limit,
+		rate: moq_net::bandwidth::Limit,
 	) -> (
 		std::net::SocketAddr,
 		tokio::task::JoinHandle<()>,
@@ -336,8 +336,9 @@ mod tests {
 				let (server, origin, rate, sessions) =
 					(server.clone(), origin.clone(), rate.clone(), sessions_tx.clone());
 				async move {
-					let request = server::whip::Request::new(&origin, moq_net::Path::from_static("ingested"), &offer)
-						.with_rate(rate);
+					let mut request =
+						server::whip::Request::new(&origin, moq_net::Path::from_static("ingested"), &offer);
+					request.rate = Some(rate);
 					let response = server::whip::accept(&server, request).await.unwrap();
 					let answer = response.answer.clone();
 					sessions.send(tokio::spawn(response.run())).await.unwrap();
@@ -394,13 +395,13 @@ mod tests {
 			&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00],
 		);
 
-		let rate = crate::rate::Limit::new(crate::rate::Cap::new(moq_net::bandwidth::Rate::from_mbps(2)));
+		let rate = moq_net::bandwidth::Limit::new(moq_net::bandwidth::Cap::new(moq_net::bandwidth::Rate::from_mbps(2)));
 		let (address, http, mut sessions) = serve_capped_whip(rate.clone()).await;
 		let pushed = push_whip(&origin, address).await;
 		let session = kio::clock::timeout(TIMEOUT, sessions.recv()).await.unwrap().unwrap();
 
 		logged("bps=1800000").await;
-		rate.set(crate::rate::Cap::new(moq_net::bandwidth::Rate::from_mbps(1)));
+		rate.set(moq_net::bandwidth::Cap::new(moq_net::bandwidth::Rate::from_mbps(1)));
 		logged("bps=900000").await;
 		// Lifting the cap lifts the publisher's ceiling rather than leaving the last one.
 		rate.set(None);
@@ -419,8 +420,9 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 		let (_route, mut opus, _catalog) = publish_opus(&origin, moq_net::Instance::random());
 		// 8 kbps with a tenth of a second of burst allows 100 bytes up front.
-		let cap = crate::rate::Cap::new(moq_net::bandwidth::Rate::from_kbps(8)).with_burst(Duration::from_millis(100));
-		let (address, http, mut sessions) = serve_capped_whip(crate::rate::Limit::new(cap)).await;
+		let cap =
+			moq_net::bandwidth::Cap::new(moq_net::bandwidth::Rate::from_kbps(8)).with_burst(Duration::from_millis(100));
+		let (address, http, mut sessions) = serve_capped_whip(moq_net::bandwidth::Limit::new(cap)).await;
 		push(&mut *opus, 20_000, &[0xfc; 1000]);
 		let pushed = push_whip(&origin, address).await;
 
@@ -504,10 +506,12 @@ mod tests {
 					let origin = whep_origin.clone();
 					let sources = sources_tx.clone();
 					async move {
-						let response =
-							server::whep::accept(&server, &origin, moq_net::Path::from_static("ingested"), &offer)
-								.await
-								.unwrap();
+						let response = server::whep::accept(
+							&server,
+							server::whep::Request::new(&origin, moq_net::Path::from_static("ingested"), &offer),
+						)
+						.await
+						.unwrap();
 						let answer = response.answer.clone();
 						let id = response.resource_id.clone();
 						let task = tokio::spawn(response.run());
@@ -547,7 +551,7 @@ mod tests {
 			.parse()
 			.expect("WHEP URL");
 		let fill = output.broadcast().clone();
-		let whep_client = tokio::spawn(async move { client.subscribe(whep, fill).await });
+		let whep_client = tokio::spawn(async move { client.subscribe(whep, fill, Default::default()).await });
 		let (whep_id, whep_task) = kio::clock::timeout(TIMEOUT, sources_rx.recv())
 			.await
 			.expect("WHEP negotiation timed out")

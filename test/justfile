@@ -153,11 +153,11 @@ native-play:
     ./native-play/run.sh
 
 # Plays a tone in headless Chromium and the native `moq play` through moq-shaper and grades
-# what the listener heard (underruns, skip-aheads, silence, the resolved delay) against
-# audio-quality/budgets.json. The full matrix is 24 rows at 60 s; nightly runs it with
+# what the listener heard (underruns, trimmed audio, silence, A/V lag, the resolved delay) against
+# audio-quality/budgets.json. The full matrix is 28 rows at 60 s; nightly runs it with
 # --enforce. Narrow it with `--profiles mild --codecs opus --runtimes chromium --duration 20`;
 # `--runtimes native` is the native player alone.
-# `--replays` grades only the recorded traces, in seconds, as nightly and release PRs touching the player do.
+# `--replays` grades only the recorded traces, in seconds, as `just ci` does on a diff touching the player.
 # See audio-quality/README.md.
 
 # Grade browser and native audio playout over an impaired path.
@@ -165,7 +165,7 @@ native-play:
 audio-quality *args:
     ./audio-quality/run.sh "$@"
 
-# Measure 22 push-to-talk presses at 300 ms on an ideal local path.
+# Measure 22 push-to-talk presses on the browser defaults over an ideal local path.
 push-to-talk:
     ./audio-quality/ptt.sh
 
@@ -293,6 +293,14 @@ json-properties:
 # Check resume against its model of one logical track from a fresh replayable seed.
 resume-model:
     bash ../sh/local.sh bash resume-model.sh
+
+# Prove the route key model, and that each variant breaks the lemmas it names.
+route-key-model:
+    bash route-key-model.sh
+
+# Check random lite-07 meshes against the route rules from a fresh replayable seed.
+route-sweep:
+    bash ../sh/local.sh bash route-sweep.sh
 
 # The TypeScript qmux peer as client and server against the in-tree Rust qmux
 # interop examples, per draft. The manifest path names the in-tree crate, which

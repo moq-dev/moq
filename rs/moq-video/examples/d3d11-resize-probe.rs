@@ -73,10 +73,11 @@ mod probe {
 	use std::time::{Duration, Instant};
 
 	use anyhow::{Context, Result, anyhow, bail};
-	use moq_video::windows::Win32::Foundation::{HMODULE, RECT};
-	use moq_video::windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
-	use moq_video::windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
-	use moq_video::windows::Win32::Graphics::Direct3D11::{
+	use moq_video::{Frame, I420, Size, Surface};
+	use windows::Win32::Foundation::{HMODULE, RECT};
+	use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+	use windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
+	use windows::Win32::Graphics::Direct3D11::{
 		D3D11_BIND_DECODER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VIDEO_ENCODER, D3D11_BOX,
 		D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
 		D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MESSAGE, D3D11_SDK_VERSION,
@@ -90,8 +91,8 @@ mod probe {
 		ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
 		ID3D11VideoProcessorOutputView,
 	};
-	use moq_video::windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
-	use moq_video::windows::Win32::Media::MediaFoundation::{
+	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
+	use windows::Win32::Media::MediaFoundation::{
 		IMFActivate, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFSample, IMFTransform, MF_E_NO_MORE_TYPES,
 		MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY,
 		MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION, MFCreateDXGIDeviceManager, MFCreateMediaType,
@@ -100,9 +101,8 @@ mod probe {
 		MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
 		MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12,
 	};
-	use moq_video::windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
-	use moq_video::windows::core::Interface;
-	use moq_video::{Frame, I420, Size, Surface};
+	use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
+	use windows::core::Interface;
 
 	/// The source stream the probe decodes, and the size it scales down to.
 	const SOURCE: Size = Size {
@@ -852,9 +852,14 @@ mod probe {
 				Surface::I420(gradient(index)),
 				moq_net::Timestamp::from_micros(index * 33_333).unwrap(),
 			);
-			for encoded in encoder.encode(&frame).context("encode")? {
+			encoder.encode(&frame).context("encode")?;
+			while let Some(encoded) = encoder.receive().context("encode")? {
 				out.push(encoded.payload.to_vec());
 			}
+		}
+		encoder.flush().context("flush")?;
+		while let Some(encoded) = encoder.receive().context("flush")? {
+			out.push(encoded.payload.to_vec());
 		}
 		Ok(out)
 	}
@@ -1053,7 +1058,10 @@ mod probe {
 		let mut frames = Vec::new();
 		for (index, unit) in stream()?.into_iter().enumerate() {
 			let timestamp = moq_net::Timestamp::from_micros(index as u64 * 33_333).unwrap();
-			frames.extend(decoder.decode(&unit.into(), timestamp, index == 0).context("decode")?);
+			decoder.decode(&unit.into(), timestamp, index == 0).context("decode")?;
+			while let Some(frame) = decoder.receive().context("decode")? {
+				frames.push(frame);
+			}
 		}
 		let Some(Surface::Texture(texture)) = frames.first().map(|f| &f.surface) else {
 			bail!("the crate's decoder did not produce a GPU texture on this machine");
@@ -1115,11 +1123,12 @@ mod probe {
 		let mut frames = Vec::new();
 		for (index, unit) in units.iter().enumerate() {
 			let timestamp = moq_net::Timestamp::from_micros(index as u64 * 33_333).unwrap();
-			frames.extend(
-				decoder
-					.decode(&unit.clone().into(), timestamp, index == 0)
-					.context("decode")?,
-			);
+			decoder
+				.decode(&unit.clone().into(), timestamp, index == 0)
+				.context("decode")?;
+			while let Some(frame) = decoder.receive().context("decode")? {
+				frames.push(frame);
+			}
 		}
 		let Some(first) = frames.into_iter().next() else {
 			bail!("the decoder did not produce a frame on this machine");
@@ -1164,6 +1173,11 @@ mod probe {
 							encoder
 								.encode(&resized)
 								.with_context(|| format!("ladder rung {rung} encode"))?;
+							while encoder
+								.receive()
+								.with_context(|| format!("ladder rung {rung} encode"))?
+								.is_some()
+							{}
 						}
 					}
 					Ok(())
@@ -1202,6 +1216,7 @@ mod probe {
 						decoder
 							.decode(&unit.clone().into(), timestamp, index == 0)
 							.context("live ladder decode")?;
+						while decoder.receive().context("live ladder decode")?.is_some() {}
 						timestamp_index += 1;
 					}
 				}

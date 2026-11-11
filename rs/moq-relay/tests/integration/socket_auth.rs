@@ -202,6 +202,25 @@ async fn recv(reader: &mut moq_net::track::Ordered) -> Vec<u8> {
 	.expect("read timeout")
 }
 
+/// Wait until `id`, a hidden endpoint, is announced to `origin`, so a request for it
+/// never syncs ahead of the announce and reports it unroutable.
+async fn announced(origin: &moq_net::origin::Producer, id: &str) {
+	let mut announced = origin.consume().with_hidden(true).announced();
+	let wait = async {
+		while let Some(event) = announced.next().await {
+			if let moq_net::announce::Event::Present(announce) = event
+				&& announce.prefix.as_str() == id
+			{
+				return;
+			}
+		}
+		panic!("{id}: origin closed");
+	};
+	kio::clock::timeout(TIMEOUT, wait)
+		.await
+		.unwrap_or_else(|_| panic!("{id} was never announced"));
+}
+
 /// The prefix grants admit a dial and its accept in either protocol, and the session
 /// carries data, over moq-lite-07 and across a moq-transport hop.
 #[tokio::test]
@@ -232,7 +251,6 @@ async fn prefix_grants_admit_a_session() {
 /// name. Bob sees a dial from alice, but alice never dialed it and resets his accept, so it
 /// never connects and mallory reads nothing.
 #[tokio::test]
-#[ignore = "flaky: mallory's request can sync before bob's announce arrives; quest/m0/test-flakes-2/forged-dial-announce.md"]
 async fn a_forged_dial_never_connects() {
 	let fixture = Fixture::new().await;
 	let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", LITE).await;
@@ -243,6 +261,7 @@ async fn a_forged_dial_never_connects() {
 
 	// Bob's first accept announces his server endpoint.
 	assert!(bob.poll_accept_tcp(&kio::Waiter::noop()).is_pending());
+	announced(&mallory_origin, ".server/bob").await;
 
 	let forge = async {
 		let broadcast = mallory_origin
@@ -275,9 +294,10 @@ async fn a_client_grant_neither_serves_nor_reads_clients() {
 	let (_bob, bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", LITE).await;
 	// Bob, a server, reads a client endpoint once the relay carries it.
 	let carried = |id: &'static str| {
-		let origin = bob_origin.consume();
+		let origin = bob_origin.clone();
 		async move {
-			kio::clock::timeout(TIMEOUT, origin.request(id, None))
+			announced(&origin, id).await;
+			kio::clock::timeout(TIMEOUT, origin.consume().request(id, None))
 				.await
 				.expect("request timeout")
 				.unwrap_or_else(|err| panic!("{id}: {err}"));
@@ -321,7 +341,6 @@ async fn a_client_grant_neither_serves_nor_reads_clients() {
 /// track, so it cannot learn a session's name to read or forge it.
 #[tokio::test]
 async fn a_reader_of_everything_lists_no_session() {
-	kio::clock::host_time();
 	let fixture = Fixture::new().await;
 	let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", LITE).await;
 	let (bob, _bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", LITE).await;

@@ -29,18 +29,26 @@ import java.net.InetAddress
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.nanoseconds
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 import kotlinx.serialization.Serializable
 import uniffi.moq.MoqException
 
@@ -210,7 +218,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
-            origin.routePrefix("", RouteOptions()).use { /* prefix route smoke */ }
+            origin.claim("", RouteOptions()).use { /* claim smoke */ }
         }
     }
 
@@ -242,13 +250,13 @@ class SmokeTest {
         val server: ServerConfig = ServerConfig(tls = ServerTls(generate = listOf("localhost")))
         assertEquals(4096uL, client.quic.maxStreams)
         assertEquals(listOf("localhost"), server.tls.generate)
-        val status: ConnectionPhase = ConnectionPhase.CONNECTED
+        val status: ConnectionPhase = ConnectionPhaseConnected(version = "moq-lite-03")
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(true, snapshot.deltas)
         assertNull(properties.display)
         assertNull(properties.flip)
         assertEquals(java.time.Duration.ofMillis(500), backoff.initial)
-        assertEquals(ConnectionPhase.CONNECTED, status)
+        assertEquals("moq-lite-03", assertIs<ConnectionPhaseConnected>(status).version)
     }
 
     @Test
@@ -587,7 +595,10 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val config = WindowConfig()
             val track =
-                broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL, compress = true))
+                broadcast.publishTrack(
+                    "log",
+                    TrackInfo(timescale = 1_000_000uL, compression = Compression.DEFLATE),
+                )
             val producer = WindowProducer(track, config)
             val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null))
             for (n in 1..3) producer.push(
@@ -694,6 +705,32 @@ class SmokeTest {
                     route.announce()
                     route.withdraw()
                 }
+            }
+    }
+
+    @Test
+    fun `a flow releases its handle however collection ends`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("thrown", null)
+            track.appendGroup().finish()
+            // Finished, so a handle left open would read the end instead of failing.
+            track.finish()
+            val consumer = broadcast.consume().subscribeTrack("thrown", null)
+            assertFailsWith<IllegalStateException> {
+                consumer.groups().collect { error("collector failed") }
+            }
+            assertFailsWith<MoqException.Cancelled> { consumer.nextGroup() }
+        }
+    }
+
+    @Test
+    fun `ending a requests collection leaves the server listening`() = runTest {
+        Server.listen(
+                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
+            )
+            .use { server ->
+                assertNull(withTimeoutOrNull(10.milliseconds) { server.requests().first() })
+                assertEquals(1, server.certFingerprints().size)
             }
     }
 
@@ -856,24 +893,24 @@ class SmokeTest {
             val following = consumer.follow("instance", null)
             origin.route("instance", RouteOptions()).use { first ->
                 val present = assertIs<AnnounceEventPresent>(announced.nextRoute())
-                assertTrue(present.announce.route.instance.isNotEmpty())
+                assertFalse(present.announce.route.instance.isMinted())
                 assertEquals(first.instance(), present.announce.route.instance)
                 assertNotNull(following.available()).close()
 
-                origin.route("instance", RouteOptions(instance = "camera", epoch = 1uL)).use {
-                    second ->
+                val camera = Instance.parse("camera")
+                origin.route("instance", RouteOptions(instance = camera, epoch = 1uL)).use { second
+                    ->
                     assertNotNull(following.available()).close()
 
                     // The takeover was not listed, so the next event is the path going absent.
                     first.withdraw()
                     second.withdraw()
                     val absent = assertIs<AnnounceEventAbsent>(announced.nextRoute())
-                    assertEquals("camera", absent.announce.route.instance)
+                    assertEquals(camera, absent.announce.route.instance)
+                    assertEquals("camera", absent.announce.route.instance.toString())
                 }
 
-                assertFailsWith<MoqException.InvalidInstance> {
-                    origin.route("refused", RouteOptions(instance = ""))
-                }
+                assertFailsWith<MoqException.InvalidInstance> { Instance.parse("") }
             }
             following.cancel()
         }
@@ -912,8 +949,7 @@ class SmokeTest {
     @Test
     fun `dynamic serves a request under a prefix`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.routePrefix("live", RouteOptions()).use { dynamic ->
-                assertFailsWith<MoqException.Internal> { dynamic.broadcast() }
+            origin.claim("live", RouteOptions()).use { dynamic ->
                 val pending = async {
                     origin.consume().request("live/cam")
                 }
@@ -1036,6 +1072,59 @@ class SmokeTest {
             }
     }
 
+    /**
+     * Over moq-lite-06, whose wire carries no instance, the session mints one: passing it back pins
+     * `request` and `follow`, while its text parsed is another, named instance that nothing serves.
+     */
+    @Test
+    fun `an announced instance pins request and follow`() = runTest {
+        val version = listOf("moq-lite-06")
+        Server.listen(
+                ServerConfig(
+                    bind = "127.0.0.1:0",
+                    versions = version,
+                    tls = ServerTls(generate = listOf("localhost")),
+                )
+            )
+            .use { server ->
+                server.route("live", RouteOptions()).use {
+                    // Not requests().first(): ending that collection cancels the server.
+                    val accepted = async { server.server.accept()!!.accept() }
+                    OriginProducer(OriginConfig()).use { viewer ->
+                        Moq.connect(
+                                "https://${server.localAddr}",
+                                ClientConfig(
+                                    bind = "127.0.0.1:0",
+                                    versions = version,
+                                    tls = ClientTls(insecure = true),
+                                    consume = viewer,
+                                    once = true,
+                                ),
+                            )
+                            .use { moq ->
+                                val session = accepted.await()
+                                val present =
+                                    assertIs<AnnounceEventPresent>(moq.announced().nextRoute())
+                                val minted = present.announce.route.instance
+                                assertTrue(minted.isMinted())
+
+                                moq.request("live", minted)
+                                val following = moq.follow("live", minted)
+                                assertNotNull(following.available()).close()
+                                following.cancel()
+
+                                val named = Instance.parse(minted.text())
+                                assertFalse(named.isMinted())
+                                assertEquals(minted.text(), named.toString())
+                                assertNotEquals(minted, named)
+                                assertFailsWith<MoqException> { moq.request("live", named) }
+                                session.cancel(0u)
+                            }
+                    }
+                }
+            }
+    }
+
     /** The returned Session owns its pending dial even after Client cancellation. */
     @Test
     fun `session owns and cancels its first dial`() = runTest {
@@ -1055,7 +1144,7 @@ class SmokeTest {
             assertEquals(0uL, session.state().connects)
             session.cancel(0u)
             session.closed()
-            assertEquals(ConnectionPhase.CLOSED, session.state().phase)
+            assertIs<ConnectionPhaseClosed>(session.state().phase)
         }
     }
 
@@ -1108,17 +1197,28 @@ class SmokeTest {
                     assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
                     val initial = estimated.delay()
 
-                    // Two 20 ms Opus frames of silence at 48 kHz mono.
-                    for (i in 0 until 2) {
-                        audio.write(
-                            AudioFrame(
-                                timestamp = Timestamp(i.toULong() * 960uL, 48_000uL),
-                                data = ByteArray(960 * 4),
-                            )
-                        )
+                    // 20 ms Opus frames of silence at 48 kHz mono, fed until both consumers read
+                    // one. A max delay of zero skips groups by the native wall clock, which the
+                    // test cannot control, so a host stalled under load may skip any fixed set
+                    // of frames; a newer one always follows.
+                    val writer =
+                        launch(Dispatchers.Default) {
+                            var i = 0uL
+                            while (isActive) {
+                                audio.write(
+                                    AudioFrame(
+                                        timestamp = Timestamp(i++ * 960uL, 48_000uL),
+                                        data = ByteArray(960 * 4),
+                                    )
+                                )
+                                yield()
+                            }
+                        }
+                    // A skipped group reads as a gap before the frame after it.
+                    for (reader in listOf(fixed, estimated)) {
+                        while (assertNotNull(reader.next()) !is AudioReadFrame) {}
                     }
-                    assertIs<AudioReadFrame>(fixed.next())
-                    assertIs<AudioReadFrame>(estimated.next())
+                    writer.cancelAndJoin()
 
                     assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
                     assertTrue(
@@ -1188,6 +1288,7 @@ class SmokeTest {
 
                         // The frame outlives its consumer's cancellation.
                         decoder.cancel()
+                        assertNull(frame.surface())
 
                         val planar = frame.pixels(VideoPixelFormat.I420)
                         assertEquals(

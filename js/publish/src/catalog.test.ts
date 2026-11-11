@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { type Installed, Manual, Milli, Nano, Wall } from "@moq/clock";
+import { Duration, type Installed, Manual, Wall } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Track } from "@moq/net";
@@ -109,7 +109,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 
 test("catalog producer advertises the page clock from the first snapshot", async () => {
 	const clock = new Manual();
-	clock.jump(Nano.fromMilli(Milli(5000)));
+	clock.jump(Duration.millis(5000));
 	const installed = clock.install();
 	const catalog = new CatalogProducer();
 
@@ -127,10 +127,10 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	// A timestamp stamped the way capture does (the clock's instant in microseconds) maps onto the
 	// wall clock the page was reading at that instant.
 	const wall = Catalog.wallClockTime(mapping, 5_000_000, 1_000_000).getTime();
-	expect(wall).toBe(Manual.WALL_START + 5000);
+	expect(wall).toBe(Manual.WALL_START.asUnixMillis() + 5000);
 
 	// Later edits keep the mapping, even across a system-clock adjustment: it is fixed for the broadcast.
-	clock.stepWall(Wall(Manual.WALL_START + 60_000));
+	clock.stepWall(Manual.WALL_START.add(Duration.secs(60)));
 	catalog.mutate((c) => {
 		c.video = { renditions: {} };
 	});
@@ -144,7 +144,7 @@ test("catalog producer advertises the page clock from the first snapshot", async
 test("catalog producer omits the clock when the page's wall clock is unset", async () => {
 	// A device booted before it synced its clock: the page began in 1970.
 	const clock = new Manual();
-	clock.stepWall(Wall(86_400_000));
+	clock.stepWall(Wall.unixMillis(86_400_000));
 	const installed = clock.install();
 	try {
 		const catalog = new CatalogProducer();
@@ -336,7 +336,7 @@ describe("estimate publication window", () => {
 	let clock = new Manual();
 	let installed: Installed | undefined;
 	const scopes: Effect[] = [];
-	const advance = (ms: number) => clock.advance(Nano.fromMilli(Milli(ms)));
+	const advance = (ms: number) => clock.advance(Duration.millis(ms));
 	afterEach(() => {
 		for (const scope of scopes.splice(0)) scope.close();
 		installed?.close();
@@ -367,7 +367,7 @@ describe("estimate publication window", () => {
 			}
 		})();
 		const sent = async () => {
-			await clock.advance(Nano(0));
+			await clock.advance(Duration.nanos(0));
 			return newest;
 		};
 		return { producer, effect, sent, consumer, estimate };

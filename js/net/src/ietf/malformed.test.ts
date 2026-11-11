@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { type Manual, Milli, Nano } from "@moq/clock";
+import { Duration, type Manual } from "@moq/clock";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
@@ -14,7 +14,7 @@ import { RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";
 import { SetupOption, SetupOptions } from "./setup_options.ts";
 import { SubscribeOk } from "./subscribe.ts";
-import { SUBSCRIBE_TRACKS_ID, SubscribeNamespace } from "./subscribe_namespace.ts";
+import { SubscribeNamespace } from "./subscribe_namespace.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 // Malformed control input the draft says ends the session must end it, with the draft's code.
@@ -52,7 +52,7 @@ async function closeCode(quic: WebTransport, clock: Manual): Promise<number | un
 	void quic.closed.then((info) => {
 		code = info.closeCode;
 	});
-	await clock.advance(Nano.fromMilli(Milli(50)));
+	await clock.advance(Duration.millis(50));
 	return code;
 }
 
@@ -112,26 +112,6 @@ for (const [version, alpn] of DRAFTS) {
 		["a namespace over 4096 bytes", subscribe([field(4097)], 1), SessionCode.ProtocolViolation],
 		["a full track name over 4096 bytes", subscribe([field(4000)], 97), SessionCode.ProtocolViolation],
 		["a trailing byte", frame(0x03, [0, 1, ...field(4), ...field(5), 0, 0]), SessionCode.ProtocolViolation],
-		[
-			"an invalid SUBSCRIBE_TRACKS FORWARD",
-			frame(SUBSCRIBE_TRACKS_ID, [0, 0, 1, 0x10, 2]),
-			SessionCode.ProtocolViolation,
-		],
-		[
-			"a duplicate SUBSCRIBE_TRACKS FORWARD",
-			frame(SUBSCRIBE_TRACKS_ID, [0, 0, 2, 0x10, 0, 0, 1]),
-			SessionCode.ProtocolViolation,
-		],
-		[
-			"a SUBSCRIBE_TRACKS prefix over 32 fields",
-			frame(SUBSCRIBE_TRACKS_ID, [0, 33, ...new Array(33).fill(field(1)).flat(), 0]),
-			SessionCode.ProtocolViolation,
-		],
-		[
-			"a SUBSCRIBE_TRACKS prefix over 4096 bytes",
-			frame(SUBSCRIBE_TRACKS_ID, [0, 1, ...field(4097), 0]),
-			SessionCode.ProtocolViolation,
-		],
 	] as const) {
 		test(`a request with ${name} closes ${alpn}`, async () => {
 			using clock = manual();

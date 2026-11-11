@@ -256,6 +256,65 @@ void audio_roundtrip()
 	ok(broadcast->close(), "close audio broadcast");
 }
 
+// Over moq-lite-06, whose wire carries no instance, the session mints the announced one.
+// Passed back as is, it pins request and follow; its text, parsed, names another instance.
+void minted_instance()
+{
+	CHECK(std::holds_alternative<moq::Error::kInvalidInstance>(moq::Instance::parse("").error().get_variant()));
+
+	auto origin = moq::OriginProducer::init({});
+	auto route = ok(origin->route("live", {}), "minted route");
+
+	moq::ServerConfig server_config;
+	server_config.bind = "127.0.0.1:0";
+	server_config.versions = {"moq-lite-06"};
+	server_config.tls.generate = {"localhost"};
+	server_config.publish = origin;
+	auto server = ok(moq::Server::init(server_config), "lite-06 server init");
+	auto addr = ok(server->listen().get(), "lite-06 listen");
+
+	moq::ClientConfig client_config;
+	client_config.tls.insecure = true;
+	client_config.versions = server_config.versions;
+	client_config.implementation = moq::IMPLEMENTATION;
+	auto client = ok(moq::Client::init(client_config), "lite-06 client init");
+	auto accepting = server->accept();
+	auto connecting = client->connect("https://" + addr);
+	auto request = ok(accepting.get(), "lite-06 accept");
+	CHECK(request != nullptr);
+	auto served = ok(request->accept(nullptr, nullptr).get(), "lite-06 request accept");
+	auto session = ok(connecting.get(), "lite-06 connect");
+
+	auto consumer = session->consume();
+	auto announced = ok(consumer->announced({}), "announced");
+	auto event = ok(announced->next().get(), "announce event");
+	CHECK(event);
+	const auto *present = std::get_if<moq::AnnounceEvent::kPresent>(&event->get_variant());
+	CHECK(present != nullptr);
+	auto minted = present->announce.route.instance;
+	CHECK(minted->is_minted());
+
+	ok(consumer->request("live", minted).get(), "request the minted instance");
+	auto following = ok(consumer->follow("live", minted), "follow the minted instance");
+	CHECK(ok(following->available().get(), "available the minted instance"));
+
+	// A shared_ptr's == compares handles, so the generated eq() compares instances.
+	auto named = ok(moq::Instance::parse(minted->text()), "parse the minted text");
+	CHECK(!named->is_minted());
+	CHECK(named->to_string() == minted->to_string());
+	CHECK(!named->eq(minted));
+	auto refused = consumer->request("live", named).get();
+	CHECK(!refused);
+	CHECK(std::holds_alternative<moq::Error::kProtocol>(refused.error().get_variant()));
+
+	following->cancel();
+	announced->cancel();
+	session->cancel(0);
+	served->cancel(0);
+	server->cancel();
+	route->cancel();
+}
+
 } // namespace
 
 int main()
@@ -264,6 +323,7 @@ int main()
 	datagram_tracks();
 	subscription_defaults();
 	audio_roundtrip();
+	minted_instance();
 	auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
 	auto timebase_other = ok(moq::BroadcastProducer::init(), "timebase other");
 	auto timebase = ok(moq::MediaTimebase::init(timebase_owner), "timebase");
@@ -299,8 +359,8 @@ int main()
 	moq::RouteOptions hidden;
 	hidden.hidden = true;
 	auto route = ok(origin->route("probe", hidden), "route");
-	CHECK(!route->instance_id().empty());
-	auto broadcast = ok(route->broadcast(), "route broadcast");
+	CHECK(route->instance_id() && !route->instance_id()->is_minted());
+	auto broadcast = route->broadcast();
 	moq::TrackInfo info;
 	info.timescale = 1000000;
 	auto track = ok(broadcast->publish_track("data", info), "publish_track");
@@ -308,7 +368,7 @@ int main()
 
 	// A route whose broadcast closed can no longer announce.
 	auto stale = ok(origin->route("stale", {}), "route");
-	ok(ok(stale->broadcast(), "stale broadcast")->close(), "close stale broadcast");
+	ok(stale->broadcast()->close(), "close stale broadcast");
 	auto reannounced = stale->announce();
 	CHECK(!reannounced);
 	CHECK(std::holds_alternative<moq::Error::kClosed>(reannounced.error().get_variant()));
@@ -339,7 +399,7 @@ int main()
 	auto session = ok(connecting.get(), "connect");
 
 	// Subscriber: resolve the announced broadcast and subscribe to its track.
-	auto announced = ok(session->consume()->follow("probe", std::nullopt), "follow");
+	auto announced = ok(session->consume()->follow("probe", nullptr), "follow");
 	// The first available() is never offline.
 	auto remote = ok(announced->available().get(), "available");
 	CHECK(remote);
@@ -347,7 +407,7 @@ int main()
 
 	// Cancel a read that has nothing to deliver yet.
 	auto pending = consumer->read_frame();
-	CHECK(pending.wait_for(50ms) == std::future_status::timeout);
+	CHECK(pending.wait_for(0ms) == std::future_status::timeout);
 	CHECK(pending.valid());
 	pending.cancel();
 	CHECK(!pending.valid());
@@ -396,7 +456,7 @@ int main()
 		Latch done;
 		std::optional<moq::Frame> received;
 		auto abandoned = read_one(consumer, received, done);
-		CHECK(!done.wait_for(50ms));
+		CHECK(!done.wait_for(0ms));
 		abandoned.handle.destroy();
 	}
 

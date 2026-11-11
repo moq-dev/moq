@@ -11,7 +11,7 @@ use crate::support::harness::{peer, spawn};
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 async fn budget(track: &mut track::Producer, millis: u64, version: Version) {

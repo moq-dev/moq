@@ -55,11 +55,14 @@ struct Node(Arc<State>);
 struct State {
 	cluster: cluster::Cluster,
 	auth: auth::Auth,
+	/// The cluster's driver, which would otherwise run on until its stats publisher next ticks.
+	driver: tokio::task::JoinHandle<anyhow::Result<()>>,
 	decider: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for State {
 	fn drop(&mut self) {
+		self.driver.abort();
 		self.decider.abort();
 	}
 }
@@ -77,12 +80,12 @@ impl Backend for Relay {
 		let pool = cache.pool.clone();
 		let mut options = cluster::Options::default();
 		// The shared sweeps include more announcements than a default ordinary client.
-		options.session.announces = options.peer.announces;
+		options.client.announces = options.peer.announces;
 		let mut stats = stats::Config::default();
 		stats.enabled = true;
 		stats.node = Some(id.to_string());
 		let (cluster, driver) = cluster::Cluster::new(options.with_cache(cache).with_stats(stats)).unwrap();
-		tokio::spawn(driver.run());
+		let driver = tokio::spawn(driver.run());
 
 		let (auth, mut admissions) = auth::Auth::embedded(format!("bench-{id}"));
 		let decider = tokio::spawn(async move {
@@ -93,7 +96,13 @@ impl Backend for Relay {
 				admission.grant(lease::Consumer::fixed(grant));
 			}
 		});
-		(Node(Arc::new(State { cluster, auth, decider })), pool)
+		let state = State {
+			cluster,
+			auth,
+			driver,
+			decider,
+		};
+		(Node(Arc::new(state)), pool)
 	}
 
 	fn origin(relay: &Node) -> &origin::Producer {

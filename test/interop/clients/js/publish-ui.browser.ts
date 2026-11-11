@@ -1063,6 +1063,10 @@ test("invalid attributes and properties refuse, retain bad markup, and recover",
 				errors.push(event.message);
 				event.preventDefault();
 			});
+			// The page's own Duration, since `lookahead` refuses a plain number.
+			const probe = document.createElement("moq-watch");
+			const lookahead = probe.lookahead;
+			probe.signals.close();
 			const cases: readonly (readonly ["moq-watch" | "moq-publish", string, string, string, unknown])[] = [
 				["moq-watch", "url", "http://[", "url", undefined],
 				["moq-publish", "url", "http://[", "url", undefined],
@@ -1072,7 +1076,7 @@ test("invalid attributes and properties refuse, retain bad markup, and recover",
 				["moq-watch", "backend", "gpu", "backend", "auto"],
 				["moq-watch", "visible", "sometimes", "visible", "never"],
 				["moq-watch", "delay", "30", "delay", "instant"],
-				["moq-watch", "lookahead", "30", "lookahead", 0],
+				["moq-watch", "lookahead", "30", "lookahead", lookahead],
 				["moq-watch", "catalog-format", "guess", "catalogFormat", "manual"],
 				["moq-publish", "source", "monitor", "source", undefined],
 				["moq-publish", "preview", "mse", "preview", "none"],
@@ -1138,24 +1142,33 @@ test("invalid attributes and properties refuse, retain bad markup, and recover",
 			return { stillBlocked, recovered };
 		});
 		expect(blocked).toEqual({ stillBlocked: true, recovered: true });
-		const disabled = await page.evaluate(() =>
-			(["moq-watch", "moq-publish"] as const).map((tag) => {
+		const disabled = await page.evaluate(async () => {
+			// Effects rerun in a later task, so each step waits one out.
+			const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+			const results = [];
+			for (const tag of ["moq-watch", "moq-publish"] as const) {
 				const element = document.createElement(tag);
 				document.body.append(element);
+				await settle();
 				// Recovery must not override a connection the page disabled first.
 				element.connection.enabled.set(false);
 				element.setAttribute("backend", "bad");
+				await settle();
 				element.removeAttribute("backend");
+				await settle();
 				const kept = element.connection.enabled.peek();
 				element.connection.enabled.set(true);
 				element.setAttribute("backend", "bad");
+				await settle();
 				element.removeAttribute("backend");
+				await settle();
 				const resumed = element.connection.enabled.peek();
 				element.remove();
 				element.signals.close();
-				return { tag, kept, resumed };
-			}),
-		);
+				results.push({ tag, kept, resumed });
+			}
+			return results;
+		});
 		expect(disabled).toEqual([
 			{ tag: "moq-watch", kept: false, resumed: true },
 			{ tag: "moq-publish", kept: false, resumed: true },

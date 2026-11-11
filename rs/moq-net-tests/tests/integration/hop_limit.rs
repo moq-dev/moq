@@ -2,7 +2,7 @@
 //! forwards one it has no room to stamp.
 //!
 //! Only a peer's route arrives with hops, so the routes under test land through the
-//! hidden `fuzz` module as a session lands them.
+//! `fuzz` module as a session lands them.
 
 use crate::support::{
 	Kind, drain,
@@ -18,11 +18,11 @@ fn produce_origin(hop: u64) -> origin::Producer {
 	config.pool = cache::Pool::unbounded();
 	let (producer, driver) = origin::Producer::new(config);
 	spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Land a peer's route at `path` on `origin`, as its session does.
-fn forward(origin: &origin::Producer, path: &str, route: origin::RouteInfo) -> origin::Route {
+fn forward(origin: &origin::Producer, path: &str, route: origin::RouteInfo) -> origin::Claim {
 	moq_net::fuzz::requests_route(origin, moq_net::Path::new(path).unwrap(), route).unwrap()
 }
 
@@ -46,6 +46,7 @@ async fn hop_limit_bounds_receive_and_send() {
 		config.pool = cache::Pool::unbounded();
 		let (relay, driver) = origin::Producer::new(config);
 		spawn(driver);
+		let relay = relay.with_proxy(true);
 		let sink = produce_origin(3);
 		let _upstream = peer(version, &source, &relay).await;
 		let _downstream = peer(version, &relay, &sink).await;
@@ -106,6 +107,7 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 		config.pool = cache::Pool::unbounded();
 		let (relay, driver) = origin::Producer::new(config);
 		spawn(driver);
+		let relay = relay.with_proxy(true);
 		let sink = produce_origin(3);
 		let _near = peer(version, &near, &relay).await;
 		let _far = peer(version, &far, &relay).await;

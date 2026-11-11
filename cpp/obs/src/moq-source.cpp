@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -435,7 +436,7 @@ static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<
 	// Wait for the broadcast to be announced. Announcements arrive over the session
 	// after it connects, so resolving against only what is announced *now* would race
 	// them and blank the source for a broadcast that is live.
-	auto announced = conn->session->consume()->follow(conn->broadcast, std::nullopt);
+	auto announced = conn->session->consume()->follow(conn->broadcast, nullptr);
 	if (!announced) {
 		LOG_ERROR("Failed to request broadcast '%s': %s", conn->broadcast.c_str(),
 			  announced.error().to_string().c_str());
@@ -531,13 +532,21 @@ static void moq_source_on_state(struct moq_source *ctx, const std::shared_ptr<Co
 	}
 
 	conn->revision = result->revision;
-	if (result->failure)
-		LOG_WARNING("MoQ connection attempt failed: %s", result->failure->to_string().c_str());
-	if (result->phase == moq::ConnectionPhase::kClosed) {
+	const auto &phase = result->phase.get_variant();
+	std::visit(
+		[](const auto &data) {
+			if constexpr (!std::is_same_v<std::decay_t<decltype(data)>, moq::ConnectionPhase::kConnected>) {
+				if (data.failure)
+					LOG_WARNING("MoQ connection attempt failed: %s",
+						    data.failure->to_string().c_str());
+			}
+		},
+		phase);
+	if (std::holds_alternative<moq::ConnectionPhase::kClosed>(phase)) {
 		moq_source_fail_locked(ctx);
 		return;
 	}
-	if (result->phase == moq::ConnectionPhase::kConnected)
+	if (std::holds_alternative<moq::ConnectionPhase::kConnected>(phase))
 		LOG_INFO("MoQ session connected (connect %llu)", (unsigned long long)result->connects);
 
 	moq_source_watch_state(ctx, conn);

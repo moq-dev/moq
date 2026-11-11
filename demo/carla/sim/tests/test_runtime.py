@@ -8,7 +8,7 @@ from moq_carla_sim import runtime
 from moq_carla_sim.drive import Command, Drive, DriveState, Gear, TimestampEntry, handle
 from moq_carla_sim.publish import Pose
 from moq_carla_sim.runtime import MAX_STAGE_MS, StuckDetector, latency_breakdown
-from moq_carla_sim.world import Truck
+from moq_carla_sim.world import Truck, drive_hold
 
 
 class FakeClock:
@@ -31,8 +31,21 @@ class Replies:
     def __init__(self) -> None:
         self.sent: list[tuple[str, dict]] = []
 
+        self.revoked_sessions: list[tuple[str, str]] = []
+
     def reply(self, command: Command, message: dict) -> None:
         self.sent.append((command.session, message))
+
+    def revoke(self, driver: str, session: str) -> None:
+        self.revoked_sessions.append((driver, session))
+
+    def revoked(self, command: Command) -> bool:
+        key = (command.driver_id, command.session)
+        if key not in self.revoked_sessions:
+            return False
+        if command.kind == "driver_left":
+            self.revoked_sessions.remove(key)
+        return True
 
 
 class DemandPublisher:
@@ -482,7 +495,7 @@ def test_a_wedged_truck_handed_back_respawns_whether_or_not_its_estop_was_reset(
         async def sleep(delay: float) -> None:
             nonlocal clock
             clock += delay
-            if clock - handed_back > 480.0:
+            if clock - handed_back > runtime.STUCK_TIMEOUT + 1.0:
                 raise asyncio.CancelledError
 
         monkeypatch.setattr(runtime.asyncio, "sleep", sleep)
@@ -525,7 +538,11 @@ def estopped_by_bystander(drive: Drive) -> None:
 
 
 @pytest.mark.parametrize("hold", [holding, estopped_holding])
-def test_stuck_watchdog_leaves_a_held_truck_alone(monkeypatch: pytest.MonkeyPatch, hold) -> None:
+def test_a_held_truck_stopped_for_the_timeout_respawns_and_revokes_its_driver(
+    monkeypatch: pytest.MonkeyPatch, hold
+) -> None:
+    """An open tab holds the lease for as long as it heartbeats, e-stopped or not."""
+
     async def scenario() -> None:
         clock = 0.0
         respawns: list[float] = []
@@ -533,23 +550,66 @@ def test_stuck_watchdog_leaves_a_held_truck_alone(monkeypatch: pytest.MonkeyPatc
         async def sleep(delay: float) -> None:
             nonlocal clock
             clock += delay
-            if clock > 2 * runtime.STUCK_TIMEOUT:
+            if clock > runtime.STUCK_TIMEOUT + 1.0:
                 raise asyncio.CancelledError
 
         monkeypatch.setattr(runtime.asyncio, "sleep", sleep)
         loop = asyncio.get_running_loop()
         monkeypatch.setattr(loop, "time", lambda: clock)
 
-        wedged = Pose(x=5.0, y=5.0, yaw=0.0, speed=0.0)
-        session = telemetry_session(pose=lambda: wedged, autonomous=False)
-        session._truck.respawn = lambda: respawns.append(clock)
+        session = telemetry_session(pose=lambda: Pose(x=5.0, y=5.0, yaw=0.0, speed=0.0), autonomous=False)
+
+        def respawn() -> None:
+            respawns.append(clock)
+            session._truck.autonomous = True
+
+        session._truck.respawn = respawn
         session._publish = lambda _telemetry: None
         hold(session._drive)
+        # Whatever the lease held, the respawn must let go of it.
+        session._clock.hold(drive_hold("truck1"))
 
         with pytest.raises(asyncio.CancelledError):
             await session._publish_telemetry()
 
-        assert respawns == []
+        assert len(respawns) == 1
+        assert runtime.STUCK_TIMEOUT <= respawns[0] < runtime.STUCK_TIMEOUT + 1.0
+        assert session._drivers.revoked_sessions == [("holder", "holder")]
+        assert session._drive.driver is None and not session._drive.estopped
+        assert session._clock.held == set()
+
+    asyncio.run(scenario())
+
+
+def test_a_revoked_drivers_commands_never_reclaim_the_fresh_spawn() -> None:
+    async def scenario() -> None:
+        session = runtime.TruckSession.__new__(runtime.TruckSession)
+        session._clock = FakeClock()
+        session._truck = SimpleNamespace(name="truck1", actuate=lambda *_args, **_kwargs: None)
+        session._drive = Drive()
+        session._deadline = None
+        session._drivers = Replies()
+        session._drivers.revoke("holder", "holder")
+        session._publish = lambda: None
+        session._commands = asyncio.Queue()
+        session._commands.put_nowait(
+            Command(kind="drive", driver_id="holder", session="holder", sequence=9, state=DriveState(throttle=0.5))
+        )
+        session._commands.put_nowait(Command(kind="estop", driver_id="holder", session="holder", sequence=10))
+        session._commands.put_nowait(Command(kind="driver_left", driver_id="holder", session="holder"))
+        task = asyncio.create_task(session._loop())
+        try:
+            while not session._commands.empty():
+                await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        assert session._drive.driver is None and not session._drive.estopped
+        assert session._drivers.sent == []
+        # Its departure was read last, which forgot the session.
+        assert session._drivers.revoked_sessions == []
 
     asyncio.run(scenario())
 
@@ -611,10 +671,21 @@ def test_session_announces_after_populating_tracks() -> None:
     assert calls == ["status", "announce"]
 
 
-def test_a_driver_keeps_the_world_stepping_with_nobody_watching() -> None:
+async def expect_held(session: runtime.TruckSession, held: set[str]) -> None:
+    """Let the session's tasks run until the world's holds are `held`."""
+    for _ in range(10):
+        if session._clock.held == held:
+            return
+        await asyncio.sleep(0)
+    pytest.fail(f"holds never became {held}, still {session._clock.held}")
+
+
+def test_a_driver_keeps_the_world_stepping_with_nobody_watching(monkeypatch: pytest.MonkeyPatch) -> None:
     """Video demand and the lease are independent; the gate must hold for both."""
 
     async def scenario() -> None:
+        # Time stands still, so only the watchdog command below ends the lease.
+        monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: 0.0)
         commands = asyncio.Queue()
         commands.put_nowait(
             Command(kind="drive", driver_id="holder", session="holder", sequence=1, state=DriveState(throttle=0.5))
@@ -631,17 +702,17 @@ def test_a_driver_keeps_the_world_stepping_with_nobody_watching() -> None:
         session._actuate = lambda: None
         session._publish = lambda: None
 
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(session._loop(), timeout=0.1)
+        task = asyncio.create_task(session._loop())
+        try:
+            await expect_held(session, {"drive:truck1"})
 
-        assert session._clock.held == {"drive:truck1"}
-
-        # The watchdog hands the truck back, and the hold goes with the lease.
-        session._commands.put_nowait(Command(kind="watchdog_expired"))
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(session._loop(), timeout=0.1)
-
-        assert session._clock.held == set()
+            # The watchdog hands the truck back, and the hold goes with the lease.
+            session._commands.put_nowait(Command(kind="watchdog_expired"))
+            await expect_held(session, set())
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     asyncio.run(scenario())
 
@@ -690,20 +761,13 @@ def test_a_status_subscriber_keeps_the_world_stepping() -> None:
         session._status = DemandPublisher()
         watcher = asyncio.create_task(session._watch_status_demand())
 
-        async def expect_held(held: set[str]) -> None:
-            for _ in range(10):
-                if session._clock.held == held:
-                    return
-                await asyncio.sleep(0)
-            pytest.fail(f"holds never became {held}, still {session._clock.held}")
-
         try:
             session._status.use.set()
-            await expect_held({"status:truck1"})
+            await expect_held(session, {"status:truck1"})
             session._status.unuse.set()
-            await expect_held(set())
+            await expect_held(session, set())
             session._status.use.set()
-            await expect_held({"status:truck1"})
+            await expect_held(session, {"status:truck1"})
         finally:
             watcher.cancel()
             with contextlib.suppress(asyncio.CancelledError):

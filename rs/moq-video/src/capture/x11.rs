@@ -336,7 +336,7 @@ impl Capture {
 			)]
 			std::thread::sleep(self.next - now);
 		}
-		self.next = Instant::now() + self.interval;
+		self.next = Instant::now().saturating_add(self.interval);
 		// The encoder's geometry is fixed at open, so a settled change ends the
 		// stream and the caller reopens against the new size.
 		match self.settled()? {
@@ -345,9 +345,9 @@ impl Capture {
 			Settled::Changed => return Ok(pump::Read::Done),
 		}
 
-		let width = u16::try_from(self.width).map_err(|_| Error::Codec(anyhow::anyhow!("X11 width is too large")))?;
+		let width = u16::try_from(self.width).map_err(|_| Error::codec(anyhow::anyhow!("X11 width is too large")))?;
 		let height =
-			u16::try_from(self.height).map_err(|_| Error::Codec(anyhow::anyhow!("X11 height is too large")))?;
+			u16::try_from(self.height).map_err(|_| Error::codec(anyhow::anyhow!("X11 height is too large")))?;
 		if let Err(error) = self.capture_image(width, height) {
 			// A resize can land after the state check but before the image request.
 			// The reply has queued the preceding events; only a confirmed source
@@ -824,9 +824,9 @@ impl PixelFormat {
 			.flat_map(|screen| &screen.allowed_depths)
 			.flat_map(|depth| &depth.visuals)
 			.find(|visual| visual.visual_id == visual_id)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("X11 root visual is missing")))?;
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("X11 root visual is missing")))?;
 		if visual.class != VisualClass::TRUE_COLOR {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"unsupported X11 visual class: {:?}",
 				visual.class
 			)));
@@ -835,7 +835,7 @@ impl PixelFormat {
 			.pixmap_formats
 			.iter()
 			.find(|format| format.depth == depth)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("X11 pixel format for depth {depth} is missing")))?;
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("X11 pixel format for depth {depth} is missing")))?;
 		Ok(Self {
 			byte_order: setup.image_byte_order,
 			bits_per_pixel: format.bits_per_pixel,
@@ -872,7 +872,7 @@ impl PixelFormat {
 		let stride = self.stride(width)?;
 		let required = self.required_len(width, height)?;
 		if data.len() < required {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"short X11 frame: got {} bytes, need {required}",
 				data.len()
 			)));
@@ -957,7 +957,7 @@ fn wm_class(value: &str) -> String {
 }
 
 fn codec(error: impl std::fmt::Display) -> Error {
-	Error::Codec(anyhow::anyhow!("X11: {error}"))
+	Error::codec(anyhow::anyhow!("X11: {error}"))
 }
 
 fn source(error: impl std::fmt::Display) -> Error {
@@ -1111,7 +1111,7 @@ mod tests {
 		observed.event(&configure(7, 800, 600), 7);
 		assert_eq!(settle.observe(&observed, now), Settled::Waiting);
 		assert_eq!(
-			settle.observe(&observed, now + super::super::settle::HOLD),
+			settle.observe(&observed, now.saturating_add(super::super::settle::HOLD)),
 			Settled::Changed
 		);
 		observed.event(&configure(7, 640, 480), 7);

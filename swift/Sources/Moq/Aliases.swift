@@ -25,7 +25,7 @@ public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
 public typealias VideoDecoderOutput = MoqVideoDecoderOutput
 /// One decoded video frame, owning the decoder's surface until released;
 /// `pixels(format:)` converts it to packed CPU pixels.
-public typealias VideoDecodedFrame = MoqVideoDecodedFrame
+public typealias VideoDecodedFrame = Video.DecodedFrame
 /// The decoded PCM layout, its delay (playout and group staleness), and whether the
 /// playout delay is estimated.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
@@ -51,16 +51,22 @@ public typealias VideoCodec = MoqFFI.MoqVideoCodec
 public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
 /// A datagram payload with its own sequence and optional timestamp.
 public typealias Datagram = MoqFFI.MoqDatagram
-/// The read-only facts on a received route: the `instance` of the stream it serves,
-/// relay hop ids (oldest first), and its static production and link cost, lower wins.
+/// Names one continuous stream at a path: `Instance.parse(text:)` names one, only a session mints
+/// one, and `==` also compares `isMinted()`, so pin a reported stream with the instance, not its text.
+public typealias Instance = MoqFFI.MoqInstance
+/// The read-only facts on a received route: the `Instance` of the stream it serves,
+/// relay hop ids (oldest first), its static production and link cost, lower wins, and its
+/// informational `rtt` to the origin node.
 public typealias RouteInfo = MoqFFI.MoqRouteInfo
 /// A route over a prefix: the origin-relative `prefix`, what each filter
 /// wildcard matched (`captures`, a required list, empty without wildcards), and the `route` serving it.
 /// Resolve a path with `OriginConsumer.request`.
 public typealias Announce = MoqFFI.MoqAnnounce
-/// What an `AnnounceConsumer` yields: `.present` or `.absent`, each carrying an
-/// `Announce`. Another publisher instance taking a path over keeps it present:
-/// hold a `Following` to see the broadcast change.
+/// What an `AnnounceConsumer` yields, each carrying an `Announce`: `.present` once a route
+/// covers the path, `.unavailable` and `.available` as a present path loses and recovers a
+/// usable path to its origin, `.absent` once the origin withdraws it, and `.offline` once this
+/// side lets go of it, which its origin may still serve. Another publisher instance taking a
+/// path over keeps it present: hold a `Following` to see the broadcast change.
 public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, delay, the ranges of the track to
 /// deliver, and group ordering.
@@ -75,13 +81,17 @@ public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
 /// Publisher-side track properties: priority, group ordering, max age,
 /// and timescale.
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
+/// How a track's frames are compressed on the wire: `.deflate`, or `nil` in `TrackInfo` for none.
+public typealias Compression = MoqFFI.MoqCompression
 
 /// A snapshot of connection statistics (RTT, bandwidth estimates, byte/packet
 /// counters). Fields are `nil` when the transport backend doesn't report them.
 public typealias ConnectionStats = MoqFFI.MoqConnectionStats
 
 /// Retry pacing for the automatic reconnect; see `Client(backoff:)`. A `nil`
-/// field keeps its default.
+/// field keeps its default. It applies only once a session has been established:
+/// a first dial that reaches no session ends the connection with its error rather
+/// than retrying.
 public typealias Backoff = MoqFFI.MoqBackoff
 
 /// Certificate trust and the mTLS identity for a `Client`.
@@ -99,7 +109,7 @@ public typealias CongestionControl = MoqFFI.MoqCongestionControl
 /// The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start.
 public typealias WebSocketConfig = MoqFFI.MoqWebSocketConfig
 
-/// The connection lifecycle phase.
+/// Where a connection is in its lifecycle, carrying that phase's failure or version.
 public typealias ConnectionPhase = MoqFFI.MoqConnectionPhase
 
 /// One coherent connection lifecycle snapshot.

@@ -48,9 +48,10 @@ internal constructor(
      * handshake or `reject(code)` to reject it; the returned session must be held to keep the
      * connection alive.
      *
-     * The Flow completes when the server stops accepting.
+     * The Flow completes when the server stops accepting. Ending the collection leaves the server
+     * listening; [close] it to stop accepting.
      */
-    fun requests(): Flow<Request> = pull({ server.cancel() }) { server.accept() }
+    fun requests(): Flow<Request> = pull { server.accept() }
 
     /**
      * Accept every session in a loop, holding each one alive in its own coroutine until it closes,

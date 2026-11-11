@@ -4,7 +4,7 @@
  * records that preserves everything; every {@link Producer.append} writes one JSON object as one
  * frame, nothing is ever superseded, and a {@link Consumer} yields every record in order.
  *
- * The whole log rides a **single group** that is never rolled: on a track created with `compress`,
+ * The whole log rides a **single group** that is never rolled: on a track created with `compression: "deflate"`,
  * that one group is one DEFLATE window, so every record compresses against the earlier ones.
  * There is deliberately no group rolling (and so no catch-up machinery); a caller that wants to
  * bound the record rate throttles at the source. Interoperable on the wire with the Rust
@@ -23,4 +23,4 @@
 export { Consumer, Rolled } from "./consumer.ts";
 export { Decoder } from "./decoder.ts";
 export { type Config, Encoder, type Pending } from "./encoder.ts";
-export { Producer } from "./producer.ts";
+export { type Finished, Producer } from "./producer.ts";

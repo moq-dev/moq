@@ -476,6 +476,21 @@ impl Producer {
 	}
 }
 
+/// A segment without its media, reported by [`Consumer::peek`].
+pub struct Info {
+	/// The segment number, as [`Segment::segment`].
+	pub segment: u64,
+	/// The bytes its groups carry on the wire; 0 for a gap. Its fragment is a little larger,
+	/// adding ~12-16 bytes per frame plus a small fixed header, so treat this as a lower bound.
+	pub bytes: usize,
+	/// Presentation duration.
+	pub duration: Duration,
+	/// Wall-clock start time, as [`Segment::program_date_time`].
+	pub program_date_time: Option<Wall>,
+	/// The absolute discontinuity sequence, as [`Segment::discontinuity`].
+	pub discontinuity: u64,
+}
+
 /// A segment with its transmuxed media, yielded by a [`Consumer`].
 pub struct Segment {
 	/// The segment number (its URI is `seg/{tag}.{segment}.m4s`).
@@ -512,7 +527,7 @@ pub struct Consumer {
 	/// The reset epoch and next append position; errors leave it unchanged.
 	position: (u64, u64),
 	feed: Option<Feed>,
-	/// The next row's media being fetched, kept across polls.
+	/// The next row's media being fetched or sized, kept across polls.
 	fetch: Option<Fetch>,
 }
 
@@ -540,6 +555,43 @@ impl Consumer {
 		kio::wait(|waiter| self.rendition.poll_latest_init(waiter, &mut load)).await
 	}
 
+	/// The next segment's [`Info`], so a caller can reserve memory and time before
+	/// [`next`](Self::next) builds its media.
+	///
+	/// Counts each frame of the segment's groups as it is read, without decoding or keeping any,
+	/// so nothing is held while the caller waits, and `next` reads them again. `None` once the
+	/// rendition ends cleanly. Fails as `next` would on a missing segment, and never advances the
+	/// cursor.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_peek(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Info>>> {
+		if self.fetch.as_ref().is_some_and(|fetch| !fetch.sizes()) {
+			self.fetch = None;
+		}
+		let (row, bytes) = loop {
+			let Some(fetch) = &mut self.fetch else {
+				let Some(row) = ready!(self.poll_row(waiter))? else {
+					return Poll::Ready(Ok(None));
+				};
+				if row.stop {
+					break (row, 0);
+				}
+				self.fetch = Some(Fetch::sizing(row));
+				continue;
+			};
+			let bytes = ready!(fetch.poll_size(&self.rendition, waiter));
+			let row = self.fetch.take().expect("fetching above").row().clone();
+			let bytes = bytes?.ok_or(crate::Error::SegmentUnavailable { segment: row.segment })?;
+			break (row, bytes);
+		};
+		Poll::Ready(Ok(Some(Info {
+			segment: row.segment,
+			bytes,
+			duration: row.duration,
+			program_date_time: self.rendition.wall_clock(row.pts),
+			discontinuity: row.discontinuity,
+		})))
+	}
+
 	/// The next segment, with its media; `None` only once the rendition ends cleanly, so a
 	/// recording that reads to `None` is complete.
 	///
@@ -559,6 +611,9 @@ impl Consumer {
 	/// media is never read under the old rows.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Segment>>> {
+		if self.fetch.as_ref().is_some_and(Fetch::sizes) {
+			self.fetch = None;
+		}
 		let (row, media) = loop {
 			let Some(fetch) = &mut self.fetch else {
 				let Some(row) = ready!(self.poll_row(waiter))? else {

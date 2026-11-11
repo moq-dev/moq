@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
 import { ConnectTimeout } from "./error.ts";
@@ -56,21 +56,6 @@ test.each(["group", "track"] as const)("%s JSON rejects an empty frame without t
 	}
 });
 
-test("group booleans refuse every shape except one byte of zero or one", async () => {
-	const group = new GroupProducer(0n);
-	const reader = group.consume();
-	for (const bytes of [[], [2], [1, 0], [0], [1]]) group.writeFrame({ payload: new Uint8Array(bytes) });
-	group.finish();
-	try {
-		for (let i = 0; i < 3; i++) await expect(reader.readBool()).rejects.toThrow("invalid bool frame");
-		expect(await reader.readBool()).toBe(false);
-		expect(await reader.readBool()).toBe(true);
-		expect(await reader.readBool()).toBeUndefined();
-	} finally {
-		reader.close();
-	}
-});
-
 for (const [version, alpn] of [
 	[Version.DRAFT_03, ALPN_03],
 	[Version.DRAFT_04, ALPN_04],
@@ -85,9 +70,9 @@ for (const [version, alpn] of [
 		const dispose = client.probe.subscribe(() => {});
 		try {
 			// The publisher samples on its 100ms PROBE cadence.
-			await clock.advance(Nano.fromMilli(Milli(100)));
+			await clock.advance(Duration.millis(100));
 			expect(client.probe.peek().estimatedRecvRate).toBe(8_000_000);
-			expect(client.probe.peek().rtt).toBe(version === Version.DRAFT_03 ? undefined : Milli(12));
+			expect(client.probe.peek().rtt).toEqual(version === Version.DRAFT_03 ? undefined : Duration.millis(12));
 		} finally {
 			dispose();
 			client.abort();
@@ -111,9 +96,9 @@ test("accept applies its default handshake deadline and releases a silent transp
 		},
 	);
 	try {
-		await clock.advance(Nano.fromMilli(Milli(29_999)));
+		await clock.advance(Duration.millis(29_999));
 		expect(outcome).toBeUndefined();
-		await clock.advance(Nano.fromMilli(Milli(1)));
+		await clock.advance(Duration.millis(1));
 		expect(outcome).toBeInstanceOf(ConnectTimeout);
 		expect((await pair.client.closed).closeCode).toBe(0);
 	} finally {
@@ -170,7 +155,7 @@ test("zero accept timeout waits for caller cancellation and preserves its reason
 	const pending = accept({
 		transport: pair.server,
 		url: new URL("https://example.com"),
-		timeout: Milli(0),
+		timeout: Duration.millis(0),
 		signal: controller.signal,
 	}).then(
 		(value) => {
@@ -181,7 +166,7 @@ test("zero accept timeout waits for caller cancellation and preserves its reason
 		},
 	);
 	try {
-		await clock.advance(Nano.fromMilli(Milli(60_000)));
+		await clock.advance(Duration.millis(60_000));
 		expect(outcome).toBeUndefined();
 		controller.abort(reason);
 		await pending;
@@ -195,15 +180,10 @@ test("zero accept timeout waits for caller cancellation and preserves its reason
 	}
 });
 
-test("invalid or pre-aborted accept options never take ownership of the transport", async () => {
+test("pre-aborted accept options never take ownership of the transport", async () => {
 	const pair = createMockTransportPair("moqt-18");
 	const closing = spyOn(pair.server, "close");
 	try {
-		for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
-			await expect(
-				accept({ transport: pair.server, url: new URL("https://example.com"), timeout: timeout as Milli }),
-			).rejects.toThrow("invalid time");
-		}
 		const reason = new Error("already cancelled");
 		await expect(
 			accept({ transport: pair.server, url: new URL("https://example.com"), signal: AbortSignal.abort(reason) }),
@@ -225,11 +205,11 @@ test.each([ALPN_04, "moqt-18"])("accepted %s sessions outlive their handshake ti
 	const url = new URL("https://example.com");
 	const [client, server] = await Promise.all([
 		connect({ url, transport: pair.client }),
-		accept({ url, transport: pair.server, timeout: Milli(1_000), signal: controller.signal }),
+		accept({ url, transport: pair.server, timeout: Duration.millis(1_000), signal: controller.signal }),
 	]);
 	try {
 		controller.abort();
-		await clock.advance(Nano.fromMilli(Milli(5_000)));
+		await clock.advance(Duration.millis(5_000));
 		expect(closing).not.toHaveBeenCalled();
 		expect(await server.stats()).toEqual({});
 	} finally {

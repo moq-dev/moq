@@ -1,4 +1,5 @@
-//! Fuzz target bodies, plus the seeds they start from.
+//! Test support, enabled by the `fuzz` feature: fuzz target bodies and their seeds, plus the
+//! plaintext crypto and sent-packet storage the benches run on.
 //!
 //! Each `pub fn` here is one target: it takes raw fuzzer bytes and drives a parser or
 //! a state machine with them. The bodies live in the crate rather than in
@@ -7,8 +8,8 @@
 //! fuzzer found into a regression `just check` runs.
 //!
 //! `packet`, `params`, `streamid`, and `streams` are ported from upstream quinn's
-//! `fuzz/fuzz_targets/`. Compiled only under `cfg(test)` or the `fuzz` feature, so none
-//! of this is part of the published API. See `fuzz/README.md` for the workflow.
+//! `fuzz/fuzz_targets/`. It tracks the crate's internals, so it can change in any release. See `fuzz/README.md`
+//! for the workflow.
 //!
 //! [`Plaintext`] is the crypto the `connection` target and the benchmarks run on, and
 //! [`SentPackets`] is the sent-packet storage its benchmark drives.
@@ -35,6 +36,17 @@ use crate::{
 pub use crate::connection::BenchSentPackets as SentPackets;
 pub use connection::connection;
 pub use plaintext::Plaintext;
+
+/// Whether `conn` is still handshaking, for the benches to wait out.
+pub fn is_handshaking(conn: &crate::connection::Connection) -> bool {
+	conn.is_handshaking()
+}
+
+/// Pins every packet to `mtu`, so black hole detection cannot shrink them.
+pub fn pin_mtu(transport: &mut crate::transport::Config, mtu: u16) {
+	transport.initial_mtu = mtu;
+	transport.min_mtu = mtu;
+}
 
 /// One fuzz target body: it returns whether the input got past the first parse, which
 /// is what [`seeds`] is checked against.

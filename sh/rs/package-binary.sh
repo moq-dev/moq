@@ -83,10 +83,10 @@ if [[ -z "$TARGET" ]]; then
     echo "Detected target: $TARGET"
 fi
 
-# Release builds must match the host. A mismatch would silently mislabel the
-# archive, so reject it before building.
+# The nix build targets the host, so a different target would silently mislabel
+# the archive; reject it before building. A prebuilt --binary names its own target.
 HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
-if [[ "$TARGET" != "$HOST_TARGET" ]]; then
+if [[ -z "$BINARY" && "$TARGET" != "$HOST_TARGET" ]]; then
     echo "Error: unsupported cross ($HOST_TARGET -> $TARGET); refusing to mislabel the archive." >&2
     exit 1
 fi
@@ -133,7 +133,7 @@ chmod 0755 "$PACKAGE_DIR/bin/$BIN"
 # Rewrite the leaked paths to load from the system dyld shared cache (via
 # /usr/lib), like a plain `cargo build` does. scrub-macho.sh also asserts no
 # /nix path survives, so this can't silently ship again.
-if [[ "$(uname)" == "Darwin" ]]; then
+if [[ "$TARGET" == *-apple-darwin ]]; then
     bin="$PACKAGE_DIR/bin/$BIN"
     "$SCRIPT_DIR/scrub-macho.sh" "$bin"
 

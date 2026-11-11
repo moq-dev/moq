@@ -121,7 +121,7 @@ impl Host {
 	}
 
 	fn now(&self) -> Instant {
-		self.instant + monotonic().saturating_sub(self.monotonic)
+		self.instant.saturating_add(monotonic().saturating_sub(self.monotonic))
 	}
 
 	/// The monotonic reading at `at`; one before calibration maps to calibration.
@@ -155,7 +155,7 @@ mod tests {
 		let now = host.now();
 		let after = kio::clock::now();
 		assert!(
-			before <= now + slack && now <= after + slack,
+			before <= now.saturating_add(slack) && now <= after.saturating_add(slack),
 			"{before:?} <= {now:?} <= {after:?}"
 		);
 	}
@@ -181,10 +181,10 @@ mod tests {
 	fn deadlines_map_onto_the_monotonic_clock() {
 		let host = Host {
 			monotonic: Duration::from_secs(100),
-			instant: Instant::ZERO + Duration::from_secs(1 << 32),
+			instant: Instant::ZERO.saturating_add(Duration::from_secs(1 << 32)),
 		};
 		assert_eq!(
-			host.monotonic(host.instant + Duration::from_millis(1500)),
+			host.monotonic(host.instant.saturating_add(Duration::from_millis(1500))),
 			Duration::from_millis(101_500)
 		);
 		assert_eq!(

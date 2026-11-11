@@ -5,7 +5,6 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use moq_rtsp::fake::{self, Media, Server};
-use moq_tokio::moq_net;
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 
@@ -65,8 +64,17 @@ async fn next_broadcast(
 			.await
 			.expect("origin closed")
 		{
-			moq_net::origin::RouteEvent::Start(_) | moq_net::origin::RouteEvent::Restart(_) => break,
-			moq_net::origin::RouteEvent::End(_) | moq_net::origin::RouteEvent::Update(_) => {}
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Restart,
+				..
+			} => break,
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::End
+					| moq_net::origin::RouteKind::Offline
+					| moq_net::origin::RouteKind::Update,
+				..
+			} => {}
 		}
 	}
 	let broadcast = running(child, "the broadcast", consumer.request("camera", None))

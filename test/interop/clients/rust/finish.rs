@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use anyhow::{Context, ensure};
 use moq_mux::catalog::Stream;
-use moq_tokio::moq_net;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
 /// How long the publisher keeps its finished broadcast up for the late readers.
@@ -103,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
 			.broadcast()
 			.create_track("live", moq_net::track::Info::default())?;
 		track.write_frame(None, b"session-alive".to_vec())?;
-		track.finish()?;
+		let _track = track.finish()?;
 		health.announce()?;
 		let ack = args.finish_ack.context("publisher needs --finish-ack")?;
 		let mut complete = String::new();

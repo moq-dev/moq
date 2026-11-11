@@ -44,8 +44,7 @@ decision 2 (maintainer, 2026-11-04) ruled out.
 Build on `Following` as
 [moq-dev/moq#7678](https://github.com/moq-dev/moq/pull/7678) left it,
 which reports the path going offline beside its `refused` flag. If the
-path watch changes under
-[front parking](/quest/m5/origin-front-parks.md), use its replacement.
+path watch has changed since, use its replacement.
 
 Tests: a refused follower asks the replacement after an overlapping
 identical-route handler swap; an announcement listener sees no event for
@@ -57,5 +56,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Front parking](/quest/m5/origin-front-parks.md) - the same refusal wait for `request`
 - [The HLS server follows each path once](/quest/m4/hls-follow-once.md) - another `Following` addition

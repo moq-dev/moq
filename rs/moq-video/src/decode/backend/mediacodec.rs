@@ -23,6 +23,7 @@
 //! stalls decoding. That is the same trade the VideoToolbox and NVDEC backends
 //! make: draw and drop.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -120,6 +121,8 @@ pub(crate) struct MediaCodec {
 	/// Whether the last acquire found every slot held, so the stall is reported
 	/// once on the way in rather than on every poll.
 	stalled: bool,
+	/// Pictures acquired from the reader, waiting for `receive`.
+	ready: VecDeque<Frame>,
 }
 
 /// Where the codec's input stands between flushes.
@@ -187,7 +190,7 @@ impl MediaCodec {
 			Codec::H265 => MIME_H265,
 			Codec::Av1 => MIME_AV1,
 			other => {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"MediaCodec {} decode is not wired",
 					other.label()
 				)));
@@ -222,7 +225,7 @@ impl MediaCodec {
 		let surface = reader.window().map_err(|e| reader_err("get the reader's window", e))?;
 
 		let decoder = media_codec::MediaCodec::from_decoder_type(mime)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("no MediaCodec decoder for {mime}")))?;
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("no MediaCodec decoder for {mime}")))?;
 		let format = decoder_format(mime, width, height);
 		decoder
 			.configure(&format, Some(&surface), MediaCodecDirection::Decoder)
@@ -238,6 +241,7 @@ impl MediaCodec {
 			pending_images: 0,
 			input: Input::Idle,
 			stalled: false,
+			ready: VecDeque::new(),
 		}))
 	}
 
@@ -246,7 +250,7 @@ impl MediaCodec {
 	/// Waits for a buffer rather than dropping the access unit when the codec has
 	/// none free: a decoder that skips one produces a broken picture until the
 	/// next keyframe, which is a far worse trade than the wait.
-	fn submit(&mut self, access_unit: &[u8], timestamp: Timestamp, out: &mut Vec<Frame>) -> Result<(), Error> {
+	fn submit(&mut self, access_unit: &[u8], timestamp: Timestamp) -> Result<(), Error> {
 		let time = timestamp.as_micros().min(u64::MAX as u128) as u64;
 
 		for _ in 0..SUBMIT_ROUNDS {
@@ -258,7 +262,7 @@ impl MediaCodec {
 				DequeuedInputBufferResult::Buffer(mut buffer) => {
 					let target = buffer.buffer_mut();
 					if target.len() < access_unit.len() {
-						return Err(Error::Codec(anyhow::anyhow!(
+						return Err(Error::codec(anyhow::anyhow!(
 							"MediaCodec input buffer is {} bytes, needs {} for this access unit",
 							target.len(),
 							access_unit.len()
@@ -290,17 +294,17 @@ impl MediaCodec {
 
 			// Every input buffer is still with the codec; collecting its output is
 			// what frees one.
-			self.drain(OUTPUT_TIMEOUT, out)?;
+			self.drain(OUTPUT_TIMEOUT)?;
 		}
 
-		Err(Error::Codec(anyhow::anyhow!(
+		Err(Error::codec(anyhow::anyhow!(
 			"MediaCodec never freed an input buffer for an access unit"
 		)))
 	}
 
-	/// Render every decoded picture the codec has ready and collect the images
+	/// Render every decoded picture the codec has ready and queue the images
 	/// they turn into.
-	fn drain(&mut self, timeout: Duration, out: &mut Vec<Frame>) -> Result<bool, Error> {
+	fn drain(&mut self, timeout: Duration) -> Result<bool, Error> {
 		loop {
 			let ended = match self
 				.codec
@@ -323,7 +327,7 @@ impl MediaCodec {
 					info.flags() & FLAG_END_OF_STREAM != 0
 				}
 				DequeuedOutputBufferInfoResult::TryAgainLater => {
-					self.collect(out)?;
+					self.collect()?;
 					return Ok(false);
 				}
 				// The stream's geometry is read off each image rather than off the
@@ -336,7 +340,7 @@ impl MediaCodec {
 			// Eagerly, because releasing for rendering queues the picture into the
 			// reader before it returns, so the image is normally there already and
 			// waiting for the next access unit would add a frame of latency.
-			self.collect(out)?;
+			self.collect()?;
 			if ended {
 				return Ok(true);
 			}
@@ -344,7 +348,7 @@ impl MediaCodec {
 	}
 
 	/// Acquire every rendered picture the reader has ready.
-	fn collect(&mut self, out: &mut Vec<Frame>) -> Result<(), Error> {
+	fn collect(&mut self) -> Result<(), Error> {
 		loop {
 			match self
 				.reader
@@ -362,7 +366,8 @@ impl MediaCodec {
 					let timestamp = Timestamp::from_nanos(nanos.max(0) as u64)?;
 					let (left, top, width, height) = image_size(&image)?;
 					let buffer = HardwareBuffer::new(self.reader.clone(), image, left, top, width, height);
-					out.push(Frame::new(Surface::HardwareBuffer(buffer), timestamp));
+					self.ready
+						.push_back(Frame::new(Surface::HardwareBuffer(buffer), timestamp));
 				}
 				// The picture is on its way but not queued yet, so it comes out on the
 				// next round rather than being lost.
@@ -394,18 +399,17 @@ impl MediaCodec {
 	}
 
 	/// Signal end of input and wait until every delayed output buffer is released.
-	fn drain_tail(&mut self) -> Result<Vec<Frame>, Error> {
-		let mut out = Vec::new();
-		self.signal_end_of_input(&mut out)?;
+	fn drain_tail(&mut self) -> Result<(), Error> {
+		self.signal_end_of_input()?;
 		let mut ended = false;
 		for _ in 0..DRAIN_ROUNDS {
-			if self.drain(DRAIN_TIMEOUT, &mut out)? {
+			if self.drain(DRAIN_TIMEOUT)? {
 				ended = true;
 				break;
 			}
 		}
 		if !ended {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"MediaCodec did not reach end of stream within {:?}",
 				DRAIN_TIMEOUT * DRAIN_ROUNDS
 			)));
@@ -415,7 +419,7 @@ impl MediaCodec {
 		// ImageReader callback so the final pictures are part of this stream rather
 		// than appearing after the next keyframe.
 		for _ in 0..DRAIN_ROUNDS {
-			self.collect(&mut out)?;
+			self.collect()?;
 			if self.pending_images == 0 {
 				break;
 			}
@@ -430,11 +434,11 @@ impl MediaCodec {
 			self.pending_images = 0;
 		}
 
-		Ok(out)
+		Ok(())
 	}
 
 	/// Queue the empty input buffer that marks the end of a ByteBuffer stream.
-	fn signal_end_of_input(&mut self, out: &mut Vec<Frame>) -> Result<(), Error> {
+	fn signal_end_of_input(&mut self) -> Result<(), Error> {
 		for _ in 0..DRAIN_ROUNDS {
 			let queued = match self
 				.codec
@@ -452,31 +456,34 @@ impl MediaCodec {
 			if queued {
 				return Ok(());
 			}
-			self.drain(OUTPUT_TIMEOUT, out)?;
+			self.drain(OUTPUT_TIMEOUT)?;
 		}
 
-		Err(Error::Codec(anyhow::anyhow!(
+		Err(Error::codec(anyhow::anyhow!(
 			"MediaCodec never freed an input buffer for the end of stream"
 		)))
 	}
 }
 
 impl Backend for MediaCodec {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
 		self.input.check()?;
-		let mut out = Vec::new();
 		// Collect what the codec finished while the caller was elsewhere, which is
 		// also what frees the input buffer the submission below needs.
-		self.drain(OUTPUT_TIMEOUT, &mut out)?;
-		self.submit(&access_unit, timestamp, &mut out)?;
-		self.drain(OUTPUT_TIMEOUT, &mut out)?;
-		Ok(out)
+		self.drain(OUTPUT_TIMEOUT)?;
+		self.submit(&access_unit, timestamp)?;
+		self.drain(OUTPUT_TIMEOUT)?;
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
 		self.input.check()?;
 		if self.input == Input::Idle {
-			return Ok(Vec::new());
+			return Ok(());
 		}
 
 		// Flushed whatever the drain did: one that never saw end of stream still
@@ -549,7 +556,7 @@ fn image_size(image: &Image) -> Result<(u32, u32, u32, u32), Error> {
 	// with its last row or column.
 	let (w, h) = (w.max(0) as u32 & !1, h.max(0) as u32 & !1);
 	if w == 0 || h == 0 {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"MediaCodec produced a {width}x{height} image, which is not a picture"
 		)));
 	}
@@ -558,12 +565,12 @@ fn image_size(image: &Image) -> Result<(u32, u32, u32, u32), Error> {
 
 /// Wrap an NDK media error from the codec, naming the call that produced it.
 fn codec_err(what: &str, error: MediaError) -> Error {
-	Error::Codec(anyhow::anyhow!("failed to {what} on the MediaCodec decoder: {error}"))
+	Error::codec(anyhow::anyhow!("failed to {what} on the MediaCodec decoder: {error}"))
 }
 
 /// Wrap an NDK media error from the reader, naming the call that produced it.
 fn reader_err(what: &str, error: MediaError) -> Error {
-	Error::Codec(anyhow::anyhow!(
+	Error::codec(anyhow::anyhow!(
 		"failed to {what} on the decoder's ImageReader: {error}"
 	))
 }
@@ -593,26 +600,26 @@ mod tests {
 			let timestamp = Timestamp::from_micros(index * 33_333).unwrap();
 			let frame = Frame::new(Surface::I420(i420.clone()), timestamp);
 			encoder.cut().unwrap();
-			for encoded in encoder.encode(&frame).unwrap() {
-				frames.extend(decoder.decode(encoded.payload, encoded.timestamp, true).unwrap());
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				frames.extend(decoder.decode_all(encoded.payload, encoded.timestamp, true).unwrap());
 			}
 		}
-		for encoded in encoder.flush().unwrap() {
-			frames.extend(decoder.decode(encoded.payload, encoded.timestamp, true).unwrap());
+		for encoded in encoder.flush_all().unwrap() {
+			frames.extend(decoder.decode_all(encoded.payload, encoded.timestamp, true).unwrap());
 		}
-		frames.extend(decoder.flush().unwrap());
+		frames.extend(decoder.flush_all().unwrap());
 
 		// A flush drains the previous stream and leaves the same decoder reusable.
 		let timestamp = Timestamp::from_micros(1_000_000).unwrap();
 		let frame = Frame::new(Surface::I420(i420.clone()), timestamp);
 		encoder.cut().unwrap();
-		for encoded in encoder.encode(&frame).unwrap() {
-			frames.extend(decoder.decode(encoded.payload, encoded.timestamp, true).unwrap());
+		for encoded in encoder.encode_all(&frame).unwrap() {
+			frames.extend(decoder.decode_all(encoded.payload, encoded.timestamp, true).unwrap());
 		}
-		for encoded in encoder.flush().unwrap() {
-			frames.extend(decoder.decode(encoded.payload, encoded.timestamp, true).unwrap());
+		for encoded in encoder.flush_all().unwrap() {
+			frames.extend(decoder.decode_all(encoded.payload, encoded.timestamp, true).unwrap());
 		}
-		frames.extend(decoder.flush().unwrap());
+		frames.extend(decoder.flush_all().unwrap());
 
 		let frame = frames.first().expect("at least one decoded frame");
 		assert_eq!(frame.size(), size);

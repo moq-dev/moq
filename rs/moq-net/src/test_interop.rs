@@ -367,7 +367,10 @@ fn lite_varint_interop() {
 			priority: 1,
 			max_age: None,
 			timescale: None,
-			compress: version.has_compression(),
+			compression: match version.has_compression() {
+				true => crate::track::Compression::Deflate,
+				false => crate::track::Compression::None,
+			},
 		}
 		.encode_bytes(version)
 		.unwrap();
@@ -594,7 +597,7 @@ fn lite_tracks_interop() {
 		priority: 3,
 		max_age: Some(std::time::Duration::from_secs(2)),
 		timescale: Some(crate::Timescale::MICRO),
-		compress: true,
+		compression: crate::track::Compression::Deflate,
 	};
 	let mut bytes = Vec::new();
 	let mut w = Encoder::new(&mut bytes, version.into());
@@ -667,7 +670,8 @@ fn ietf_track_status_interop() {
 					unknown: Default::default(),
 					dynamic_groups: false,
 					compress: false,
-					max_cache_duration: Some(std::time::Duration::from_millis(5000)),
+					// The max age is never sent as MAX_CACHE_DURATION.
+					max_cache_duration: None,
 					timescale: Some(crate::Timescale::MILLI),
 					// The JS track's priority 2, lower-first on the wire as `127 - 2`.
 					priority: Some(125),

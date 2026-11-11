@@ -44,7 +44,7 @@ arrival slots handed to its frames oldest first, as one group, halved the AAC
 `bursty` and `wide` discards (`bursty` summed over the seven nights 1156 to 584
 ms a minute) and lowered both rows' target by 20 to 60 ms. That shallower target doubled AAC
 `wide`'s player re-stalls (mean 3.0 to 6.6 a minute), the 0.95 quantile's trade
-that [Watch](/quest/m1/audio-jitter-target/watch.md)'s time stretch absorbs.
+that the browser's time stretch absorbs.
 
 AAC `bursty` still discards about three times what Opus `bursty` does (584
 against 174 summed), and parity is not expected: the harness keeps ffmpeg's

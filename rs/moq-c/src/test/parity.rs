@@ -595,18 +595,26 @@ fn audio_encoder_without_a_broadcast() {
 
 	// Stereo by default, so a frame is twice the frame size in interleaved samples.
 	let pcm = vec![0.0f32; frame_size as usize * 2];
+	let mut packet: moq_frame = unsafe { std::mem::zeroed() };
 	let mut packets = 0;
 	for _ in 0..3 {
-		let count = unsafe { moq_audio_encoder_encode(encoder, pcm.as_ptr(), pcm.len()) };
-		assert!(count >= 0, "encode failed: {count}");
-		packets += count;
+		assert_eq!(unsafe { moq_audio_encoder_encode(encoder, pcm.as_ptr(), pcm.len()) }, 0);
+		assert_eq!(unsafe { moq_audio_encoder_receive(encoder, &mut packet) }, 1);
+		assert!(packet.payload_size > 0);
+		assert_eq!(unsafe { moq_audio_encoder_receive(encoder, &mut packet) }, 0);
+		packets += 1;
 	}
+	assert_eq!(moq_audio_encoder_flush(encoder), 0);
+	assert_eq!(
+		unsafe { moq_audio_encoder_receive(encoder, &mut packet) },
+		0,
+		"libopus holds no packet"
+	);
 	let mut padding = 0;
 	let drained = unsafe { moq_audio_encoder_finish(encoder, pcm.as_ptr(), pcm.len() / 2, &mut padding) };
 	assert!(drained >= 0, "finish failed: {drained}");
 	assert!(packets + drained > 0, "the encoder produced packets");
 	if drained > 0 {
-		let mut packet: moq_frame = unsafe { std::mem::zeroed() };
 		assert_eq!(unsafe { moq_audio_encoder_packet(encoder, 0, &mut packet) }, 0);
 		assert!(packet.payload_size > 0);
 		assert!(unsafe { moq_audio_encoder_packet(encoder, drained as u32, &mut packet) } < 0);
@@ -640,28 +648,40 @@ fn video_encoder_without_a_broadcast() {
 	};
 	let encoder = id(unsafe { moq_video_encoder_create(&input, &output) });
 	let rgba = gray_rgba(320, 240);
-	let mut packets = 0;
+	let mut packet: moq_frame = unsafe { std::mem::zeroed() };
+	let mut keyframes = Vec::new();
+	let mut receive = |keyframes: &mut Vec<bool>| loop {
+		match unsafe { moq_video_encoder_receive(encoder, &mut packet) } {
+			0 => break,
+			1 => {
+				assert!(packet.payload_size > 0);
+				assert!(!packet.timestamp.is_null(), "an access unit carries its timestamp");
+				keyframes.push(packet.keyframe);
+			}
+			code => panic!("receive failed: {code}"),
+		}
+	};
 	for index in 0..5 {
+		if index == 3 {
+			assert_eq!(moq_video_encoder_cut(encoder), 0);
+		}
 		let frame = moq_video_encoder_frame {
 			timestamp: micros(index * 33_333),
 			data: rgba.as_ptr(),
 			data_size: rgba.len(),
 		};
-		let count = unsafe { moq_video_encoder_encode(encoder, &frame) };
-		assert!(count >= 0, "encode failed: {count}");
-		packets += count;
+		assert_eq!(unsafe { moq_video_encoder_encode(encoder, &frame) }, 0);
+		receive(&mut keyframes);
 	}
-	assert_eq!(moq_video_encoder_cut(encoder), 0);
-	let drained = moq_video_encoder_finish(encoder);
-	assert!(drained >= 0, "finish failed: {drained}");
-	assert!(packets + drained > 0, "the encoder produced access units");
-	if drained > 0 {
-		let mut packet: moq_frame = unsafe { std::mem::zeroed() };
-		assert_eq!(unsafe { moq_video_encoder_packet(encoder, 0, &mut packet) }, 0);
-		assert!(packet.payload_size > 0);
-	}
-	assert!(moq_video_encoder_finish(encoder) < 0, "finishing twice fails");
+	assert_eq!(moq_video_encoder_flush(encoder), 0);
+	receive(&mut keyframes);
+	assert_eq!(
+		keyframes,
+		[true, false, false, true, false],
+		"keyframes at the start and the cut"
+	);
 	assert_eq!(moq_video_encoder_free(encoder), 0);
+	assert!(moq_video_encoder_free(encoder) < 0);
 }
 
 /// Only Apple decoders hand out a native surface; elsewhere asking for one is refused up front.

@@ -38,7 +38,6 @@ missing required CPU feature before starting transport cryptography.
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
 | [moq-auth](/lib/rs/moq-auth) | Relay authorization: JWT signing and verification, and the auth server contract. |
-| [moq-room](/lib/rs/moq-room) | Workspace-only native rooms; use the published JS room API for applications. |
 | [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
 | [moq-crypto](https://github.com/moq-dev/moq/tree/main/rs/moq-crypto) | Workspace-only end-to-end encryption of groups, datagrams, and track names, scoped to a publisher run's epoch, and per-frame Ed25519 signatures, so relays forward content they cannot read, forge, retime, or relocate. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
@@ -61,7 +60,7 @@ let origin = moq_tokio::origin::spawn();
 let client = moq_tokio::connect::Config::default().init(Default::default())?;
 let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 // Reconnects on its own; `closed()` resolves when it gives up.
-let session = client.with_origin(origin.clone()).connect(url);
+let session = client.with_publisher(&origin).with_subscriber(origin.clone()).connect(url);
 
 // Subscribe: wait for a route, resolve the broadcast at its path, read the catalog.
 let consumer = origin.consume();
@@ -85,8 +84,8 @@ let route = origin.route("my-stream.hang", RouteOptions::default())?;
 // moq-mux (from a container) or moq-video / moq-audio (from a device) fill
 // `route.broadcast()`. Keep the route: dropping it, or closing its broadcast,
 // retracts it, and `withdraw()`/`announce()` hide and show the same stream. To
-// serve a whole subtree on demand instead, `origin.route_prefix("room", ..)?`
-// yields each requested path: answer with `request.route(..)`, `serve` a held
+// serve a whole subtree on demand instead, `origin.claim("room", ..)?` returns
+// a `Claim` that yields each requested path: answer with `request.route(..)`, `serve` a held
 // broadcast, or `reject`.
 ```
 

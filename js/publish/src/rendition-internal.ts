@@ -1,4 +1,4 @@
-import type { Milli } from "@moq/clock";
+import type { Duration } from "@moq/clock";
 import type { Stats } from "@moq/hang";
 import type * as Moq from "@moq/net";
 import { type Getter, Signal } from "@moq/signals";
@@ -50,7 +50,7 @@ export class Rendition<Config> {
 	 * so an HLS or DASH export can cut its segments before any media is encoded. That declaration
 	 * is fixed for the network broadcast, so a later change here does not move it.
 	 */
-	readonly join = new Signal<Milli | undefined>(undefined);
+	readonly join = new Signal<Duration | undefined>(undefined);
 
 	/**
 	 * What the producer has sent under this rendition, written by the producer and reported under
@@ -61,7 +61,7 @@ export class Rendition<Config> {
 
 	/**
 	 * The open track producer, or `undefined` while the network broadcast is down, after the track
-	 * closes, and, for non-audio tracks with the broadcast's `onDemand`, while no subscriber is attached.
+	 * closes, and, for non-audio tracks with the broadcast's `onDemand: "all"`, while no subscriber is attached.
 	 * Producers should
 	 * encode only while this is set, and only media matching the current {@link config}: a new
 	 * identity swaps in a new track.

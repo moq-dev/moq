@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano, now, sleep, wall, yieldNow } from "@moq/clock";
+import { Duration, type Instant, now, sleep, type Wall, wall, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Credential, Grant, Issued, Request, Requests } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
@@ -29,7 +29,9 @@ export async function decodePatterns(r: Reader): Promise<Path.Patterns> {
 /** Whether two grants allow the same paths and lapse together. */
 function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
 	if (a === undefined || b === undefined) return a === b;
-	return a.publish.equals(b.publish) && a.subscribe.equals(b.subscribe) && a.expires === b.expires;
+	const expires =
+		a.expires === undefined || b.expires === undefined ? a.expires === b.expires : a.expires.eq(b.expires);
+	return a.publish.equals(b.publish) && a.subscribe.equals(b.subscribe) && expires;
 }
 
 /** The session or peer carries no AUTH exchange, or takes no tokens in band. */
@@ -57,8 +59,8 @@ export class Duplicate extends Error {
  *
  * @internal
  */
-export const RETRY_INITIAL = Milli(1000);
-const RETRY_MAX = Milli(30_000);
+export const RETRY_INITIAL = Duration.millis(1000);
+const RETRY_MAX = Duration.millis(30_000);
 
 // Whether a refusal is the acceptor failing to decide rather than its verdict on the token,
 // such as an unreachable auth server or a full verification queue.
@@ -114,12 +116,13 @@ export interface AuthWire {
 function union(grants: Iterable<Grant>): Grant {
 	const publish: Path.Pattern[] = [];
 	const subscribe: Path.Pattern[] = [];
-	let expires: number | undefined;
+	let expires: Wall | undefined;
 	for (const grant of grants) {
 		for (const pattern of grant.publish) publish.push(pattern);
 		for (const pattern of grant.subscribe) subscribe.push(pattern);
 		// The earliest expiry is when the union next shrinks.
-		if (grant.expires !== undefined) expires = Math.min(expires ?? grant.expires, grant.expires);
+		if (grant.expires !== undefined && (expires === undefined || grant.expires.lt(expires)))
+			expires = grant.expires;
 	}
 	return { publish: new Path.Patterns(publish), subscribe: new Path.Patterns(subscribe), expires };
 }
@@ -343,7 +346,7 @@ export function ended(handle: Handle): Error | undefined {
 /**
  * The tokens this side presents and the grant they earn, across every session built on it.
  *
- * A session made without one creates its own, returned by `Established.auth`, which ends with
+ * A session made without one creates its own, returned by `Session.auth`, which ends with
  * that session. Pass one to `connect` as `auth` instead and it outlives its sessions: each
  * presents every token the handle holds, so a {@link Credential} it returned keeps riding a route's
  * announcements across a reconnect. It backs one active session at a time, plus the ones
@@ -471,9 +474,11 @@ class IssuedGrant implements Issued {
 	#stream: Stream;
 	#wire: AuthWire;
 	#writes = Promise.resolve();
-	/** The latest grant, until its write starts: a newer one replaces it rather than queueing. */
-	#queued: Grant | undefined;
-	#done = false;
+	/**
+	 * Open, holding the latest grant until its write starts, so a newer one replaces it rather
+	 * than queueing; or done: closed, revoked, or a reply that could not be sent.
+	 */
+	#state: { kind: "open"; queued?: Grant } | { kind: "done" } = { kind: "open" };
 
 	constructor(stream: Stream, wire: AuthWire) {
 		this.#stream = stream;
@@ -495,41 +500,51 @@ class IssuedGrant implements Issued {
 			// The peer already closed the stream: nothing left to tell it.
 			if (err instanceof StreamError) return;
 			// A grant the wire cannot carry is withheld, never widened, and so is any other
-			// reply that fails to encode.
+			// reply that fails to encode. An update since then is dropped with it.
 			if (!(err instanceof Unsupported)) console.warn("auth reply not sent", err);
-			this.#done = true;
-			this.#queued = undefined;
+			this.#state = { kind: "done" };
 			return this.#wire.unsupported(this.#stream, error(err).message).catch(() => void 0);
 		});
 	}
 
 	update(grant: Grant): void {
-		if (this.#done) return;
+		const state = this.#state;
+		if (state.kind === "done") return;
 		// A grant still waiting to be written is replaced, so a peer withholding stream credit
 		// holds at most one.
-		const queued = this.#queued !== undefined;
-		this.#queued = grant;
+		const queued = state.queued !== undefined;
+		state.queued = grant;
 		if (queued) return;
 		this.#write(async () => {
-			const grant = this.#queued;
-			this.#queued = undefined;
-			if (grant === undefined) return;
-			const expires = grant.expires === undefined ? undefined : grant.expires - wall();
-			await this.#wire.grant(this.#stream, { publish: grant.publish, subscribe: grant.subscribe, expires });
+			// A close since then sends the grant itself.
+			const state = this.#state;
+			if (state.kind === "done" || state.queued === undefined) return;
+			const grant = state.queued;
+			state.queued = undefined;
+			await this.#send(grant);
 		});
 	}
 
+	async #send(grant: Grant): Promise<void> {
+		const expires = grant.expires?.since(wall()).asMillis();
+		await this.#wire.grant(this.#stream, { publish: grant.publish, subscribe: grant.subscribe, expires });
+	}
+
 	revoke(code: SessionCode, reason: string): void {
-		if (this.#done) return;
+		if (this.#state.kind === "done") return;
 		// The peer never saw a grant still queued, so the refusal replaces it.
-		this.#queued = undefined;
+		this.#state = { kind: "done" };
 		this.#write(() => this.#wire.refuse(this.#stream, code, reason));
-		this.close();
+		this.#writes = this.#writes.then(() => this.#stream.writer.close());
 	}
 
 	close(): void {
-		if (this.#done) return;
-		this.#done = true;
+		const state = this.#state;
+		if (state.kind === "done") return;
+		this.#state = { kind: "done" };
+		// The grant still queued is the last thing the peer hears before the end.
+		const last = state.queued;
+		if (last !== undefined) this.#write(() => this.#send(last));
 		this.#writes = this.#writes.then(() => this.#stream.writer.close());
 	}
 }
@@ -621,6 +636,8 @@ export class AuthSession {
 	#presented = new Set<Presented>();
 	// The handle's tokens as this session presents them, so a request carries only those.
 	#byToken = new Map<Token, Presented>();
+	// How many presented tokens await a reply: at setup, and with bytes. Recounted from
+	// #presented by #recount after every change to it or to an `isAnswered`.
 	#setupPending = new Signal(0);
 	#pending = new Signal(0);
 	#closed = false;
@@ -790,9 +807,7 @@ export class AuthSession {
 			return true;
 		} finally {
 			if (started !== undefined) {
-				console.debug(
-					`request waited for authorization: path=${path} waited=${Nano.toMilli(Instant.durationSince(now(), started))}ms`,
-				);
+				console.debug(`request waited for authorization: path=${path} waited=${now().since(started)}`);
 			}
 		}
 	}
@@ -843,8 +858,6 @@ export class AuthSession {
 	close(err: Error = new Error("session closed")) {
 		if (this.#closed) return;
 		this.#closed = true;
-		this.#pending.set(0);
-		this.#setupPending.set(0);
 		for (const presented of this.#presented) {
 			presented.ended = true;
 			presented.isAnswered = true;
@@ -859,8 +872,7 @@ export class AuthSession {
 
 	#present(wire: AuthWire, presented: Presented) {
 		this.#presented.add(presented);
-		if (presented.setup) this.#setupPending.update((n) => n + 1);
-		if (presented.token.byteLength > 0) this.#pending.update((n) => n + 1);
+		this.#recount();
 		void this.#run(wire, presented);
 	}
 
@@ -873,7 +885,7 @@ export class AuthSession {
 		let granted = false;
 		// The peer replied to an earlier attempt, so it knows AUTH.
 		let replied = false;
-		let delay: Milli | undefined;
+		let delay: Duration | undefined;
 		for (;;) {
 			refused = false;
 			// Whether the peer answered this token, so a close is not the peer predating AUTH:
@@ -906,7 +918,10 @@ export class AuthSession {
 						break;
 					}
 					if ("grant" in reply) {
-						const expires = reply.grant.expires === undefined ? undefined : wall() + reply.grant.expires;
+						const expires =
+							reply.grant.expires === undefined
+								? undefined
+								: wall().add(Duration.millis(reply.grant.expires));
 						presented.grant = { publish: reply.grant.publish, subscribe: reply.grant.subscribe, expires };
 						answered = granted = replied = true;
 						delay = undefined;
@@ -967,11 +982,11 @@ export class AuthSession {
 			granted = false;
 			// Unanswered again, as on its first presentation: a request or publication the token
 			// might cover waits for the retry's verdict rather than being judged without it.
-			this.#unsettle(presented);
+			presented.isAnswered = false;
 			this.#recompute();
-			delay = delay === undefined ? RETRY_INITIAL : Milli(Math.min(delay * 2, RETRY_MAX));
+			delay = delay === undefined ? RETRY_INITIAL : delay.mul(2).min(RETRY_MAX);
 			presented.retry = new AbortController();
-			await sleep(Nano.fromMilli(delay), { signal: presented.retry.signal }).catch(() => void 0);
+			await sleep(delay, { signal: presented.retry.signal }).catch(() => void 0);
 			presented.retry = undefined;
 			if (this.#closed || presented.withdrawn || presented.ended) {
 				refused = false;
@@ -992,7 +1007,7 @@ export class AuthSession {
 		presented.grant = undefined;
 		// A token that ends unanswered counts as answered for enforcement: its refusal is
 		// the reply.
-		this.#settle(presented);
+		presented.isAnswered = true;
 		this.#presented.delete(presented);
 		const owner = presented.owner;
 		if (owner && this.#byToken.get(owner) === presented) this.#byToken.delete(owner);
@@ -1020,27 +1035,25 @@ export class AuthSession {
 
 	/** The peer granted `presented`: it counts as answered, and so does the handle's token. */
 	#answered(presented: Presented) {
-		this.#settle(presented);
+		presented.isAnswered = true;
 		presented.owner?.answer();
 	}
 
-	/** Stop counting `presented` as unanswered, for enforcement and the setup wait. */
-	#settle(presented: Presented) {
-		if (presented.isAnswered) return;
-		presented.isAnswered = true;
-		if (presented.setup) this.#setupPending.update((n) => n - 1);
-		if (presented.token.byteLength > 0 && !this.#closed) this.#pending.update((n) => n - 1);
-	}
-
-	/** Count `presented` as unanswered again, as a retry presents it anew. */
-	#unsettle(presented: Presented) {
-		if (!presented.isAnswered) return;
-		presented.isAnswered = false;
-		if (presented.setup) this.#setupPending.update((n) => n + 1);
-		if (presented.token.byteLength > 0) this.#pending.update((n) => n + 1);
+	/** Count the presented tokens still awaiting a reply, for enforcement and the setup wait. */
+	#recount() {
+		let setup = 0;
+		let pending = 0;
+		for (const presented of this.#presented) {
+			if (presented.isAnswered) continue;
+			if (presented.setup) setup += 1;
+			if (presented.token.byteLength > 0) pending += 1;
+		}
+		this.#setupPending.set(setup);
+		this.#pending.set(pending);
 	}
 
 	#recompute() {
+		this.#recount();
 		const granted: Grant[] = [];
 		for (const presented of this.#presented) {
 			if (presented.grant) granted.push(presented.grant);

@@ -13,6 +13,7 @@ test("a connect request parses with every field", () => {
 		remote: "203.0.113.9:4433",
 		local: "[::1]:443",
 		server_name: "relay.example",
+		host: "relay.example",
 		alpn: "moq-lite-05",
 		path: "/demo/room",
 		query: "jwt=abc",

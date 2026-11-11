@@ -1470,6 +1470,10 @@ impl TrackState {
 		for groups in dropped.iter() {
 			self.drop_groups(groups.clone(), super::Hole::drop(err.clone()));
 		}
+		// The runs are billed, so a source refusing fills in fragments pays for them.
+		if !dropped.is_empty() {
+			self.charge_debt();
+		}
 	}
 }
 

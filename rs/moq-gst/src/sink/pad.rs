@@ -9,7 +9,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 
-use hang::moq_net;
 use moq_mux::import;
 
 use super::listed::Listed;
@@ -99,6 +98,8 @@ impl Names {
 #[derive(Default)]
 pub(super) struct Closed {
 	_track: Option<Sink>,
+	/// A finished text track, which no longer has a [`Sink`].
+	_text: Option<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::TextConfig>>,
 	/// The catalog `_track` published in, kept open until the owner drops.
 	_catalog: Option<moq_mux::catalog::Producer>,
 }
@@ -976,25 +977,37 @@ impl Pad {
 			}
 		};
 		let Publishing {
-			mut track,
+			track,
 			catalog,
 			caps,
 			named,
 		} = *publishing;
-		let result = match &mut track {
-			Sink::Media(media) => media.track.finish().map_err(anyhow::Error::from),
-			Sink::Text(text) => text.producer.finish().map_err(anyhow::Error::from),
-			Sink::Opaque(producer) => producer.clone().finish().map_err(anyhow::Error::from),
-		};
 		if named {
 			self.names.end(track.name());
 		}
+		let mut text = None;
+		let (result, track) = match track {
+			Sink::Media(mut media) => (
+				media.track.finish().map_err(anyhow::Error::from),
+				Some(Sink::Media(media)),
+			),
+			Sink::Text(sink) => {
+				let result = sink.producer.finish().map(|finished| text = Some(finished));
+				(result.map_err(anyhow::Error::from), None)
+			}
+			// `closed` retains its own clone, whose appends the end refuses.
+			Sink::Opaque(producer) => (
+				producer.clone().finish().map(drop).map_err(anyhow::Error::from),
+				Some(Sink::Opaque(producer)),
+			),
+		};
 		self.producer = match result {
 			Ok(()) => Producer::Idle { caps: Some(caps) },
 			Err(_) => Producer::Failed,
 		};
 		let closed = Closed {
-			_track: Some(track),
+			_track: track,
+			_text: text,
 			_catalog: Some(catalog),
 		};
 		(closed, result.map(|()| true))
@@ -1932,9 +1945,11 @@ mod tests {
 		assert_eq!(decoder.layout().channels(), 6);
 		let mut decoded_samples = false;
 		for packet in &packets {
-			let decoded = decoder.decode(packet).expect("decode the published opus packet");
-			assert_eq!(decoded.samples.len() % 6, 0);
-			decoded_samples |= !decoded.samples.is_empty();
+			decoder.decode(packet).expect("decode the published opus packet");
+			while let Some(decoded) = decoder.receive().expect("receive the decoded opus packet") {
+				assert_eq!(decoded.samples.len() % 6, 0);
+				decoded_samples |= !decoded.samples.is_empty();
+			}
 		}
 		assert!(decoded_samples, "the 5.1 packets decoded to silence");
 	}

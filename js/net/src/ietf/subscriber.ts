@@ -1,4 +1,4 @@
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -23,9 +23,9 @@ import {
 import { type Fill, fillChanged, type Requests, wantedRuns } from "../fill.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
-import * as Instance from "../instance.ts";
 import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
+import * as Mint from "../mint.ts";
 import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
@@ -71,11 +71,6 @@ import { joinFilter, Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
-
-// Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
-// candidate outranks it, while the route stays selectable as the last path. Matches Rust
-// Cost::DRAIN: cost is the whole mechanism, not a separate state.
-const DRAIN_COST: Cost = 2n ** 62n - 1n;
 
 /** A fetch stream the head cannot be stitched from, which costs only that head. */
 class JoinUnsupported extends Error {
@@ -221,9 +216,9 @@ export class Subscriber {
 	// Whether a SUBSCRIBE_NAMESPACE's REQUEST_OK counts the NAMESPACEs that follow it (MoQ Active Count).
 	#activeCount: boolean;
 
-	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
+	// Settles when the peer sends GOAWAY, ranking this session's routes last.
 	#goaway?: GetPromise<Drain>;
-	// Our grant (MoQ Auth): a subscription it stops covering is cancelled. Undefined until
+	// Our grant: a subscription it stops covering is cancelled. Undefined until
 	// the peer answers, which allows everything.
 	#grant?: Getter<Grant | undefined>;
 	#auth?: AuthSession;
@@ -259,7 +254,7 @@ export class Subscriber {
 		activeCount?: boolean;
 		/** Settles when the peer sends GOAWAY. */
 		goaway?: GetPromise<Drain>;
-		/** The union of our tokens' grants (MoQ Auth), which bounds what we subscribe to. */
+		/** The union of our tokens' grants, which bounds what we subscribe to. */
 		grant?: Getter<Grant | undefined>;
 		auth?: AuthSession;
 		/** How many live requests the peer may hold. */
@@ -275,8 +270,8 @@ export class Subscriber {
 		this.#goaway = goaway;
 		this.#grant = grant;
 		this.#auth = auth;
-		// A draining peer usually stops publishing namespaces, so reprice from the signal
-		// itself. Waiting for another message would leave the route primary until close.
+		// A draining peer usually stops publishing namespaces, so rank its routes last from the
+		// signal itself. Waiting for another message would leave the route primary until close.
 		void goaway?.then(() => this.#drainAnnounced());
 	}
 
@@ -287,14 +282,13 @@ export class Subscriber {
 		return this.#goaway?.peek() !== undefined;
 	}
 
-	// What a route costs once the peer has asked us to leave.
-	#priced(route: WireRoute): WireRoute {
-		if (!this.#goingAway()) return route;
-		if (route.cost === DRAIN_COST) return route;
-		return { ...route, cost: DRAIN_COST };
+	// A route ranks last, at its real cost, once the peer has asked us to leave.
+	#drained(route: WireRoute): WireRoute {
+		if (!this.#goingAway() || route.draining) return route;
+		return { ...route, draining: true };
 	}
 
-	// Reprice every live advertisement. Idempotent, since the signal stays set.
+	// Rank every live advertisement last. Idempotent, since the signal stays set.
 	#drainAnnounced(): void {
 		for (const [path, info] of this.#announced) {
 			this.#settleAnnounce(path, info);
@@ -402,7 +396,7 @@ export class Subscriber {
 		}
 		// moq-transport carries no instance, so each namespace the peer advertises anew is a
 		// stream of its own, even one it advertised before on this session.
-		route = this.#priced({ ...route, instance: Instance.minted(), epoch: 0n });
+		route = this.#drained({ ...route, instance: Mint.fresh(), epoch: 0n });
 		const entry: Announced = { adverts: [{ id, route }], route };
 		this.#announced.set(path, entry);
 		this.#consumes.announce(path, entry, route);
@@ -436,7 +430,7 @@ export class Subscriber {
 		if (newest === undefined) return;
 		// Every advertisement of a path the peer holds is the stream its first one named.
 		const { instance, epoch } = existing.route;
-		const route = this.#priced({ ...newest.route, instance, epoch });
+		const route = this.#drained({ ...newest.route, instance, epoch });
 		if (routesEqual(existing.route, route)) return;
 		existing.route = route;
 		this.#consumes.announce(path, existing, route, false);
@@ -452,7 +446,7 @@ export class Subscriber {
 	/**
 	 * Drop advertisement `id` for a path, retracting it only once the last one goes.
 	 */
-	#detachAnnounce(path: Path.Valid, id: number) {
+	#detachAnnounce(path: Path.Valid, id: number, ended: boolean) {
 		const existing = this.#announced.get(path);
 		const index = existing?.adverts.findIndex((advert) => advert.id === id) ?? -1;
 		if (existing === undefined || index === -1) return;
@@ -474,7 +468,13 @@ export class Subscriber {
 			// A consumer that closed stays registered until its request is off the wire.
 			if (!sees(filter, path) || consumer.closed.peek() !== undefined) continue;
 			const scope = filter.scope;
-			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "end", route: existing.route });
+			// Only the peer's withdrawal ends the route; losing its stream or path lets it go.
+			consumer.append({
+				prefix: path,
+				captures: scopeCaptures(scope, path),
+				kind: ended ? "end" : "offline",
+				route: existing.route,
+			});
 		}
 	}
 
@@ -511,13 +511,14 @@ export class Subscriber {
 		let released = false;
 
 		// The stream owns every advertisement it carried, so give them back however it ends:
-		// as the request starts leaving, a decode error, or the peer resetting it. Without
+		// as the request starts leaving, a decode error, or the peer resetting it. Closing the
+		// stream withdraws nothing, which NAMESPACE_DONE is for, so they go offline. Without
 		// this each namespace keeps its count and the source never detaches, which would pin
 		// the path for the session even after the other source withdrew.
 		const release = () => {
 			released = true;
 			for (const [path, held] of live) {
-				if (held.id !== undefined) this.#detachAnnounce(path, held.id);
+				if (held.id !== undefined) this.#detachAnnounce(path, held.id, false);
 			}
 			live.clear();
 		};
@@ -639,7 +640,7 @@ export class Subscriber {
 							// over: the path is gone even though the message says active.
 							if (this.#reflected(params.cluster)) {
 								console.debug(`dropping reflected namespace: broadcast=${path}`);
-								if (held?.id !== undefined) this.#detachAnnounce(path, held.id);
+								if (held?.id !== undefined) this.#detachAnnounce(path, held.id, false);
 								live.set(path, {});
 								continue;
 							}
@@ -658,7 +659,7 @@ export class Subscriber {
 
 							const held = live.get(path);
 							live.delete(path);
-							if (held?.id !== undefined) this.#detachAnnounce(path, held.id);
+							if (held?.id !== undefined) this.#detachAnnounce(path, held.id, true);
 						} else {
 							throw new Error(
 								`unexpected message on subscribe_namespace stream: 0x${msgType.toString(16)}`,
@@ -1097,7 +1098,7 @@ export class Subscriber {
 				timescale: ok.properties.timescale,
 				priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 				// No MAX_CACHE_DURATION sets no publisher limit, not the authored default.
-				maxAge: cache === undefined ? null : Milli(Number(cache)),
+				maxAge: cache === undefined ? null : Duration.millis(Number(cache)),
 				ietf: this.#session.version,
 			});
 			producer = staged.producer;
@@ -1572,6 +1573,7 @@ export class Subscriber {
 		// that the stream is recorded, so settling this promise hands it back to be torn down.
 		if (cancelled.aborted) throw new Error("subscribe cancelled before it was sent");
 
+		this.#aliases.resubscribe({ broadcast, name: request.name });
 		const bounds = wireSpan(request.subscription.ranges ?? [{}]);
 		const msg = new Subscribe({
 			requestId,
@@ -1632,7 +1634,7 @@ export class Subscriber {
 					timescale: ok.properties.timescale,
 					priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 					// No MAX_CACHE_DURATION sets no publisher limit, not the authored default.
-					maxAge: maxCacheDuration === undefined ? null : Milli(Number(maxCacheDuration)),
+					maxAge: maxCacheDuration === undefined ? null : Duration.millis(Number(maxCacheDuration)),
 					// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
 					ietf: version,
 				});
@@ -1741,6 +1743,9 @@ export class Subscriber {
 		// stream ends.
 		this.#announceSlots.acquire();
 		let attached: number | undefined;
+		// Set once the peer ends the request, by FIN or reset, which withdraws the
+		// advertisement; a violation or a refused update here loses it instead.
+		let withdrawn = false;
 
 		try {
 			// Send OK first. This must complete before notifying consumers,
@@ -1761,6 +1766,7 @@ export class Subscriber {
 				if (framed === undefined) {
 					// FIN cancels only on some drafts; on the rest the request lasts until reset.
 					await request.ended;
+					withdrawn = true;
 					break;
 				}
 
@@ -1808,7 +1814,7 @@ export class Subscriber {
 				if (this.#reflected(held)) {
 					if (attached !== undefined) {
 						console.debug(`publish_namespace now loops back, detaching: broadcast=${path}`);
-						this.#detachAnnounce(path, attached);
+						this.#detachAnnounce(path, attached, false);
 						attached = undefined;
 					}
 				} else if (attached === undefined) {
@@ -1829,7 +1835,7 @@ export class Subscriber {
 			// Give back exactly what was taken: a request that never got its OK out never
 			// referenced the path, and retracting there would drop someone else's count.
 			if (attached !== undefined) {
-				this.#detachAnnounce(path, attached);
+				this.#detachAnnounce(path, attached, withdrawn);
 			}
 		}
 	}
@@ -2127,7 +2133,7 @@ export class Subscriber {
 					stream.tryDecode(decode) ??
 					(await race([stream.decodeMaybe(decode), producer?.closed ?? hooks.trackReleased(track)]));
 				if (object === null || object instanceof Error) {
-					join.fail(object ?? new Error("the track closed under the head"));
+					join.fail(object ?? new Error("the track closed under the head"), producer);
 					stream.stop(object ?? new StreamError(StreamCode.Cancel));
 					return;
 				}
@@ -2186,11 +2192,11 @@ export class Subscriber {
 				next += 1;
 			}
 			console.debug(`join head: group=${join.sequence} objects=${next}`);
-			join.finish();
+			join.finish(producer);
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
 			if (e instanceof JoinUnsupported) console.warn(`${e.message}, joining at the next whole group`);
-			join.fail(e);
+			join.fail(e, producer);
 			if (e instanceof ProtocolViolation) this.#fail(e.code, e.message);
 			// As for a subgroup object: the track is malformed, not just its head.
 			if (e instanceof StreamError && e.code === StreamCode.MalformedTrack) track.abort(e);

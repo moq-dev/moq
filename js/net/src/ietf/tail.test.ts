@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Instant, Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
@@ -61,7 +61,7 @@ async function subscribed(largest?: bigint) {
 	const reader = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ ranges: [{ start: { relative: 0n } }], delay: { max: Milli(60_000) } });
+		.subscribe({ ranges: [{ start: { relative: 0n } }], delay: { max: Duration.millis(60_000) } });
 
 	const peer = await Stream.accept(pair.client, VERSION);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
@@ -118,7 +118,7 @@ test("a group stream that arrives after PUBLISH_DONE is delivered", async () => 
 	})();
 	await clock.drive(read);
 	// The Stream Count was met, so nothing waited out the grace.
-	expect(Nano.toMilli(Instant.durationSince(clock.now(), started))).toBeLessThan(GRACE);
+	expect(clock.now().since(started).lt(GRACE)).toBe(true);
 });
 
 test("a group read across PUBLISH_DONE is delivered whole", async () => {
@@ -154,9 +154,9 @@ test("a Stream Count of 0 is a hint, so a late stream within the grace is still 
 	const next = reader.recvGroup().finally(() => {
 		ended = true;
 	});
-	await clock.advance(Nano.fromMilli(Milli(GRACE - 1)));
+	await clock.advance(GRACE.sub(Duration.millis(1)));
 	expect(ended).toBe(false);
-	await clock.advance(Nano.fromMilli(Milli(1)));
+	await clock.advance(Duration.millis(1));
 	expect(await next).toBeUndefined();
 	expect(await reader.closed).toBeNull();
 });

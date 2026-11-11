@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
-import { type Arrival, type Options, QUANTUM, type Quantum, replay } from "./replay";
+import { type Arrival, type Options, QUANTUM, replay } from "./replay";
 
 const RATE = 48000;
 const CONFIG = { codec: "opus", sampleRate: RATE, numberOfChannels: 1 } as Catalog.AudioConfig;
@@ -46,7 +46,7 @@ describe("replay", () => {
 		expect(
 			await underruns(
 				paced(10, () => 30),
-				{ rate: RATE, config: CONFIG, delay: Milli(100), duration: observed(10) },
+				{ rate: RATE, config: CONFIG, delay: Duration.millis(100), duration: observed(10) },
 			),
 		).toBe(0);
 	});
@@ -55,13 +55,13 @@ describe("replay", () => {
 		// Five frames held and flushed at once: 80 ms of arrival spread.
 		const trace = paced(10, (i) => 30 + (4 - (i % 5)) * 20);
 		expect(
-			await underruns(trace, { rate: RATE, config: CONFIG, delay: Milli(40), duration: observed(10) }),
+			await underruns(trace, { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(10) }),
 		).toBeGreaterThan(50);
 		expect(
 			await underruns(trace, {
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(150),
+				delay: Duration.millis(150),
 				duration: observed(10),
 			}),
 		).toBe(0);
@@ -75,7 +75,7 @@ describe("replay", () => {
 			for await (const { underruns } of replay(arrivals, {
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(100),
+				delay: Duration.millis(100),
 				duration: observed(10),
 			}))
 				last = underruns;
@@ -94,7 +94,7 @@ describe("replay", () => {
 			await underruns(trace, {
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(100),
+				delay: Duration.millis(100),
 				duration: observed(10),
 			}),
 		).toBeGreaterThan(frame);
@@ -110,7 +110,7 @@ describe("replay", () => {
 			await underruns(trace, {
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(100),
+				delay: Duration.millis(100),
 				duration: observed(10),
 			}),
 		).toBeGreaterThan(0);
@@ -124,7 +124,7 @@ describe("replay", () => {
 			{
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(100),
+				delay: Duration.millis(100),
 				duration: 15_000,
 			},
 		)) {
@@ -133,6 +133,61 @@ describe("replay", () => {
 		}
 		expect(last).toBeGreaterThanOrEqual(15_000);
 		expect(heard).toBe(0);
+	});
+});
+
+/**
+ * How far the playhead trails the shared clock video plays from, in ms, for each quantum played once
+ * the first `settle` ms have passed, with the underruns the ring counted by the end.
+ */
+async function lag(trace: Arrival[], options: Options, settle: number) {
+	const lags: number[] = [];
+	let underruns = 0;
+	for await (const quantum of replay(trace, options)) {
+		if (quantum.at >= settle && !quantum.stalled && quantum.clock !== undefined) {
+			lags.push(quantum.clock - quantum.timestamp);
+		}
+		underruns = quantum.underruns;
+	}
+	lags.sort((a, b) => a - b);
+	return { lags, median: lags[lags.length >> 1], underruns };
+}
+
+// Audio and video keep separate clocks that align once the delay covers the arrivals. Settling audio
+// later than the clock would trade lip sync for fewer underruns, so these hold the line: at steady
+// state the playhead rests on or just ahead of the clock, and a target short of the spread underruns
+// rather than drifting behind it.
+describe("replay against the shared clock", () => {
+	let warn: Mock<typeof console.warn>;
+	beforeEach(() => {
+		warn = spyOn(console, "warn").mockImplementation(() => {});
+	});
+	afterEach(() => warn.mockRestore());
+
+	// The ring rests one frame ahead of the newest arrival's playout, as the trim that preceded the
+	// time stretch left it, so audio leads the clock by up to that frame and never trails it.
+	for (const [name, lateness] of [
+		["evenly paced", () => 30],
+		["flushed five frames at a time", (i: number) => 30 + (4 - (i % 5)) * 20],
+	] as const) {
+		it(`plays ${name} frames on the clock at auto, never behind it`, async () => {
+			const options: Options = { rate: RATE, config: CONFIG, delay: "auto", duration: observed(60) };
+			const { lags } = await lag(paced(60, lateness), options, 30_000);
+			expect(lags.length).toBeGreaterThan(0);
+			expect(lags[0]).toBeGreaterThanOrEqual(-25);
+			expect(lags.at(-1)).toBeLessThanOrEqual(0);
+		});
+	}
+
+	it("underruns a target short of the spread rather than settling behind the clock", async () => {
+		// 80 ms of spread against a 40 ms target: every flush runs the ring dry.
+		const trace = paced(60, (i) => 30 + (4 - (i % 5)) * 20);
+		const options: Options = { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(60) };
+		const { lags, median, underruns } = await lag(trace, options, 30_000);
+		expect(underruns).toBeGreaterThanOrEqual(trace.length / 5);
+		// Each refill catches back up within the frame after it, never by a whole flush.
+		expect(median).toBeLessThanOrEqual(20);
+		expect(lags.at(-1)).toBeLessThan(40);
 	});
 });
 
@@ -151,35 +206,6 @@ describe("replay at auto", () => {
 		expect(await settled(60, () => 30)).toBe(40);
 		// Five frames flushed at once: 80 ms of spread to cover, plus one frame.
 		expect(await settled(60, (i) => 30 + (4 - (i % 5)) * 20)).toBeGreaterThanOrEqual(100);
-	});
-});
-
-describe("ingress diagnostics", () => {
-	it("keeps recorded arrival and lateness when delivery is held", async () => {
-		const trace = [0, 20, 40].map((timestamp) => ({ timestamp, at: timestamp + 1000, group: 0, duration: 20 }));
-		const run = async (decodeAfter?: number) => {
-			let window: Quantum["arrivals"] = [];
-			for await (const quantum of replay(trace, {
-				rate: RATE,
-				config: CONFIG,
-				delay: Milli(100),
-				duration: 300,
-				decodeAfter,
-			}))
-				window = quantum.arrivals;
-			return window;
-		};
-		const direct = await run();
-		const held = await run(1200);
-		expect(held).toEqual(direct);
-		expect(held).toEqual(
-			trace.map((entry) => ({
-				kind: "frame" as const,
-				timestamp: Milli(entry.timestamp),
-				arrival: Milli(entry.at),
-				late: false,
-			})),
-		);
 	});
 });
 
@@ -228,7 +254,7 @@ describe("recorded frame durations", () => {
 		for await (const { output } of replay(trace, {
 			rate: RATE,
 			config: CONFIG,
-			delay: Milli(20),
+			delay: Duration.millis(20),
 			duration: 100,
 		}))
 			heard += output.filter((sample) => sample !== 0).length;

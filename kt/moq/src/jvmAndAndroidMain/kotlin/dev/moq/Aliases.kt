@@ -49,16 +49,23 @@ typealias Request = uniffi.moq.MoqRequest
 typealias Transport = uniffi.moq.MoqTransport
 
 // Origin (broadcast discovery / announcement).
-/** The publish side of an origin: create routes so subscribers can discover them. */
+/** The publish side of an origin: create routes and claims so subscribers can discover them. */
 typealias OriginProducer = uniffi.moq.MoqOriginProducer
 
 /**
- * A route on an origin: an exact route owning one broadcast (`broadcast()` to fill it), or a prefix
- * route yielding the requests beneath it (`requested()`). `announce`, `withdraw`, and `setCost`
- * advertise it. Closing or cancelling it retracts it, as does ending its broadcast; a broadcast
- * handle alone does not keep it announced.
+ * An exact route on an origin, owning one broadcast (`broadcast()` to fill it). `announce`,
+ * `withdraw`, and `setCost` advertise it. Closing or cancelling it retracts it, as does ending its
+ * broadcast; a broadcast handle alone does not keep it announced.
  */
 typealias Route = uniffi.moq.MoqRoute
+
+/**
+ * A prefix route on an origin, from `OriginProducer.claim`: a claim that every path beneath a
+ * prefix can be served, yielding each request (`requested()`). `announce`, `withdraw`, and
+ * `setCost` advertise it. Closing or cancelling it retracts it and rejects the requests still
+ * waiting.
+ */
+typealias Claim = uniffi.moq.MoqClaim
 
 /** Config for creating an origin, such as its total cache budget. */
 typealias OriginConfig = uniffi.moq.MoqOriginConfig
@@ -88,7 +95,8 @@ typealias Following = uniffi.moq.MoqFollowing
 typealias Announce = uniffi.moq.MoqAnnounce
 
 /**
- * What an [AnnounceConsumer] yields: [AnnounceEventPresent] or [AnnounceEventAbsent].
+ * What an [AnnounceConsumer] yields: [AnnounceEventPresent], [AnnounceEventUnavailable],
+ * [AnnounceEventAvailable], [AnnounceEventAbsent], or [AnnounceEventOffline].
  *
  * Another publisher instance taking a path over keeps it present: hold a [Following] to see the
  * broadcast change.
@@ -97,11 +105,26 @@ typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 
 // Kotlin cannot reach a sealed class's subtypes through its typealias, so each
 // variant gets its own.
-/** A route now covers the path, which was absent. */
+/** A route now covers the path, which was absent; it may arrive unavailable. */
 typealias AnnounceEventPresent = uniffi.moq.MoqAnnounceEvent.Present
 
-/** No route covers the path any more; carries its last route. */
+/**
+ * The present path lost every usable path to its origin but may recover one: it stays present while
+ * requests for it may fail.
+ */
+typealias AnnounceEventUnavailable = uniffi.moq.MoqAnnounceEvent.Unavailable
+
+/** The present path recovered a usable path: request it again. */
+typealias AnnounceEventAvailable = uniffi.moq.MoqAnnounceEvent.Available
+
+/** The origin withdrew the path; carries its last route. */
 typealias AnnounceEventAbsent = uniffi.moq.MoqAnnounceEvent.Absent
+
+/**
+ * This side let go of the path, which its origin may still serve: the session it arrived on closed,
+ * or the network lost every path to it. Carries its last route.
+ */
+typealias AnnounceEventOffline = uniffi.moq.MoqAnnounceEvent.Offline
 
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
@@ -152,15 +175,22 @@ typealias Frame = uniffi.moq.MoqFrame
 typealias Timestamp = uniffi.moq.MoqTimestamp
 
 /**
+ * Names one continuous stream at a path: `Instance.parse` names one, only a session mints one, and
+ * equality also compares `isMinted()`, so pin a reported stream with the instance, not its text.
+ */
+typealias Instance = uniffi.moq.MoqInstance
+
+/**
  * How a [Route] advertises itself: `hidden` until `announce`, its static production cost (lower
- * wins), an optional stable instance (null mints a fresh one the route keeps for its lifetime), and
- * the epoch, which only matters with a stable instance.
+ * wins), an optional stable [Instance] (null mints a fresh one the route keeps for its lifetime),
+ * and the epoch, which only matters with a stable instance.
  */
 typealias RouteOptions = uniffi.moq.MoqRouteOptions
 
 /**
- * The read-only facts on a received route: the instance of the stream it serves, relay hop ids
- * (oldest first), and static production and link cost (lower wins).
+ * The read-only facts on a received route: the [Instance] of the stream it serves, relay hop ids
+ * (oldest first), static production and link cost (lower wins), and its informational `rtt` to the
+ * origin node.
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo
 
@@ -216,6 +246,11 @@ typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 /** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */
 typealias TrackInfo = uniffi.moq.MoqTrackInfo
 
+/**
+ * How a track's frames are compressed on the wire: `DEFLATE`, or `null` in [TrackInfo] for none.
+ */
+typealias Compression = uniffi.moq.MoqCompression
+
 /** One audio frame: PCM payload bytes plus a presentation timestamp. */
 typealias AudioFrame = uniffi.moq.MoqAudioFrame
 
@@ -238,7 +273,7 @@ typealias VideoDecoderOutput = uniffi.moq.MoqVideoDecoderOutput
  * One decoded video frame, owning the decoder's surface until closed; `pixels(format)` converts it
  * to packed CPU pixels.
  */
-typealias VideoDecodedFrame = uniffi.moq.MoqVideoDecodedFrame
+typealias VideoDecodedFrame = dev.moq.video.DecodedFrame
 
 /** The PCM layout the caller feeds an audio producer. */
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput
@@ -304,14 +339,36 @@ typealias GrantConsumer = uniffi.moq.MoqGrantConsumer
 /** What the peer lets this side do: publish and subscribe patterns, and an expiry. */
 typealias Grant = uniffi.moq.MoqGrant
 
-/** A connection lifecycle transition reported by [Session.state]. */
+/** Where a connection is in its lifecycle, carrying that phase's failure or version. */
 typealias ConnectionPhase = uniffi.moq.MoqConnectionPhase
+
+// Kotlin cannot reach a sealed class's subtypes through its typealias, so each
+// variant gets its own.
+/** No session has connected yet; carries the latest failed dial. */
+typealias ConnectionPhaseConnecting = uniffi.moq.MoqConnectionPhase.Connecting
+
+/** A session is serving; carries its negotiated version. */
+typealias ConnectionPhaseConnected = uniffi.moq.MoqConnectionPhase.Connected
+
+/** No session is serving while the connection redials; carries why. */
+typealias ConnectionPhaseDisconnected = uniffi.moq.MoqConnectionPhase.Disconnected
+
+/**
+ * The old session serves while its replacement dials; carries its version and the replacement's
+ * failure.
+ */
+typealias ConnectionPhaseMigrating = uniffi.moq.MoqConnectionPhase.Migrating
+
+/** The connection has stopped for good; carries the terminal error, if any. */
+typealias ConnectionPhaseClosed = uniffi.moq.MoqConnectionPhase.Closed
 
 /** One coherent connection lifecycle snapshot. */
 typealias ConnectionState = uniffi.moq.MoqConnectionState
 
 /**
  * Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
+ * It applies only once a session has been established: a first dial that reaches no session ends
+ * the connection with its error rather than retrying.
  */
 typealias Backoff = uniffi.moq.MoqBackoff
 

@@ -7,6 +7,8 @@
 
 #include <moq/moq.hpp>
 
+#include "moq-worker.h"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -17,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -52,6 +55,22 @@ inline bool WaitFor(const std::function<bool()> &done, std::chrono::milliseconds
 		std::this_thread::sleep_for(std::chrono::milliseconds(2));
 	}
 	return true;
+}
+
+// Runs whatever `worker` already queued, so a test checks what an object's dropped calls
+// did without waiting out a window. Dropping a moq::Continuation does not recall a result
+// whose delivery already began, which can still queue after this returns: a check after
+// it can miss a stale continuation, never fail falsely.
+inline void Drain(const MoQWorker &worker)
+{
+	auto drained = std::make_shared<std::promise<void>>();
+	// A stopped worker runs nothing more, which is just as settled.
+	if (!worker.Executor()([drained] { drained->set_value(); }))
+		return;
+	if (drained->get_future().wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+		std::fprintf(stderr, "FAIL: the worker never reached the drain\n");
+		std::abort();
+	}
 }
 
 // A moq-ffi server that publishes every broadcast it consumes, so whatever one

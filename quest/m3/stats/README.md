@@ -93,7 +93,7 @@ kind.
     browser has only PROBE rtt until
     [#2733](https://github.com/moq-dev/moq/issues/2733)-style counters land.
 - **Encoding**: cumulative counters about once a second through
-  `moq_json::snapshot` on one track with `compress: true`, produced whenever
+  `moq_json::snapshot` on one track with `Compression::Deflate`, produced whenever
   stats are enabled. The [m1 compression migration](https://github.com/moq-dev/moq/pull/7046)
   removed the `.z` siblings and kept merge-patch deltas on the single track. An unsubscribed stats track never leaves the process.
   Gauges are carried but never summed.
@@ -101,15 +101,16 @@ kind.
   `#[non_exhaustive]` catalog types, and new types. The line left the
   [QoS](/quest/m3/qos/README.md) line, which keeps the relay's moq-stats
   changes.
-- **No `@moq/stats` package.** Media types live in `@moq/hang`, and the
-  demo dashboard's relay-stats reader stays where it is.
+- **Media types live in `@moq/hang`.** `@moq/stats` reads only the relay's
+  `moq-stats` format; amended 2026-11-11, when the demo's relay-stats reader
+  moved there ([JS reader for relay stats](/quest/m1/stats-reader.md)).
 - Docs stay inline: `doc/concept/hang.md` documents both catalog sections,
   `doc/concept/stats.md` gains a media section beside the relay's, and
   `drafts/draft-lcurley-moq-hang.md` specs the wire.
 
 Decided in the 2026-09-30 audit: a Rust encoder adapting its bitrate to viewer
-feedback moved to [encoder feedback](/quest/m5/stats-encoder-feedback.md) (m5),
-along with its open questions. This line publishes, reads, and classifies the
+feedback moved to m5 and was deleted there on 2026-11-09 for want of a
+consumer. This line publishes, reads, and classifies the
 reports; no encoder acts on them here.
 
 Decided 2026-10-05 (moq.pro audit): the client health model and preflight
@@ -118,20 +119,7 @@ generic, so they join this line as [client health](/doc/concept/stats.md#health)
 and [preflight](/quest/m3/stats/preflight.md). moq.pro keeps the per-project
 connection view and the dashboard flow.
 
-## Required
-
-- [Rust reporters](/quest/m3/stats/rust.md) - the player and gateways
-  publish stats and feedback, as the CLI remuxes and capture do
-- [Preflight](/quest/m3/stats/preflight.md) - a bounded test run over a
-  broadcast reports which media layer is broken and why
-- [Client health in use](/quest/m3/stats/health-consumers.md) - a per-connection media counter, consumers of the grade, and re-measured limits
-- [The media test checks browser feedback](/quest/m3/stats/feedback-media-test.md) - a browser publishes feedback and Rust reads it back with `moq export echo`
-
 ## Related
 
 - [QoS](/quest/m3/qos/README.md) - the relay's delivery counters; the
   combined per-broadcast verdict reading both lives downstream
-- [Encoder feedback](/quest/m5/stats-encoder-feedback.md) - a Rust encoder
-  adapts its bitrate to what its viewers report
-- [Latency ledger](/quest/m5/latency-ledger.md) - adds the viewer's latency
-  stages to the same feedback snapshot

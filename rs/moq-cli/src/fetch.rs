@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64::Engine;
-use hang::moq_net;
 use kio::clock::Instant;
 use kio::clock::timeout_at;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -45,7 +44,7 @@ struct Frame {
 /// Fetch the group `args` names from the broadcast `--broadcast` names and write it to stdout.
 pub async fn run(moq: MoqSide, args: Args, net: crate::Net) -> anyhow::Result<()> {
 	let mut stdout = tokio::io::stdout();
-	fetch(&moq, &args, &net, Instant::now() + TIMEOUT, &mut stdout).await
+	fetch(&moq, &args, &net, Instant::now().saturating_add(TIMEOUT), &mut stdout).await
 }
 
 async fn fetch(
@@ -230,7 +229,7 @@ mod tests {
 				Request {
 					args: &args,
 					path: "demo",
-					deadline: Instant::now() + timeout,
+					deadline: Instant::now().saturating_add(timeout),
 				},
 				std::future::ready(Ok((self.origin.clone(), ()))),
 				&mut out,
@@ -309,7 +308,7 @@ mod tests {
 		async fn fetch(&self, broadcast: &str, args: &[&str], timeout: Duration) -> (anyhow::Result<()>, Vec<u8>) {
 			let (moq, args) = parse(&self.connect, broadcast, args);
 			let mut out = Vec::new();
-			let result = super::fetch(&moq, &args, &net(), Instant::now() + timeout, &mut out).await;
+			let result = super::fetch(&moq, &args, &net(), Instant::now().saturating_add(timeout), &mut out).await;
 			(result, out)
 		}
 
@@ -445,7 +444,7 @@ mod tests {
 			Request {
 				args: &args,
 				path: "demo",
-				deadline: started + TIMEOUT,
+				deadline: started.saturating_add(TIMEOUT),
 			},
 			async {
 				// Advance simulated discovery time before handing back the ready origin.
@@ -472,7 +471,7 @@ mod tests {
 			Request {
 				args: &args,
 				path: "demo",
-				deadline: started + TIMEOUT,
+				deadline: started.saturating_add(TIMEOUT),
 			},
 			std::future::pending(),
 			&mut Vec::new(),

@@ -14,7 +14,7 @@ Participants are discovered from the announce stream. Identity is the path befor
 - `{identity}/camera.hang`: camera + microphone, hd/sd renditions
 - `{identity}/screen.hang`: screenshare; its announce/unannounce is the share lifecycle
 
-This is the generic room layer extracted from [hang.live](https://hang.live) (roster, local/remote, `hang/*.json` metadata) and [iroh-live](https://github.com/n0-computer/iroh-live) (the `chat` track `iroh-rooms` is moving onto the announce bus). Memes, 3D layout, chat UI, and accounts stay in the app. The native twin is [`moq-room`](../../rs/moq-room).
+This is the generic room layer extracted from [hang.live](https://hang.live) (roster, local/remote, `hang/*.json` metadata) and [iroh-live](https://github.com/n0-computer/iroh-live) (the `chat` track `iroh-rooms` is moving onto the announce bus). Memes, 3D layout, chat UI, and accounts stay in the app.
 
 ## Install
 
@@ -61,8 +61,8 @@ const room = new Room({ connection, identity });
 
 // room.remotes is a Map<identity, Remote>. Each Remote has camera/screen
 // Members; call member.canvas.set(canvas) to display video and
-// member.muted.set(false) to play audio.
-// member.player exposes the complete Watch.Player pipeline.
+// member.muted.set(false) to play audio. member.video and member.audio
+// report the playing timestamp and receive stats.
 ```
 
 `Local` publishes through `Publish.Broadcast`, which encodes while enabled: while `cameraEnabled` is on, the camera's hd and sd renditions encode even when nobody in the room watches, so a member who arrives late can fetch the last few seconds. While `microphoneEnabled` is on, the microphone keeps raw audio and encodes it once someone listens. Turn either off to stop that capture.

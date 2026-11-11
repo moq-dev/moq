@@ -57,7 +57,7 @@ impl StatusPublisher {
 	/// Also restates the status in a fresh group when a joiner wants one. Status is published every
 	/// frame, so checking here answers a joiner within a frame without a task of its own.
 	pub fn publish(&mut self, status: &Status) {
-		if let std::task::Poll::Ready(Err(err)) = self.producer.poll_refresh(&moq_net::kio::Waiter::noop()) {
+		if let std::task::Poll::Ready(Err(err)) = self.producer.poll_refresh(&kio::Waiter::noop()) {
 			tracing::warn!(%err, "failed to refresh status");
 		}
 		if let Err(err) = self
