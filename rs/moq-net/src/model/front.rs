@@ -75,6 +75,9 @@ pub(super) enum Event {
 		result: Result<(), Error>,
 		delivered: bool,
 	},
+	/// A copy detached while spliced, still feeding its segment, ended. Only fed while
+	/// nothing has replaced it.
+	Drained { track: Arc<str>, result: Result<(), Error> },
 	/// A reader arrived on the track.
 	Used { track: Arc<str> },
 	/// The last reader left the track.
@@ -196,6 +199,10 @@ struct Track {
 	refusal: Option<Error>,
 	/// Whether anyone reads the track: a copy is only spliced in for a reader.
 	used: bool,
+	/// A copy detached while spliced still feeds the track's segment until a
+	/// replacement splices in or [`Event::Drained`] reports its end, so a source
+	/// refusing the track does not end it before then.
+	draining: bool,
 	/// The track finished or aborted: nothing is spliced again, and it stays only
 	/// until it goes unread for the linger.
 	ended: bool,
@@ -298,6 +305,7 @@ impl Front {
 						refused: HashSet::new(),
 						refusal: None,
 						used: false,
+						draining: false,
 						ended: false,
 					},
 				);
@@ -315,6 +323,7 @@ impl Front {
 				result,
 				delivered,
 			} => self.track_ended(track, source, closing, result, delivered, &mut actions),
+			Event::Drained { track, result } => self.drained(track, result, &mut actions),
 			Event::Used { track } => self.used(track, &mut actions),
 			Event::Unused { track, now } => self.unused(track, now, &mut actions),
 			Event::Deadline { now } => self.deadline(now, &mut actions),
@@ -409,6 +418,7 @@ impl Front {
 			for track in self.tracks.values_mut() {
 				if matches!(track.state, TrackState::Querying { source: s } | TrackState::Spliced { source: s } if s == old)
 				{
+					track.draining |= track.state == (TrackState::Spliced { source: old });
 					track.state = TrackState::Idle;
 				}
 			}
@@ -461,6 +471,7 @@ impl Front {
 		for track in self.tracks.values_mut() {
 			if matches!(track.state, TrackState::Querying { source: s } | TrackState::Spliced { source: s } if s == source)
 			{
+				track.draining |= track.state == (TrackState::Spliced { source });
 				track.state = TrackState::Idle;
 			}
 		}
@@ -496,6 +507,8 @@ impl Front {
 						|| expected.max_age != info.max_age
 						|| expected.priority != info.priority =>
 				{
+					// At once: a detached copy's remaining groups are not waited for.
+					track.draining = false;
 					Err(Error::Unsupported)
 				}
 				Some(_) => Ok(()),
@@ -509,6 +522,7 @@ impl Front {
 		match verdict {
 			Ok(()) => {
 				track.state = TrackState::Spliced { source };
+				track.draining = false;
 				actions.push(Action::Splice {
 					track: name.clone(),
 					source,
@@ -579,6 +593,10 @@ impl Front {
 			return;
 		}
 		if track.refused.contains(&source) {
+			// The detached copy may still deliver the rest, and its end is the track's.
+			if track.draining {
+				return;
+			}
 			let err = track.refusal.clone().unwrap_or(Error::NotFound);
 			track.ended = true;
 			actions.push(Action::Abort { track: name, err });
@@ -589,6 +607,28 @@ impl Front {
 		}
 		track.state = TrackState::Querying { source };
 		actions.push(Action::Query { track: name, source });
+	}
+
+	fn drained(&mut self, name: Arc<str>, result: Result<(), Error>, actions: &mut Vec<Action>) {
+		let Some(track) = self.tracks.get_mut(&name) else {
+			return;
+		};
+		track.draining = false;
+		if track.ended || matches!(track.state, TrackState::Spliced { .. }) {
+			return;
+		}
+		match result {
+			// The content is over: nothing a replacement could add.
+			Ok(()) => {
+				if !matches!(track.state, TrackState::Parked { .. }) {
+					track.state = TrackState::Idle;
+				}
+				track.ended = true;
+				actions.push(Action::Finish { track: name });
+			}
+			// Stalled until a replacement splices in, or ended now if every source refused.
+			Err(_) => self.redispatch(name, actions),
+		}
 	}
 
 	fn used(&mut self, name: Arc<str>, actions: &mut Vec<Action>) {
@@ -1049,6 +1089,55 @@ mod tests {
 				.iter()
 				.any(|action| matches!(action, Action::Query { track, source: 200 } if track.as_ref() == "audio"))
 		);
+	}
+
+	/// The serving copy detaches while still open, because its source closed or a
+	/// better route replaced it, and the replacement refuses the track: the detached
+	/// copy's end, not the refusal, ends it.
+	#[test]
+	fn a_refusal_waits_for_the_detached_copy() {
+		for (closed, end, expected) in [true, false].into_iter().flat_map(|closed| {
+			[
+				(closed, Ok(()), Action::Finish { track: name("video") }),
+				(
+					closed,
+					Err(Error::Dropped),
+					Action::Abort {
+						track: name("video"),
+						err: Error::Unroutable,
+					},
+				),
+			]
+		}) {
+			let mut front = serving(remote(1, 10), 100);
+			if closed {
+				front.step(Event::SourceClosed { source: 100 });
+			}
+			front.step(Event::Selected {
+				best: Some(remote(2, 10)),
+				serving_closing: false,
+			});
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			});
+			assert_actions(
+				front.step(Event::TrackInfo {
+					track: name("video"),
+					source: 200,
+					closing: false,
+					result: Err(Error::Unroutable),
+				}),
+				&[],
+			);
+			assert_actions(
+				front.step(Event::Drained {
+					track: name("video"),
+					result: end,
+				}),
+				&[expected],
+			);
+		}
 	}
 
 	#[test]

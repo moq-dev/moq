@@ -2723,6 +2723,9 @@ struct TrackIo {
 	/// The spliced copy, once it died: its segment keeps ending readers with its error
 	/// unless a takeover follows, which retires it.
 	dead: Option<track::Consumer>,
+	/// Whether `dead` was detached while still open, so its end is reported to the
+	/// machine as [`Event::Drained`].
+	draining: bool,
 	/// Whether the track had a reader as of the last demand edge.
 	used: bool,
 }
@@ -2739,6 +2742,7 @@ impl TrackIo {
 		self.prior = None;
 		self.held = None;
 		self.dead = None;
+		self.draining = false;
 	}
 
 	/// Hold the spliced copy's newest `group`. Past the prior warm copy's edge, that
@@ -2802,6 +2806,7 @@ async fn run_front(task: FrontTask) {
 		SourceClosed(u64),
 		Info(Arc<str>, u64, Result<track::Info, Error>),
 		Ended(Arc<str>, u64, Result<(), Error>),
+		Drained(Arc<str>, Result<(), Error>),
 		Held(Arc<str>, group::Producer),
 		Demand(Arc<str>),
 		Deadline,
@@ -2955,6 +2960,7 @@ async fn run_front(task: FrontTask) {
 						for io in tracks.values_mut() {
 							if io.copy.as_ref().is_some_and(|(s, _)| *s == source) {
 								io.bury();
+								io.draining = true;
 							}
 							if io.query.as_ref().is_some_and(|(s, ..)| *s == source) {
 								io.query = None;
@@ -3019,6 +3025,7 @@ async fn run_front(task: FrontTask) {
 						// edge the copy is asked to advance.
 						io.edge = io.resume.resume_position();
 						io.held = None;
+						io.draining = false;
 						io.copy = Some((source, copy));
 					}
 					Action::Park { track: name } => {
@@ -3033,6 +3040,7 @@ async fn run_front(task: FrontTask) {
 						io.prior = None;
 						io.held = None;
 						io.dead = None;
+						io.draining = false;
 						let parked = match &warm {
 							Some(warm) => io.resume.park(&warm.track),
 							None => io.resume.release(),
@@ -3147,6 +3155,12 @@ async fn run_front(task: FrontTask) {
 				{
 					return Poll::Ready(Step::Ended(name.clone(), *source, result));
 				}
+				if io.draining
+					&& let Some(dead) = &io.dead
+					&& let Poll::Ready(result) = dead.poll_complete(waiter)
+				{
+					return Poll::Ready(Step::Drained(name.clone(), result));
+				}
 				if let Some((_, copy)) = &io.copy
 					&& let Poll::Ready(group) =
 						copy.poll_latest_group(io.held.as_ref().map(|held| held.0.sequence), waiter)
@@ -3184,6 +3198,7 @@ async fn run_front(task: FrontTask) {
 						prior: None,
 						held: None,
 						dead: None,
+						draining: false,
 						used: false,
 					},
 				);
@@ -3252,6 +3267,11 @@ async fn run_front(task: FrontTask) {
 					result,
 					delivered,
 				}
+			}
+			Step::Drained(name, result) => {
+				let Some(io) = tracks.get_mut(&name) else { continue };
+				io.draining = false;
+				Event::Drained { track: name, result }
 			}
 			Step::Held(name, group) => {
 				if let Some(io) = tracks.get_mut(&name) {
@@ -8255,6 +8275,48 @@ mod tests {
 			assert!(matches!(reopened.query().await, Err(Error::Unsupported)));
 			assert!(matches!(reopened.subscribe(None).await, Err(Error::Unsupported)));
 		}
+	}
+
+	/// The serving route is withdrawn while its copy of the track is still open, and the
+	/// next route for the same publisher no longer has the broadcast: its refusal must not
+	/// end the track, which takes the incumbent's remaining groups and clean end.
+	#[tokio::test]
+	async fn a_refused_replacement_keeps_a_withdrawn_incumbent_open() {
+		let (mut rig, incumbent, source) = ResumeRig::new(&[9, 2]).await;
+		let standby = rig.standby(&[9, 5, 3]);
+
+		// The peer withdraws the broadcast: the route retracts and its source closes,
+		// while the subscription already in flight stays open.
+		incumbent.withdrawn();
+		source.close();
+
+		let request = queued(&standby).await;
+		let successor = broadcast::Info::new().produce();
+		let mut handler = successor.dynamic();
+		request.accept(&successor);
+		let track = tokio::time::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front asked the standby")
+			.expect("request");
+		track.reject(Error::Unroutable);
+		for _ in 0..10 {
+			tokio::task::yield_now().await;
+		}
+
+		let mut group = rig.incumbent_track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = next_group(&mut rig.subscription)
+			.await
+			.expect("the incumbent keeps serving")
+			.expect("track open");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"last");
+
+		rig.incumbent_track.finish().unwrap();
+		let end = next_group(&mut rig.subscription)
+			.await
+			.map(|group| group.map(|group| group.sequence));
+		assert!(matches!(end, Ok(None)), "the incumbent's clean end, not {end:?}");
 	}
 
 	#[tokio::test]
