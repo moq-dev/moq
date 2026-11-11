@@ -10,9 +10,8 @@ public typealias Grant = MoqFFI.MoqGrant
 /// `for try await grant in session.grants() { ... }` yields the current grant,
 /// then each change, `nil` while there is none.
 ///
-/// Returned by `Session.grants()`. AUTH is only on `moq-lite-07-wip` and on
-/// moq-transport sessions that negotiate the MoQ Auth extension; elsewhere the
-/// grant stays `nil`. The sequence ends when the session does; cancelling the
+/// Returned by `Session.grants()`. AUTH is only on `moq-lite-07-wip`; elsewhere
+/// the grant stays `nil`. The sequence ends when the session does; cancelling the
 /// consuming task cancels the consumer.
 public final class GrantConsumer: AsyncSequence, Sendable {
     /// The grant emitted by this sequence, `nil` while there is none.

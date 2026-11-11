@@ -200,8 +200,7 @@ pub unsafe extern "C" fn moq_session_tokens_answered(
 /// change it: `0` when the session closed or [moq_session_grants_cancel] stopped the watch, or
 /// a negative error when the session failed. Release `user_data` there. Read each handle with [moq_grant_info] and release it with
 /// [moq_grant_free]. A dialed session's grant survives reconnects, reading not present while
-/// offline. AUTH is only on `moq-lite-07-wip` and on moq-transport sessions that negotiate the
-/// MoQ Auth extension; elsewhere the grant stays not present.
+/// offline. AUTH is only on `moq-lite-07-wip`; elsewhere the grant stays not present.
 ///
 /// Returns a positive watcher handle, or a negative code: `MOQ_ERROR_OFFLINE` for an accepted
 /// session still in SETUP.

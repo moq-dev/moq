@@ -149,8 +149,9 @@ async fn a_newer_group_resets_an_unfinished_older_one() {
 #[kio::test]
 async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 	// lite-07 needs 4: session-long AUTH and ANNOUNCE plus TRACK held until SUBSCRIBE answers.
-	// Three is below the setup minimum; the second subscription waits for the first's credit.
-	for (version, credit) in [("moq-lite-07-wip", 4), ("moq-transport-22", 3)] {
+	// moq-transport needs 2: SUBSCRIBE_NAMESPACE and the first SUBSCRIBE. The second
+	// subscription waits for the first's credit.
+	for (version, credit) in [("moq-lite-07-wip", 4), ("moq-transport-22", 2)] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);

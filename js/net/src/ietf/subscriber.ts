@@ -218,7 +218,7 @@ export class Subscriber {
 
 	// Settles when the peer sends GOAWAY, ranking this session's routes last.
 	#goaway?: GetPromise<Drain>;
-	// Our grant (MoQ Auth): a subscription it stops covering is cancelled. Undefined until
+	// Our grant: a subscription it stops covering is cancelled. Undefined until
 	// the peer answers, which allows everything.
 	#grant?: Getter<Grant | undefined>;
 	#auth?: AuthSession;
@@ -254,7 +254,7 @@ export class Subscriber {
 		activeCount?: boolean;
 		/** Settles when the peer sends GOAWAY. */
 		goaway?: GetPromise<Drain>;
-		/** The union of our tokens' grants (MoQ Auth), which bounds what we subscribe to. */
+		/** The union of our tokens' grants, which bounds what we subscribe to. */
 		grant?: Getter<Grant | undefined>;
 		auth?: AuthSession;
 		/** How many live requests the peer may hold. */

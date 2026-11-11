@@ -8721,18 +8721,13 @@ async fn answered(session: &MoqSession) -> Result<(), MoqError> {
 		.expect("the tokens were never answered")
 }
 
-/// Both sides of a session read the grant their peer gave them, on lite-07 and on moq-transport
-/// with the Auth extension, and a peer that verifies no tokens of its own refuses another one as
-/// unsupported.
+/// Both sides of a lite-07 session read the grant their peer gave them, and a peer that verifies
+/// no tokens of its own refuses another one as unsupported.
 #[tokio::test]
 async fn auth_reads_the_peer_grant() {
-	for version in ["moq-lite-07-wip", "moq-transport-18"] {
-		auth_reads_the_peer_grant_on(version).await;
-	}
-}
-
-async fn auth_reads_the_peer_grant_on(version: &str) {
-	let (server, client, accepted) = kio::clock::timeout(TIMEOUT, session_pair(version)).await.expect("pair");
+	let (server, client, accepted) = kio::clock::timeout(TIMEOUT, session_pair("moq-lite-07-wip"))
+		.await
+		.expect("pair");
 
 	// Each side's origins span the root, so its peer grants it everything.
 	await_grant(&client, grant(&["**"], &["**"])).await;

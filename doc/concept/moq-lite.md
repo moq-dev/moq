@@ -244,11 +244,10 @@ A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
 code and the session stays up. A client that publishes outside its grant closes
 the session with `UNAUTHORIZED`, naming the path. A session whose last
 credential expires closes with `EXPIRED_AUTH_TOKEN` instead: refresh the token
-and reconnect, rather than treating the credential as invalid. moq-transport carries the same
-exchange through the [MoQ Auth extension](/draft/moq-auth), with
-the same patterns. Older versions have no grant; the URL token keeps working
-everywhere. On moq-transport an added token is kept even without the extension,
-so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
+and reconnect, rather than treating the credential as invalid. Older versions
+and moq-transport have no grant; the URL token keeps working everywhere. On
+moq-transport an added token is kept for the requests that name it, so an
+announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
 authorization token. Naming a fresh token renews the announcement in place with
 `REQUEST_UPDATE`, so it can outlive the token it started with. A token added to a reconnecting
 connection's auth handle is presented on every session it makes, so the

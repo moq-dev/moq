@@ -19,9 +19,9 @@ export const DEFAULT_TIMEOUT = Duration.millis(30_000);
  * Returns the control stream, the uni streams that arrived before it (see
  * {@link receiveSetup}), plus what the peer's SETUP declared: whether it requires
  * solicitation, which decides whether we announce namespaces unprompted (see the MoQ Solicit
- * extension), its Hop ID (see the MoQ Cluster extension), and whether MoQ Auth
- * is negotiated, plus the implementation it advertised. We declare our Hop ID on every
- * session, and Solicit and Auth unless `extensions` declines them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
+ * extension) and its Hop ID (see the MoQ Cluster extension), plus the implementation it
+ * advertised. We declare our Hop ID on every session, and Solicit unless `extensions`
+ * declines it: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
  * can tell us nothing we won't have asked for, and a peer that knows our Hop ID can withhold
  * the advertisements that already flowed through us.
  */
@@ -38,7 +38,6 @@ export async function exchangeSetup(
 	maxAge: boolean;
 	activeCount: boolean;
 	cluster: Ietf.Cluster.Hops;
-	auth: boolean;
 	peerImplementation: string | undefined;
 }> {
 	const params = new Ietf.SetupOptions();
@@ -79,8 +78,6 @@ export async function exchangeSetup(
 		maxAge: received.maxAge,
 		activeCount: received.activeCount,
 		cluster: { self, peer: received.cluster },
-		// Negotiated only when both sides offer it.
-		auth: received.auth && extensions.auth,
 		peerImplementation: received.implementation,
 	};
 }
@@ -111,7 +108,6 @@ async function receiveSetup(
 	maxAge: boolean;
 	activeCount: boolean;
 	cluster: Hop | undefined;
-	auth: boolean;
 	implementation: string | undefined;
 }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
@@ -175,7 +171,6 @@ async function receiveSetup(
 		maxAge: Ietf.maxAgeFromSetup(setup.parameters),
 		activeCount: Ietf.activeCountFromSetup(setup.parameters),
 		cluster: Ietf.Cluster.fromSetup(setup.parameters),
-		auth: Ietf.Auth.fromSetup(setup.parameters) === true,
 		implementation: Ietf.implementationFromSetup(setup.parameters),
 	};
 }

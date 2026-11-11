@@ -456,9 +456,8 @@ impl Server {
 			peer_implementation: options.implementation.clone(),
 			assigned_hop: crate::Hop::random(),
 			timer: Timer::new(None),
-			// The client's SETUP already settled whether it offered MoQ Auth, so it is
-			// negotiated exactly when we offer it too.
-			auth: crate::auth::Link::ietf(options.declared.auth && self.extensions.auth),
+			// moq-transport carries no AUTH: a token rides the requests that name it.
+			auth: crate::auth::Link::ietf(),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -899,7 +898,7 @@ impl PausedIetf {
 
 		// The client's SETUP was read at the pause; hand the stream back
 		// for GOAWAY. A server never advertises a path, hence `None`.
-		let (protocol, goaway, credential) = ietf::start(ietf::Config {
+		let (protocol, goaway) = ietf::start(ietf::Config {
 			runtime: runtime.clone(),
 			stats: server.stats.clone(),
 			limits: server.limits,
@@ -934,7 +933,7 @@ impl PausedIetf {
 				stats: server.stats.clone(),
 				goaway,
 				auth,
-				credential,
+				credential: None,
 				estimate: None,
 				peer_target: None,
 				bandwidth: crate::bandwidth::Allocator::default(),
@@ -2296,7 +2295,7 @@ mod tests {
 			token: None,
 			peer_implementation: None,
 			assigned_hop: Hop::random(),
-			auth: crate::auth::Link::ietf(false),
+			auth: crate::auth::Link::ietf(),
 			timer: Timer::new(None),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),

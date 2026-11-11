@@ -1139,7 +1139,7 @@ pub(super) struct Subscriber {
 	// deliberately past draft-22 section 9.2's SHOULD NOT: refusing them would
 	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
-	// Our grant (MoQ Auth): a subscription it stops covering is cancelled.
+	// Our grant: a subscription it stops covering is cancelled.
 	auth: crate::auth::Link,
 	// Namespaces the peer may have announced at once (`session::Limits::announces`), and
 	// tracks it lists to us.
@@ -1256,7 +1256,7 @@ impl Subscriber {
 		}
 	}
 
-	/// Bound what we subscribe to by the grant this session's tokens earn (MoQ Auth),
+	/// Bound what we subscribe to by the grant this session's tokens earn,
 	/// and what the peer may publish to us by the session's limit, as either changes.
 	pub fn with_auth(mut self, auth: crate::auth::Link) -> Self {
 		self.auth = auth;
@@ -3479,7 +3479,7 @@ struct RunSubscribe {
 	/// Holds the session busy while the request waits on authorization or TRACK_STATUS.
 	/// Past that, only a subscription or a fill counts.
 	setup: Option<crate::session::Working>,
-	/// Subscribe only to what our grant covers (MoQ Auth), and cancel once it no longer
+	/// Subscribe only to what our grant covers, and cancel once it no longer
 	/// does, leaving the rest of the session alone.
 	gate: crate::auth::Gate,
 	/// Group FETCHes for cache misses: standalone, so they outlive each subscription.
