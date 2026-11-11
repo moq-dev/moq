@@ -1439,3 +1439,41 @@ fn a_restarted_floorless_route_drops_what_it_no_longer_carries() {
 	assert_eq!(revivals(&sim.events), 0);
 	sim.check().unwrap();
 }
+
+/// Relay 4 hears origin 7's claims from relay 0, which certifies them all, and from
+/// relay 3, which asked only for `b`. While 4's own distance sets 0 aside, 0 moves
+/// between two equal routes and says so. That change of hops moves no certifier, so
+/// 4 lets go of nothing, where pruning on it lost the root claim for good.
+#[test]
+fn a_change_of_hops_alone_lets_go_of_no_claim() {
+	let (origin, other) = (6, 7);
+	let mut sim = Sim::new(8);
+	sim.join(other, 4, 1);
+	sim.join(other, 5, 1);
+	sim.join(origin, 3, 1);
+	sim.join(origin, 2, 1);
+	sim.join(0, 1, 1);
+	sim.link(0, 2, SimLink::cost(3), SimLink::cost(1));
+	sim.join(0, 3, 1);
+	sim.join(0, 4, 1);
+	sim.link(1, 2, SimLink::cost(2), SimLink::cost(1));
+	sim.join(2, 3, 1);
+	sim.join(2, 5, 1);
+	sim.link(3, 4, SimLink::cost(1), SimLink::cost(2));
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "", 0, None);
+	sim.originate(other, 8, 0);
+	sim.announce(other, "", 0, None);
+	sim.watch(3, "b");
+	assert!(sim.run());
+	assert_eq!(sim.shows(4, 7, ""), Some(true));
+
+	let hops = sim.stats.hop_updates;
+	sim.disconnect(origin, 3);
+	assert!(sim.run());
+	assert!(sim.stats.hop_updates > hops, "a route changed its hops alone");
+	assert_eq!(sim.shows(4, 7, ""), Some(true));
+	sim.disconnect(2, 3);
+	assert!(sim.run());
+	assert_eq!(sim.shows(4, 7, ""), Some(true));
+}

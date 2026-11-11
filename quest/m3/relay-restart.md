@@ -43,7 +43,17 @@ Guidance:
   backends, `moq-tokio` and `moq-uring`.
 - Decide what happens to cluster peer sessions: handed to the new process,
   or re-dialed. Today a peer session does not leave on GOAWAY and holds a
-  drain to its bound.
+  drain to its bound. Measured on a staging mesh: a relay with no inbound
+  peer stopped about two minutes after its stop signal, and every relay
+  with one stopped about seven minutes after it, having waited out the full
+  300 s session window that opened at the two-minute mark. So inbound peers
+  add about five minutes to each restart and to each wave of a batched
+  rollout.
+  Decided 2026-11-11 (maintainer, `/quest-plan`): ✅ remove that cost
+  here, by running the new process beside the old (rejected as an interim:
+  the draining relay closing inbound peer sessions once its other sessions
+  have left, a forced close that works against this design; a separate
+  quest for it).
 - Two processes share one node identity for the length of a drain. Stats,
   routes and announcements must count and name each session once across
   them.

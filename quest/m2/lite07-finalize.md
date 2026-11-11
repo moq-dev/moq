@@ -132,7 +132,7 @@ transcript freezes at the cut and a flaw in it can only be fixed on the wire.
 - [Takeover](/quest/m1/stream-credit/takeover.md) - lite-07 lets a group stream take over for another group
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
 - [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - may change START per update on lite-07
-- [Route latency](/quest/m2/route-latency.md) - may add a latency sum to ROUTE; leaves this list if the maintainer takes the no-wire path
+- [Route latency in js/net](/quest/m2/route-latency.md) - js/net reads and writes ROUTE's RTT
 - [A symbolic model proves a route key proof binds to its session and side](/quest/m1/route-key-model.md) - may change what the Route Key Parameter signs, if the model finds a replay, reflection, or relaying attack
 
 ## Related

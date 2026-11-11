@@ -114,11 +114,12 @@ proof's proposals:
     plus that cost, an independent one pays the link alone, and a relay
     moves only for a strictly lower `(draining, price)`. With exact
     information that is a potential game on the forest's total link cost.
-    Under the sweep's churn, 2996 of 3000 scenarios settle; 4 (the first is
-    478) never do, as two carriers keep a narrowed route standing while two
-    relays swap between them. `sweep_cache_routing_long` reproduces them
-    behind `#[ignore]`, and [the implementation](/quest/m3/cache-routing/select.md)
-    settles them first.
+    Under the sweep's churn, 2997 of 3000 scenarios settle; 3 (48, 582, and
+    2251, after [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)
+    changed feasibility; 4 before it) never do, as two carriers keep a narrowed
+    route standing while two relays swap between them. The sweep names them in
+    `UNSETTLED` and checks each still never settles, and
+    [the implementation](/quest/m3/cache-routing/select.md) settles them first.
 11. ✅ **The wire is in moq-lite-07 itself**, overturning the proof's choice
     of a SETUP extension. (rejected: an additive Warm Routes SETUP
     extension) Lite-07 is unpublished, so its shape can still change until
@@ -172,10 +173,6 @@ This README's own work, once its children land:
 - Docs: warm routes and how to price skip links in `doc/bin/relay/cluster.md`,
   and a section on the routing concept page once the
   [routing guide](/quest/m1/routing-guide.md) has added it.
-
-## Required
-
-- [Warm routes and per-broadcast parent selection](/quest/m3/cache-routing/select.md) - relays advertise warm routes and pull each broadcast through the cheapest eligible neighbor
 
 ## Related
 

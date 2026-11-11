@@ -20,9 +20,10 @@ and how many moves warm routes caused.
   each front's demand, and eligibility through `Router::eligible` with the
   rendezvous hash ordering tied routes. Port that file's fixtures and sweep
   to the implementation, or drive it from them.
-- First make `sweep_cache_routing_long` settle: 4 of its 3000 scenarios
-  never do under the epic's item 10, and its `#[ignore]` comes off once they
-  do. Land after the overtaking-echo fix that
+- First make the sweep settle: `UNSETTLED` in `cache.rs` names the 3 of
+  its 3000 scenarios that never do under the epic's item 10, and empties as
+  they do; then run `sweep_cache_routing_long`, which the merge gate skips as
+  slow, nightly. Land after the overtaking-echo fix that
   [moq-dev/moq#8447](https://github.com/moq-dev/moq/pull/8447) found, which
   item 8's argument needs.
 - Extend today's selection rather than adding a second selector.

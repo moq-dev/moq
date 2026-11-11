@@ -407,7 +407,7 @@ The subscriber creates the stream with an ANNOUNCE_REQUEST message.
 The publisher replies with a single ANNOUNCE_OK message followed by the matching routes and claims and any future changes:
 
 - ROUTE_START: the publisher reaches an origin node.
-- ROUTE_UPDATE: a route's seqno, metric, or down-only bit changed.
+- ROUTE_UPDATE: a route's seqno, metric, down-only bit, RTT, or hops changed.
 - ROUTE_HOLD: the publisher has no usable route but holds it while it recovers.
 - ROUTE_END: the publisher let go of a route and every claim under it.
 - ANNOUNCE_START: a matching claim of a route's origin node.
@@ -495,12 +495,33 @@ A receiver adds the session's link cost (see [Cost Parameter](#cost-parameter)) 
 Each link adds at least 1, so a route's metric strictly increases away from its origin.
 A metric that overflows 64 bits makes the route unusable.
 
+A route carries its Hops: the Hop ID of every node it crossed, the origin node first and the sender last.
+A Hop ID is a non-zero 64-bit value a node names itself with for as long as its process runs, such as the Node ID it started with; a rotation does not change it.
+A node sending its selected route appends its own Hop ID to the Hops it received, and an origin's own route starts with its Hop ID alone.
+A relay forwards the other entries unchanged and never qualifies them.
+A route that arrives with 32 Hops is unusable.
+
+A route may also carry an RTT: the round trip to its origin node in milliseconds, summed link by link.
+It is informational: nothing ranks or selects a route, or judges it feasible, by its RTT.
+An origin advertises its own route with an RTT of 0.
+A receiver adds its link min RTT for the session to the RTT of every route the peer sends; the sum is its RTT through that peer, which it advertises on the route it selects.
+A link min RTT is the lowest smoothed RTT [RFC9002] the connection measured over the last 30 seconds, read once a second, in milliseconds rounded up.
+A lifetime minimum never rises after a path change, so it is not a link min RTT.
+A node SHOULD keep the link min RTT it adds until the lowest reading differs from it by more than the larger of 5 ms and a quarter of it, so jitter and short queues send no ROUTE_UPDATE and a lasting change sends one per route.
+A node whose connection reports no RTT has no link min RTT, so it sends the routes it learned there without one, and a route without one stays without one past every later node.
+A sum too large to encode is sent without one too.
+An endpoint learns its round trip to an origin node by adding its own link min RTT to the RTT of the route it selected; without its own, the RTT alone covers every hop past its first.
+Like the Metric, an RTT is unverified: a peer can misstate only what crosses it.
+
 A node keeps a feasibility distance per Node ID: the highest Seqno of any route it advertised, and the lowest metric it advertised at that Seqno, as in [RFC8966] Section 3.5.1.
 A route is feasible when no feasibility distance is kept for its Node ID yet, when its Seqno is greater than the distance's, or when its Seqno is equal and its advertised Metric is lower.
 A node selects, per Node ID, among its feasible routes that are not held: a session that has not received a GOAWAY, then the highest local priority, then the lowest metric.
 It MUST NOT select an infeasible route, and a distance only ever falls within a Seqno, so advertising a longer route never raises it.
+It MUST NOT select a route whose Hops name it either, feasible or not: that is a copy of a route the node sent, which no distance refuses once the node dropped it.
+Such a route counts below as an infeasible route where the feasibility condition refuses it, and as no route where it does not: its sender routes through the node, and moves once it hears the node has no route.
+Under a qualified Node ID it counts only if its Hops also begin with those of the route the node last sent under that Node ID: otherwise a relay past the node derived the Node ID from the node's route under another, and that copy stands whatever the node does.
 A node MAY mark a session upstream.
-A route is down-only when it arrived on an upstream session or with its Down Only bit set; a node sends a down-only route with the bit set, and never on an upstream session.
+A route is down-only when it arrived on an upstream session or with its down-only flag set; a node sends a down-only route with the flag set, and never on an upstream session.
 
 A node sends its selected route to an origin node on an Announce Stream it answers only while the route has a claim the stream's request presents (see [Announce](#announce)): it sends ROUTE_START before the first such claim, and once the last one is withdrawn, the batch carrying that withdrawal, closed by its floor (which certifies the withdrawal where the node can certify the request), then ROUTE_END. It starts that route on the stream again only once the subscriber echoed the ROUTE_END. A subscriber therefore holds no route for an origin node its request does not meet.
 A node that does not forward, such as a client, sends only its own route, and holds no feasibility distance for any other.
@@ -518,7 +539,8 @@ Any other node forwards the request to the peer whose route it would select, eve
 Every node keeps one pending request per origin node, its own or forwarded, at the highest Seqno requested, dropping requests no newer, until it selects a route at least that new or has no route left, and sends it again whenever its Seqno rises or that peer changes.
 
 The receiver of a ROUTE_END echoes it back on the same stream once it dropped the route.
-A node drops a feasibility distance once it neither selects nor advertises the route and every ROUTE_END it sent for it was echoed; a closed session counts as an echo.
+A node drops a feasibility distance once no peer's route to the node is left open, it advertises none, and every ROUTE_END it sent for it was echoed; a closed session counts as an echo.
+No peer then routes through the node, and the Hops refuse any copy of its own route that still returns.
 
 A SUBSCRIBE, FETCH, TRACK, TRACKS, or DATAGRAMS request names the origin node that serves it.
 A subscriber that names 0 lets the publisher select one (see [Resolution](#resolution)), and a relay forwarding a request names the origin node it selected or was given.
@@ -1180,7 +1202,10 @@ ROUTE_START Message {
   Node ID (i),
   Seqno (i),
   Metric (i),
-  Down Only (8),
+  Flags (8),
+  [RTT (i),]
+  Hop Count (i),
+  Hop ID (i) ...,
 }
 ~~~
 
@@ -1198,9 +1223,20 @@ The origin's sequence number of the route, which only the origin advances.
 **Metric**:
 The publisher's metric to the origin node, 0 when it is the origin.
 
-**Down Only**:
-1 if the route is down-only (see [Routing](#routing)), 0 otherwise.
-Any other value is a PROTOCOL_VIOLATION.
+**Flags**:
+A bit field: 0x1 when the route is down-only (see [Routing](#routing)), and 0x2 when an RTT follows.
+Any other bit set is a PROTOCOL_VIOLATION.
+
+**RTT**:
+The publisher's RTT to the origin node in milliseconds (see [Routing](#routing)), 0 when it is the origin.
+Present only when Flags has 0x2 set, and absent when the publisher has none.
+
+**Hop Count**:
+The number of Hop IDs that follow.
+More than 32 is a PROTOCOL_VIOLATION.
+
+**Hop ID**:
+The route's Hops (see [Routing](#routing)), in order, the publisher's own last.
 
 
 ## ROUTE_UPDATE {#route-update}
@@ -1213,7 +1249,10 @@ ROUTE_UPDATE Message {
   Route ID (i),
   Seqno (i),
   Metric (i),
-  Down Only (8),
+  Flags (8),
+  [RTT (i),]
+  Hop Count (i),
+  Hop ID (i) ...,
 }
 ~~~
 
@@ -1223,14 +1262,14 @@ Set to 0x7 to indicate a ROUTE_UPDATE message.
 **Route ID**:
 The ordinal implicitly assigned by a prior ROUTE_START on this stream.
 
-**Seqno**, **Metric**, and **Down Only**:
+**Seqno**, **Metric**, **Flags**, **RTT**, **Hop Count**, and **Hop ID**:
 As defined for [ROUTE_START](#route-start), replacing the route's.
 A ROUTE_UPDATE for a held route makes it usable again.
 
 
 ## ROUTE_HOLD {#route-hold}
 A publisher sends a ROUTE_HOLD message when it has no usable route to the origin node but still holds the route and its claims while it recovers (see [Routing](#routing)), referencing its Route ID.
-The receiver keeps the route's last Seqno, Metric, and Down Only, and does not select it until a ROUTE_UPDATE.
+The receiver keeps the route's last Seqno, Metric, Flags, RTT, and Hops, and does not select it until a ROUTE_UPDATE.
 
 ~~~
 ROUTE_HOLD Message {
@@ -2370,6 +2409,8 @@ The `Message Length` describes the payload size on the wire.
 - A receiver mints an Instance for each announcement a session of an earlier version delivers, and a `Minted` field beside every Instance (ANNOUNCE_START, ANNOUNCE_RESTART, TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS) says whether a receiver minted it, so no Instance text is reserved for minting.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
 - Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
+- ROUTE_START and ROUTE_UPDATE carry Flags, whose 0x2 bit adds an optional RTT: the informational sum of each link's lowest smoothed RTT over the last 30 seconds to the origin node, which never selects a route.
+- Added Hops to ROUTE_START and ROUTE_UPDATE: the Hop ID of every node the route crossed, at most 32. A node never selects a route whose Hops name it, so one that dropped its feasibility distance cannot take back a copy of its own route.
 - Added ROUTE_HOLD (0xB), which holds a route while it recovers; ROUTE_END lets it go. Neither withdraws the origin's claims, and the subscriber echoes every ROUTE_END back.
 - Added ROUTE_REQUEST (0xA), sent by the subscriber on the Announce Stream to ask for a route with a newer seqno when every route it has is infeasible.
 - Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.

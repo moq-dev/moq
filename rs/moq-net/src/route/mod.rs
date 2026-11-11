@@ -18,6 +18,7 @@
 
 pub(crate) mod node;
 mod proof;
+mod rtt;
 mod view;
 
 #[cfg(test)]
@@ -29,6 +30,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet},
 	fmt,
 	sync::Arc,
+	time::Duration,
 };
 
 use crate::Path;
@@ -38,6 +40,8 @@ pub(crate) use node::Node;
 pub(crate) use proof::EXPORTER_LABEL;
 pub use proof::RouteKey;
 pub(crate) use proof::{Proof, Transcript};
+#[cfg(feature = "async")]
+pub(crate) use rtt::LinkRtt;
 pub(crate) use view::{View, within};
 use view::{ancestors, below, covering, narrow};
 
@@ -150,16 +154,32 @@ pub(crate) fn qualifier(key: [u8; 32]) -> Arc<dyn Fn(Id) -> Id + Send + Sync> {
 	})
 }
 
+/// The most nodes a route crosses, its origin included: the longest hop list a
+/// message carries.
+pub(crate) const MAX_HOPS: usize = 32;
+
 /// What a node advertises for one identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Advert {
 	pub seqno: Seqno,
 	pub metric: Metric,
 	pub down_only: bool,
+	/// The round trip to the identity, the sum of each link's min RTT: informational,
+	/// never read to rank or select a route. `None` once a node on the path could not
+	/// measure its link.
+	pub rtt: Option<Duration>,
+	/// The nodes the route crossed, by the hop id each names itself with: the origin
+	/// node first and the sender last.
+	pub hops: Arc<[Id]>,
+}
+
+/// The RTT through `peer` along a route it advertised: unknown when either part is.
+fn through_rtt(advert: &Advert, peer: &Peer) -> Option<Duration> {
+	advert.rtt?.checked_add(peer.rtt?)
 }
 
 /// A ROUTE's state on a stream.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Reach {
 	/// A usable route.
 	Finite(Advert),
@@ -207,6 +227,8 @@ pub(crate) struct Eligible<N> {
 	pub next: N,
 	/// This node's metric through it.
 	pub metric: Metric,
+	/// This node's RTT through it, when known.
+	pub rtt: Option<Duration>,
 	/// Advertised at exactly this node's feasibility distance: a request goes through
 	/// it only when the neighbor's rendezvous hash for the broadcast is below this
 	/// node's, so the hash orders the tie and no two tied nodes pull through each other.
@@ -251,11 +273,14 @@ pub(crate) struct Event<A> {
 }
 
 /// A route a node holds from one neighbor.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Entry {
 	/// The last finite advertisement.
 	advert: Advert,
 	held: bool,
+	/// Its hops name this node: a copy of a route this node sent, come back. This
+	/// node never uses it, which the distance alone cannot ensure once it is gone.
+	crossed: bool,
 }
 
 /// A seqno request a node keeps until a route at least that new is selected or
@@ -335,6 +360,8 @@ impl<A: Clone + Eq> Heard<A> {
 
 struct Peer {
 	link: Link,
+	/// The link's min RTT, which routes learned here add; `None` while unmeasured.
+	rtt: Option<Duration>,
 	/// The neighbor sent GOAWAY: rank it below every other eligible route.
 	draining: bool,
 	/// The prefix the neighbor asked this node for, once it opened a stream.
@@ -399,6 +426,9 @@ pub(crate) struct Retained {
 }
 
 pub(crate) struct Router<N, A> {
+	/// How this node names itself in the hops of a route it forwards. A rotation
+	/// leaves it alone, so a route that crossed this node always says so.
+	hop: Id,
 	neighbors: BTreeMap<N, Peer>,
 	origins: BTreeMap<Id, Origin<A>>,
 	rx: BTreeMap<Id, BTreeMap<N, Entry>>,
@@ -408,6 +438,9 @@ pub(crate) struct Router<N, A> {
 	filed: BTreeMap<(Id, N), Id>,
 	/// Babel's feasibility distance per identity.
 	fd: BTreeMap<Id, (Seqno, Metric)>,
+	/// The hops of the route this node last sent under a qualified key, kept as long
+	/// as its distance: a route that extends them came through this node's own.
+	advertised: BTreeMap<Id, Arc<[Id]>>,
 	sent: BTreeMap<(Id, N), Reach>,
 	/// ROUTE_ENDs sent to each neighbor and not yet echoed back. Until they all
 	/// return, a neighbor may still hold this node's advertisement, so the
@@ -458,14 +491,17 @@ pub(crate) enum Error {
 }
 
 impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
-	/// A node with no sessions, minting rotated identities from `seed`.
-	pub fn new(seed: u64) -> Self {
+	/// A node with no sessions, naming itself `hop` in the routes it forwards and
+	/// minting rotated identities from `seed`.
+	pub fn new(hop: Id, seed: u64) -> Self {
 		Self {
+			hop,
 			neighbors: BTreeMap::new(),
 			origins: BTreeMap::new(),
 			rx: BTreeMap::new(),
 			filed: BTreeMap::new(),
 			fd: BTreeMap::new(),
+			advertised: BTreeMap::new(),
 			sent: BTreeMap::new(),
 			unacked: BTreeMap::new(),
 			pending: BTreeMap::new(),
@@ -516,6 +552,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			neighbor,
 			Peer {
 				link,
+				rtt: None,
 				draining: false,
 				watch: None,
 				asked: None,
@@ -582,13 +619,28 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		if let Some(peer) = self.neighbors.get_mut(&neighbor) {
 			peer.draining = true;
 		}
-		let ids: Vec<Id> = self
-			.rx
-			.iter()
+		self.update(self.through(neighbor));
+	}
+
+	/// The link to `neighbor` has `rtt`, or `None` unmeasured: every route learned
+	/// there adds it.
+	pub fn rtt(&mut self, neighbor: N, rtt: Option<Duration>) {
+		let Some(peer) = self.neighbors.get_mut(&neighbor) else {
+			return;
+		};
+		if peer.rtt == rtt {
+			return;
+		}
+		peer.rtt = rtt;
+		self.update(self.through(neighbor));
+	}
+
+	/// The identities `neighbor` sent a route for.
+	fn through(&self, neighbor: N) -> Vec<Id> {
+		(self.rx.iter())
 			.filter(|(_, routes)| routes.contains_key(&neighbor))
 			.map(|(id, _)| *id)
-			.collect();
-		self.update(ids);
+			.collect()
 	}
 
 	#[cfg(test)]
@@ -767,7 +819,8 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			return;
 		}
 		// Echo every ROUTE_END once applied, filed or refused.
-		if reach.is_none() {
+		let ended = reach.is_none();
+		if ended {
 			self.out.push(Out::Echo { to: from, id: named });
 		}
 		let Some(id) = self.key(from, named) else {
@@ -780,9 +833,26 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			};
 		}
 		let routes = self.rx.entry(id).or_default();
+		// Whether only the route's hops or RTT changed, and not whether this node may
+		// use it: that moves no route here.
+		let mut same = false;
 		match reach {
 			Some(Reach::Finite(advert)) => {
-				routes.insert(from, Entry { advert, held: false });
+				let crossed = advert.hops.contains(&self.hop);
+				let full = |advert: &Advert| advert.hops.len() >= MAX_HOPS;
+				same = routes.get(&from).is_some_and(|was| {
+					let (old, new) = (&was.advert, &advert);
+					!was.held
+						&& was.crossed == crossed
+						&& full(old) == full(new)
+						&& (old.seqno, old.metric, old.down_only) == (new.seqno, new.metric, new.down_only)
+				});
+				let entry = Entry {
+					advert,
+					held: false,
+					crossed,
+				};
+				routes.insert(from, entry);
 			}
 			Some(Reach::Held) => {
 				if let Some(entry) = routes.get_mut(&from) {
@@ -801,9 +871,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		// last view only for what it certified. An uncertified claim lives only
 		// while the stream carries it, and the restart's batch names only what it
 		// still carries, so one kept here would never be withdrawn.
-		if reach.is_none()
-			&& let Some(heard) = self.heard.get_mut(&(id, from))
-		{
+		if ended && let Some(heard) = self.heard.get_mut(&(id, from)) {
 			let raw = std::mem::take(&mut heard.raw);
 			let kept = heard.kept.get_or_insert(raw);
 			let floors = &kept.floors;
@@ -812,7 +880,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			// What it drops lay outside every floor, so nothing it differed in.
 			heard.ended = true;
 		}
-		self.update([id]);
+		self.recompute([id], !same);
 	}
 
 	/// A batch of announcement changes for `named` from `from`, closed by its
@@ -1022,11 +1090,11 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		type Rank<N> = (bool, Reverse<i8>, Metric, N);
 		let mut best: Option<(Rank<N>, Selected<N>)> = None;
 		for (&next, entry) in self.rx.get(&id)? {
-			if entry.held || !self.feasible(id, entry.advert) {
+			if entry.held || !self.selectable(id, entry) {
 				continue;
 			}
 			let peer = &self.neighbors[&next];
-			let Some(metric) = add(entry.advert.metric, peer.link.cost) else {
+			let Some(metric) = self.metric(next, entry) else {
 				continue;
 			};
 			let rank = (peer.draining, Reverse(peer.link.priority), metric, next);
@@ -1053,13 +1121,26 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		}
 		let fd = self.fd.get(&id);
 		(self.rx.get(&id).into_iter().flatten())
-			.filter(|(_, entry)| !entry.held)
+			.filter(|(_, entry)| !entry.held && !entry.crossed)
 			.filter_map(|(&next, entry)| {
-				let metric = add(entry.advert.metric, self.neighbors[&next].link.cost)?;
 				let tied = fd.is_some_and(|&fd| fd == (entry.advert.seqno, entry.advert.metric));
-				(tied || self.feasible(id, entry.advert)).then_some(Eligible { next, metric, tied })
+				if !tied && !self.feasible(id, &entry.advert) {
+					return None;
+				}
+				let metric = self.metric(next, entry)?;
+				let rtt = through_rtt(&entry.advert, &self.neighbors[&next]);
+				Some(Eligible { next, metric, rtt, tied })
 			})
 			.collect()
+	}
+
+	/// This node's RTT to `id` along `route`: 0 at the identity's own node.
+	fn route_rtt(&self, id: Id, route: &Selected<N>) -> Option<Duration> {
+		let Some(next) = route.next else {
+			return Some(Duration::ZERO);
+		};
+		let entry = self.rx.get(&id)?.get(&next)?;
+		through_rtt(&entry.advert, &self.neighbors[&next])
 	}
 
 	/// Whether a request for a claim at `claim` may go through `next`.
@@ -1193,21 +1274,47 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	}
 
 	/// Babel's feasibility condition against this node's feasibility distance.
-	fn feasible(&self, id: Id, advert: Advert) -> bool {
+	fn feasible(&self, id: Id, advert: &Advert) -> bool {
 		match self.fd.get(&id) {
 			None => true,
 			Some(&(seqno, metric)) => advert.seqno > seqno || (advert.seqno == seqno && advert.metric < metric),
 		}
 	}
 
-	/// The usable but infeasible routes for `id`, with their metrics.
+	/// Whether this node may select or certify through `entry`: a feasible route that
+	/// did not cross it. One that crossed it and is feasible all the same is no route
+	/// at all, since no seqno would change where it has been.
+	fn selectable(&self, id: Id, entry: &Entry) -> bool {
+		!entry.crossed && self.feasible(id, &entry.advert)
+	}
+
+	/// This node's metric through `entry`, the route `next` sent, or `None` when it is
+	/// unreachable, never saturated: the metric overflows, or the route already
+	/// crossed as many nodes as one may.
+	fn metric(&self, next: N, entry: &Entry) -> Option<Metric> {
+		if entry.advert.hops.len() >= MAX_HOPS {
+			return None;
+		}
+		entry.advert.metric.checked_add(self.neighbors[&next].link.cost)
+	}
+
+	/// The usable but infeasible routes for `id`, with their metrics: this node holds
+	/// the identity while it has one. One that crossed this node counts like any other:
+	/// its sender routes through this node, and moves once it hears this node has no
+	/// route. Under a qualified key that holds only if the route extends the one this
+	/// node last sent under the key. Otherwise a relay past this node derived the key
+	/// from this node's route to another identity, which stands whatever happens to
+	/// this one, and waiting on it would never end.
 	fn infeasible(&self, id: Id) -> impl Iterator<Item = (Metric, N)> + '_ {
-		self.rx
-			.get(&id)
-			.into_iter()
-			.flatten()
-			.filter(move |(_, entry)| !entry.held && !self.feasible(id, entry.advert))
-			.filter_map(move |(&next, entry)| Some((add(entry.advert.metric, self.neighbors[&next].link.cost)?, next)))
+		let sent = self.advertised.get(&id);
+		let derived = move |entry: &Entry| match id & QUALIFIED {
+			0 => true,
+			_ => sent.is_some_and(|sent| entry.advert.hops.starts_with(sent)),
+		};
+		(self.rx.get(&id).into_iter().flatten())
+			.filter(move |(_, entry)| !entry.held && !self.feasible(id, &entry.advert))
+			.filter(move |(_, entry)| !entry.crossed || derived(entry))
+			.filter_map(move |(&next, entry)| Some((self.metric(next, entry)?, next)))
 	}
 
 	/// Where this node sends a request for `id`: its feasible route's next hop,
@@ -1253,7 +1360,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	/// Whether `entry`'s last finite advertisement from `next` is feasible here
 	/// and reachable across the link, as selection requires of a usable route.
 	fn reachable(&self, id: Id, next: N, entry: &Entry) -> bool {
-		self.feasible(id, entry.advert) && add(entry.advert.metric, self.neighbors[&next].link.cost).is_some()
+		self.selectable(id, entry) && self.metric(next, entry).is_some()
 	}
 
 	/// The regions of `id` that this node's certifiers certify, those whose
@@ -1446,6 +1553,13 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	/// this node advertises, what each neighbor is sent, its seqno request, and
 	/// what the reader sees.
 	fn update(&mut self, ids: impl IntoIterator<Item = Id>) {
+		self.recompute(ids, true);
+	}
+
+	/// [`Self::update`], letting go of what no neighbor certifies only when `prune`. A
+	/// neighbor's change of hops or RTT alone moves no certifier, so it lets go of
+	/// nothing: only a message that could have cost a region its certifier does.
+	fn recompute(&mut self, ids: impl IntoIterator<Item = Id>, prune: bool) {
 		let peers: Vec<N> = self
 			.neighbors
 			.iter()
@@ -1461,7 +1575,9 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			self.changed.entry(id).or_default();
 		}
 		for id in ids {
-			self.prune(id);
+			if prune {
+				self.prune(id);
+			}
 			self.record(id, &peers);
 			let ctx = self.ctx(id, self.selected(id));
 			let mut dirty = self.dirty.remove(&id).unwrap_or_default();
@@ -1477,6 +1593,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 				&& Self::of(&self.unacked, id).next().is_none()
 			{
 				self.fd.remove(&id);
+				self.advertised.remove(&id);
 			}
 			self.requests(id);
 			self.show(id, &ctx, &dirty);
@@ -1621,6 +1738,12 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	/// changed among the dirty claims, unless any could have.
 	fn advertise(&mut self, id: Id, peers: &[N], ctx: &Ctx<N>, dirty: &Dirty) {
 		let selected = self.selected(id);
+		// The selected route's hops, then this node: its own route starts with it.
+		let through = selected.and_then(|route| route.next);
+		let hops: Arc<[Id]> = (through.iter())
+			.flat_map(|next| self.rx[&id][next].advert.hops.iter().copied())
+			.chain([self.hop])
+			.collect();
 		let floors = self.adopted_floors(id).cloned().unwrap_or_default();
 		// Built only for a stream sent a whole snapshot, once per interest.
 		let mut adopted: Option<View<A>> = None;
@@ -1630,8 +1753,8 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		for &to in peers {
 			let peer = &self.neighbors[&to];
 			let serves = self.serves(peer, id);
-			let was = self.sent.get(&(id, to)).copied();
-			if !serves && was.is_none() {
+			let started = self.sent.contains_key(&(id, to));
+			if !serves && !started {
 				continue;
 			}
 			let reach = match selected {
@@ -1639,16 +1762,18 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 					seqno: route.seqno,
 					metric: route.metric,
 					down_only: route.down_only,
+					rtt: self.route_rtt(id, &route),
+					hops: hops.clone(),
 				})),
-				None if serves && ctx.live && was.is_some() => Some(Reach::Held),
+				None if serves && ctx.live && started => Some(Reach::Held),
 				_ => None,
 			};
 			// A route starts again only once the neighbor echoed its last end there, so
 			// one that withholds echoes holds at most one end per identity.
-			let reach = reach.filter(|_| was.is_some() || !self.unacked.contains_key(&(id, to)));
+			let reach = reach.filter(|_| started || !self.unacked.contains_key(&(id, to)));
 			let watch = peer.watch.as_ref().expect("a watching peer");
 			let sent = self.sent_views.get(&(id, to));
-			let (changes, meets) = match (reach, sent) {
+			let (changes, meets) = match (&reach, sent) {
 				(None, _) => (Vec::new(), false),
 				// A stream holding nothing that the route still does not meet.
 				(Some(_), None) if !self.meets(id, ctx, watch) => (Vec::new(), false),
@@ -1700,16 +1825,23 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 				check.apply(changes.clone(), floors.clone());
 				assert_eq!(check, adopted.present(watch), "incremental presentation to {to:?}");
 			}
-			plans.push((to, was, reach, meets, changes, floors, watch.clone()));
+			plans.push((to, started, reach, meets, changes, floors, watch.clone()));
 		}
 
-		for (to, was, reach, meets, changes, floors, watch) in plans {
+		for (to, started, reach, meets, changes, floors, watch) in plans {
 			let key = (id, to);
+			let reaching = reach.is_some();
 			let send = reach.filter(|_| meets);
+			let sending = send.is_some();
 			if let Some(send) = send
-				&& was != Some(send)
+				&& self.sent.get(&key) != Some(&send)
 			{
-				self.sent.insert(key, send);
+				if id & QUALIFIED != 0
+					&& let Reach::Finite(advert) = &send
+				{
+					self.advertised.insert(id, advert.hops.clone());
+				}
+				self.sent.insert(key, send.clone());
 				self.out.push(Out::Route {
 					to,
 					id,
@@ -1717,7 +1849,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 				});
 			}
 			// A batch goes while the route does, the last one just before its ROUTE_END.
-			if send.is_some() || reach.is_some() && was.is_some() && self.sent_views.contains_key(&key) {
+			if sending || reaching && started && self.sent_views.contains_key(&key) {
 				let sent = self.sent_views.entry(key).or_default();
 				let floor = sent.floor(&watch);
 				sent.apply(changes.clone(), floors);
@@ -1732,8 +1864,8 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 				}
 			}
 			// Announcements ride on the route and end with it.
-			if send.is_none() {
-				if was.is_some() {
+			if !sending {
+				if started {
 					*self.unacked.entry(key).or_default() += 1;
 					self.sent.remove(&key);
 					self.out.push(Out::Route { to, id, reach: None });
@@ -1961,10 +2093,4 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			forgot,
 		});
 	}
-}
-
-/// `metric` plus a strictly positive link `cost`, or `None` when it overflows: an
-/// overflowed route is unreachable, never saturated.
-fn add(metric: Metric, cost: Metric) -> Option<Metric> {
-	metric.checked_add(cost)
 }

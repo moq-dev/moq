@@ -2,8 +2,10 @@
 
 ## Goal
 
-`just test interop --all` passes the `go -> cpp` media cell on a loaded
-host, and its quarantine in `test/interop/interop.sh`'s `run_round` is
+`just test interop --all` passes the `go -> cpp` media cell, the
+`rust-swapped -> js` and `rust-swapped -> js-native-node` wrong-tone cells,
+and the Python/Rust sockets lane on a loaded host, and their quarantines in
+`test/interop/interop.sh` (`run_round`, and the `run_sockets` call) are
 removed.
 
 ## Plan
@@ -28,10 +30,12 @@ load, find why the consumed broadcast reaches the publish side, and fix it
 there.
 
 A later full run on the same branch, with this cell quarantined, failed
-three other lanes once each, all passing when rerun; they are recorded
-here, not quarantined: `rust-swapped -> js` timed out
-after decoding only the opus rendition into the swapped tone, and
+three other lanes once each, all passing when rerun, so they are quarantined
+here too (maintainer, 2026-11-11): `rust-swapped -> js` timed out after
+decoding only the opus rendition into the swapped tone, and
 `rust-swapped -> js-native-node` ended with `Error: unroutable`, both on
 `moq-lite-06`; the Python/Rust sockets lane on `moq-lite-07-wip` also ended
 with only `Error: unroutable`, and passed in three narrowed reruns. Check
-whether they share this cell's cause before quarantining them.
+whether they share this cell's cause, and that of
+[interop-python-go.md](/quest/m0/test-flakes-2/interop-python-go.md), whose
+Go subscriber also closed its session for publishing outside its grant.

@@ -217,10 +217,10 @@ pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::I
 
 	// The playlist ended: serve the finished broadcast for the linger, so a subscriber that
 	// arrives after the end still gets the tail. An interrupt drops it at once.
-	importer.finish()?;
+	let finished = importer.finish()?;
 	let linger = ingest.linger;
 	tracing::info!(?linger, "playlist ended; serving the finished broadcast");
-	moq_mux::Linger::new([route.broadcast().clone()], importer, linger)
+	moq_mux::Linger::new([route.broadcast().clone()], finished, linger)
 		.wait()
 		.await;
 	Ok(())

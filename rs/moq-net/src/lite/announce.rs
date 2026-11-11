@@ -147,15 +147,37 @@ fn decode_warm_serves(r: &mut Decoder<'_>) -> Result<Serves, DecodeError> {
 	}
 }
 
-/// Encode a seqno, metric, and down-only bit. No origin advertises the last seqno,
-/// which would leave no room for the successor a ROUTE_REQUEST names.
+/// ROUTE_START and ROUTE_UPDATE flag: the route is down-only.
+const DOWN_ONLY: u8 = 0x1;
+/// ROUTE_START and ROUTE_UPDATE flag: an RTT follows.
+const RTT: u8 = 0x2;
+
+/// Encode a seqno, metric, flags, RTT in milliseconds, and the hops the route
+/// crossed. No origin advertises the last seqno, which would leave no room for the
+/// successor a ROUTE_REQUEST names, and no relay forwards a route that crossed too many.
 fn encode_advert(w: &mut Encoder<'_>, advert: &Advert) -> Result<(), EncodeError> {
-	if advert.seqno == route::MAX {
+	if advert.seqno == route::MAX || advert.hops.len() > route::MAX_HOPS {
 		return Err(EncodeError::InvalidState);
 	}
 	w.varint(advert.seqno)?;
 	w.varint(advert.metric)?;
-	w.bool(advert.down_only);
+	// A sum past the field's range, which only a peer's absurd value reaches, is unknown.
+	let rtt = advert.rtt.and_then(|rtt| u64::try_from(rtt.as_millis()).ok());
+	let mut flags = 0;
+	if advert.down_only {
+		flags |= DOWN_ONLY;
+	}
+	if rtt.is_some() {
+		flags |= RTT;
+	}
+	w.u8(flags);
+	if let Some(rtt) = rtt {
+		w.varint(rtt)?;
+	}
+	w.varint(advert.hops.len() as u64)?;
+	for hop in advert.hops.iter() {
+		w.varint(*hop)?;
+	}
 	Ok(())
 }
 
@@ -164,10 +186,26 @@ fn decode_advert(r: &mut Decoder<'_>) -> Result<Advert, DecodeError> {
 	if seqno == route::MAX {
 		return Err(DecodeError::InvalidValue);
 	}
+	let metric = r.varint()?;
+	let flags = r.u8()?;
+	if flags & !(DOWN_ONLY | RTT) != 0 {
+		return Err(DecodeError::InvalidValue);
+	}
+	let rtt = match flags & RTT {
+		0 => None,
+		_ => Some(std::time::Duration::from_millis(r.varint()?)),
+	};
+	let count = r.varint()?;
+	if count > route::MAX_HOPS as u64 {
+		return Err(DecodeError::TooMany);
+	}
+	let hops = (0..count).map(|_| r.varint()).collect::<Result<_, _>>()?;
 	Ok(Advert {
 		seqno,
-		metric: r.varint()?,
-		down_only: r.bool()?,
+		metric,
+		down_only: flags & DOWN_ONLY != 0,
+		rtt,
+		hops,
 	})
 }
 
@@ -1668,6 +1706,8 @@ mod tests {
 			seqno,
 			metric,
 			down_only,
+			rtt: None,
+			hops: [].into(),
 		}
 	}
 
@@ -1709,6 +1749,22 @@ mod tests {
 				id: 0,
 				advert: advert(42, 0, true),
 			},
+			AnnounceBroadcast::RouteStart {
+				node: 0x7a40,
+				advert: Advert {
+					rtt: Some(std::time::Duration::ZERO),
+					hops: [5, route::MAX, 9].into(),
+					..advert(1, 0, false)
+				},
+			},
+			AnnounceBroadcast::RouteUpdate {
+				id: 1,
+				advert: Advert {
+					rtt: Some(std::time::Duration::from_millis(u64::MAX)),
+					hops: (1..=route::MAX_HOPS as u64).collect(),
+					..advert(2, 3, true)
+				},
+			},
 			AnnounceBroadcast::RouteHold { id: 3 },
 			AnnounceBroadcast::RouteEnd { id: 0 },
 			AnnounceBroadcast::Floor {
@@ -1723,6 +1779,22 @@ mod tests {
 		] {
 			assert_eq!(broadcast_round_trip(&msg, Version::Lite07), msg);
 		}
+	}
+
+	/// A peer's largest RTT plus a link goes past the field: it is forwarded as
+	/// unknown, never an error that would end the stream.
+	#[test]
+	fn an_rtt_past_the_field_is_unknown() {
+		let msg = |rtt| AnnounceBroadcast::RouteUpdate {
+			id: 1,
+			advert: Advert {
+				rtt,
+				..advert(2, 3, false)
+			},
+		};
+		let past = std::time::Duration::from_millis(u64::MAX).checked_add(std::time::Duration::from_millis(1));
+		assert!(past.is_some());
+		assert_eq!(broadcast_round_trip(&msg(past), Version::Lite07), msg(None));
 	}
 
 	/// A floor is a marker: the Route ID and the revision plus one, 0 when it certifies
@@ -1800,6 +1872,13 @@ mod tests {
 				id: 0,
 				advert: advert(route::MAX, 1, false),
 			},
+			AnnounceBroadcast::RouteUpdate {
+				id: 0,
+				advert: Advert {
+					hops: (0..=route::MAX_HOPS as u64).collect(),
+					..advert(0, 1, false)
+				},
+			},
 			// The last revision has no room for the offset.
 			AnnounceBroadcast::Floor {
 				id: 0,
@@ -1818,11 +1897,32 @@ mod tests {
 				w.varint(seqno).unwrap();
 				w.varint(metric).unwrap();
 				w.u8(down_only);
+				w.varint(0u64).unwrap();
 			}
 		};
+		// A route with `count` hops, naming `named` of them.
+		let hops = |count: u64, named: u64| {
+			move |w: &mut Encoder<'_>| {
+				for field in [1, 0, 1] {
+					w.varint(field as u64).unwrap();
+				}
+				w.u8(0);
+				w.varint(count).unwrap();
+				for hop in 0..named {
+					w.varint(hop + 1).unwrap();
+				}
+			}
+		};
+		let over = route::MAX_HOPS as u64 + 1;
 		let malformed = [
+			// More hops than a route may cross, hops missing, and one too many.
+			forge(ROUTE_START, hops(over, over)),
+			forge(ROUTE_START, hops(2, 1)),
+			forge(ROUTE_START, hops(1, 2)),
 			forge(ROUTE_START, advert(0, 0, 1, 0)),
 			forge(ROUTE_START, advert(1, route::MAX, 1, 0)),
+			// A flag no version defines, and an RTT flag without its field.
+			forge(ROUTE_START, advert(1, 0, 1, 4)),
 			forge(ROUTE_START, advert(1, 0, 1, 2)),
 			// ROUTE_UPDATE's leading field is the Route ID, so 0 is a valid id here.
 			forge(ROUTE_UPDATE, advert(0, route::MAX, 1, 0)),

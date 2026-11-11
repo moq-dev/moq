@@ -266,10 +266,10 @@ unopened while the reader went on. The test now reads a datagram through that
 queue before counting queues, fixed by
 [moq-dev/moq#8396](https://github.com/moq-dev/moq/pull/8396).
 
+Added 2026-11-10 (maintainer's standing rule that flakes join this epic):
+interop's `python -> go` media cell, whose Go subscriber closed its lite-07
+session as publishing outside its grant once in
+[moq-dev/moq#8444](https://github.com/moq-dev/moq/pull/8444)'s local run and
+passed on rerun. It is quarantined until its child fixes it.
+
 Public API: none. Wire: none.
-
-## Required
-
-- [Kotlin's playout-delay smoke test holds up under load](/quest/m0/test-flakes-2/kt-playout-delay.md) - the audio playout-delay smoke test passes under load, and its `@Ignore` is removed
-- [Interop's go -> cpp cell holds up under load](/quest/m0/test-flakes-2/interop-go-cpp.md) - the cell passes on a loaded host, and its quarantine is removed
-- [The doc API's failing-render test holds up under load](/quest/m0/test-flakes-2/doc-api-typedoc-timeout.md) - the test passes on a loaded host, and its `test.skip` is removed

@@ -56,9 +56,3 @@ This epic owns the end-to-end proof: an unmodified TCP client and server (SSH
 and an HTTP bulk transfer) talk through a two-relay chain with loss injected on
 one hop, with no corruption, FIN and reset propagated, and memory bounded by
 the window.
-
-## Required
-
-- [Rust byte streams](/quest/m3/stream/rust.md) - a duplex `AsyncRead`/`AsyncWrite` stream, a listener and a dialer, and `moq` CLI forwarding
-- [JS byte streams](/quest/m3/stream/js.md) - the same surface in `@moq/net`
-- [Stream benchmark](/quest/m3/stream/bench.md) - throughput and latency against raw TCP through a relay chain, with and without loss

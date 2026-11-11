@@ -270,19 +270,18 @@ impl Wake for Flag {
 }
 
 /// Clears the thread's runtime when [`run`] returns or unwinds, printing the seed
-/// that replays an unwinding run.
+/// that replays an unwinding run when [`run`] seeded it.
 struct Enter {
-	seed: u64,
+	replay: Option<u64>,
 }
 
 impl Drop for Enter {
 	fn drop(&mut self) {
 		CURRENT.with(|current| current.borrow_mut().take());
-		if std::thread::panicking() {
-			eprintln!(
-				"kio::clock::sim run panicked; replay it with MOQ_SIM_SEED={}",
-				self.seed
-			);
+		if let Some(seed) = self.replay
+			&& std::thread::panicking()
+		{
+			eprintln!("kio::clock::sim run panicked; replay it with MOQ_SIM_SEED={seed}");
 		}
 	}
 }
@@ -298,12 +297,24 @@ impl Drop for Enter {
 /// exceeds the ready kio poll limit, a detached task panics, or `MOQ_SIM_SEED` is
 /// not a `u64`.
 pub fn run<F: IntoFuture>(future: F) -> F::Output {
-	run_seeded(seed_from_env(), future)
+	let seed = seed_from_env();
+	enter(seed, Some(seed), future)
 }
 
-fn run_seeded<F: IntoFuture>(seed: u64, future: F) -> F::Output {
+/// [`run`] with [`rng`](crate::clock::rng) and [`seed`](crate::clock::seed) drawn from
+/// `seed`, ignoring `MOQ_SIM_SEED`: for a sweep that derives each case's seed itself,
+/// so one setting replays a case.
+///
+/// # Panics
+///
+/// As [`run`] does, except on `MOQ_SIM_SEED`.
+pub fn run_seeded<F: IntoFuture>(seed: u64, future: F) -> F::Output {
+	enter(seed, None, future)
+}
+
+fn enter<F: IntoFuture>(seed: u64, replay: Option<u64>, future: F) -> F::Output {
 	let runtime = Runtime::enter(seed);
-	let enter = Enter { seed };
+	let enter = Enter { replay };
 
 	let mut future = pin!(future.into_future());
 	let mut output = None;
