@@ -26,7 +26,6 @@ import dev.moq.video.ProducerOptions as VideoProducerOptions
 import dev.moq.video.ReadFrame as VideoReadFrame
 import java.net.DatagramSocket
 import java.net.InetAddress
-import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -1147,8 +1146,6 @@ class SmokeTest {
     /**
      * A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
      */
-    // Quarantined: flaky, see quest/m0/test-flakes-2/kt-playout-delay.md.
-    @Ignore
     @Test
     fun `audio consumer reports its playout delay`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
@@ -1174,14 +1171,14 @@ class SmokeTest {
                     val catalog = CatalogConsumer.subscribe(consumer).next()!!
                     val rendition = catalog.audio["mic"]!!
 
+                    // The skip budget ages groups by wall clock, so a max of zero lets a host
+                    // stalled under load skip both frames and wait for a third that never comes.
+                    // The test writes nothing more, so tolerate any stall.
+                    val budget = java.time.Duration.ofSeconds(30)
                     val fixedOutput =
                         AudioDecoderOutput(
                             format = AudioSampleFormat.F32,
-                            delay =
-                                Delay(
-                                    min = java.time.Duration.ofMillis(80),
-                                    max = java.time.Duration.ZERO,
-                                ),
+                            delay = Delay(min = java.time.Duration.ofMillis(80), max = budget),
                             estimate = false,
                         )
                     val fixed = AudioConsumer.subscribe(consumer, "mic", rendition, fixedOutput)
@@ -1190,7 +1187,10 @@ class SmokeTest {
                             consumer,
                             "mic",
                             rendition,
-                            AudioDecoderOutput(format = AudioSampleFormat.F32),
+                            AudioDecoderOutput(
+                                format = AudioSampleFormat.F32,
+                                delay = Delay(min = java.time.Duration.ZERO, max = budget),
+                            ),
                         )
                     assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
                     val initial = estimated.delay()
