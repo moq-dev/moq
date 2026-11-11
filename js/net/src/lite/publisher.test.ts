@@ -3869,10 +3869,11 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 }
 
 // A lite-07 announce stream the test reads as the subscriber, and answers.
-function routedAnswer(origin: OriginProducer) {
+function routedAnswer(origin: OriginProducer, grant?: Signal<Grant | undefined>) {
 	const version = Version.DRAFT_07;
 	const pair = createMockTransportPair(ALPN_07_WIP);
-	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const auth = grant && { grant, ready: Promise.resolve() };
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume(), auth);
 	let replies!: ReadableStreamDefaultController<Uint8Array>;
 	let output!: ReadableStreamDefaultController<Uint8Array>;
 	const reader = new Reader(new ReadableStream<Uint8Array>({ start: (c) => (output = c) }), undefined, version);
@@ -3907,7 +3908,7 @@ test("a lite-07 answer carries this origin's claims under its own route", async 
 		expect(await next()).toEqual({
 			status: "routeStart",
 			node,
-			advert: { seqno: 1n, metric: 0n, downOnly: false },
+			advert: { seqno: 1n, metric: 0n, downOnly: false, rtt: 0n },
 		});
 		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
 		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 0n });
@@ -3941,7 +3942,7 @@ test("a lite-07 answer carries this origin's claims under its own route", async 
 		expect(await next()).toEqual({
 			status: "routeUpdate",
 			id: 1n,
-			advert: { seqno: 10n, metric: 0n, downOnly: false },
+			advert: { seqno: 10n, metric: 0n, downOnly: false, rtt: 0n },
 		});
 
 		// An echo of a route that is not ending is a violation.
@@ -3981,6 +3982,32 @@ test("a lite-07 route starts again only once every end is echoed", async () => {
 		expect(await next()).toMatchObject({ status: "routeStart", node: own.node });
 		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 1n });
 		expect(await next()).toMatchObject({ status: "floor", id: 1n });
+	} finally {
+		cam.close();
+		close();
+		origin.close();
+		await running.catch(() => {});
+	}
+});
+
+// A floor certifies the requested prefix only while the grant covers all of it, so a grant
+// change that flips that re-floors the route even when it shows the same claims.
+test("a lite-07 grant change alone re-floors the route", async () => {
+	const origin = new OriginProducer();
+	const cam = publish(origin, Path.from("a/x"));
+	const grant = new Signal<Grant | undefined>(grantOf("a/x"));
+	const { running, next, ok, close } = routedAnswer(origin, grant);
+	try {
+		await ok();
+		expect(await next()).toMatchObject({ status: "routeStart" });
+		expect(await next()).toMatchObject({ status: "active", suffix: "a/x", route: 0n });
+		expect(await next()).toEqual({ status: "floor", id: 0n, revision: undefined });
+		expect(await next()).toEqual({ status: "synced" });
+
+		grant.set({ ...grantOf("a/x"), publish: new Path.Patterns([Path.Pattern.subtree(Path.empty())]) });
+		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 0n });
+		grant.set(grantOf("a/x"));
+		expect(await next()).toEqual({ status: "floor", id: 0n, revision: undefined });
 	} finally {
 		cam.close();
 		close();

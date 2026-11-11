@@ -820,7 +820,8 @@ export class Publisher {
 		const origin = this.#publish && wireOf(this.#publish);
 
 		// The route while the peer holds it: from the first claim shown until the last one goes.
-		let route: { id: bigint; node: bigint; seqno: bigint } | undefined;
+		// `certified` is whether its last floor certified, so a grant change alone re-floors it.
+		let route: { id: bigint; node: bigint; seqno: bigint; certified?: boolean } | undefined;
 		let nextRoute = 0n;
 		let nextAnnounce = 0n;
 		// Route IDs ended and not yet echoed, and the origin node each reached. No route starts
@@ -915,12 +916,13 @@ export class Publisher {
 					await write({ status: "update", id: prev.id, cost });
 				}
 			}
-			if (!route || !changed) return;
+			if (!route || (!changed && route.certified === certifies)) return;
+			route.certified = certifies;
 			await write({ status: "floor", id: route.id, revision: certifies ? revision : undefined });
 			if (live.size === 0) await end();
 		};
 
-		const advert = (seqno: bigint): Advert => ({ seqno, metric: 0n, downOnly: false });
+		const advert = (seqno: bigint): Advert => ({ seqno, metric: 0n, downOnly: false, rtt: 0n });
 		// What the peer decodes for a claim: lite-07 carries its instance, epoch, and cost.
 		const onWire = (route: WireRoute): WireRoute => ({ ...route, auth: undefined });
 		const restarted = (prev: Advertised, next: Advertised): boolean =>

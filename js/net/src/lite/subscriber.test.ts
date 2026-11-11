@@ -187,7 +187,7 @@ const PEER = HopSchema.parse(2n);
 // Lite-07 origin nodes, and the route a peer advertises to each.
 const NODE_A = 0x7an;
 const NODE_B = 0x8bn;
-const ADVERT = { seqno: 1n, metric: 0n, downOnly: false };
+const ADVERT = { seqno: 1n, metric: 0n, downOnly: false, rtt: 20n };
 
 /**
  * Write a claim the way `version` carries it: before lite-07 with its hop chain, and on lite-07
@@ -3795,6 +3795,8 @@ test("a lite-07 batch applies at its floor, and a held route turns unavailable",
 		kind: "update",
 		route: { available: true, cost: 8n },
 	});
+	// Nothing ranks by RTT, so a change to it alone reports nothing.
+	await send({ status: "routeUpdate", id: 0n, advert: { ...ADVERT, metric: 5n, rtt: 90n } });
 
 	// A route the peer lets go takes its claims offline, and is echoed back.
 	await send({ status: "routeEnd", id: 0n });

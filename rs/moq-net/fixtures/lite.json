@@ -42,11 +42,32 @@
 		"expect": "refused"
 	},
 	{
-		"name": "a ROUTE_START names its origin node, seqno, metric, and down-only bit",
+		"name": "a ROUTE_START names its origin node, seqno, metric, and flags",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
 		"hex": "06059234030501",
 		"expect": "decoded"
+	},
+	{
+		"name": "a ROUTE_START's 0x2 flag carries an RTT in milliseconds",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "0606923403050319",
+		"expect": "decoded"
+	},
+	{
+		"name": "a ROUTE_START's RTT flag without its RTT is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "06059234030502",
+		"expect": "refused"
+	},
+	{
+		"name": "a ROUTE_START flag no version defines is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "06059234030504",
+		"expect": "refused"
 	},
 	{
 		"name": "a ROUTE_START naming Node ID 0 is refused",

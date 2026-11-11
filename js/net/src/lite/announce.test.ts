@@ -375,10 +375,20 @@ test("the literal draft-07 stream matches what Rust decodes", async () => {
 // `rs/moq-net/fixtures/lite.json` pins the same bytes on both sides.
 test("the route layer round-trips on draft-07", async () => {
 	const v = Version.DRAFT_07;
-	const advert = { seqno: 3n, metric: 5n, downOnly: true };
+	const advert = { seqno: 3n, metric: 5n, downOnly: true, rtt: undefined };
 	const cases: [AnnounceBroadcast, number[]][] = [
 		[{ status: "routeStart", node: 0x1234n, advert }, [6, 5, 0x92, 0x34, 3, 5, 1]],
 		[{ status: "routeUpdate", id: 1n, advert }, [7, 4, 1, 3, 5, 1]],
+		// Flag 0x2: an RTT follows, 0 at the origin.
+		[
+			{ status: "routeStart", node: 0x1234n, advert: { ...advert, downOnly: false, rtt: 0n } },
+			[6, 6, 0x92, 0x34, 3, 5, 2, 0],
+		],
+		[{ status: "routeUpdate", id: 1n, advert: { ...advert, rtt: 25n } }, [7, 5, 1, 3, 5, 3, 25]],
+		[
+			{ status: "routeUpdate", id: 1n, advert: { ...advert, rtt: ROUTE_MAX } },
+			[7, 13, 1, 3, 5, 3, ...Array(9).fill(0xff)],
+		],
 		[{ status: "routeHold", id: 1n }, [0xb, 1, 1]],
 		[{ status: "routeEnd", id: 1n }, [8, 1, 1]],
 		// Revision 4 travels as 5: 0 certifies nothing.
@@ -406,7 +416,7 @@ test("the route layer round-trips on draft-07", async () => {
 
 test("the route layer refuses the last seqno and Node ID 0", async () => {
 	const v = Version.DRAFT_07;
-	const last = { seqno: ROUTE_MAX, metric: 0n, downOnly: false };
+	const last = { seqno: ROUTE_MAX, metric: 0n, downOnly: false, rtt: undefined };
 	await expect(
 		bytes((w) => encodeAnnounceBroadcast(w, { status: "routeStart", node: 1n, advert: last }, v), v),
 	).rejects.toThrow();
@@ -437,6 +447,16 @@ test("the route layer refuses the last seqno and Node ID 0", async () => {
 		await w.u8(0);
 	});
 	await expect(decodeAnnounceBroadcast(new Reader(undefined, maxed, v), v)).rejects.toThrow(ProtocolViolation);
+	// A flag no version defines, and the RTT flag without its field.
+	for (const flags of [4, 2]) {
+		const flagged = await forged(async (w) => {
+			await w.u62(1n);
+			await w.u62(0n);
+			await w.u62(0n);
+			await w.u8(flags);
+		});
+		await expect(decodeAnnounceBroadcast(new Reader(undefined, flagged, v), v)).rejects.toThrow();
+	}
 });
 
 test("the subscriber's replies round-trip on draft-07", async () => {

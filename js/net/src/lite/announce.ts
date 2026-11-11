@@ -54,12 +54,18 @@ export const ROUTE_MAX = 2n ** 64n - 1n;
 export type Base = { distance: bigint; keep: number };
 
 /** How a lite-07 publisher reaches an origin node: the origin's seqno, the publisher's metric to it,
- * and whether it may only travel away from an upstream. */
+ * whether it may only travel away from an upstream, and its informational RTT to it in milliseconds,
+ * `undefined` when unmeasured. */
 export interface Advert {
 	seqno: bigint;
 	metric: bigint;
 	downOnly: boolean;
+	rtt: bigint | undefined;
 }
+
+// ROUTE_START and ROUTE_UPDATE flags.
+const DOWN_ONLY = 0x1;
+const RTT = 0x2;
 
 /**
  * A message on the publisher's side of the Announce Stream.
@@ -248,18 +254,23 @@ async function decodeRouteCost(r: Reader, version: Version): Promise<Cost | unde
 	return cost;
 }
 
-/** Encode a seqno, metric, and down-only bit. No origin advertises the last seqno. */
+/** Encode a seqno, metric, flags, and RTT. No origin advertises the last seqno. */
 async function encodeAdvert(w: Writer, advert: Advert) {
 	if (advert.seqno >= ROUTE_MAX) throw new Error("a route never advertises the last seqno");
 	await w.u62(advert.seqno);
 	await w.u62(advert.metric);
-	await w.bool(advert.downOnly);
+	await w.u8((advert.downOnly ? DOWN_ONLY : 0) | (advert.rtt === undefined ? 0 : RTT));
+	if (advert.rtt !== undefined) await w.u62(advert.rtt);
 }
 
 async function decodeAdvert(r: Reader): Promise<Advert> {
 	const seqno = await r.u62();
 	if (seqno === ROUTE_MAX) throw new ProtocolViolation("a route advertised the last seqno");
-	return { seqno, metric: await r.u62(), downOnly: await r.bool() };
+	const metric = await r.u62();
+	const flags = await r.u8();
+	if (flags & ~(DOWN_ONLY | RTT)) throw new ProtocolViolation(`unknown route flags: ${flags}`);
+	const rtt = flags & RTT ? await r.u62() : undefined;
+	return { seqno, metric, downOnly: (flags & DOWN_ONLY) !== 0, rtt };
 }
 
 // lite-06 message body (no discriminator; the type is carried outside the length prefix).

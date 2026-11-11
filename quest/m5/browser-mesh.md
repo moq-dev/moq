@@ -59,6 +59,3 @@ relay does.
 
 - [Ship JS-only @moq/net from Rust](/quest/m5/rs2ts-js.md) - the Rust router and model running in the tab
 - [P2P](/quest/m4/p2p/README.md) - direct browser sessions, their signaling, and `Peers`
-
-## Related
-
