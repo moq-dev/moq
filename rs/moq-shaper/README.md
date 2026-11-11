@@ -148,7 +148,7 @@ delay = "5ms"
 ```
 
 `--profile` takes a file's path, or one of the built-ins in `profiles/`, embedded in the binary. The
-audio-quality lane (`test/audio-quality/`) uses `bursty` and `step`, plus its own flag profiles.
+audio-quality lane (`test/audio-quality/`) uses `bursty`, `step`, and `congestion`, plus its own flag profiles.
 
 | Name | What it models |
 | --- | --- |
@@ -159,6 +159,7 @@ audio-quality lane (`test/audio-quality/`) uses `bursty` and `step`, plus its ow
 | `cellular-step` | A 2 Mbit/s uplink behind a 500ms queue that drops to 500 kbit/s at 10s and recovers at 20s. |
 | `cellular-bursty` | A 2 Mbit/s uplink released in scheduler grants of five datagrams or 20ms, at 1 Mbit/s from 10s to 20s. |
 | `cellular-deep` | A 1 Mbit/s uplink behind a 2s queue that drops to 300 kbit/s at 10s and recovers at 20s. |
+| `congestion` | A 1 Mbit/s downlink behind a 1s queue that collapses to 16 kbit/s at 25s and recovers at 26.5s. |
 
 Each built-in is a shared path, as a browser page's sessions on one host would be. The `cellular-*` ones
 shape only the uplink and keep a plain delay on the way back, so the acknowledgments are not impaired.

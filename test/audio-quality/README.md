@@ -50,7 +50,7 @@ response would make a failure hard to attribute. The `mild` and `wide` profiles 
 shaper startup, before the page connects; the driver gives up on a row with no audio 20 s in, so the
 measured window starts before the step, and `--duration` must exceed 30 s so playback spans it.
 
-`congestion` ([`congestion.toml`](congestion.toml)) is a queue that fills until it drops, as a
+`congestion` ([`congestion.toml`](../../rs/moq-shaper/profiles/congestion.toml)) is a queue that fills until it drops, as a
 congested link's does, rather than random loss. The tone needs about 140 kbit/s, so for a second and
 a half the queue holds its full second of wait and drops the rest, longer than any row's target.
 When the rate returns, the transport delivers the backlog, the queue's and every retransmit. The
@@ -388,7 +388,6 @@ run.sh                 builds, starts the relay and publishers, runs each row be
 ../lib/pulse.py        the native rows' private PulseAudio null sink
 record.sh              records traces/, by hand
 relay.toml             anonymous relay, self-signed cert
-congestion.toml        the congestion profile's shaper treatment
 budgets.json           a ceiling per metric per row
 traces/                recorded arrivals, one replay profile each
 clients/js/
