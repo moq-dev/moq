@@ -749,7 +749,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lite, announce, ietf, varint, path, pattern, ingest, request, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0]
+        target: [lite, announce, ietf, varint, path, pattern, ingest, request, session_lite, session_ietf, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0]
+        # A whole session runs at 50 to 90 inputs a second, and its coverage still climbs
+        # after five minutes, so it gets fifteen.
+        include:
+          - target: session_lite
+            seconds: 900
+          - target: session_ietf
+            seconds: 900
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -770,7 +777,8 @@ jobs:
           restore-keys: |
             fuzz-corpus-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
       - name: Fuzz
-        run: nix develop --command just rs fuzz ${{ matrix.target }} -- -max_total_time=300
+        # A low per-input timeout, so unbounded work an input causes is a finding.
+        run: nix develop --command just rs fuzz ${{ matrix.target }} -- -max_total_time=${{ matrix.seconds || 300 }} -timeout=10
       - name: Minimize corpus
         run: nix develop --command just rs fuzz --minimize ${{ matrix.target }}
       - name: Save corpus
