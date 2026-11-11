@@ -7749,7 +7749,7 @@ impl DropCursor {
 			.reported
 			.iter()
 			.filter_map(|(run, report)| match report {
-				Report::Stale { received } => Some((run.clone(), *received)),
+				Report::Stale { received, .. } if report.reopens() => Some((run.clone(), *received)),
 				_ => None,
 			})
 			.collect();
@@ -7763,16 +7763,6 @@ impl DropCursor {
 		// A received stale run is folded in again by the next scan, if the track still holds it.
 		self.scanned = None;
 		(stale.into_iter().collect(), received)
-	}
-
-	/// Retire a stale report on `sequence` once its group is handed out: the group won over
-	/// the drop, so no update reopens it.
-	fn retire(record: &mut Record, sequence: u64) {
-		if let Some(end) = sequence.checked_add(1)
-			&& matches!(record.reported.get(&sequence), Some(Report::Stale { .. }))
-		{
-			record.reported.insert(sequence..end, Report::Dropped);
-		}
 	}
 
 	/// Record a run this cursor's fills gave up on as a miss, as `hole` says; a reason
@@ -7905,19 +7895,10 @@ impl DropCursor {
 			if clipped.end < range.end {
 				record.pending.insert(clipped.end..range.end, pending.clone());
 			}
-			let blocked: RangeSet<u64> = record
-				.reported
-				.overlapping(&clipped)
-				.filter(|(_, report)| report.blocks(&pending.hole))
-				.map(|(run, _)| run.clone())
-				.collect();
-			if let Some(gap) = blocked.gaps(&clipped).next() {
+			if let Some(gap) = record.report(clipped, &pending.hole, pending.received) {
 				if gap.end < range.end {
 					record.pending.insert(gap.end..range.end, pending.clone());
 				}
-				// Replacing what it goes out over: a final report is never reopened by an update.
-				record.reported
-					.insert(gap.clone(), Report::of(&pending.hole, pending.received));
 				return Some((gap, pending.hole));
 			}
 		}
@@ -8581,7 +8562,7 @@ impl Cursor {
 		self.record.delivered.insert(sequence);
 		// The group won over any stale report on it.
 		if self.drops.is_some() {
-			DropCursor::retire(&mut self.record, sequence);
+			self.record.retire(sequence);
 		}
 		let mut delivered = std::mem::take(&mut self.record.delivered);
 		self.forget_past_budget(&mut delivered);
@@ -9712,10 +9693,20 @@ impl Subscriber {
 	}
 
 	/// What this reader settled.
+	#[cfg(test)]
 	fn record(&self) -> &Record {
 		match &self.inner {
 			Inner::Plain(cursor) => &cursor.record,
 			Inner::Resume(_, logical) => &logical.record,
+		}
+	}
+
+	/// What this reader settled, for its publisher to record what its wire was told.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn record_mut(&mut self) -> &mut Record {
+		match &mut self.inner {
+			Inner::Plain(cursor) => &mut cursor.record,
+			Inner::Resume(_, logical) => &mut logical.record,
 		}
 	}
 
@@ -9984,7 +9975,15 @@ impl Subscriber {
 	fn poll_drop_probing(&mut self, probe: bool, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, Hole)> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.poll_drop(probe, waiter),
-			Inner::Resume(resume, logical) => resume.poll_drop(&logical.record.delivered, probe, waiter),
+			// Each copy reports to its own route; the logical record keeps one route's run from
+			// going out over what another's already settled.
+			Inner::Resume(resume, logical) => loop {
+				if let Some(next) = logical.record.next_pending() {
+					return Poll::Ready(next);
+				}
+				let (range, hole) = std::task::ready!(resume.poll_drop(&logical.record.delivered, probe, waiter));
+				logical.record.pending.insert(range, Pending::own(hole));
+			},
 		}
 	}
 

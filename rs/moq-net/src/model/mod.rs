@@ -27,7 +27,7 @@ mod delivered;
 mod expiry;
 // The early exit a read nothing woke takes.
 mod idle;
-mod record;
+pub(crate) mod record;
 mod skipped;
 // How far a group's writer reads ahead of its fastest reader.
 pub(crate) mod pace;
