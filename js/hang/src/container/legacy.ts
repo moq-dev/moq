@@ -68,6 +68,16 @@ function micros(timestamp: Duration): number {
 	return Math.floor(timestamp.asMicros());
 }
 
+/**
+ * A track its {@link Producer} finished: every frame is written and it takes no more.
+ * {@link Producer.finish} returns it, mirroring the Rust `container::Finished`; the producer itself
+ * still refuses a frame after the finish.
+ */
+export interface Finished {
+	/** Abort the track with an error; see {@link Producer.abort}. */
+	abort(err: Error): void;
+}
+
 /** Writes legacy-container frames into a MoQ track, starting a new group on each keyframe. */
 export class Producer {
 	#track: Moq.Track.Producer;
@@ -190,15 +200,18 @@ export class Producer {
 		this.#reordered = false;
 	}
 
-	/** Close the track and current group, optionally with an error. */
-	close(err?: Error) {
-		if (!err) this.#close();
-		if (err) this.#group?.abort(err);
-		else this.#group?.finish();
-		if (err) this.#track.abort(err);
-		else {
-			this.#track.finish();
-			this.#track.close();
-		}
+	/** Close the current group and finish the track, returning it as {@link Finished}. */
+	finish(): Finished {
+		this.#close();
+		this.#track.finish();
+		this.#track.close();
+		return this;
+	}
+
+	/** Abort the current group and the track with `err`, which readers see in place of a clean end. */
+	abort(err: Error) {
+		this.#group?.abort(err);
+		this.#group = undefined;
+		this.#track.abort(err);
 	}
 }

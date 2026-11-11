@@ -119,7 +119,7 @@ export function finish(
 		} finally {
 			encoder.close();
 		}
-		media.close();
+		media.finish();
 		const catalog = new CatalogProducer();
 		catalog.mutate((root) => {
 			root.video = { renditions: { video: config } };
