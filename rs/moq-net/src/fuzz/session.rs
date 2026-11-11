@@ -141,11 +141,12 @@ fn session(lite: bool, data: &[u8]) -> bool {
 
 /// The transport between a relay and one of its peers at `version`.
 fn transport(version: Version) -> memory::Config {
-	let mut config = memory::Config::default();
-	config.protocol = Some(version.alpn().to_string());
-	config.max_concurrent_uni_streams = Some(STREAMS);
-	config.max_concurrent_bi_streams = Some(STREAMS);
-	config
+	memory::Config {
+		protocol: Some(version.alpn().to_string()),
+		max_concurrent_uni_streams: Some(STREAMS),
+		max_concurrent_bi_streams: Some(STREAMS),
+		..Default::default()
+	}
 }
 
 /// One thing the peer does.
