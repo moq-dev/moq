@@ -18,9 +18,13 @@ class FakePipeline {
 	}
 	close() {}
 }
+const broadcasts: { enabled: Signal<boolean> }[] = [];
 class FakeBroadcast {
 	net = new Signal(undefined);
 	catalog = { mutate: (fn: (value: object) => void) => fn({}) };
+	constructor(props: { enabled: Signal<boolean> }) {
+		broadcasts.push(props);
+	}
 	close() {}
 }
 // Exercise room lifecycle wiring independently of camera drivers and browser workers.
@@ -39,13 +43,45 @@ function setup() {
 	// Each test counts only its own Local's sources and encoders.
 	sources.length = 0;
 	encoders.length = 0;
+	broadcasts.length = 0;
 	const bandwidth = new Signal(undefined);
 	const local = new Local({
 		connection: { origin: new Signal(undefined), allocator: bandwidth } as never,
 		identity: Path.from("alice"),
 	});
-	return { local, bandwidth, screen: sources.at(-1) as FakeSource };
+	const [camera, screenBroadcast] = broadcasts;
+	if (!camera || !screenBroadcast) throw new Error("expected the camera and screen broadcasts");
+	return { local, bandwidth, screen: sources.at(-1) as FakeSource, broadcasts: { camera, screen: screenBroadcast } };
 }
+
+// Replays LeavingStopsPublishing in `verify/Room.tla`: a participant who has not joined, or has
+// left, neither publishes nor encodes their screen, even with a live share.
+test("a screen share publishes only while joined", async () => {
+	const { local, screen, broadcasts } = setup();
+	// The screen's hd, sd, and audio encoders are constructed last.
+	const screenEncoders = () => encoders.slice(-3).map((e) => (e.enabled as Signal<boolean>).peek());
+	try {
+		local.screenEnabled.set(true);
+		screen.out.state.set({ kind: "live", media: { video: {} } });
+		await flush();
+		expect(broadcasts.camera.enabled.peek()).toBe(false);
+		expect(broadcasts.screen.enabled.peek()).toBe(false);
+		expect(screenEncoders()).toEqual([false, false, false]);
+
+		local.enabled.set(true);
+		await flush();
+		expect(broadcasts.screen.enabled.peek()).toBe(true);
+		expect(screenEncoders()).toEqual([true, true, true]);
+
+		local.enabled.set(false);
+		await flush();
+		expect(broadcasts.camera.enabled.peek()).toBe(false);
+		expect(broadcasts.screen.enabled.peek()).toBe(false);
+		expect(screenEncoders()).toEqual([false, false, false]);
+	} finally {
+		local.close();
+	}
+});
 
 test("screen capture stays enabled while prompting and resets after a live share ends", async () => {
 	const { local, bandwidth, screen } = setup();

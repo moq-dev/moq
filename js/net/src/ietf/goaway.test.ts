@@ -1,16 +1,14 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { SessionCode, StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
-import { AuthMessage, AuthOk, IetfAuthWire } from "./auth.ts";
 import { Connection } from "./connection.ts";
 import { GoAway } from "./goaway.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { RequestOk } from "./request.ts";
-import { NativeSession } from "./session.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { ALPN, Version } from "./version.ts";
 
@@ -41,9 +39,9 @@ for (const [version, alpn, requestId] of [
 
 			const drain = await connection.draining;
 			expect(drain.uri).toBe("");
-			expect(drain.timeout).toBe(Milli(5000));
+			expect(drain.timeout).toEqual(Duration.millis(5000));
 
-			expect(await settlesWithin(connection.closed, clock, Milli(20))).toBe(false);
+			expect(await settlesWithin(connection.closed, clock, Duration.millis(20))).toBe(false);
 		} finally {
 			connection.abort();
 		}
@@ -69,7 +67,7 @@ test("a server rejects a client GOAWAY that names a redirect", async () => {
 	try {
 		await peer.writer.u53(GoAway.id);
 		await new GoAway({ newSessionUri: "https://other.example/", timeout: 0n }).encode(peer.writer, version);
-		expect(await settlesWithin(connection.closed, clock, Milli(50))).toBe(true);
+		expect(await settlesWithin(connection.closed, clock, Duration.millis(50))).toBe(true);
 	} finally {
 		connection.abort();
 	}
@@ -134,52 +132,6 @@ for (const [version, alpn] of [
 			expect(connection.draining.peek()).toBeUndefined();
 		} finally {
 			connection.abort();
-		}
-	});
-}
-
-for (const [version, alpn] of [
-	[Version.DRAFT_18, ALPN.DRAFT_18],
-	[Version.DRAFT_22, ALPN.DRAFT_22],
-] as const) {
-	test(`${alpn} AUTH replies handle GOAWAY across grants`, async () => {
-		const pair = createMockTransportPair(alpn);
-		const wire = new IetfAuthWire(new NativeSession(pair.client, version, true));
-		const stream = await wire.present(new Uint8Array());
-		const peer = await Stream.accept(pair.server, version);
-		if (!peer) throw new Error("no AUTH stream");
-		try {
-			await peer.writer.u53(GoAway.id);
-			await new GoAway({ newSessionUri: "" }).encode(peer.writer, version);
-			await new AuthOk(new Path.Patterns(), new Path.Patterns()).encode(peer.writer, version);
-			expect(await wire.read(stream)).toEqual({
-				grant: { publish: new Path.Patterns(), subscribe: new Path.Patterns(), expires: undefined },
-			});
-			await peer.writer.u53(GoAway.id);
-			await new GoAway({ newSessionUri: "" }).encode(peer.writer, version);
-			await expect(wire.read(stream)).rejects.toThrow("second GOAWAY");
-		} finally {
-			pair.client.close();
-		}
-	});
-
-	test(`${alpn} an AUTH presenter can send GOAWAY before withdrawing`, async () => {
-		const pair = createMockTransportPair(alpn);
-		const wire = new IetfAuthWire(new NativeSession(pair.client, version, true));
-		const stream = await Stream.open(pair.client, { version });
-		const peer = await Stream.accept(pair.server, version);
-		if (!peer) throw new Error("no AUTH stream");
-		try {
-			await new AuthMessage(1n, new Uint8Array()).encode(peer.writer, version);
-			expect(await stream.reader.u53()).toBe(AuthMessage.id);
-			await wire.accept(stream);
-			const withdrawn = wire.withdrawn(stream);
-			await peer.writer.u53(GoAway.id);
-			await new GoAway({ newSessionUri: "" }).encode(peer.writer, version);
-			peer.writer.close();
-			await withdrawn;
-		} finally {
-			pair.client.close();
 		}
 	});
 }

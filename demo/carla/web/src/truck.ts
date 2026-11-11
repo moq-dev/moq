@@ -9,7 +9,7 @@
  *
  * @module
  */
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
@@ -44,7 +44,7 @@ interface Command {
 /** A driver session: pending until the truck accepts, `null` once the dial or the session failed. */
 type Session = Moq.Signals.Signal<Moq.Socket.TrackStream | null | undefined>;
 
-const CONTROL_HEARTBEAT = Milli(250);
+const CONTROL_HEARTBEAT = Duration.millis(250);
 const MAX_PENDING_ACKS = 64;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -120,7 +120,7 @@ export class Truck {
 		this.#signals.run(this.#runActive.bind(this));
 		this.#signals.run(this.#runControlLease.bind(this));
 		this.#signals.run(this.#runRespawn.bind(this));
-		this.#signals.interval(() => this.#heartbeat(), Nano.fromMilli(CONTROL_HEARTBEAT));
+		this.#signals.interval(() => this.#heartbeat(), CONTROL_HEARTBEAT);
 
 		// Video pipeline.
 		this.broadcast = new Watch.Broadcast({
@@ -313,11 +313,11 @@ export class Truck {
 	#timestamps(): { label: string; ts: number }[] {
 		const entries: { label: string; ts: number }[] = [];
 		const received = this.sync.out.timestamp.peek();
-		if (received != null) entries.push({ label: "received", ts: received });
+		if (received != null) entries.push({ label: "received", ts: received.asMillis() });
 		const decoded = this.videoDecoder.out.timestamp.peek();
-		if (decoded != null) entries.push({ label: "decoded", ts: decoded });
+		if (decoded != null) entries.push({ label: "decoded", ts: decoded.asMillis() });
 		const rendered = this.videoRenderer.out.timestamp.peek();
-		if (rendered != null) entries.push({ label: "rendered", ts: rendered });
+		if (rendered != null) entries.push({ label: "rendered", ts: rendered.asMillis() });
 		return entries;
 	}
 

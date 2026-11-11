@@ -122,8 +122,6 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 	mock.protocol = Some(version.alpn().to_string());
 	let (client, server) = create_mock_session_pair(mock);
 	// Tokens ride requests alone, and the client announces with PUBLISH_NAMESPACE.
-	let mut client_extensions = moq_net::setup::Extensions::default();
-	client_extensions.auth = false;
 	let mut server_extensions = moq_net::setup::Extensions::default();
 	server_extensions.solicit = false;
 	let (subscribe, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
@@ -131,7 +129,6 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(version.into())
-			.with_extensions(client_extensions)
 			.with_publisher(origin.consume())
 			.connect(harness::now(), client)
 			.await
@@ -305,11 +302,13 @@ fn waiting(c: &mut Criterion) {
 								let mut seen = std::collections::HashSet::new();
 								while seen.len() < paths {
 									match announced.next().await.unwrap() {
-										moq_net::origin::RouteEvent::Start(update)
-										| moq_net::origin::RouteEvent::Update(update)
-										| moq_net::origin::RouteEvent::Restart(update)
-											if update.prefix.as_str().starts_with(&prefix) =>
-										{
+										moq_net::origin::RouteEvent {
+											kind:
+												moq_net::origin::RouteKind::Start
+												| moq_net::origin::RouteKind::Update
+												| moq_net::origin::RouteKind::Restart,
+											announce: update,
+										} if update.prefix.as_str().starts_with(&prefix) => {
 											seen.insert(update.prefix);
 										}
 										_ => {}
@@ -383,8 +382,10 @@ fn shared_requests(c: &mut Criterion) {
 							}
 							let mut seen = std::collections::HashSet::new();
 							while seen.len() < tokens * requests {
-								if let moq_net::origin::RouteEvent::Start(update)
-								| moq_net::origin::RouteEvent::Restart(update) = announced.next().await.unwrap()
+								if let moq_net::origin::RouteEvent {
+									kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Restart,
+									announce: update,
+								} = announced.next().await.unwrap()
 									&& update.prefix.as_str().starts_with(&prefix)
 								{
 									seen.insert(update.prefix);

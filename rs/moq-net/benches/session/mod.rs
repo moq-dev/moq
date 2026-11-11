@@ -43,6 +43,10 @@
 //! `session_join_*` times a new viewer connecting, resolving a broadcast, and
 //! receiving its latest group, swept over what the relays already announce.
 //!
+//! `session_announce` times one broadcast announced and withdrawn beside many a publisher
+//! already announces, until every viewer session saw both, swept over those broadcasts and
+//! the viewers: a change's cost grows with the viewers it reaches, never with the claims held.
+//!
 //! `session_dash_*` models the moq.pro dash aggregator: one session following
 //! every node's per-project stats broadcast, each announced by a peer relay, at
 //! one small frame per track per tick. Throughput counts tracks, so a flat
@@ -417,11 +421,34 @@ impl Instructions {
 	}
 }
 
+/// A current-thread runtime for one benchmark cell: the sessions a cell leaves behind stop
+/// with its runtime instead of running inside the next cell's setup and samples.
 fn runtime() -> tokio::runtime::Runtime {
 	tokio::runtime::Builder::new_current_thread()
 		.enable_time()
 		.build()
 		.unwrap()
+}
+
+/// Drop what a cell built on `rt`, if Criterion's filter ran it, and assert every task its
+/// sessions and origins spawned ends with it: a task that outlives its handles leaks for
+/// as long as a relay runs.
+fn retire<T>(rt: &tokio::runtime::Runtime, built: Option<T>) {
+	let Some(built) = built else {
+		return;
+	};
+	drop(built);
+	// Each close reaches the next driver on its following poll; this many passes is far
+	// more than any teardown chain takes.
+	rt.block_on(async {
+		for _ in 0..1024 {
+			if rt.metrics().num_alive_tasks() == 0 {
+				break;
+			}
+			tokio::task::yield_now().await;
+		}
+	});
+	assert_eq!(rt.metrics().num_alive_tasks(), 0, "tasks outlived the cell's handles");
 }
 
 /// A multi-threaded runtime with `workers` threads, for the scenarios timed in process CPU.
@@ -494,7 +521,7 @@ fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
 	for _ in 0..frames {
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 	}
-	group.finish().unwrap();
+	let group = group.finish().unwrap();
 	group.sequence
 }
 
@@ -531,7 +558,10 @@ impl Backend for Model {
 	const PREFIX: &'static str = "";
 
 	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool) {
-		make_origin(id, capacity)
+		// A relay forwards the routes it learns, as moq-relay's cluster does; off, a
+		// moq-lite-07 viewer never learns the publisher's broadcasts.
+		let (origin, pool) = make_origin(id, capacity);
+		(origin.with_proxy(true), pool)
 	}
 
 	fn origin(relay: &Self::Relay) -> &origin::Producer {
@@ -596,7 +626,8 @@ struct Cluster<B: Backend> {
 	/// One datagram track per broadcast, indexed like [`path`], for datagram shapes only.
 	datagrams: Vec<datagram::Producer>,
 	_broadcasts: Vec<origin::Route>,
-	_origins: Vec<origin::Producer>,
+	/// Each publisher's origin, indexed like `publisher`.
+	origins: Vec<origin::Producer>,
 	_pairs: Vec<Pair>,
 	next_hop: u64,
 	/// The relay and publisher caches; each viewer owns its own.
@@ -616,7 +647,7 @@ impl<B: Backend> Cluster<B> {
 			tracks: Vec::new(),
 			datagrams: Vec::new(),
 			_broadcasts: Vec::new(),
-			_origins: Vec::new(),
+			origins: Vec::new(),
 			_pairs: Vec::new(),
 			next_hop: 0,
 			pools: Vec::new(),
@@ -684,7 +715,7 @@ impl<B: Backend> Cluster<B> {
 			let target = &this.relays[publisher % shape.relays];
 			options.server_subscribe = Some(B::origin(target).clone());
 			this._pairs.push(B::connect(options, target, false).await);
-			this._origins.push(origin);
+			this.origins.push(origin);
 		}
 
 		this
@@ -745,7 +776,16 @@ impl Viewer {
 			.unwrap()
 			.routes();
 		let event = announced.next().await.expect("announced");
-		assert!(matches!(event, moq_net::origin::RouteEvent::Start(_)), "{event:?}");
+		assert!(
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			),
+			"{event:?}"
+		);
 		self.following.push(announced);
 	}
 
@@ -952,11 +992,13 @@ impl<B: Backend> Room<B> {
 	/// Each round completes its reads before this step; pending read deadlines
 	/// share this clock too.
 	fn tick(&mut self) {
-		self.cache_now += if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
-			Duration::from_secs(1)
-		} else {
-			cache::DEFAULT_EXPIRY
-		};
+		self.cache_now = self
+			.cache_now
+			.saturating_add(if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+				Duration::from_secs(1)
+			} else {
+				cache::DEFAULT_EXPIRY
+			});
 		for pool in self.pools() {
 			pool.poll(self.cache_now, &kio::Waiter::noop());
 		}
@@ -1128,8 +1170,7 @@ impl<B: Backend> Room<B> {
 			let group = writing.get_or_insert_with(|| self.cluster.tracks[broadcast].append_group().unwrap());
 			group.write_frame(Timestamp::ZERO, self.payload.clone()).unwrap();
 			if last {
-				group.finish().unwrap();
-				*writing = None;
+				writing.take().expect("written above").finish().unwrap();
 			}
 		}
 		if last {
@@ -1190,7 +1231,6 @@ impl<B: Backend> Room<B> {
 }
 
 fn delivery<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) {
-	let rt = runtime();
 	let shapes: Vec<_> = shapes.into_iter().collect();
 	let cpu = if std::env::var_os("SESSION_CPU").is_some() {
 		"_cpu"
@@ -1200,6 +1240,7 @@ fn delivery<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator
 	let mut group = c.benchmark_group(format!("{}session_delivery_{name}{cpu}", B::PREFIX));
 	for version in VERSIONS {
 		for shape in shapes.iter().filter(|shape| shape.runs_on(version)) {
+			let rt = runtime();
 			// Built on first call: Criterion only calls a routine its filter
 			// selects, and calls it again for every sample.
 			let mut room = None;
@@ -1212,6 +1253,7 @@ fn delivery<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator
 				let room = room.get_or_insert_with(|| rt.block_on(Room::<B>::new(version, *shape)));
 				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
 			});
+			retire(&rt, room);
 		}
 	}
 	group.finish();
@@ -1309,11 +1351,11 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
 		return;
 	}
-	let rt = runtime();
 	let mut group = c.benchmark_group(format!("{}session_range_updates", B::PREFIX));
 	group.sample_size(10);
 	for span in [2u64, 16] {
 		for requests in [1usize, 16] {
+			let rt = runtime();
 			group.throughput(Throughput::Elements(requests as u64));
 			group.bench_function(BenchmarkId::new(format!("groups_{span}"), requests), |b| {
 				let (mut cluster, mut viewers) = rt.block_on(async {
@@ -1407,11 +1449,11 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 }
 
 fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) {
-	let rt = runtime();
 	let shapes: Vec<_> = shapes.into_iter().collect();
 	let mut group = c.benchmark_group(format!("{}session_join_{name}", B::PREFIX));
 	for version in VERSIONS {
 		for shape in &shapes {
+			let rt = runtime();
 			let mut cluster = None;
 			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
 				let cluster = cluster.get_or_insert_with(|| {
@@ -1457,6 +1499,71 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 					})
 				})
 			});
+			retire(&rt, cluster);
+		}
+	}
+	group.finish();
+}
+
+/// `(broadcasts, viewers)` shapes for [`announce`].
+const ANNOUNCE: [(usize, usize); 4] = [(16, 1), (4096, 1), (16, 64), (4096, 64)];
+
+/// One more broadcast announced and withdrawn beside `broadcasts` a publisher already
+/// announces through one relay, timed until each of `viewers` sessions saw both.
+fn announce<B: Backend>(c: &mut Criterion) {
+	let mut group = c.benchmark_group(format!("{}session_announce", B::PREFIX));
+	for version in VERSIONS {
+		for (broadcasts, viewers) in ANNOUNCE {
+			let rt = runtime();
+			let mut room = None;
+			let id = format!("{version}/broadcasts={broadcasts}/viewers={viewers}");
+			group.bench_function(BenchmarkId::from_parameter(id), |b| {
+				let (cluster, routes, next) = room.get_or_insert_with(|| {
+					rt.block_on(async {
+						let shape = Shape {
+							publishers: 1,
+							broadcasts,
+							viewers,
+							..Shape::BASE
+						};
+						let mut cluster = Cluster::<B>::new(version, shape, false).await;
+						let mut routes = Vec::new();
+						for _ in 0..viewers {
+							let viewer = cluster.join(0, false).await;
+							let mut announced = viewer.origin.consume().routes();
+							for _ in 0..broadcasts {
+								let event = announced.next().await.expect("announced");
+								assert_eq!(event.kind, origin::RouteKind::Start);
+							}
+							routes.push((viewer, announced));
+						}
+						(cluster, routes, broadcasts)
+					})
+				});
+				b.iter_custom(|iters| {
+					rt.block_on(async {
+						let start = Instant::now();
+						for _ in 0..iters {
+							// A fresh path each time: a broadcast's identity never comes back.
+							let route = cluster.origins[0]
+								.route(path(*next), origin::RouteOptions::default())
+								.unwrap();
+							*next += 1;
+							for (_, announced) in routes.iter_mut() {
+								let event = announced.next().await.expect("announced");
+								assert_eq!(event.kind, origin::RouteKind::Start);
+							}
+							drop(route);
+							for (_, announced) in routes.iter_mut() {
+								let event = announced.next().await.expect("withdrawn");
+								assert_eq!(event.kind, origin::RouteKind::End);
+							}
+						}
+						start.elapsed()
+					})
+				})
+			});
+			retire(&rt, room);
 		}
 	}
 	group.finish();
@@ -1573,18 +1680,19 @@ impl<B: Backend> DashRoom<B> {
 }
 
 fn dash<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Dash>) {
-	let rt = runtime();
 	let shapes: Vec<_> = shapes.into_iter().collect();
 	let mut group = c.benchmark_group(format!("{}session_dash_{name}", B::PREFIX));
 	group.sample_size(10);
 	for version in DASH_VERSIONS {
 		for shape in &shapes {
+			let rt = runtime();
 			let mut room = None;
 			group.throughput(Throughput::Elements(shape.total() as u64));
 			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
 				let room = room.get_or_insert_with(|| rt.block_on(DashRoom::<B>::new(version, *shape)));
 				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
 			});
+			retire(&rt, room);
 		}
 	}
 	group.finish();
@@ -1597,7 +1705,6 @@ fn allocations<B: Backend>() {
 
 	println!("group::Consumer: {} bytes", size_of::<moq_net::group::Consumer>());
 
-	let rt = runtime();
 	let fanout = Shape {
 		publishers: 1,
 		viewers: 256,
@@ -1609,6 +1716,7 @@ fn allocations<B: Backend>() {
 	let shapes: Vec<_> = groups.chain(datagram_shapes()).collect();
 	for version in VERSIONS {
 		for &shape in shapes.iter().filter(|shape| shape.runs_on(version)) {
+			let rt = runtime();
 			let mut room = rt.block_on(Room::<B>::new(version, shape));
 			room.instructions = Instructions::open();
 			ALLOCATIONS.store(0, Ordering::Relaxed);
@@ -1752,17 +1860,18 @@ impl<B: Backend> ChurnRoom<B> {
 }
 
 fn churn<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Churn>) {
-	let rt = runtime();
 	let shapes: Vec<_> = shapes.into_iter().collect();
 	let mut group = c.benchmark_group(format!("{}session_churn_{name}", B::PREFIX));
 	group.throughput(Throughput::Elements(1));
 	for version in CHURN_VERSIONS {
 		for shape in &shapes {
+			let rt = runtime();
 			let mut room = None;
 			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
 				let room = room.get_or_insert_with(|| rt.block_on(ChurnRoom::<B>::new(version, *shape)));
 				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
 			});
+			retire(&rt, room);
 		}
 	}
 	group.finish();
@@ -1832,8 +1941,8 @@ pub(crate) fn fanout_threads<B: Backend>(c: &mut Criterion) {
 	// Groups delivered per round: one to each viewer.
 	group.throughput(Throughput::Elements(shape.viewers as u64));
 	for workers in [1, 16] {
-		let rt = threaded(workers);
 		for version in ["moq-lite-06", "moq-lite-07-wip"] {
+			let rt = threaded(workers);
 			let mut room = None;
 			group.bench_function(format!("{version}/workers={workers}"), |b| {
 				let room = room.get_or_insert_with(|| {
@@ -1911,7 +2020,16 @@ pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
 							while let Ok(Some(event)) =
 								kio::clock::timeout(Duration::from_secs(1), announced.next()).await
 							{
-								assert!(matches!(event, moq_net::origin::RouteEvent::End(_)), "{event:?}");
+								assert!(
+									matches!(
+										event,
+										moq_net::origin::RouteEvent {
+											kind: moq_net::origin::RouteKind::End,
+											..
+										}
+									),
+									"{event:?}"
+								);
 								retracted += 1;
 							}
 							let elapsed = start.elapsed();
@@ -2076,6 +2194,8 @@ pub(crate) fn session<B: Backend>(c: &mut Criterion) {
 	);
 
 	join::<B>(c, "relays", [1, 2, 8].map(|relays| Shape { relays, ..base }));
+
+	announce::<B>(c);
 
 	churn::<B>(c, "sessions", [1, 16, 128].map(|sessions| Churn { sessions, held: 16 }));
 	churn::<B>(

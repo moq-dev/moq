@@ -6,6 +6,8 @@
 # large for one job splits across several.
 # CHECK_FAIL_FAST=1 stops every lane at the first failed module, for the land
 # gate, which ejects a failing batch either way and gains nothing from the rest.
+# CHECK_TIMES=FILE also writes each phase's wall seconds, CPU milliseconds, and
+# label there, one per line, ending with the whole run's.
 # `--query` prints the selection before CI installs its toolchain and caches.
 # `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
@@ -114,7 +116,7 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 # moq-cli builds the Rust interop clients as examples from outside its
 # crate; sh/rs/select.test.py fails when a target's directory is missing.
 # moq-relay's tests read its NixOS module.
-module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
+module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
     tools='cargo jq' compiles='check fix' fix
 # The C package links moq-c's native-libs lists, and the C++ package's FFI
 # pin. Both packages format with sh/clang-format.sh and OBS's style file.
@@ -156,9 +158,36 @@ module flake '(^\.cargo/|^rs/.*\.(toml|txt|ptx|in)$|^Cargo\.(toml|lock)$|^rust-t
 module bench '^bench/' \
     tools='cargo' compiles=check
 # The CARLA demo's simulator worker and launchers. Its player is a JS
-# package and its GPU bridge a Rust crate, so those modules cover them.
+# package, so that module covers it.
 module carla '^demo/carla/(sim/|justfile$)' \
     tools='uv'
+# The CARLA demo's GPU bridge, a Cargo workspace of its own. It also matches
+# rs/, narrowed after the tool check to the crates it path-depends on, so their
+# API changes compile it while other rs/ changes skip it.
+module carla_bridge '^(\.cargo/config\.toml$|Cargo\.toml$|clippy\.toml$|rust-toolchain\.toml$|demo/carla/(bridge/|justfile$)|rs/)' \
+    tools='cargo jq' compiles='check fix' fix
+# Reads the bridge's manifest and the root workspace's, so it needs cargo and
+# runs only after setup. Dev-dependencies of the crates it reaches never build
+# into it, so they are left out.
+carla_bridge_scope() {
+    local crates
+    crates=$(
+        {
+            cargo metadata --no-deps --format-version 1 --manifest-path demo/carla/bridge/Cargo.toml
+            cargo metadata --no-deps --format-version 1
+        } | jq -rs '
+            (.[1].workspace_root + "/") as $root
+            | (.[1].packages | map({key: (.manifest_path | rtrimstr("/Cargo.toml")), value: [.dependencies[] | select(.kind != "dev") | .path // empty]}) | from_entries) as $deps
+            | def close: (. + [.[] | $deps[.][]?] | unique) as $next | if $next == . then . else $next | close end;
+            [.[0].packages[].dependencies[] | .path // empty] | unique | close | .[] | ltrimstr($root) | gsub("\\."; "\\.")' |
+            tr '\n' '|'
+    )
+    [[ -n "$crates" ]] || {
+        echo "error: found no rs/ crates under the CARLA bridge" >&2
+        exit 1
+    }
+    echo "^(\.cargo/config\.toml$|Cargo\.toml$|clippy\.toml$|rust-toolchain\.toml$|demo/carla/(bridge/|justfile$)|(${crates%|})/)"
+}
 # swift needs no tools: it skips off macOS by design, and platform.yml is its
 # real gate. Its formatter is absent where nixpkgs cannot build it (see
 # flake.nix).
@@ -198,6 +227,9 @@ module python '(\.pyi?|(^|/)pyproject\.toml)$' \
 module shell '' \
     tools='shellcheck shfmt' fix
 module large_files ''
+# Only the release cut edits a MIGRATE.md. A widened run still has a diff to
+# check; only an explicit --all has none.
+module migrate '(^|/)MIGRATE\.md$'
 module text ''
 module toml '' \
     tools='taplo' fix
@@ -276,6 +308,12 @@ for module in "${modules[@]}"; do
         command -v "$tool" >/dev/null 2>&1 || absent+=("$tool")
     done
     if ((${#absent[@]} == 0)); then
+        # A query keeps every rs/ path: any rs/ change already selects rs,
+        # which reports the same need and Rust cache.
+        if [[ "$module" == carla_bridge && -z "$all" ]]; then
+            pattern=$(carla_bridge_scope)
+            grep -qE "$pattern" "$changed" || continue
+        fi
         selected+=("$module")
     elif [[ -n "${CI_STRICT:-}" ]]; then
         missing+=("${absent[@]}")
@@ -367,6 +405,7 @@ step() {
         # The check keeps docs and the isolated default-media lint; the test
         # phase enforces the other clippy checks in its existing build.
         check:rs) run just rs lint-changed "$rs_list" ;;
+        check:carla_bridge) run just carla bridge-check ;;
         check:bench)
             run python3 bench/compare.test.py
             run bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
@@ -412,6 +451,7 @@ step() {
             run sh/markdown.sh check
             ;;
         check:large_files) run sh/large-files.sh "$large_base" ;;
+        check:migrate) [[ "$base" == --all ]] || run sh/migrate.sh "$base" ;;
         check:text) run sh/text.sh ;;
         check:python)
             files '*.py' '*.pyi'
@@ -432,6 +472,7 @@ step() {
         test:py) run just py test ;;
         test:gh) run just gh test ;;
         fix:rs) run just rs fix-changed "$rs_list" ;;
+        fix:carla_bridge) run just carla bridge-fix ;;
         fix:js) run just js fix-changed "$js_list" ;;
         fix:biome) run just biome-fix ;;
         fix:markdown)
@@ -478,10 +519,29 @@ github() {
     [[ -n "${GITHUB_ACTIONS:-}" ]]
 }
 
-# Run one lane's modules in order, appending each phase's seconds to the lane's
-# times file and announcing each phase's start and end on fd 3. A failed phase
-# skips the rest of that module, but independent modules still run. A TERM
-# stops the running phase, waits for it, and records the phase it cut short.
+# Sets cpu to the CPU milliseconds, user and system, of every child this shell
+# has waited for. `times` must run in this shell, not a command substitution's
+# fork, whose children are its own. Bash prints three decimals, with the
+# locale's decimal point.
+lane_cpu() {
+    local user system each minutes seconds
+    times >"$times.cpu"
+    { read -r _ _ && read -r user system; } <"$times.cpu"
+    cpu=0
+    for each in "$user" "$system"; do
+        minutes=${each%%m*}
+        seconds=${each#*m}
+        seconds=${seconds%s}
+        cpu=$((cpu + minutes * 60000 + 10#${seconds%[.,]*} * 1000 + 10#${seconds#*[.,]}))
+    done
+}
+
+# Run one lane's modules in order, appending each phase's wall seconds and CPU
+# milliseconds to the lane's times file and announcing each phase's start and
+# end on fd 3. A failed phase skips the rest of that module, but independent
+# modules still run. A TERM stops the running phase, waits for it, and records
+# the phase it cut short. CPU counts only processes the phase waited for, so
+# not the work of a daemon such as Nix's or Gradle's.
 run_lane() {
     times=$1
     shift
@@ -500,6 +560,8 @@ run_lane() {
         for phase in "${phases[@]}"; do
             current="$phase $module"
             began=$SECONDS
+            lane_cpu
+            cpu_began=$cpu
             if github; then echo "::group::$current"; else echo "==> $current"; fi
             echo "$action: $current started" >&3
             # A job, as `run` explains; errexit stays on inside it. Untrapped,
@@ -537,7 +599,8 @@ run_lane() {
 }
 record() {
     local seconds=$((SECONDS - began))
-    echo "$seconds $current${1:+ ($1)}" >>"$times"
+    lane_cpu
+    echo "$seconds $((cpu - cpu_began)) $current${1:+ ($1)}" >>"$times"
     echo "$action: $current ${1:-passed} in ${seconds}s" >&3
 }
 cancelled() {
@@ -546,28 +609,33 @@ cancelled() {
     record cancelled
 }
 
-# Each phase's wall time, printed when the run ends, pass or fail, so the slow
-# module of a check or a queue run is named without reading log timestamps.
-# GitHub Actions also gets it in the job summary. Concurrent phases overlap, so
-# the run's own wall time comes last.
+# Each phase's wall and CPU time, printed when the run ends, pass or fail, so
+# the slow module of a check or a queue run is named without reading log
+# timestamps. GitHub Actions also gets it in the job summary, and CHECK_TIMES
+# in its file. Concurrent phases overlap, so the whole run comes last.
 report() {
-    local name row seconds label rows=()
+    local name row seconds cpu label total=0 rows=()
     for name in "${lanes[@]:0:next}"; do
         [[ ! -f "$logs/$name.times" ]] || mapfile -t -O "${#rows[@]}" rows <"$logs/$name.times"
     done
     ((${#rows[@]})) || return 0
-    rows+=("$SECONDS wall time")
-    echo "$action: seconds per module" >&2
     for row in "${rows[@]}"; do
-        read -r seconds label <<<"$row"
-        printf '%6d  %s\n' "$seconds" "$label" >&2
+        read -r seconds cpu label <<<"$row"
+        total=$((total + cpu))
+    done
+    rows+=("$SECONDS $total whole run")
+    [[ -z "${CHECK_TIMES:-}" ]] || printf '%s\n' "${rows[@]}" >"$CHECK_TIMES"
+    echo "$action: wall and CPU seconds per module" >&2
+    for row in "${rows[@]}"; do
+        read -r seconds cpu label <<<"$row"
+        printf '%6d %7d  %s\n' "$seconds" "$((cpu / 1000))" "$label" >&2
     done
     [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
     {
-        printf '| %s module | Seconds |\n| --- | ---: |\n' "$action"
+        printf '| %s module | Wall seconds | CPU seconds |\n| --- | ---: | ---: |\n' "$action"
         for row in "${rows[@]}"; do
-            read -r seconds label <<<"$row"
-            printf '| %s | %d |\n' "$label" "$seconds"
+            read -r seconds cpu label <<<"$row"
+            printf '| %s | %d | %d |\n' "$label" "$seconds" "$((cpu / 1000))"
         done
     } >>"$GITHUB_STEP_SUMMARY"
 }
@@ -642,7 +710,7 @@ done
 # Name every failed module after all independent work has completed.
 if ((${#failed[@]})); then
     for name in "${failed[@]}"; do
-        failed_phases=$(sed -n 's/^[0-9]* \(.*\) (failed)$/\1/p' "$logs/$name.times")
+        failed_phases=$(sed -n 's/^[0-9]* [0-9]* \(.*\) (failed)$/\1/p' "$logs/$name.times")
         while IFS= read -r phase; do
             if github; then echo "::error::$action: $phase failed"; else echo "$action: $phase failed" >&2; fi
         done <<<"${failed_phases:-${members[$name]# }}"

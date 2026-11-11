@@ -187,6 +187,12 @@ impl TaskSet {
 		}
 	}
 
+	/// The children queued or running.
+	#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+	pub fn len(&self) -> usize {
+		self.state.read().queued.len() + self.active.len()
+	}
+
 	/// Drive submitted children until every submission handle is dropped and all
 	/// active children finish. The async form of [`Self::poll`], for callers with
 	/// nothing else to poll.

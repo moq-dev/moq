@@ -405,7 +405,7 @@ mod tests {
 	fn fires_only_on_supplied_time() {
 		let mut clock = Manual::new();
 		let deadlines = Deadlines::new(clock.now());
-		let at = clock.now() + Duration::from_secs(3);
+		let at = clock.now().saturating_add(Duration::from_secs(3));
 		let mut deadline = Deadline::new(&deadlines);
 		deadline.set(Some(at));
 		assert_eq!(deadlines.next(), Some(at));
@@ -447,10 +447,10 @@ mod tests {
 		let deadlines = Deadlines::new(clock.now());
 		let mut deadline = Deadline::after(&deadlines, Duration::from_secs(1));
 
-		deadline.set(Some(clock.now() + Duration::from_secs(5)));
+		deadline.set(Some(clock.now().saturating_add(Duration::from_secs(5))));
 		assert_eq!(
 			deadlines.next(),
-			Some(clock.now() + Duration::from_secs(5)),
+			Some(clock.now().saturating_add(Duration::from_secs(5))),
 			"re-armed later"
 		);
 		clock.advance(Duration::from_secs(1));
@@ -464,7 +464,7 @@ mod tests {
 		deadlines.advance(clock.now());
 		assert!(deadline.poll(&crate::Waiter::noop()).is_ready());
 
-		deadline.set(Some(clock.now() + Duration::from_secs(1)));
+		deadline.set(Some(clock.now().saturating_add(Duration::from_secs(1))));
 		assert!(
 			deadline.poll(&crate::Waiter::noop()).is_pending(),
 			"an elapsed deadline re-arms"
@@ -478,7 +478,7 @@ mod tests {
 		let deadlines = Deadlines::new(clock.now());
 		let mut deadline = Deadline::new(&deadlines);
 
-		deadline.set(Some(clock.now() - Duration::from_secs(1)));
+		deadline.set(Some(clock.now().saturating_sub(Duration::from_secs(1))));
 		assert!(deadline.poll(&crate::Waiter::noop()).is_ready(), "in the past");
 		deadline.set(Some(clock.now()));
 		assert!(deadline.poll(&crate::Waiter::noop()).is_ready(), "exactly now");
@@ -532,7 +532,7 @@ mod tests {
 	fn equal_deadlines_fire_in_arming_order() {
 		let mut clock = Manual::new();
 		let deadlines = Deadlines::new(clock.now());
-		let at = clock.now() + Duration::from_secs(1);
+		let at = clock.now().saturating_add(Duration::from_secs(1));
 
 		// Created in one order, armed in the other.
 		let order = Arc::new(Mutex::new(Vec::new()));
@@ -587,7 +587,7 @@ mod tests {
 		let ticking = deadlines.clone();
 		tasks.push(move |waiter: &crate::Waiter| {
 			while tick.poll(waiter).is_ready() {
-				tick.set(Some(ticking.now() + PERIOD));
+				tick.set(Some(ticking.now().saturating_add(PERIOD)));
 			}
 			Poll::Pending
 		});
@@ -609,9 +609,13 @@ mod tests {
 
 		assert!(owner.as_mut().poll(&mut cx).is_pending());
 		for ticks in 1..=3 {
-			now.set(start + PERIOD * ticks);
+			now.set(start.saturating_add(PERIOD * ticks));
 			assert!(owner.as_mut().poll(&mut cx).is_pending());
-			assert_eq!(next.get(), Some(now.get() + PERIOD), "the deadline re-armed");
+			assert_eq!(
+				next.get(),
+				Some(now.get().saturating_add(PERIOD)),
+				"the deadline re-armed"
+			);
 			assert_eq!(wakes.count.load(Ordering::SeqCst), 0, "tick {ticks} woke its own poll");
 		}
 
@@ -626,7 +630,7 @@ mod tests {
 	#[test]
 	#[should_panic(expected = "time moved backwards")]
 	fn time_cannot_move_backwards() {
-		let deadlines = Deadlines::new(Instant::ZERO + Duration::from_secs(1));
+		let deadlines = Deadlines::new(Instant::ZERO.saturating_add(Duration::from_secs(1)));
 		deadlines.advance(Instant::ZERO);
 	}
 
@@ -634,7 +638,7 @@ mod tests {
 	/// unwinding does not panic a second time.
 	#[test]
 	fn moving_backwards_leaves_the_queue_unpoisoned() {
-		let deadlines = Deadlines::new(Instant::ZERO + Duration::from_secs(1));
+		let deadlines = Deadlines::new(Instant::ZERO.saturating_add(Duration::from_secs(1)));
 		let deadline = Deadline::after(&deadlines, Duration::from_secs(1));
 		let moved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| deadlines.advance(Instant::ZERO)));
 		assert!(moved.is_err());
@@ -646,28 +650,28 @@ mod tests {
 	/// handed, and the ambient timers arm on it and fire only as it advances.
 	#[test]
 	fn an_entered_queue_is_the_ambient_clock() {
-		let start = Instant::ZERO + Duration::from_secs(10);
+		let start = Instant::ZERO.saturating_add(Duration::from_secs(10));
 		let deadlines = Deadlines::new(start);
 		let entered = deadlines.enter();
 		assert_eq!(crate::clock::now(), start);
 
 		let mut sleep = std::pin::pin!(crate::clock::sleep(Duration::from_secs(1)));
-		assert_eq!(deadlines.next(), Some(start + Duration::from_secs(1)));
+		assert_eq!(deadlines.next(), Some(start.saturating_add(Duration::from_secs(1))));
 		let (wakes, waiter) = counter();
 		let waker = waiter.waker().clone();
 		let mut cx = Context::from_waker(&waker);
 		assert!(sleep.as_mut().poll(&mut cx).is_pending());
 
-		deadlines.advance(start + Duration::from_millis(999));
-		assert_eq!(crate::clock::now(), start + Duration::from_millis(999));
+		deadlines.advance(start.saturating_add(Duration::from_millis(999)));
+		assert_eq!(crate::clock::now(), start.saturating_add(Duration::from_millis(999)));
 		assert_eq!(wakes.count.load(Ordering::SeqCst), 0);
-		deadlines.advance(start + Duration::from_secs(1));
+		deadlines.advance(start.saturating_add(Duration::from_secs(1)));
 		assert_eq!(wakes.count.load(Ordering::SeqCst), 1, "the sleep was not woken");
 		assert!(sleep.as_mut().poll(&mut cx).is_ready());
 
 		drop(entered);
 		assert!(
-			crate::clock::now() > start + Duration::from_secs(1),
+			crate::clock::now() > start.saturating_add(Duration::from_secs(1)),
 			"the host clock is back"
 		);
 	}
@@ -679,24 +683,33 @@ mod tests {
 		let _entered = deadlines.enter();
 		let mut sleep = crate::clock::sleep(Duration::MAX);
 		assert_eq!(deadlines.next(), None);
-		sleep.reset(Instant::ZERO + Duration::from_secs(1));
-		assert_eq!(deadlines.next(), Some(Instant::ZERO + Duration::from_secs(1)));
+		sleep.reset(Instant::ZERO.saturating_add(Duration::from_secs(1)));
+		assert_eq!(
+			deadlines.next(),
+			Some(Instant::ZERO.saturating_add(Duration::from_secs(1)))
+		);
 	}
 
 	/// Entering nests, and dropping a guard restores the queue entered before it.
 	#[test]
 	fn entering_nests() {
-		let outer = Deadlines::new(Instant::ZERO + Duration::from_secs(1));
-		let inner = Deadlines::new(Instant::ZERO + Duration::from_secs(2));
+		let outer = Deadlines::new(Instant::ZERO.saturating_add(Duration::from_secs(1)));
+		let inner = Deadlines::new(Instant::ZERO.saturating_add(Duration::from_secs(2)));
 		let _outer = outer.enter();
 		{
 			let _inner = inner.enter();
-			assert_eq!(crate::clock::now(), Instant::ZERO + Duration::from_secs(2));
+			assert_eq!(
+				crate::clock::now(),
+				Instant::ZERO.saturating_add(Duration::from_secs(2))
+			);
 		}
-		assert_eq!(crate::clock::now(), Instant::ZERO + Duration::from_secs(1));
+		assert_eq!(
+			crate::clock::now(),
+			Instant::ZERO.saturating_add(Duration::from_secs(1))
+		);
 		std::thread::spawn(|| {
 			assert!(
-				crate::clock::now() > Instant::ZERO + Duration::from_secs(2),
+				crate::clock::now() > Instant::ZERO.saturating_add(Duration::from_secs(2)),
 				"other threads keep their own clock"
 			)
 		})
@@ -720,8 +733,8 @@ mod tests {
 	/// and the retired inner guard's drop does not bring a queue back.
 	#[test]
 	fn a_caught_out_of_order_drop_restores_the_clock() {
-		let outer = Deadlines::new(Instant::ZERO + Duration::from_secs(1));
-		let inner = Deadlines::new(Instant::ZERO + Duration::from_secs(2));
+		let outer = Deadlines::new(Instant::ZERO.saturating_add(Duration::from_secs(1)));
+		let inner = Deadlines::new(Instant::ZERO.saturating_add(Duration::from_secs(2)));
 		let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
 			let outer = outer.enter();
 			let _inner = inner.enter();
@@ -730,7 +743,7 @@ mod tests {
 		assert!(result.is_err(), "the out-of-order drop did not panic");
 		assert!(super::entered().is_none(), "a dropped queue is still the ambient clock");
 		assert!(
-			crate::clock::now() > Instant::ZERO + Duration::from_secs(2),
+			crate::clock::now() > Instant::ZERO.saturating_add(Duration::from_secs(2)),
 			"the host clock is back"
 		);
 	}

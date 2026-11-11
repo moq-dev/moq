@@ -90,8 +90,9 @@ impl<T: serde::Serialize> ReportTrack<T> {
 
 	/// End the track cleanly, keeping the last snapshot.
 	fn finish(&mut self) {
-		if let Some(track) = &mut self.track
-			&& let Err(err) = track.finish()
+		// A clone, so the track stays to abort, refusing writes now that it finished.
+		if let Some(track) = &self.track
+			&& let Err(err) = track.clone().finish()
 		{
 			tracing::warn!(%err, "failed to finish a report");
 		}
@@ -489,7 +490,9 @@ async fn write_echo(
 				let event = event.context("announcements ended")?;
 				let (announce, active) = match event {
 					moq_net::announce::Event::Present(announce) => (announce, true),
-					moq_net::announce::Event::Absent(announce) => (announce, false),
+					moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => (announce, false),
+					// A reader rides out its path being held.
+					moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
 				};
 				let path = announce.prefix;
 				if !path.has_prefix(&prefix) || !hang::echo::is_echo(&path) {
@@ -688,7 +691,7 @@ mod tests {
 		tokio::spawn(write_echo(origin.consume(), String::new(), out));
 
 		let claim = origin
-			.route_prefix("viewer.echo", moq_net::origin::RouteOptions::default())
+			.claim("viewer.echo", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		kio::clock::timeout(Duration::from_secs(1), claim.requested())
 			.await

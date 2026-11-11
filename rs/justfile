@@ -18,6 +18,16 @@ no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuz
 default:
     just check
 
+# Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/route/RouteHandoff.tla`.
+# Pass `-config rs/<path>.cfg` for a config not named after the spec.
+tla spec *args:
+    nix shell --inputs-from . nixpkgs#tlaplus --command tlc -workers auto -cleanup -metadir "$(mktemp -d)" {{ args }} rs/{{ spec }}
+
+# Prove a Tamarin model's lemmas, e.g. `just rs tamarin moq-net/verify/route-key/RouteKey.spthy`.
+# Pass `-D=<VARIANT>` for a variant the model defines.
+tamarin spec *args:
+    nix shell --inputs-from . nixpkgs#tamarin-prover --command tamarin-prover --prove {{ args }} rs/{{ spec }}
+
 # Default features for the selected packages; `features` covers the feature
 # matrix nightly and on release PRs. No `cargo check` pass: clippy is a
 # superset of it, and the two use different rustc wrappers, so running both
@@ -154,8 +164,9 @@ macos-test:
     source sh/checks.sh
     run just rs test --manifest-path rs/moq-auth/Cargo.toml
     run just rs test -p kio -p hang -p moq-tokio -p moq-sock
-    run just rs test -p moq-sock --features fast-apple-datapath
     run just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
+    # Runner has no camera; these tests need none.
+    run just rs test -p moq-video --no-default-features --features capture -E 'test(/^capture::avfoundation::tests::/)'
     run just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
     # The runner's paravirtual Metal device proves the IOSurface import, ignored elsewhere.
     run just rs test -p moq-video --no-default-features --features render --lib --run-ignored only \
@@ -293,8 +304,6 @@ coroutines:
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-mux --no-deps --no-default-features
     run bash sh/rs/coroutines.sh moq-hls -- --no-default-features
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-hls --no-deps --no-default-features
-    run bash sh/rs/coroutines.sh moq-room -- --no-default-features
-    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-room --no-deps --no-default-features
     run bash sh/rs/coroutines.sh moq-stats -- --no-default-features
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-stats --no-deps --no-default-features
     run bash sh/rs/coroutines.sh moq-crypto -- --no-default-features --features sign,e2ee,provider,serde
@@ -487,12 +496,6 @@ fuzz target *args:
 coverage crate="workspace":
     bash sh/rs/coverage.sh '{{ crate }}'
 
-# Fail on mutants of .cargo/mutants.toml's scope that no test catches, under
-# target/mutants. Arguments pass to cargo-mutants: `just rs mutants --shard 0/8`.
-[positional-arguments]
-mutants *args:
-    bash sh/rs/mutants.sh "$@"
-
 # Build the default workspace members.
 build:
     bash sh/local.sh cargo build --locked
@@ -568,7 +571,7 @@ gst-smoke *args:
 codspeed:
     VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation \
         -p kio -p moq-audio -p moq-crypto -p moq-json -p moq-mux -p moq-net -p moq-pattern -p moq-quic -p moq-rtmp \
-        --features moq-audio/bus,moq-net/fuzz,moq-quic/fuzz \
+        --features moq-audio/bus,moq-json/bench,moq-net/fuzz,moq-quic/fuzz \
         --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
         --bench catalog --bench containers --bench decode_clock --bench export --bench jitter \
         --bench parameter_sets --bench sync --bench ts_programs --bench ts_schedule --bench ts_video \

@@ -341,18 +341,19 @@ const GOLDEN_RESOLVED = [
 	{ start: { suffix: Path.from("room/b"), hops: [hop(0x5555n), relay] } },
 ];
 
-// Pinned from the Rust encoder (`lite::compress::tests::golden_stream_is_pinned`), so the
-// JS decoder is checked against real compressed output.
+// Rust's compressed output (`lite::compress::tests::golden_stream_is_pinned`) before lite-07's
+// route layer, which js/net does not speak yet; quest/m2/cluster-routing/routes/js.md realigns
+// both streams with Rust's.
 const GOLDEN =
-	"001800000a726f6f6d2f612f63616d01610000029111a2220000000f0102036d69630161000101b33301000208000101c044440100010101000e020101620161000201c055550100";
+	"001900000a726f6f6d2f612f63616d0161000000029111a222000000100102036d6963016100000101b33301000208000101c044440100010101000f02010162016100000201c055550100";
 
 test("AnnounceHistory resolves the Rust encoder's compressed stream", async () => {
 	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
 });
 
-// JS always encodes literally; Rust decodes these bytes too (`js_literal_stream_decodes`).
+// JS always encodes literally. Rust's `js_literal_stream_decodes` pins the route-layer form.
 const JS_LITERAL =
-	"001800000a726f6f6d2f612f63616d01610000029111a2220000001800000a726f6f6d2f612f6d69630161000002b333a2220000020a000002c04444a22200000101010015000006726f6f6d2f620161000002c05555a2220000";
+	"001900000a726f6f6d2f612f63616d0161000000029111a2220000001900000a726f6f6d2f612f6d6963016100000002b333a2220000020a000002c04444a22200000101010016000006726f6f6d2f62016100000002c05555a2220000";
 
 test("the literal draft-07 stream matches what Rust decodes", async () => {
 	const wire = await bytes(async (w) => {
@@ -471,12 +472,12 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 		expect(got).toMatchObject({ cost: ceiling });
 	}
 
-	// ANNOUNCE_START: path base, path keep, empty suffix, instance "a", epoch 0, hop base, no
-	// hops, hop keep, then a cost of 2^64-1, which only lite-07's varints can carry.
+	// ANNOUNCE_START: path base, path keep, empty suffix, instance "a", unminted, epoch 0, hop
+	// base, no hops, hop keep, then a cost of 2^64-1, which only lite-07's varints can carry.
 	const wire = await bytes(async (w) => {
 		await w.u53(0);
-		await w.u53(18);
-		for (const byte of [0, 0, 0, 1, 0x61, 0, 0, 0, 0]) await w.u8(byte);
+		await w.u53(19);
+		for (const byte of [0, 0, 0, 1, 0x61, 0, 0, 0, 0, 0]) await w.u8(byte);
 		await w.u62(huge);
 	}, Version.DRAFT_07);
 	const got = await decodeAnnounceBroadcast(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07);
@@ -494,8 +495,8 @@ test("wip start and update carry one static cost", async () => {
 			),
 		v,
 	);
-	// Path base, path keep, empty suffix, instance "b", epoch 0, hop base, no hops, hop keep, cost.
-	expect([...start]).toEqual([0, 10, 0, 0, 0, 1, 0x62, 0, 0, 0, 0, 0]);
+	// Path base, path keep, empty suffix, instance "b", unminted, epoch 0, hop base, no hops, hop keep, cost.
+	expect([...start]).toEqual([0, 11, 0, 0, 0, 1, 0x62, 0, 0, 0, 0, 0, 0]);
 	const update = await bytes(
 		(w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [], cost: Cost.zero }, v),
 		v,

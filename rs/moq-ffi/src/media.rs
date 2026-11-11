@@ -1310,14 +1310,11 @@ impl MoqMediaContainerProducer {
 		let result = (|| {
 			let _guard = crate::ffi::enter();
 			let mut guard = self.inner.lock().unwrap();
-			let mut container = guard.take().ok_or(MoqError::Closed)?;
-			if let Err(err) = container.import.finish() {
-				container.import.abort(cause(&err));
-				return Err(MoqError::Codec {
-					reason: format!("finish failed: {err}"),
-				});
-			}
-			self.children.keep(container);
+			let container = guard.take().ok_or(MoqError::Closed)?;
+			let finished = container.import.finish().map_err(|err| MoqError::Codec {
+				reason: format!("finish failed: {err}"),
+			})?;
+			self.children.keep(finished);
 			Ok(())
 		})();
 		self.driver.check()?;
@@ -1648,7 +1645,7 @@ mod read_tests {
 			write(5, 5_000_000);
 			write(4, 4_700_000);
 			write(3, 4_400_000);
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			let mut micros = Vec::new();
 			while let Some(read) = media.read().await.unwrap() {
 				if let moq_mux::container::Read::Frame { frame, .. } = read {
@@ -1753,7 +1750,7 @@ mod read_tests {
 			panic!("end is not EOF")
 		};
 		assert_eq!(frame.payload, b"resumed");
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert!(reader.next().await.unwrap().is_none());
 		reader.cancel();
 		assert!(matches!(reader.next().await, Err(MoqError::Cancelled)));

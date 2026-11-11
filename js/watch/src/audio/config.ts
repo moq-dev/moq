@@ -1,4 +1,4 @@
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
@@ -57,10 +57,10 @@ export function playbackIdentity(config: Catalog.AudioConfig): PlaybackIdentity 
  * Undefined for Opus, whose packets state their own duration (see `Util.Opus.packetSamples`), and
  * for codecs with no constant. Never learned from observed timestamps.
  */
-export function frameDuration(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">): Milli | undefined {
+export function frameDuration(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">): Duration | undefined {
 	const samples = frameSamples(config);
 	if (samples === undefined) return undefined;
-	return Milli((samples * 1000) / config.sampleRate);
+	return Duration.millis((samples * 1000) / config.sampleRate);
 }
 
 /**
@@ -68,11 +68,11 @@ export function frameDuration(config: Pick<Catalog.AudioConfig, "codec" | "sampl
  * duration an Opus packet declares in its TOC byte (RFC 6716 §3.1), always reckoned at 48 kHz.
  * CMAF reports an implicit duration as zero, which states nothing.
  */
-export function packetDuration(codec: string, frame: Container.Frame): Milli | undefined {
-	if (frame.duration) return Milli.fromMicro(frame.duration);
+export function packetDuration(codec: string, frame: Container.Frame): Duration | undefined {
+	if (frame.duration !== undefined && !frame.duration.isZero()) return frame.duration;
 	if (!codec.startsWith("opus")) return undefined;
 	const samples = Util.Opus.packetSamples(frame.payload);
-	return samples === undefined ? undefined : Milli((samples * 1000) / OPUS_RATE);
+	return samples === undefined ? undefined : Duration.millis((samples * 1000) / OPUS_RATE);
 }
 
 function frameSamples(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">): number | undefined {

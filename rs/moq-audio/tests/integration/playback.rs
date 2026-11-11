@@ -55,7 +55,7 @@ async fn open() -> playback::Engine {
 
 	// The first pull fills the device's buffer at once, so only a clock that
 	// keeps moving after it shows the device is playing.
-	let deadline = kio::clock::Instant::now() + Duration::from_secs(10);
+	let deadline = kio::clock::Instant::now().saturating_add(Duration::from_secs(10));
 	let mut first = None;
 	loop {
 		let clock = observer.read().expect("an observation").clock;

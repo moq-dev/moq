@@ -23,13 +23,3 @@ Routing: Wildcard landed in #4403, so a service claims the prefix it could
 serve instead of enumerating broadcasts. Serving the relay's ingested-only
 view (`origin::Consumer::local()`) to localhost workers belongs to moq.pro's
 edge, which embeds moq-relay; it moved there on 2026-09-28.
-
-## Required
-
-- [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
-- [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
-- [kio's Instant has no panicking arithmetic, and peer values never wrap](/quest/m0/peer-arithmetic.md) - every deadline states what overflow means, so a peer's retry interval or a huge configured duration cannot panic a task
-- [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Dart `moq` 0.1.1 reaches pub.dev from `release`
-- [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in GitHub's merge queue, one tested entry at a time, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
-- [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one drops a queued PR
-- [GOAWAY redirects to loopback are refused in every spelling](/quest/m0/goaway-loopback.md) - Rust's `is_local` decodes `moqt://127.1`-style hosts as the dial does, and both clients' fixes reach `release`

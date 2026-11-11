@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
 import { ProtocolViolation, SessionCode } from "../error.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin } from "../mock.ts";
@@ -116,7 +116,7 @@ test("a defined object status does not close the session", async () => {
 		}).encode(version);
 		const writer = writable.getWriter();
 		await writer.write(bytes);
-		expect(await settlesWithin(pair.server.closed, clock, Milli(50))).toBe(false);
+		expect(await settlesWithin(pair.server.closed, clock, Duration.millis(50))).toBe(false);
 	} finally {
 		connection.abort();
 	}
@@ -191,7 +191,7 @@ test("a relay shares one IETF subscription across stream and datagram readers", 
 			accept({ url, transport: upstream.server, publish: source.consume() }),
 		]);
 		const original = wireOf(peers[0]).consume(path);
-		const requests = relay.routePrefix(path);
+		const requests = relay.claim(path);
 		const cursor = requests.requested();
 		const routing = (async () => {
 			for await (const request of cursor) request.serve(original);

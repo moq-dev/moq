@@ -1,6 +1,6 @@
 // Protected tracks over real moq-lite and MoQ Transport sessions: relays forward ciphertext.
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type Broadcast, Connection, Origin, type Path, Time } from "@moq/net";
 // The in-memory WebTransport pair @moq/net tests with; not part of its published surface.
 import { createMockTransportPair } from "../../../net/src/mock.ts";
@@ -81,7 +81,7 @@ for (const [name, protocol, routed, timed] of transports) {
 		expect(Epoch.of(remote)).toBe(routed ? generation.epoch : undefined);
 		const epoch = Epoch.of(remote) ?? generation.epoch;
 		const consumer = await new Protected.Consumer(remote, cred.consume(epoch)).subscribe("video", {
-			delay: { max: Milli(60_000) },
+			delay: { max: Duration.millis(60_000) },
 		});
 
 		const received = await consumer.recvGroup();

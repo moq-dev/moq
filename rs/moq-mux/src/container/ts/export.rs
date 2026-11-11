@@ -126,6 +126,8 @@ where
 	active_program: u64,
 	follow_until: Option<kio::clock::Instant>,
 	follow_timer: Option<std::pin::Pin<Box<kio::clock::Sleep>>>,
+	/// When a read last found nothing more due: the output had caught up then ([`Self::shed`]).
+	caught_up: Option<kio::clock::Instant>,
 }
 
 /// Input and mux state belonging to one publisher instance. The release clock
@@ -895,8 +897,8 @@ impl Track {
 		let ahead = ahead.min(arrived.duration_since(kio::clock::Instant::ZERO));
 		let ahead = ahead.min(read.duration_since(kio::clock::Instant::ZERO));
 		let arrival = Arrival {
-			arrived: arrived - ahead,
-			read: read - ahead,
+			arrived: arrived.saturating_sub(ahead),
+			read: read.saturating_sub(ahead),
 			decode: key.into(),
 			restart,
 			sync,
@@ -1661,6 +1663,7 @@ where
 			active_program: 0,
 			follow_until: None,
 			follow_timer: None,
+			caught_up: None,
 		}
 	}
 
@@ -1704,6 +1707,14 @@ where
 	/// muxer has no use for it.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
+		let poll = self.poll_frame(waiter);
+		if poll.is_pending() {
+			self.caught_up = Some(kio::clock::now());
+		}
+		poll
+	}
+
+	fn poll_frame(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		if self.pending.is_some() {
 			self.stop_old(waiter)?;
 		}
@@ -1799,6 +1810,13 @@ where
 
 		// 4. Mux each frame the jitter buffer lets go (the first carries the buffered
 		// PAT/PMT), then lay out every grid slot whose time has come ([`Self::lay_due`]).
+		// A shed makes room in each source's jitter window, so read them again.
+		if self.program.queue.is_empty()
+			&& self.shed()
+			&& let Err(err) = self.fill(waiter)
+		{
+			self.leave(err)?;
+		}
 		loop {
 			if let Some(out) = self.pop() {
 				return Poll::Ready(Ok(Some(out)));
@@ -2507,8 +2525,13 @@ where
 				.filter(|track| track.source.reads(&self.program.source, name, config));
 			let mut track = match reused {
 				Some(track) => track,
-				None => match ExportSource::for_video(&self.program.source, name, config, self.budget())?
-					.map(|s| at_edge(s, self.program.replay))
+				None => match ExportSource::for_video(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(self.budget()),
+				)?
+				.map(|s| at_edge(s, self.program.replay))
 				{
 					Some(source) => Track::new(source, kind.clone()),
 					None => continue,
@@ -2528,8 +2551,13 @@ where
 				.filter(|track| track.source.reads(&self.program.source, name, config));
 			let mut track = match reused {
 				Some(track) => track,
-				None => match ExportSource::for_audio(&self.program.source, name, config, self.budget())?
-					.map(|s| at_edge(s, self.program.replay))
+				None => match ExportSource::for_audio(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(self.budget()),
+				)?
+				.map(|s| at_edge(s, self.program.replay))
 				{
 					Some(source) => Track::new(source, kind.clone()),
 					None => continue,
@@ -2556,7 +2584,11 @@ where
 				Some(track) => track,
 				None => Track::new(
 					stream_edge(
-						ExportSource::for_stream(&self.program.source, name, self.budget())?,
+						ExportSource::for_stream(
+							&self.program.source,
+							name,
+							moq_net::track::Delay::default().with_max(self.budget()),
+						)?,
 						&kind,
 						self.program.replay,
 					),
@@ -2604,17 +2636,31 @@ where
 				continue;
 			}
 			let source = if let Some(config) = catalog.video.renditions.get(name) {
-				ExportSource::for_video(&self.program.source, name, config, budget)?
-					.map(|s| at_edge(s, self.program.replay))
+				ExportSource::for_video(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(budget),
+				)?
+				.map(|s| at_edge(s, self.program.replay))
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
-				ExportSource::for_audio(&self.program.source, name, config, budget)?
-					.map(|s| at_edge(s, self.program.replay))
+				ExportSource::for_audio(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(budget),
+				)?
+				.map(|s| at_edge(s, self.program.replay))
 			} else if mpegts
 				.tracks
 				.get(name)
 				.is_some_and(|t| t.verbatim.is_some() || t.pes_packet.is_some())
 			{
-				let source = ExportSource::for_stream(&self.program.source, name, budget)?;
+				let source = ExportSource::for_stream(
+					&self.program.source,
+					name,
+					moq_net::track::Delay::default().with_max(budget),
+				)?;
 				Some(stream_edge(source, &track.kind, self.program.replay))
 			} else {
 				None
@@ -2648,13 +2694,23 @@ where
 				if track.source.reads(&self.program.source, name, config) {
 					continue;
 				}
-				let source = ExportSource::for_video(&self.program.source, name, config, budget)?;
+				let source = ExportSource::for_video(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(budget),
+				)?;
 				(source, video_kind(config, name)?)
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
 				if track.source.reads(&self.program.source, name, config) {
 					continue;
 				}
-				let source = ExportSource::for_audio(&self.program.source, name, config, budget)?;
+				let source = ExportSource::for_audio(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(budget),
+				)?;
 				(source, audio_kind(config, name)?)
 			} else {
 				continue;
@@ -2854,7 +2910,8 @@ where
 			self.cancel_pending();
 			let next = self.replacement(self.program.source.switched(broadcast), catalog);
 			self.pending = Some(Box::new(next));
-			self.follow_until.get_or_insert_with(|| kio::clock::now() + follow);
+			self.follow_until
+				.get_or_insert_with(|| kio::clock::now().saturating_add(follow));
 			return Ok(());
 		}
 		if let Some(mut pending) = self.pending.take() {
@@ -3846,6 +3903,35 @@ where
 	/// frames are only read then, so with the whole delay they would arrive at their deadline.
 	fn budget(&self) -> Duration {
 		self.program.delay / 2
+	}
+
+	/// Shed what a padded output fell more than [`Self::budget`] behind on, as when its sink
+	/// blocks or drains slower than the multiplex rate. Every slot it missed would otherwise go
+	/// out at once, and the frames it left unread would reach the jitter buffer as late as a
+	/// source clock running far slow. Instead it drops what is due by now and resumes the grid
+	/// on the media still to come, flagging the jump as a PCR discontinuity.
+	///
+	/// It is behind by how long the jitter buffer's front has been overdue since a read last
+	/// caught up: a frame held back while the output keeps up (for the program's tables, or a
+	/// generation still going out) is no lag of the sink's, and a source that fell silent leaves
+	/// nothing overdue.
+	/// Returns whether it shed.
+	fn shed(&mut self) -> bool {
+		// Once every source has ended, the tail goes out late if it must.
+		if self.program.mux_rate.is_none() || self.held.is_some() || self.program.schedule.ended() {
+			return false;
+		}
+		let (Some(due), Some(caught_up)) = (self.jitter.front_deadline(), self.caught_up) else {
+			return false;
+		};
+		let behind = kio::clock::now().saturating_duration_since(due.max(caught_up));
+		if behind <= self.budget() {
+			return false;
+		}
+		tracing::warn!(?behind, "MPEG-TS output fell behind its multiplex rate, shedding");
+		self.jitter.shed(kio::clock::now());
+		self.rewind();
+		true
 	}
 
 	/// Lay out every grid slot whose time has come, and wake when the next one is due.
@@ -5113,7 +5199,12 @@ mod tests {
 		let publisher = broadcast.create_track("video", hang::container::track_info(0)).unwrap();
 		let _publisher = Producer::new(publisher, Container::Legacy(MediaKind::Video));
 		let source = crate::source::announced(&broadcast.consume()).await;
-		let source = super::ExportSource::for_stream(&source, "video", Duration::from_secs(2)).unwrap();
+		let source = super::ExportSource::for_stream(
+			&source,
+			"video",
+			moq_net::track::Delay::default().with_max(Duration::from_secs(2)),
+		)
+		.unwrap();
 		let mut track = super::Track::new(source, Kind::Video(mpeg2ts::es::StreamType::H264));
 		let arrived = kio::clock::now();
 		for &(at, keyframe) in frames {
@@ -5228,7 +5319,12 @@ mod tests {
 				(1, "video", Kind::Video(mpeg2ts::es::StreamType::H264)),
 				(2, "audio", Kind::Mp2 { sample_rate: 48_000 }),
 			] {
-				let source = super::ExportSource::for_stream(&source, name, Duration::from_secs(2)).unwrap();
+				let source = super::ExportSource::for_stream(
+					&source,
+					name,
+					moq_net::track::Delay::default().with_max(Duration::from_secs(2)),
+				)
+				.unwrap();
 				let mut track = super::Track::new(source, kind);
 				track.pid = pid;
 				tracks.push(track);
@@ -5274,7 +5370,7 @@ mod tests {
 				for at in (40..=end).step_by(40) {
 					publisher.write(frame(at)).unwrap();
 				}
-				publisher.finish().unwrap();
+				publisher.end_with(None).unwrap();
 			}
 			let waiter = kio::Waiter::noop();
 			for index in order {
@@ -5295,7 +5391,11 @@ mod tests {
 			// The last available audio frame, including its scheduling lead, anchors both orders.
 			let (decode, key, _) = tracks[1].released.unwrap();
 			assert_eq!(decode.as_micros(), 800_000);
-			assert_eq!(jitter.at(0, key), Some(start + Duration::from_millis(500)), "{order:?}");
+			assert_eq!(
+				jitter.at(0, key),
+				Some(start.saturating_add(Duration::from_millis(500))),
+				"{order:?}"
+			);
 			tokio::time::advance(Duration::from_millis(500)).await;
 			let video = std::iter::from_fn(|| match jitter.poll_next(&waiter) {
 				std::task::Poll::Ready(ready) => Some(ready),

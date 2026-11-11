@@ -1,6 +1,8 @@
 # `@moq/qmux`
 
 ```ts
+import { Duration } from "@moq/clock";
+
 export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBufferSize"> {
 	protocol?: string;
 }
@@ -10,19 +12,14 @@ export interface BidirectionalStream extends WebTransportBidirectionalStream {
 }
 
 export interface Config {
-	handshakeTimeout?: number | null;
-	idleTimeout?: number | null;
+	handshakeTimeout?: Duration | null;
+	idleTimeout?: Duration | null;
 	maxDatagramFrameSize?: bigint | null;
 	maxRecordSize?: bigint;
 	maxStreamsBidi?: bigint;
 	maxStreamsUni?: bigint;
 	receiveWindow?: bigint;
 	streamReceiveWindow?: bigint;
-}
-
-export interface InstallOptions {
-	requireProtocol?: boolean;
-	versions?: Record<string, Version | Version[] | null>;
 }
 
 export interface SendStream extends WritableStream<Uint8Array> {
@@ -133,8 +130,6 @@ export interface WebSocketStreamOpenEvent {
 	readable: ReadableStream<WebSocketStreamData>;
 	writable: WritableStream<WebSocketStreamData>;
 }
-
-export function install(options?: InstallOptions): boolean;
 
 export function selectSubprotocol(offered: string | readonly string[] | null | undefined, options?: Pick<SessionOptions, "protocols" | "versions" | "requireProtocol">): string | undefined;
 ```

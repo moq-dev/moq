@@ -4,7 +4,7 @@
  *
  * @module
  */
-import { Instant, Nano, now, Second, sleep, sleepUntil } from "@moq/clock";
+import { Duration, Instant, now, sleep, sleepUntil, Wall } from "@moq/clock";
 
 /** Cancels a subscription, effect, or other registration when called. */
 export type Dispose = () => void;
@@ -730,7 +730,7 @@ export class Effect {
 		if (this.#async.size > 0) {
 			// Diagnostic only: a task that ignores cancellation stalls the rerun, so name it.
 			const warn = new AbortController();
-			sleep(Nano.fromSecond(Second(5)), { signal: warn.signal, ref: false }).then(() => {
+			sleep(Duration.secs(5), { signal: warn.signal, ref: false }).then(() => {
 				// A close() racing the timer disarms it, but the wakeup can already be
 				// queued by then. There is nothing to warn about once the effect is gone.
 				if (this.#dispose === undefined) return;
@@ -853,7 +853,7 @@ export class Effect {
 	}
 
 	/** Runs `fn` after `duration` on the installed clock, unless the effect reruns or closes first. */
-	timer(fn: () => void, duration: Nano) {
+	timer(fn: () => void, duration: Duration) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.timer called when closed, ignoring");
 			return;
@@ -873,7 +873,7 @@ export class Effect {
 	 * Shares {@link run}'s handling of a task that outlived its run: the child is closed at the
 	 * next teardown, not immediately.
 	 */
-	timeout(fn: (effect: Effect) => void, duration: Nano) {
+	timeout(fn: (effect: Effect) => void, duration: Duration) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.timeout called when closed, ignoring");
 			return;
@@ -909,16 +909,15 @@ export class Effect {
 	 * Runs `fn` every positive period until cleanup, arming the first deadline before returning.
 	 * Each period uses the clock installed then; a late callback delays the next by a full period.
 	 */
-	interval(fn: () => void, period: Nano) {
+	interval(fn: () => void, period: Duration) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.interval called when closed, ignoring");
 			return;
 		}
 
-		Instant.add(Instant.zero, period);
-		if (period === 0) throw new RangeError("interval period must be positive");
+		if (period.isZero()) throw new RangeError("interval period must be positive");
 		const abort = new AbortController();
-		let next = Instant.add(now(), period);
+		let next = now().saturatingAdd(period);
 		void (async () => {
 			for (;;) {
 				await sleepUntil(next, { signal: abort.signal });
@@ -930,7 +929,7 @@ export class Effect {
 				}
 				// A callback may install a clock with a different origin. A full Delay period
 				// starts from that clock's now, never from the previous clock's deadline.
-				next = Instant.add(now(), period);
+				next = now().saturatingAdd(period);
 			}
 		})().catch(noop);
 		this.cleanup(() => abort.abort());
@@ -1349,7 +1348,8 @@ export class Derived<const S extends readonly Getter<unknown>[], T> implements G
 const EQUAL_DEPTH = 64;
 
 // Deep equality for plain objects/arrays, SameValueZero for everything else.
-// Class instances have identity semantics (e.g. two different Broadcast instances are never equal).
+// Class instances have identity semantics (e.g. two different Broadcast instances are never equal),
+// except the clock's immutable values, which compare by value like the numbers they replace.
 function isEqual(a: unknown, b: unknown, depth = 0): boolean {
 	if (a === b || (Number.isNaN(a) && Number.isNaN(b))) return true;
 	if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
@@ -1360,6 +1360,7 @@ function isEqual(a: unknown, b: unknown, depth = 0): boolean {
 
 	// Both must be plain objects or both arrays to deep-compare.
 	if (protoA !== protoB) return false;
+	if (a instanceof Duration || a instanceof Instant || a instanceof Wall) return a.eq(b as never);
 	if (protoA !== Object.prototype && protoA !== Array.prototype) return false;
 
 	// Holes are not keys, so a sparse array's length is only visible here.

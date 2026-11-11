@@ -27,7 +27,7 @@ const FRAMERATES: [f64; 11] = [
 /// rate and its integer neighbour, so no measurement is ambiguous between them.
 const FRAMERATE_TOLERANCE: f64 = 0.0005;
 
-/// The catalog fields an [`Estimator`] can measure from the frames fed to it.
+/// The catalog fields a producer measures from the frames written to it.
 ///
 /// An absent field is one to measure: whatever the config already carries when it reaches
 /// [`container::Producer::set`](crate::container::Producer::set) is authoritative and left alone,
@@ -100,25 +100,11 @@ impl Estimate {
 /// # }
 /// ```
 ///
-/// Drive one directly only when you write to a raw
-/// [`track::Producer`](moq_net::track::Producer) instead. The methods mirror the ones on
-/// [`container::Producer`](crate::container::Producer), so call them at the same points:
-///
-/// ```
-/// # use moq_mux::catalog::Estimator;
-/// # use moq_net::Timestamp;
-/// let mut estimator = Estimator::new();
-/// estimator.write(Timestamp::from_micros(0).unwrap(), 1200);
-/// estimator.cut(Some(Timestamp::from_micros(33_000).unwrap()));
-///
-/// let estimate = estimator.estimate();
-/// ```
-///
 /// A standalone estimator has no other tracks to order against, so it never measures a delay.
 ///
 /// Move-only (not `Clone`): it owns the running measurement for exactly one track.
 #[derive(Default)]
-pub struct Estimator {
+pub(crate) struct Estimator {
 	jitter: Jitter,
 	bitrate: Bitrate,
 	/// The framerate and delay, measured over the same windows.

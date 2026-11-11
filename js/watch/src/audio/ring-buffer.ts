@@ -1,7 +1,7 @@
-import { Micro, type Milli, Second } from "@moq/clock";
 import { ringCapacity } from "./latency";
 import { Stretch } from "./stretch";
 
+/** The worklet's PCM ring. Latencies are in milliseconds and timestamps in microseconds, as the port carries them. */
 export class AudioRingBuffer {
 	#buffer: Float32Array[];
 	#writeIndex = 0;
@@ -14,6 +14,10 @@ export class AudioRingBuffer {
 	#parked = false;
 	#underruns = 0;
 	#skips = 0;
+	// Samples of media a skip dropped, and that the stretch removed by accelerating, gap zeros
+	// included and declared silence excluded, as moq-audio counts them.
+	#trimmed = 0;
+	#accelerated = 0;
 
 	// Where the publisher declared its audio ends, as a sample index, until the next reset.
 	#end?: number;
@@ -63,14 +67,14 @@ export class AudioRingBuffer {
 	constructor(props: {
 		rate: number;
 		channels: number;
-		latency: Milli;
+		latency: number;
 		buffered?: boolean;
 	}) {
 		if (props.channels <= 0) throw new Error("invalid channels");
 		if (props.rate <= 0) throw new Error("invalid sample rate");
 		if (props.latency <= 0) throw new Error("invalid latency");
 
-		this.#latencySamples = Math.ceil(props.rate * Second.fromMilli(props.latency));
+		this.#latencySamples = Math.ceil(props.rate * (props.latency / 1000));
 		if (this.#latencySamples === 0) throw new Error("empty buffer");
 
 		this.rate = props.rate;
@@ -105,6 +109,16 @@ export class AudioRingBuffer {
 		return this.#skips;
 	}
 
+	/** Media the ring's skips dropped unplayed, less declared silence, cumulative. */
+	get trimmed(): number {
+		return (this.#trimmed / this.rate) * 1000;
+	}
+
+	/** Media the stretch removed by playing faster, cumulative. */
+	get accelerated(): number {
+		return (this.#accelerated / this.rate) * 1000;
+	}
+
 	/** Whether playback is at a declared end, reached or announced before any audio, and nothing has played since. */
 	get silent(): boolean {
 		return this.#silent;
@@ -119,10 +133,10 @@ export class AudioRingBuffer {
 	}
 
 	/** The playhead, with the staged window's unplayed output mapped back onto the samples it came from. */
-	get timestamp(): Micro {
+	get timestamp(): number {
 		const stretch = this.#stretch;
 		const staged = stretch.length > 0 ? (stretch.available * this.#window) / stretch.length : 0;
-		return Micro.fromSecond(((this.#readIndex - staged) / this.rate) as Second);
+		return ((this.#readIndex - staged) / this.rate) * 1_000_000;
 	}
 
 	/** Whether an insert has anchored the indices since creation or the last reset. */
@@ -140,8 +154,8 @@ export class AudioRingBuffer {
 	}
 
 	/** Move the floor, which never exceeds the fixed capacity, and end a park. */
-	setLatency(latency: Milli): void {
-		const latencySamples = Math.ceil(this.rate * Second.fromMilli(latency));
+	setLatency(latency: number): void {
+		const latencySamples = Math.ceil(this.rate * (latency / 1000));
 		if (latencySamples <= 0) throw new Error("empty buffer");
 		if (latencySamples > this.capacity) throw new Error("latency exceeds capacity");
 
@@ -170,10 +184,10 @@ export class AudioRingBuffer {
 		this.#parked = true;
 	}
 
-	write(timestamp: Micro, data: Float32Array[]): void {
+	write(timestamp: number, data: Float32Array[]): void {
 		if (data.length !== this.channels) throw new Error("wrong number of channels");
 
-		let start = Math.round(Second.fromMicro(timestamp) * this.rate);
+		let start = Math.round((timestamp / 1_000_000) * this.rate);
 		let samples = data[0].length;
 
 		// Anchor both indices to the first sample so we play from its timestamp instead of
@@ -227,7 +241,7 @@ export class AudioRingBuffer {
 		const latency = this.#latencySamples;
 		const queued = end - this.#readIndex + this.#stretch.available;
 		if (end - this.#readIndex > this.capacity) {
-			this.#skip(end - this.capacity);
+			this.#skip(end - this.capacity, start);
 		} else if (band && pause && pause.start <= this.#readIndex && queued > latency + this.#chunk) {
 			// Skip only the silence past the queued floor, which the staged window counts toward, so the
 			// read index only moves forward and never re-stages PCM the window already holds.
@@ -241,7 +255,7 @@ export class AudioRingBuffer {
 					latency + Math.floor(((this.capacity - latency) * 3) / 4),
 				)
 		) {
-			this.#skip(end - latency);
+			this.#skip(end - latency, start);
 		}
 
 		// Fill gaps with zeros if there's a discontinuity
@@ -294,8 +308,8 @@ export class AudioRingBuffer {
 	 * A successor track overwrites the slots its own samples land on, but anything the previous
 	 * track wrote beyond them would otherwise still play once the successor runs out.
 	 */
-	truncate(timestamp: Micro): void {
-		const target = Math.round(Second.fromMicro(timestamp) * this.rate);
+	truncate(timestamp: number): void {
+		const target = Math.round((timestamp / 1_000_000) * this.rate);
 		if (target >= this.#writeIndex) return;
 		const length = this.length;
 		// A staged window runs the read index ahead of the playhead. Unstage it so the successor
@@ -321,16 +335,21 @@ export class AudioRingBuffer {
 	 * rather than an underrun. Pass the end less any codec delay that leaves the decoded audio short
 	 * of it.
 	 */
-	end(timestamp: Micro): void {
-		this.#end = Math.round(Second.fromMicro(timestamp) * this.rate);
+	end(timestamp: number): void {
+		this.#end = Math.round((timestamp / 1_000_000) * this.rate);
 		// The end can arrive after the playhead already ran out at it, or before any audio, as for a
 		// listener that joins during a mute.
 		if (!this.#anchored || (this.#stalled && this.length <= 0 && this.#ended())) this.#silent = true;
 	}
 
-	// Move the read index forward to `index`, dropping any queued audio it passes, staged included.
-	#skip(index: number): void {
-		if (index > this.#readIndex && this.length > 0) this.#skips++;
+	// Move the read index forward to `index`, dropping any queued audio it passes, staged included,
+	// and the front of the incoming chunk at `start` when `index` lies past it. An empty ring only
+	// re-anchors over a gap it never held: neither counter moves, as in moq-audio.
+	#skip(index: number, start: number): void {
+		if (index > this.#readIndex && this.length > 0) {
+			this.#skips++;
+			this.#trimmed += this.#discarded(index, start);
+		}
 		// The staged window lies behind the new index, so it is dropped with the rest, as moq-audio's
 		// trim discards staged output first.
 		const length = this.length;
@@ -341,6 +360,21 @@ export class AudioRingBuffer {
 		this.#readIndex = index;
 		this.#peak = Math.max(0, this.#peak - (length - this.length));
 		this.#prune();
+	}
+
+	// Media a skip to `index` drops: the unplayed share of the staged window, what the ring holds up
+	// to `index`, and the incoming chunk's front below it, less declared silence. The gap between the
+	// write index and the chunk at `start` was never held, so it is no trim.
+	#discarded(index: number, start: number): number {
+		const stretch = this.#stretch;
+		const held = Math.min(index, this.#writeIndex);
+		const front = Math.max(start, this.#writeIndex);
+		let dropped = held - this.#readIndex + Math.max(0, index - front);
+		if (stretch.available > 0 && !this.#windowQuiet) dropped += (stretch.available * this.#window) / stretch.length;
+		for (const pause of this.#pauses) {
+			dropped -= Math.max(0, Math.min(held, pause.end) - Math.max(this.#readIndex, pause.start));
+		}
+		return dropped;
 	}
 
 	// Forget the declared silences the playhead has passed.
@@ -462,6 +496,7 @@ export class AudioRingBuffer {
 		const stretch = this.#stretch;
 		stretch.process(frames, this.#peak - this.#latencySamples, enabled);
 		this.#peak -= frames - stretch.length;
+		this.#accelerated += Math.max(0, frames - stretch.length);
 		this.#readIndex += frames;
 		this.#window = frames;
 		this.#windowQuiet = quiet;

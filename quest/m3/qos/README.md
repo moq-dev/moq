@@ -37,7 +37,7 @@ Decided (2026-10-06 audit): stats prefix tracks (`<path>/prefix.json`)
 landed first in #5811, since they are a prerequisite of the lag API; the lag
 histogram was deferred to m2 by the maintainer on 2026-10-15 and lands on the
 stats totals and
-prefix tracks rather than the group tracks' per-path
+prefix tracks rather than the bucket tracks' per-path
 `paths` rows, which stay unchanged for existing readers
 (2026-10-12).
 Rejected: the histogram first, which would make prefix tracks carry the lag
@@ -55,15 +55,7 @@ crate. Client stats left the line (2026-09-29)
 when media stats moved out of moq-stats onto hang tracks, which are additive
 on `main`.
 
-## Required
-
-- [Viewer lag histogram](/quest/m3/qos/lag-histogram.md) - the egress `lag`
-  histogram and `dropped` counters land on the stats totals and prefix
-  tracks
-
 ## Related
 
 - [Media stats](/quest/m3/stats/README.md) - publishers and viewers report
   their own media, transport, and playback health, the media half of a verdict
-- [Loss delay](/quest/m5/cut-through/loss-delay.md) - an ingress counter of
-  bytes a loss held back by at least one RTT, on the same rows

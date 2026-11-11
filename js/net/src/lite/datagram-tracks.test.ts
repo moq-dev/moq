@@ -1,4 +1,5 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test";
+import * as clock from "@moq/clock";
 import { yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
@@ -132,6 +133,10 @@ test("lite-07 bounds and prioritizes independent createWritable datagram queues"
 	try {
 		await reader.info();
 		while (datagrams.priority.peek() !== 19) await datagrams.priority.changed();
+		// The publisher opens a track's queue after writing its DATAGRAMS_INFO, so the reader can
+		// see the info first: a datagram through each queue is what proves both are open.
+		datagrams.append(undefined, new Uint8Array([0]));
+		expect((await reader.recv())?.sequence).toBe(0n);
 		await second.info();
 		other.append(undefined, new Uint8Array([1]));
 		await second.recv();
@@ -149,7 +154,7 @@ test("lite-07 bounds and prioritizes independent createWritable datagram queues"
 		// Type, Subscribe ID, and Sequence each occupy one byte on this untimed track.
 		datagrams.append(undefined, new Uint8Array(898));
 		datagrams.append(undefined, new Uint8Array(897));
-		expect((await reader.recv())?.sequence).toBe(1n);
+		expect((await reader.recv())?.sequence).toBe(2n);
 	} finally {
 		second.close();
 		reader.close();
@@ -482,13 +487,14 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		const remote = wireOf(client).consume(path);
 		const reader = remote.datagrams("audio");
 		reader.setPriority(5);
-		// The end has to reach the client before the abort, and the mock delivers it in
-		// microtasks. A write-budget yield is a host task that the drain below can't advance,
-		// so under CPU load the publisher's answer could still be stalled when the abort lands.
+		// Only the end's routing yields a host task after the finish below: the receive loop's
+		// budget never runs out here.
 		const budget = spyOn(Budget.prototype, "poll").mockImplementation(() => undefined);
+		let routing: ReturnType<typeof spyOn> | undefined;
 		// Runs even when the test times out with a wait still pending.
 		onTestFinished(() => {
 			budget.mockRestore();
+			routing?.mockRestore();
 			reader.close();
 			remote.close();
 			client.abort();
@@ -497,9 +503,15 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		});
 		await reader.info();
 		while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+		// The client marks the end taken, then waits a host task to route what arrived with it.
+		const received = Promise.withResolvers<void>();
+		const hostTask = clock.yieldNow;
+		routing = spyOn(clock, "yieldNow").mockImplementation(() => {
+			received.resolve();
+			return hostTask();
+		});
 		datagrams.finish();
-		// The mock delivers the end in microtasks, all within this host task.
-		for (let i = 0; i < 10000; i++) await Promise.resolve();
+		await received.promise;
 		client.abort();
 		expect(await reader.recv()).toBeUndefined();
 	});

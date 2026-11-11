@@ -14,7 +14,7 @@ Participants are discovered from the announce stream. Identity is the path befor
 - `{identity}/camera.hang`: camera + microphone, hd/sd renditions
 - `{identity}/screen.hang`: screenshare; its announce/unannounce is the share lifecycle
 
-This is the generic room layer extracted from [hang.live](https://hang.live) (roster, local/remote, `hang/*.json` metadata) and [iroh-live](https://github.com/n0-computer/iroh-live) (the `chat` track `iroh-rooms` is moving onto the announce bus). Memes, 3D layout, chat UI, and accounts stay in the app. The native twin is [`moq-room`](../../rs/moq-room).
+This is the generic room layer extracted from [hang.live](https://hang.live) (roster, local/remote, `hang/*.json` metadata) and [iroh-live](https://github.com/n0-computer/iroh-live) (the `chat` track `iroh-rooms` is moving onto the announce bus). Memes, 3D layout, chat UI, and accounts stay in the app.
 
 ## Install
 

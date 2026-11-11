@@ -284,10 +284,9 @@ after upload. `nix copy` never re-uploads a path the bucket already has, so a
 path many commits reuse keeps its first upload's age. Each job therefore
 records the store paths it pushed under `roots/<commit>/`, then copies every
 object in that commit's recorded closures that is over a week old onto itself,
-restarting its age; it fails if any is already gone. The daily
-`cache-refresh.yml` repeats that for the newest cached commit, the one Smoke
-pins, so it always substitutes in full even when nothing merges;
-older commits' paths still expire. `flake.nix` sets `fallback = true` because
+restarting its age; it fails if any is already gone. The newest cached
+commit, the one Smoke pins, therefore substitutes in full while `main` keeps
+merging; older commits' paths still expire. `flake.nix` sets `fallback = true` because
 that expiry can remove a path before one that depends on it.
 
 The Worker logs R2 internal errors (10001) and service-unavailable errors
@@ -320,7 +319,7 @@ done.
      "target": "tag",
      "enforcement": "active",
      "conditions": {"ref_name": {"exclude": [], "include": [
-       "refs/tags/moq-relay-v*", "refs/tags/moq-cli-v*", "refs/tags/moq-boy-v*",
+       "refs/tags/moq-relay-v*", "refs/tags/moq-cli-v*",
        "refs/tags/moq-c-v*", "refs/tags/moq-gst-v*",
        "refs/tags/moq-ffi-v*", "refs/tags/moq-dart-v*"
      ]}},
@@ -346,7 +345,7 @@ done.
    bootstrap created:
 
    ```bash
-   for tag in 'moq-relay-v*' 'moq-cli-v*' 'moq-boy-v*' 'moq-c-v*' 'moq-gst-v*'; do
+   for tag in 'moq-relay-v*' 'moq-cli-v*' 'moq-c-v*' 'moq-gst-v*'; do
      gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
        -f name="$tag" -f type=tag
    done

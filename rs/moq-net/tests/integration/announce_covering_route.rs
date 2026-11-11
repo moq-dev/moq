@@ -28,16 +28,9 @@ fn produce_origin(hop: u64) -> origin::Producer {
 
 /// Drain every event the cursor has pending, as `kind prefix` lines.
 fn drain(announced: &mut moq_net::origin::Routes) -> Vec<String> {
-	use moq_net::origin::RouteEvent as Event;
 	let mut seen = Vec::new();
 	while let Some(event) = announced.try_next() {
-		let (kind, announce) = match event {
-			Event::Start(announce) => ("Start", announce),
-			Event::Update(announce) => ("Update", announce),
-			Event::Restart(announce) => ("Restart", announce),
-			Event::End(announce) => ("End", announce),
-		};
-		seen.push(format!("{kind} {}", announce.prefix));
+		seen.push(format!("{:?} {}", event.kind, event.announce.prefix));
 	}
 	seen
 }
@@ -133,7 +126,7 @@ async fn relays_route_a_covering_claim_that_listings_omit() {
 		let version: Version = version.parse().unwrap();
 		let publisher = produce_origin(1);
 		let claim = publisher
-			.route_prefix("room", moq_net::origin::RouteOptions::default())
+			.claim("room", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let listed = publisher
 			.route("lobby.chat", moq_net::origin::RouteOptions::hidden())

@@ -101,6 +101,7 @@ case "$1" in
         nextest just rs test -p moq-tokio --release -E 'test(benchmark_receive_windows)' --run-ignored only --success-output immediate
         nextest just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ignored only --success-output immediate
         nextest just rs test -p moq-tokio --release -E 'test(benchmark_datagram_delivery)' --run-ignored only --success-output immediate
+        nextest just rs test -p moq-net --release --features async --test integration -E 'test(=mesh_sweep::benchmark_route_mesh)' --run-ignored only --success-output immediate
         # One build for the crates whose benchmarks need no features of their own.
         nextest just rs test --release --no-fail-fast -p moq-relay -p moq-c -p moq-mux -p moq-cli \
             -E 'test(benchmark_stun_sources) | test(benchmark_handles) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_stream_import)' \
@@ -138,13 +139,15 @@ case "$1" in
     rust-extra)
         criterion qmux --manifest-path rs/qmux/Cargo.toml --bench receive
         criterion msf -p moq-msf --bench catalog
-        # The allocation/window/play-buffer/batch/receive-bursts tables keep their stdout in the run;
+        # The allocation/window/play-buffer/batch/receive-bursts/openh264 tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-crypto -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
-            -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode -p moq-hls --features moq-quic/fuzz \
+            -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode -p moq-hls -p moq-video \
+            --features moq-json/bench,moq-quic/fuzz,moq-video/openh264 \
             --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
             --bench producer --bench play_buffer --bench jitter --bench sync --bench decode_clock --bench ts_programs --bench ts_video \
-            --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout --bench include
+            --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout --bench include \
+            --bench openh264
         criterion audio-capture -p moq-audio --features capture --bench capture
         # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous.
         # The concurrent cases' latency percentiles stay in the run's stdout.
@@ -158,14 +161,13 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts requests fills fetch forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression datagrams socket; do
+        for benchmark in broadcasts requests fills forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression datagrams socket; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
         javascript qmux-record just js qmux-record-bench
         javascript qmux-datagrams just js qmux-datagrams-bench
         javascript cmaf just js cmaf-bench
-        javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench
         javascript e2ee just js e2ee-bench
         javascript json-stream just js json-stream-bench

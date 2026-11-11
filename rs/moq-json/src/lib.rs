@@ -31,7 +31,11 @@ pub mod stream;
 mod strict;
 pub mod window;
 
-pub use crate::diff::{Diff, diff};
+/// Test support for the codec bench, enabled by the `bench` feature: the merge-patch diff.
+#[cfg(feature = "bench")]
+pub mod bench {
+	pub use crate::diff::{Diff, diff};
+}
 
 /// The most a frame, or a group's frames together, may hold: 32 MiB, which moq-net's group cache
 /// also holds, so a larger frame is refused before it is written.

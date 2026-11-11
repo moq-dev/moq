@@ -531,8 +531,8 @@ impl Encoding {
 			if planned.keyframe {
 				encoder.cut().context("request an IDR")?;
 			}
-			let packets = encoder.encode(&frame).context("encode")?;
-			for packet in packets {
+			encoder.encode(&frame).context("encode")?;
+			while let Some(packet) = encoder.receive().context("encode")? {
 				let keyframe = packet.keyframe;
 				if !self.gate.admit(planned.index, keyframe) {
 					continue;
@@ -578,10 +578,10 @@ fn probe(config: &moq_video::encode::Config) -> Result<Bytes> {
 	let luma = size.width as usize * size.height as usize;
 	let gray = I420::new(size, vec![0x80; luma + luma / 2])?;
 	let mut encoder = Encoder::new(config)?;
-	let mut packets = encoder.encode(&Frame::new(Surface::I420(gray), moq_net::Timestamp::from_micros(0)?))?;
-	packets.extend(encoder.finish()?);
+	encoder.encode(&Frame::new(Surface::I420(gray), moq_net::Timestamp::from_micros(0)?))?;
+	encoder.flush()?;
 	let mut sets = Vec::new();
-	for packet in &packets {
+	while let Some(packet) = encoder.receive()? {
 		for nal in nals(&packet.payload)? {
 			if matches!(nal.first().map(|header| header & 0x1f), Some(7 | 8)) {
 				sets.push(nal);

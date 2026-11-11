@@ -1,6 +1,7 @@
-import type { Micro, Milli } from "@moq/clock";
-
-/** Everything the main thread sends the render worklet over its port. */
+/**
+ * Everything the main thread sends the render worklet over its port. Structured clone carries no
+ * clock classes, so latencies are plain milliseconds and timestamps plain microseconds.
+ */
 export type Message = Init | Data | Latency | Reset | Truncate | Playing | End;
 
 /** Create the worklet's ring. */
@@ -8,7 +9,7 @@ export interface Init {
 	type: "init";
 	channels: number;
 	rate: number;
-	latency: Milli;
+	latency: number;
 	// Buffered mode: anchor to the first frame and play through. The ring holds the floor; the
 	// lookahead above it is held back upstream (the main thread applies the backpressure).
 	buffered: boolean;
@@ -28,26 +29,26 @@ export interface Reset {
 /** Drop buffered samples at or after `timestamp`, keeping what is already due. */
 export interface Truncate {
 	type: "truncate";
-	timestamp: Micro;
+	timestamp: number;
 }
 
 /** The publisher declared its audio ends here, less any codec delay, so running dry there is silence. */
 export interface End {
 	type: "end";
-	timestamp: Micro;
+	timestamp: number;
 }
 
 /** Audio samples, with their buffers transferred. */
 export interface Data {
 	type: "data";
 	data: Float32Array[];
-	timestamp: Micro;
+	timestamp: number;
 }
 
 /** Latency update: the floor held as decoded PCM. */
 export interface Latency {
 	type: "latency";
-	latency: Milli;
+	latency: number;
 	// When set, also hold playback, keeping what is buffered, until the next latency message without
 	// it. Echoed like a reset's epoch, so state from before the park cannot report the ring playing.
 	park?: number;
@@ -56,7 +57,7 @@ export interface Latency {
 /** State update from the worklet back to the main thread. */
 export interface State {
 	type: "state";
-	timestamp: Micro;
+	timestamp: number;
 	stalled: boolean;
 	// Whether `timestamp` is on the current timeline: it reads 0 until a frame anchors the ring.
 	anchored: boolean;
@@ -64,6 +65,10 @@ export interface State {
 	underruns: number;
 	// How many times the ring skipped ahead, dropping queued audio, cumulative.
 	skips: number;
+	// Media those skips dropped unplayed, less declared silence, cumulative.
+	trimmed: number;
+	// Media the stretch removed by playing faster, cumulative.
+	accelerated: number;
 	// Whether playback is at a declared end, reached or announced before any audio, and nothing has played since.
 	silent: boolean;
 	// The epoch of the last reset or park the worklet applied.

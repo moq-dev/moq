@@ -26,7 +26,7 @@ const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(
 async fn avc3_source_to_cmaf_export_roundtrip() {
 	let mut live = Live::avc3();
 	live.track.write(video_frame(0, true)).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	let init = chunk_now(&mut exporter)
@@ -99,7 +99,7 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 
 	let mut live = Live::audio(config);
 	live.track.write(raw_frame(0, &[0x01, 0x02, 0x03, 0x04], true)).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	let init = chunk_now(&mut exporter)
@@ -164,7 +164,7 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 			true,
 		))
 		.unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	let init = chunk_now(&mut exporter)
@@ -296,7 +296,7 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	live.track.write(raw_frame(0, &[0x82, 0x49, 0x83, 0x42], true)).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	let init = chunk_now(&mut exporter)
@@ -361,7 +361,7 @@ async fn av1_source_to_cmaf_export_synthesizes_av01() {
 		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	live.track.write(raw_frame(0, &[0x12, 0x00, 0x0a, 0x0b], true)).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	let init = chunk_now(&mut exporter)
@@ -486,7 +486,7 @@ async fn single_track_export_init_matches_fragment_track_id() {
 		.expect("catalog consumer");
 	let selected = catalog_stream.select(crate::select::Broadcast::default().audio(crate::select::Audio::default()));
 	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer).await, selected)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 
 	let init = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -496,7 +496,7 @@ async fn single_track_export_init_matches_fragment_track_id() {
 
 	// A fragment is a group, and ending the track is what closes the last one. The
 	// next non-init fragment is a moof+mdat for the same (only) track.
-	importer.finish().unwrap();
+	let importer = importer.finish().unwrap();
 	let fragment = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out")
@@ -544,12 +544,12 @@ async fn next_chunk_reports_segment_metadata() {
 	live.track.write(video_frame(0, true)).unwrap();
 	live.track.write(video_frame(33_000, false)).unwrap();
 	live.track.write(video_frame(66_000, true)).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 
 	// Sub-GOP cap so GOP 0 splits into two parts (the trailing part non-independent).
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
 		.with_fragment_duration(std::time::Duration::from_millis(20))
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 
 	// First emit is the init segment, which carries no segmenting metadata to assert on.
 	chunk_now(&mut exporter)
@@ -679,7 +679,7 @@ async fn ntsc_tail_uses_a_representable_catalog_cadence() {
 		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	live.track.write(video_frame(0, true)).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	chunk_now(&mut exporter)
@@ -703,7 +703,7 @@ async fn unusable_framerate_uses_the_standard_fallback_rate() {
 		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	live.track.write(raw_frame(0, &[0x82, 0x00], true)).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	chunk_now(&mut exporter)
@@ -745,7 +745,7 @@ async fn one_packet_audio_group_is_timed_by_the_catalog() {
 		.unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	chunk_now(&mut exporter)
 		.await
 		.init()
@@ -777,7 +777,7 @@ async fn audio_fragment_is_the_publisher_group() {
 	}
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	chunk_now(&mut exporter)
 		.await
 		.init()
@@ -793,7 +793,7 @@ async fn audio_fragment_is_the_publisher_group() {
 	);
 	// The one-frame-per-fragment mode is the explicit way back to per-packet output.
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY)
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
 		.with_fragment_duration(std::time::Duration::ZERO);
 	chunk_now(&mut exporter).await.init().expect("init");
 	let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
@@ -809,7 +809,7 @@ async fn closed_audio_group_flushes_without_a_successor() {
 	live.track.write(raw_frame(0, &[0x08, 0xaa], true)).unwrap();
 	live.track.write(raw_frame(20_000, &[0x08, 0xbb], false)).unwrap();
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	chunk_now(&mut exporter).await.init().expect("init");
 	assert!(
 		drain_now(&mut exporter).await.is_empty(),
@@ -842,7 +842,7 @@ async fn uncut_audio_waits_for_the_explicit_cap() {
 	}
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	chunk_now(&mut exporter).await.init().expect("init");
 	assert!(
 		drain_now(&mut exporter).await.is_empty(),
@@ -850,7 +850,7 @@ async fn uncut_audio_waits_for_the_explicit_cap() {
 	);
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY)
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
 		.with_fragment_duration(std::time::Duration::from_millis(200));
 	chunk_now(&mut exporter).await.init().expect("init");
 	let fragments = drain_now(&mut exporter).await;
@@ -875,7 +875,7 @@ async fn opus_frame_duration_from_toc() {
 		.unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	chunk_now(&mut exporter)
 		.await
 		.init()
@@ -1015,7 +1015,7 @@ fn a_long_gop_does_not_cost_a_stack_frame_per_sample() {
 
 				let mut exporter =
 					crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-						.with_max_delay(RECORDING_MAX_DELAY);
+						.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 				assert!(
 					chunk_now(&mut exporter).await.init().is_some(),
 					"first chunk must be the init segment"
@@ -1070,11 +1070,11 @@ async fn export_av(group: u64) -> (Vec<(u32, usize)>, (u32, u32)) {
 			.write(raw_frame(i * 20_000, &[0x08, 0xaa, 0xbb, 0xcc], i % group == 0))
 			.unwrap();
 	}
-	live.track.finish().unwrap();
-	audio.finish().unwrap();
+	live.track.end_with(None).unwrap();
+	let _finished = audio.finish().unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	let init = chunk_now(&mut exporter).await.init().expect("init");
 	let ids = track_ids(&init);
 
@@ -1132,7 +1132,7 @@ async fn video_that_ends_first_writes_its_tail_in_order() {
 	for i in 0..6u64 {
 		live.track.write(video_frame(i * 33_000, i % 3 == 0)).unwrap();
 	}
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 	// The audio runs on for another half second in 100 ms groups, always ready.
 	for i in 0..30u64 {
 		audio
@@ -1141,7 +1141,7 @@ async fn video_that_ends_first_writes_its_tail_in_order() {
 	}
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	let init = chunk_now(&mut exporter).await.init().expect("init");
 	let (video_id, audio_id) = track_ids(&init);
 
@@ -1384,7 +1384,7 @@ async fn video_cut_preserves_the_exact_duration_without_a_successor() {
 	live.track.write(video_frame(0, true)).unwrap();
 	live.track.write(video_frame(10_000, false)).unwrap();
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	chunk_now(&mut exporter).await.init().expect("init");
 	assert!(drain_now(&mut exporter).await.is_empty());
 	live.track
@@ -1442,7 +1442,7 @@ async fn audio_before_the_first_keyframe_is_kept() {
 	wait_for_sps(&mut live);
 	// The CLI's default max delay: a parked reader falls behind it within a second.
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(std::time::Duration::from_millis(500));
+		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_millis(500)));
 
 	// Two seconds of audio, published live with no video yet.
 	for i in 0..20u64 {
@@ -1748,7 +1748,7 @@ async fn aac_bitrate_churn_keeps_the_track() {
 	let name = live.track.name().to_string();
 	live.track.write(raw_frame(0, &[0x01, 0x02, 0x03, 0x04], true)).unwrap();
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	chunk_now(&mut exporter).await.init().expect("init");
 
 	live.catalog
@@ -1820,10 +1820,10 @@ async fn a_new_parameter_set_stays_in_band() {
 	let sps2: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xee];
 	live.track.write(video_frame(0, true)).unwrap();
 	live.track.write(annexb_frame(33_000, &[sps2, PPS, IDR])).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	let init = chunk_now(&mut exporter).await.init().expect("init");
 	let mp4_atom::Codec::Avc3(avc3) = video_codec(&init) else {
 		panic!("expected an avc3 sample entry");
@@ -1874,10 +1874,10 @@ async fn split_parameter_sets_case(
 	live.track.write(frame(0, &leading, true)).unwrap();
 	live.track.write(frame(0, &[idr], idr_opens_group)).unwrap();
 	live.track.write(frame(33_000, &[delta], false)).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	chunk_now(&mut exporter).await.init().expect("init");
 	let samples: Vec<(Bytes, bool)> = drain_now(&mut exporter)
 		.await
@@ -1948,11 +1948,11 @@ async fn split_h265_parameter_sets_keep_the_sync_point() {
 async fn an_in_band_keyframe_without_parameter_sets_fails() {
 	let mut live = Live::avc3();
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	chunk_now(&mut exporter).await.init().expect("init");
 
 	live.track.write(annexb_frame(0, &[IDR])).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 	let err = error_now(&mut exporter).await;
 	assert!(
 		matches!(
@@ -1998,7 +1998,7 @@ async fn a_return_resumes_after_its_last_group() {
 	live.track.write(video_frame(0, true)).unwrap();
 	write_audio(&mut audio, 0, 11);
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	chunk_now(&mut exporter).await.init().expect("init");
 	drain_now(&mut exporter).await;
 
@@ -2034,7 +2034,7 @@ async fn a_track_that_never_describes_itself_fails() {
 	wait_for_sps(&mut live);
 	live.track.write(raw_frame(0, IDR_ONLY, true)).unwrap();
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 
 	// Live audio, one second at a time, until the export gives up on the video.
 	let mut second = 0;
@@ -2065,7 +2065,7 @@ async fn an_uncut_audio_backlog_is_bounded() {
 	wait_for_sps(&mut live);
 	live.track.write(raw_frame(0, IDR_ONLY, true)).unwrap();
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 
 	// One audio group that never closes, one second at a time.
 	let mut second = 0;
@@ -2213,13 +2213,13 @@ async fn cmaf_source_exports_at_the_frame_timestamp() {
 		.write_frame(moq_net::Timestamp::from_secs(10).unwrap(), fragment)
 		.unwrap();
 	group.finish().unwrap();
-	track.finish().unwrap();
+	let _track = track.finish().unwrap();
 
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer).await, catalog_stream)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	let init = chunk_now(&mut exporter).await.init().expect("init");
 	let fragments = drain_now(&mut exporter).await;
 
@@ -2265,10 +2265,10 @@ async fn a_bare_keyframe_is_prefixed_with_cached_parameter_sets() {
 	let mut live = Live::avc3();
 	live.track.write(video_frame(0, true)).unwrap();
 	live.track.write(annexb_frame(33_000, &[IDR])).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	chunk_now(&mut exporter).await.init().expect("init");
 
 	let fragments = drain_now(&mut exporter).await;
@@ -2345,7 +2345,7 @@ async fn high10_waits_for_its_sps() {
 	assert!(pending.is_err(), "an init before the SPS: {pending:?}");
 
 	live.track.write(video_frame(0, true)).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 	let init = chunk_now(&mut exporter).await.init().expect("init");
 	let mp4_atom::Codec::Avc1(avc1) = video_codec(&init) else {
 		panic!("expected an avc1 sample entry");
@@ -2408,7 +2408,7 @@ async fn annexb_without_dimensions_waits_for_the_sps() {
 	let sps = crate::codec::h264::fixtures::SPS_IPB;
 	let pps = crate::codec::h264::fixtures::PPS;
 	live.track.write(annexb_frame(0, &[sps, pps, IDR])).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 	let init = chunk_now(&mut exporter).await.init().expect("init");
 	let mp4_atom::Codec::Avc1(avc1) = video_codec(&init) else {
 		panic!("expected an avc1 sample entry built from the SPS");
@@ -2551,7 +2551,7 @@ async fn a_moved_rendition_continues_on_its_new_track() {
 			moving.a.write(marked_frame(i, 0xa1)).unwrap();
 		}
 		let mut exporter = crate::container::fmp4::Export::new(moving.source().await, moving.catalog_stream().await)
-			.with_max_delay(RECORDING_MAX_DELAY);
+			.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 		let init = chunk_now(&mut exporter).await.init().expect("init");
 		let mut fragments = drain_now(&mut exporter).await;
 
@@ -2592,7 +2592,7 @@ async fn a_rendition_moved_to_another_sample_entry_fails() {
 		moving.a.write(marked_frame(i, 0xa1)).unwrap();
 	}
 	let mut exporter = crate::container::fmp4::Export::new(moving.source().await, moving.catalog_stream().await)
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 	chunk_now(&mut exporter).await.init().expect("init");
 
 	moving.point("b", None, Moving::MAIN_SPS);
@@ -2615,13 +2615,13 @@ async fn export_reordered_clip(cap: Option<std::time::Duration>) -> (Bytes, Vec<
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer).await, catalog_stream)
-		.with_max_delay(RECORDING_MAX_DELAY)
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
 		.with_fragment_duration(cap);
 	let mut init = None;
 	let mut fragments = Vec::new();

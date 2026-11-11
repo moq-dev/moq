@@ -91,8 +91,9 @@ codec config, a pad requested again, or a stream resumed after EOS publishes as
 `url`, `broadcast`, `linger`, `connect-version`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
-`sessions`. The sink reconnects for as long as the pipeline runs and only
-reports `failed` on an answer redialing can't change, such as a rejected token.
+`sessions`. Once connected, the sink reconnects for as long as the pipeline runs and only
+reports `failed` on an answer redialing can't change, such as a rejected token. A first
+connect that reaches no relay reports `failed` and posts an error instead of retrying.
 Both elements accept the same connection properties. `connect-version` is a
 comma-separated list, matching the CLI's repeatable `--connect-version`;
 unknown versions fail startup. QUIC durations are milliseconds. Zero disables the local idle timeout; a zero
@@ -168,7 +169,8 @@ A rendition that leaves the catalog
 gets EOS once its track ends. A broadcast that ends or loses its publisher holds
 its pads without EOS until it is announced again, so the pipeline does not end
 on its own. Losing the relay connection also holds the pads: `moqsrc` redials
-without a retry deadline and resumes when the broadcast returns. A refused
+without a retry deadline and resumes when the broadcast returns. A first connect
+that reaches no relay posts an error rather than retrying. A refused
 connection, refused path or catalog, or malformed protocol input or catalog posts
 an error. Properties: `url`,
 `broadcast`, `max-delay`, `connect-version` (comma-separated protocol versions to offer, most

@@ -8,7 +8,7 @@ const AGES: [Option<Duration>; 3] = [None, Some(Duration::ZERO), Some(Duration::
 
 async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::Result<()> {
 	let mut cache = moq_net::origin::Config::default();
-	cache.cache_duration = Duration::from_secs(1);
+	cache.cache_duration = Some(Duration::from_secs(1));
 	// A relay carries what it learned on to its other peers (moq-lite-07).
 	let relay = moq_tokio::origin::spawn_config(cache).with_proxy(true);
 	let ws = moq_tokio::websocket::Listener::bind("127.0.0.1:0".parse()?)
@@ -110,6 +110,8 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 		let front = consumer.request("age", None).await?;
 		for (i, age) in AGES.into_iter().enumerate() {
 			let track = front.track(&i.to_string())?.subscribe(None).await?;
+			// moq-transport never sends MAX_CACHE_DURATION: it would expire the newest group too.
+			let age = if version.is_lite() { age } else { None };
 			anyhow::ensure!(
 				track.info().max_age == age,
 				"{version}: track {i} age {:?}, wanted {age:?}",

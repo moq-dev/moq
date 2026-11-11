@@ -47,7 +47,8 @@ fn verdict(err: &Error) -> Verdict {
 /// Three knobs, each with one job: `initial` and `multiplier` set the wait before
 /// each retry, `max` caps it, and `healthy` decides which sessions count as failed
 /// attempts. See [`moq_net::reconnect::Backoff`], which this resolves to, for how
-/// the policy applies them.
+/// the policy applies them. It applies only once a session has been established: a first
+/// dial that reaches no session ends the connection instead of retrying.
 #[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -97,7 +98,7 @@ pub struct Backoff {
 	#[serde(skip)]
 	pub healthy: Option<crate::cli::Duration>,
 
-	/// Maximum time to spend retrying before giving up. Defaults to 10s; zero retries forever.
+	/// Maximum time to spend retrying before giving up. Unset or zero retries forever.
 	///
 	/// No new walk of the peer's addresses starts once it has passed, but one under way finishes:
 	/// each candidate but the last gets up to 5s, and the last runs to `--connect-timeout`,
@@ -167,13 +168,13 @@ impl Backoff {
 		self.resolve().initial
 	}
 
-	/// The configured retry-delay cap, or its default; zero leaves the delay uncapped.
-	pub fn max(&self) -> Duration {
+	/// The configured retry-delay cap, or its default; `None` leaves the delay uncapped.
+	pub fn max(&self) -> Option<Duration> {
 		self.resolve().max
 	}
 
-	/// The retry deadline window, with zero meaning unlimited and unset using the default.
-	pub fn timeout(&self) -> Duration {
+	/// The retry deadline window, or its default; `None` retries forever.
+	pub fn timeout(&self) -> Option<Duration> {
 		self.resolve().timeout
 	}
 
@@ -183,13 +184,18 @@ impl Backoff {
 		backoff.multiplier = self.multiplier;
 		let knobs = [
 			(&mut backoff.initial, self.initial),
-			(&mut backoff.max, self.max),
 			(&mut backoff.healthy, self.healthy),
-			(&mut backoff.timeout, self.timeout),
 		];
 		for (knob, set) in knobs {
 			if let Some(set) = set {
 				*knob = set.into();
+			}
+		}
+		// A configured zero turns the bound off.
+		let bounds = [(&mut backoff.max, self.max), (&mut backoff.timeout, self.timeout)];
+		for (bound, set) in bounds {
+			if let Some(set) = set {
+				*bound = Some(set.into()).filter(|set: &Duration| !set.is_zero());
 			}
 		}
 		backoff
@@ -676,19 +682,40 @@ pub struct Monitor {
 	last_presence: moq_net::stats::Presence,
 }
 
-/// The current lifecycle phase of a reconnecting connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where a reconnecting connection is, with the data that phase carries.
+#[derive(Clone, Debug)]
 pub enum Phase {
 	/// No session has connected yet.
-	Connecting,
+	Connecting {
+		/// The latest failed dial, or none before the first one fails.
+		failure: Option<Error>,
+	},
 	/// A session is serving.
-	Connected,
+	Connected {
+		/// The live session's transport.
+		transport: crate::Transport,
+		/// The live session's negotiated version.
+		version: Version,
+	},
 	/// No session is serving while the connection redials.
-	Disconnected,
+	Disconnected {
+		/// Why nothing serves: the last session's close reason or the latest failed dial.
+		failure: Option<Error>,
+	},
 	/// The old session serves while its replacement dials.
-	Migrating,
+	Migrating {
+		/// The serving session's transport.
+		transport: crate::Transport,
+		/// The serving session's negotiated version.
+		version: Version,
+		/// The replacement's latest failed dial.
+		failure: Option<Error>,
+	},
 	/// The reconnect loop has stopped for good.
-	Closed,
+	Closed {
+		/// The error it gave up with, or none when stopped locally.
+		failure: Option<Error>,
+	},
 }
 
 /// One coherent observation of a connection's lifecycle.
@@ -696,40 +723,43 @@ pub enum Phase {
 pub struct Observation {
 	/// An opaque revision to pass back to the next state wait.
 	pub revision: u64,
-	/// The current lifecycle phase, distinct from cumulative statistics presence.
-	pub phase: Phase,
 	/// How many sessions have connected, including replacements.
 	pub connects: u64,
 	/// When a session last connected, retained while offline.
 	pub last_connected: Option<kio::clock::Instant>,
-	/// The live session's transport, or none while offline.
-	pub transport: Option<crate::Transport>,
-	/// The latest failed attempt or terminal failure, cleared by a successful connect.
-	pub failure: Option<Error>,
-	/// The live session's negotiated version, or none while offline.
-	pub version: Option<Version>,
+	/// The current lifecycle phase and its data, distinct from cumulative statistics presence.
+	pub phase: Phase,
 }
 
 impl State {
 	fn observation(&self) -> Observation {
-		let live = self.lifecycle.live();
+		let phase = match &self.lifecycle {
+			Lifecycle::Connecting { failure } => Phase::Connecting {
+				failure: failure.clone(),
+			},
+			Lifecycle::Live(live) => match &live.migrating {
+				Some(migrating) => Phase::Migrating {
+					transport: live.transport,
+					version: live.session.version(),
+					failure: migrating.failure.clone(),
+				},
+				None => Phase::Connected {
+					transport: live.transport,
+					version: live.session.version(),
+				},
+			},
+			Lifecycle::Offline { failure, .. } => Phase::Disconnected {
+				failure: failure.clone(),
+			},
+			Lifecycle::Closed(failure) => Phase::Closed {
+				failure: failure.clone(),
+			},
+		};
 		Observation {
 			revision: self.revision,
-			phase: match &self.lifecycle {
-				Lifecycle::Connecting { .. } => Phase::Connecting,
-				Lifecycle::Live(live) if live.migrating.is_some() => Phase::Migrating,
-				Lifecycle::Live(_) => Phase::Connected,
-				Lifecycle::Offline { .. } => Phase::Disconnected,
-				Lifecycle::Closed(_) => Phase::Closed,
-			},
 			connects: self.connects,
 			last_connected: self.last_connected,
-			transport: live.map(|live| live.transport),
-			failure: match &self.lifecycle {
-				Lifecycle::Closed(err) => err.clone(),
-				lifecycle => lifecycle.failure().cloned(),
-			},
-			version: live.map(|live| live.session.version()),
+			phase,
 		}
 	}
 }
@@ -830,8 +860,9 @@ pub struct Snapshot {
 ///
 /// The task connects, waits for the session to end, then (unless reconnecting is
 /// disabled, see [`crate::Client::with_reconnect`])
-/// redials with exponential backoff. The read surface mirrors [`moq_net::Session`]
-/// so a caller can treat it like a session that transparently reconnects:
+/// redials with exponential backoff. A first dial that reaches no session never retries:
+/// the loop stops with its error, so a setup mistake surfaces at once. The read surface
+/// mirrors [`moq_net::Session`] so a caller can treat it like a session that transparently reconnects:
 /// [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
 /// The extra toggle a plain session doesn't have is the connection lifecycle: [`established`](Self::established)
@@ -1036,6 +1067,10 @@ impl Connection {
 		// The dial in flight, and the address it was asked for. It owns its client, so a
 		// fresh port can replace the loop's between walks.
 		let mut dial: Option<(url::Url, std::pin::Pin<Box<Dial>>)> = None;
+		// The QUIC probe in flight while the live session runs on the WebSocket fallback, and
+		// the address whose race that fallback won, which its end makes QUIC's again.
+		#[cfg(all(feature = "websocket", feature = "quic"))]
+		let (mut probe, mut fallback): (Option<Probing>, Option<url::Url>) = (None, None);
 		// Mirrors the live session's estimates while it serves.
 		let mut forward: Option<Forward> = None;
 		let mut timer: Option<kio::clock::Sleep> = None;
@@ -1061,6 +1096,11 @@ impl Connection {
 								shared.connected(&session, transport);
 								forward = Some(Forward::new(&session));
 								policy.connected(kio::clock::now(), session);
+								#[cfg(all(feature = "websocket", feature = "quic"))]
+								if client.on_fallback(&url, transport) {
+									policy.fallback(kio::clock::now());
+									fallback = Some(url);
+								}
 							}
 							Err(err) => {
 								#[cfg(feature = "quic")]
@@ -1076,6 +1116,25 @@ impl Connection {
 								#[cfg(not(feature = "quic"))]
 								let verdict = verdict(&err);
 								policy.failed(kio::clock::now(), err, verdict);
+							}
+						}
+					}
+					#[cfg(all(feature = "websocket", feature = "quic"))]
+					if let Some((_, attempt)) = probe.as_mut()
+						&& let Poll::Ready(res) = waiter.poll_future(attempt.as_mut())
+					{
+						let (url, _) = probe.take().expect("polled above");
+						// Reaching QUIC moves the policy off the fallback, making the handshake
+						// over it the dial in flight.
+						match res {
+							Ok(handshake) => {
+								if policy.probed(kio::clock::now(), Ok(())) {
+									tracing::info!(peer = %Endpoint(&url), "QUIC reachable again; leaving the WebSocket fallback");
+									dial = Some((url, handshake));
+								}
+							}
+							Err(err) => {
+								policy.probed(kio::clock::now(), Err(err));
 							}
 						}
 					}
@@ -1108,12 +1167,26 @@ impl Connection {
 				// The policy already counted the timeout; dropping the dial cancels it.
 				Action::Abandon => {
 					#[cfg(feature = "quic")]
-					{
+					if dial.is_some() {
 						dial_failed = true;
 					}
 					dial = None;
+					#[cfg(all(feature = "websocket", feature = "quic"))]
+					{
+						probe = None;
+					}
 				}
+				#[cfg(all(feature = "websocket", feature = "quic"))]
+				Action::Probe(attempt) => {
+					let url = attempt.target().url().clone();
+					let client = client.clone();
+					probe = Some((url, Box::pin(async move { client.probe(attempt).await })));
+				}
+				#[cfg(not(all(feature = "websocket", feature = "quic")))]
+				Action::Probe(_) => unreachable!("only a WebSocket fallback probes"),
 				Action::Migrating => {
+					#[cfg(all(feature = "websocket", feature = "quic"))]
+					left_fallback(&mut probe, &mut fallback);
 					forward = None;
 					// After the predecessor is published, so a close woken by this status
 					// finds it and honors its handover deadline.
@@ -1122,6 +1195,8 @@ impl Connection {
 				}
 				Action::Retired => shared.predecessor(None),
 				Action::Offline(failure) => {
+					#[cfg(all(feature = "websocket", feature = "quic"))]
+					left_fallback(&mut probe, &mut fallback);
 					forward = None;
 					shared.offline(failure.as_ref());
 				}
@@ -1148,6 +1223,8 @@ impl Connection {
 				// The terminal snapshot does the offline bookkeeping, so a watcher never sees a
 				// `Disconnected` the loop will not redial from.
 				Action::Done(res) => {
+					#[cfg(all(feature = "websocket", feature = "quic"))]
+					left_fallback(&mut probe, &mut fallback);
 					shared.predecessor(None);
 					return res;
 				}
@@ -1343,7 +1420,25 @@ impl Connection {
 }
 
 /// A dial in flight.
-type Dial = dyn Future<Output = crate::Result<crate::client::Dialed>> + Send;
+pub(crate) type Dial = dyn Future<Output = crate::Result<crate::client::Dialed>> + Send;
+
+/// A QUIC probe in flight, resolving to the MoQ handshake to finish over what it reached.
+#[cfg(all(feature = "websocket", feature = "quic"))]
+type Probe = dyn Future<Output = crate::Result<std::pin::Pin<Box<Dial>>>> + Send;
+
+/// The address a probe dials, and the probe in flight.
+#[cfg(all(feature = "websocket", feature = "quic"))]
+type Probing = (url::Url, std::pin::Pin<Box<Probe>>);
+
+/// The live session left the WebSocket fallback: stop probing, and give QUIC its head start
+/// on the next race, since the outage that lost the last one may be over.
+#[cfg(all(feature = "websocket", feature = "quic"))]
+fn left_fallback(probe: &mut Option<Probing>, fallback: &mut Option<url::Url>) {
+	*probe = None;
+	if let Some(url) = fallback.take() {
+		crate::websocket::forget(&url);
+	}
+}
 
 /// Whether a dial to `url` runs over the QUIC endpoint, whose socket a fresh port replaces.
 #[cfg(feature = "quic")]
@@ -1488,7 +1583,7 @@ mod tests {
 		assert_eq!(parsed.backoff.initial, Some((Duration::from_secs(7)).into()));
 		assert_eq!(parsed.backoff.multiplier, 5);
 		assert_eq!(parsed.backoff.max, Some((Duration::from_secs(11)).into()));
-		assert_eq!(parsed.backoff.timeout(), Duration::ZERO, "0 means retry forever");
+		assert_eq!(parsed.backoff.timeout(), None, "0 means retry forever");
 
 		// With no flags, the parser defaults resolve to the policy's defaults.
 		let parsed = Wrapper::parse_from(&[]).unwrap();
@@ -1747,9 +1842,8 @@ mod tests {
 		};
 		let second = first.clone();
 		let initial = first.state();
-		assert_eq!(initial.phase, Phase::Connecting);
+		assert!(matches!(initial.phase, Phase::Connecting { failure: None }));
 		assert_eq!(initial.connects, 0);
-		assert!(initial.version.is_none());
 		let failure = Error::ConnectFailed;
 		// The update precedes registration: reading a token must not lose this wake.
 		shared.retrying(&failure);
@@ -1757,8 +1851,7 @@ mod tests {
 		let Poll::Ready(Ok(next)) = first.poll_state(&waiter, initial.revision) else {
 			panic!("missed earlier update")
 		};
-		assert_eq!(next.phase, Phase::Connecting);
-		assert!(next.failure.is_some());
+		assert!(matches!(next.phase, Phase::Connecting { failure: Some(_) }));
 		assert!(
 			matches!(second.poll_state(&waiter, initial.revision), Poll::Ready(Ok(_))),
 			"independent observer lost its update"
@@ -1776,10 +1869,12 @@ mod tests {
 		shared.end(Some(failure));
 		drop(shared);
 		let final_state = first.state();
-		assert_eq!(final_state.phase, Phase::Closed);
-		assert!(final_state.failure.is_some(), "terminal cause must remain observable");
 		assert!(
-			matches!(first.poll_state(&waiter, repeated.revision), Poll::Ready(Ok(state)) if state.phase == Phase::Closed)
+			matches!(final_state.phase, Phase::Closed { failure: Some(_) }),
+			"terminal cause must remain observable"
+		);
+		assert!(
+			matches!(first.poll_state(&waiter, repeated.revision), Poll::Ready(Ok(state)) if matches!(state.phase, Phase::Closed { .. }))
 		);
 		assert!(matches!(
 			first.poll_state(&waiter, final_state.revision),
@@ -1840,7 +1935,7 @@ mod tests {
 		};
 		let (woken, _waiter) = Woken::watch(&monitor);
 		drop(shared);
-		assert_eq!(woken.phases(), [Phase::Closed]);
+		assert!(matches!(woken.phases()[..], [Phase::Closed { .. }]));
 	}
 
 	#[cfg(feature = "tcp")]
@@ -1856,7 +1951,7 @@ mod tests {
 		connection.abort(moq_net::Error::Cancel);
 		connection.closed().await.unwrap();
 		let final_state = monitor.state_changed(initial.revision).await.unwrap();
-		assert_eq!(final_state.phase, Phase::Closed);
+		assert!(matches!(final_state.phase, Phase::Closed { .. }));
 		assert_eq!(final_state.connects, 0);
 		assert!(monitor.state_changed(final_state.revision).await.is_err());
 	}
@@ -1990,10 +2085,12 @@ mod tests {
 		}
 	}
 
-	/// A refused socket still spends the retry budget rather than stopping on its first error.
+	/// A refused first dial ends the loop with its error at once, spending none of an
+	/// unlimited retry window: a peer that never answered is more likely a setup mistake
+	/// than a restart.
 	#[cfg(feature = "tcp")]
 	#[tokio::test(start_paused = true)]
-	async fn a_refused_tcp_dial_keeps_retrying() {
+	async fn a_refused_first_dial_fails_at_once() {
 		// Refusal is what's under test, so this can't use [`dead`]. Only Linux
 		// refuses a SYN to a port that is bound but not listening, so only Linux
 		// holds it: a released port can become another process's listener mid-test.
@@ -2014,9 +2111,9 @@ mod tests {
 			.to_string();
 
 		let mut config = crate::connect::Config::default();
-		config.backoff.initial = Some((Duration::from_millis(50)).into());
-		config.backoff.max = Some((Duration::from_millis(50)).into());
-		config.backoff.timeout = Some((Duration::from_millis(100)).into());
+		config.backoff.initial = Some((FAST).into());
+		// Zero retries forever, so only the first walk failing fast ends this loop.
+		config.backoff.timeout = Some((Duration::ZERO).into());
 		// No timer may be pending while a dial is in flight, since the paused clock
 		// jumps to it whenever the runtime idles. Linux and macOS refuse a loopback
 		// connect inside the call, but Windows reports it later, after retrying the
@@ -2028,9 +2125,48 @@ mod tests {
 		let started = kio::clock::now();
 		let connection = client.connect(url(&format!("tcp://{addr}/")));
 		let err = connection.closed().await.expect_err("refused socket connected");
-		assert!(matches!(err, Error::Reconnect(_)), "{err}");
 		assert!(err.to_string().contains(&refused), "{err}");
-		assert!(started.elapsed() >= Duration::from_millis(100));
+		// A retry would first wait out a jittered share of `initial`.
+		assert_eq!(started.elapsed(), Duration::ZERO, "the first walk backed off");
+	}
+
+	/// A connection to `host` that had a session and now redials a [`dead`] address.
+	///
+	/// A first walk that fails ends the loop rather than retrying, so a test of the retry
+	/// loop starts from a session: this serves one, repoints `host` at a dead address, and
+	/// ends the session from the server. Returns the connection, already reporting
+	/// [`Status::Disconnected`], the live server's address and its later sessions, and the
+	/// server task.
+	#[cfg(feature = "tcp")]
+	async fn redialing(
+		host: &str,
+		config: crate::connect::Config,
+	) -> (
+		Connection,
+		std::net::SocketAddr,
+		tokio::sync::mpsc::UnboundedReceiver<moq_net::Session>,
+		tokio::task::JoinHandle<()>,
+	) {
+		let (live, mut accepted, task) = serve(crate::origin::spawn()).await;
+		crate::resolve::hosts::point(host, [live]);
+		let mut connection = config
+			.init(Default::default())
+			.unwrap()
+			.connect(url(&format!("tcp://{host}:1/")));
+		assert_eq!(connection.status().await.unwrap(), Status::Connected);
+		let session = accepted.recv().await.unwrap();
+
+		// Hold the failing listener until the runtime ends: a released port can
+		// become another process's listener while the connection keeps retrying.
+		let failing = dead().await.socket_addrs(|| None).unwrap();
+		assert!(
+			std::net::TcpListener::bind(failing[0]).is_err(),
+			"the failing port stays reserved"
+		);
+		crate::resolve::hosts::point(host, failing);
+		drop(session);
+		assert_eq!(connection.status().await.unwrap(), Status::Disconnected);
+		(connection, live, accepted, task)
 	}
 
 	/// A redial that keeps failing reports why while it retries, and the connect that
@@ -2039,31 +2175,21 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_failing_redial_reports_why_until_it_connects() {
-		// Hold the failing listener until the runtime ends: a released port can
-		// become another process's listener while the connection keeps retrying.
-		let failing = dead().await.socket_addrs(|| None).unwrap();
-		assert!(
-			std::net::TcpListener::bind(failing[0]).is_err(),
-			"the failing port stays reserved"
-		);
-		let (live, mut accepted, _task) = serve(crate::origin::spawn()).await;
-
 		// Unique to this test: the table is process-wide.
 		const HOST: &str = "failing-redial.test";
-		crate::resolve::hosts::point(HOST, failing);
 
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.max = Some((FAST).into());
 		config.backoff.timeout = Some((Duration::ZERO).into());
-		let client = config.init(Default::default()).unwrap();
-		let mut connection = client.connect(url(&format!("tcp://{HOST}:1/")));
+		let (mut connection, live, mut accepted, _task) = redialing(HOST, config).await;
 		let monitor = connection.monitor();
 
+		// The session's end may be reported first; wait for a failed redial's reason.
 		let failure = kio::wait(|waiter| {
 			monitor.state.poll(waiter, |state| match state.lifecycle.failure() {
-				Some(err) => Poll::Ready(err.clone()),
-				None => Poll::Pending,
+				Some(err @ Error::Tcp(_)) => Poll::Ready(err.clone()),
+				_ => Poll::Pending,
 			})
 		})
 		.await
@@ -2092,14 +2218,14 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn closing_between_retries_clears_the_failure() {
-		// A held port, not a released one: another test's server could claim a
-		// released port, and the dial would connect instead of failing.
+		// Unique to this test: the table is process-wide.
+		const HOST: &str = "closing-between-retries.test";
+
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.max = Some((FAST).into());
 		config.backoff.timeout = Some((Duration::ZERO).into());
-		let client = config.init(Default::default()).unwrap();
-		let connection = client.connect(dead().await);
+		let (connection, _live, _accepted, _task) = redialing(HOST, config).await;
 		let mut monitor = connection.monitor();
 
 		kio::wait(|waiter| {
@@ -2110,11 +2236,14 @@ mod tests {
 		})
 		.await
 		.unwrap_or_else(|_| panic!("the connection ended before reporting its retry reason"));
+		// The one session's connect and disconnect, both already counted.
+		let presence = monitor.presence_changed().await.unwrap();
+		assert_eq!((presence.sessions_started, presence.sessions_ended), (1, 1));
 
 		connection.close().await.expect("close");
 		// Resolves with an error once the loop's state is final.
 		let ended = monitor.presence_changed().await;
-		assert!(ended.is_err(), "nothing connected, so only the end moves presence");
+		assert!(ended.is_err(), "nothing reconnected, so only the end moves presence");
 		assert!(monitor.failure().is_none(), "nothing is retrying");
 	}
 
@@ -2227,7 +2356,7 @@ mod tests {
 
 		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
 		let mut state = monitor.state();
-		while state.phase != Phase::Connected {
+		while !matches!(state.phase, Phase::Connected { .. }) {
 			state = kio::clock::timeout(WAIT, monitor.state_changed(state.revision))
 				.await
 				.unwrap()
@@ -2240,7 +2369,10 @@ mod tests {
 			.expect("the connection did not close");
 		assert!(closed.is_err(), "the abort ends the loop with an error");
 		assert!(monitor.failure().is_none(), "nothing is retrying");
-		assert_eq!(woken.phases(), [Phase::Closed], "the loop is not redialing");
+		assert!(
+			matches!(woken.phases()[..], [Phase::Closed { .. }]),
+			"the loop is not redialing"
+		);
 	}
 
 	/// A loop that gives up reports its error next, never a `Disconnected` it will not redial
@@ -2649,6 +2781,207 @@ mod tests {
 			.unwrap();
 	}
 
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	fn fallback_version() -> moq_net::Version {
+		"moq-lite-07-wip".parse().unwrap()
+	}
+
+	/// A client offering only [`fallback_version`], dialing over in-memory qmux sessions to a
+	/// server publishing `origin`, and sending each server session it accepts with whether a
+	/// probe reached it.
+	///
+	/// A dial lands on WebSocket, as the race does while UDP is blocked, and records the win
+	/// the way the race would. A probe fails while `blocked` holds and otherwise reaches what
+	/// stands in for QUIC.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	fn fallback_client(
+		origin: moq_net::origin::Producer,
+		blocked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+		accepted: tokio::sync::mpsc::UnboundedSender<(bool, moq_net::Session)>,
+	) -> Client {
+		use std::sync::atomic::Ordering;
+
+		// A client qmux session whose server side accepts the MoQ handshake in the background.
+		let serve = {
+			let (origin, accepted) = (origin.clone(), accepted.clone());
+			move |probe: bool| {
+				let (origin, accepted) = (origin.clone(), accepted.clone());
+				async move {
+					let versions = moq_net::Versions::from(fallback_version());
+					let config = || {
+						let mut config = qmux::Config::new(qmux::Version::QMux01);
+						config.protocol =
+							qmux::Protocol::Negotiate(versions.alpns().iter().map(|alpn| alpn.to_string()).collect());
+						config
+					};
+					let (client, server) = tokio::io::duplex(64 * 1024);
+					let (client, server) = tokio::try_join!(
+						qmux::Session::connect(qmux::transport::Stream::new(client), config()),
+						qmux::Session::accept(qmux::transport::Stream::new(server), config())
+					)
+					.unwrap();
+					let (client, server) = (crate::spawn_qmux(client), crate::spawn_qmux(server));
+					tokio::spawn(async move {
+						let server_config = moq_net::Server::new().with_versions(versions).with_publisher(&origin);
+						if let Ok((session, driver)) = server_config.accept(moq_net::time::Instant::now(), server).await
+						{
+							tokio::spawn(moq_net::time::run(driver));
+							let _ = accepted.send((probe, session));
+						}
+					});
+					client
+				}
+			}
+		};
+
+		let config = crate::connect::Config {
+			version: vec![fallback_version()],
+			..Default::default()
+		};
+		let mut client = config.init(Default::default()).unwrap();
+		let dial = serve.clone();
+		client.dialer = Some(std::sync::Arc::new(
+			move |addr: crate::connect::Addr, moq: moq_net::Client| {
+				let transport = dial(false);
+				Box::pin(async move {
+					let session = connect_session(&moq, transport.await).await?;
+					crate::websocket::remember(addr.url());
+					Ok(crate::client::Dialed {
+						session,
+						transport: crate::Transport::WebSocket,
+					})
+				})
+			},
+		));
+		client.prober = Some(std::sync::Arc::new(move |_addr: crate::connect::Addr| {
+			let blocked = blocked.load(Ordering::SeqCst);
+			let transport = serve(true);
+			Box::pin(async move {
+				match blocked {
+					true => Err(Error::ConnectFailed),
+					false => Ok(transport.await),
+				}
+			})
+		}));
+		client
+	}
+
+	/// The MoQ handshake a test dial runs over `transport`.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	async fn connect_session(moq: &moq_net::Client, transport: qmux::Session) -> crate::Result<moq_net::Session> {
+		let (session, driver) = moq.connect(moq_net::time::Instant::now(), transport).await?;
+		tokio::spawn(moq_net::time::run(driver));
+		Ok(session)
+	}
+
+	/// A link that fell back to WebSocket while UDP was blocked moves back to QUIC once a
+	/// probe gets through, without dropping the subscription it carries, and gives the race
+	/// back QUIC's head start. Until then it stays on WebSocket, probing no faster than the
+	/// backoff allows.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	#[tokio::test(start_paused = true)]
+	async fn a_websocket_fallback_returns_to_quic_once_udp_works() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+		const WAIT: Duration = Duration::from_secs(5);
+		// Past the first three probes' longest waits (10 s, 20 s, 40 s), short of the fourth.
+		const OUTAGE: Duration = Duration::from_secs(71);
+		// The longest the fourth probe waits after the third.
+		const BOUND: Duration = Duration::from_secs(80);
+
+		let origin = crate::origin::spawn();
+		let broadcast = origin.route("cam", moq_net::origin::RouteOptions::default()).unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		let blocked = std::sync::Arc::new(AtomicBool::new(true));
+		let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
+
+		let subscriber = crate::origin::spawn();
+		let client = fallback_client(origin.clone(), blocked.clone(), accepted).with_subscriber(subscriber.clone());
+		let url = url("https://fallback-returns.test/");
+		let connection = kio::clock::timeout(WAIT, client.connect(url.clone()).established())
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
+		assert!(crate::websocket::won(&url));
+		let (probe, fallback) = sessions.recv().await.unwrap();
+		assert!(!probe);
+
+		let cam = kio::clock::timeout(WAIT, subscriber.consume().follow("cam", None).unwrap().available())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::ZERO, b"g0".as_ref()).unwrap();
+		group.finish().unwrap();
+		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(g0.sequence, 0);
+
+		// Every probe fails while UDP is blocked, and the link keeps serving on WebSocket.
+		kio::clock::sleep(OUTAGE).await;
+		assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
+		assert_eq!(connection.connects(), 1);
+		assert!(sessions.try_recv().is_err(), "a failed probe connected");
+
+		blocked.store(false, Ordering::SeqCst);
+		let (probe, _preferred) = kio::clock::timeout(BOUND, sessions.recv())
+			.await
+			.expect("never probed QUIC within the backoff bound")
+			.unwrap();
+		assert!(probe, "redialed instead of probing");
+		kio::clock::sleep(Duration::from_millis(1)).await;
+		assert_eq!(connection.transport(), Some(crate::Transport::WebTransport));
+		assert_eq!(connection.connects(), 2);
+		assert!(connection.connected(), "the move went through a disconnect");
+		assert!(!crate::websocket::won(&url), "the race still skips QUIC's head start");
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::ZERO, b"g1".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut g1 = kio::clock::timeout(WAIT, sub.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(g1.sequence, 1, "the subscription dropped across the move");
+		assert_eq!(g1.read_frame().await.unwrap().unwrap().payload[..], b"g1"[..]);
+
+		// The fallback session drains, closing within the handover window.
+		kio::clock::timeout(Duration::from_secs(11), fallback.closed())
+			.await
+			.expect("the fallback session outlived its handover");
+	}
+
+	/// A WebSocket win is provisional: once the session it brought up ends, the redial
+	/// gives QUIC its head start again, since the outage that lost the race may be over.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	#[tokio::test(start_paused = true)]
+	async fn a_websocket_session_ending_restores_the_quic_head_start() {
+		const WAIT: Duration = Duration::from_secs(5);
+		let blocked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+		let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
+		let client = fallback_client(crate::origin::spawn(), blocked, accepted);
+		let url = url("https://fallback-ends.test/");
+		let mut connection = kio::clock::timeout(WAIT, client.connect(url.clone()).established())
+			.await
+			.unwrap()
+			.unwrap();
+		let (_, server) = sessions.recv().await.unwrap();
+		assert!(crate::websocket::won(&url));
+
+		server.abort(moq_net::Error::Cancel);
+		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Connected);
+		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Disconnected);
+		assert!(!crate::websocket::won(&url), "the redial would skip QUIC's head start");
+	}
+
 	/// A configured token is held before its dial starts the session, so a broadcast
 	/// published before the dial, which only that token's grant covers, waits for its
 	/// answer instead of closing the session against the connection credential's grant.
@@ -2766,7 +3099,7 @@ mod duration_tests {
 		max,
 		"--connect-backoff-max",
 		|c: &Backoff| c.max(),
-		|d| d
+		|d: Duration| Some(d).filter(|d| !d.is_zero())
 	);
 	crate::cli::duration::test_config_duration!(
 		timeout_set_in_code_beats_parser_default,
@@ -2774,7 +3107,7 @@ mod duration_tests {
 		timeout,
 		"--connect-backoff-timeout",
 		|c: &Backoff| c.timeout(),
-		|d| d
+		|d: Duration| Some(d).filter(|d| !d.is_zero())
 	);
 	crate::cli::duration::test_config_duration!(
 		handover_set_in_code_beats_parser_default,

@@ -59,7 +59,7 @@ pub struct Settings {
 #[usage(prefix = "runtime")]
 struct Runtime {
 	#[usage(env = "MOQ_RUNTIME_WORKERS", cli("--runtime-workers"))]
-	workers: Option<u16>,
+	workers: Option<String>,
 
 	#[usage(env = "MOQ_RUNTIME_PIN", cli("--runtime-pin"))]
 	pin: Option<bool>,

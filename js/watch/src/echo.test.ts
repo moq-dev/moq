@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Echo as Schema } from "@moq/hang";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
@@ -31,8 +31,8 @@ function announced(origin: Origin.Producer): Set<string> {
 		for (;;) {
 			const entry = await listing.next();
 			if (!entry) break;
-			if (entry.kind === "absent") paths.delete(entry.prefix);
-			else paths.add(entry.prefix);
+			if (entry.kind === "absent" || entry.kind === "offline") paths.delete(entry.prefix);
+			else if (entry.kind === "present") paths.add(entry.prefix);
 		}
 	})();
 	return paths;
@@ -49,7 +49,7 @@ async function read(origin: Origin.Producer, path: string, clock: Manual): Promi
 		schema: Schema.SnapshotSchema,
 	});
 	await flush();
-	await clock.advance(Nano.fromMilli(Milli(1000)));
+	await clock.advance(Duration.millis(1000));
 	const value = (await consumer.latest())?.value;
 	consumer.close();
 	request.close();
@@ -75,7 +75,7 @@ test("publishes feedback where the catalog solicits it and follows the solicitat
 		broadcast,
 		origin,
 		name: "alice",
-		probe: { rtt: Milli(20) },
+		probe: { rtt: Duration.millis(20) },
 		sources: [
 			source("room/live.hang", { video: { frames: 2, bytes: 20 } }),
 			source("room/live.hang", { audio: { underruns: 1 } }),

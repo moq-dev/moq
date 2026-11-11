@@ -234,6 +234,64 @@ void main() {
     server.cancel();
   });
 
+  test('an announced instance pins request and follow', () async {
+    // moq-lite-06 carries no instance, so the session mints one for the route.
+    const version = ['moq-lite-06'];
+    final origin = MoqOriginProducer(config: MoqOriginConfig());
+    final server = MoqServer(
+      config: MoqServerConfig(
+        bind: '127.0.0.1:0',
+        versions: version,
+        tls: MoqServerTls(generate: ['localhost']),
+        quic: MoqQuicConfig(),
+        publish: origin,
+      ),
+    );
+    final address = await server.listen().timeout(timeout);
+    final accepted = () async {
+      final request = await server.accept().timeout(timeout);
+      if (request == null) throw StateError('server closed before accept');
+      return request.accept().timeout(timeout);
+    }();
+    final route = origin.route(path: 'live', options: RouteOptions());
+
+    final client = await Moq.connect(
+      'https://$address',
+      options: ConnectOptions(
+        tls: ClientTls(insecure: true),
+        bind: '127.0.0.1:0',
+        versions: version,
+        once: true,
+      ),
+    ).timeout(timeout);
+    final serverSession = await accepted;
+
+    final announced = client.announced();
+    final present = await nextRoute(announced) as AnnounceEventPresent;
+    final minted = present.announce.route.instance;
+    expect(minted.isMinted(), isTrue);
+
+    await client.request('live', instance: minted).timeout(timeout);
+    final following = client.follow('live', instance: minted);
+    expect(await following.available().timeout(timeout), isNotNull);
+
+    // The same text, parsed, names another instance that nothing serves.
+    final named = Instance.parse(text: minted.text());
+    expect(named.isMinted(), isFalse);
+    expect(named, isNot(minted));
+    await expectLater(
+      client.request('live', instance: named).timeout(timeout),
+      throwsA(isA<ProtocolMoqException>()),
+    );
+
+    following.cancel();
+    announced.cancel();
+    await client.close();
+    serverSession.cancel(code: 0);
+    route.cancel();
+    server.cancel();
+  });
+
   test('connects, announces, subscribes, and delivers a frame', () async {
     final relay = MoqOriginProducer(config: MoqOriginConfig());
     final server = MoqServer(
@@ -619,24 +677,23 @@ void main() {
     expect(present.announce.route.instance, first.instance());
     (await following.available().timeout(timeout))!.dispose();
 
+    final camera = Instance.parse(text: 'camera');
+    expect(camera.isMinted(), isFalse);
     final second = origin.route(
       path: 'instance',
-      options: RouteOptions(instance: 'camera', epoch: 1),
+      options: RouteOptions(instance: camera, epoch: 1),
     );
-    expect(second.instance(), 'camera');
+    expect(second.instance(), camera);
     (await following.available().timeout(timeout))!.dispose();
 
     // The takeover was not listed, so the next event is the path going absent.
     first.withdraw();
     second.withdraw();
     final absent = await nextRoute(announced) as AnnounceEventAbsent;
-    expect(absent.announce.route.instance, 'camera');
+    expect(absent.announce.route.instance, camera);
 
     expect(
-      () => origin.route(
-        path: 'refused',
-        options: RouteOptions(instance: ''),
-      ),
+      () => Instance.parse(text: ''),
       throwsA(isA<InvalidInstanceMoqException>()),
     );
     first.cancel();
@@ -688,12 +745,12 @@ void main() {
 
   test('dynamic serves a request under a prefix', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final dynamic = origin.routePrefix(prefix: 'live', options: RouteOptions());
+    final dynamic = origin.claim(prefix: 'live', options: RouteOptions());
     final pending = origin.consume().request(path: 'live/cam');
     final request = (await dynamic.requested().timeout(timeout))!;
     expect(request.path(), 'live/cam');
     // A hidden job route answers nobody until it announces, under the instance its
-    // prefix route lends.
+    // claim lends.
     final served = request.route(options: RouteOptions(hidden: true));
     expect(served.instance(), dynamic.instance());
     served.announce();
@@ -701,7 +758,6 @@ void main() {
     // Closing the job's broadcast ends its route.
     served.broadcast().close();
     expect(() => served.announce(), throwsA(isA<ClosedMoqException>()));
-    expect(() => dynamic.broadcast(), throwsA(isA<InternalMoqException>()));
     dynamic.cancel();
     await expectLater(
       dynamic.requested(),

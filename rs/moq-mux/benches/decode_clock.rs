@@ -76,7 +76,7 @@ fn read(c: &mut Criterion) {
 					let mut clock = decode::DecodeClock::default();
 					let (mut held, mut most) = (0, 0);
 					for index in 0..frames {
-						let latest = Instant::ZERO + Duration::from_millis(index);
+						let latest = Instant::ZERO.saturating_add(Duration::from_millis(index));
 						clock.push(index, pts(shape, index), latest, 0);
 						held += 1;
 						loop {

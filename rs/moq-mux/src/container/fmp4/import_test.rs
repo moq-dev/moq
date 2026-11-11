@@ -94,7 +94,7 @@ fn video_config_result(codec: mp4_atom::Codec) -> crate::Result<hang::catalog::V
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut import = super::Import::new(broadcast, catalog.reserve());
 	import.decode(&init)?;
-	import.finish()?;
+	let _finished = import.finish()?;
 	Ok(catalog.snapshot().video.renditions.values().next().unwrap().clone())
 }
 
@@ -643,10 +643,10 @@ fn repeated_reinit_keeps_flat_state() {
 			let snapshot = catalog.snapshot();
 			assert_eq!(snapshot.video.renditions.len(), 1, "{label}");
 			assert_eq!(snapshot.audio.renditions.len(), 1, "{label}");
-			if generation % 2 == 1 {
-				fmp4.finish().unwrap();
+			match generation % 2 == 1 {
+				true => drop(fmp4.finish().unwrap()),
+				false => drop(fmp4),
 			}
-			drop(fmp4);
 			let snapshot = catalog.snapshot();
 			assert!(snapshot.video.renditions.is_empty(), "{label}");
 			assert!(snapshot.audio.renditions.is_empty(), "{label}");
@@ -695,7 +695,7 @@ async fn bbb_samples(passthrough: bool) -> [Vec<(u128, bool, bytes::Bytes)>; 2] 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
 	// The file ends on a malformed fragment, after every whole one has published.
 	let _ = fmp4.decode(include_bytes!("test_data/bbb.mp4"));
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 	published(&consumer, &catalog).await
 }
 
@@ -855,7 +855,7 @@ async fn separated_runs_keep_their_samples() {
 		for chunk in fragment.chunks(7) {
 			fmp4.decode(chunk).unwrap();
 		}
-		fmp4.finish().unwrap();
+		let _finished = fmp4.finish().unwrap();
 		let [got_video, got_audio] = published(&consumer, &catalog).await;
 		assert_eq!(got_video, video, "video, passthrough {passthrough}");
 		assert_eq!(got_audio, audio, "audio, passthrough {passthrough}");
@@ -1082,7 +1082,7 @@ async fn unwrapped_samples_present_at_their_composition_time() {
 	.encode(&mut fragment)
 	.unwrap();
 	fmp4.decode(&fragment).unwrap();
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 
 	let mut group = track.recv_group().await.unwrap().unwrap();
 	let mut frames = Vec::new();
@@ -1225,7 +1225,7 @@ async fn audio_presents_from_its_edit() {
 			// A fragment wholly before the edit publishes nothing.
 			fmp4.decode(&audio_fragment(0, 512, 4)).unwrap();
 			fmp4.decode(&audio_fragment_samples(512, 1024, 4, 3)).unwrap();
-			fmp4.finish().unwrap();
+			let _finished = fmp4.finish().unwrap();
 
 			let snapshot = catalog.snapshot();
 			if let Container::Cmaf { init } = &snapshot.audio.renditions.values().next().unwrap().container {
@@ -1337,7 +1337,7 @@ async fn video_drops_the_samples_before_its_edit() {
 			for fragment in &fragments {
 				fmp4.decode(fragment).unwrap();
 			}
-			fmp4.finish().unwrap();
+			let _finished = fmp4.finish().unwrap();
 			let [video, _] = published(&consumer, &catalog).await;
 			assert_eq!(video, expected, "edit at {media_time}, passthrough {passthrough}");
 		}
@@ -1390,7 +1390,7 @@ async fn video_joined_mid_gop_starts_at_a_sync_sample() {
 		for fragment in &after_seek {
 			fmp4.decode(fragment).unwrap();
 		}
-		fmp4.finish().unwrap();
+		let _finished = fmp4.finish().unwrap();
 		let [video, _] = published(&consumer, &catalog).await;
 		assert_eq!(video, expected, "passthrough {passthrough}");
 	}
@@ -1450,7 +1450,7 @@ fn test_av1_catalog() {
 	let color = video.color.as_ref().expect("the range");
 	assert_eq!(
 		(color.primaries, color.range),
-		(None, Some(hang::catalog::Range::Limited))
+		(None, Some(hang::catalog::ColorRange::Limited))
 	);
 	let Container::Cmaf { init, .. } = &video.container else {
 		panic!("expected Cmaf container");
@@ -1592,7 +1592,7 @@ async fn test_seek_sets_initial_sequence_in(passthrough: bool) {
 	fmp4.seek(100).unwrap();
 	// Trailing partial fragments may error; ignore.
 	let _ = fmp4.decode(&frag_buf);
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 
 	let sequences = drain_group_sequences(&mut video_track);
 	assert!(!sequences.is_empty(), "expected at least one group");
@@ -2046,7 +2046,7 @@ async fn segmented_source_groups_per_segment_in(passthrough: bool) {
 			fmp4.decode(&frag).unwrap();
 		}
 	}
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 
 	// An unwrapped video group also ends on a Legacy duration marker.
 	let marker = usize::from(!passthrough);
@@ -2109,7 +2109,7 @@ async fn segmented_source_writes_one_group_per_segment_in(passthrough: bool) {
 		Some(std::time::Duration::from_secs(1)),
 		"passthrough={passthrough}"
 	);
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 	catalog.finish().unwrap();
 
 	assert_eq!(
@@ -2167,7 +2167,7 @@ async fn groups_with_skew(video_offset_us: i64, passthrough: bool) -> (Vec<u64>,
 			fmp4.decode(&frag).unwrap();
 		}
 	}
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 	catalog.finish().unwrap();
 
 	(
@@ -2247,7 +2247,7 @@ async fn a_single_leading_styp_still_segments_on_keyframes_in(passthrough: bool)
 		.unwrap();
 		fmp4.decode(&frag).unwrap();
 	}
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 
 	// An unwrapped video group also ends on a Legacy duration marker.
 	let marker = usize::from(!passthrough);
@@ -2306,7 +2306,7 @@ async fn a_mid_gop_join_keeps_tracks_on_the_same_groups_in(passthrough: bool) {
 		.unwrap();
 		fmp4.decode(&frag).unwrap();
 	}
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 
 	let video = drain_group_sequences(&mut video_track);
 	let audio = drain_group_sequences(&mut audio_track);
@@ -2489,7 +2489,7 @@ fn fragment_jitter_never_shrinks_in(passthrough: bool) {
 		"a tighter fragment pair lowered the jitter"
 	);
 
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 	assert_eq!(audio_jitter(&catalog), Some(cadence));
 }
 
@@ -2603,7 +2603,7 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 			after = kio::clock::wall();
 		}
 	}
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 	catalog.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
@@ -2691,7 +2691,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 			.append(&serde_json::json!("after"), catalog.clock().now())
 			.unwrap();
 	}
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	assert_eq!(
@@ -2755,7 +2755,7 @@ async fn an_import_shifts_onto_an_explicit_clock() {
 	let before = clock.now().as_micros();
 	fmp4.decode(&live_session(3_600_000_000, 5)).unwrap();
 	let after = clock.now().as_micros();
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	assert_eq!(snapshot.media.clock, clock.wall());
@@ -2844,7 +2844,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert!(!published.is_empty(), "the first fragment publishes the catalog");
 	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
 
-	fmp4.finish().unwrap();
+	let _finished = fmp4.finish().unwrap();
 	assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
 }
 
@@ -2884,21 +2884,6 @@ async fn a_moov_with_nothing_selected_releases_its_reservation() {
 		.mutate(|catalog| catalog.m2ts = Some(hang::catalog::M2ts::new("input.m2ts")))
 		.unwrap();
 	assert_eq!(clocks.drain().len(), 1, "no reservation still gates the catalog");
-}
-
-/// A moov after `finish()` is refused: its tracks would be declared but never finished.
-#[test]
-fn a_moov_after_finish_is_refused() {
-	let (init, _, _) = bbb_init();
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
-
-	fmp4.finish().unwrap();
-	let err = fmp4.decode(&init).unwrap_err();
-	assert!(matches!(err, crate::Error::Finished), "{err:?}");
-	let snapshot = catalog.snapshot();
-	assert!(snapshot.video.renditions.is_empty() && snapshot.audio.renditions.is_empty());
 }
 
 /// The catalog waits for a selected track's fragment: a deselected track's fragment is skipped,
@@ -2967,7 +2952,7 @@ async fn imports_the_sample_defaults_fixtures_in(passthrough: bool) {
 
 		fmp4.decode(&fixture.fragment).unwrap();
 		fmp4.decode(&later).unwrap();
-		fmp4.finish().unwrap();
+		let _finished = fmp4.finish().unwrap();
 
 		let Some(wire) = wire else {
 			// Unwrapped, each sample is its own frame and each sync sample opens a group. Legacy
@@ -3033,7 +3018,7 @@ fn an_unknown_subtitle_track_does_not_refuse_supported_media() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut importer = super::Import::new(broadcast, catalog.reserve());
 	importer.decode(&input).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 	assert!(!catalog.snapshot().video.renditions.is_empty());
 	assert!(catalog.snapshot().text.renditions.is_empty());
 }
@@ -3118,7 +3103,7 @@ async fn webvtt_samples_become_timed_text_with_source_metadata() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut importer = super::Import::new(broadcast, catalog.reserve());
 	importer.decode(&input).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 	let snapshot = catalog.snapshot();
 	assert_eq!(snapshot.text.renditions.len(), 1);
 	let (name, config) = snapshot.text.renditions.iter().next().unwrap();
@@ -3181,7 +3166,7 @@ fn empty_and_multiple_webvtt_cues_are_supported() {
 		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let mut importer = super::Import::new(broadcast, catalog.reserve());
 		importer.decode(&input).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 		assert_eq!(catalog.snapshot().text.renditions.len(), 1);
 	}
 }
@@ -3240,7 +3225,7 @@ fn oversized_text_sample_is_refused_before_staging() {
 			.to_string(),
 		err.to_string()
 	);
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 	assert_eq!(catalog.snapshot().text.renditions.len(), 1);
 }
 
@@ -3258,7 +3243,7 @@ async fn webvtt_kind_and_lone_cr_terminators() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut importer = super::Import::new(broadcast, catalog.reserve());
 	importer.decode(&input).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 	let snapshot = catalog.snapshot();
 	let (name, config) = snapshot.text.renditions.iter().next().unwrap();
 	assert_eq!(config.role, hang::catalog::TextRole::Caption);
@@ -3289,7 +3274,7 @@ fn webvtt_seek_after_several_cues_does_not_reuse_a_group() {
 	// Segment 101 was missed; groups 100..=102 already hold the three cues.
 	importer.seek(102).unwrap();
 	importer.decode(&webvtt_fragment(4000, &[cue], 1000)).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 }
 
 /// A text fragment may not start inside the decode span of the previous fragment's samples.
@@ -3334,8 +3319,8 @@ fn emsg_metadata_drops_warn_once() {
 	data.extend_from_slice(&fixture[..cursor.position() as usize]);
 	data.extend_from_slice(&audio_fragment(0, 1024, 327));
 	import.decode(&data).unwrap();
-	import.finish().unwrap();
 	assert_eq!(import.dropped_metadata(), 2);
+	let _import = import.finish().unwrap();
 	assert_eq!(catalog.snapshot().video.renditions.len(), 1);
 	assert_eq!(catalog.snapshot().audio.renditions.len(), 1);
 	logs_assert(|lines| {
@@ -3370,7 +3355,7 @@ async fn webvtt_sub_millisecond_cue_stays_positive() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut importer = super::Import::new(broadcast, catalog.reserve());
 	importer.decode(&init).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 	let snapshot = catalog.snapshot();
 	let name = snapshot.text.renditions.keys().next().unwrap();
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
@@ -3388,7 +3373,7 @@ async fn imported_webvtt(payload: Vec<u8>) -> bytes::Bytes {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut importer = super::Import::new(broadcast, catalog.reserve());
 	importer.decode(&webvtt_input(payload, 1250)).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 	let snapshot = catalog.snapshot();
 	let name = snapshot.text.renditions.keys().next().unwrap();
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
@@ -3491,7 +3476,7 @@ async fn imported_ttml(
 	input.extend(webvtt_fragment(100_000, &[TTML.as_bytes().to_vec()], 4000));
 	let mut importer = super::Import::new(broadcast, timebase.reserve());
 	importer.decode(&input).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 	let snapshot = catalog.snapshot();
 	let (name, config) = snapshot.text.renditions.iter().next().unwrap();
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
@@ -3551,7 +3536,7 @@ fn unsupported_stpp_tracks_are_skipped() {
 		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let mut importer = super::Import::new(broadcast, catalog.reserve());
 		importer.decode(&input).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 		assert!(catalog.snapshot().text.renditions.is_empty(), "{namespace} {mime}");
 	}
 }
@@ -3584,7 +3569,7 @@ async fn ttml_body_begins_at_the_serialized_frame_timestamp() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut importer = super::Import::new(broadcast, catalog.reserve());
 	importer.decode(&input).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 	let snapshot = catalog.snapshot();
 	let name = snapshot.text.renditions.keys().next().unwrap();
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
@@ -3831,7 +3816,7 @@ async fn declared_boundaries_wait_for_sync_samples() {
 				.unwrap();
 				import.decode(&fragment).unwrap();
 			}
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			let marker = usize::from(!passthrough);
 			assert_eq!(
 				drain_group_frames(&mut track),
@@ -3874,7 +3859,7 @@ async fn declared_boundaries_do_not_split_passthrough_fragments() {
 		import
 			.decode(&video_fragment(video_id, 4 * tick, tick, &[(0, 0, 0xE)]))
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		assert_eq!(
 			drain_group_frames(&mut track),
 			if passthrough { vec![3, 1] } else { vec![3, 3, 2] }

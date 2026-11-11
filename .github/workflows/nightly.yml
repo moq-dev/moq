@@ -18,7 +18,7 @@ name: Nightly
 # the wheel builds in a manylinux container, the Kotlin/Swift/Go/Dart packages
 # link the FFI on every platform) and nothing notices until the tag is pushed.
 #
-# `audio-quality` is here because of what it measures. It plays thirty-six rows of
+# `audio-quality` is here because of what it measures. It plays twenty-eight rows of
 # audio in real time, a minute each, which no merge gate should carry, and every
 # number it grades is a timing one that moves with whatever else the runner is
 # doing. A per-PR arm would fail on unrelated load often enough to be ignored;
@@ -247,7 +247,7 @@ jobs:
   # Explicit Pages deployment works with GITHUB_TOKEN; a branch push alone does not.
   benchmark-site:
     name: Benchmark site
-    needs: [nightly, sizes]
+    needs: [nightly, sizes, gate-cost]
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
@@ -340,6 +340,8 @@ jobs:
         # `rs quic-sim` sweeps moq-quic's simulated workloads from a fresh seed; PRs run a fixed 64.
         # `rs rung-disable` proves FFI simulcast disable and recovery on a shaped BBR3 uplink.
         # `test resume-model` sweeps resume against its model from a fresh seed; PRs run a fixed 64.
+        # `test route-key-model` proves the route key proof with Tamarin, and that each variant breaks what it names.
+        # `test route-sweep` checks random lite-07 meshes against the route rules from a fresh seed; PRs run a fixed 8.
         # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
@@ -355,7 +357,7 @@ jobs:
         # `rs v4l2` streams moq-video's V4L2 capture from the kernel's vivid
         # virtual camera, a module load no pull request job should make.
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
-        recipe: ["gate", "gh test-integration", "rs doctest --workspace", "rs send-depth", "test drill-sensitivity", "rs uring", "test json-properties", "test resume-model", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
+        recipe: ["gate", "gh test-integration", "rs doctest --workspace", "rs send-depth", "test drill-sensitivity", "rs uring", "test json-properties", "test resume-model", "test route-key-model", "test route-sweep", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
         include:
           # Miri interprets kio's and moq-net's in-memory unsafe; too slow for the merge gate.
           - recipe: rs miri
@@ -456,7 +458,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
-    # Twenty-four rows at a minute each, plus the relay, CLI, and shaper built from source.
+    # Twenty-eight rows at a minute each, plus the relay, CLI, and shaper built from source.
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -702,6 +704,44 @@ jobs:
           path: target/bench/size
           retention-days: 45
 
+  # The merge gate's own build and test cost under fixed scenarios, for the
+  # benchmark history (see bench/README.md). x86 because hosted ARM runners
+  # expose no hardware counters, and no Rust cache, which would replay
+  # compilations rather than measure them. The scenarios run every module in
+  # turn, cold and then after a moq-net edit, so they take hours.
+  gate-cost:
+    name: Gate cost
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      # The hosted image's default of 4 hides every hardware counter; 2 allows user-space ones.
+      - name: Allow user-space instruction counts
+        run: sudo sysctl -w kernel.perf_event_paranoid=2
+      # Ubuntu 24.04 confines the user namespaces Nix's unshare maps for the
+      # flake module's runner image build, as `just gh runner-vm-ci` handles.
+      # The runner is disposable, so the profile stays loaded.
+      - name: Allow Nix builders to map user namespaces
+        run: sudo apparmor_parser --add "$(nix build --no-link --print-out-paths .#runner-userns-profile)"
+      - name: Measure the gate
+        id: measure
+        run: nix develop --command just gh gate-cost
+      - name: Record benchmark outcome
+        if: ${{ !cancelled() }}
+        run: nix develop --command just gh benchmark-report status "${{ steps.measure.outcome }}" target/bench/nightly/gate-cost
+      - name: Preserve results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bench-gate-cost
+          path: target/bench/nightly/gate-cost
+          retention-days: 45
+
   fuzz:
     name: Fuzz (${{ matrix.target }})
     runs-on: ubuntu-24.04-arm
@@ -709,7 +749,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lite, announce, ietf, varint, path, pattern, ingest, request, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0]
+        target: [lite, announce, ietf, varint, path, pattern, ingest, request, session_lite, session_ietf, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0]
+        # A whole session runs at 50 to 90 inputs a second, and its coverage still climbs
+        # after five minutes, so it gets fifteen.
+        include:
+          - target: session_lite
+            seconds: 900
+          - target: session_ietf
+            seconds: 900
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -730,7 +777,8 @@ jobs:
           restore-keys: |
             fuzz-corpus-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
       - name: Fuzz
-        run: nix develop --command just rs fuzz ${{ matrix.target }} -- -max_total_time=300
+        # A low per-input timeout, so unbounded work an input causes is a finding.
+        run: nix develop --command just rs fuzz ${{ matrix.target }} -- -max_total_time=${{ matrix.seconds || 300 }} -timeout=10
       - name: Minimize corpus
         run: nix develop --command just rs fuzz --minimize ${{ matrix.target }}
       - name: Save corpus

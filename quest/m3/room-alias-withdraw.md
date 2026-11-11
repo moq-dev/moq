@@ -26,8 +26,6 @@ Facts at `9f51fa0966`:
   (`remote.ts:145-149`).
 - The suffix is optional by design (`js/room/src/path.ts:5-6`, `:38-40`):
   hang.live omits it, and this publisher writes it (`path.ts:69-70`).
-- Rust's `rs/moq-room/src/room.rs:78-80` removes by exact path, so Rust
-  doesn't have this bug. Check whether Rust shows two participants for two
-  aliases, and if so, make it match the JS behavior this quest settles.
+- The Rust `moq-room` crate is deleted, so this is JS only.
 
 Public API: none. Wire: none.

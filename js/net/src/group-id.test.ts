@@ -90,7 +90,7 @@ for (const wire of WIRES) {
 		const datagrams = wire.datagrams ? publication.broadcast.createDatagrams("video") : undefined;
 		const track = publication.broadcast.createTrack("video");
 
-		const dynamic = relay.routePrefix(path);
+		const dynamic = relay.claim(path);
 		const inputs: BroadcastConsumer[] = [];
 		const forwarding = (async () => {
 			for await (const request of dynamic.requested()) {

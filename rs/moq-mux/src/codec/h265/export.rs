@@ -30,13 +30,14 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	/// Set the max delay for the per-track source.
+	/// Set how far behind the live edge the per-track source plays:
+	/// [`Delay::min`](moq_net::track::Delay::min) is where it starts, and
+	/// [`Delay::max`](moq_net::track::Delay::max) how late a group may fall before it is skipped.
 	///
-	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
-	/// Defaults to
-	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip aggressively).
-	pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
-		self.inner = self.inner.with_max_delay(max_delay);
+	/// See [`Consumer`](crate::container::Consumer) for the per-track start and skip behavior.
+	/// Defaults to zero for both (start at the live edge, skip aggressively).
+	pub fn with_delay(mut self, delay: moq_net::track::Delay) -> Self {
+		self.inner = self.inner.with_delay(delay);
 		self
 	}
 
@@ -214,13 +215,13 @@ mod tests {
 		let mut g1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 		write_length_prefixed(&mut g1, 33_000, &[trail]);
 		g1.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let consumer = broadcast.consume();
 		// The whole track is written before the exporter runs, so it needs a budget
 		// wide enough to read it: the default skips everything but the live edge.
 		let mut export = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)))
-			.with_max_delay(std::time::Duration::from_secs(30));
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 
 		let frame0 = export.next().await.unwrap().expect("first frame");
 		let frame1 = export.next().await.unwrap().expect("second frame");
@@ -331,7 +332,7 @@ mod tests {
 			let nals: &[&[u8]] = &[&[0x40, 1, 0x0c], &[0x42, 1, 1], &[0x44, 1, 0xc0], &[0x26, 1, 0x88]];
 			write_length_prefixed(&mut group, 0, nals);
 			group.finish().unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			let consumer = broadcast.consume();
 			let mut exporter = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)));
 			let result = exporter.next().await;

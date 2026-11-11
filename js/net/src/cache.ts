@@ -18,10 +18,10 @@
  *
  * @module
  */
-import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
+import { Duration, type Instant, now, sleepUntil } from "@moq/clock";
 
 /** How long a group nobody reads or writes stays cached by default, matching Rust `cache::DEFAULT_EXPIRY`. */
-export const DEFAULT_EXPIRY = Milli(30_000);
+export const DEFAULT_EXPIRY = Duration.millis(30_000);
 
 // Bun 1.4's heap (bun:jsc `heapStats`) grows about 2.9 KB per cached single-frame group with no
 // subscriber, and 3.9 KB more per subscriber, whose sink holds its own mirror of every cached
@@ -30,9 +30,15 @@ export const DEFAULT_EXPIRY = Milli(30_000);
 export const ENTRY_OVERHEAD = 3 * 1024;
 /** Bookkeeping billed per subscriber mirror a cached group holds. */
 export const MIRROR_OVERHEAD = 4 * 1024;
+// Bun 1.4's heap grows about 334 bytes per disjoint run of a track's drop set, its change-log
+// entry included, and about 53 more per entry of the expiry index a pool with an idle window keeps.
+/** Bookkeeping billed per run of a track's drop set. */
+export const RUN_OVERHEAD = 336;
+/** Bookkeeping billed per entry of a drop set's expiry index. */
+export const BORN_OVERHEAD = 64;
 
 // The coarse clock behind access stamps, as Rust's: the expiry window rounds up to it.
-const TICK = Nano.fromMilli(Milli(100));
+const TICK = Duration.millis(100);
 
 // Sub-tick boosts break ties within one tick: a write outranks a merely inserted group, and a
 // read outranks both, so a same-tick access still reads as newer than the mean of weaker ones.
@@ -59,7 +65,7 @@ export interface Config {
 	/** The byte target usage converges toward; unbounded when omitted. */
 	capacity?: number;
 	/** How long a group nobody reads or writes stays cached; never reclaimed for idleness when omitted. */
-	expiry?: Milli;
+	expiry?: Duration;
 }
 
 /**
@@ -85,7 +91,7 @@ export class Pool {
 
 	constructor(config: Config = {}) {
 		this.#capacity = config.capacity ?? Number.POSITIVE_INFINITY;
-		if (config.expiry !== undefined) this.#expiry = Math.max(1, Math.ceil(Nano.fromMilli(config.expiry) / TICK));
+		if (config.expiry !== undefined) this.#expiry = Math.max(1, Math.ceil(config.expiry.divDuration(TICK)));
 	}
 
 	/** The byte target, or undefined when unbounded. */
@@ -99,8 +105,8 @@ export class Pool {
 	}
 
 	/** The idle window, rounded up to the pool's 100 ms tick, or undefined when idle groups stay. */
-	get expiry(): Milli | undefined {
-		return this.#expiry === undefined ? undefined : Nano.toMilli(Nano(this.#expiry * TICK));
+	get expiry(): Duration | undefined {
+		return this.#expiry === undefined ? undefined : TICK.mul(this.#expiry);
 	}
 
 	/** Change the byte target; undefined makes it unbounded. Writes pay a shrink down as they go. */
@@ -112,7 +118,7 @@ export class Pool {
 	now(): number {
 		const at = now();
 		this.#epoch ??= at;
-		this.#tick = Math.max(this.#tick, Math.floor((at - this.#epoch) / TICK));
+		this.#tick = Math.max(this.#tick, Math.floor(at.since(this.#epoch).divDuration(TICK)));
 		return this.#tick;
 	}
 
@@ -191,7 +197,7 @@ export class Pool {
 		if (this.#sweep !== undefined || this.#expiry === undefined || this.#tracks.size === 0) return;
 		const sweep = new AbortController();
 		this.#sweep = sweep;
-		const at = Instant.add(now(), Nano((this.#expiry * TICK) / 2));
+		const at = now().saturatingAdd(TICK.mul(this.#expiry / 2));
 		void sleepUntil(at, { signal: sweep.signal, ref: false }).then(
 			() => {
 				if (this.#sweep !== sweep) return;
@@ -227,6 +233,14 @@ export interface Owner<E extends Entry> {
 	shed(entry: E, debt: number, cap: number): number;
 	/** Something was evicted: settle what the cache's contents decide. */
 	settle(): void;
+	/** Forget the lowest runs of the track's drop set toward `debt`, freeing about `cap` at most, and return the bytes freed. */
+	shedDrops(debt: number, cap: number): number;
+	/** Fold the oldest gaps of the track's arrivals toward `debt`, freeing about `cap` at most, and return the bytes freed. */
+	shedArrivals(debt: number, cap: number): number;
+	/** Forget the runs of the drop set given up longer than the pool's idle window before tick `now`, returning whether any went. */
+	expireDrops(now: number): boolean;
+	/** Whether the track holds a drop run a reclaim may forget, which keeps its account in the idle sweep. */
+	holdsDrops(): boolean;
 }
 
 /**
@@ -269,6 +283,18 @@ export class Track<E extends Entry> {
 		this.#written += n;
 	}
 
+	/** Bill `n` bytes the track keeps beside its groups, such as its drop set, which the idle sweep then visits. */
+	bill(n: number): void {
+		this.pool.add(n);
+		this.wrote(n);
+		if (this.#owner.holdsDrops()) this.pool.register(this as Track<Entry>);
+	}
+
+	/** Release `n` bytes {@link bill} billed. */
+	unbill(n: number): void {
+		this.pool.sub(n);
+	}
+
 	/** Whether the account caches any group. */
 	get empty(): boolean {
 		return this.#live.size === 0;
@@ -299,8 +325,10 @@ export class Track<E extends Entry> {
 		if (this.#live.size === 0) {
 			this.#order = [];
 			this.#head = 0;
-			this.#debt = 0;
-			this.pool.unregister(this as Track<Entry>);
+			if (!this.#owner.holdsDrops()) {
+				this.#debt = 0;
+				this.pool.unregister(this as Track<Entry>);
+			}
 		}
 	}
 
@@ -375,6 +403,20 @@ export class Track<E extends Entry> {
 			evicted = true;
 			this.#owner.evict(entry, "evicted");
 		}
+		// Then the arrivals' oldest gaps, which costs a reader only the wait for a late group, as
+		// the grace passing would.
+		if (this.#debt > 0 && paid < cap) {
+			const freed = this.#owner.shedArrivals(this.#debt, cap - paid);
+			this.#debt -= Math.min(freed, this.#debt);
+			paid += freed;
+		}
+		// Then the drop set, oldest sequences first: losing a run costs a reader a judgment or a
+		// fill, never content being read.
+		if (this.#debt > 0 && paid < cap) {
+			const freed = this.#owner.shedDrops(this.#debt, cap - paid);
+			this.#debt -= Math.min(freed, this.#debt);
+			paid += freed;
+		}
 		const edge = this.#owner.edge();
 		if (edge) fresh.push(edge);
 		for (const entry of fresh) {
@@ -397,8 +439,10 @@ export class Track<E extends Entry> {
 		const order = this.#order;
 		const head = this.#head;
 		const len = order.length - head;
-		if (expiry === undefined || len === 0) return false;
+		if (expiry === undefined) return false;
 		const now = this.pool.now();
+		const forgot = this.#owner.expireDrops(now);
+		if (len === 0) return forgot;
 		const start = full ? 0 : this.#cursor % len;
 		const width = full ? len : Math.min(len, EVICT_SCAN);
 		if (!full) this.#cursor = start + width;
@@ -410,7 +454,7 @@ export class Track<E extends Entry> {
 		}
 		for (const entry of expired) this.#owner.evict(entry, "expired");
 		this.#compact();
-		return expired.length > 0;
+		return expired.length > 0 || forgot;
 	}
 
 	// Skip the empty slots at the front of the order, and rebuild it once the slots before the
@@ -441,6 +485,7 @@ export class Track<E extends Entry> {
 	sweep(): void {
 		if (this.evictExpired(true)) this.#owner.settle();
 		// A live edge alone never expires, so it needs no sweep to keep its track alive for.
+		if (this.#owner.holdsDrops()) return;
 		for (const entry of this.#live.keys()) if (!this.#owner.protects(entry)) return;
 		this.pool.unregister(this as Track<Entry>);
 	}

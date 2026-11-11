@@ -1254,6 +1254,7 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 	// Only the SNI: a WebTransport CONNECT authority or WebSocket `Host` is client-chosen
 	// without having selected a certificate, so a session without SNI reports none.
 	out.server_name = request.server_name().map(str::to_owned);
+	out.host = request.authority().map(str::to_owned);
 	out.alpn = request.alpn().map(str::to_owned);
 	out.role = request.role().and_then(role);
 	out.implementation = request.peer_implementation().map(str::to_owned);
@@ -1899,7 +1900,7 @@ mod tests {
 		assert_eq!(lease.ended().await, lease::Reason::Expired);
 		assert_eq!(
 			kio::clock::now(),
-			start + Duration::from_secs(10),
+			start.saturating_add(Duration::from_secs(10)),
 			"expired at the deadline despite re-polling"
 		);
 	}

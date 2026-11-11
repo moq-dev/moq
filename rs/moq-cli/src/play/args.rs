@@ -84,11 +84,24 @@ pub struct Args {
 	/// Write what the speaker played to this file, one JSON sample per line every 250ms.
 	///
 	/// Each line has the playhead, the playout target, the render quanta the speaker played
-	/// and how many were quiet, and the gaps and stalls since the line before, in the metric
-	/// schema of `test/audio-quality`, whose analyzer reduces it to underruns, skips, and
-	/// silence. Audio only, so it needs `--video off`.
+	/// and how many were quiet, the received audio trimmed and accelerated away, and the gaps
+	/// and stalls since the line before, in the metric schema of `test/audio-quality`, whose
+	/// analyzer reduces it to underruns, trims, and silence. Audio only, so it needs
+	/// `--video off`.
 	#[usage(long, value_name = "PATH", value_hint = usage_rs::ValueHint::FilePath, extensions("ndjson"))]
 	pub metrics: Option<PathBuf>,
+
+	/// The VA-API render node, such as `/dev/dri/renderD129`. Defaults to the
+	/// first that encodes, decodes, and scales.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath)]
+	pub vaapi_device: Option<std::path::PathBuf>,
+
+	/// The V4L2 M2M decoder node, such as `/dev/video10`. Defaults to the first
+	/// that decodes H.264.
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	#[usage(long, env = "MOQ_V4L2_DECODER", value_hint = usage_rs::ValueHint::FilePath)]
+	pub v4l2_decoder: Option<std::path::PathBuf>,
 }
 
 impl Args {

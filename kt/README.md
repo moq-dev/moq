@@ -35,7 +35,8 @@ Moq.connect("https://relay.example.com").use { moq ->
         // restarts; `moq.follow(path)` hands out each new run, or null once it goes offline.
         val announce = when (event) {
             is AnnounceEventPresent -> event.announce
-            is AnnounceEventAbsent -> return@collect
+            // Absent, offline, or a change in availability.
+            else -> return@collect
         }
         // Prefix stays origin-relative; captures reports what * matched.
         println("got broadcast ${announce.prefix}")
@@ -47,7 +48,7 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
-`Moq.connect(url, ClientConfig(...))` builds the `MoqClient` from the config record, wires the publish + consume origins, and hands back a `Moq` you can `use {}`. Cancelling the surrounding coroutine scope propagates through the Flow extensions to the native consumer's `cancel()` via their `onCompletion` hook.
+`Moq.connect(url, ClientConfig(...))` builds the `MoqClient` from the config record, wires the publish + consume origins, and hands back a `Moq` you can `use {}`. However a Flow extension's collection ends, by cancellation, an exception, or the stream's end, its `onCompletion` hook calls the native consumer's `cancel()`, so collect each one once. `Server.requests()` and `Claim.requestedBroadcasts()` are the exceptions: ending them leaves the server listening and the claim advertised.
 
 ### What the wrapper adds
 

@@ -30,6 +30,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -199,7 +200,7 @@ int publish(
     moq::RouteOptions hidden;
     hidden.hidden = true;
     auto route = ok(session->publish()->route(path, hidden), "route");
-    auto broadcast = ok(route->broadcast(), "route broadcast");
+    auto broadcast = route->broadcast();
     auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "catalog producer");
     auto media = ok(
         moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::kAvc3, {}}),
@@ -261,20 +262,27 @@ int publish(
         std::puts("finish ended");
         std::fflush(stdout);
         auto health_route = ok(session->publish()->route(path + ".health", hidden), "health route");
-        auto health = ok(health_route->broadcast(), "health broadcast");
+        auto health = health_route->broadcast();
         auto track = ok(health->publish_track("live", std::nullopt), "health track");
         const std::string payload = "session-alive";
         ok(track->write_frame({std::vector<uint8_t>(payload.begin(), payload.end()), std::nullopt}), "health write");
         ok(track->finish(), "health finish");
         ok(health_route->announce(), "health announce");
         // Only teardown waits on the FIFO; linger has already completed on its own clock.
-        std::ifstream ack(finish_ack);
-        std::string line;
-        if (!std::getline(ack, line) || line != "complete" || session->state().connects != 1) {
+        // stdio, not ifstream: libc++'s filebuf fills its whole buffer, so it would wait for an EOF
+        // that never comes while this process inherits a writer of the FIFO.
+        std::FILE *ack = std::fopen(finish_ack.c_str(), "r");
+        char line[16] = {};
+        const bool complete = ack && std::fgets(line, sizeof(line), ack) && std::string_view(line) == "complete\n";
+        if (ack) {
+            std::fclose(ack);
+        }
+        if (!complete || session->state().connects != 1) {
             fail("finish acknowledgement or session continuity failed");
         }
         ok(health->close(), "health close");
         std::puts("finish acknowledged");
+        std::fflush(stdout);
     } else {
         ok(broadcast->close(), "broadcast close");
     }
@@ -351,7 +359,7 @@ int subscribe(
     const auto read_deadline = finish
         ? Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(timeout))
         : deadline;
-    auto announced = ok(session->consume()->follow(path, std::nullopt), "follow");
+    auto announced = ok(session->consume()->follow(path, nullptr), "follow");
     auto consumer = until(announced->available(), read_deadline, "available");
     if (!consumer) fail("first available() reported offline");
 
@@ -408,7 +416,7 @@ int subscribe(
             const auto *end = std::get_if<moq::AnnounceEvent::kAbsent>(&event->get_variant());
             if (end && end->announce.prefix == path) break;
         }
-        auto watch = ok(session->consume()->follow(path + ".health", std::nullopt), "health watch");
+        auto watch = ok(session->consume()->follow(path + ".health", nullptr), "health watch");
         auto health = until(watch->available(), read_deadline, "health available");
         if (!health) fail("first health available() reported offline");
         auto track = until(health->subscribe_track("live", std::nullopt), read_deadline, "health subscribe");

@@ -415,7 +415,7 @@ async fn worker_tokio_custom_route_and_quic() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
-	config.runtime.workers = Some(2);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(2).unwrap());
 	config.runtime.pin = false;
 	embed_and_stop(config).await;
 }
@@ -438,7 +438,7 @@ async fn uring_custom_route_and_quic() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
-	config.runtime.workers = Some(2);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(2).unwrap());
 	config.runtime.pin = false;
 	config.runtime.io_uring = true;
 	embed_and_stop(config).await;
@@ -507,7 +507,7 @@ async fn worker_tokio_webrtc_feed() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
-	config.runtime.workers = Some(2);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(2).unwrap());
 	config.runtime.pin = false;
 	webrtc_feed(config).await;
 }
@@ -599,9 +599,14 @@ fn embedded_loader_refuses_obsolete_file_settings() {
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::origin::RouteEvent::Start(route)
-		| moq_net::origin::RouteEvent::Update(route)
-		| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
-		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: route,
+		} => Some((route, true)),
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+			announce: route,
+		} => Some((route, false)),
 	}
 }

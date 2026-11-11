@@ -402,11 +402,6 @@ impl<E: Serialize> Catalog<E> {
 		Ok(serde_json::to_string(self)?)
 	}
 
-	/// Serialize the catalog to a pretty-printed JSON string.
-	pub fn to_json_pretty(&self) -> Result<String> {
-		Ok(serde_json::to_string_pretty(self)?)
-	}
-
 	/// Serialize the catalog to a vector of bytes.
 	pub fn to_vec(&self) -> Result<Vec<u8>> {
 		Ok(serde_json::to_vec(self)?)
@@ -1230,8 +1225,7 @@ mod test {
 		assert_eq!(catalog.media.interval(), Some(std::time::Duration::from_secs(2)));
 
 		// PTS 2000 ms lands 2s after the wall epoch, whatever the track timescale.
-		let expected = kio::clock::Wall::UNIX_EPOCH
-			+ std::time::Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
+		let expected = kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_millis(1_751_846_402_000);
 		assert_eq!(
 			clock
 				.wall_clock(moq_net::Timestamp::from_millis(2000).unwrap())

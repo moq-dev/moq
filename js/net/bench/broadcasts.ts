@@ -1,5 +1,6 @@
 /** Sweep observers against routes for one route update, and against tracks for one listing change. */
 
+import { Wall } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../src/auth.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
@@ -38,7 +39,7 @@ for (const scope of [
 		for (const observerCount of observerCounts) {
 			const origin = new Producer();
 			const handles = Array.from({ length: routeCount }, (_, index) =>
-				origin.routePrefix(Path.from(`room/${index}${scope === "full-name" ? ".chat" : ""}`)),
+				origin.claim(Path.from(`room/${index}${scope === "full-name" ? ".chat" : ""}`)),
 			);
 			const touched = Path.from(
 				scope === "rooted-producers" ? "0" : scope === "full-name" ? "room/0.chat" : "room/0",
@@ -215,7 +216,7 @@ for (const patternCount of [8, 32, 128]) {
 		);
 		const start = performance.now();
 		for (let i = 0; i < 1024; i++) {
-			grant.set({ publish: new Path.Patterns(), subscribe, expires: i });
+			grant.set({ publish: new Path.Patterns(), subscribe, expires: Wall.unixMillis(i) });
 			await Promise.resolve();
 		}
 		console.log(`fetch,${patternCount},${fetchCount},${(((performance.now() - start) * 1000) / 1024).toFixed(2)}`);
@@ -233,7 +234,7 @@ const nextInstance = Instance.parse("01900000-0000-7000-8000-000000000002");
 for (const pathCount of routeCounts) {
 	for (const readerCount of observerCounts) {
 		const origin = new Producer();
-		const dynamic = origin.routePrefix(Path.from("room"), { instance: { id: instance, epoch: 0n } });
+		const dynamic = origin.claim(Path.from("room"), { instance: { id: instance, epoch: 0n } });
 		const pending = dynamic.requested();
 		const requests = Array.from({ length: pathCount }, (_, index) =>
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),

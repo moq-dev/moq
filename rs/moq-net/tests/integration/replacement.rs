@@ -94,7 +94,10 @@ async fn replace(version: &str, instance: Option<Instance>) {
 	let _first = link(version, &publisher, &viewer).await;
 	let mut announced = viewer.consume().routes();
 	match next_event(&mut announced).await {
-		origin::RouteEvent::Start(announce) => {
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			announce,
+		} => {
 			assert_eq!(announce.prefix.as_str(), "cam");
 			let carried = announce.route.instance();
 			assert_eq!(carried.is_minted(), !carries, "{version}: minted {carried}");
@@ -133,7 +136,10 @@ async fn replace(version: &str, instance: Option<Instance>) {
 	// A minted instance makes the replacement a restart, delivered at once, and the old
 	// handle refuses new requests from then on.
 	match announced.try_next() {
-		Some(origin::RouteEvent::Restart(announce)) => assert_eq!(announce.prefix.as_str(), "cam"),
+		Some(origin::RouteEvent {
+			kind: origin::RouteKind::Restart,
+			announce,
+		}) => assert_eq!(announce.prefix.as_str(), "cam"),
 		other => panic!("{version}: expected the restart, got {other:?}"),
 	}
 	let Err(err) = subscribe(&old, "meta").await else {

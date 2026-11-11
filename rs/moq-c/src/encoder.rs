@@ -1,9 +1,10 @@
 //! Codec-only encoders, independent of any broadcast.
 //!
-//! Each call that produces packets keeps them on the encoder handle, readable by index with
-//! [moq_audio_encoder_packet] or [moq_video_encoder_packet] until the next such call or the
-//! handle is freed; [moq_audio_encoder_receive] keeps the one packet it writes the same way. Publish them with [crate::moq_publish_audio] or [crate::moq_publish_video]
-//! and [crate::moq_publish_media_frame].
+//! Encoding submits a frame; [moq_audio_encoder_receive] and [moq_video_encoder_receive] pop
+//! one packet at a time, which the encoder handle keeps until its next call or until it is
+//! freed. [moq_audio_encoder_finish] keeps its packets the same way, readable by index with
+//! [moq_audio_encoder_packet]. Publish them with [crate::moq_publish_audio] or
+//! [crate::moq_publish_video] and [crate::moq_publish_media_frame].
 
 use std::time::Duration;
 
@@ -81,31 +82,11 @@ impl AudioEncoder {
 }
 
 struct VideoEncoder {
-	/// `None` once finished; the packets it drained stay readable.
-	encoder: Option<moq_video::encode::Sink>,
+	encoder: moq_video::encode::Sink,
 	format: moq_video_pixel_format,
 	size: moq_video::Size,
-	packets: Vec<Packet>,
-}
-
-impl VideoEncoder {
-	fn encoder(&mut self) -> Result<&mut moq_video::encode::Sink, Error> {
-		self.encoder
-			.as_mut()
-			.ok_or_else(|| Error::InvalidConfig("the encoder finished".into()))
-	}
-
-	fn keep(&mut self, packets: Vec<moq_video::encode::Encoded>) -> Result<i32, Error> {
-		self.packets = packets
-			.into_iter()
-			.map(|packet| Packet {
-				payload: packet.payload,
-				timestamp: Some(Box::new(packet.timestamp.into())),
-				keyframe: packet.keyframe,
-			})
-			.collect();
-		count(&self.packets)
-	}
+	/// The last received access unit, owning what [moq_video_encoder_receive] lent out.
+	packet: Option<Packet>,
 }
 
 /// Run `f` on an encoder resolved under the global lock, then locked on its own.
@@ -359,19 +340,18 @@ pub unsafe extern "C" fn moq_video_encoder_create(
 		// Opened before the global lock is taken: bringing up a hardware encoder is slow.
 		let encoder = crate::video::block_on(moq_video::encode::Sink::open(&config))?;
 		State::lock().encoders.video.insert(Shared::new(VideoEncoder {
-			encoder: Some(encoder),
+			encoder,
 			format,
 			size: config.size(),
-			packets: Vec::new(),
+			packet: None,
 		}))
 	})
 }
 
 /// Encode one raw picture in the input's layout and resolution.
 ///
-/// Returns the number of access units now available (zero or more, since a backend that
-/// pipelines hands back an earlier picture's), read with [moq_video_encoder_packet], or a
-/// negative code on failure.
+/// Returns zero, or a negative code on failure. Read its access units with
+/// [moq_video_encoder_receive], which a pipelining backend readies only after later pictures.
 ///
 /// # Safety
 /// - `frame` must point at a valid [moq_video_encoder_frame] whose `data` holds `data_size` bytes.
@@ -389,8 +369,8 @@ pub unsafe extern "C" fn moq_video_encoder_encode(encoder: u32, frame: *const mo
 				moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA => moq_video::Surface::rgba(data, video.size)?,
 			};
 			let frame = moq_video::Frame::new(surface, timestamp);
-			let packets = crate::video::block_on(video.encoder()?.encode(frame))?;
-			video.keep(packets)
+			crate::video::block_on(video.encoder.encode(frame))?;
+			Ok(0)
 		})
 	})
 }
@@ -400,7 +380,7 @@ pub unsafe extern "C" fn moq_video_encoder_encode(encoder: u32, frame: *const mo
 pub extern "C" fn moq_video_encoder_cut(encoder: u32) -> i32 {
 	ffi::enter(move || {
 		with(encoder, video, |video| {
-			crate::video::block_on(video.encoder()?.cut())?;
+			crate::video::block_on(video.encoder.cut())?;
 			Ok(())
 		})
 	})
@@ -411,60 +391,51 @@ pub extern "C" fn moq_video_encoder_cut(encoder: u32) -> i32 {
 pub extern "C" fn moq_video_encoder_bitrate(encoder: u32, bitrate: u64) -> i32 {
 	ffi::enter(move || {
 		with(encoder, video, |video| {
-			crate::video::block_on(
-				video
-					.encoder()?
-					.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)),
-			)?;
+			crate::video::block_on(video.encoder.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)))?;
 			Ok(())
 		})
 	})
 }
 
-/// Drain the access units the codec still holds, keeping the encoder open.
+/// Pop the oldest ready access unit into `dst`; call until it returns zero after each
+/// [moq_video_encoder_encode] or [moq_video_encoder_flush].
 ///
-/// Returns their count, read with [moq_video_encoder_packet], or a negative code.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_video_encoder_flush(encoder: u32) -> i32 {
-	ffi::enter(move || {
-		with(encoder, video, |video| {
-			let packets = crate::video::block_on(video.encoder()?.flush())?;
-			video.keep(packets)
-		})
-	})
-}
-
-/// Drain and close the encoder.
-///
-/// Returns the number of access units drained, read with [moq_video_encoder_packet], or a
-/// negative code. Nothing more can be encoded; free the handle once the packets are read.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_video_encoder_finish(encoder: u32) -> i32 {
-	ffi::enter(move || {
-		with(encoder, video, |video| {
-			let encoder = video
-				.encoder
-				.take()
-				.ok_or_else(|| Error::InvalidConfig("the encoder finished".into()))?;
-			let packets = crate::video::block_on(encoder.finish())?;
-			video.keep(packets)
-		})
-	})
-}
-
-/// Read access unit `index` from the last encode, flush, or finish.
-///
-/// `payload` and `timestamp` borrow the encoder until its next call or
-/// [moq_video_encoder_free]; `keyframe` says whether the unit starts from a keyframe. Returns
-/// zero, or a negative code, `MOQ_ERROR_NO_INDEX` past the last unit.
+/// Returns one when it wrote an access unit, zero while the codec holds the rest, or a negative
+/// code. `payload` and `timestamp` borrow the encoder until its next call or
+/// [moq_video_encoder_free]; `keyframe` says whether the unit starts from a keyframe.
 ///
 /// # Safety
 /// - `dst` must point at a writable [moq_frame].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_video_encoder_packet(encoder: u32, index: u32, dst: *mut moq_frame) -> i32 {
+pub unsafe extern "C" fn moq_video_encoder_receive(encoder: u32, dst: *mut moq_frame) -> i32 {
 	ffi::enter(move || {
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		with(encoder, video, |video| packet(&video.packets, index, dst))
+		with(encoder, video, |video| {
+			let Some(ready) = video.encoder.receive()? else {
+				return Ok(0);
+			};
+			let packet = video.packet.insert(Packet {
+				payload: ready.payload,
+				timestamp: Some(Box::new(ready.timestamp.into())),
+				keyframe: ready.keyframe,
+			});
+			*dst = packet.info();
+			Ok(1)
+		})
+	})
+}
+
+/// Mark the end of input, so [moq_video_encoder_receive] returns every access unit the codec
+/// still holds. The encoder stays open: the next picture starts new input.
+///
+/// Returns zero, or a negative code.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_video_encoder_flush(encoder: u32) -> i32 {
+	ffi::enter(move || {
+		with(encoder, video, |video| {
+			crate::video::block_on(video.encoder.flush())?;
+			Ok(0)
+		})
 	})
 }
 

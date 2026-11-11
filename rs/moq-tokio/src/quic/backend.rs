@@ -15,7 +15,7 @@ use std::time::Duration;
 /// The transport config the resolved quic knobs describe, for either role.
 fn transport(quic: &Resolved, role: &str) -> Result<driver::transport::Config> {
 	let mut transport = driver::transport::Config::default();
-	transport.idle_timeout = Some(quic.idle_timeout);
+	transport.idle_timeout = quic.idle_timeout;
 	transport.keep_alive = quic.keep_alive;
 	// MTU discovery is enabled by default; disable it unless asked.
 	if !quic.mtu_discovery {

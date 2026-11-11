@@ -46,7 +46,7 @@ async fn settle() {
 /// A worker claiming `pool`, answering each request with an output whose `video`
 /// track carries the worker's name.
 struct Worker {
-	_claim: Rc<origin::Route>,
+	_claim: Rc<origin::Claim>,
 	/// Each output with its track, which would end once its route drops.
 	outputs: Rc<RefCell<Vec<(origin::Route, track::Producer)>>>,
 	origin: origin::Producer,
@@ -55,11 +55,7 @@ struct Worker {
 impl Worker {
 	fn new(hop: u64, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(
-			origin
-				.route_prefix("pool", moq_net::origin::RouteOptions::default())
-				.unwrap(),
-		);
+		let claim = Rc::new(origin.claim("pool", moq_net::origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(kio::clock::sim::spawn(async move {

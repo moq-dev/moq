@@ -81,10 +81,14 @@ async fn until(announced: &mut origin::Routes, path: &str, active: bool) {
 	let wait = async {
 		loop {
 			let (announce, now_active) = match announced.next().await.expect("origin closed") {
-				origin::RouteEvent::Start(announce)
-				| origin::RouteEvent::Update(announce)
-				| origin::RouteEvent::Restart(announce) => (announce, true),
-				origin::RouteEvent::End(announce) => (announce, false),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
+					announce,
+				} => (announce, true),
+				origin::RouteEvent {
+					kind: origin::RouteKind::End | origin::RouteKind::Offline,
+					announce,
+				} => (announce, false),
 			};
 			if announce.prefix.as_str() == path && now_active == active {
 				return;

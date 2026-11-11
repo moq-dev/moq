@@ -29,7 +29,8 @@ Decided 2026-11-08 (maintainer, moq-dev/studio /quest-plan):
 - The studio prototypes the format first (`moq-studio --watch`, reading a
   provisional `dev.moq.studio.layers` track), and the spec starts from what
   that prototype settles (rejected: drafting the spec in parallel).
-- Players mix layers' audio in, at the gain and mute the layout carries.
+- Players mix layers' audio in, at the gain, mute, pan, and delay the layout
+  carries (pan and delay added 2026-11-09, as the spec quest records).
 - Each layer carries a priority and whether a viewer may toggle it. A player
   maps priority onto moq-lite's subscription priorities and unsubscribes a
   toggled-off layer.

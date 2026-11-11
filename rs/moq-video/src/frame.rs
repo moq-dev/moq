@@ -180,7 +180,7 @@ pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
 		events: libc::POLLIN,
 		revents: 0,
 	};
-	let deadline = kio::clock::now() + DMA_BUF_FENCE_TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(DMA_BUF_FENCE_TIMEOUT);
 	loop {
 		// A signal restarts the wait against the same deadline rather than
 		// granting a fresh budget, so the total stall stays bounded.
@@ -612,14 +612,16 @@ impl Surface {
 			// encoder to import. If VA-API is missing or refuses the buffer,
 			// download and resize on the CPU.
 			#[cfg(all(target_os = "linux", feature = "vaapi"))]
-			Surface::DmaBuf(buffer) if output == crate::Output::Native => match vaapi::resize(buffer, size) {
-				Ok(scaled) => Surface::DmaBuf(scaled),
-				Err(err) => {
-					static WARN_ONCE: std::sync::Once = std::sync::Once::new();
-					WARN_ONCE.call_once(|| tracing::warn!(%err, "GPU resize failed; falling back to the CPU"));
-					Surface::I420(buffer.inner.download_i420()?.resize(size)?)
+			Surface::DmaBuf(buffer) if output == crate::Output::Native => {
+				match vaapi::resize(buffer, size, config.vaapi.as_deref()) {
+					Ok(scaled) => Surface::DmaBuf(scaled),
+					Err(err) => {
+						static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+						WARN_ONCE.call_once(|| tracing::warn!(%err, "GPU resize failed; falling back to the CPU"));
+						Surface::I420(buffer.inner.download_i420()?.resize(size)?)
+					}
 				}
-			},
+			}
 			#[allow(
 				unreachable_patterns,
 				reason = "the other surfaces exist only on some platforms and features"
@@ -656,17 +658,6 @@ impl Surface {
 	/// [`Color::infer`].
 	pub fn to_rgba(&self, config: &crate::convert::Config) -> Result<crate::convert::Rgba, Error> {
 		crate::convert::rgba(self, config)
-	}
-
-	/// Convert to owned, tightly packed BGRA8 pixels on the CPU.
-	///
-	/// The same conversion as [`to_rgba`](Self::to_rgba) with red and blue
-	/// exchanged. Reach for it when the destination wants that order, which is
-	/// most of them: GPUI's `RenderImage`, Direct2D, and Win32 generally. Doing
-	/// it here is one pass over the frame; converting to RGBA and swapping the
-	/// channels afterwards is two.
-	pub fn to_bgra(&self, config: &crate::convert::Config) -> Result<crate::convert::Bgra, Error> {
-		crate::convert::bgra(self, config)
 	}
 
 	/// The pixels as a CoreVideo pixel buffer, the mirror of

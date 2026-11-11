@@ -55,13 +55,13 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 		}
 	}
 
-	fn finish(&mut self) -> Result<()> {
-		match self {
-			ContainerImpl::Fmp4(decoder) => decoder.finish(),
-			ContainerImpl::Mkv(decoder) => decoder.finish(),
-			ContainerImpl::Ts(decoder) => decoder.finish().map_err(Into::into),
-			ContainerImpl::Flv(decoder) => decoder.finish(),
-		}
+	fn finish(self) -> Result<FinishedImpl<E>> {
+		Ok(match self {
+			ContainerImpl::Fmp4(decoder) => FinishedImpl::Fmp4(Box::new(decoder.finish()?)),
+			ContainerImpl::Mkv(decoder) => FinishedImpl::Mkv(Box::new(decoder.finish()?)),
+			ContainerImpl::Ts(decoder) => FinishedImpl::Ts(Box::new(decoder.finish()?)),
+			ContainerImpl::Flv(decoder) => FinishedImpl::Flv(Box::new(decoder.finish()?)),
+		})
 	}
 
 	fn abort(self, err: moq_net::Error) {
@@ -118,9 +118,14 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 		self.inner.decode(data)
 	}
 
-	/// Finish the importer, flushing any buffered data.
-	pub fn finish(&mut self) -> Result<()> {
-		self.inner.finish()
+	/// Finish the importer, flushing any buffered data, and return the [`Finished`]
+	/// importer.
+	///
+	/// Every track ends either way, so a failed finish can't be retried.
+	pub fn finish(self) -> Result<Finished<E>> {
+		Ok(Finished {
+			inner: self.inner.finish()?,
+		})
 	}
 
 	/// Abort every published track with `err`, so subscribers see the real cause
@@ -141,6 +146,43 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.inner.seek(sequence)
+	}
+}
+
+/// The finished importers [`Finished`] dispatches to.
+enum FinishedImpl<E: crate::container::ts::Catalog = ()> {
+	// Boxed like the importers they finished.
+	Fmp4(Box<crate::container::fmp4::Finished<E>>),
+	Mkv(Box<crate::container::mkv::Finished<E>>),
+	Ts(Box<crate::container::ts::Finished<E>>),
+	Flv(Box<crate::container::flv::Finished<E>>),
+}
+
+/// A container importer that [finished](Container::finish): every track has ended, and they can
+/// still be read or aborted, but it takes no more input.
+///
+/// Dropping it retires the tracks and their catalog renditions, as dropping the [`Container`]
+/// does.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut container: moq_mux::import::container::Finished) {
+/// container.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it retires the tracks and their catalog renditions"]
+pub struct Finished<E: crate::container::ts::Catalog = ()> {
+	inner: FinishedImpl<E>,
+}
+
+impl<E: crate::container::ts::Catalog> Finished<E> {
+	/// Release every track's cache, reporting `err` to readers that have not drained it.
+	pub fn abort(self, err: moq_net::Error) {
+		match self.inner {
+			FinishedImpl::Fmp4(finished) => finished.abort(err),
+			FinishedImpl::Mkv(finished) => finished.abort(err),
+			FinishedImpl::Ts(finished) => finished.abort(err),
+			FinishedImpl::Flv(finished) => finished.abort(err),
+		}
 	}
 }
 

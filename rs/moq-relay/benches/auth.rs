@@ -56,6 +56,8 @@ impl Fixture {
 		});
 		let mut config = moq_tokio::listen::Config::default();
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		// Only moq-lite-07 speaks AUTH, and no version offers it by default.
+		config.version = vec!["moq-lite-07-wip".parse().unwrap()];
 		let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
 		let port = server.tcp_local_addr().unwrap().port();
 		let (cluster, driver) = cluster::Cluster::new(Default::default()).unwrap();
@@ -70,7 +72,7 @@ impl Fixture {
 			}
 		});
 		let mut config = moq_tokio::connect::Config::default();
-		config.version = vec!["moq-transport-22".parse().unwrap()];
+		config.version = vec!["moq-lite-07-wip".parse().unwrap()];
 		let client = config.init(Default::default()).unwrap().with_reconnect(false);
 		let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().unwrap();
 		let mut connections = Vec::new();
@@ -169,6 +171,8 @@ impl Queue {
 		let (auth, mut admissions) = auth::Auth::embedded("bench");
 		let mut config = moq_tokio::listen::Config::default();
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		// Only moq-lite-07 speaks AUTH, and no version offers it by default.
+		config.version = vec!["moq-lite-07-wip".parse().unwrap()];
 		let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
 		let port = server.tcp_local_addr().unwrap().port();
 		let (cluster, driver) = cluster::Cluster::new(Default::default()).unwrap();
@@ -183,7 +187,7 @@ impl Queue {
 			}
 		});
 		let mut config = moq_tokio::connect::Config::default();
-		config.version = vec!["moq-transport-22".parse().unwrap()];
+		config.version = vec!["moq-lite-07-wip".parse().unwrap()];
 		let client = config.init(Default::default()).unwrap().with_reconnect(false);
 		let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().unwrap();
 		let (connection, ()) = tokio::join!(async { client.connect(url).established().await.unwrap() }, async {

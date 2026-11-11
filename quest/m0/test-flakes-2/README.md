@@ -229,14 +229,47 @@ two random-mesh withdrawal tests, which hit nextest's 60 s kill in
 `just check` and are quarantined with `#[ignore]` by
 [moq-dev/moq#8336](https://github.com/moq-dev/moq/pull/8336).
 
+Added 2026-11-09 (maintainer's standing rule that flakes join this epic):
+`js/net`'s datagram session-close-after-end test again, whose lite-05 case
+failed the merge queue for [moq-dev/moq#8276](https://github.com/moq-dev/moq/pull/8276)
+after [moq-dev/moq#8321](https://github.com/moq-dev/moq/pull/8321) re-enabled it.
+The test now aborts once the client has recorded the end, signalled by the
+subscriber's `yieldNow()`, and is re-enabled by
+[moq-dev/moq#8357](https://github.com/moq-dev/moq/pull/8357).
+
+Added 2026-11-09 (maintainer's standing rule that flakes join this epic):
+moq-rs's Python socket test `test_tcp_rst_and_endpoint_close_are_errors`, whose
+reader got `Unroutable` after the endpoint closed during
+[moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)'s loaded `just check`.
+It is quarantined with `pytest.mark.skip` until its child fixes it.
+
+Added 2026-11-09 (maintainer's standing rule that flakes join this epic): the
+Go wrapper's `TestRecvGroupCancelKeepsConsumer`, whose `RecvGroup` after a
+cancelled one missed an appended group during
+[moq-dev/moq#8363](https://github.com/moq-dev/moq/pull/8363)'s loaded
+`just check`. It is quarantined with `t.Skip` until its child fixes it.
+
+Added 2026-11-09 (maintainer, `/quest-complete`, under the flaky-test rule):
+`js/common/worklet.test.ts`'s dev-server test, a candidate for bun's 5 s timeout
+in a loaded full `just check` on [moq-dev/moq#8325](https://github.com/moq-dev/moq/pull/8325).
+The failed log was not retained, so the failing test is unconfirmed.
+It is quarantined with `test.skip` until its child fixes it.
+
+Added 2026-11-09 (maintainer, /quest-complete): interop's `finish` cases with
+a cpp or rust publisher, which failed under a loaded host and passed on rerun.
+They are quarantined until their child fixes them.
+
+Resolved 2026-11-09 (maintainer, `/quest-complete`): `js/net`'s lite-07
+createWritable datagram queue test failed only on code predating [moq-dev/moq#8195](https://github.com/moq-dev/moq/pull/8195): a write
+that yielded after handing DATAGRAMS_INFO over left the first track's queue
+unopened while the reader went on. The test now reads a datagram through that
+queue before counting queues, fixed by
+[moq-dev/moq#8396](https://github.com/moq-dev/moq/pull/8396).
+
+Added 2026-11-10 (maintainer's standing rule that flakes join this epic):
+interop's `python -> go` media cell, whose Go subscriber closed its lite-07
+session as publishing outside its grant once in
+[moq-dev/moq#8444](https://github.com/moq-dev/moq/pull/8444)'s local run and
+passed on rerun. It is quarantined until its child fixes it.
+
 Public API: none. Wire: none.
-
-## Required
-
-- [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [js/net's bandwidth sampling test holds up under load](/quest/m0/test-flakes-2/bandwidth-sampling.md) - the sampling test counts ticks without racing the mocked clock, and its `test.skip` is removed
-- [js/net's widened max-age re-drop test ends cleanly, not with a reset](/quest/m0/test-flakes-2/widened-max-age-reset.md) - the test finishes the track only after the re-drop reply arrives, so the end is a FIN, and drops its wall-clock assert
-- [bench/relay.test.py's stream-transport test gets a port free for TCP and UDP](/quest/m0/test-flakes-2/relay-port-pair.md) - the test binds TCP and UDP to one number free in both, so parallel checks can't collide with it
-- [js/net's compressed-frame cap test holds up under load](/quest/m0/test-flakes-2/compressed-frame-cap.md) - the cap is proven without a 32 MiB payload, and its `test.skip` is removed
-- [js/net's lite-07 re-dropped re-offer test holds up under load](/quest/m0/test-flakes-2/redropped-reoffer.md) - update 3 is ordered before the re-offer opens by an event, not a yield count, and its `test.skip` is removed
-- [moq-net's random-mesh withdrawal tests fit the gate](/quest/m0/test-flakes-2/mesh-withdraw-runtime.md) - the 200-seed mesh tests cost seconds of CPU, and their `#[ignore]` is removed

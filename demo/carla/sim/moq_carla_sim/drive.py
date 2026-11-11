@@ -148,6 +148,11 @@ class Drive:
         return None if self._session is None else handle(self._session)
 
     @property
+    def holder(self) -> tuple[str, str] | None:
+        """The lease holder's driver id and session, or None while nobody holds it."""
+        return None if self._driver is None or self._session is None else (self._driver, self._session)
+
+    @property
     def state(self) -> DriveState:
         return self._state
 

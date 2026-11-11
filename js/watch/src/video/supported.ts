@@ -6,11 +6,19 @@ import { decoderConfigKey, hardwareAcceleration } from "./config";
 
 /** Whether the WebCodecs video decoder can play this config. */
 export async function supported(config: Catalog.VideoConfig): Promise<boolean> {
+	return (await accepted(config)) !== undefined;
+}
+
+/**
+ * The codec string WebCodecs accepts for this config, or undefined when none fits. It never rewrites
+ * the config, so the catalog keeps the publisher's string while the decoder configures with this one.
+ */
+export async function accepted(config: Catalog.VideoConfig): Promise<string | undefined> {
 	if (!Catalog.containerSupported(config.container)) {
 		// `kind` is the literal "unknown" tag; the container the publisher actually named is in `raw`.
 		const kind = config.container.kind === "unknown" ? config.container.raw.kind : config.container.kind;
 		console.warn(`video: ignoring rendition with unknown container: ${kind}`);
-		return false;
+		return undefined;
 	}
 
 	let description: Uint8Array | undefined;
@@ -26,40 +34,27 @@ export async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 			// track rather than letting isConfigSupported pass on a
 			// description-less config and then having runCmaf fail later.
 			console.warn(`video: malformed CMAF init segment for codec ${config.codec}`, err);
-			return false;
+			return undefined;
 		}
 	}
-	const { supported } = await VideoDecoder.isConfigSupported({
-		codec: config.codec,
-		description,
-		displayAspectWidth: config.displayAspectWidth,
-		displayAspectHeight: config.displayAspectHeight,
-		optimizeForLatency: config.optimizeForLatency ?? true,
-		hardwareAcceleration: hardwareAcceleration(config),
-	});
 
-	if (supported) return true;
+	// Safari rejects `avc3.*` codec strings even though its H.264 decoder handles inline SPS/PPS,
+	// so retry those as `avc1.*`.
+	const codecs = [config.codec];
+	if (config.codec.startsWith("avc3.")) codecs.push(`avc1.${config.codec.slice("avc3.".length)}`);
 
-	// Safari rejects `avc3.*` codec strings even though its H.264 decoder handles
-	// inline SPS/PPS. Rewrite to `avc1.*` and retry; mutate config.codec so the
-	// later `decoder.configure()` call uses the accepted string too.
-	if (config.codec.startsWith("avc3.")) {
-		const avc1 = `avc1.${config.codec.slice("avc3.".length)}`;
-		const retry = await VideoDecoder.isConfigSupported({
-			codec: avc1,
+	for (const codec of codecs) {
+		const { supported } = await VideoDecoder.isConfigSupported({
+			codec,
 			description,
 			displayAspectWidth: config.displayAspectWidth,
 			displayAspectHeight: config.displayAspectHeight,
 			optimizeForLatency: config.optimizeForLatency ?? true,
 			hardwareAcceleration: hardwareAcceleration(config),
 		});
-		if (retry.supported) {
-			config.codec = avc1;
-			return true;
-		}
+		if (supported) return codec;
 	}
-
-	return false;
+	return undefined;
 }
 
 Object.assign(supported, { [supportCacheKey]: decoderConfigKey });
