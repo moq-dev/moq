@@ -42,7 +42,7 @@ just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/rout
 All three pass at the sync commit. Each takes minutes on 4 workers, so run them last. First run what answers in seconds:
 
 - `just rs test -p moq-net --lib -E 'test(/route::/)'`. `sweep_no_route_outgrows_a_loop_free_path` delivers every message and echo in a random order on random meshes with unequal costs, flaps, restarts, and collections, and checks the metric bound, loop freedom, and the quiet state. Raise its case count for a wider search: 40,000 cases run in 15 seconds in release.
-- TLC's simulation mode on the config in question, which samples deep runs the exhaustive bounds do not reach: add `-simulate num=3000 -depth 80`.
+- TLC's simulation mode, which samples runs the exhaustive bounds do not reach. The config's `MaxRev`, `MaxFlaps`, and `MaxCollects` still bound a simulated run, so raise them in a copy of the config first, such as three session changes, two claim changes, and a collection, then add `-simulate num=3000 -depth 150`.
 
 Both behind-a-triangle configs fail `SimplePaths` within seconds if `Crossed` is made false, which is the count to infinity the hops fix: a relay drops its distance once its neighbours echoed, and takes back a copy of its own route that a third relay still held.
 
