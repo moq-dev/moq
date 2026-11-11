@@ -13,7 +13,7 @@ moq-relay's `incoming::Sealed` (`incoming.rs:116`) swaps `within` for
 The same PR rewrites every other `within` reference: the
 `rs/moq-tokio/CHANGELOG.md` Unreleased entry, the `rs/moq-relay/MIGRATE.md`
 Unreleased note, and the intra-doc link in `rs/moq-relay/src/auth.rs`
-(`AuthDecider` docs), which otherwise fails `cargo doc -D warnings`.
+(`Auth::admit` docs), which otherwise fails `cargo doc -D warnings`.
 Public API: `Request::within` removed, `Request::poll_expired`/`expired`
 added; neither is on `release`. Wire: none.
 
