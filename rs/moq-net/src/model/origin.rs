@@ -1111,8 +1111,10 @@ impl OriginConsumerState {
 				self.put(prefix, PendingUpdate::Unannounce(last, gone));
 			}
 			// The embedded announce cancels with this retraction; the consumer still
-			// needs the leading one, reported as the later one went.
-			Some(PendingUpdate::UnannounceAnnounce { old, .. }) => {
+			// needs the leading one. Its reason is the later one only when both carry
+			// one identity; otherwise the later reason is for a route never delivered.
+			Some(PendingUpdate::UnannounceAnnounce { old, gone: prior, new }) => {
+				let gone = if old.1 == new.1 { gone } else { prior };
 				self.put(prefix, PendingUpdate::Unannounce(old, gone));
 			}
 		}
@@ -10413,6 +10415,27 @@ mod tests {
 		drop(exact);
 		announced.expect_next_offline("").await;
 		announced.expect_next_active("").await;
+	}
+
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn capture_change_coalesced_keeps_the_lost_route_offline() {
+		let producer = origin(1).produce();
+		let broad = producer.announce("room", RouteInfo::new()).unwrap();
+		let exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
+		let mut announced = producer
+			.consume()
+			.scope("room/alice", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.covering()
+			.routes();
+		announced.expect_next_active("").await;
+
+		// Both leave before the next poll: the one retraction delivered is the
+		// exact route's, which was lost rather than withdrawn.
+		drop(exact);
+		drop(broad);
+		announced.expect_next_offline("").await;
 	}
 
 	#[test]
