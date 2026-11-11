@@ -100,4 +100,3 @@ async fn a_side_that_declines_solicit_takes_unsolicited_announces() {
 		}
 	}
 }
-

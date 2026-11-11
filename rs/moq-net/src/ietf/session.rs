@@ -12,8 +12,7 @@ use std::task::{Poll, ready};
 
 use super::{
 	Control, Message, Namespaces, PublishNamespaces, Publisher, RecvFill, RecvGroup, Subscriber, Version, active_count,
-	cluster, hidden, max_age, peer, request_stream::Reject, request_update, solicit,
-	subscriber::is_protocol_violation,
+	cluster, hidden, max_age, peer, request_stream::Reject, request_update, solicit, subscriber::is_protocol_violation,
 };
 
 type RecvStream = crate::transport::boxed::RecvStream;
@@ -401,12 +400,7 @@ impl Launch {
 			},
 		);
 		let publish_namespaces = PublishNamespaces::new(publisher.clone());
-		let dispatch = Dispatch::new(
-			session.clone(),
-			publisher,
-			subscriber.clone(),
-			version,
-		);
+		let dispatch = Dispatch::new(session.clone(), publisher, subscriber.clone(), version);
 		// A transport without datagrams never delivers one.
 		let datagrams = (session.max_datagram_size() != 0).then(|| Datagrams {
 			session: session.clone(),
@@ -1398,12 +1392,7 @@ enum DispatchState {
 }
 
 impl Dispatch {
-	fn new(
-		session: Transport,
-		publisher: Publisher,
-		subscriber: Subscriber,
-		version: Version,
-	) -> Self {
+	fn new(session: Transport, publisher: Publisher, subscriber: Subscriber, version: Version) -> Self {
 		Self {
 			session,
 			version,

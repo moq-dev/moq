@@ -129,7 +129,7 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(version.into())
-						.with_publisher(origin.consume())
+			.with_publisher(origin.consume())
 			.connect(harness::now(), client)
 			.await
 			.unwrap();
