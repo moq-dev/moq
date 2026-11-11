@@ -83,6 +83,7 @@
         "@moq/publish": "workspace:^",
         "@moq/room": "workspace:^",
         "@moq/signals": "workspace:^",
+        "@moq/stats": "workspace:^",
         "@moq/watch": "workspace:^",
       },
       "devDependencies": {
@@ -91,11 +92,9 @@
         "highlight.js": "^11.12.0",
         "open": "^11.0.4",
         "rolldown": "^1.2.16",
-        "solid-js": "^1.9.18",
         "tailwindcss": "^4.1.13",
         "typescript": "7.0.2",
         "vite": "^8.3.5",
-        "vite-plugin-solid": "^2.11.15",
       },
     },
     "doc": {
@@ -129,6 +128,7 @@
         "@moq/qmux": "workspace:*",
         "@moq/room": "workspace:*",
         "@moq/signals": "workspace:*",
+        "@moq/stats": "workspace:*",
         "@moq/ui": "workspace:*",
         "@moq/video": "workspace:*",
         "@moq/watch": "workspace:*",
@@ -373,6 +373,20 @@
         "@types/react",
         "react",
       ],
+    },
+    "js/stats": {
+      "name": "@moq/stats",
+      "version": "0.1.0",
+      "dependencies": {
+        "@moq/json": "workspace:^",
+        "@moq/net": "workspace:^",
+        "@moq/signals": "workspace:^",
+        "zod": "^4.6.7",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.4.4",
+        "typescript": "7.0.2",
+      },
     },
     "js/ui": {
       "name": "@moq/ui",
@@ -865,6 +879,8 @@
     "@moq/room": ["@moq/room@workspace:js/room"],
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
+
+    "@moq/stats": ["@moq/stats@workspace:js/stats"],
 
     "@moq/ui": ["@moq/ui@workspace:js/ui"],
 

@@ -1,13 +1,16 @@
-# moq-transport is a compatibility layer again
+# [S] Docs state the frozen moq-transport scope
 
 ## Goal
 
-Our moq-transport support covers what a third-party implementation needs to
+The docs that describe moq-transport support (`doc/concept/`,
+`drafts/draft-lcurley-moq-ietf.md` if it lists the extensions, and the interop
+matrix in [interop audit](/quest/m3/audit-interop.md)) state the frozen scope:
+our moq-transport support covers what a third-party implementation needs to
 exchange live media with ours, and stops there: SETUP, the standard
 AUTHORIZATION TOKEN, live PUBLISH_NAMESPACE / SUBSCRIBE / PUBLISH, joining
 FETCH, and relay forwarding between moq-transport and moq-lite sessions,
-including across our relays. Our own extensions and the IETF-only features
-nobody third-party uses are deleted from Rust, JS, and the drafts.
+including across our relays, plus the extensions a third party speaks. The
+code deletions are done; this is the docs work that remains.
 
 ## Plan
 
@@ -29,15 +32,30 @@ Settled with this epic:
   [moq-dev/moq#7190](https://github.com/moq-dev/moq/pull/7190)), and the
   relay paths moq.pro's fleet smoke runs: cross-relay moq-transport
   subscribes and a draft-18 session to a third-party relay.
+- Kept (decided 2026-11-10, maintainer, in
+  [moq-dev/moq#8445](https://github.com/moq-dev/moq/pull/8445)): moq-net's
+  listing of a moq-transport peer's tracks with SUBSCRIBE_TRACKS, since
+  Cloudflare's relay (cloudflare/moq-rs) answers it; without it we could not
+  list tracks on that relay. Receiving SUBSCRIBE_TRACKS stays refused.
 - Kept, as rejected in the same interview: lite-07's `ietf` object extension
   and moq-lite 01 to 04.
 - Not here: `ietf/flate.rs`; compression removal has its own work.
 
-This epic's own work, after its children: the docs that describe
-moq-transport support (`doc/concept/`, `drafts/draft-lcurley-moq-ietf.md` if
-it lists the extensions, and the interop matrix in
-[interop audit](/quest/m3/audit-interop.md)) state the frozen scope, and
-AGENTS.md's IETF rule is reworded only if the maintainer asks.
+Our moq-transport extensions, decided 2026-11-10 (maintainer, on
+[moq-dev/moq#8444](https://github.com/moq-dev/moq/pull/8444)):
+✅ keep MoQ Cluster (HOP_ID, RELAY_COST, HOP_PATH, ROUTE_COST), Solicit,
+Hidden, and Active Count, and delete only the in-band AUTH exchange (rejected:
+delete all five). OpenMOQ's moqx relay implements draft-lcurley-moq-cluster-01
+over moq-transport draft 18 and turns it on by default, so a third party does
+speak cluster, and the other three cost about 780 dedicated lines between
+them. AUTH cost about 2k dedicated lines plus wiring and no third party uses
+it; a third party authenticates with the standard AUTHORIZATION TOKEN, which
+stays. In-band grants and token renewal are moq-lite-07 only.
+
+Sized S as a standalone quest (decided 2026-11-11, maintainer, in
+[moq-dev/moq#8445](https://github.com/moq-dev/moq/pull/8445), which deleted
+the last child; rejected: finishing the docs there, XS). AGENTS.md's IETF rule
+is reworded only if the maintainer asks.
 
 ## Related
 

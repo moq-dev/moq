@@ -15,7 +15,7 @@
 //! only once another serves it, so the origin always holds a route for it.
 
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	sync::{Arc, Mutex, MutexGuard},
 	task::{Poll, ready},
 };
@@ -58,6 +58,8 @@ pub(crate) struct Served {
 	/// The selected route's metric: a path through the claim costs the Announce
 	/// Cost plus this.
 	pub metric: Metric,
+	/// The round trip to the route's origin node, informational.
+	pub rtt: Option<std::time::Duration>,
 	/// Whether a usable route serves it; a held one leaves it shown but unavailable.
 	pub available: bool,
 }
@@ -354,10 +356,19 @@ struct State {
 	/// with the name each stream's peer gives it: while they stay the same, only a
 	/// claim whose shown state changed is served differently.
 	routes: HashMap<Id, Routes>,
+	/// The streams whose close changes a path to this node, which then advances its
+	/// seqno so a node remembering a shorter path accepts the longer one without a
+	/// ROUTE_REQUEST: one whose peer forwarded it a route, or, on a node that does
+	/// not forward, one this node's route goes out on. A new stream lengthens no path.
+	links: HashSet<Key>,
+	/// Answer streams of a node that does not forward, which join `links` once this
+	/// node's route goes out on them.
+	origins: HashSet<Key>,
 }
 
-/// An identity's usable feasible routes: each stream, its metric, and the peer's name.
-type Routes = Vec<(Key, Metric, Id)>;
+/// An identity's usable feasible routes: each stream, its metric and RTT, and the
+/// peer's name.
+type Routes = Vec<(Key, Metric, Option<std::time::Duration>, Id)>;
 
 /// Where one shown claim is served: each stream, what it was last sent, and
 /// whether it confirmed serving it.
@@ -399,13 +410,14 @@ impl Home {
 }
 
 impl Node {
-	/// A node declaring a fresh identity, `seed` keying its rotation.
+	/// A node declaring a fresh identity, which also names it in the hops of the routes
+	/// it forwards, `seed` keying its rotation.
 	pub fn new(id: Id, seed: u64) -> Self {
 		debug_assert!(
 			id != 0 && id & QUALIFIED == 0,
 			"a declared identity is non-zero and unqualified"
 		);
-		let mut router = Router::new(seed);
+		let mut router = Router::new(id, seed);
 		router.originate(id, 0);
 		Self {
 			state: Arc::new(Mutex::new(State {
@@ -414,6 +426,8 @@ impl Node {
 				queues: HashMap::new(),
 				homes: BTreeMap::new(),
 				routes: HashMap::new(),
+				links: HashSet::new(),
+				origins: HashSet::new(),
 			})),
 		}
 	}
@@ -461,17 +475,21 @@ impl Node {
 
 	/// Register a stream this node asked the peer for under `prefix`.
 	pub fn receive(&self, link: Link, prefix: Path) -> Result<Stream, Error> {
-		self.register(link, |router, key| router.asks(key, prefix))
+		self.register(link, false, |router, key| router.asks(key, prefix))
 	}
 
 	/// Register a stream answering the peer's request for `prefix`.
 	pub fn answer(&self, link: Link, prefix: Path) -> Result<Stream, Error> {
-		self.register(link, |router, key| router.peer_interest(key, prefix))
+		// A node that forwards nothing knows no better than that every stream carrying
+		// its route is a path to it; one whose prefix matches no claim carries none yet.
+		let origin = !link.proxy;
+		self.register(link, origin, |router, key| router.peer_interest(key, prefix))
 	}
 
 	fn register(
 		&self,
 		link: Link,
+		origin: bool,
 		open: impl FnOnce(&mut Router<Key, Claim>, Key) -> Result<(), Error>,
 	) -> Result<Stream, Error> {
 		let mut state = self.lock();
@@ -480,13 +498,16 @@ impl Node {
 		state.router.connect(key, link)?;
 		let queue = kio::Shared::default();
 		state.queues.insert(key, queue.clone());
+		if origin {
+			state.origins.insert(key);
+		}
 		if let Err(err) = open(&mut state.router, key) {
 			state.router.disconnect(key);
 			state.queues.remove(&key);
+			state.origins.remove(&key);
+			state.links.remove(&key);
 			return Err(err);
 		}
-		// The node's own set of sessions changed.
-		let _ = state.router.bump();
 		state.flush();
 		Ok(Stream {
 			node: self.clone(),
@@ -561,7 +582,25 @@ impl Stream {
 	/// ROUTE_START, ROUTE_UPDATE, ROUTE_HOLD (`Held`), or ROUTE_END (`None`) for
 	/// the identity the peer names `named`.
 	pub fn route(&self, named: Id, reach: Option<Reach>) {
-		self.with(|router, key| router.route(key, named, reach));
+		let mut state = self.node.lock();
+		// Only the peer's own route has metric 0: any other means the peer forwards.
+		if matches!(&reach, Some(Reach::Finite(advert)) if advert.metric > 0) {
+			state.links.insert(self.key);
+		}
+		state.router.route(self.key, named, reach);
+		state.flush();
+	}
+
+	/// `next`, of the same session, takes this stream's place: it inherits whether
+	/// this one was a route link, so closing this one changes no path.
+	pub fn replaced_by(&self, next: &Stream) {
+		let mut state = self.node.lock();
+		if state.links.remove(&self.key) {
+			state.links.insert(next.key);
+		}
+		if state.origins.remove(&self.key) {
+			state.origins.insert(next.key);
+		}
 	}
 
 	/// A batch of claim changes for the route the peer names `named`, closed by
@@ -586,6 +625,11 @@ impl Stream {
 	/// The peer sent GOAWAY: its routes rank below every other.
 	pub fn goaway(&self) {
 		self.with(|router, key| router.goaway(key));
+	}
+
+	/// The link to the peer has `rtt`, or `None` unmeasured.
+	pub fn rtt(&self, rtt: Option<std::time::Duration>) {
+		self.with(|router, key| router.rtt(key, rtt));
 	}
 
 	/// This stream's session now serves `claim` of `id`, so a stream that no longer
@@ -616,7 +660,10 @@ impl Drop for Stream {
 		for home in state.homes.values_mut() {
 			home.keys.remove(&self.key);
 		}
-		let _ = state.router.bump();
+		state.origins.remove(&self.key);
+		if state.links.remove(&self.key) {
+			let _ = state.router.bump();
+		}
 		state.flush();
 	}
 }
@@ -634,7 +681,12 @@ impl State {
 			let mut acked = Vec::new();
 			for out in self.router.drain() {
 				let (key, output) = match out {
-					Out::Route { to, id, reach } => (to, Output::Route { id, reach }),
+					Out::Route { to, id, reach } => {
+						if reach.is_some() && Some(id) == self.router.declared() && self.origins.contains(&to) {
+							self.links.insert(to);
+						}
+						(to, Output::Route { id, reach })
+					}
 					Out::Batch { to, id, changes, floor } => (to, Output::Batch { id, changes, floor }),
 					Out::Request { to, id, seqno } => {
 						if let Some(queue) = self.queues.get(&to) {
@@ -679,7 +731,7 @@ impl State {
 	/// the routes changed too.
 	fn home(&mut self, id: Id, claims: BTreeSet<Path>, ended: &BTreeMap<(Id, Path), bool>) {
 		let routes: Routes = (self.router.routes(id).into_iter())
-			.map(|(key, metric)| (key, metric, self.router.name(key, id)))
+			.map(|(key, metric, rtt)| (key, metric, rtt, self.router.name(key, id)))
 			.collect();
 		let last = self.routes.get(&id).map_or(&[][..], Vec::as_slice);
 		let claims = match last == routes.as_slice() {
@@ -704,28 +756,29 @@ impl State {
 		for claim in shown.into_iter().rev() {
 			let shown = &self.router.shown()[&(id, claim.clone())];
 			let (item, available) = (shown.item.clone(), shown.available);
-			let carrying: Vec<(Key, Metric, Id)> = (routes.iter())
-				.filter(|(key, _, _)| self.router.carries(*key, &claim))
+			let carrying: Vec<(Key, Metric, Option<std::time::Duration>, Id)> = (routes.iter())
+				.filter(|(key, ..)| self.router.carries(*key, &claim))
 				.copied()
 				.collect();
 			let home = self.homes.entry((id, claim.clone())).or_default();
 			// With no route left, the router no longer knows the name a stream's peer
 			// gave the identity, so it keeps the one it was served under.
-			let wanted: Vec<(Key, Metric, bool, Id)> = match carrying.is_empty() {
+			let wanted: Vec<(Key, Metric, Option<std::time::Duration>, bool, Id)> = match carrying.is_empty() {
 				true => (home.keys.iter())
-					.map(|(key, slot)| (*key, slot.served.metric, false, slot.named))
+					.map(|(key, slot)| (*key, slot.served.metric, slot.served.rtt, false, slot.named))
 					.collect(),
 				false => (carrying.into_iter())
-					.map(|(key, metric, named)| (key, metric, available, named))
+					.map(|(key, metric, rtt, named)| (key, metric, rtt, available, named))
 					.collect(),
 			};
 			for slot in home.keys.values_mut() {
 				slot.leaving = true;
 			}
-			for (key, metric, available, named) in wanted {
+			for (key, metric, rtt, available, named) in wanted {
 				let served = Served {
 					claim: item.clone(),
 					metric,
+					rtt,
 					available,
 				};
 				match home.keys.get_mut(&key) {
@@ -802,7 +855,7 @@ impl State {
 			let home = self.homes.get(&(id, claim.clone()));
 			let slots = home.into_iter().flat_map(|home| home.keys.iter());
 			let carrying: Vec<_> = (routes.iter())
-				.filter(|(key, _, _)| self.router.carries(*key, claim))
+				.filter(|(key, ..)| self.router.carries(*key, claim))
 				.collect();
 			if carrying.is_empty() {
 				for (_, slot) in slots {
@@ -813,10 +866,11 @@ impl State {
 			}
 			let slots: BTreeMap<Key, &Slot> = slots.filter(|(_, slot)| !slot.leaving).map(|(k, s)| (*k, s)).collect();
 			let want: BTreeMap<Key, (Served, Id)> = (carrying.iter())
-				.map(|&&(key, metric, named)| {
+				.map(|&&(key, metric, rtt, named)| {
 					let served = Served {
 						claim: shown.item.clone(),
 						metric,
+						rtt,
 						available: shown.available,
 					};
 					(key, (served, named))
@@ -919,6 +973,7 @@ mod tests {
 				served: Served {
 					claim: claim(&instance, 5),
 					metric: 1,
+					rtt: None,
 					available: true,
 				},
 			}]
@@ -1203,6 +1258,8 @@ mod tests {
 				seqno,
 				metric: 0,
 				down_only: false,
+				rtt: None,
+				hops: [].into(),
 			}))
 		};
 		for origin in 10..110 {
@@ -1296,6 +1353,98 @@ mod tests {
 		assert_eq!(read.len(), 2, "the route, then its claim");
 	}
 
+	/// The seqnos of the finite ROUTE messages for `id` a stream would send.
+	fn routes(stream: &Stream, id: Id) -> Vec<Seqno> {
+		(outputs(stream).into_iter())
+			.filter_map(|output| match output {
+				Output::Route { id: to, reach } if to == id => match reach {
+					Some(Reach::Finite(advert)) => Some(advert.seqno),
+					reach => panic!("unexpected reach {reach:?}"),
+				},
+				_ => None,
+			})
+			.collect()
+	}
+
+	fn finite(seqno: Seqno, metric: Metric) -> Option<Reach> {
+		Some(Reach::Finite(Advert {
+			seqno,
+			metric,
+			down_only: false,
+			rtt: None,
+			hops: [].into(),
+		}))
+	}
+
+	/// A relay's own seqno advances only when a session over which another node
+	/// learned a path to it closes: a client that forwards nothing costs no ROUTE.
+	#[test]
+	fn a_relay_bumps_only_when_a_route_link_closes() {
+		let relay = Node::new(2, 2);
+		relay.own(p("live/r"), Some(claim(&Instance::random(), 0)));
+		let forwarding = Link::default();
+		// Two peer relays, each forwarding a route of a third node.
+		let to_a = relay.answer(forwarding.clone(), Path::empty()).unwrap();
+		let from_a = relay.receive(Link::default(), Path::empty()).unwrap();
+		let to_b = relay.answer(forwarding.clone(), Path::empty()).unwrap();
+		let from_b = relay.receive(Link::default(), Path::empty()).unwrap();
+		from_a.route(5, finite(0, 1));
+		from_b.route(6, finite(0, 1));
+		assert_eq!(routes(&to_b, 2), [0]);
+		outputs(&to_a);
+
+		// A client sending only its own route connects and leaves.
+		let to_client = relay.answer(forwarding, Path::empty()).unwrap();
+		let from_client = relay.receive(Link::default(), Path::empty()).unwrap();
+		from_client.route(9, finite(0, 0));
+		drop((to_client, from_client));
+		assert!(routes(&to_a, 2).is_empty());
+		assert!(routes(&to_b, 2).is_empty());
+
+		// A permit change refiling a peer's stream is no link change either.
+		// The refile replays no forwarded route, yet the session stays a route link.
+		let refiled = relay.receive(Link::default(), Path::empty()).unwrap();
+		from_a.replaced_by(&refiled);
+		drop(from_a);
+		assert!(routes(&to_b, 2).is_empty());
+
+		// Losing a forwarding peer does change a path.
+		drop((to_a, refiled));
+		assert_eq!(routes(&to_b, 2), [1]);
+		drop(from_b);
+	}
+
+	/// A node that forwards nothing advances its seqno whenever a session carrying
+	/// its route closes, so moving to a farther relay needs no ROUTE_REQUEST.
+	#[test]
+	fn a_publisher_bumps_when_any_session_closes() {
+		let publisher = Node::new(9, 9);
+		publisher.own(p("live/p"), Some(claim(&Instance::random(), 0)));
+		let origin = Link {
+			proxy: false,
+			..Link::default()
+		};
+		let first = publisher.answer(origin.clone(), Path::empty()).unwrap();
+		let second = publisher.answer(origin, Path::empty()).unwrap();
+		assert_eq!(routes(&second, 9), [0]);
+		drop(first);
+		assert_eq!(routes(&second, 9), [1]);
+
+		// A session whose prefix matches no claim carries no route, so its close moves no path.
+		let unmatched = publisher
+			.answer(
+				Link {
+					proxy: false,
+					..Link::default()
+				},
+				p("other"),
+			)
+			.unwrap();
+		assert!(outputs(&unmatched).is_empty());
+		drop(unmatched);
+		assert!(routes(&second, 9).is_empty());
+	}
+
 	#[test]
 	fn a_route_lost_with_its_session_leaves_the_others_serving() {
 		let instance = Instance::random();
@@ -1326,6 +1475,8 @@ mod tests {
 			seqno: 0,
 			metric: 0,
 			down_only: false,
+			rtt: None,
+			hops: [].into(),
 		};
 		receive.route(1, Some(Reach::Finite(advert)));
 		receive.batch(1, vec![(p("live/x"), Some(claim(&instance, 0)))], Some(1));

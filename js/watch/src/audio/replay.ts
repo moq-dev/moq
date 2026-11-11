@@ -21,7 +21,6 @@ import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { type Group, Time, Track } from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
-import { type Arrival as Diagnostic, gap } from "../arrivals";
 import { type Delay, Sync } from "../sync";
 import { Backpressure } from "./buffer";
 import { frameDuration } from "./config";
@@ -74,8 +73,6 @@ export interface Options {
 
 /** One render quantum, as the worklet produced it. */
 export interface Quantum {
-	/** Every frame and gap the decoder received so far, in delivery order. Grows between yields. */
-	arrivals: readonly Diagnostic[];
 	/** When it finished rendering, on the trace's clock, in ms. */
 	at: number;
 	/** The quantum: what the ring supplied at the front, zeros after it. Reused between yields. */
@@ -209,7 +206,6 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 	// The decoder's read loop, with the codec taken out. Traces record no declared ends, so a gap is
 	// the only codec epoch a replay meets. A failure is rethrown at the next quantum.
-	const arrivals: Diagnostic[] = [];
 	const delivery = Promise.withResolvers<void>();
 	if (options.decodeAfter === undefined) delivery.resolve();
 	let failure: { error: unknown } | undefined;
@@ -219,14 +215,12 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		for (;;) {
 			const next = await consumer.next();
 			if (!next) return;
-			if (next.kind === "gap") arrivals.push(gap(next));
 			if (next.kind !== "frame") continue;
 
 			const { timestamp: media, arrival } = next.frame;
 			const timestamp = media.asMicros();
 			read.set(timestamp);
-			const late = audio.received(media, arrival);
-			arrivals.push({ kind: "frame", timestamp: media, arrival, late });
+			audio.received(media, arrival);
 			const entry = recorded.get(timestamp);
 			if (!entry) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);
 			frame.set(Duration.millis(entry.duration));
@@ -324,7 +318,6 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			if (sync.playing.peek()) ring.read([output]);
 			observe();
 			yield {
-				arrivals,
 				at: now,
 				output,
 				stalled: ring.stalled,

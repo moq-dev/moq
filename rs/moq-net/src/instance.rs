@@ -64,10 +64,10 @@ impl Instance {
 	}
 }
 
-/// 128 random bits as hex.
+/// 128 random bits as hex, from the ambient generator so a simulated run replays them.
 fn random() -> String {
 	use rand::RngExt;
-	format!("{:032x}", rand::rng().random::<u128>())
+	format!("{:032x}", kio::clock::rng().random::<u128>())
 }
 
 impl FromStr for Instance {

@@ -1,8 +1,9 @@
-//! Test support, enabled by the `fuzz` feature: fuzz target bodies for the wire codecs and their
-//! seeds, plus the hooks the benches and `moq-net-tests` reach private state through.
+//! Test support, enabled by the `fuzz` feature: fuzz target bodies for the wire codecs and
+//! sessions and their seeds, plus the hooks the benches and `moq-net-tests` reach private
+//! state through.
 //!
-//! Each `pub fn` here is one target: it takes raw fuzzer bytes, drives a decoder, and
-//! checks that whatever came out survives a re-encode. The bodies live in the crate
+//! Each codec target takes raw fuzzer bytes, drives a decoder, and checks that whatever
+//! came out survives a re-encode; the session targets are described in `session`. The bodies live in the crate
 //! rather than in `fuzz/fuzz_targets/` because the `lite` and `ietf` modules are
 //! private modules, so an outside harness cannot reach a single decoder. Keeping them
 //! here also lets the tests below replay them on stable, which is what turns a crash
@@ -12,9 +13,11 @@
 
 mod ingest;
 mod request;
+mod session;
 
 pub use ingest::ingest;
 pub use request::request;
+pub use session::{session_ietf, session_lite};
 
 /// A lite-07 publisher run loop waiting on SUBSCRIBE_START, for the publisher bench.
 pub use crate::lite::CoverageBench;
@@ -252,6 +255,8 @@ pub const TARGETS: &[(&str, Target)] = &[
 	("pattern", pattern),
 	("ingest", ingest),
 	("request", request),
+	("session_lite", session_lite),
+	("session_ietf", session_ietf),
 ];
 
 /// The moq-lite versions a target decodes at, selected by the input's first byte.
@@ -449,8 +454,8 @@ fn hop_chain(ids: impl IntoIterator<Item = u64>) -> Hops {
 
 /// One announcement on an announce stream, resolved: what the application sees.
 ///
-/// The hop chain travels only on lite-06: lite-07 names the claim's route instead, so
-/// its writer drops the chain and its reader decodes an empty one.
+/// The hop chain is lite-06's, and lite-07's trailing Lite-06 Chain: a lite-07 claim
+/// names its route instead, and carries a chain only when it was learned over lite-06.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Announced {
 	/// ANNOUNCE_START: a route's suffix and wire hop ids, taking the next id.
@@ -496,13 +501,13 @@ impl AnnounceWriter {
 					instance: self.version.has_instance().then(|| "a".parse().unwrap()),
 					epoch: 0,
 					suffix,
-					hops: self.chain(hops),
+					hops: hop_chain(hops.iter().copied()),
 					cost: Default::default(),
 				}
 			}
 			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
-				hops: self.chain(hops),
+				hops: hop_chain(hops.iter().copied()),
 				cost: Default::default(),
 			},
 			Announced::End(id) => {
@@ -512,14 +517,6 @@ impl AnnounceWriter {
 		};
 		msg.encode(&mut Encoder::new(data, self.version.into()), self.version)
 			.expect("could not encode an announcement");
-	}
-
-	/// The hop chain as this version carries it: none on lite-07.
-	fn chain(&self, hops: &[u64]) -> Hops {
-		match self.version.has_routes() {
-			true => Hops::default(),
-			false => hop_chain(hops.iter().copied()),
-		}
 	}
 }
 
@@ -677,11 +674,13 @@ impl RouteRelay {
 			seqno: 0,
 			metric: 0,
 			down_only: false,
+			rtt: None,
+			hops: [].into(),
 		};
 		let receive = (0..streams)
 			.map(|_| {
 				let receive = node.receive(crate::route::Link::default(), Path::empty()).unwrap();
-				receive.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert)));
+				receive.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert.clone())));
 				let snapshot = (0..claims)
 					.map(|i| (Self::path(i), Some(Self::claim(&instance, 0))))
 					.collect();
@@ -1589,8 +1588,8 @@ const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
 	(30, &[7, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
-	(5, &[6, 4, 1, 0, 1, 0]),
-	(5, &[7, 4, 0, 1, 2, 0]),
+	(5, &[6, 6, 1, 0, 1, 0, 1, 1]),
+	(5, &[7, 6, 0, 1, 2, 0, 1, 1]),
 	(5, &[8, 1, 0]),
 	(5, &[9, 2, 0, 1]),
 	(5, &[11, 1, 0]),
@@ -1905,6 +1904,7 @@ pub fn seeds() -> Vec<Seed> {
 	seeds.extend(ingest::seeds());
 	seeds.extend(ingest::limit_seeds());
 	seeds.extend(request::seeds());
+	seeds.extend(session::seeds());
 
 	seeds
 }

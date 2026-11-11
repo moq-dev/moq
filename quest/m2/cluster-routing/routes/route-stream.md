@@ -18,12 +18,11 @@ Decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing).
 
 Why: today a side's requests ride the streams it opened and its answers ride
 the streams its peer opened, and QUIC orders no stream against another. The
-first count to infinity [the fix](/quest/m2/cluster-routing/routes/echo-order.md)
-records is one message overtaking another across that split, and the router
-keys each stream as its own neighbour (`route/node.rs`), where the model and
-`Sim` have one neighbour per session. That fix no longer rests on this: the
-hop list it adds holds with the echo unordered, so it lands first, on
-today's streams. This removes the ordering hazard as a class and makes a
+first count to infinity the route model found is one message overtaking
+another across that split, and the router keys each stream as its own
+neighbour (`route/node.rs`), where the model and `Sim` have one neighbour per
+session. The fix does not rest on this: the hops a route carries
+([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)) hold with the echo unordered, on today's streams. This removes the ordering hazard as a class and makes a
 token-scope change an edit.
 
 Settled:
@@ -134,6 +133,5 @@ Public API: none expected. Wire: lite-07-wip only.
 ## Related
 
 - [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - the JS side of the same wire
-- [A node advances its route seqno only when a route link changes](/quest/m1/route-seqno-bumps.md) - changes the same registration path
 - [Announce interest streams share one route table](/quest/m4/announce-interest-memory.md) - lite-07 then holds one interest stream per side; the bound still matters for older versions
 - [A regrant re-checks only the routes it can change](/quest/m4/regrant-route-recheck.md) - its per-stream product loses a factor on lite-07

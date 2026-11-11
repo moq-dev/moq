@@ -189,7 +189,8 @@ typealias RouteOptions = uniffi.moq.MoqRouteOptions
 
 /**
  * The read-only facts on a received route: the [Instance] of the stream it serves, relay hop ids
- * (oldest first), and static production and link cost (lower wins).
+ * (oldest first), static production and link cost (lower wins), and its informational `rtt` to the
+ * origin node.
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo
 
@@ -366,6 +367,8 @@ typealias ConnectionState = uniffi.moq.MoqConnectionState
 
 /**
  * Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
+ * It applies only once a session has been established: a first dial that reaches no session ends
+ * the connection with its error rather than retrying.
  */
 typealias Backoff = uniffi.moq.MoqBackoff
 
