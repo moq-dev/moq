@@ -978,7 +978,7 @@ fn a_route_that_crossed_a_node_is_refused_once_its_distance_is_gone() {
 	assert!(sim.deliver(b, a));
 	assert!(sim.holds(a, 7), "b's route stays open until b ends it");
 	assert!(sim.route(a, 7).is_none(), "a refuses its own route, come back");
-	assert!(!sim.starved(a, 7), "with no distance, no seqno would help");
+	assert!(!sim.starved(a, 7), "no seqno would help");
 	assert_eq!(sim.shows(a, 7, ""), None);
 
 	// b still reaches the origin, and a takes the route b learns there.
@@ -1099,23 +1099,79 @@ fn a_route_that_returns_through_a_scoped_peer_is_refused() {
 /// relay cannot add itself, so it is unreachable there, not waiting on a seqno.
 #[test]
 fn a_route_stops_at_the_hop_limit() {
-	let mut sim = Sim::new(5);
-	for node in 0..5 {
-		sim.nodes[node].max_hops = 3;
-	}
-	for node in 0..4 {
+	let last = MAX_HOPS + 1;
+	let mut sim = Sim::new(last + 1);
+	for node in 0..last {
 		sim.join(node, node + 1, 1);
 	}
 	originate(&mut sim, 0, 7, 0);
 	assert!(sim.run());
-	assert_eq!(
-		sim.route(2, 7).map(|route| route.metric),
-		Some(2),
-		"the origin, 1, and 2 make three"
-	);
-	assert!(sim.route(3, 7).is_none(), "2's route crossed three nodes already");
-	assert!(sim.holds(3, 7) && !sim.starved(3, 7));
-	assert!(!sim.holds(4, 7), "3 has nothing to send on");
+	let full = last - 2;
+	assert_eq!(sim.route(full, 7).map(|route| route.metric), Some(full as Metric));
+	assert!(sim.route(full + 1, 7).is_none(), "the route crossed as many nodes as one may");
+	assert!(sim.holds(full + 1, 7) && !sim.starved(full + 1, 7));
+	assert!(!sim.holds(last, 7), "nothing is sent on");
+}
+
+/// A relay sends the origin's route to a peer that files it under a qualified key
+/// and hands it back. While the peer got there by another relay the copy is a route
+/// like any other; once the peer takes this relay's own, the copy has crossed it. No
+/// seqno changes that, so the relay lets the key go without asking for one.
+#[test]
+fn a_scoped_copy_that_crossed_a_relay_asks_for_no_seqno() {
+	let (origin, near, far, cdn) = (0, 1, 2, 3);
+	let mut sim = Sim::new(4);
+	sim.join(origin, near, 1);
+	sim.join(origin, far, 1);
+	sim.link(near, cdn, SimLink::cost(1), SimLink::cost(1).grant(LOCAL));
+	sim.link(far, cdn, SimLink::cost(1), SimLink::cost(2).grant(LOCAL));
+	// The peer hears the far relay first.
+	sim.hold(near, cdn);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "local/x", 0, None);
+	assert!(sim.run());
+	let key = qualified(LOCAL.subject, 7);
+	assert_eq!(next(&sim, cdn, key), Some(far));
+	assert_eq!(next(&sim, near, key), Some(cdn));
+
+	sim.release(near, cdn);
+	assert!(sim.run());
+	assert_eq!(next(&sim, cdn, key), Some(near), "the peer took the shorter route");
+	assert!(sim.route(near, key).is_none(), "which crossed the near relay");
+	assert!(!sim.starved(near, key));
+	assert_eq!(sim.seqno(origin), 0, "nothing failed, so nothing was asked");
+	assert_eq!(sim.retained().pending, 0);
+	assert_eq!(sim.shows(near, 7, "local/x"), Some(true));
+}
+
+/// The same copy, arriving at a metric the relay's distance refuses: the peer had
+/// the origin through the far relay, and falls back on the near one's route when
+/// that goes. The copy is infeasible, but it extends nothing the near relay sent
+/// under the key, so the peer will never move off it: the relay does not wait.
+#[test]
+fn a_scoped_copy_that_crossed_a_relay_is_not_waited_on() {
+	let (origin, near, far, cdn) = (0, 1, 2, 3);
+	let mut sim = Sim::new(4);
+	sim.join(origin, near, 5);
+	sim.join(origin, far, 1);
+	// The near relay is nearer the origin than the peer, so its route is feasible there.
+	sim.link(near, cdn, SimLink::cost(1), SimLink::cost(3).grant(LOCAL));
+	sim.link(far, cdn, SimLink::cost(1), SimLink::cost(5).grant(LOCAL));
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "local/x", 0, None);
+	assert!(sim.run());
+	let key = qualified(LOCAL.subject, 7);
+	assert_eq!(next(&sim, cdn, key), Some(far));
+	assert_eq!(sim.route(near, key).map(|route| route.metric), Some(7));
+
+	sim.disconnect(far, cdn);
+	assert!(sim.run());
+	assert_eq!(sim.route(cdn, key).map(|route| (route.next, route.metric)), Some((Some(near), 8)));
+	assert!(sim.holds(near, key) && sim.route(near, key).is_none());
+	assert!(!sim.starved(near, key), "the peer's route stands whatever the relay does");
+	assert_eq!(sim.seqno(origin), 0);
+	assert_eq!(sim.retained().pending, 0);
+	assert_eq!(sim.shows(near, 7, "local/x"), Some(true));
 }
 
 /// The cost of the longest loop-free path from `from` through nodes not yet `seen`,

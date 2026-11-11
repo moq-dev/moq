@@ -96,15 +96,23 @@ Serves(n) == n = Origin \/ n \notin Leaves
 \* `Entry::crossed`: the route's hops name this node.
 Crossed(n, e) == \E i \in DOMAIN e.hops : e.hops[i] = n
 
-Feasible(n, s, e) ==
-    /\ ~Crossed(n, e)
-    /\ ~s.fd.on \/ e.seq > s.fd.seq \/ (e.seq = s.fd.seq /\ e.met < s.fd.met)
+Feasible(s, e) ==
+    ~s.fd.on \/ e.seq > s.fd.seq \/ (e.seq = s.fd.seq /\ e.met < s.fd.met)
 
-UsableSet(n, s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].held /\ Feasible(n, s, s.rx[m])}
-\* With no distance kept, no route waits on a seqno.
+\* `eligible`: a node selects and certifies only through a feasible route that
+\* did not cross it.
+Eligible(n, s, e) == ~Crossed(n, e) /\ Feasible(s, e)
+
+\* Whether hops `h` extend `a`, the hops of the route this node last sent.
+Extends(a, h) == a # <<>> /\ Len(a) <= Len(h) /\ SubSeq(h, 1, Len(a)) = a
+
+UsableSet(n, s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].held /\ Eligible(n, s, s.rx[m])}
+\* `infeasible`: a crossed route counts only while it extends the route this
+\* node last sent, so its sender moves once it hears this node has none.
 InfeasibleSet(n, s) ==
-    {m \in Nodes : s.fd.on /\ s.rx[m].on /\ ~s.rx[m].held /\ ~Feasible(n, s, s.rx[m])}
-Certifiers(n, s) == {m \in Nodes : s.rx[m].on /\ Feasible(n, s, s.rx[m])}
+    {m \in Nodes : /\ s.rx[m].on /\ ~s.rx[m].held /\ ~Feasible(s, s.rx[m])
+                   /\ ~Crossed(n, s.rx[m]) \/ Extends(s.adv, s.rx[m].hops)}
+Certifiers(n, s) == {m \in Nodes : s.rx[m].on /\ Eligible(n, s, s.rx[m])}
 Recoverable(n, s) == \E m \in Certifiers(n, s) : s.rx[m].held
 
 \* This node's metric through the route `m` sent.
@@ -246,14 +254,17 @@ Update(n, s0, ov, ups, eb) ==
         live == Live(n, s2)
         av == Adopted(n, s2, ov)
         plans == [m \in Peers(n, ups) |-> Plan(n, s2, m, sel, live, av, ov)]
+        \* `advertised`: the hops of the last route this node started or changed anywhere.
+        sends == \E m \in Peers(n, ups) : plans[m].sent.kind = "fin" /\ plans[m].sent # s2.sent[m]
         s3 == [s2 EXCEPT
+                 !.adv = IF sends THEN sel.hops ELSE @,
                  !.sent = [m \in Nodes |-> IF m \in Peers(n, ups) THEN plans[m].sent ELSE s2.sent[m]],
                  !.sentV = [m \in Nodes |-> IF m \in Peers(n, ups) THEN plans[m].sentV ELSE s2.sentV[m]],
                  !.unacked = [m \in Nodes |-> IF m \in Peers(n, ups) THEN plans[m].unacked ELSE s2.unacked[m]]]
         \* Drop the feasibility distance once nothing routes, advertises, or awaits an echo.
         drained == n # Origin
                    /\ \A m \in Nodes : ~s3.rx[m].on /\ s3.sent[m].kind = "none" /\ s3.unacked[m] = 0
-        s4 == IF drained THEN [s3 EXCEPT !.fd = NoFd] ELSE s3
+        s4 == IF drained THEN [s3 EXCEPT !.fd = NoFd, !.adv = <<>>] ELSE s3
         req == Requests(n, s4, sel)
         s5 == [s4 EXCEPT !.pending = req.pending]
         now == ShownNow(n, s5, sel, live, ov)
@@ -291,6 +302,7 @@ Commit(rs, q0) ==
 InitNode == [
     rx |-> [m \in Nodes |-> NoEntry],
     fd |-> NoFd,
+    adv |-> <<>>,
     heard |-> [m \in Nodes |-> NoHeard],
     view |-> NoView,
     sent |-> [m \in Nodes |-> NoReach],

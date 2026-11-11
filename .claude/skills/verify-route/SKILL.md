@@ -58,7 +58,7 @@ Sync commit: `52fa6b2f0ece29c44bfa2459ec93fc54b4b48221`, plus the change that ad
 
 | Code (`rs/moq-net/src/route/`) | Model |
 | --- | --- |
-| `mod.rs` `feasible`, `Entry::crossed`, `through`, `selected`, `infeasible`, `recoverable`, `live`, `certifiers` | `Feasible`, `Crossed`, `Through`, `Selected`, `InfeasibleSet`, `Recoverable`, `Live`, `Certifiers` |
+| `mod.rs` `feasible`, `Entry::crossed`, `eligible`, `through`, `selected`, `infeasible`, `advertised`, `recoverable`, `live`, `certifiers` | `Feasible`, `Crossed`, `Eligible`, `Through`, `Selected`, `InfeasibleSet`, `adv` and `Extends`, `Recoverable`, `Live`, `Certifiers` |
 | `mod.rs` `certified`, `prune`, `adopted` | `Certified`, `Prune`, `Adopted` |
 | `mod.rs` `update`, `record`, `advertise`, `requests` | `Update`, `Record`, `Plan`, `Requests` |
 | `mod.rs` `show`, `shown_now` | `Events`, `ShownNow` |

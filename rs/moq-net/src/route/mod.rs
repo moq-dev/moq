@@ -251,8 +251,8 @@ struct Entry {
 	/// The last finite advertisement.
 	advert: Advert,
 	held: bool,
-	/// Its hops name this node: a copy of a route this node sent, come back. It is
-	/// never feasible, which the distance alone cannot say once this node forgot it.
+	/// Its hops name this node: a copy of a route this node sent, come back. This
+	/// node never uses it, which the distance alone cannot ensure once it is gone.
 	crossed: bool,
 }
 
@@ -400,8 +400,6 @@ pub(crate) struct Router<N, A> {
 	/// How this node names itself in the hops of a route it forwards. A rotation
 	/// leaves it alone, so a route that crossed this node always says so.
 	hop: Id,
-	/// The most nodes a route this node uses may cross, its origin and this node included.
-	pub max_hops: usize,
 	neighbors: BTreeMap<N, Peer>,
 	origins: BTreeMap<Id, Origin<A>>,
 	rx: BTreeMap<Id, BTreeMap<N, Entry>>,
@@ -411,6 +409,9 @@ pub(crate) struct Router<N, A> {
 	filed: BTreeMap<(Id, N), Id>,
 	/// Babel's feasibility distance per identity.
 	fd: BTreeMap<Id, (Seqno, Metric)>,
+	/// The hops of the route this node last sent for an identity, kept as long as its
+	/// distance: a route that extends them came through this node's own.
+	advertised: BTreeMap<Id, Arc<[Id]>>,
 	sent: BTreeMap<(Id, N), Reach>,
 	/// ROUTE_ENDs sent to each neighbor and not yet echoed back. Until they all
 	/// return, a neighbor may still hold this node's advertisement, so the
@@ -466,12 +467,12 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	pub fn new(hop: Id, seed: u64) -> Self {
 		Self {
 			hop,
-			max_hops: MAX_HOPS,
 			neighbors: BTreeMap::new(),
 			origins: BTreeMap::new(),
 			rx: BTreeMap::new(),
 			filed: BTreeMap::new(),
 			fd: BTreeMap::new(),
+			advertised: BTreeMap::new(),
 			sent: BTreeMap::new(),
 			unacked: BTreeMap::new(),
 			pending: BTreeMap::new(),
@@ -1033,7 +1034,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		type Rank<N> = (bool, Reverse<i8>, Metric, N);
 		let mut best: Option<(Rank<N>, Selected<N>)> = None;
 		for (&next, entry) in self.rx.get(&id)? {
-			if entry.held || !self.feasible(id, entry) {
+			if entry.held || !self.eligible(id, entry) {
 				continue;
 			}
 			let peer = &self.neighbors[&next];
@@ -1062,7 +1063,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			return Vec::new();
 		}
 		(self.rx.get(&id).into_iter().flatten())
-			.filter(|(_, entry)| !entry.held && self.feasible(id, entry))
+			.filter(|(_, entry)| !entry.held && self.eligible(id, entry))
 			.filter_map(|(&next, entry)| Some((next, self.through(next, entry)?)))
 			.collect()
 	}
@@ -1197,35 +1198,41 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		self.filed.get(&(id, next)).copied().unwrap_or(id)
 	}
 
-	/// Babel's feasibility condition against this node's feasibility distance, and
-	/// never a route that crossed this node.
-	fn feasible(&self, id: Id, entry: &Entry) -> bool {
-		let advert = &entry.advert;
-		!entry.crossed
-			&& match self.fd.get(&id) {
-				None => true,
-				Some(&(seqno, metric)) => advert.seqno > seqno || (advert.seqno == seqno && advert.metric < metric),
-			}
+	/// Babel's feasibility condition against this node's feasibility distance.
+	fn feasible(&self, id: Id, advert: &Advert) -> bool {
+		match self.fd.get(&id) {
+			None => true,
+			Some(&(seqno, metric)) => advert.seqno > seqno || (advert.seqno == seqno && advert.metric < metric),
+		}
+	}
+
+	/// Whether this node may select or certify through `entry`: a feasible route that
+	/// did not cross it. One that crossed it and is feasible all the same is no route
+	/// at all, since no seqno would change where it has been.
+	fn eligible(&self, id: Id, entry: &Entry) -> bool {
+		!entry.crossed && self.feasible(id, &entry.advert)
 	}
 
 	/// This node's metric through `entry`, the route `next` sent, or `None` when it is
 	/// unreachable, never saturated: the metric overflows, or the route already
 	/// crossed as many nodes as one may.
 	fn through(&self, next: N, entry: &Entry) -> Option<Metric> {
-		if entry.advert.hops.len() >= self.max_hops {
+		if entry.advert.hops.len() >= MAX_HOPS {
 			return None;
 		}
 		entry.advert.metric.checked_add(self.neighbors[&next].link.cost)
 	}
 
-	/// The usable but infeasible routes for `id`, with their metrics: while it has
-	/// one, this node holds the identity and asks for a newer seqno. With no distance
-	/// kept there are none, since the only routes refused then are its own, come back,
-	/// which no seqno makes feasible.
+	/// The usable but infeasible routes for `id`, with their metrics: this node holds
+	/// the identity while it has one. A route that crossed this node counts only if it
+	/// extends the route this node last sent, since its sender then routes through this
+	/// node and moves once it hears this node has none. Any other one that crossed it
+	/// stays as it is whatever this node does, and waiting on it would never end.
 	fn infeasible(&self, id: Id) -> impl Iterator<Item = (Metric, N)> + '_ {
-		let kept = self.fd.contains_key(&id);
+		let sent = self.advertised.get(&id);
 		(self.rx.get(&id).into_iter().flatten())
-			.filter(move |(_, entry)| kept && !entry.held && !self.feasible(id, entry))
+			.filter(move |(_, entry)| !entry.held && !self.feasible(id, &entry.advert))
+			.filter(move |(_, entry)| !entry.crossed || sent.is_some_and(|sent| entry.advert.hops.starts_with(sent)))
 			.filter_map(move |(&next, entry)| Some((self.through(next, entry)?, next)))
 	}
 
@@ -1272,7 +1279,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	/// Whether `entry`'s last finite advertisement from `next` is feasible here
 	/// and reachable across the link, as selection requires of a usable route.
 	fn reachable(&self, id: Id, next: N, entry: &Entry) -> bool {
-		self.feasible(id, entry) && self.through(next, entry).is_some()
+		self.eligible(id, entry) && self.through(next, entry).is_some()
 	}
 
 	/// The regions of `id` that this node's certifiers certify, those whose
@@ -1303,6 +1310,23 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		let Some(regions) = self.certified(id, true) else {
 			return;
 		};
+		// A certifier whose view the merged one lags was not one when its regions were
+		// let go below, and sends nothing more now it certifies again: take its view back.
+		let merged = self.views.get(&id);
+		let lags = |view: &View<A>| {
+			(view.floors.iter()).any(|(region, &rev)| merged.and_then(|merged| merged.as_of(region)) < Some(rev))
+		};
+		let back: Vec<N> = (self.certifiers(id).into_iter())
+			.filter(|next| lags(self.heard[&(id, *next)].view()))
+			.collect();
+		if !back.is_empty() {
+			let merged = self.views.entry(id).or_default();
+			for next in back {
+				merged.merge(self.heard[&(id, next)].view());
+			}
+			self.resync(id);
+			self.mark_all(id);
+		}
 		let Some(merged) = self.views.get(&id) else {
 			return;
 		};
@@ -1496,6 +1520,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 				&& Self::of(&self.unacked, id).next().is_none()
 			{
 				self.fd.remove(&id);
+				self.advertised.remove(&id);
 			}
 			self.requests(id);
 			self.show(id, &ctx, &dirty);
@@ -1737,6 +1762,9 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			if let Some(send) = send
 				&& self.sent.get(&key) != Some(&send)
 			{
+				if let Reach::Finite(advert) = &send {
+					self.advertised.insert(id, advert.hops.clone());
+				}
 				self.sent.insert(key, send.clone());
 				self.out.push(Out::Route {
 					to,

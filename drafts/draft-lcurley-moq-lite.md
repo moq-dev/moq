@@ -499,10 +499,11 @@ A relay forwards the other entries unchanged and never qualifies them.
 A route that arrives with 32 Hops is unusable.
 
 A node keeps a feasibility distance per Node ID: the highest Seqno of any route it advertised, and the lowest metric it advertised at that Seqno, as in [RFC8966] Section 3.5.1.
-A route whose Hops name the receiver is never feasible there: it is a copy of a route the receiver sent.
-Any other route is feasible when no feasibility distance is kept for its Node ID yet, when its Seqno is greater than the distance's, or when its Seqno is equal and its advertised Metric is lower.
+A route is feasible when no feasibility distance is kept for its Node ID yet, when its Seqno is greater than the distance's, or when its Seqno is equal and its advertised Metric is lower.
 A node selects, per Node ID, among its feasible routes that are not held: a session that has not received a GOAWAY, then the highest local priority, then the lowest metric.
 It MUST NOT select an infeasible route, and a distance only ever falls within a Seqno, so advertising a longer route never raises it.
+It MUST NOT select a route whose Hops name it either, feasible or not: that is a copy of a route the node sent, which no distance refuses once the node dropped it.
+Such a route counts among the node's routes below only while it is infeasible and its Hops begin with those of the route the node last sent to that origin node: its sender then routes through the node, and moves once it hears the node has no route.
 A node MAY mark a session upstream.
 A route is down-only when it arrived on an upstream session or with its Down Only bit set; a node sends a down-only route with the bit set, and never on an upstream session.
 
@@ -511,19 +512,19 @@ A node that does not forward, such as a client, sends only its own route, and ho
 An origin advances its Seqno whenever its own set of sessions changes.
 It never advertises a Seqno or Revision of 2^64-1: a change that would reach it instead rotates its Node ID, ending the old route everywhere and announcing its claims again under the new one.
 
-A node with no usable route to an origin node holds it while it can still recover: while it keeps a feasibility distance for the node and a route it has to the node is infeasible, or a peer holds a route whose last advertisement is feasible here.
+A node with no usable route to an origin node holds it while it can still recover: while every route it has to the node is infeasible, or a peer holds a route whose last advertisement is feasible here.
 A held route travels as a ROUTE_HOLD, and its claims stay shown but unavailable until a ROUTE_UPDATE makes it usable again.
 Otherwise the node lets go, sending ROUTE_END wherever it advertised the route, and its claims go offline.
 Neither proves that the origin withdrew its claims.
 
-A node that keeps a feasibility distance for an origin node, and whose routes to it are all infeasible, sends a ROUTE_REQUEST with its distance's Seqno plus 1 to the peer whose route it would select were it feasible.
+A node whose routes to an origin node are all infeasible sends a ROUTE_REQUEST with its distance's Seqno plus 1 to the peer whose route it would select were it feasible.
 A node holding a selected route at least that new answers by advertising it, and the origin answers by raising its Seqno to at least the requested one; a request for 2^64-1 rotates the origin's Node ID.
 Any other node forwards the request to the peer whose route it would select, even the requester.
 Every node keeps one pending request per origin node, its own or forwarded, at the highest Seqno requested, dropping requests no newer, until it selects a route at least that new or has no route left, and sends it again whenever its Seqno rises or that peer changes.
 
 The receiver of a ROUTE_END echoes it back on the same stream once it dropped the route.
 A node drops a feasibility distance once no peer's route to the node is left open, it advertises none, and every ROUTE_END it sent for it was echoed; a closed session counts as an echo.
-No peer then routes through the node, and its Hops refuse any copy of its own route that still returns.
+No peer then routes through the node, and the Hops refuse any copy of its own route that still returns.
 
 A SUBSCRIBE, FETCH, TRACK, TRACKS, or DATAGRAMS request names the origin node that serves it.
 A subscriber that names 0 lets the publisher select one (see [Resolution](#resolution)), and a relay forwarding a request names the origin node it selected or was given.
@@ -2249,7 +2250,7 @@ The `Message Length` describes the payload size on the wire.
 - A receiver mints an Instance for each announcement a session of an earlier version delivers, and a `Minted` field beside every Instance (ANNOUNCE_START, ANNOUNCE_RESTART, TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS) says whether a receiver minted it, so no Instance text is reserved for minting.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
 - Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
-- Added Hops to ROUTE_START and ROUTE_UPDATE: the Hop ID of every node the route crossed, at most 32. A route whose Hops name the receiver is never feasible there, so a node that dropped its feasibility distance cannot take back a copy of its own route.
+- Added Hops to ROUTE_START and ROUTE_UPDATE: the Hop ID of every node the route crossed, at most 32. A node never selects a route whose Hops name it, so one that dropped its feasibility distance cannot take back a copy of its own route.
 - Added ROUTE_HOLD (0xB), which holds a route while it recovers; ROUTE_END lets it go. Neither withdraws the origin's claims, and the subscriber echoes every ROUTE_END back.
 - Added ROUTE_REQUEST (0xA), sent by the subscriber on the Announce Stream to ask for a route with a newer seqno when every route it has is infeasible.
 - Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.
