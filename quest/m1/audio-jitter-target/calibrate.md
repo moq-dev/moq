@@ -56,7 +56,3 @@ Native rows stay report-only; enforcing them belongs to
   schedule` and download each with `gh run download <id> -n
   audio-quality-run` as it lands, since artifacts expire after 7 days. Never
   dispatch the nightly by hand.
-
-## Related
-
-- [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - re-measures the AAC browser rows after the TS importer change; if it has not finished when the model lands, these seven nights serve both
