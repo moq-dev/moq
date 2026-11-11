@@ -5398,7 +5398,6 @@ impl Subscriber {
 			progress: state.clone(),
 			validity: self.validity.start(),
 			messages: super::request_stream::Messages::new(self.session.clone(), self.control.client()),
-			stream: None,
 			step: JoinStep::Open(Default::default()),
 		};
 		Some(JoiningTask {
@@ -5519,7 +5518,6 @@ struct JoinFetch {
 	progress: kio::Shared<JoiningState>,
 	validity: crate::model::broadcast::RequestValidity,
 	messages: super::request_stream::Messages,
-	stream: Option<Stream<Transport, Version>>,
 	step: JoinStep,
 }
 
@@ -5527,15 +5525,18 @@ enum JoinStep {
 	/// Opening the request stream.
 	Open(crate::transport::open::Open),
 	/// Waiting for FETCH_OK, flushing the FETCH meanwhile.
-	Answer,
+	Answer(Stream<Transport, Version>),
 	/// The request stays open while the subscription still needs its fill. From draft 18
 	/// it may carry a GOAWAY meanwhile; before that, nothing follows the answer here.
 	Listen {
+		stream: Stream<Transport, Version>,
 		/// The publisher finished its side.
 		finished: bool,
 	},
 	/// Closing the request, then ending with how it went.
-	Close(StreamClose, Option<Result<(), Error>>),
+	Close(StreamClose, Result<(), Error>),
+	/// Over: polled no more.
+	Done,
 }
 
 impl JoinFetch {
@@ -5549,10 +5550,9 @@ impl JoinFetch {
 	}
 
 	/// Abandon the request's reads and close it, ending with `res`.
-	fn close(&mut self, res: Result<(), Error>) {
-		let mut stream = self.stream.take().expect("the request stream is open");
+	fn close(mut stream: Stream<Transport, Version>, res: Result<(), Error>) -> JoinStep {
 		stream.reader.abort(&Error::Cancel);
-		self.step = JoinStep::Close(StreamClose::new(stream), Some(res));
+		JoinStep::Close(StreamClose::new(stream), res)
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -5586,90 +5586,121 @@ impl JoinFetch {
 		Poll::Ready(res)
 	}
 
+	/// Open the request stream and write the FETCH, registering its ID.
+	fn open(
+		&mut self,
+		waiter: &kio::Waiter,
+		open: &mut crate::transport::open::Open,
+	) -> Poll<Result<Stream<Transport, Version>, Error>> {
+		// This subscription owns its joining fetch, so wait for stream credit.
+		// No ID is spent while opening a stream, so dropping a blocked open
+		// cannot leave a gap in the peer's sequential request IDs.
+		self.validity.check(waiter)?;
+		if let Poll::Ready(err) = self.track.poll_aborted(waiter) {
+			return Poll::Ready(Err(err));
+		}
+		let stream = ready!(Stream::poll_open(&self.this.session, open, self.this.version, waiter))?;
+		let mut stream = stream.with_stats(self.this.origin.stats());
+		let fetch_id = self.this.control.next_request_id();
+		self.progress.lock().committed = true;
+		{
+			let mut state = self.this.state.lock();
+			if let Some(track) = state.subscribes.get_mut(&self.subscribe_id) {
+				track.fetch_id = Some(fetch_id);
+				state.fetches.insert(fetch_id, FillRequest::Joining(self.subscribe_id));
+			}
+		}
+		// Flushed while waiting for the answer, so a cancellation still ends a request the
+		// peer's send window holds back.
+		stream.writer.buffer_message(
+			ietf::Fetch::ID,
+			&ietf::Fetch {
+				authorization_token: None,
+				request_id: fetch_id,
+				subscriber_priority: super::priority::to_wire(
+					self.track.subscription().map(|s| s.priority).unwrap_or(0),
+				),
+				group_order: GroupOrder::Ascending,
+				fetch_type: FetchType::RelativeJoining {
+					subscriber_request_id: self.subscribe_id,
+					group_offset: 0,
+				},
+				range_filters: false,
+				fill_timeout: false,
+				properties_wanted: true,
+				// Served by the subscription it joins, which named the instance.
+			},
+		)?;
+		Poll::Ready(Ok(stream))
+	}
+
 	fn poll_join(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		loop {
-			match &mut self.step {
-				JoinStep::Open(open) => {
-					// This subscription owns its joining fetch, so wait for stream credit.
-					// No ID is spent while opening a stream, so dropping a blocked open
-					// cannot leave a gap in the peer's sequential request IDs.
-					self.validity.check(waiter)?;
-					if let Poll::Ready(err) = self.track.poll_aborted(waiter) {
-						return Poll::Ready(Err(err));
+			self.step = match std::mem::replace(&mut self.step, JoinStep::Done) {
+				JoinStep::Open(mut open) => match self.open(waiter, &mut open) {
+					Poll::Ready(Ok(stream)) => JoinStep::Answer(stream),
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Pending => {
+						self.step = JoinStep::Open(open);
+						return Poll::Pending;
 					}
-					let stream = ready!(Stream::poll_open(&self.this.session, open, self.this.version, waiter))?;
-					let mut stream = stream.with_stats(self.this.origin.stats());
-					let fetch_id = self.this.control.next_request_id();
-					self.progress.lock().committed = true;
-					{
-						let mut state = self.this.state.lock();
-						if let Some(track) = state.subscribes.get_mut(&self.subscribe_id) {
-							track.fetch_id = Some(fetch_id);
-							state.fetches.insert(fetch_id, FillRequest::Joining(self.subscribe_id));
-						}
-					}
-					// Flushed while waiting for the answer, so a cancellation still ends a request the
-					// peer's send window holds back.
-					stream.writer.buffer_message(
-						ietf::Fetch::ID,
-						&ietf::Fetch {
-							authorization_token: None,
-							request_id: fetch_id,
-							subscriber_priority: super::priority::to_wire(
-								self.track.subscription().map(|s| s.priority).unwrap_or(0),
-							),
-							group_order: GroupOrder::Ascending,
-							fetch_type: FetchType::RelativeJoining {
-								subscriber_request_id: self.subscribe_id,
-								group_offset: 0,
-							},
-							range_filters: false,
-							fill_timeout: false,
-							properties_wanted: true,
-							// Served by the subscription it joins, which named the instance.
-						},
-					)?;
-					self.stream = Some(stream);
-					self.step = JoinStep::Answer;
-				}
-				JoinStep::Answer => {
-					let stream = self.stream.as_mut().expect("the request stream is open");
+				},
+				JoinStep::Answer(mut stream) => {
 					if Self::poll_cancelled(&self.progress, waiter).is_ready() {
-						self.close(Ok(()));
+						self.step = Self::close(stream, Ok(()));
 						continue;
 					}
-					let answer = ready!(match stream.writer.poll_flush(waiter) {
-						Poll::Ready(Ok(())) =>
+					let answer = match stream.writer.poll_flush(waiter) {
+						Poll::Ready(Ok(())) => {
 							self.this
-								.poll_read_fetch_response(&mut stream.reader, &mut self.messages, waiter),
+								.poll_read_fetch_response(&mut stream.reader, &mut self.messages, waiter)
+						}
 						Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
 						Poll::Pending => Poll::Pending,
-					});
+					};
 					match answer {
-						Ok(_) => self.step = JoinStep::Listen { finished: false },
-						Err(err) => self.close(Err(err)),
+						Poll::Ready(Ok(_)) => JoinStep::Listen {
+							stream,
+							finished: false,
+						},
+						Poll::Ready(Err(err)) => Self::close(stream, Err(err)),
+						Poll::Pending => {
+							self.step = JoinStep::Answer(stream);
+							return Poll::Pending;
+						}
 					}
 				}
-				JoinStep::Listen { finished } => {
-					let stream = self.stream.as_mut().expect("the request stream is open");
-					if !*finished {
+				JoinStep::Listen {
+					mut stream,
+					mut finished,
+				} => {
+					if !finished {
 						match self.messages.poll_end(&mut stream.reader, waiter) {
-							Poll::Ready(Ok(())) => *finished = true,
+							Poll::Ready(Ok(())) => finished = true,
 							Poll::Ready(Err(err)) => {
-								self.close(Err(err));
+								self.step = Self::close(stream, Err(err));
 								continue;
 							}
 							Poll::Pending => {}
 						}
 					}
-					ready!(Self::poll_cancelled(&self.progress, waiter));
-					self.close(Ok(()));
+					match Self::poll_cancelled(&self.progress, waiter) {
+						Poll::Ready(()) => Self::close(stream, Ok(())),
+						Poll::Pending => {
+							self.step = JoinStep::Listen { stream, finished };
+							return Poll::Pending;
+						}
+					}
 				}
-				JoinStep::Close(close, res) => {
-					let _ = ready!(close.poll(waiter));
-					return Poll::Ready(res.take().expect("polled after completion"));
-				}
-			}
+				JoinStep::Close(mut close, res) => match close.poll(waiter) {
+					Poll::Ready(_) => return Poll::Ready(res),
+					Poll::Pending => {
+						self.step = JoinStep::Close(close, res);
+						return Poll::Pending;
+					}
+				},
+				JoinStep::Done => return Poll::Ready(Ok(())),
+			};
 		}
 	}
 }
@@ -5738,50 +5769,72 @@ impl TrackStatus {
 
 /// [`TrackStatus`]'s exchange, failing with why the request was refused or abandoned.
 struct LearnTrackStatus {
-	request: Option<track::Request>,
-	/// Registered before accepting: `accept` releases the request's own fetch gate, and a
-	/// cache-miss fetch queued in the gap would be drained as NotFound.
-	dynamic: Option<track::Requests>,
-	demand: Option<track::Demand>,
 	validity: crate::model::broadcast::RequestValidity,
 	/// The timescale the fetches sent alongside read their objects in.
 	timescale: Later<Option<Timescale>>,
 	messages: super::request_stream::Messages,
-	stream: Option<Stream<Transport, Version>>,
 	step: LearnStep,
 }
 
+/// The track being learned, until the answer accepts or refuses it.
+struct Asked {
+	request: track::Request,
+	/// Registered before accepting: `accept` releases the request's own fetch gate, and a
+	/// cache-miss fetch queued in the gap would be drained as NotFound.
+	dynamic: track::Requests,
+}
+
+impl Asked {
+	/// Refuse the request with `err`, and fail with it.
+	fn reject(self, err: Error) -> Poll<Result<Idle, Error>> {
+		self.request.reject(err.clone());
+		Poll::Ready(Err(err))
+	}
+}
+
+#[allow(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk; an allow, since the size gap varies by target"
+)]
 enum LearnStep {
 	/// Opening the request stream.
-	Open(crate::transport::open::Open),
+	Open {
+		asked: Asked,
+		open: crate::transport::open::Open,
+	},
 	/// Waiting for the answer, flushing the TRACK_STATUS meanwhile.
-	Response,
+	Response {
+		asked: Asked,
+		stream: Stream<Transport, Version>,
+		demand: track::Demand,
+	},
 	/// A local terminal ended the wait: closing the request, then failing with it.
-	Cancelled(StreamClose, Option<Error>),
-	/// Checking the answer against what the peer's SETUP negotiated.
-	Answered(Option<Result<ietf::TrackStatusOk, Error>>),
+	Cancelled(StreamClose, Error),
+	/// Checking the answer against what the peer's SETUP negotiated, with the request
+	/// stream finished.
+	Answered {
+		asked: Asked,
+		stream: Stream<Transport, Version>,
+		response: Result<ietf::TrackStatusOk, Error>,
+	},
+	/// Over: polled no more.
+	Done,
 }
 
 impl LearnTrackStatus {
 	fn new(this: &Subscriber, request: track::Request, timescale: Later<Option<Timescale>>) -> Self {
 		Self {
-			dynamic: Some(request.requests()),
-			request: Some(request),
-			demand: None,
 			validity: this.validity.start(),
 			timescale,
 			messages: super::request_stream::Messages::new(this.session.clone(), this.control.client()),
-			stream: None,
-			step: LearnStep::Open(Default::default()),
+			step: LearnStep::Open {
+				asked: Asked {
+					dynamic: request.requests(),
+					request,
+				},
+				open: Default::default(),
+			},
 		}
-	}
-
-	/// Refuse the request with `err`, and fail with it.
-	fn reject(&mut self, err: Error) -> Poll<Result<Idle, Error>> {
-		if let Some(request) = self.request.take() {
-			request.reject(err.clone());
-		}
-		Poll::Ready(Err(err))
 	}
 
 	fn poll(
@@ -5794,18 +5847,24 @@ impl LearnTrackStatus {
 		gate: &mut crate::auth::Gate,
 	) -> Poll<Result<Idle, Error>> {
 		loop {
-			match &mut self.step {
-				LearnStep::Open(open) => {
+			self.step = match std::mem::replace(&mut self.step, LearnStep::Done) {
+				LearnStep::Open { asked, mut open } => {
 					let opened = if gate.poll_denied(waiter).is_ready() {
 						Err(Error::Unauthorized)
 					} else if let Err(err) = self.validity.check(waiter) {
 						Err(err)
 					} else {
-						ready!(Stream::poll_open(&this.session, open, this.version, waiter))
+						match Stream::poll_open(&this.session, &mut open, this.version, waiter) {
+							Poll::Ready(opened) => opened,
+							Poll::Pending => {
+								self.step = LearnStep::Open { asked, open };
+								return Poll::Pending;
+							}
+						}
 					};
 					let mut stream = match opened {
 						Ok(stream) => stream.with_stats(this.origin.stats()),
-						Err(err) => return self.reject(err),
+						Err(err) => return asked.reject(err),
 					};
 					let request_id = this.control.next_request_id();
 
@@ -5822,14 +5881,19 @@ impl LearnTrackStatus {
 						},
 					);
 					if let Err(err) = written {
-						return self.reject(err);
+						return asked.reject(err);
 					}
-					self.stream = Some(stream);
-					self.demand = self.request.as_ref().map(|request| request.demand());
-					self.step = LearnStep::Response;
+					LearnStep::Response {
+						demand: asked.request.demand(),
+						asked,
+						stream,
+					}
 				}
-				LearnStep::Response => {
-					let stream = self.stream.as_mut().expect("the request stream is open");
+				LearnStep::Response {
+					asked,
+					mut stream,
+					mut demand,
+				} => {
 					let response = match stream.writer.poll_flush(waiter) {
 						Poll::Ready(Ok(())) => {
 							this.poll_read_track_status_response(&mut stream.reader, &mut self.messages, waiter)
@@ -5851,8 +5915,7 @@ impl LearnTrackStatus {
 						Some(SetupResponse::Cancelled(Error::from_transport(err)))
 					} else {
 						// A fetch needs nothing from the status to go out, only to read its objects.
-						let dynamic = self.dynamic.as_mut().expect("held until accepted");
-						while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(waiter) {
+						while let Poll::Ready(Ok(fill)) = asked.dynamic.poll_requested_fill(waiter) {
 							group_fetches.push(ServeFill::new(
 								this.clone(),
 								broadcast_path.clone(),
@@ -5863,65 +5926,76 @@ impl LearnTrackStatus {
 							));
 						}
 						let _ = group_fetches.poll(waiter);
-						let demand = self.demand.as_mut().expect("set with the request stream");
-						ready!(crate::util::poll_unwanted(demand, waiter));
+						if crate::util::poll_unwanted(&mut demand, waiter).is_pending() {
+							self.step = LearnStep::Response { asked, stream, demand };
+							return Poll::Pending;
+						}
 						None
 					};
 					match res {
 						Some(SetupResponse::Response(response)) => {
 							let _ = stream.writer.finish();
-							self.step = LearnStep::Answered(Some(response));
+							LearnStep::Answered {
+								asked,
+								stream,
+								response,
+							}
 						}
 						Some(SetupResponse::Cancelled(err)) => {
-							if let Some(request) = self.request.take() {
-								request.reject(err.clone());
-							}
+							asked.request.reject(err.clone());
 							stream.reader.abort(&Error::Cancel);
-							let stream = self.stream.take().expect("the request stream is open");
-							self.step = LearnStep::Cancelled(StreamClose::new(stream), Some(err));
+							LearnStep::Cancelled(StreamClose::new(stream), err)
 						}
-						None if self
-							.request
-							.as_ref()
-							.is_some_and(|request| request.reject_unwanted(Error::Cancel)) =>
-						{
-							let mut stream = self.stream.take().expect("the request stream is open");
+						None if asked.request.reject_unwanted(Error::Cancel) => {
 							stream.reader.abort(&Error::Cancel);
 							stream.writer.abort(&Error::Cancel);
 							return Poll::Ready(Err(Error::Cancel));
 						}
 						// Demand returned in the gap.
-						None => {}
+						None => LearnStep::Response { asked, stream, demand },
 					}
 				}
-				LearnStep::Cancelled(close, err) => {
-					let _ = ready!(close.poll(waiter));
-					return Poll::Ready(Err(err.take().expect("polled after completion")));
-				}
-				LearnStep::Answered(response) => {
+				LearnStep::Cancelled(mut close, err) => match close.poll(waiter) {
+					Poll::Ready(_) => return Poll::Ready(Err(err)),
+					Poll::Pending => {
+						self.step = LearnStep::Cancelled(close, err);
+						return Poll::Pending;
+					}
+				},
+				LearnStep::Answered {
+					asked,
+					stream,
+					response,
+				} => {
 					// A track that needs a property we do not understand is not forwarded.
-					let refusal = match response {
-						Some(Ok(ok)) => refused(
-							&ok.properties,
-							this.version,
-							ready!(this.peer_setup.poll_get(waiter)).flate,
-						),
-						_ => None,
+					let flate = match &response {
+						Ok(_) => match this.peer_setup.poll_get(waiter) {
+							Poll::Ready(peer) => peer.flate,
+							Poll::Pending => {
+								self.step = LearnStep::Answered {
+									asked,
+									stream,
+									response,
+								};
+								return Poll::Pending;
+							}
+						},
+						Err(_) => false,
 					};
-					let ok = match (response.take().expect("answered once"), refusal) {
-						(Ok(_), Some(err)) => Err(err),
-						(res, _) => res,
-					};
-					let ok = match ok {
+					let response = response.and_then(|ok| match refused(&ok.properties, this.version, flate) {
+						Some(err) => Err(err),
+						None => Ok(ok),
+					});
+					let ok = match response {
 						Ok(ok) => ok,
 						Err(err) => {
 							tracing::debug!(%err, broadcast = %crate::path::Rooted(this.origin.root(), broadcast_path), track = %track_name, "track status refused");
-							return self.reject(err);
+							return asked.reject(err);
 						}
 					};
 
 					tracing::debug!(broadcast = %crate::path::Rooted(this.origin.root(), broadcast_path), track = %track_name, "track status known");
-					let request = self.request.take().expect("held until accepted");
+					let Asked { request, dynamic } = asked;
 					// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 					// Idle from the accept, so no reader takes it as live in between.
 					let track = request.idle().stage(accepted_info(&ok.properties, this.version));
@@ -5933,15 +6007,17 @@ impl LearnTrackStatus {
 						track.report_object(largest.group, largest.object);
 					}
 					let track = track.commit();
+					drop(stream);
 					return Poll::Ready(Ok(Idle {
 						demand: track.demand(),
 						track,
-						dynamic: self.dynamic.take().expect("held until accepted"),
+						dynamic,
 						properties: ok.properties,
 						finished: false,
 					}));
 				}
-			}
+				LearnStep::Done => return Poll::Ready(Err(Error::Cancel)),
+			};
 		}
 	}
 }
@@ -7204,31 +7280,40 @@ struct FetchRun {
 	/// The frame the reader wants in the run's first group.
 	start: u64,
 	draft20: bool,
-	stream: Option<Stream<Transport, Version>>,
 	messages: super::request_stream::Messages,
 	/// Where FETCH_OK hands the run to its fetch stream.
 	slot: kio::Producer<GroupFetch>,
-	/// Registered before the FETCH goes out, since its stream can overtake FETCH_OK.
-	registered: Option<GroupFetchEntry>,
 	step: FetchRunStep,
+}
+
+/// The FETCH on its request stream, registered under its ID.
+struct FetchRequest {
+	stream: Stream<Transport, Version>,
+	/// Registered before the FETCH goes out, since its stream can overtake FETCH_OK.
+	registered: GroupFetchEntry,
 }
 
 enum FetchRunStep {
 	/// Opening the request stream.
 	Open(crate::transport::open::Open),
 	/// Waiting for FETCH_OK, flushing the FETCH meanwhile.
-	Answer,
+	Answer(FetchRequest),
 	/// Waiting for the timescale the objects are stamped in.
-	Timescale(ietf::FetchOk),
+	Timescale(FetchRequest, ietf::FetchOk),
 	/// Keeping the request open until its data stream finishes or every reader leaves.
 	Receive {
+		req: FetchRequest,
 		covered: std::ops::Range<u64>,
 		/// Whether the request stream may still carry a reset.
 		listening: bool,
-		abandoned: bool,
 	},
-	/// Finishing the request stream.
-	Close(StreamClose),
+	/// Finishing the request stream, still registered until it closes.
+	Close {
+		close: StreamClose,
+		_registered: GroupFetchEntry,
+	},
+	/// Over: polled no more.
+	Done,
 }
 
 impl FetchRun {
@@ -7252,281 +7337,324 @@ impl FetchRun {
 			fill,
 			run,
 			timescale,
-			stream: None,
 			slot: kio::Producer::new(GroupFetch::Pending),
-			registered: None,
 			step: FetchRunStep::Open(Default::default()),
 		}
 	}
 
 	/// Refuse what the run still owes, and cancel the request.
-	fn cancel(&mut self, err: Error) -> Poll<()> {
+	fn cancel(&self, req: FetchRequest, err: Error) -> FetchRunStep {
 		self.fill.reject_groups(self.run.clone(), err);
-		self.registered = None;
-		if let Some(stream) = self.stream.take() {
-			Subscriber::cancel_group_fetch(stream);
-		}
-		Poll::Ready(())
+		let FetchRequest { stream, registered } = req;
+		drop(registered);
+		Subscriber::cancel_group_fetch(stream);
+		FetchRunStep::Done
 	}
 
 	/// Refuse `groups`, then finish the request stream.
-	fn refuse(&mut self, groups: std::ops::Range<u64>, err: Error) {
+	fn refuse(&self, req: FetchRequest, groups: std::ops::Range<u64>, err: Error) -> FetchRunStep {
 		self.fill.reject_groups(groups, err);
-		self.close();
+		Self::close(req)
 	}
 
 	/// Finish the request stream.
-	fn close(&mut self) {
-		let stream = self.stream.take().expect("the request stream is open");
-		self.step = FetchRunStep::Close(StreamClose::new(stream));
+	fn close(req: FetchRequest) -> FetchRunStep {
+		FetchRunStep::Close {
+			close: StreamClose::new(req.stream),
+			_registered: req.registered,
+		}
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
-			match &mut self.step {
-				FetchRunStep::Open(open) => {
-					// The owning subscribe/linger loop enforces its admitted gate, including a
-					// token-authorized announce outside the session scope. Its abort ends this job.
-					// The fill is already owned by waiting readers; credit backpressures it until
-					// their demand leaves instead of refusing accepted work.
-					let opened = if let Err(err) = self.validity.check(waiter) {
-						Err(err)
-					} else if let Poll::Ready(err) = self.fill.poll_aborted(waiter) {
-						Err(err)
-					} else if self.fill.poll_unwanted_groups(self.run.clone(), waiter).is_ready() {
-						Err(Error::Cancel)
-					} else if let Poll::Ready(Err(err)) = self.timescale.poll(waiter) {
-						// A TRACK_STATUS sent alongside that failed fails the fetch.
-						Err(err)
-					} else {
-						ready!(Stream::poll_open(&self.this.session, open, self.this.version, waiter))
-					};
-					let mut stream = match opened {
-						Ok(stream) => stream.with_stats(self.this.origin.stats()),
-						Err(err) => {
-							self.fill.reject_groups(self.run.clone(), err);
-							return Poll::Ready(());
-						}
-					};
-					let fetch_id = self.this.control.next_request_id();
-					self.registered = Some(GroupFetchEntry::new(&self.this.state, fetch_id, self.slot.clone()));
-
-					let namespace = self.broadcast.clone();
-					let track = self.name.as_str().into();
-					let from = ietf::Location {
-						group: self.run.start,
-						object: self.start,
-					};
-					let fetch_type = match self.draft20 {
-						// No End Object includes the whole End Group.
-						true => FetchType::Filtered {
-							namespace,
-							track,
-							filter: Filter::Absolute {
-								start: from,
-								end: Some(ietf::EndLocation {
-									group: self.last,
-									object: None,
-								}),
-							},
-						},
-						// An End Object of 0 is the whole End Group.
-						false => FetchType::Standalone {
-							namespace,
-							track,
-							start: from,
-							end: ietf::Location {
-								group: self.last,
-								object: 0,
-							},
-						},
-					};
-					// Flushed while waiting for the answer, so the terminals below still end a
-					// request the peer's send window holds back.
-					let written = stream.writer.buffer_message(
-						ietf::Fetch::ID,
-						&ietf::Fetch {
-							authorization_token: None,
-							request_id: fetch_id,
-							subscriber_priority: super::priority::to_wire(self.fill.priority()),
-							group_order: GroupOrder::Ascending,
-							fetch_type,
-							range_filters: false,
-							fill_timeout: false,
-							// The copy learns the track from SUBSCRIBE_OK or TRACK_STATUS_OK, so a
-							// FETCH_OK repeating it is waste, except that only its TIMESCALE opts the
-							// answer into the timestamps a timed copy needs. A FETCH sent alongside
-							// TRACK_STATUS cannot know yet, so it asks.
-							properties_wanted: match self.timescale.peek() {
-								Some(Ok(timescale)) => timescale.is_some(),
-								_ => true,
-							},
-						},
-					);
-					self.stream = Some(stream);
-					match written {
-						Ok(()) => self.step = FetchRunStep::Answer,
-						Err(err) => {
-							tracing::debug!(%err, groups = ?self.run, "group fetch refused");
-							self.refuse(self.run.clone(), err);
-						}
-					}
-				}
-				FetchRunStep::Answer => {
-					let stream = self.stream.as_mut().expect("the request stream is open");
-					let response = match stream.writer.poll_flush(waiter) {
-						Poll::Ready(Ok(())) => {
-							self.this
-								.poll_read_fetch_response(&mut stream.reader, &mut self.messages, waiter)
-						}
-						Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-						Poll::Pending => Poll::Pending,
-					};
-					let res = if let Poll::Ready(Err(err)) = response {
-						SetupResponse::Response(Err(err))
-					} else if let Err(err) = self.validity.check(waiter) {
-						SetupResponse::Cancelled(err)
-					} else if let Poll::Ready(err) = self.fill.poll_aborted(waiter) {
-						SetupResponse::Cancelled(err)
-					} else if let Poll::Ready(Err(err)) = self.timescale.poll(waiter) {
-						SetupResponse::Cancelled(err)
-					} else if let Poll::Ready(res) = response {
-						SetupResponse::Response(res)
-					} else if self.fill.poll_unwanted_groups(self.run.clone(), waiter).is_ready() {
-						SetupResponse::Cancelled(Error::Cancel)
-					} else {
+			self.step = match std::mem::replace(&mut self.step, FetchRunStep::Done) {
+				FetchRunStep::Open(mut open) => match self.open(waiter, &mut open) {
+					Poll::Ready(step) => step,
+					Poll::Pending => {
+						self.step = FetchRunStep::Open(open);
 						return Poll::Pending;
-					};
-					match res {
-						SetupResponse::Response(Ok(ok)) => self.step = FetchRunStep::Timescale(ok),
-						SetupResponse::Cancelled(err) => return self.cancel(err),
-						SetupResponse::Response(Err(err)) => {
-							tracing::debug!(%err, groups = ?self.run, "group fetch refused");
-							self.refuse(self.run.clone(), err);
-						}
 					}
-				}
-				FetchRunStep::Timescale(_) => {
-					// The objects are stamped in the track's timescale, which the TRACK_STATUS sent
-					// alongside may still owe: they wait unread in their stream until it lands, and
-					// its failure fails the fetch.
-					let timescale = if let Err(err) = self.validity.check(waiter) {
-						Err(err)
-					} else if let Poll::Ready(err) = self.fill.poll_aborted(waiter) {
-						Err(err)
-					} else if let Poll::Ready(res) = self.timescale.poll(waiter) {
-						res
-					} else if self.fill.poll_unwanted_groups(self.run.clone(), waiter).is_ready() {
-						Err(Error::Cancel)
-					} else {
+				},
+				FetchRunStep::Answer(mut req) => match self.poll_answer(waiter, &mut req) {
+					Poll::Ready(SetupResponse::Response(Ok(ok))) => FetchRunStep::Timescale(req, ok),
+					Poll::Ready(SetupResponse::Cancelled(err)) => self.cancel(req, err),
+					Poll::Ready(SetupResponse::Response(Err(err))) => {
+						tracing::debug!(%err, groups = ?self.run, "group fetch refused");
+						self.refuse(req, self.run.clone(), err)
+					}
+					Poll::Pending => {
+						self.step = FetchRunStep::Answer(req);
 						return Poll::Pending;
-					};
-					let timescale = match timescale {
-						Ok(timescale) => timescale,
-						Err(err) => return self.cancel(err),
-					};
-					let FetchRunStep::Timescale(ok) = std::mem::replace(&mut self.step, FetchRunStep::Answer) else {
-						unreachable!()
-					};
-					if let Some(step) = self.answered(ok, timescale) {
-						return step;
 					}
-				}
+				},
+				FetchRunStep::Timescale(req, ok) => match self.poll_timescale(waiter) {
+					Poll::Ready(Ok(timescale)) => self.answered(req, ok, timescale),
+					Poll::Ready(Err(err)) => self.cancel(req, err),
+					Poll::Pending => {
+						self.step = FetchRunStep::Timescale(req, ok);
+						return Poll::Pending;
+					}
+				},
 				FetchRunStep::Receive {
+					mut req,
 					covered,
-					listening,
-					abandoned,
-				} => {
-					let stream = self.stream.as_mut().expect("the request stream is open");
-					let slot = &self.slot;
-					// A publisher that fails after FETCH_OK resets the request instead and owes no
-					// fetch stream, so the groups it left waiting are refused. A FIN is not that:
-					// the fetch stream can trail it.
-					let reset = 'reset: {
-						if *listening {
-							match self.messages.poll_end(&mut stream.reader, waiter) {
-								Poll::Ready(Err(err)) => break 'reset Some(err),
-								Poll::Ready(Ok(())) => *listening = false,
-								Poll::Pending => {}
-							}
-						}
-						if let Poll::Ready(err) = self.fill.poll_aborted(waiter) {
-							// Completed history stays cached. Only this FETCH's unfinished group is
-							// ours to abort; closing a track never cascades into cached siblings.
-							let state = slot.read();
-							if let GroupFetch::Receiving(Some(group)) = &*state {
-								group.abort_open(err.clone());
-							}
-							*abandoned = !matches!(*state, GroupFetch::Done);
-							break 'reset Some(err);
-						}
-
-						let unwanted = self.fill.poll_unwanted_groups(covered.clone(), waiter).is_ready();
-						let _ = ready!(slot.poll(waiter, |state| match &**state {
-							GroupFetch::Done => Poll::Ready(()),
-							GroupFetch::Receiving(Some(group))
-								if unwanted
-									&& group.poll_unwanted(waiter).is_ready()
-									&& group.abort_unwanted(Error::Cancel) =>
-							{
-								*abandoned = true;
-								Poll::Ready(())
-							}
-							GroupFetch::Ready(_) | GroupFetch::Receiving(None) if unwanted => {
-								*abandoned = true;
-								Poll::Ready(())
-							}
-							_ => Poll::Pending,
-						}));
-						None
-					};
-					let covered = covered.clone();
-					if *abandoned {
-						if let Ok(mut state) = self.slot.write()
-							&& !matches!(*state, GroupFetch::Done)
-						{
-							*state = GroupFetch::Cancelled;
-						}
-						// A closed track answers what the run still owes with its abort, so the fill
-						// is not asked for the same run again; groups nobody reads are owed nothing.
-						if let Some(err) = reset {
-							self.fill.reject_groups(covered, err);
-						}
-						self.registered = None;
-						if let Some(stream) = self.stream.take() {
-							Subscriber::cancel_group_fetch(stream);
-						}
-						return Poll::Ready(());
+					mut listening,
+				} => match self.poll_receive(waiter, &mut req, &covered, &mut listening) {
+					Poll::Ready(received) => self.received(req, covered, received),
+					Poll::Pending => {
+						self.step = FetchRunStep::Receive {
+							req,
+							covered,
+							listening,
+						};
+						return Poll::Pending;
 					}
-					// A run already being written is the fetch stream's to settle; one still waiting
-					// for its stream is lost.
-					if let Some(err) = reset
-						&& let Ok(mut state) = self.slot.write()
-						&& matches!(*state, GroupFetch::Ready(_))
-					{
-						*state = GroupFetch::Done;
-						self.fill.reject_groups(covered, err);
+				},
+				FetchRunStep::Close { mut close, _registered } => match close.poll(waiter) {
+					Poll::Ready(_) => FetchRunStep::Done,
+					Poll::Pending => {
+						self.step = FetchRunStep::Close { close, _registered };
+						return Poll::Pending;
 					}
-					self.close();
-				}
-				FetchRunStep::Close(close) => {
-					let _ = ready!(close.poll(waiter));
-					return Poll::Ready(());
-				}
-			}
+				},
+				FetchRunStep::Done => return Poll::Ready(()),
+			};
 		}
 	}
 
+	/// Open the request stream and write the FETCH, or refuse the run when it cannot go out.
+	fn open(&mut self, waiter: &kio::Waiter, open: &mut crate::transport::open::Open) -> Poll<FetchRunStep> {
+		// The owning subscribe/linger loop enforces its admitted gate, including a
+		// token-authorized announce outside the session scope. Its abort ends this job.
+		// The fill is already owned by waiting readers; credit backpressures it until
+		// their demand leaves instead of refusing accepted work.
+		let opened = if let Err(err) = self.validity.check(waiter) {
+			Err(err)
+		} else if let Poll::Ready(err) = self.fill.poll_aborted(waiter) {
+			Err(err)
+		} else if self.fill.poll_unwanted_groups(self.run.clone(), waiter).is_ready() {
+			Err(Error::Cancel)
+		} else if let Poll::Ready(Err(err)) = self.timescale.poll(waiter) {
+			// A TRACK_STATUS sent alongside that failed fails the fetch.
+			Err(err)
+		} else {
+			ready!(Stream::poll_open(&self.this.session, open, self.this.version, waiter))
+		};
+		let mut stream = match opened {
+			Ok(stream) => stream.with_stats(self.this.origin.stats()),
+			Err(err) => {
+				self.fill.reject_groups(self.run.clone(), err);
+				return Poll::Ready(FetchRunStep::Done);
+			}
+		};
+		let fetch_id = self.this.control.next_request_id();
+		let registered = GroupFetchEntry::new(&self.this.state, fetch_id, self.slot.clone());
+
+		let namespace = self.broadcast.clone();
+		let track = self.name.as_str().into();
+		let from = ietf::Location {
+			group: self.run.start,
+			object: self.start,
+		};
+		let fetch_type = match self.draft20 {
+			// No End Object includes the whole End Group.
+			true => FetchType::Filtered {
+				namespace,
+				track,
+				filter: Filter::Absolute {
+					start: from,
+					end: Some(ietf::EndLocation {
+						group: self.last,
+						object: None,
+					}),
+				},
+			},
+			// An End Object of 0 is the whole End Group.
+			false => FetchType::Standalone {
+				namespace,
+				track,
+				start: from,
+				end: ietf::Location {
+					group: self.last,
+					object: 0,
+				},
+			},
+		};
+		// Flushed while waiting for the answer, so the terminals below still end a
+		// request the peer's send window holds back.
+		let written = stream.writer.buffer_message(
+			ietf::Fetch::ID,
+			&ietf::Fetch {
+				authorization_token: None,
+				request_id: fetch_id,
+				subscriber_priority: super::priority::to_wire(self.fill.priority()),
+				group_order: GroupOrder::Ascending,
+				fetch_type,
+				range_filters: false,
+				fill_timeout: false,
+				// The copy learns the track from SUBSCRIBE_OK or TRACK_STATUS_OK, so a
+				// FETCH_OK repeating it is waste, except that only its TIMESCALE opts the
+				// answer into the timestamps a timed copy needs. A FETCH sent alongside
+				// TRACK_STATUS cannot know yet, so it asks.
+				properties_wanted: match self.timescale.peek() {
+					Some(Ok(timescale)) => timescale.is_some(),
+					_ => true,
+				},
+			},
+		);
+		let req = FetchRequest { stream, registered };
+		Poll::Ready(match written {
+			Ok(()) => FetchRunStep::Answer(req),
+			Err(err) => {
+				tracing::debug!(%err, groups = ?self.run, "group fetch refused");
+				self.refuse(req, self.run.clone(), err)
+			}
+		})
+	}
+
+	/// FETCH_OK or the refusal, or the local terminal that ended the wait for it.
+	fn poll_answer(&mut self, waiter: &kio::Waiter, req: &mut FetchRequest) -> Poll<SetupResponse<ietf::FetchOk>> {
+		let stream = &mut req.stream;
+		let response = match stream.writer.poll_flush(waiter) {
+			Poll::Ready(Ok(())) => self
+				.this
+				.poll_read_fetch_response(&mut stream.reader, &mut self.messages, waiter),
+			Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+			Poll::Pending => Poll::Pending,
+		};
+		Poll::Ready(if let Poll::Ready(Err(err)) = response {
+			SetupResponse::Response(Err(err))
+		} else if let Err(err) = self.validity.check(waiter) {
+			SetupResponse::Cancelled(err)
+		} else if let Poll::Ready(err) = self.fill.poll_aborted(waiter) {
+			SetupResponse::Cancelled(err)
+		} else if let Poll::Ready(Err(err)) = self.timescale.poll(waiter) {
+			SetupResponse::Cancelled(err)
+		} else if let Poll::Ready(res) = response {
+			SetupResponse::Response(res)
+		} else if self.fill.poll_unwanted_groups(self.run.clone(), waiter).is_ready() {
+			SetupResponse::Cancelled(Error::Cancel)
+		} else {
+			return Poll::Pending;
+		})
+	}
+
+	/// The timescale the objects are stamped in, or why the fetch ends without it.
+	fn poll_timescale(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Timescale>, Error>> {
+		// The objects are stamped in the track's timescale, which the TRACK_STATUS sent
+		// alongside may still owe: they wait unread in their stream until it lands, and
+		// its failure fails the fetch.
+		Poll::Ready(if let Err(err) = self.validity.check(waiter) {
+			Err(err)
+		} else if let Poll::Ready(err) = self.fill.poll_aborted(waiter) {
+			Err(err)
+		} else if let Poll::Ready(res) = self.timescale.poll(waiter) {
+			res
+		} else if self.fill.poll_unwanted_groups(self.run.clone(), waiter).is_ready() {
+			Err(Error::Cancel)
+		} else {
+			return Poll::Pending;
+		})
+	}
+
+	/// Ready once the run is done with: its fetch stream finished, every reader left, or
+	/// the request reset. Says why the request reset, if it did, and whether the run was
+	/// abandoned.
+	fn poll_receive(
+		&mut self,
+		waiter: &kio::Waiter,
+		req: &mut FetchRequest,
+		covered: &std::ops::Range<u64>,
+		listening: &mut bool,
+	) -> Poll<Received> {
+		let slot = &self.slot;
+		// A publisher that fails after FETCH_OK resets the request instead and owes no
+		// fetch stream, so the groups it left waiting are refused. A FIN is not that:
+		// the fetch stream can trail it.
+		if *listening {
+			match self.messages.poll_end(&mut req.stream.reader, waiter) {
+				Poll::Ready(Err(err)) => {
+					return Poll::Ready(Received {
+						reset: Some(err),
+						abandoned: false,
+					});
+				}
+				Poll::Ready(Ok(())) => *listening = false,
+				Poll::Pending => {}
+			}
+		}
+		if let Poll::Ready(err) = self.fill.poll_aborted(waiter) {
+			// Completed history stays cached. Only this FETCH's unfinished group is
+			// ours to abort; closing a track never cascades into cached siblings.
+			let state = slot.read();
+			if let GroupFetch::Receiving(Some(group)) = &*state {
+				group.abort_open(err.clone());
+			}
+			return Poll::Ready(Received {
+				reset: Some(err),
+				abandoned: !matches!(*state, GroupFetch::Done),
+			});
+		}
+
+		let unwanted = self.fill.poll_unwanted_groups(covered.clone(), waiter).is_ready();
+		let mut abandoned = false;
+		let _ = ready!(slot.poll(waiter, |state| match &**state {
+			GroupFetch::Done => Poll::Ready(()),
+			GroupFetch::Receiving(Some(group))
+				if unwanted && group.poll_unwanted(waiter).is_ready() && group.abort_unwanted(Error::Cancel) =>
+			{
+				abandoned = true;
+				Poll::Ready(())
+			}
+			GroupFetch::Ready(_) | GroupFetch::Receiving(None) if unwanted => {
+				abandoned = true;
+				Poll::Ready(())
+			}
+			_ => Poll::Pending,
+		}));
+		Poll::Ready(Received { reset: None, abandoned })
+	}
+
+	/// End the request once the run is done with.
+	fn received(&self, req: FetchRequest, covered: std::ops::Range<u64>, received: Received) -> FetchRunStep {
+		let Received { reset, abandoned } = received;
+		if abandoned {
+			if let Ok(mut state) = self.slot.write()
+				&& !matches!(*state, GroupFetch::Done)
+			{
+				*state = GroupFetch::Cancelled;
+			}
+			// A closed track answers what the run still owes with its abort, so the fill
+			// is not asked for the same run again; groups nobody reads are owed nothing.
+			if let Some(err) = reset {
+				self.fill.reject_groups(covered, err);
+			}
+			let FetchRequest { stream, registered } = req;
+			drop(registered);
+			Subscriber::cancel_group_fetch(stream);
+			return FetchRunStep::Done;
+		}
+		// A run already being written is the fetch stream's to settle; one still waiting
+		// for its stream is lost.
+		if let Some(err) = reset
+			&& let Ok(mut state) = self.slot.write()
+			&& matches!(*state, GroupFetch::Ready(_))
+		{
+			*state = GroupFetch::Done;
+			self.fill.reject_groups(covered, err);
+		}
+		Self::close(req)
+	}
+
 	/// Settle what FETCH_OK covers and hand the run to its fetch stream, or end the request
-	/// with `Some` when the answer covers nothing it can take.
-	fn answered(&mut self, ok: ietf::FetchOk, timescale: Option<Timescale>) -> Option<Poll<()>> {
+	/// when the answer covers nothing it can take.
+	fn answered(&self, req: FetchRequest, ok: ietf::FetchOk, timescale: Option<Timescale>) -> FetchRunStep {
 		let (run, last, start) = (self.run.clone(), self.last, self.start);
 		// Draft-22's End Location is inclusive; older drafts spell a bounded object one past it.
 		let mut end = ok.end_location;
 		if self.draft20 {
 			let Some(object) = end.object.checked_add(1) else {
-				self.refuse(run, Error::ProtocolViolation);
-				return None;
+				return self.refuse(req, run, Error::ProtocolViolation);
 			};
 			end.object = object;
 		}
@@ -7548,22 +7676,20 @@ impl FetchRun {
 				err.to_string().as_ref(),
 			);
 			self.fill.reject_groups(run, err);
-			return Some(Poll::Ready(()));
+			return FetchRunStep::Done;
 		}
 
 		// The publisher knows where the track ends, which a range FETCH downstream needs.
 		if ok.end_of_track {
 			let Some(final_sequence) = end.group.checked_add(u64::from(whole_last || end.object > 0)) else {
-				self.refuse(run, Error::ProtocolViolation);
-				return None;
+				return self.refuse(req, run, Error::ProtocolViolation);
 			};
 			self.fill.finish_track_at(final_sequence);
 		}
 
 		// Before draft-22, an empty answer opens no fetch stream at all.
 		if !whole_last && (end.group, end.object) <= (run.start, start) {
-			self.refuse(run, Error::NotFound);
-			return None;
+			return self.refuse(req, run, Error::NotFound);
 		}
 
 		// The groups the answer covers: whole up to the End Location's group, and that one up
@@ -7593,13 +7719,20 @@ impl FetchRun {
 		}
 
 		// Keep the request open until its data stream finishes or every reader leaves.
-		self.step = FetchRunStep::Receive {
+		FetchRunStep::Receive {
+			req,
 			covered: run.start..covered + 1,
 			listening: true,
-			abandoned: false,
-		};
-		None
+		}
 	}
+}
+
+/// How a [`FetchRun`]'s run was done with.
+struct Received {
+	/// Why the request reset, if it did.
+	reset: Option<Error>,
+	/// Nobody reads the run any more, so the request is cancelled.
+	abandoned: bool,
 }
 
 /// A stream finishing: its writer waits for the peer to acknowledge the FIN, as

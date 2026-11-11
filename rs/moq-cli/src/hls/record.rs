@@ -606,6 +606,7 @@ mod tests {
 		broadcast: moq_net::origin::Route,
 		catalog: moq_mux::catalog::Producer,
 		video: Vec<Video>,
+		finished: Vec<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>>,
 	}
 
 	impl Publisher {
@@ -637,6 +638,7 @@ mod tests {
 				broadcast,
 				catalog,
 				video,
+				finished: Vec::new(),
 			}
 		}
 
@@ -656,9 +658,7 @@ mod tests {
 		}
 
 		fn finish(&mut self) {
-			for video in &mut self.video {
-				video.finish().unwrap();
-			}
+			self.finished = self.video.drain(..).map(|video| video.finish().unwrap()).collect();
 			self.catalog.finish().unwrap();
 		}
 	}
@@ -872,7 +872,7 @@ mod tests {
 		recorded(dir.path(), "video1").await;
 		let removed = Arc::downgrade(&broadcaster.rendition(Kind::Video, "video1").unwrap());
 		// Finishing bounds its last segment, so the removed instance's cursor drains.
-		publisher.video.remove(1).finish().unwrap();
+		let _finished = publisher.video.remove(1).finish().unwrap();
 		publisher
 			.catalog
 			.mutate(|catalog| {
