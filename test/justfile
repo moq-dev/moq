@@ -294,6 +294,10 @@ json-properties:
 resume-model:
     bash ../sh/local.sh bash resume-model.sh
 
+# Prove the route key model, and that each variant breaks the lemmas it names.
+route-key-model:
+    bash route-key-model.sh
+
 # Check random lite-07 meshes against the route rules from a fresh replayable seed.
 route-sweep:
     bash ../sh/local.sh bash route-sweep.sh
