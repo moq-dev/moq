@@ -101,6 +101,8 @@ pub(super) struct Routed {
 	rtt: route::LinkRtt,
 	/// When to read the link's RTT next, or `None` once it stopped reading.
 	read_rtt: Option<crate::time::Deadline>,
+	/// Whether the peer has a route here, so the link's RTT is read.
+	sampling: bool,
 }
 
 impl Routed {
@@ -133,13 +135,6 @@ impl Routed {
 		let stream = node
 			.receive(scoped(&link, &regions, key), prefix.clone())
 			.map_err(refused)?;
-		let mut rtt = route::LinkRtt::default();
-		stream.rtt(rtt.read(subscriber.session.metrics().rtt()));
-		// A transport can report its first RTT later, such as qmux after its first ping.
-		let read_rtt = Some(crate::time::Deadline::after(
-			&subscriber.runtime,
-			route::LinkRtt::INTERVAL,
-		));
 		Ok(Self {
 			node,
 			stream,
@@ -162,8 +157,9 @@ impl Routed {
 			previous: HashMap::new(),
 			ready: Default::default(),
 			drained: false,
-			rtt,
-			read_rtt,
+			rtt: Default::default(),
+			read_rtt: None,
+			sampling: false,
 		})
 	}
 
@@ -512,9 +508,25 @@ impl Routed {
 		waiter: &kio::Waiter,
 	) -> Result<(), Error> {
 		// Only a route the peer sent adds the link's min RTT, so a peer sending none
-		// costs no timer.
-		while !self.routes.is_empty()
-			&& let Some(read_rtt) = &mut self.read_rtt
+		// costs no timer. Reading restarts its window on resuming, so a pause never
+		// keeps a reading older than the window.
+		match (self.routes.is_empty(), self.sampling) {
+			(true, true) => {
+				self.sampling = false;
+				self.rtt = Default::default();
+				self.read_rtt = None;
+				self.stream.rtt(None);
+			}
+			(false, false) => {
+				self.sampling = true;
+				self.read_rtt = Some(crate::time::Deadline::after(
+					&subscriber.runtime,
+					std::time::Duration::ZERO,
+				));
+			}
+			_ => {}
+		}
+		while let Some(read_rtt) = &mut self.read_rtt
 			&& read_rtt.poll(waiter).is_ready()
 		{
 			let last = self.rtt.reported();
@@ -996,6 +1008,41 @@ mod tests {
 		kio::clock::sim::advance(super::route::LinkRtt::INTERVAL).await;
 		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
 		assert_eq!(routed.rtt.reported(), Some(rtt));
+	}
+
+	/// A stream whose peer ends every route stops reading, and starts a fresh window
+	/// once one returns, so a reading from before the pause never stays reported.
+	#[kio::test]
+	async fn a_pause_restarts_the_window() {
+		use crate::lite::test_transport::SinkStats;
+		let ms = std::time::Duration::from_millis;
+		let session = SinkSession::new(Default::default()).with_stats(SinkStats::default().with_rtt(ms(10)));
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(session.clone());
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let mut writer = crate::coding::Writer::new(
+			crate::lite::test_transport::SinkSend::new(Default::default()),
+			crate::lite::Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		feed(&mut routed, &mut decoder, &[]).unwrap();
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(routed.rtt.reported(), Some(ms(10)));
+
+		routed.receive(&prefix, Msg::RouteEnd { id: 0 }, &mut decoder).unwrap();
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert!(routed.read_rtt.is_none(), "no route, no timer");
+		session.set_stats(SinkStats::default().with_rtt(ms(100)));
+		kio::clock::sim::advance(std::time::Duration::from_secs(60)).await;
+
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: ADVERT,
+		};
+		routed.receive(&prefix, route, &mut decoder).unwrap();
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(routed.rtt.reported(), Some(ms(100)));
 	}
 
 	/// What the stream keeps between floors is the net change to its committed claims,
