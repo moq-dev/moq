@@ -82,7 +82,8 @@ class CoverageTablesTests(unittest.TestCase):
         self.assertIn("must start with a repo-relative path", self.check().stderr)
 
     def test_a_call_is_not_a_definition(self):
-        self.write("src/lib.rs", SOURCE.replace("pub fn sync(&mut self) {}", "pub fn other(&mut self) {\n        sync();\n    }"))
+        caller = "pub fn other(&mut self) {\n        sync();\n    }"
+        self.write("src/lib.rs", SOURCE.replace("pub fn sync(&mut self) {}", caller))
         self.assertIn("`Reader::sync`: no `sync` defined", self.check().stderr)
 
     def test_an_empty_file_fails(self):
