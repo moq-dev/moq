@@ -6,7 +6,7 @@
 //! the origin, minting a source per request that names the claim's origin node.
 
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap},
+	collections::{BTreeMap, HashMap},
 	task::Poll,
 };
 
@@ -22,8 +22,8 @@ use super::{AnnouncedRoute, Subscriber};
 struct WireRoute {
 	node: route::Id,
 	reach: route::Reach,
-	/// The Announce IDs of its live claims.
-	claims: BTreeSet<u64>,
+	/// The Announce ID of each of its live claims, by path.
+	claims: BTreeMap<Path, u64>,
 	/// How its claims differ from `committed`, by path, so what the stream keeps
 	/// between floors is bounded by its claims rather than the messages it read.
 	pending: BTreeMap<Path, Option<node::Claim>>,
@@ -175,7 +175,7 @@ impl Routed {
 					WireRoute {
 						node,
 						reach,
-						claims: BTreeSet::new(),
+						claims: BTreeMap::new(),
 						pending: BTreeMap::new(),
 						committed: None,
 					},
@@ -186,7 +186,7 @@ impl Routed {
 			Msg::RouteHold { id } => self.reach(id, route::Reach::Held)?,
 			Msg::RouteEnd { id } => {
 				let route = self.routes.remove(&id).ok_or(Error::ProtocolViolation)?;
-				for claim in route.claims {
+				for claim in route.claims.into_values() {
 					decoder.end(claim)?;
 					self.claims.remove(&claim);
 					self.held.pop();
@@ -271,17 +271,12 @@ impl Routed {
 
 	/// A claim the peer started under `route`, assigned Announce ID `id`.
 	fn start(&mut self, id: u64, route: u64, path: Path, claim: node::Claim) -> Result<(), Error> {
-		let claims = &self.claims;
 		let wire = self.routes.get_mut(&route).ok_or(Error::ProtocolViolation)?;
-		if wire
-			.claims
-			.iter()
-			.any(|other| claims.get(other).is_some_and(|other| other.path == path))
-		{
+		if wire.claims.contains_key(&path) {
 			return Err(Error::ProtocolViolation);
 		}
 		self.held.push(self.slots.acquire()?);
-		wire.claims.insert(id);
+		wire.claims.insert(path.clone(), id);
 		wire.change(path.clone(), Some(claim.clone()));
 		self.claims.insert(id, WireClaim { route, path, claim });
 		Ok(())
@@ -292,7 +287,7 @@ impl Routed {
 		let claim = self.claims.remove(&id).ok_or(Error::ProtocolViolation)?;
 		self.held.pop();
 		let route = self.routes.get_mut(&claim.route).ok_or(Error::ProtocolViolation)?;
-		route.claims.remove(&id);
+		route.claims.remove(&claim.path);
 		route.change(claim.path, None);
 		Ok(())
 	}

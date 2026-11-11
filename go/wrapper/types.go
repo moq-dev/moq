@@ -221,8 +221,6 @@ const (
 	ProtocolKindVersion = ffi.MoqProtocolKindVersion
 	// ProtocolKindDeliveryTimeout identifies delivery timeout.
 	ProtocolKindDeliveryTimeout = ffi.MoqProtocolKindDeliveryTimeout
-	// ProtocolKindSessionClosed identifies session closed.
-	ProtocolKindSessionClosed = ffi.MoqProtocolKindSessionClosed
 	// ProtocolKindGoingAway identifies going away.
 	ProtocolKindGoingAway = ffi.MoqProtocolKindGoingAway
 	// ProtocolKindTooFarBehind identifies too far behind.

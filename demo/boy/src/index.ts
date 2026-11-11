@@ -1,4 +1,4 @@
-import "@moq/boy/element";
+import "./element.tsx";
 import { Effect } from "@moq/signals";
 
 const url = import.meta.env.VITE_RELAY_URL || "http://localhost:4443";

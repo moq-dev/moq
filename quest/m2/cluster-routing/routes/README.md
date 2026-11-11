@@ -179,7 +179,9 @@ the bullets below are the contract it carries.
 - Loop freedom is Babel's feasibility condition (RFC 8966) keyed by node:
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is
-  ROUTE_HOLD or ROUTE_END; there is no count to infinity.
+  ROUTE_HOLD or ROUTE_END. The route model found a count to infinity
+  (2026-11-10): an echo can overtake a route derived from the echoed one;
+  [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md) orders it.
 - Starvation recovery is Babel's seqno request (RFC 8966 s3.8, decided
   2026-10-12). A node whose routes to an origin are all infeasible sends
   ROUTE_REQUEST for that origin, with its feasibility seqno plus one, to the
@@ -543,7 +545,9 @@ benchmarks.
 - [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - forwarding fixtures ported and the model deleted, incident fixtures, end-to-end checks, and benchmarks
 - [Firefox tabs prove their route key](/quest/m2/cluster-routing/routes/browser-proof.md) - a current Firefox tab opens a lite-07 session with a route-key proof the relay verifies, once neqo's exporter follows the draft
 - [Playwright bundles Chromium's spec exporter](/quest/m2/cluster-routing/routes/playwright-pin.md) - the toolchain's Playwright bundles Chromium 158+, so the route key lane proves the Chromium tab
-- [Showing an identity's claims costs the claims that changed](/quest/m2/cluster-routing/routes/show-cost.md) - lite-07 session setup and teardown grow linearly with broadcasts, not quadratically per identity
+- [A ROUTE_END echo arrives behind the echoer's routes](/quest/m2/cluster-routing/routes/echo-order.md) - no node drops its feasibility distance while a route derived from its own can still arrive, so routes never count to infinity
+- [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - every ordering on 4-5 relay meshes with two origins and clients, with an announce budget and convergence
+- [Seeded lite-07 meshes hold the route rules and an announce budget](/quest/m1/route-mesh-sweep.md) - the route rules and message budget checked on real sessions over random meshes
 
 ## Related
 

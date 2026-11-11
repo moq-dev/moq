@@ -54,6 +54,8 @@ deleted.
 - [io_uring quiescence on a quiet host](/quest/m4/uring-bench-followups.md) - quiet-host acceptance numbers and a nightly `worker_turns` QUIC request-reply series
 - [#2819](/quest/m4/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: validate PipeWire DMA-BUFs into the Vulkan renderer on hardware
 - [Windows.Graphics.Capture](/quest/m4/capture-wgc.md) - the WGC display and window backend verified on real Windows hardware
+- [The foreground app](/quest/m4/capture-foreground.md) - which app and window are in front, with a wait for changes, on macOS, Windows, and X11, for moq-dev/studio's source that follows the game
+- [Leaving apps out of a display capture](/quest/m4/capture-exclude.md) - a display capture that never shows chosen apps where the system can filter, for moq-dev/studio's privacy shield
 - [The moq CLI can publish a changing catalog](/quest/m4/cli-catalog-updates.md) - catalog updates mid-stream, so recovery replays need no hand-built clients
 - [The relay over QUIC on the sim](/quest/m4/quic-sim.md) - the relay and moq-tokio's `Client` and `Server` run over `moq-quic` on the seeded sim
 - [moq-shaper's own socket never passes for path loss](/quest/m4/shaper-socket.md) - relay-sized buffers and its own socket drops reported beside path drops
@@ -104,3 +106,10 @@ deleted.
 - [The dev shell builds Kotlin with Gradle 9](/quest/m4/kt-gradle-9.md) - `gradle_9` in the dev shell, so the Android target builds there
 - [A hung Python test fails instead of hanging the suite](/quest/m4/py-test-timeouts.md) - one pytest-timeout bound covers every `py/` test
 - [Chromium's Opus encoder stamps chunks from their input](/quest/m4/chromium-opus-timestamps.md) - waiting on Chromium; unlocks native `usedtx` for push-to-talk
+- [Resume sweeps are checked against the TLA+ model](/quest/m4/resume-trace-validation.md) - each resume sweep case is a behaviour of `ResumeReader.tla`
+- [Reconnect runs are checked against the TLA+ model](/quest/m4/reconnect-trace-validation.md) - a seeded sweep of the connect policy whose runs are behaviours of `Handover.tla`
+- [Subscription runs are checked against the TLA+ model](/quest/m4/subscribe-trace-validation.md) - a seeded sweep of one lite-07 subscription whose runs are behaviours of `SubscribeAccounting.tla`
+- [Kani proves the varint codecs and length arithmetic for every input](/quest/m4/codec-kani.md) - bounded proofs of no panic, no overflow, and round-trip, nightly
+- [js/net decodes the Rust fuzzers' corpus the same way](/quest/m4/fuzz-corpus-js.md) - nightly, both codecs agree on acceptance and re-encoding for every corpus input
+- [No mutation of the route and resume code survives its tests](/quest/m4/mutants.md) - cargo-mutants nightly, failing on any survivor
+- [Concurrent tests run under many Miri schedules and ThreadSanitizer](/quest/m4/miri-seeds-tsan.md) - shim-free race checks on kio and moq-net, nightly
