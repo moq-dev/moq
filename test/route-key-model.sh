@@ -13,7 +13,7 @@ check() {
     local name=$1 breaks=$2
     shift 2
     local status=0
-    just rs tamarin "$spec" "$@" > "$log/$name" 2>&1 || status=$?
+    just rs tamarin "$spec" "$@" >"$log/$name" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
         cat "$log/$name"
         failed+=("$name: tamarin exited $status")
