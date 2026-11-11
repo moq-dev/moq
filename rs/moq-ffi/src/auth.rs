@@ -33,8 +33,7 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 /// presented.
 ///
 /// Returned by [`MoqSession::grants`](crate::session::MoqSession::grants). AUTH is only on
-/// `moq-lite-07-wip` and on moq-transport sessions that negotiate the MoQ Auth extension;
-/// elsewhere the grant stays `None`.
+/// `moq-lite-07-wip`; elsewhere the grant stays `None`.
 #[derive(uniffi::Object)]
 pub struct MoqGrantConsumer {
 	/// The watch behind [`grant`](Self::grant), which reads without the lock.

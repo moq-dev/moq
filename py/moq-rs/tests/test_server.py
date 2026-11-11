@@ -172,10 +172,10 @@ async def test_client_reconnects_and_resumes_announcements():
 
 
 async def test_session_state_names_a_failing_first_dial():
-    """A first dial returns a session whose state reports each failed attempt."""
+    """A first dial that reaches no session ends the session with its error rather than retrying."""
     import socket
 
-    # A socket that never answers holds the port, so each dial times out.
+    # A socket that never answers holds the port, so the dial times out.
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as silent:
         silent.bind(("127.0.0.1", 0))
         host, port = silent.getsockname()
@@ -198,12 +198,12 @@ async def test_session_state_names_a_failing_first_dial():
             state = session.state()
             assert isinstance(state.phase, moq.ConnectionPhase.CONNECTING)
             assert state.connects == 0
-            for _ in range(2):
-                state = await asyncio.wait_for(session.state_changed(state.revision), timeout=10)
-                assert isinstance(state.phase, moq.ConnectionPhase.CONNECTING)
-                assert isinstance(state.phase.failure, moq.Error.Connect)
-                assert state.connects == 0
-            session.cancel(0)
+            state = await asyncio.wait_for(session.state_changed(state.revision), timeout=10)
+            assert isinstance(state.phase, moq.ConnectionPhase.CLOSED)
+            assert isinstance(state.phase.failure, moq.Error.Connect)
+            assert state.connects == 0
+            with pytest.raises(moq.Error.Connect):
+                await asyncio.wait_for(session.closed(), timeout=10)
 
 
 async def test_viewer_holds_without_an_estimate():

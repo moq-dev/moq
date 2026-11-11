@@ -29,6 +29,8 @@ const MOVED = {
 	"/lib/rs/crate/web-transport": "/lib/rs/",
 	"/lib/rs/crate/libmoq": "/lib/c/",
 	"/lib/rs/crate/moq-boy": "/bin/demo",
+	"/lib/rs/crate/moq-room": "/lib/js/room",
+	"/lib/rs/moq-room": "/lib/js/room",
 	"/lib/js/env/web": "/lib/js/",
 	"/lib/js/env/native": "/lib/js/",
 	"/lib/js/@moq/boy": "/bin/demo",

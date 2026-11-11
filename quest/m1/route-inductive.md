@@ -36,9 +36,9 @@ stay constants the config states. Say both bounds in the `verify-route` skill.
   replay it on `route::tests::Sim` as the skill says before calling it a bug.
 - Apalache needs type annotations. Add them to the spec TLC already checks,
   so both tools read one file and neither drifts.
-- `NoCountToInfinity` stays out until
-  [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md) lands; expect
-  the search for the invariant to find that path again.
+- `NoCountToInfinity` follows from `SimplePaths`, which is inductive on its
+  own: every route sent adds its sender to hops that did not name it
+  ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)). Start there.
 - Run it through the `tla` recipes with Apalache from the flake. If five
   relays does not fit Nightly, record the largest mesh that does and its time.
 

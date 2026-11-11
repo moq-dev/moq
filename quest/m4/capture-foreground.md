@@ -13,6 +13,9 @@ It works on macOS, Windows, and X11 under a window manager that publishes
 the active window. Where the desktop does not tell an app, which is every
 Wayland session, setting it up is an `Unsupported` error naming the reason,
 decided before the first report, never a report that stays empty or stale.
+On macOS the application picks at setup between following every window,
+which needs the Accessibility permission, and following the app with no
+permission, which misses a switch between two windows of one app.
 
 ## Plan
 
@@ -44,7 +47,16 @@ Recommendations, for the PR to confirm against each system:
   changes. Those notifications arrive only while the main run loop runs, so
   setup either checks for one or says what the caller must be running; a
   watch that never fires is the failure to avoid. Which window of that app
-  is in front is the decision under Waiting.
+  is in front follows the caller's macOS mode, the same one
+  [the capture listing](/quest/m3/capture-list.md) takes. Decided 2026-11-10
+  (maintainer, /quest-unblock): ✅ both modes, the application picks one at
+  setup (rejected: app by event only; Accessibility only; app only). The
+  Accessibility mode follows the focused window, including a switch between
+  two windows of one app, and setup refuses with `Unsupported` naming the
+  missing permission rather than falling back. The basic mode needs no
+  permission and reports the app by event and its front window as of that
+  event, so a window switch inside one app is not noticed until the app
+  changes; the docs say so. The Mac test covers both.
 - **Wayland.** Refused even with XWayland running. The compositor tells no
   client which window has focus, and XWayland's `_NET_ACTIVE_WINDOW` covers
   X11 clients only, so it would name a stale app, or none, whenever a native
@@ -67,23 +79,6 @@ Tests:
   app, to the desktop, and to a full-screen game.
 
 Public API: additive. Wire: none.
-
-## Waiting
-
-- Maintainer: which window macOS reports as in front. The window server
-  orders windows front to back without a permission, but only the
-  Accessibility API posts when focus moves between two windows of one app.
-  An agent cannot choose it because one option adds a permission prompt to
-  every embedder. Options: (1, recommended) report the app by event and its
-  front window as of that event, and narrow the Goal, the change contract,
-  and the Mac test to say a window switch inside one app is not noticed on
-  macOS. A caller can capture the whole app with `Source::App`, but
-  `open_app` captures the main display only, so a game on another display is
-  missed until the app capture follows the app's display; (2) ask for the
-  Accessibility permission and follow the focused window, keeping the Goal
-  as written; (3) report the app only on macOS, narrowing the Goal the same
-  way as (1). Done when
-  this item names the pick.
 
 ## Required
 

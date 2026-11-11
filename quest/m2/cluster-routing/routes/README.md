@@ -40,7 +40,7 @@ The items below were decided 2026-11-10 (maintainer, /quest-plan on lite-07 rout
 22. ✅ **A side's interest is a set of prefixes edited in place.** The live set never nests, and one edit may swap prefixes for a wider or narrower one without re-sending what both cover ([the interest set](/quest/m2/cluster-routing/routes/interest-set.md)). A token-scope change is such an edit, with one prefix per region of the scope. This supersedes items 16 and 17, and the handoff contract's "An interest change opens a new stream" below, once the route stream lands.
 23. ✅ Asked what a floor covers with several prefixes on one stream: **one prefix, named by its id.** This amends item 10: the floor is still a marker and never a region list. Rejected: a floor over the whole set.
 24. ✅ Asked how a side learns a newly added prefix's initial set is complete: **SYNCED per prefix, naming its id**, plus one marker per edit where it takes effect for both sides. Rejected: one SYNCED per edit, counted in order.
-25. ✅ Asked how a relay safely forgets a publisher that is gone, after the model showed a per-neighbour echo is not enough once the origin sits behind a relay: **each route names the relays it crossed, and a node never uses a route that names itself** ([the fix](/quest/m2/cluster-routing/routes/echo-order.md), which holds the counterexamples and the model results). Feasibility still selects routes; the list is one per origin route, not the per-claim Hop ID list item 6 removed, and the echo and the drain rule stay as they are. This supersedes the claim, in the handoff contract and in decision 6 below, that the echo alone makes forgetting safe. First decided as a relay echoing a ROUTE_END only once its own downstream had; the model ran that the same day and it fails when a session closes before answering. Rejected: that deferred echo; never dropping the distance; a timer; relays as the only origin nodes.
+25. ✅ Asked how a relay safely forgets a publisher that is gone, after the model showed a per-neighbour echo is not enough once the origin sits behind a relay: **each route names the nodes it crossed, and a node never uses a route that names itself** ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487), which holds the counterexamples and the model results). Feasibility still selects routes; the list is one per origin route, not the per-claim Hop ID list item 6 removed, and the echo and the drain rule stay as they are. As built: Babel's feasibility condition is unchanged, and a node never selects or certifies through such a route. Where the condition refuses it, it still counts as infeasible, so a relay whose neighbours all route through it holds its claims while one of them finds another way. Under a qualified key it counts only while its hops extend those of the route the node last sent under that key: a copy that a scoped peer hands back under a key derived from the node's own route never moves, so nothing waits on it. The origin names itself too, so a rotated identity's route is refused where it began, and a node names itself by a Hop ID that a rotation leaves alone. The hop limit is the wire's 32 and no lower. A change of hops or RTT alone lets go of no region. This supersedes the claim, in the handoff contract and in decision 6 below, that the echo alone makes forgetting safe. First decided as a relay echoing a ROUTE_END only once its own downstream had; the model ran that the same day and it fails when a session closes before answering. Rejected: that deferred echo; never dropping the distance; a timer; relays as the only origin nodes.
 
 
 The route layer's core landed in
@@ -144,11 +144,13 @@ the bullets below are the contract it carries.
   `reconnect_without_restart_needs_a_seqno_advance`). A random identity alone
   does not keep a dead incarnation away. What bounds it is ordered sessions,
   state scoped to the session that delivered it, never advertising an
-  unreachable route, and keeping the feasibility distance until every
-  ROUTE_END it sent is echoed back: a collected incarnation then reappears
-  only from a
-  message already in flight on a live session, which delivers the retraction
-  next (`collected_incarnation_returns_only_while_its_retraction_is_in_flight`).
+  unreachable route, keeping the feasibility distance until every
+  ROUTE_END it sent is echoed back, and the hops each route carries, which
+  refuse a copy of a route this node sent once the distance is gone: a
+  collected incarnation then reappears only from a message already in flight
+  on a live session that never crossed this node, which delivers the
+  retraction next
+  (`collected_incarnation_returns_only_while_its_retraction_is_in_flight`).
   `cluster.id` stops naming a routing identity.
 - Decided 2026-10-14: every identity a scoped connection sends is
   qualified: filed under a key the receiver derives, rather than its bare
@@ -193,9 +195,9 @@ the bullets below are the contract it carries.
   ROUTE_HOLD or ROUTE_END. The route model found a count to infinity
   (2026-11-10): an echo can overtake a route derived from the echoed one,
   and even in order a per-neighbour echo misses a derived copy held by a
-  third relay; [the fix](/quest/m2/cluster-routing/routes/echo-order.md)
-  adds the relays a route crossed, and a node refuses one naming itself
-  (Plan item 25).
+  third relay. Each route therefore names the nodes it crossed, and a node
+  never selects one that names itself (Plan item 25,
+  `sweep_no_route_outgrows_a_loop_free_path`).
 - Starvation recovery is Babel's seqno request (RFC 8966 s3.8, decided
   2026-10-12). A node whose routes to an origin are all infeasible sends
   ROUTE_REQUEST for that origin, with its feasibility seqno plus one, to the
@@ -389,9 +391,11 @@ loss never reports an END:
   feasibility distance once it also advertises the identity nowhere and
   every neighbour has echoed each ROUTE_END it sent, or closed. Until then
   an advertisement derived from its own can still wait on some session, and
-  accepting it loops; once all echoes are back no node holds its
-  advertisement, so dropping the distance is as safe as a fresh node joining
-  (`collection_keeps_the_feasibility_distance_against_a_queued_echo`). The
+  accepting it loops; once all echoes are back no neighbour routes through
+  it (`collection_keeps_the_feasibility_distance_against_a_queued_echo`),
+  and a copy a third node still holds names this node in its hops, so it is
+  refused when it returns
+  (`a_route_handed_round_a_triangle_is_refused_where_it_began`). The
   echo is per neighbour, not a diffusing computation: every other node
   keeps its own distance. A stale route accepted after the drain dead-ends at
   a node that let go, like any collected incarnation.
@@ -485,7 +489,11 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    every step, and leaves no distance for a dead identity; dropping the
    distance before the echoes return fails the queued echo fixture, and
    dropping it at no entry loops where the echoed condition never does
-   (`sweep_forgetting_distances`). Rejected: keeping the distance forever,
+   (`sweep_forgetting_distances`). Revised 2026-11-10 (Plan item 25): the
+   echo is not enough alone, since a third node can hold a copy derived from
+   the advertisement and hand it back after the drain. Each route names the
+   nodes it crossed, and a node never selects one that names itself
+   (`sweep_no_route_outgrows_a_loop_free_path`). Rejected: keeping the distance forever,
    which grows with publisher churn times uptime on every relay that saw an
    identity, about 16 bytes each, until a restart; and Babel's source GC
    timer, which assumes stale echoes are gone by then rather than proving it.
@@ -556,7 +564,6 @@ benchmarks.
 ## Required
 
 - [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - every ordering on 4-5 relay meshes with two origins and clients, with an announce budget and convergence
-- [Seeded lite-07 meshes hold the route rules and an announce budget](/quest/m1/route-mesh-sweep.md) - the route rules and message budget checked on real sessions over random meshes
 
 ## Related
 

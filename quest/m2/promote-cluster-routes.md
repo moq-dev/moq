@@ -24,8 +24,7 @@ no new quest under the old path first.
 ## Waiting
 
 - moq-dev/moq: the open PRs under `quest/m2/cluster-routing/routes/` land or
-  close ([#8401](https://github.com/moq-dev/moq/pull/8401),
-  [#8397](https://github.com/moq-dev/moq/pull/8397) and
-  [#8375](https://github.com/moq-dev/moq/pull/8375) on 2026-11-09). Check
+  close (only [#8443](https://github.com/moq-dev/moq/pull/8443) on
+  2026-11-10). Check
   with `gh pr list -R moq-dev/moq --search "head:quest/m2/cluster-routing/routes/"`
   printing nothing.

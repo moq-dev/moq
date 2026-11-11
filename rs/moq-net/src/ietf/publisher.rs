@@ -718,7 +718,7 @@ struct Namespaces {
 	/// Requests whose stream woke the loop, so a wake polls those rather than every
 	/// update in flight.
 	woken: Arc<Woken>,
-	/// What we may advertise: our grant (MoQ Auth) and the ceiling on the peer.
+	/// What we may advertise: our grant and the ceiling on the peer.
 	permit: crate::auth::Permit,
 	/// The dispatcher-owned gate for a solicited namespace request.
 	gate: Option<crate::auth::Gate>,
@@ -871,7 +871,7 @@ enum NamespaceEvent {
 	Update(Option<(crate::announce::Announce, bool, bool)>),
 	/// The retry sleep fired: re-offer whatever the peer should be holding and isn't.
 	Retry,
-	/// Our grant (MoQ Auth) or the ceiling changed: re-check every namespace against it.
+	/// Our grant or the ceiling changed: re-check every namespace against it.
 	Regrant(crate::auth::Permit),
 	/// The queued update at the front got this request ID.
 	Renew(RequestId),
@@ -948,7 +948,7 @@ pub(super) struct Publisher {
 	// Shared across request handlers; None marks a dispatched subscription still resolving.
 	joins: kio::Shared<HashMap<RequestId, Option<Joined<GroupOf<Transport>>>>>,
 	version: Version,
-	// Our grant (MoQ Auth): only what it lets us publish is advertised and served, and a
+	// Our grant: only what it lets us publish is advertised and served, and a
 	// shrink withdraws what it no longer covers.
 	auth: crate::auth::Link,
 	// Dispatched finite serves, including those not yet polled.
@@ -1299,7 +1299,7 @@ impl SubscribeRequest {
 		// refused by the lookup, on this request alone.
 		tracing::debug!(id = %msg.request_id, broadcast = %self.broadcast(), track = %msg.track_name, "subscribe started");
 
-		// Serve only what our grant lets us publish (MoQ Auth), and stop once it no
+		// Serve only what our grant lets us publish, and stop once it no
 		// longer does. Checked before resolving, so a denied request never reaches the
 		// origin. Our own authorization of the peer (the limit) admits a request without a
 		// token; an AUTHORIZATION TOKEN on the request goes to the application to verify for
@@ -2851,7 +2851,7 @@ impl Publisher {
 		}
 	}
 
-	/// Bound what we publish by the grant this session's tokens earn (MoQ Auth).
+	/// Bound what we publish by the grant this session's tokens earn.
 	pub fn with_auth(mut self, auth: crate::auth::Link) -> Self {
 		self.auth = auth;
 		self
@@ -5874,9 +5874,7 @@ struct ForwardNamespaces {
 
 enum ForwardState {
 	Start,
-	/// Waiting on the peer's SETUP, and with MoQ Auth on the answer to the credential we
-	/// presented at setup, so the first advertisement, the initial set included, is already
-	/// checked against our grant.
+	/// Waiting on the peer's SETUP, which says which extensions an advertisement carries.
 	Setup,
 	/// Streaming updates (origin route (un)announces), until the peer closes its side.
 	Run,
@@ -5928,9 +5926,7 @@ impl ForwardNamespaces {
 					self.state = ForwardState::Setup;
 				}
 				ForwardState::Setup => {
-					if ready!(publisher.peer_setup.poll_get(waiter)).auth {
-						ready!(publisher.auth.poll_setup_answered(waiter));
-					}
+					ready!(publisher.peer_setup.poll_get(waiter));
 					(ns.permit, ns.epoch) = publisher.permit_now(ns.gate.as_ref());
 					self.work = std::mem::take(&mut self.initial)
 						.into_iter()
@@ -6425,17 +6421,12 @@ enum NamespaceServeState {
 	/// peer's SETUP says whether it speaks it. The same SETUP says whether the OK counts what
 	/// it sends first (MoQ Active Count).
 	Setup,
-	/// With MoQ Auth, the count waits for our grant and leaves out what it does not cover.
-	Count {
-		peer: cluster::Peer,
-		hidden: bool,
-		announced: crate::origin::Routes,
-	},
 	/// The acknowledgement, sent only while the token is live, even behind stream credit.
 	Ok {
 		peer: cluster::Peer,
 		hidden: bool,
-		announced: crate::origin::Routes,
+		// Boxed: the routes cursor dwarfs every other state.
+		announced: Box<crate::origin::Routes>,
 		initial: Vec<crate::announce::Announce>,
 		/// Taken once buffered.
 		ok: Option<ietf::RequestOk>,
@@ -6517,7 +6508,7 @@ impl NamespaceOpen {
 		self.state = NamespaceServeState::Ok {
 			peer,
 			hidden,
-			announced,
+			announced: Box::new(announced),
 			initial,
 			ok: Some(ietf::RequestOk {
 				largest: None,
@@ -6600,19 +6591,12 @@ impl NamespaceOpen {
 					let announced = origin.routes();
 
 					match declared.active_count {
-						true if declared.auth => {
-							self.state = NamespaceServeState::Count {
-								peer,
-								hidden,
-								announced,
-							}
-						}
 						true => self.count(peer, hidden, announced),
 						false => {
 							self.state = NamespaceServeState::Ok {
 								peer,
 								hidden,
-								announced,
+								announced: Box::new(announced),
 								initial: Vec::new(),
 								ok: Some(ietf::RequestOk {
 									largest: None,
@@ -6621,18 +6605,6 @@ impl NamespaceOpen {
 							}
 						}
 					}
-				}
-				NamespaceServeState::Count { .. } => {
-					ready!(gate.poll_setup_answered(waiter));
-					let NamespaceServeState::Count {
-						peer,
-						hidden,
-						announced,
-					} = std::mem::replace(&mut self.state, NamespaceServeState::Done)
-					else {
-						unreachable!("counting");
-					};
-					self.count(peer, hidden, announced);
 				}
 				NamespaceServeState::Ok { ok, .. } => {
 					if let Poll::Ready(refusal) = gate.poll_token_ended(waiter) {
@@ -6655,7 +6627,7 @@ impl NamespaceOpen {
 					return Poll::Ready(Ok(Some(Acknowledged {
 						peer,
 						hidden,
-						announced,
+						announced: *announced,
 						initial,
 					})));
 				}
@@ -19623,7 +19595,6 @@ mod tests {
 			solicit,
 			hidden: false,
 			max_age: false,
-			auth: false,
 			active_count: false,
 			flate: false,
 		});
@@ -19960,7 +19931,7 @@ mod tests {
 
 	async fn swaps_a_route_auth(version: Version) {
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
 		let second = auth
 			.present(bytes::Bytes::from_static(b"second-secret"), false)
@@ -20026,7 +19997,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let other = crate::auth::Link::ietf(false);
+		let other = crate::auth::Link::ietf();
 		let foreign = other
 			.present(bytes::Bytes::from_static(b"foreign-secret"), false)
 			.unwrap();
@@ -20036,7 +20007,7 @@ mod tests {
 		settle().await;
 
 		let ok = publish_namespace_ok(VERSION).await;
-		let (publisher, log) = auth_publisher(&origin, &crate::auth::Link::ietf(false), vec![ok], VERSION);
+		let (publisher, log) = auth_publisher(&origin, &crate::auth::Link::ietf(), vec![ok], VERSION);
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"cam", 1).await;
 
@@ -20055,7 +20026,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let token = auth.present(bytes::Bytes::from_static(b"late-secret"), false).unwrap();
 		let cam = origin.announce("cam", crate::origin::RouteInfo::new()).unwrap();
 		settle().await;
@@ -20081,7 +20052,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let a = origin
 			.announce("cam-a", crate::origin::RouteInfo::new().with_auth(present(b"a-first")))
@@ -20280,7 +20251,7 @@ mod tests {
 			// A token too big for the header's u16 length, so the header fails after its stream
 			// opened and its request ID was spent. A message goes out whole, so this is the one
 			// failure a fresh in-memory stream can be made to show.
-			let auth = crate::auth::Link::ietf(false);
+			let auth = crate::auth::Link::ietf();
 			let token = auth.present(bytes::Bytes::from(vec![0; 70_000]), false).unwrap();
 			let _cam = origin
 				.announce("cam", crate::origin::RouteInfo::new().with_auth(token))
@@ -20327,7 +20298,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let cam = origin
 			.announce("cam", crate::origin::RouteInfo::new().with_auth(present(b"first")))
@@ -20380,7 +20351,7 @@ mod tests {
 
 	async fn advertises_again_unanswered(version: Version) {
 		let origin = unheld_origin();
-		let auth = crate::auth::Link::ietf(false);
+		let auth = crate::auth::Link::ietf();
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let cam = origin
 			.announce("cam", crate::origin::RouteInfo::new().with_auth(present(b"first")))
@@ -20613,7 +20584,7 @@ mod tests {
 					}
 					for end in [End::Local, End::Fin, End::Reset, End::Refused] {
 						let origin = unheld_origin();
-						let auth = crate::auth::Link::ietf(false);
+						let auth = crate::auth::Link::ietf();
 						let first = auth.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 						let mut first_grant = first.grant();
 						let cam = origin

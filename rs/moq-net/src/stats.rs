@@ -298,7 +298,8 @@ struct SessionCounters {
 	bytes: Mutex<SessionBytes>,
 	wire_tx: AtomicU64,
 	wire_rx: AtomicU64,
-	control: [[AtomicU64; 2]; Message::ALL.len()],
+	/// Per class: bytes sent and received, then messages sent and received.
+	control: [[AtomicU64; 4]; Message::ALL.len()],
 }
 
 impl SessionCounters {
@@ -337,11 +338,12 @@ impl SessionCounters {
 		(presence, activity, empty)
 	}
 
-	fn control(&self, totals: &mut [[u64; 2]; Message::ALL.len()]) {
-		for (total, counters) in totals.iter_mut().zip(&self.control) {
-			for (total, counter) in total.iter_mut().zip(counters) {
-				*total += counter.load(Ordering::Relaxed);
-			}
+	fn control(&self, totals: &mut [Totals; Message::ALL.len()]) {
+		for (total, [tx, rx, tx_messages, rx_messages]) in totals.iter_mut().zip(&self.control) {
+			total.tx += tx.load(Ordering::Relaxed);
+			total.rx += rx.load(Ordering::Relaxed);
+			total.tx_messages += tx_messages.load(Ordering::Relaxed);
+			total.rx_messages += rx_messages.load(Ordering::Relaxed);
 		}
 	}
 
@@ -916,7 +918,8 @@ impl Role {
 	}
 }
 
-/// Cumulative bytes sent and received, returned per [`Message`] class by [`Snapshot::control`].
+/// Cumulative bytes and messages sent and received, returned per [`Message`] class by
+/// [`Snapshot::control`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Totals {
@@ -924,6 +927,10 @@ pub struct Totals {
 	pub tx: u64,
 	/// Bytes of complete messages decoded and consumed.
 	pub rx: u64,
+	/// Messages successfully encoded for sending, counted like [`Self::tx`].
+	pub tx_messages: u64,
+	/// Complete messages decoded and consumed, counted like [`Self::rx`].
+	pub rx_messages: u64,
 }
 
 /// The bounded class of a successfully encoded or decoded control message.
@@ -1003,7 +1010,7 @@ pub struct Snapshot {
 	sessions: HashMap<Tier, Presence>,
 	/// Connected-session activity per tier; read via [`Self::activity`].
 	activity: HashMap<Tier, Activity>,
-	control: HashMap<Tier, [[u64; 2]; Message::ALL.len()]>,
+	control: HashMap<Tier, [Totals; Message::ALL.len()]>,
 }
 
 impl Snapshot {
@@ -1014,9 +1021,9 @@ impl Snapshot {
 		let mut rows = Vec::new();
 		for (tier, totals) in &self.control {
 			for class in Message::ALL {
-				let [tx, rx] = totals[class as usize];
-				if tx != 0 || rx != 0 {
-					rows.push((tier.clone(), class, Totals { tx, rx }));
+				let totals = totals[class as usize];
+				if totals != Totals::default() {
+					rows.push((tier.clone(), class, totals));
 				}
 			}
 		}
@@ -1734,7 +1741,9 @@ impl Session {
 		let Some(inner) = &self.inner else { return };
 		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
 		if let Some(counters) = &current.presence {
-			counters.control[class as usize][usize::from(received)].fetch_add(bytes as u64, Ordering::Relaxed);
+			let counters = &counters.control[class as usize];
+			counters[usize::from(received)].fetch_add(bytes as u64, Ordering::Relaxed);
+			counters[2 + usize::from(received)].fetch_add(1, Ordering::Relaxed);
 		}
 	}
 
@@ -2722,8 +2731,24 @@ mod tests {
 		context.retag(second.clone(), crate::Path::from_static(""));
 		context.control(Message::TrackInfo, 23, true);
 		let expected = vec![
-			(second, Message::TrackInfo, Totals { tx: 0, rx: 23 }),
-			(first, Message::Announce, Totals { tx: 17, rx: 0 }),
+			(
+				second,
+				Message::TrackInfo,
+				Totals {
+					rx: 23,
+					rx_messages: 1,
+					..Default::default()
+				},
+			),
+			(
+				first,
+				Message::Announce,
+				Totals {
+					tx: 17,
+					tx_messages: 1,
+					..Default::default()
+				},
+			),
 		];
 		assert_eq!(registry.snapshot().control(), expected);
 		drop(context);

@@ -91,7 +91,7 @@ implementation behind each feature.
 | Live pub/sub | [moq-net](rs/moq-net) | [@moq/net](js/net) |
 | Media catalog and containers | [hang](rs/hang), [moq-mux](rs/moq-mux) | [@moq/hang](js/hang) |
 | Capture and playback | [moq-audio](rs/moq-audio), [moq-video](rs/moq-video) | [@moq/publish](js/publish), [@moq/watch](js/watch) |
-| Rooms and chat | [moq-room](rs/moq-room) | [@moq/room](js/room) |
+| Rooms and chat | | [@moq/room](js/room) |
 | Authorization | [moq-auth](rs/moq-auth) | [@moq/auth](js/auth) |
 
 The Rust core also has [Python](https://doc.moq.dev/lib/py/),

@@ -206,7 +206,7 @@ worker exits for systemd to restart.
   packets only up to the next keyframe.
 - **Tested without CARLA.** A Vulkan stand-in for the plugin drives the
   bridge: `just carla bridge-gpu` runs it on an NVIDIA host, and
-  `cargo run -p moq-carla-bridge --example standin -- <socket> truck1/front`
+  `cargo run --manifest-path demo/carla/bridge/Cargo.toml --example standin -- <socket> truck1/front`
   feeds a worker by hand. The plugin itself compiles only in the CARLA build.
 
 The C ABI the plugin calls is `bridge/include/carla_bridge.h`. moq-dev/carla
@@ -270,5 +270,5 @@ unfamiliar layout; the result is stored per device.
 ## Checks
 
 `just carla check` lints and tests the worker and its launchers without CARLA
-or a GPU. `just js` and `just rs` cover the player and the bridge, and
+or a GPU. `just js` covers the player, `just carla bridge-check` the bridge, and
 `just carla bridge-gpu` runs the bridge's hardware test.

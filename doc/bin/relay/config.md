@@ -48,7 +48,6 @@ allow.uid = [1001]
 
 [listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
                                      # The relay always offers ietf, for moq-lite-07 relay links.
-auth = false                         # Decline MoQ Auth.
 solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
 ```
 
@@ -332,8 +331,7 @@ tls.cert = "relay.pem"               # Present a client certificate (mTLS to pee
 tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
-extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
-extensions.solicit = false           # Decline MoQ Solicit. All default to on, as in [listen.extensions].
+extensions.solicit = false           # Decline MoQ Solicit on outbound moq-transport sessions, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only
