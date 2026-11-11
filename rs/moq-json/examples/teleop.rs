@@ -42,14 +42,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	{
 		state.update(Timed::from(control).at(Timestamp::from_millis(tick as u64)?))?;
 	}
-	state.finish()?;
+	let _state = state.finish()?;
 
 	// Every discrete command is meaningful, including Stop between Arm and Disarm.
 	let expected = [Command::Arm, Command::Stop, Command::Disarm];
 	for (tick, command) in expected.iter().enumerate() {
 		commands.append(Timed::from(command).at(Timestamp::from_millis(tick as u64)?))?;
 	}
-	commands.finish()?;
+	let _commands = commands.finish()?;
 
 	let waiter = kio::Waiter::noop();
 	// `latest` skips the stale steering values; `next` would replay them in order.

@@ -476,14 +476,11 @@ impl MoqAudioProducer {
 		// Held through the flush, so a racing broadcast close waits it out instead of
 		// missing a track that still publishes.
 		let mut inner = self.inner.lock().unwrap();
-		let mut producer = inner.take().ok_or(MoqError::Closed)?;
+		let producer = inner.take().ok_or(MoqError::Closed)?;
 		self.reservation.lock().unwrap().take();
-		if let Err(err) = producer.finish() {
-			// Readers see the failure rather than `Dropped`, as a failed video drain does.
-			producer.abort(moq_net::Error::Transport(err.to_string()));
-			return Err(err.into());
-		}
-		self.children.keep(producer);
+		// A failed finish already ended the track with an error, so readers see the failure
+		// rather than `Dropped`, as a failed video drain does.
+		self.children.keep(producer.finish()?);
 		Ok(())
 	}
 }
