@@ -3,9 +3,10 @@
 ## Goal
 
 `sweep_handoff` in `rs/moq-net/src/route/tests/handoff.rs` reports no revival
-over 20,000 scenarios: no reader sees a claim start again after it saw the
-claim end, unless it forgot the claim in between. The scenario that revives
-one today is a plain test.
+over 20,000 scenarios: no reader sees one life of a claim start again after
+it saw that life end, unless it forgot the claim in between. A publisher that
+withdraws a claim and announces it again starts a new life, which is no
+revival. The scenario that revives one today is a plain test.
 
 ## Plan
 

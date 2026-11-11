@@ -8,7 +8,8 @@ the prefix it covers, carries its own path, and is believed by a relay it did
 not cross. TLC shows on it:
 
 - A relay shows a claim exactly while it holds a route that covers the claim
-  and did not cross the relay, at the newest revision the relay knows.
+  and did not cross the relay, and the newest revision the relay knows still
+  has the claim. It shows the claim as it is at that revision.
 - Once nothing is in flight, no relay shows a claim that no path from its
   publisher carries.
 - A change of path or seqno alone starts, ends, and changes no claim a reader

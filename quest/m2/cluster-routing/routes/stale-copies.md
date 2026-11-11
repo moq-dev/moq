@@ -87,7 +87,9 @@ Settled:
    - **Distance, as today.** A relay uses a neighbour only when the
      neighbour's cost is below the lowest cost the relay ever advertised.
      Anything routed through the relay costs more than that, so such a
-     neighbour cannot be stale. It never loops, even for a moment. It refuses
+     neighbour's route is no copy of the relay's own. It can still be stale
+     another way: a neighbour whose path closed stays usable until its
+     withdrawal arrives. It never loops, even for a moment. It refuses
      good routes: a longer way round waits for the publisher to advance its
      seqno, and a relay cannot join a copy carried by a neighbour that is no
      closer to the publisher, which is the join cache-aware routing wants.

@@ -5,7 +5,8 @@
 `route::Router` keys a route by its publisher and the prefix it covers, and
 believes a route that did not cross it, as
 [the model](/quest/m2/cluster-routing/routes/scope-model.md) settled. A relay
-shows a claim exactly while such a route covers it, two relays never keep a
+shows a claim exactly while such a route covers it and the newest revision
+the relay knows still has the claim, two relays never keep a
 dead route alive through each other, a change of path or seqno alone changes
 no claim a reader sees, and a relay behind a scoped neighbour reaches what a
 farther one offers. The `residual_` tests
