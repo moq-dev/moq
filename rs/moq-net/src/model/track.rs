@@ -4016,6 +4016,28 @@ pub struct Producer {
 	stats: stats::Scope,
 }
 
+/// Bytes a session keeps for a track beside its cache, billed to the track's account and
+/// released on drop.
+pub(crate) struct Bill(cache::Extra);
+
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+impl Bill {
+	/// Bill `bytes` in all.
+	pub(crate) fn set(&self, bytes: u64) {
+		let size = self.0.size();
+		match bytes > size {
+			true => self.0.add(bytes - size),
+			false => self.0.sub(size - bytes),
+		}
+	}
+}
+
+impl std::fmt::Debug for Bill {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_tuple("Bill").field(&self.0.size()).finish()
+	}
+}
+
 impl Producer {
 	/// The immutable publisher priority committed when this track was accepted.
 	#[cfg(test)]
@@ -4906,6 +4928,13 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn seen_subscription(&mut self, seen: Option<Subscription>) {
 		self.prev_subscription = seen;
+	}
+
+	/// Open a bill against this track's account, for what a session keeps for it beside the
+	/// cache, such as its tail's record of finished streams.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn bill(&self) -> Bill {
+		Bill(self.state.read().cache.extra())
 	}
 
 	/// How long a subscriber session's tail waits for a late group: `budget`, bounded by how
@@ -9716,11 +9745,19 @@ impl Subscriber {
 	/// Bill what this reader settled, and pay what it can of the debt its track left its
 	/// readers; [`Error::Lagged`] once that needed a run it was promised.
 	fn settle_record(&mut self) -> Result<()> {
-		let (state, record) = match &mut self.inner {
-			Inner::Plain(cursor) => (&cursor.state, &mut cursor.record),
-			Inner::Resume(_, logical) => (&logical.state, &mut logical.record),
-		};
-		record.settle(|| state.read().cache.clone())
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				let state = &cursor.state;
+				match cursor.misses.as_deref_mut() {
+					Some(misses) => cursor.record.settle(|| state.read().cache.clone(), misses),
+					None => cursor.record.settle(|| state.read().cache.clone(), &mut ()),
+				}
+			}
+			Inner::Resume(_, logical) => {
+				let state = &logical.state;
+				logical.record.settle(|| state.read().cache.clone(), &mut ())
+			}
+		}
 	}
 
 	/// What this reader settled.

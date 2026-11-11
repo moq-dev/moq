@@ -1632,6 +1632,20 @@ fn looser(ours: Option<Duration>, asked: Option<Duration>) -> bool {
 	}
 }
 
+/// The misses a reader gave up, billed with its record and forgotten below its floor once it
+/// folds: it hands out nothing there, so never asks a fill for it again.
+impl super::super::record::Beside for Misses {
+	fn runs(&self) -> u64 {
+		self.given_up.len() as u64
+	}
+
+	fn forget_below(&mut self, floor: u64) {
+		if floor > 0 {
+			self.given_up.remove(0..floor);
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::super::{Delay, Servable, Subscription};

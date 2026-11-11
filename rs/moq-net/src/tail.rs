@@ -34,7 +34,15 @@ pub(crate) struct Tail {
 	// that update names one only if it was sent before the publisher served the group, so the
 	// group won over it, even once the cache evicted it.
 	finished: RangeSet<u64>,
+	// What `finished` bills to the track's account, [`FINISHED_OVERHEAD`] per run, once the
+	// subscription has a copy to bill.
+	bill: Option<crate::model::track::Bill>,
 }
+
+/// Heap `finished` keeps per run, doubled for half-full `BTreeMap` nodes as the cache's own
+/// overheads are. Billed, so a publisher fragmenting the streams it finishes between updates
+/// costs what the cache would hold.
+const FINISHED_OVERHEAD: u64 = 2 * size_of::<Range<u64>>() as u64;
 
 impl Default for Tail {
 	fn default() -> Self {
@@ -51,6 +59,19 @@ impl Tail {
 			active: 0,
 			ended: false,
 			finished: RangeSet::new(),
+			bill: None,
+		}
+	}
+
+	/// Bill what this tail keeps to `bill`, the subscription's copy's account.
+	pub fn bill(&mut self, bill: crate::model::track::Bill) {
+		self.bill = Some(bill);
+		self.rebill();
+	}
+
+	fn rebill(&self) {
+		if let Some(bill) = &self.bill {
+			bill.set(self.finished.len() as u64 * FINISHED_OVERHEAD);
 		}
 	}
 
@@ -119,6 +140,7 @@ impl Tail {
 	/// one is no verdict, so none needs them.
 	pub fn updated(&mut self) {
 		self.finished = RangeSet::new();
+		self.rebill();
 	}
 
 	/// Whether a data stream whose header arrived is still being read.
@@ -167,6 +189,7 @@ impl Reading {
 			&& let Ok(mut state) = tail.write()
 		{
 			state.finished.insert(group..group.saturating_add(1));
+			state.rebill();
 		}
 	}
 

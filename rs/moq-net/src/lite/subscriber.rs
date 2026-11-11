@@ -286,6 +286,9 @@ impl Drop for ParkWait {
 
 impl TrackEntry {
 	fn new(copy: Option<Accepted>, tail: kio::Producer<Tail>) -> Self {
+		if let Some(copy) = &copy {
+			Self::bill_tail(&tail, copy);
+		}
 		Self {
 			copy,
 			parked: None,
@@ -317,7 +320,17 @@ impl TrackEntry {
 	}
 
 	/// Give the copy to the subscription, opening the groups of the streams parked on it.
+	/// Bill what the tail keeps to the copy's account.
+	fn bill_tail(tail: &kio::Producer<Tail>, copy: &Accepted) {
+		// Opened before the tail's lock, which is never held across the track's.
+		let bill = copy.producer.bill();
+		if let Ok(mut tail) = tail.write() {
+			tail.bill(bill);
+		}
+	}
+
 	fn accept(&mut self, copy: Accepted, version: Version, now: crate::time::Instant) {
+		Self::bill_tail(&self.tail, &copy);
 		self.copy = Some(copy);
 		let Some(parked) = self.parked.clone() else {
 			return;

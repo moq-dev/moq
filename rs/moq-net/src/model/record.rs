@@ -264,6 +264,23 @@ impl Record {
 	}
 }
 
+/// Runs a reader keeps beside its record, billed with it and settled by its fold: the
+/// misses it gave up, which it never asks a fill for again.
+pub(super) trait Beside {
+	/// How many runs it holds.
+	fn runs(&self) -> u64;
+	/// Forget every run below `floor`, which the record folded.
+	fn forget_below(&mut self, floor: u64);
+}
+
+impl Beside for () {
+	fn runs(&self) -> u64 {
+		0
+	}
+
+	fn forget_below(&mut self, _floor: u64) {}
+}
+
 /// What a record bills, and the debt its track left to its readers.
 impl Record {
 	/// How many runs it holds above its floor, each billed [`RUN_OVERHEAD`]: the handed-out
@@ -287,11 +304,15 @@ impl Record {
 	/// promised could pay, and its record is one to end (see [`cache::Reader::ends`]).
 	///
 	/// Call with no track lock held: a growing bill settles the track's debt.
-	pub(super) fn settle(&mut self, account: impl FnOnce() -> Arc<cache::Track>) -> Result<(), Error> {
+	pub(super) fn settle(
+		&mut self,
+		account: impl FnOnce() -> Arc<cache::Track>,
+		beside: &mut dyn Beside,
+	) -> Result<(), Error> {
 		if self.failed {
 			return Err(Error::Lagged);
 		}
-		let bytes = self.runs() * RUN_OVERHEAD;
+		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
 		let bill = match &mut self.bill {
 			Some(bill) => bill,
 			None if bytes == 0 => return Ok(()),
@@ -302,7 +323,8 @@ impl Record {
 			return Ok(());
 		}
 		self.fold();
-		let bytes = self.runs() * RUN_OVERHEAD;
+		beside.forget_below(self.floor);
+		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
 		let bill = self.bill.as_mut().expect("opened above");
 		let freed = bill.size().saturating_sub(bytes);
 		bill.set(bytes);
@@ -399,12 +421,12 @@ mod test {
 		for sequence in 0..4 {
 			record.delivered.insert(sequence);
 		}
-		record.settle(|| track.clone()).unwrap();
+		record.settle(|| track.clone(), &mut ()).unwrap();
 		assert_eq!(pool.used(), 0, "a lone prefix bills nothing");
 		for sequence in (10..1_000).step_by(2) {
 			record.reported.insert(sequence..sequence + 1, Report::Dropped);
 		}
-		record.settle(|| track.clone()).unwrap();
+		record.settle(|| track.clone(), &mut ()).unwrap();
 		assert_eq!(pool.used(), 495 * RUN_OVERHEAD);
 		drop(record);
 		assert_eq!(pool.used(), 0);
@@ -421,10 +443,10 @@ mod test {
 		record.reported.insert(1..u64::MAX / 2, Report::Dropped);
 		record.delivered.insert(u64::MAX / 2);
 		record.reported.insert(u64::MAX / 2 + 1..u64::MAX / 2 + 2, Report::Skip);
-		record.settle(|| track.clone()).unwrap();
+		record.settle(|| track.clone(), &mut ()).unwrap();
 		assert_eq!(pool.used(), 3 * RUN_OVERHEAD);
 		owe(&track, pool.used());
-		record.settle(|| track.clone()).unwrap();
+		record.settle(|| track.clone(), &mut ()).unwrap();
 		assert_eq!(pool.used(), 0, "all of it folded");
 		assert!(record.told(7) && record.delivered.contains(7), "a folded drop stays dropped");
 		assert_eq!(record.report(0..u64::MAX / 2 + 2, &Hole::Skip, false), None);
@@ -458,13 +480,13 @@ mod test {
 			for sequence in (5..1_000).step_by(2) {
 				record.reported.insert(sequence..sequence + 1, Report::Dropped);
 			}
-			record.settle(|| track.clone()).unwrap();
+			record.settle(|| track.clone(), &mut ()).unwrap();
 			owe(&track, pool.used());
-			let err = record.settle(|| track.clone()).unwrap_err();
+			let err = record.settle(|| track.clone(), &mut ()).unwrap_err();
 			assert_eq!(StreamError::from(&err), StreamError::TooFarBehind, "{promise:?}");
 			assert_eq!(pool.used(), 0, "{promise:?}: its record went with it");
 			assert!(record.failed());
-			assert!(record.settle(|| track.clone()).is_err(), "{promise:?}: it stays ended");
+			assert!(record.settle(|| track.clone(), &mut ()).is_err(), "{promise:?}: it stays ended");
 		}
 	}
 
@@ -478,9 +500,9 @@ mod test {
 		record.reported.insert(1..2, Report::Dropped);
 		record.pending.insert(2..3, Pending::own(Hole::drop(StreamError::NotFound)));
 		record.skipped.insert(4, Duration::from_secs(1));
-		record.settle(|| track.clone()).unwrap();
+		record.settle(|| track.clone(), &mut ()).unwrap();
 		owe(&track, RUN_OVERHEAD);
-		record.settle(|| track.clone()).unwrap();
+		record.settle(|| track.clone(), &mut ()).unwrap();
 		assert_eq!(pool.used(), 2 * RUN_OVERHEAD, "the drop folded");
 		assert!(!record.told(2), "the run given up is still owed");
 	}
@@ -501,12 +523,12 @@ mod test {
 		for sequence in (1..1_000).step_by(2) {
 			large.reported.insert(sequence..sequence + 1, stale);
 		}
-		small.settle(|| track.clone()).unwrap();
-		large.settle(|| track.clone()).unwrap();
+		small.settle(|| track.clone(), &mut ()).unwrap();
+		large.settle(|| track.clone(), &mut ()).unwrap();
 		owe(&track, RUN_OVERHEAD);
-		small.settle(|| track.clone()).unwrap();
-		assert!(large.settle(|| track.clone()).is_err());
+		small.settle(|| track.clone(), &mut ()).unwrap();
+		assert!(large.settle(|| track.clone(), &mut ()).is_err());
 		assert_eq!(pool.used(), RUN_OVERHEAD);
-		small.settle(|| track.clone()).unwrap();
+		small.settle(|| track.clone(), &mut ()).unwrap();
 	}
 }
