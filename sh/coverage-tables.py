@@ -51,9 +51,11 @@ def defines(source: str, name: str) -> bool:
 
 def implements(header: str) -> str:
     """The last segment of the type an `impl` header implements, ignoring generics, bounds, and `where`."""
-    flat, depth = "", 0
+    flat, depth, prev = "", 0, ""
     for char in header:
-        depth += {"<": 1, ">": -1}.get(char, 0)
+        if not (char == ">" and prev == "-"):
+            depth += {"<": 1, ">": -1}.get(char, 0)
+        prev = char
         if depth == 0 and char != ">":
             flat += char
     flat = re.split(r"\bwhere\b", flat)[0]

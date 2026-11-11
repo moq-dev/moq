@@ -16,7 +16,7 @@ pub enum Restart {
 pub struct Reader {
     pub(crate) bound: u64,
 }
-impl Reader {
+impl<F: Fn() -> u64> Reader<F> {
     pub fn sync(&mut self) {}
 }
 pub struct Mirror<T>(T);
