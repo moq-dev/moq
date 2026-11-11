@@ -194,11 +194,12 @@ pub struct MoqWebSocketConfig {
 
 /// Retry pacing for the automatic reconnect.
 ///
-/// The delay starts at `initial`, multiplies by `multiplier` after each failed attempt,
-/// and caps at `max`. After `timeout` of consecutive failures the connection gives up
-/// for good; the window resets whenever a session stays up past 1s. Each null field uses
-/// moq-tokio's default: 1s, x2, 5s, and no give-up. Zero means off: no wait, no growth,
-/// no cap, or no give-up.
+/// It applies only once a session has been established: a first dial that reaches no
+/// session ends the connection with its error rather than retrying. The delay starts at
+/// `initial`, multiplies by `multiplier` after each failed attempt, and caps at `max`.
+/// After `timeout` of consecutive failures the connection gives up for good; the window
+/// resets whenever a session stays up past 1s. Each null field uses moq-tokio's default:
+/// 1s, x2, 5s, and no give-up. Zero means off: no wait, no growth, no cap, or no give-up.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqBackoff {
 	/// Delay before the first reconnect attempt. 0 retries at once.
@@ -590,11 +591,13 @@ impl MoqClient {
 
 	/// Start a connection without waiting for its first dial to succeed.
 	///
-	/// The session automatically reconnects with backoff when the transport drops (unless
-	/// [`MoqClientConfig::once`] is set), and broadcasts consumed through it ride out the
-	/// gap. Read [`MoqSession::state`]
-	/// and wait with [`MoqSession::state_changed`] for first-dial failures and reconnects;
-	/// [`MoqSession::closed`] waits for the terminal result.
+	/// Once a session has been established, it automatically reconnects with backoff when
+	/// the transport drops (unless [`MoqClientConfig::once`] is set), and broadcasts
+	/// consumed through it ride out the gap. The first dial fails fast instead: if none of
+	/// the peer's addresses yields a session, [`MoqSession::closed`] resolves with that
+	/// error, so an app started before its relay is reachable must start the session again.
+	/// Read [`MoqSession::state`] and wait with [`MoqSession::state_changed`] for
+	/// reconnects; [`MoqSession::closed`] waits for the terminal result.
 	///
 	/// Both origin sides are always accessible via [`MoqSession::publish`] and
 	/// [`MoqSession::consume`], without the caller constructing a [`MoqOriginProducer`].
