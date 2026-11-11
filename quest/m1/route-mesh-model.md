@@ -30,6 +30,12 @@ are routing's confidence gates for finalizing lite-07.
 - Count to infinity stays in its own open-finding config until
   [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md) lands, so
   the other rules still run on larger meshes.
+- Decided 2026-11-10 (maintainer, a later /quest-plan on lite-07 routing):
+  the model takes a cost per link, since deployments price links, and always
+  includes an origin that is not adjacent to every relay. The triangle with
+  the origin as one of its nodes cannot reach the count to infinity found
+  that day, which needs only an origin behind a relay; the echo fix adds the
+  costs and that shape, and this keeps both on every larger mesh.
 
 Replay every counterexample on `route::tests::Sim` before calling it a bug, as
 the `verify-route` skill says, and pin confirmed ones as `residual_*` tests.

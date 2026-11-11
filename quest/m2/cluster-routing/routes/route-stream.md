@@ -18,8 +18,8 @@ Decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing).
 
 Why: today a side's requests ride the streams it opened and its answers ride
 the streams its peer opened, and QUIC orders no stream against another. The
-count to infinity [the echo order](/quest/m2/cluster-routing/routes/echo-order.md)
-found is one message overtaking another across that split, and the router
+first count to infinity [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md)
+records is one message overtaking another across that split, and the router
 keys each stream as its own neighbour (`route/node.rs`), where the model and
 `Sim` have one neighbour per session.
 

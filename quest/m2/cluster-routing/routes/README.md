@@ -40,6 +40,7 @@ The items below were decided 2026-11-10 (maintainer, /quest-plan on lite-07 rout
 22. ✅ **A side's interest is a set of prefixes edited in place.** The live set never nests, and one edit may swap prefixes for a wider or narrower one without re-sending what both cover ([the interest set](/quest/m2/cluster-routing/routes/interest-set.md)). A token-scope change is such an edit, with one prefix per region of the scope. This supersedes items 16 and 17, and the handoff contract's "An interest change opens a new stream" below, once the route stream lands.
 23. ✅ Asked what a floor covers with several prefixes on one stream: **one prefix, named by its id.** This amends item 10: the floor is still a marker and never a region list. Rejected: a floor over the whole set.
 24. ✅ Asked how a side learns a newly added prefix's initial set is complete: **SYNCED per prefix, naming its id**, plus one marker per edit where it takes effect for both sides. Rejected: one SYNCED per edit, counted in order.
+25. ✅ Asked how a relay safely forgets a publisher that is gone, after the model showed a per-neighbour echo is not enough once the origin sits behind a relay: **a relay echoes a ROUTE_END from the neighbour it routed through only when its own ROUTE_ENDs have been echoed**, and any other neighbour's at once ([the echo fix](/quest/m2/cluster-routing/routes/echo-order.md), which holds the counterexample). This supersedes the "per neighbour, not a diffusing computation" claim in the handoff contract and in decision 6 below. Rejected: never dropping the distance; a timer; relays as the only origin nodes.
 
 
 The route layer's core landed in
@@ -190,8 +191,10 @@ the bullets below are the contract it carries.
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is
   ROUTE_HOLD or ROUTE_END. The route model found a count to infinity
-  (2026-11-10): an echo can overtake a route derived from the echoed one;
-  [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md) orders it.
+  (2026-11-10): an echo can overtake a route derived from the echoed one,
+  and even in order a per-neighbour echo misses a derived copy held by a
+  third relay; [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md)
+  makes the echo wait for the echoer's own downstream (Plan item 25).
 - Starvation recovery is Babel's seqno request (RFC 8966 s3.8, decided
   2026-10-12). A node whose routes to an origin are all infeasible sends
   ROUTE_REQUEST for that origin, with its feasibility seqno plus one, to the
@@ -555,7 +558,7 @@ benchmarks.
 - [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - forwarding fixtures ported and the model deleted, incident fixtures, end-to-end checks, and benchmarks
 - [Firefox tabs prove their route key](/quest/m2/cluster-routing/routes/browser-proof.md) - a current Firefox tab opens a lite-07 session with a route-key proof the relay verifies, once neqo's exporter follows the draft
 - [Playwright bundles Chromium's spec exporter](/quest/m2/cluster-routing/routes/playwright-pin.md) - the toolchain's Playwright bundles Chromium 158+, so the route key lane proves the Chromium tab
-- [A ROUTE_END echo arrives behind the echoer's routes](/quest/m2/cluster-routing/routes/echo-order.md) - no node drops its feasibility distance while a route derived from its own can still arrive, so routes never count to infinity
+- [A node forgets a route only once nothing derived from it remains](/quest/m2/cluster-routing/routes/echo-order.md) - a node echoes a ROUTE_END only when its own downstream has, so no relay drops its feasibility distance while a derived route exists and routes never count to infinity
 - [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - every ordering on 4-5 relay meshes with two origins and clients, with an announce budget and convergence
 - [Seeded lite-07 meshes hold the route rules and an announce budget](/quest/m1/route-mesh-sweep.md) - the route rules and message budget checked on real sessions over random meshes
 

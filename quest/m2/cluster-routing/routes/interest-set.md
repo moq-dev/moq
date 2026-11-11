@@ -68,7 +68,8 @@ The edit rule those three imply, to prove rather than assume:
 Work:
 
 - Start from the model and `Sim` with the echo on the neighbour's FIFO
-  ([the echo order](/quest/m2/cluster-routing/routes/echo-order.md)).
+  and a sound drain
+  ([the echo fix](/quest/m2/cluster-routing/routes/echo-order.md)).
 - Give the model at least two prefixes and edits in flight: add, remove,
   widen, narrow, and an edit that crosses a claim change, a route change, a
   ROUTE_END, and its echo. The model fixes interest at the root today, so
@@ -95,7 +96,7 @@ Public API: none (the router is crate-private). Wire: none.
 
 ## Required
 
-- [A ROUTE_END echo arrives behind the echoer's routes](/quest/m2/cluster-routing/routes/echo-order.md) - the model and `Sim` with the echo on the neighbour's FIFO, which this builds on
+- [A node forgets a route only once nothing derived from it remains](/quest/m2/cluster-routing/routes/echo-order.md) - the model, `Sim`, and router with the echo on the neighbour's FIFO, per-link costs, and a sound drain, which this builds on
 
 ## Related
 
