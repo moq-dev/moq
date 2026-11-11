@@ -162,7 +162,8 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 					reset();
 					continue;
 				}
-				if (epoch !== undefined && update.frame.epoch !== epoch) reset();
+				// A new run (or the first after a gap) counts from zero, so its series starts afresh.
+				if (update.frame.epoch !== epoch) reset();
 				epoch = update.frame.epoch;
 				const stats = nodeStatsOf(update.frame);
 				nodeStats.mutate((s) => {
