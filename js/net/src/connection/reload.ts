@@ -40,14 +40,25 @@ function sameTokens(a: readonly string[], b: readonly string[]): boolean {
 	return a.length === b.length && a.every((token, i) => token === b[i]);
 }
 
+/** Whether `cause` is the peer refusing the credentials a session presented. */
+function refusal(cause: unknown): cause is SessionError {
+	return (
+		cause instanceof SessionError &&
+		(cause.code === SessionCode.Unauthorized ||
+			cause.code === SessionCode.MalformedAuthToken ||
+			cause.code === SessionCode.Expired)
+	);
+}
+
 /**
  * Exponential backoff settings for the reconnect loop.
  *
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
- * lockstep. Every failure is retried, including an attempt that outlives
- * {@link ConnectProps.timeout}, until {@link ReloadDelay.timeout} runs out; only an auth
- * rejection or a refused GOAWAY redirect stops the current URL sooner. A new URL or a
- * disable/re-enable starts another sequence.
+ * lockstep. Nothing retries until a session to the current URL has been established: the
+ * first attempt failing stops that URL with its error. After that, every failure is retried,
+ * including an attempt that outlives {@link ConnectProps.timeout}, until
+ * {@link ReloadDelay.timeout} runs out; only an auth rejection or a refused GOAWAY redirect
+ * stops the current URL sooner. A new URL or a disable/re-enable starts another sequence.
  *
  * A GOAWAY off a session that outlived {@link ReloadDelay.healthy} migrates at once, unless it
  * sends the connection back to an endpoint that already redirected it elsewhere and the
@@ -79,7 +90,7 @@ export type ReloadDelay = {
 
 	/**
 	 * Maximum total time to spend retrying the current URL before giving up
-	 * (default: `null`, unlimited; zero gives up when the first attempt fails). Counts from the first dial, and restarts after a healthy session
+	 * (default: `null`, unlimited; zero gives up at the first failure). Counts from the first dial, and restarts after a healthy session
 	 * outside a redirect loop, a URL change, or a disable/re-enable. It decides whether another
 	 * attempt starts and never cuts one that is running, so giving up can take up to one attempt
 	 * longer than the window; {@link ConnectProps.timeout} bounds each attempt. A peer that
@@ -192,6 +203,11 @@ export type ReloadStatus = "connecting" | "connected" | "disconnected";
  * The reconnect loop behind a Connection handle: connects, waits for the session to end, then
  * redials with exponential backoff.
  *
+ * The first attempt for a URL fails fast instead: until a session to it has been established,
+ * a failed attempt sets {@link Reload.error} rather than retrying, so a setup mistake such as an
+ * untrusted certificate or no version in common surfaces at once. A page opened before its
+ * relay is reachable therefore stays disconnected until a new URL or a disable/re-enable.
+ *
  * @internal
  */
 export class Reload {
@@ -215,7 +231,8 @@ export class Reload {
 	/**
 	 * The failure that stopped retrying the current URL, or undefined while the loop is live.
 	 *
-	 * Set on an auth rejection or when the retry window expires. Cleared when a new URL or a
+	 * Set when the first attempt for a URL fails, on an auth rejection, or when the retry window
+	 * expires. Cleared when a new URL or a
 	 * disable/re-enable starts another sequence, not on a page hide/show. Transient drops
 	 * that are still being retried leave this empty.
 	 */
@@ -367,6 +384,11 @@ export class Reload {
 	// Whether the sequence stopped because the peer refused those tokens.
 	#refused = false;
 
+	// The configured href a session has been established for. Until it matches, a failed attempt
+	// gives up rather than retrying. Kept across a page hide/show and a disable/re-enable, which
+	// resume a URL that worked.
+	#establishedHref: string | undefined;
+
 	// Increased by 1 each time to trigger a reload.
 	#tick = new Signal(0);
 
@@ -484,14 +506,7 @@ export class Reload {
 		});
 
 		// New credentials redial a URL that stopped on an auth refusal of the old ones.
-		this.#signals.run((effect) => {
-			const tokens = effect.get(this.tokens);
-			if (!this.#refused || this.#givenUpHref === undefined || sameTokens(tokens, this.#dialedTokens)) return;
-			this.#refused = false;
-			this.#givenUpHref = undefined;
-			this.#error.set(undefined);
-			this.#tick.update((tick) => tick + 1);
-		});
+		this.#signals.run((effect) => this.#redialRefused(effect.get(this.tokens)));
 
 		this.#url = this.#signals.computed((effect) => effect.get(this.url)?.href);
 		// Create a reactive root so cleanup is easier.
@@ -616,6 +631,7 @@ export class Reload {
 					this.#serve(connection);
 					this.#setDialing(false);
 					connected = now();
+					this.#establishedHref = href;
 
 					// A cancelled effect resolves undefined, so the sentinel tells the session
 					// closing (null for clean, an Error otherwise) apart from this run being
@@ -714,6 +730,18 @@ export class Reload {
 				const closed = ended(this.auth);
 				if (closed) {
 					this.#giveUp(closed);
+					return;
+				}
+
+				// The first attempt fails fast: a URL that never yielded a session is more likely
+				// misconfigured than restarting, and only the app can fix that.
+				if (this.#establishedHref !== href) {
+					console.warn("connection failed, not retrying:", err);
+					this.#giveUp(error(err));
+					// A refused credential still redials once the tokens change, including a
+					// change that landed while this dial was in flight.
+					this.#refused = refusal(err);
+					this.#redialRefused(this.tokens.peek());
 					return;
 				}
 
@@ -895,13 +923,7 @@ export class Reload {
 		// for good.
 		//
 		// Tokens replaced since that dial are new credentials, so those earn another dial.
-		if (
-			cause instanceof SessionError &&
-			(cause.code === SessionCode.Unauthorized ||
-				cause.code === SessionCode.MalformedAuthToken ||
-				cause.code === SessionCode.Expired) &&
-			sameTokens(this.tokens.peek(), this.#dialedTokens)
-		) {
+		if (refusal(cause) && sameTokens(this.tokens.peek(), this.#dialedTokens)) {
 			console.warn("session rejected as unauthorized, not retrying");
 			this.#giveUp(cause);
 			this.#refused = true;
@@ -936,6 +958,15 @@ export class Reload {
 			if (deadline !== null && now().ge(deadline)) return giveUp();
 			this.#tick.update((prev) => Math.max(prev, tick));
 		}, wait);
+	}
+
+	// Redial a URL that stopped on an auth refusal, once `tokens` differ from the refused ones.
+	#redialRefused(tokens: readonly string[]): void {
+		if (!this.#refused || this.#givenUpHref === undefined || sameTokens(tokens, this.#dialedTokens)) return;
+		this.#refused = false;
+		this.#givenUpHref = undefined;
+		this.#error.set(undefined);
+		this.#tick.update((tick) => tick + 1);
 	}
 
 	#giveUp(cause: Error): void {

@@ -30,7 +30,7 @@ test("hides the play button while the catalog needs a newer player", async () =>
 		}),
 	} as unknown as Document;
 
-	const status = new Signal<"offline" | "loading" | "live" | "error" | "unsupported">("live");
+	const status = new Signal<"connecting" | "offline" | "loading" | "live" | "error" | "unsupported">("live");
 	const watch = {
 		controls: { paused: new Signal(true) },
 		video: { source: { out: { error: new Signal(undefined) } } },

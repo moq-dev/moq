@@ -272,7 +272,7 @@ impl Client {
 	fn link(&self, supported: bool, requests: bool) -> Result<crate::auth::Link, Error> {
 		match &self.auth {
 			Some(handle) => crate::auth::Link::attach(handle, supported, requests),
-			None if requests => Ok(crate::auth::Link::ietf(supported)),
+			None if requests => Ok(crate::auth::Link::ietf()),
 			None => Ok(crate::auth::Link::new(supported)),
 		}
 	}
@@ -421,11 +421,10 @@ impl Client {
 
 				// SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				// The peer's SETUP decides whether AUTH is negotiated. A handle that does not
-				// offer it keeps the option out of our SETUP and presents no credential.
-				let auth = self.link(self.extensions.auth, true)?;
+				// moq-transport carries no AUTH: a token rides the requests that name it.
+				let auth = self.link(false, true)?;
 				let peer_implementation = setup::PeerImplementation::default();
-				let (protocol, goaway, credential) = ietf::start(ietf::Config {
+				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					stats: self.stats.clone(),
 					limits: self.limits,
@@ -459,7 +458,7 @@ impl Client {
 						stats: self.stats.clone(),
 						goaway,
 						auth,
-						credential,
+						credential: None,
 						estimate: None,
 						peer_target: None,
 						bandwidth: self.allocator(),
@@ -618,6 +617,12 @@ impl Connect {
 	/// The started session, or the error the handshake failed with.
 	fn poll(&mut self, client: &Client, waiter: &kio::Waiter) -> Poll<Result<(Session, crate::Driver), Error>> {
 		let res = ready!(self.poll_step(client, waiter));
+		// A server that shares no version with us closes the session over our SETUP, and its
+		// close reason can lose the race to the stream's reset, so name the likely cause here.
+		if let (Err(err), Self::Exchange { negotiation, .. }) = (&res, &*self) {
+			let offered: Vec<String> = negotiation.supported.iter().map(ToString::to_string).collect();
+			tracing::warn!(%err, ?offered, "version negotiation failed; the server may accept none of the offered versions");
+		}
 		// Release what the handshake held, even on a failure.
 		*self = Self::Done;
 		Poll::Ready(res)

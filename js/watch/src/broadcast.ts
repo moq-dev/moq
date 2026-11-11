@@ -45,13 +45,14 @@ function provesOther(active: Moq.Broadcast.Consumer | undefined, instance: Moq.I
 	return !Instance.isMinted(active.instance) && active.instance !== instance;
 }
 
-// Whether an announced route covers `path`, until closed. Hidden routes count: a service claim
+// Whether an announced route covers `path`, and whether the origin has heard every attached
+// session's initial announcements for it, until closed. Hidden routes count: a service claim
 // under a `.`-named prefix is kept out of listings, but it still covers the renditions it would
 // produce, and this is never shown to anyone.
 function watchCovered(
 	origin: Moq.Origin.Reader,
 	path: Moq.Path.Valid,
-): { covered: Getter<boolean>; close: () => void } {
+): { covered: Getter<boolean>; synced: Getter<boolean>; close: () => void } {
 	const announced = origin.announced(Path.Pattern.literal(path), { hidden: true, covering: true });
 	const covered = new Signal(false);
 	const active = new Set<Moq.Path.Valid>();
@@ -69,7 +70,7 @@ function watchCovered(
 		}
 		covered.set(false);
 	})();
-	return { covered, close: () => announced.close() };
+	return { covered, synced: announced.synced, close: () => announced.close() };
 }
 
 // Every section carrying a `broadcast` reference must be listed here, same as `Catalog.checkResolvable`;
@@ -108,6 +109,7 @@ export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 export type BroadcastInput = {
 	// The read-side origin to borrow. Independent of any connection: whichever sessions feed
 	// the origin resolve the broadcast, and the handle spans their reconnects.
+	// Unset reads "connecting", like an origin with no session attached, never "offline".
 	origin: Getter<Moq.Origin.Reader | undefined>;
 
 	// Whether to start downloading the broadcast. Defaults to true.
@@ -134,9 +136,12 @@ export type BroadcastInput = {
 
 /** Signals the component derives. */
 export type BroadcastOutput = {
+	// "connecting" means no session can answer yet: none is attached, as while the connection
+	// dials, redials, or was refused, or one is still delivering its initial announcements.
+	// "offline" means one could answer and the broadcast is not there.
 	// "error" means the origin refused the broadcast; `error` says why.
 	// "unsupported" means its catalog requires a newer player.
-	status: Signal<"offline" | "loading" | "live" | "error" | "unsupported">;
+	status: Signal<"connecting" | "offline" | "loading" | "live" | "error" | "unsupported">;
 	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
 	// Why the origin refused the broadcast, while `status` is "error". A refusal is final:
@@ -151,13 +156,17 @@ export type BroadcastOutput = {
 
 type Status = GetterType<BroadcastOutput["status"]>;
 
+// What the catalog run reports, where "absent" means no handle to read; `#runStatus` turns that
+// into "connecting" or "offline".
+type Progress = Exclude<Status, "connecting" | "offline"> | "absent";
+
 /** A catalog source that can wait for announcement before subscribing. */
 export class Broadcast {
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<BroadcastInput>;
 
 	readonly #out: BroadcastOutput = {
-		status: new Signal<Status>("offline"),
+		status: new Signal<Status>("connecting"),
 		active: new Signal<Moq.Broadcast.Consumer | undefined>(undefined),
 		error: new Signal<Error | undefined>(undefined),
 		catalog: new Signal<Catalog.Root | undefined>(undefined),
@@ -169,8 +178,17 @@ export class Broadcast {
 	// its relay about the broadcasts a catalog actually references.
 	readonly #watches = new Map<
 		Moq.Path.Valid,
-		{ origin: Moq.Origin.Reader; covered: Getter<boolean>; close: () => void; users: number }
+		{
+			origin: Moq.Origin.Reader;
+			covered: Getter<boolean>;
+			synced: Getter<boolean>;
+			close: () => void;
+			users: number;
+		}
 	>();
+
+	// `#runCatalog`'s view of the broadcast, before "absent" is told apart.
+	readonly #progress = new Signal<Progress>("absent");
 
 	// Requests are shared by callers; each owns its restart watch in the origin.
 	readonly #references = new Map<
@@ -214,6 +232,33 @@ export class Broadcast {
 		this.#signals.run(this.#runBroadcast.bind(this));
 		this.#signals.run(this.#runCatalog.bind(this));
 		this.#signals.run(this.#runFiltered.bind(this));
+		this.#signals.run(this.#runStatus.bind(this));
+	}
+
+	// Without a handle, the broadcast is offline only once a session could have announced it.
+	// A connection holds the origin's announcements unsynced while it is not established, and
+	// a bare origin has no session at all; either way nobody has answered yet.
+	#runStatus(effect: Effect): void {
+		const progress = effect.get(this.#progress);
+		if (progress !== "absent") {
+			this.#out.status.set(progress);
+			return;
+		}
+
+		// A disabled broadcast asks nobody, so there is no answer to wait for.
+		if (!effect.get(this.in.enabled)) {
+			this.#out.status.set("offline");
+			return;
+		}
+
+		const origin = effect.get(this.in.origin);
+		const discovery = origin && effect.get(origin.discovery);
+		let connecting = discovery === undefined;
+		// A session without discovery never announces, so there is nothing to wait for.
+		if (origin && discovery === true) {
+			connecting = !effect.get(this.#watchPath(effect, origin, effect.get(this.in.name)).synced);
+		}
+		this.#out.status.set(connecting ? "connecting" : "offline");
 	}
 
 	// Publish the catalog minus every rendition this consumer cannot use: one naming a
@@ -230,13 +275,17 @@ export class Broadcast {
 		effect.set(this.#out.catalog, raw ? filterCatalog(raw, usable) : undefined);
 	}
 
-	// Whether `path` is covered by an announced route, for `relativeBroadcast`'s
-	// cross-broadcast refs. Announcements are prefix routes, so a route at "room/" covers
-	// "room/alice/cam.hang" without naming it. That is how a rendition produced only on demand
-	// gets selected: its service claims a covering prefix, and nothing announces the exact path
-	// until this subscribes. Watches exactly `path`, shared by every caller asking about it.
-	// The blind cases (announcement gate off, no discovery) never reach here; see `#relativeTarget`.
-	#isPathAnnounced(effect: Effect, origin: Moq.Origin.Reader, path: Moq.Path.Valid): boolean {
+	// Watch the announcements covering exactly `path`, shared by every caller asking about it
+	// until the effect reruns. `covered` gates `relativeBroadcast`'s cross-broadcast refs:
+	// announcements are prefix routes, so a route at "room/" covers "room/alice/cam.hang" without
+	// naming it. That is how a rendition produced only on demand gets selected: its service claims
+	// a covering prefix, and nothing announces the exact path until this subscribes. `synced` tells
+	// `#runStatus` whether the broadcast's absence is known yet.
+	#watchPath(
+		effect: Effect,
+		origin: Moq.Origin.Reader,
+		path: Moq.Path.Valid,
+	): { covered: Getter<boolean>; synced: Getter<boolean> } {
 		let entry = this.#watches.get(path);
 		if (!entry || entry.origin !== origin) {
 			entry?.close();
@@ -255,7 +304,7 @@ export class Broadcast {
 				held.close();
 			});
 		});
-		return effect.get(held.covered);
+		return held;
 	}
 
 	// Share one origin request across callers reading the same referenced broadcast.
@@ -341,12 +390,12 @@ export class Broadcast {
 		if (!enabled) return;
 
 		// Even a manual catalog is unplayable once the origin refuses its media. `#runBroadcast`
-		// clears the error on a fresh request, and this run's cleanup drops back to "offline".
+		// clears the error on a fresh request, and this run's cleanup drops back to "absent".
 		if (effect.get(this.#out.error)) {
-			effect.set(this.#out.status, "error", "offline");
+			effect.set(this.#progress, "error", "absent");
 			return;
 		}
-		effect.cleanup(() => this.#out.status.set("offline"));
+		effect.cleanup(() => this.#progress.set("absent"));
 
 		const catalogFormat = effect.get(this.in.catalogFormat);
 		const name = effect.get(this.in.name);
@@ -361,7 +410,7 @@ export class Broadcast {
 			// exception would surface as an unhandled error.
 			const catalog = effect.get(this.in.catalog);
 			let accepted: Catalog.Root | undefined;
-			let status: Status = "loading";
+			let status: Progress = "loading";
 			try {
 				accepted =
 					catalog &&
@@ -373,7 +422,7 @@ export class Broadcast {
 			}
 			this.#raw.set(accepted, true);
 			effect.cleanup(() => this.#raw.set(undefined, true));
-			this.#out.status.set(status);
+			this.#progress.set(status);
 			return;
 		}
 
@@ -381,7 +430,7 @@ export class Broadcast {
 		// A withdrawn handle can close before its removal propagates through the active signal.
 		if (!broadcast || effect.get(broadcast.closed) !== undefined) return;
 
-		this.#out.status.set("loading");
+		this.#progress.set("loading");
 
 		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json, which reads
 		// it compressed or not and subscribes itself; MSF stays on its own one-blob-per-group fetch.
@@ -411,7 +460,7 @@ export class Broadcast {
 		effect.cleanup(() => this.#raw.set(undefined));
 
 		effect.spawn(async () => {
-			let status: Status = "offline";
+			let status: Progress = "absent";
 			let received = false;
 			let finished = false;
 			try {
@@ -429,7 +478,7 @@ export class Broadcast {
 					console.debug("received catalog", format, this.in.name.peek(), update);
 
 					this.#raw.set(Catalog.checkResolvable(Catalog.checkRenditions(update), name), true);
-					this.#out.status.set("live");
+					this.#progress.set("live");
 				}
 			} catch (err) {
 				if (err instanceof Catalog.UnsupportedVersion) status = "unsupported";
@@ -439,7 +488,7 @@ export class Broadcast {
 			} finally {
 				if (!finished) {
 					this.#raw.set(undefined);
-					this.#out.status.set(status);
+					this.#progress.set(status);
 				}
 			}
 		});
@@ -472,7 +521,7 @@ export class Broadcast {
 		// gate, only report the path usable once it is announced: the request then resolves
 		// from the table, never blind.
 		if (effect.get(this.in.follow) && effect.get(origin.discovery) !== false) {
-			if (!this.#isPathAnnounced(effect, origin, resolved)) return undefined;
+			if (!effect.get(this.#watchPath(effect, origin, resolved).covered)) return undefined;
 		}
 
 		return { local: false, path: resolved };

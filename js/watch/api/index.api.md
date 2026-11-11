@@ -107,7 +107,7 @@ export type BroadcastOutput = {
 	active: Signals.Signal<Net.Broadcast.Consumer | undefined>;
 	catalog: Signals.Signal<Hang.Catalog.Root | undefined>;
 	error: Signals.Signal<Error | undefined>;
-	status: Signals.Signal<"offline" | "loading" | "live" | "error" | "unsupported">;
+	status: Signals.Signal<"connecting" | "offline" | "loading" | "live" | "error" | "unsupported">;
 };
 
 export { BufferedRange } from "@moq/hang/container";

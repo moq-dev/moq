@@ -63,6 +63,12 @@ class MigrateTests(unittest.TestCase):
         self.assertIn("rs/pkg/MIGRATE.md", result.stderr)
         self.assertIn("Impact section", result.stderr)
 
+    def test_deleted_guide_passes(self):
+        self.git("rm", "-q", "rs/pkg/MIGRATE.md")
+        self.commit()
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_uncommitted_edit_fails(self):
         self.write("rs/pkg/MIGRATE.md", GUIDE + "\nMore.\n")
         self.assertNotEqual(self.check().returncode, 0)
