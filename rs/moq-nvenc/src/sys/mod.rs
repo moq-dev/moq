@@ -10,6 +10,8 @@ mod version;
 // The bindgen output is plain C-ABI type/enum/fn-pointer definitions generated
 // for Linux, the only target that loads the driver. They compile on every
 // target, so the crate builds elsewhere as a stub that never loads NVENC.
+// Their layout tests are gated to Linux (re-apply after regenerating): on
+// Windows `c_ulong` is 32-bit, so the Linux offsets don't hold there.
 #[allow(warnings, reason = "bindgen output")]
 #[rustfmt::skip]
 mod linux_sys;
