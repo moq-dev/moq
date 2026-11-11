@@ -34,12 +34,8 @@ a group that lost its stream resumes without loss.
 
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ the wait on
 [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670), Drop set's own
-PR, becomes a `Required` link to [Drop set](/quest/m1/drop-set.md), since
+PR, becomes a `Required` link to Drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)), since
 resuming a reset group sends a second stream for the same group, which #7670's
 hold-the-duplicate rule rewrites.
 
 Public API: none. Wire: lite-07 group stream takeover.
-
-## Required
-
-- [Drop set](/quest/m1/drop-set.md) - its hold-the-duplicate rule governs a resumed group's second stream

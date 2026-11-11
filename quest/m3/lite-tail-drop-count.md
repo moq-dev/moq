@@ -14,7 +14,3 @@ Decided 2026-10-30 (maintainer, follow-up planning): m2. Found by the audit on [
 - The IETF tail keeps its grace until the moq-transport gap-signal extension (planned in [moq-dev/moq#7425](https://github.com/moq-dev/moq/pull/7425)) lands, since moq-transport can't signal gaps.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Drop set](/quest/m1/drop-set.md) - the per-cursor drop reporting this counts

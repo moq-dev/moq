@@ -23,15 +23,14 @@ additive. video-vaapi moved up from later work
 because a downstream iGPU transcode trial needs it now.
 
 Held here by open claims: a quest's branch is its path, so a claimed quest
-cannot move until its PR merges, and an epic moves with its children. These
-breaking epics and quests stay in m1 for now and are listed in m2's
-`Required`, so the cut still waits on them: drop-set and
-stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
-moves what remains of them once their claims merge.
+cannot move until its PR merges, and an epic moves with its children. This
+breaking epic stays in m1 for now and is listed in m2's
+`Required`, so the cut still waits on it: stream-credit. The
+[re-cut follow-up](/quest/m2/recut-held.md) moves what remains of it once
+its claims merge.
 
 ## Required
 
-- [Drop set](/quest/m1/drop-set.md) - each cursor's disposition record is billed to the cache pool, as the track's drop runs are, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind`
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [A reader on a failed copy continues on the held re-offer](/quest/m1/copy-recover.md) - a live reader keeps a group whose copy fails by continuing on the same track's re-offer at the same frame
 - [Group errors are cached by kind](/quest/m1/group-error-cache.md) - permanent group errors bind every reader, retryable ones are kept only for a bounded time, and a live SUBSCRIBE_DROP or FETCH answered `Old` no longer caches it for good

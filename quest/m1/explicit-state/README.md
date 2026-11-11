@@ -65,7 +65,7 @@ Out of scope: the lite `TrackRun` start shortcut that never sends its
 pending drops (`rs/moq-net/src/lite/publisher.rs`, the "start past
 everything" branch). It belongs to
 [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md),
-which collapses that state and waits on [Drop set](/quest/m1/drop-set.md).
+which collapses that state and waits on Drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)).
 
 ## Required
 
