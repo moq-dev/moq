@@ -240,7 +240,10 @@ mod tests {
 			.unwrap();
 		drop(transcoder.run());
 		assert!(matches!(catalog.recv_group().await, Err(moq_net::Error::Cancel)));
-		assert!(!consumer.is_closed(), "the caller's handle decides the output's lifetime");
+		assert!(
+			!consumer.is_closed(),
+			"the caller's handle decides the output's lifetime"
+		);
 		drop(output);
 		assert!(consumer.is_closed());
 	}
