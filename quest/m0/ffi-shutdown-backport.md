@@ -44,14 +44,25 @@ PR, [moq-dev/moq#8378](https://github.com/moq-dev/moq/pull/8378), merges
 that `release-dart.yml` succeeds and pub.dev lists 0.1.1, and deletes this
 quest.
 
+Pushed 2026-11-11: `moq-dart-v0.1.1` at `release`'s head, `7b7d621ecb`, after
+[moq-dev/moq#8378](https://github.com/moq-dev/moq/pull/8378) merged.
+Its [release-dart run](https://github.com/moq-dev/moq/actions/runs/43107848443)
+built and checked the package, then failed at Publish: pub.dev rejected the
+upload because publishing is not enabled for `moq-dev/moq`. Do not publish
+under another tag; the next step is the Waiting item below.
+
 Public API: none. Wire: none.
 
 ## Waiting
 
-- moq-dev/moq: the combined patch cut's release-plz PR,
-  [moq-dev/moq#8378](https://github.com/moq-dev/moq/pull/8378), merges into
-  `release`. Check with `gh pr view 8378 --repo moq-dev/moq --json state`;
-  then push the tag as the Plan's 2026-11-09 decision says.
+- Maintainer: enable publishing from GitHub Actions for the `moq` package on
+  pub.dev, for repository `moq-dev/moq` and tag pattern `moq-dart-v{{version}}`
+  (see [dart.dev/go/publishing-from-github](https://dart.dev/go/publishing-from-github)),
+  then re-run the failed run with `gh run rerun 43107848443 --repo moq-dev/moq --failed`.
+  Check: that run's conclusion is `success`, and `curl -s https://pub.dev/api/packages/moq`
+  lists 0.1.1. An agent cannot take this step: it changes the package owner's
+  pub.dev settings. Considered: an agent could drive a signed-in browser, but
+  that needs the owner's go-ahead first.
 
 ## Related
 
