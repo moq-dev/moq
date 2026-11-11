@@ -490,8 +490,11 @@ export interface ResumeSource {
 	 * route change keeps, and those the serving copy reported.
 	 */
 	reofferStale(): Run[];
-	/** Open a bill for the reader's record against the serving copy's account, undefined without one. */
-	bill(): CacheReader | undefined;
+	/**
+	 * The bill for the reader's record on the serving copy's account: `current` while it bills that
+	 * account, or else a new one. `current` without a serving copy.
+	 */
+	bill(current: CacheReader | undefined): CacheReader | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -759,8 +762,11 @@ export const hooks: {
 	 * the pool can hand it debt. Mirrors the Rust crate-private `track::Producer::bill`.
 	 */
 	billTrack: (producer: Producer) => CacheReader;
-	/** Open a bill against the account of the track `subscriber` reads, undefined while it has none. */
-	billSubscriber: (subscriber: Subscriber) => CacheReader | undefined;
+	/**
+	 * The bill on the account of the track `subscriber` reads: `current` while it bills that account,
+	 * or else a new one; undefined while it has none.
+	 */
+	billSubscriber: (subscriber: Subscriber, current: CacheReader | undefined) => CacheReader | undefined;
 	/**
 	 * Re-offer what a subscriber gave up as stale through dispositions, as a wire whose every update
 	 * reopens its stale drops does: each run is judged again under the new terms. Returns the runs

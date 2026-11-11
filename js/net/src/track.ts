@@ -3061,12 +3061,15 @@ export class Subscriber {
 		};
 	}
 
-	// A bill against the account of the track this reads: a resumed reader's serving copy, as the
-	// Rust logical track's account bills its routes' readers.
-	#openBill(): cache.Reader | undefined {
-		if (this.#resume) return this.#resume.bill();
+	// The bill on the account of the track this reads: `current` while it bills that account, or
+	// else a new one. A resumed reader's follows its serving copy across route changes, so the pool
+	// that holds what it reads is the one its debt comes from.
+	#billOn(current: cache.Reader | undefined): cache.Reader | undefined {
+		if (this.#resume) return this.#resume.bill(current);
 		const producer = this.#state.producer;
-		return producer && accountOf(producer).reader();
+		if (!producer) return current;
+		const account = accountOf(producer);
+		return current?.bills(account) ? current : account.reader();
 	}
 
 	// How many runs the record holds above its floor, each billed `cache.READER_RUN_OVERHEAD`:
@@ -3089,11 +3092,13 @@ export class Subscriber {
 	#settleRecord(handed?: bigint): TooFarBehind | undefined {
 		if (this.#lagged) return new TooFarBehind();
 		const bytes = this.#recordRuns() * cache.READER_RUN_OVERHEAD;
-		if (!this.#bill) {
-			if (bytes === 0) return undefined;
-			this.#bill = this.#openBill();
+		if (!this.#bill && bytes === 0) return undefined;
+		const bill = this.#billOn(this.#bill);
+		if (bill !== this.#bill) {
+			// The serving route changed: the replaced route's pool stops carrying this record.
+			this.#bill?.close();
+			this.#bill = bill;
 		}
-		const bill = this.#bill;
 		if (!bill) return undefined;
 		bill.set(bytes);
 		if (bill.debt === 0) return undefined;
@@ -3817,7 +3822,7 @@ export class Subscriber {
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && mayLand(producer, land);
 		};
-		hooks.billSubscriber = (subscriber) => subscriber.#openBill();
+		hooks.billSubscriber = (subscriber, current) => subscriber.#billOn(current);
 		hooks.resumeSubscriber = (name, subscription, source) => {
 			const state = new TrackState(subscription ?? Subscription.default());
 			const subscriber = new Subscriber(name, state);

@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import * as cache from "./cache.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
@@ -3683,4 +3684,32 @@ test("a group an inner front hands out already failed still continues on the out
 	inner.consumer.close();
 	a.close();
 	b.close();
+});
+
+// A routed reader's record bills the pool of the copy serving it, and follows a route change: the
+// replaced route's pool stops carrying it, so the pool serving the reader is the one whose debt can
+// fold it.
+test("a routed reader's record bills the serving route's pool across a route change", async () => {
+	const { a, b, active, swap, close } = await setup();
+	const pools = { a: new cache.Pool({ capacity: 1 << 30 }), b: new cache.Pool({ capacity: 1 << 30 }) };
+	const ta = copy(a);
+	const tb = copy(b);
+	hooks.poolTrack(ta.producer, pools.a);
+	hooks.poolTrack(tb.producer, pools.b);
+	const sub = active.track("seq").subscribe({ delay: { max: null } });
+	// Every other group, so the reader's record holds a run per gap.
+	const runs = 64n;
+	for (let group = 0n; group < runs; group++) ta.write(2n * group);
+	expect(drain(sub).length).toBe(Number(runs));
+
+	await swap();
+	tb.write(2n * runs);
+	const before = { a: pools.a.used, b: pools.b.used };
+	expect(drain(sub)).toEqual([2n * runs]);
+	const bill = Number(runs - 1n) * cache.READER_RUN_OVERHEAD;
+	expect(before.a - pools.a.used).toBeGreaterThanOrEqual(bill);
+	expect(pools.b.used - before.b).toBeGreaterThanOrEqual(bill);
+
+	sub.close();
+	close();
 });

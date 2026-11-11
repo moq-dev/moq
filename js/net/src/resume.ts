@@ -737,6 +737,12 @@ class Reader implements ResumeSource {
 		return { groups: groups.map((group) => this.#handOut(serving, group)), givenUp };
 	}
 
+	/** The bill on the serving copy's account, whose pool holds what this reader reads. */
+	bill(current: CacheReader | undefined): CacheReader | undefined {
+		const serving = this.#serving();
+		return serving ? hooks.billSubscriber(serving.sub, current) : current;
+	}
+
 	/**
 	 * Take back every stale run: those queued here, those this reader reported, and those the
 	 * serving copy reported, which its cursor owes again. What this reader reported counts
@@ -745,11 +751,6 @@ class Reader implements ResumeSource {
 	 * replaced copy may no longer deliver, so what it gave up is the new route's to deliver or
 	 * give up. Mirrors the Rust `Reader::reoffer_stale`.
 	 */
-	bill(): CacheReader | undefined {
-		const serving = this.#serving();
-		return serving && hooks.billSubscriber(serving.sub);
-	}
-
 	reofferStale(): Run[] {
 		const taken = this.#reportedStale;
 		this.#reportedStale = [];

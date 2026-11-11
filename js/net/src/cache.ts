@@ -558,6 +558,11 @@ export class Reader {
 		return this.#bytes;
 	}
 
+	/** Whether this bills `account`. */
+	bills(account: unknown): boolean {
+		return this.#track === account;
+	}
+
 	/**
 	 * The debt the track's readers owe, forgiven once the pool is back within its capacity:
 	 * nothing needs the room any more, as the track forgives its own debt.
