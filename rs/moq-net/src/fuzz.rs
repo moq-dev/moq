@@ -449,8 +449,8 @@ fn hop_chain(ids: impl IntoIterator<Item = u64>) -> Hops {
 
 /// One announcement on an announce stream, resolved: what the application sees.
 ///
-/// The hop chain travels only on lite-06: lite-07 names the claim's route instead, so
-/// its writer drops the chain and its reader decodes an empty one.
+/// The hop chain is lite-06's, and lite-07's trailing Lite-06 Chain: a lite-07 claim
+/// names its route instead, and carries a chain only when it was learned over lite-06.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Announced {
 	/// ANNOUNCE_START: a route's suffix and wire hop ids, taking the next id.
@@ -496,13 +496,13 @@ impl AnnounceWriter {
 					instance: self.version.has_instance().then(|| "a".parse().unwrap()),
 					epoch: 0,
 					suffix,
-					hops: self.chain(hops),
+					hops: hop_chain(hops.iter().copied()),
 					cost: Default::default(),
 				}
 			}
 			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
-				hops: self.chain(hops),
+				hops: hop_chain(hops.iter().copied()),
 				cost: Default::default(),
 			},
 			Announced::End(id) => {
@@ -512,14 +512,6 @@ impl AnnounceWriter {
 		};
 		msg.encode(&mut Encoder::new(data, self.version.into()), self.version)
 			.expect("could not encode an announcement");
-	}
-
-	/// The hop chain as this version carries it: none on lite-07.
-	fn chain(&self, hops: &[u64]) -> Hops {
-		match self.version.has_routes() {
-			true => Hops::default(),
-			false => hop_chain(hops.iter().copied()),
-		}
 	}
 }
 
