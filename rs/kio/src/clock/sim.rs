@@ -270,7 +270,7 @@ impl Wake for Flag {
 }
 
 /// Clears the thread's runtime when [`run`] returns or unwinds, printing the seed
-/// that replays an unwinding run when the environment picked it.
+/// that replays an unwinding run when [`run`] seeded it.
 struct Enter {
 	replay: Option<u64>,
 }
