@@ -1,4 +1,4 @@
-# [XS] `test-lints.test.py` hangs `just check`
+# [XS] test-lints.test.py hangs just check
 
 ## Goal
 
