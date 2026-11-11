@@ -42,4 +42,7 @@ rebuild and pin browser binaries outside nixpkgs.
   [NixOS/nixpkgs#585789](https://github.com/NixOS/nixpkgs/pull/585789) (it also
   fixes `update.sh` for 1.65's SHA-pinned driver version and rebases the
   python driver patch). Advance it by answering that PR's review; then wait
-  for it to reach `nixpkgs-unstable`.
+  for it to reach `nixpkgs-unstable`. Decided 2026-11-11 (maintainer,
+  /quest-unblock): an agent drafts each review fix on the fork's branch with
+  an `Assisted-by:` trailer, as nixpkgs' CONTRIBUTING.md requires, and the
+  maintainer reviews the diff and reply before anything is pushed or posted.

@@ -42,16 +42,10 @@ Decided 2026-11-09 (maintainer, /quest-unblock): ✅ an agent pushes
 PR, [moq-dev/moq#8378](https://github.com/moq-dev/moq/pull/8378), merges
 (rejected: tag before #8378 merges; the maintainer pushes it). Then it checks
 that `release-dart.yml` succeeds and pub.dev lists 0.1.1, and deletes this
-quest.
+quest. [moq-dev/moq#8378](https://github.com/moq-dev/moq/pull/8378) merged
+2026-11-11, so the tag push is ready.
 
 Public API: none. Wire: none.
-
-## Waiting
-
-- moq-dev/moq: the combined patch cut's release-plz PR,
-  [moq-dev/moq#8378](https://github.com/moq-dev/moq/pull/8378), merges into
-  `release`. Check with `gh pr view 8378 --repo moq-dev/moq --json state`;
-  then push the tag as the Plan's 2026-11-09 decision says.
 
 ## Related
 
