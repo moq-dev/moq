@@ -4,6 +4,14 @@ import { Error as NetError, type Timed } from "@moq/net";
 import { type Config as CodecConfig, Encoder, type Pending } from "./encoder.ts";
 
 /**
+ * A log its producer finished: it takes no more records. {@link Producer.finish} returns it,
+ * mirroring the Rust `stream::Finished`; the producer itself still refuses an append after the
+ * finish.
+ */
+// biome-ignore lint/suspicious/noEmptyInterface: nothing is left to call once the track is released.
+export interface Finished {}
+
+/**
  * Publishes an ordered log of JSON records to a track, one record per frame in a single group.
  *
  * An {@link Encoder} that owns its track. When something else already owns the track, use the
@@ -76,12 +84,13 @@ export class Producer<T> {
 		this.#track.abort(abort);
 	}
 
-	/** Finish the track, closing the group. */
-	finish(): void {
+	/** Finish the track, closing the group, and return it as {@link Finished}. */
+	finish(): Finished {
 		this.#group?.finish();
 		this.#group = undefined;
 		this.#track.finish();
 		this.#track.close();
+		return this;
 	}
 }
 

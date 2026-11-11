@@ -18,13 +18,6 @@ The quests separate portable decoding, audio, and publishing so each can land an
 
 Decided in the 2026-09-30 audit: the Windows and Linux GPU decode paths and the macOS and Windows GPU encoder inputs moved to m2 (listed under Related), because each needs physical-hardware proof, and Linux GPU input is already m2/m3.
 
-## Required
-
-- [Video source replacement](/quest/m3/obs-moq-video/source.md) - remove the FFmpeg video decode and attempt macOS GPU delivery immediately, with a working CPU fallback on other platforms
-- [Linux bundle](/quest/m3/obs-moq-video/linux-bundle.md) - attach a portable Linux x86_64 tarball to every obs-moq release once FFmpeg is gone
-- [Video publishing](/quest/m3/obs-moq-video/adapter.md) - back an internal OBS video encoder with moq-video and expose the combined opt-in mode
-- [VP8/VP9 in OBS](/quest/m3/obs-moq-video/vpx-obs.md) - play VP8 and VP9 through moq-video's libvpx backend on every OBS platform
-
 ## Related
 
 - [Video hardware validation](/quest/m5/video-hardware.md) - physical hardware evidence is required for each claimed GPU path
