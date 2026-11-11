@@ -15705,7 +15705,10 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		let consumer = producer.consume();
 		let _node = consumer.route_node();
-		assert!(driver.poll(Instant::now(), &waiter).is_ok(), "the producer owns the origin");
+		assert!(
+			driver.poll(Instant::now(), &waiter).is_ok(),
+			"the producer owns the origin"
+		);
 		drop(producer);
 		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
 	}
