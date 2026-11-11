@@ -113,3 +113,4 @@ deleted.
 - [js/net decodes the Rust fuzzers' corpus the same way](/quest/m4/fuzz-corpus-js.md) - nightly, both codecs agree on acceptance and re-encoding for every corpus input
 - [No mutation of the route and resume code survives its tests](/quest/m4/mutants.md) - cargo-mutants nightly, failing on any survivor
 - [Concurrent tests run under many Miri schedules and ThreadSanitizer](/quest/m4/miri-seeds-tsan.md) - shim-free race checks on kio and moq-net, nightly
+- [moq's fuzz targets run continuously on OSS-Fuzz](/quest/m4/oss-fuzz.md) - round-the-clock fuzzing with private crash reports, after the session targets exist and the maintainer approves the application

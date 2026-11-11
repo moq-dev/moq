@@ -36,6 +36,7 @@ consumer asks.
 
 ## Required
 
+- [Miri's GenMC mode explores every schedule of kio's lock-free code](/quest/m5/miri-genmc.md) - waiting on rust-lang/miri to run `cargo miri test` in GenMC mode, then Nightly checks kio's log and channel exhaustively
 - [Mesh over ICE](/quest/m5/mesh-ice.md) - mesh nodes on different networks connect directly through the P2P line's ICE pairs, once a mesh user needs it
 - [Video validation hardware is on hand](/quest/m5/video-hardware-access.md) - the machines the validation runs on, including a Raspberry Pi 4/5 for embedded presenting
 - [Fair share across broadcasts on cluster links](/quest/m5/broadcast-fairness.md) - broadcasts share a cluster link fairly, so one tenant's priority never starves another's, once a tenant identity exists
