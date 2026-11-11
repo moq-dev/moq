@@ -70,4 +70,4 @@ behavior follows quinn's fixes.
 
 ## Related
 
-- [Dependency audit](/quest/m3/audit-deps.md) - covers crates cargo-deny can see
+- [Cost audit](/quest/m3/audit-cost.md) - covers crates cargo-deny can see
