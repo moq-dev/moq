@@ -1750,12 +1750,7 @@ impl TableCursor {
 			// identity explicitly so consumers keyed on it remove it.
 			Some(previous) if previous.captures != captures => {
 				if let Ok(mut state) = self.state.write() {
-					state.apply_unannounce(
-						self.under.rejoin(presented),
-						previous.meta,
-						previous.captures,
-						gone,
-					);
+					state.apply_unannounce(self.under.rejoin(presented), previous.meta, previous.captures, gone);
 					state.apply_announce(self.under.rejoin(presented), meta, captures);
 				}
 			}
