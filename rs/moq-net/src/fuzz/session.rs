@@ -8,7 +8,7 @@
 //! The relay is one origin serving three sessions: the peer, a bystander publishing a
 //! broadcast, and a bystander subscribing to it. Beyond "does not panic", each run asserts:
 //!
-//! - The bystander's subscriber reads every group its publisher wrote, one per action, in
+//! - The bystander's subscriber reads every group its publisher wrote, one a second, in
 //!   order and byte for byte.
 //! - Once the peer is gone and the clock runs past every timeout, the origin holds what it
 //!   held for the bystander alone: the same pool charge, tasks, routes, cursors, and
@@ -28,7 +28,7 @@ use bytes::Bytes;
 use kio::clock::sim::{self, JoinHandle};
 
 use crate::{
-	Client, Pattern, Patterns, Server, Session, Version, broadcast,
+	Client, Pattern, Patterns, Server, Session, Version, broadcast, cache,
 	coding::{Encoder, Form},
 	origin, track,
 	transport::{
@@ -51,9 +51,22 @@ const SETTLE: Duration = Duration::from_millis(1);
 /// The clock a [`Action::Advance`] tick moves.
 const TICK: Duration = Duration::from_millis(100);
 
+/// How often the bystander publishes a group while the peer plays.
+const PUBLISH: Duration = Duration::from_secs(1);
+
+/// The most a script may advance the clock in all. Idle sessions still wake for their timers,
+/// so hours of simulated time cost seconds that would read as a timeout the peer caused.
+const ADVANCE: Duration = Duration::from_secs(600);
+
+/// How long a cached group nobody reads stays in the relay's pool.
+const EXPIRY: Duration = Duration::from_secs(1);
+
 /// How long the clock may run once the peer leaves before the origin must be back to its
-/// baseline: past every timeout the relay keeps, the cache's idle expiry the longest.
+/// baseline: past every timeout the relay keeps.
 const DRAIN: Duration = Duration::from_secs(300);
+
+/// How often the drain checks whether the origin is back to its baseline.
+const POLL: Duration = Duration::from_millis(250);
 
 /// The broadcast and track names the bystander publishes, and the track the relay reads of
 /// each broadcast the peer announces.
@@ -101,13 +114,25 @@ fn session(lite: bool, data: &[u8]) -> bool {
 			streams: Vec::new(),
 			lite,
 			form: version.into(),
+			advance: ADVANCE,
 		};
 		let mut script = Script(script);
+		// The bystander publishes on its own clock, so its groups interleave with whatever
+		// the peer does, bounded by the time a script can pass rather than its length.
+		let publishing = {
+			let bystander = relay.bystander.clone();
+			sim::spawn(async move {
+				loop {
+					kio::clock::sleep(PUBLISH).await;
+					bystander.publish();
+				}
+			})
+		};
 		while let Some(action) = script.next() {
 			peer.play(action).await;
 			kio::clock::sleep(SETTLE).await;
-			relay.bystander.publish();
 		}
+		publishing.abort();
 		drop(peer);
 
 		relay.check(victim).await
@@ -149,7 +174,7 @@ enum Action {
 	Read { stream: u8 },
 	/// Send a datagram.
 	Datagram { data: Vec<u8> },
-	/// Let `ticks` of [`TICK`] pass.
+	/// Let `ticks` of [`TICK`] pass, within [`ADVANCE`].
 	Advance { ticks: u8 },
 	/// Close the session with a code.
 	Close { code: u8 },
@@ -247,6 +272,8 @@ struct Peer {
 	streams: Vec<Stream>,
 	lite: bool,
 	form: Form,
+	/// What remains of [`ADVANCE`].
+	advance: Duration,
 }
 
 #[derive(Default)]
@@ -320,7 +347,11 @@ impl Peer {
 			Action::Datagram { data } => {
 				let _ = self.transport.send_datagram(data.into(), Default::default());
 			}
-			Action::Advance { ticks } => kio::clock::sleep(TICK * ticks as u32).await,
+			Action::Advance { ticks } => {
+				let advance = self.advance.min(TICK * ticks as u32);
+				self.advance -= advance;
+				kio::clock::sleep(advance).await;
+			}
 			Action::Close { code } => self.transport.close(code as u32, ""),
 		}
 	}
@@ -518,7 +549,7 @@ struct Relay {
 	version: Version,
 	origin: origin::Producer,
 	driver: Rc<RefCell<origin::Driver>>,
-	bystander: Bystander,
+	bystander: Rc<Bystander>,
 	baseline: Held,
 	_driving: JoinHandle<()>,
 }
@@ -535,7 +566,10 @@ struct Victim {
 
 impl Relay {
 	async fn new(version: Version) -> Self {
-		let (origin, driver) = origin::Producer::new(origin::Config::new(1.try_into().expect("a nonzero hop")));
+		let mut config = origin::Config::new(1.try_into().expect("a nonzero hop"));
+		// The cache's idle expiry is the longest wait in the drain, so keep it short.
+		config.pool = cache::Pool::new(cache::Config::default().with_expiry(EXPIRY));
+		let (origin, driver) = origin::Producer::new(config);
 		// A relay carries every peer's routes on to the others.
 		let origin = origin.with_proxy(true);
 		let driver = Rc::new(RefCell::new(driver));
@@ -545,7 +579,7 @@ impl Relay {
 				kio::clock::drive(move |now, waiter| driver.borrow_mut().poll(now, waiter)).await;
 			})
 		};
-		let bystander = Bystander::new(&origin, version).await;
+		let bystander = Rc::new(Bystander::new(&origin, version).await);
 		let baseline = held(&origin, &driver);
 		Self {
 			version,
@@ -650,7 +684,7 @@ impl Relay {
 				self.bystander.read.borrow().len(),
 				self.bystander.sent.borrow().len(),
 			);
-			kio::clock::sleep(Duration::from_secs(1)).await;
+			kio::clock::sleep(POLL).await;
 		}
 
 		let sent = self.bystander.sent.borrow();

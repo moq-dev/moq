@@ -1,8 +1,9 @@
-//! Test support, enabled by the `fuzz` feature: fuzz target bodies for the wire codecs and their
-//! seeds, plus the hooks the benches and `moq-net-tests` reach private state through.
+//! Test support, enabled by the `fuzz` feature: fuzz target bodies for the wire codecs and
+//! sessions and their seeds, plus the hooks the benches and `moq-net-tests` reach private
+//! state through.
 //!
-//! Each `pub fn` here is one target: it takes raw fuzzer bytes, drives a decoder, and
-//! checks that whatever came out survives a re-encode. The bodies live in the crate
+//! Each codec target takes raw fuzzer bytes, drives a decoder, and checks that whatever
+//! came out survives a re-encode; the session targets are described in `session`. The bodies live in the crate
 //! rather than in `fuzz/fuzz_targets/` because the `lite` and `ietf` modules are
 //! private modules, so an outside harness cannot reach a single decoder. Keeping them
 //! here also lets the tests below replay them on stable, which is what turns a crash

@@ -1,5 +1,5 @@
 # The libFuzzer harness for moq-net's wire codecs and sessions. `just rs fuzz <target>` drives it,
-# and nightly.yml runs every target for five minutes.
+# and nightly.yml runs every target.
 #
 # A workspace member so it shares the root lockfile, which is the only thing that
 # keeps its resolve from drifting when a sibling it depends on is bumped. It is
