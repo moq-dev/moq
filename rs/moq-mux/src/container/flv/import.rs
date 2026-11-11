@@ -152,13 +152,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		self.input.check()?;
 		self.buffer.extend_from_slice(data);
 
-		match self.drain() {
-			Ok(()) => Ok(()),
-			Err(err) => match err.downcast::<crate::Error>() {
-				Ok(err) => Err(err),
-				Err(err) => Err(err.into()),
-			},
-		}
+		self.drain().map_err(typed)
 	}
 
 	fn drain(&mut self) -> anyhow::Result<()> {
@@ -495,7 +489,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Ok(());
 		}
 		// The first frame anchors the stream before the reservation below publishes.
-		let timestamp = self.timebase.shift(Timestamp::from_millis(pts_ms as u64)?)?;
+		let shifted = self.timebase.shift(Timestamp::from_millis(pts_ms as u64)?);
+		let timestamp = self.refuse(shifted)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
@@ -519,7 +514,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Ok(());
 		}
 		// The first frame anchors the stream before the reservation below publishes.
-		let timestamp = self.timebase.shift(Timestamp::from_millis(timestamp)?)?;
+		let shifted = self.timebase.shift(Timestamp::from_millis(timestamp)?);
+		let timestamp = self.refuse(shifted)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
@@ -546,7 +542,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// (Re)build the video track `track_id` for `config`, unless it matches the current one.
 	fn init_video(&mut self, track_id: u8, config: VideoConfig) -> anyhow::Result<()> {
-		let result = self.build_video(track_id, config).map_err(crate::Error::from);
+		let result = self.build_video(track_id, config).map_err(typed);
 		self.refuse(result)
 	}
 
@@ -579,7 +575,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// (Re)build the audio track `track_id` for `config`, unless it matches the current one.
 	fn init_audio(&mut self, track_id: u8, config: AudioConfig) -> anyhow::Result<()> {
-		let result = self.build_audio(track_id, config).map_err(crate::Error::from);
+		let result = self.build_audio(track_id, config).map_err(typed);
 		self.refuse(result)
 	}
 
@@ -860,4 +856,9 @@ fn config_from_eac3(frame: &[u8]) -> anyhow::Result<AudioConfig> {
 		header.sample_rate,
 		header.channel_count,
 	))
+}
+
+/// The typed error inside `err`, or `err` wrapped as [`Other`](crate::Error::Other).
+fn typed(err: anyhow::Error) -> crate::Error {
+	err.downcast().unwrap_or_else(crate::Error::from)
 }
