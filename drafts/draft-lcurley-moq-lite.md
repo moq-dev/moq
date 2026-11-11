@@ -494,6 +494,7 @@ A metric that overflows 64 bits makes the route unusable.
 
 A route carries its Hops: the Hop ID of every node it crossed, the origin node first and the sender last.
 A Hop ID is a non-zero 64-bit value a node names itself with for as long as its process runs, such as the Node ID it started with; a rotation does not change it.
+A receiver tolerates a zero or repeated Hop ID instead of closing the session: such a route harms only itself.
 A node sending its selected route appends its own Hop ID to the Hops it received, and an origin's own route starts with its Hop ID alone.
 A relay forwards the other entries unchanged and never qualifies them.
 A route that arrives with 32 Hops is unusable.

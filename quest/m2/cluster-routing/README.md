@@ -37,6 +37,13 @@ Decided with the maintainer, 2026-10-13:
 - Keep Babel. A detour longer than the lost route may wait for a sequence
   refresh from the origin; instant failover is not required. Measure failure
   detection, additional routing recovery, and total interruption separately.
+  Reaffirmed 2026-11-11 (maintainer, /quest-plan after
+  [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)'s reviews),
+  asked whether to replace it: ✅ keep it for route selection, with the hops
+  that PR added, and replace only how a relay decides whose copy of a
+  publisher's claims to believe
+  ([the model](/quest/m2/cluster-routing/routes/certify-model.md)). Rejected:
+  a path-vector without distances, and link-state among relays.
 - An origin declares its own routing identity, fresh per process or tab
   restart and shared across its live sessions. It is unverified. Decided 2026-11-02 (maintainer, /quest-unblock): no
   key proof is planned; if a use case needs a provable identity, moq-lite-07's
