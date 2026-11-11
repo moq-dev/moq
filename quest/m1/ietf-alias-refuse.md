@@ -26,7 +26,3 @@ return `OnceStep::Refuse`, and delete `OnceStep::Unbound`. Cover it with a
 test whose peer never acknowledges the FIN.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [A reused moq-transport alias delivers a group that beats its SUBSCRIBE_OK](/quest/m1/ietf-alias-reuse.md) - the same alias table, for a reused alias on the same track

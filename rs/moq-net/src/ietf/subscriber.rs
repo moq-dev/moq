@@ -96,8 +96,16 @@ struct AliasTable {
 	ended: bool,
 	map: HashMap<u64, Alias>,
 
-	/// Retired aliases in retirement order, so the oldest is forgotten first.
-	retired: std::collections::VecDeque<u64>,
+	/// Retired aliases in retirement order, so the oldest is forgotten first, each with the
+	/// track it served.
+	retired: std::collections::VecDeque<Retired>,
+}
+
+/// A tombstoned alias and the full track name its cancelled subscription was for.
+struct Retired {
+	alias: u64,
+	broadcast: Path,
+	name: String,
 }
 
 type TrackAliases = kio::Producer<AliasTable>;
@@ -117,7 +125,7 @@ fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 		// this lands is indistinguishable from one for the new track.
 		Entry::Occupied(mut entry) if *entry.get() == Alias::Retired => {
 			entry.insert(Alias::Active(request_id));
-			table.retired.retain(|&retired| retired != alias);
+			table.retired.retain(|retired| retired.alias != alias);
 			Ok(())
 		}
 		Entry::Occupied(mut entry) if entry.get().holder() == Some(request_id) => {
@@ -167,7 +175,7 @@ fn rebind_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId,
 ///
 /// Only retires an alias that still belongs to this request: a later subscription may
 /// already have reclaimed it, and that binding outranks a departing owner.
-fn retire_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId) {
+fn retire_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId, broadcast: &Path, name: &str) {
 	let Ok(mut aliases) = aliases.write() else {
 		return;
 	};
@@ -178,16 +186,44 @@ fn retire_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 	}
 
 	table.map.insert(alias, Alias::Retired);
-	table.retired.push_back(alias);
+	table.retired.push_back(Retired {
+		alias,
+		broadcast: broadcast.clone(),
+		name: name.to_owned(),
+	});
 
 	while table.retired.len() > RETIRED_ALIAS_CAPACITY {
 		let oldest = table.retired.pop_front().expect("non-empty above the capacity");
 		// Only forget an entry that is still a tombstone. A reclaimed alias is live again
 		// and its own retirement is queued separately.
-		if table.map.get(&oldest) == Some(&Alias::Retired) {
-			table.map.remove(&oldest);
+		if table.map.get(&oldest.alias) == Some(&Alias::Retired) {
+			table.map.remove(&oldest.alias);
 		}
 	}
+}
+
+/// Forget the tombstones of a track we are subscribing to again.
+///
+/// The publisher may answer the new SUBSCRIBE with the alias it used before (draft-22
+/// section 3.1.3), and the first group can overtake that SUBSCRIBE_OK. Without its
+/// tombstone the alias reads as unknown, so that group waits on the binding instead of
+/// being dropped as a straggler. Other tracks' tombstones stay, so their stragglers are
+/// still dropped at once.
+fn forget_retired_track(aliases: &TrackAliases, broadcast: &Path, name: &str) {
+	let Ok(mut aliases) = aliases.write() else {
+		return;
+	};
+	let table = &mut *aliases;
+
+	table.retired.retain(|retired| {
+		if retired.broadcast != *broadcast || retired.name != name {
+			return true;
+		}
+		if table.map.get(&retired.alias) == Some(&Alias::Retired) {
+			table.map.remove(&retired.alias);
+		}
+		false
+	});
 }
 
 #[derive(Default)]
@@ -1310,7 +1346,7 @@ impl Subscriber {
 
 		let aliases = self.state.lock().aliases.clone();
 		insert_track_alias(&aliases, alias, REQUEST_ID).expect("bind the alias");
-		retire_track_alias(&aliases, alias, REQUEST_ID);
+		retire_track_alias(&aliases, alias, REQUEST_ID, &Path::default(), "track");
 	}
 
 	/// What the peer declared in its SETUP. See [`super::Publisher::peer`].
@@ -1439,7 +1475,7 @@ impl Subscriber {
 			state.fetches.remove(&fetch_id);
 		}
 		if let Some(alias) = track.alias {
-			retire_track_alias(&state.aliases, alias, request_id);
+			retire_track_alias(&state.aliases, alias, request_id, &track.broadcast, &track.name);
 		}
 		// The subscription is over, so the tail a fill's head was waiting for is never
 		// coming. A publisher's clean end already published the head, so what is left was
@@ -4224,6 +4260,7 @@ impl SubscribeOnce {
 			false => Fill::Done,
 		});
 		let mut state = this.state.lock();
+		forget_retired_track(&state.aliases, broadcast_path, track_name);
 		// A resumed subscription keeps the alias it is bound to and the data streams it
 		// counted while it forwarded before.
 		let (alias, tail) = match held {
@@ -9222,7 +9259,7 @@ mod tests {
 	fn retiring_old_track_does_not_retire_reused_alias() {
 		let aliases = TrackAliases::default();
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
-		retire_track_alias(&aliases, 7, RequestId(13));
+		retire_track_alias(&aliases, 7, RequestId(13), &Path::default(), "track");
 
 		assert_eq!(aliases.read().map.get(&7), Some(&Alias::Active(RequestId(11))));
 	}
@@ -9234,7 +9271,7 @@ mod tests {
 	async fn retired_alias_drops_late_groups_immediately() {
 		let aliases = TrackAliases::default();
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
-		retire_track_alias(&aliases, 7, RequestId(11));
+		retire_track_alias(&aliases, 7, RequestId(11), &Path::default(), "track");
 
 		let runtime = crate::time::sim();
 		let resolve = resolve_track_alias(&runtime, aliases.consume(), 7);
@@ -9258,7 +9295,7 @@ mod tests {
 	async fn a_retired_alias_maps_to_the_cancelled_code() {
 		let aliases = TrackAliases::default();
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
-		retire_track_alias(&aliases, 7, RequestId(11));
+		retire_track_alias(&aliases, 7, RequestId(11), &Path::default(), "track");
 
 		let err = resolve_track_alias(&crate::time::sim(), aliases.consume(), 7)
 			.await
@@ -9277,7 +9314,7 @@ mod tests {
 	fn subscribe_ok_reclaims_a_retired_alias() {
 		let aliases = TrackAliases::default();
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
-		retire_track_alias(&aliases, 7, RequestId(11));
+		retire_track_alias(&aliases, 7, RequestId(11), &Path::default(), "track");
 
 		insert_track_alias(&aliases, 7, RequestId(13)).unwrap();
 
@@ -9286,6 +9323,38 @@ mod tests {
 			aliases.read().retired.is_empty(),
 			"reclaiming an alias must drop its tombstone",
 		);
+	}
+
+	/// Subscribing to a track again forgets its tombstone, so a publisher that reuses the
+	/// alias (draft-22 section 3.1.3) can have its first group beat the SUBSCRIBE_OK: the
+	/// group waits for the binding instead of being dropped. Another track's tombstone
+	/// still drops its stragglers at once.
+	#[kio::test]
+	async fn resubscribing_lets_a_reused_alias_beat_its_subscribe_ok() {
+		let catalog = Path::new("demo").unwrap();
+		let aliases = TrackAliases::default();
+		insert_track_alias(&aliases, 0, RequestId(11)).unwrap();
+		retire_track_alias(&aliases, 0, RequestId(11), &catalog, "catalog.json");
+		insert_track_alias(&aliases, 1, RequestId(13)).unwrap();
+		retire_track_alias(&aliases, 1, RequestId(13), &catalog, "video");
+
+		forget_retired_track(&aliases, &catalog, "catalog.json");
+
+		let runtime = crate::time::sim();
+		let early = resolve_track_alias(&runtime, aliases.consume(), 0);
+		let mut early = std::pin::pin!(early);
+		assert!(poll!(&mut early).is_pending(), "the early group waits for SUBSCRIBE_OK");
+
+		insert_track_alias(&aliases, 0, RequestId(15)).unwrap();
+		assert!(matches!(poll!(&mut early), std::task::Poll::Ready(Ok(RequestId(15)))));
+
+		let straggler = resolve_track_alias(&runtime, aliases.consume(), 1);
+		let mut straggler = std::pin::pin!(straggler);
+		assert!(matches!(
+			poll!(&mut straggler),
+			std::task::Poll::Ready(Err(Error::Cancel))
+		));
+		assert_eq!(aliases.read().retired.len(), 1);
 	}
 
 	/// An alias still serving a live subscription is not a tombstone, so a publisher
@@ -10922,7 +10991,7 @@ mod tests {
 
 		for i in 0..(RETIRED_ALIAS_CAPACITY as u64 + 10) {
 			insert_track_alias(&aliases, i, RequestId(i)).unwrap();
-			retire_track_alias(&aliases, i, RequestId(i));
+			retire_track_alias(&aliases, i, RequestId(i), &Path::default(), "track");
 		}
 
 		let table = aliases.read();
