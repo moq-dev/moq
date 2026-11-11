@@ -109,6 +109,7 @@ export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 export type BroadcastInput = {
 	// The read-side origin to borrow. Independent of any connection: whichever sessions feed
 	// the origin resolve the broadcast, and the handle spans their reconnects.
+	// Unset reads "connecting", like an origin with no session attached, never "offline".
 	origin: Getter<Moq.Origin.Reader | undefined>;
 
 	// Whether to start downloading the broadcast. Defaults to true.
