@@ -19,7 +19,8 @@
 (* Scope: one target, redirects between endpoints the policy accepts plus  *)
 (* one it refuses, no retry window, no tokens, not connecting once, and no *)
 (* redirect-loop scoring. A session's age stands in for its tenure: 1 is   *)
-(* past `Backoff::healthy`.                                                *)
+(* past `Backoff::healthy`. Until a session has been established, a failed *)
+(* dial ends the policy (`Reconnect::established`).                        *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -158,6 +159,12 @@ CallerSame == UNCHANGED callerVars
 (* The policy: one pass of `Reconnect::poll`'s loop.                        *)
 (***************************************************************************)
 
+\* `Reconnect::established`. A dial that connects once the policy stopped
+\* waiting on it still counts toward `used`, but that happens only after an
+\* `Abandon`, which ends the policy until a session has been established. So
+\* wherever the policy reads it, any session connected means one was established.
+Established == used > 0
+
 \* `Reconnect::done`: the live session and the predecessor go with the policy.
 Done ==
     /\ phase' = "done"
@@ -228,11 +235,17 @@ Abandon ==
     /\ ~PredDue
     /\ phase = "dialing"
     /\ timer["dial"]
-    /\ phase' = "backoff"
-    /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
     /\ dial' = "none"
     /\ probing' = FALSE
-    /\ UNCHANGED <<live, watch, probe, pred, target, queue, sess, used, dialTo,
+    /\ IF Established
+       THEN /\ phase' = "backoff"
+            /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
+            /\ UNCHANGED <<live, pred, queue>>
+       \* The first walk fails fast: `Action::Abandon`, then the `Done` it queued.
+       ELSE /\ Done
+            /\ queue' = <<"Done">>
+            /\ UNCHANGED timer
+    /\ UNCHANGED <<watch, probe, target, sess, used, dialTo,
                    misdials, lc, lcSess, migrating, spred, started, ended>>
 
 BackoffEnds ==
@@ -358,13 +371,15 @@ Connected ==
           ELSE UNCHANGED <<phase, live, watch, queue, probe>>
     /\ UNCHANGED <<pred, target, timer, dialTo, probing, misdials>>
 
-\* A dial failed, with a verdict a retry may repair or one it cannot.
+\* A dial failed, with a verdict a retry may repair or one it cannot. Until a
+\* session has been established, any failure ends the policy.
 Failed ==
     /\ dial # "none"
     /\ dial' = "none"
     /\ IF phase # "dialing"
        THEN UNCHANGED <<phase, live, pred, queue, timer, callerVars>>
-       ELSE \/ /\ phase' = "backoff"
+       ELSE \/ /\ Established
+               /\ phase' = "backoff"
                /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
                /\ UNCHANGED <<live, pred, queue, callerVars>>
             \/ /\ Done
@@ -529,6 +544,10 @@ NoOrphan ==
 \* `Presence`: started - ended is 1 while connected and 0 otherwise.
 PresenceBalanced ==
     Parked => started - ended = IF lc = "live" THEN 1 ELSE 0
+
+\* The first walk fails fast: nothing backs off before a session has been
+\* established, so a setup mistake ends the policy instead of looping.
+FirstWalkFailsFast == phase = "backoff" => Established
 
 \* A dial never goes elsewhere than where a session the policy still holds
 \* was redirected and the policy never acted on it: the peer is leaving, and

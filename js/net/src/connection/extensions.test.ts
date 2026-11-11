@@ -1,6 +1,4 @@
 import { expect, spyOn, test } from "bun:test";
-import { SessionCode } from "../error.ts";
-import { AuthMessage, AuthOk } from "../ietf/auth.ts";
 import { PublishNamespace } from "../ietf/publish_namespace.ts";
 import { RequestOk } from "../ietf/request.ts";
 import { ALPN, Version } from "../ietf/version.ts";
@@ -35,39 +33,13 @@ async function acceptWith(extensions: Extensions) {
 }
 
 test("a declined extension stays out of SETUP", async () => {
-	// Control: both sides offer both.
+	// Control: both sides offer it.
 	const all = await handshake({}, {});
 	expect(all.accepted.solicit).toBe(true);
-	expect(all.accepted.auth).toBe(true);
-	expect(all.dialed.auth).toBe(true);
 
-	const none = await handshake({ auth: false, solicit: false }, {});
+	const none = await handshake({ solicit: false }, {});
 	expect(none.accepted.solicit).toBeUndefined();
-	expect(none.accepted.auth).toBe(false);
-	// Negotiated only when both offer it, so the declining side does not speak it either.
-	expect(none.dialed.auth).toBe(false);
 	expect(none.dialed.solicit).toBe(true);
-});
-
-test("an AUTH to a side that declined it closes the session", async () => {
-	// Control: offered by both, the connection credential is granted.
-	const offering = await acceptWith({});
-	const granted = await Stream.open(offering.pair.client, { version: VERSION });
-	await new AuthMessage(0n, new Uint8Array()).encode(granted.writer, VERSION);
-	expect(await granted.reader.u53()).toBe(AuthOk.id);
-	offering.connection.close();
-
-	const logged = spyOn(console, "error").mockImplementation(() => void 0);
-	try {
-		const declined = await acceptWith({ auth: false });
-		const refused = await Stream.open(declined.pair.client, { version: VERSION });
-		// The session closes on the message type alone, so the rest of the write may fail.
-		await new AuthMessage(0n, new Uint8Array()).encode(refused.writer, VERSION).catch(() => undefined);
-		const info = await declined.pair.client.closed;
-		expect(info.closeCode).toBe(SessionCode.ProtocolViolation);
-	} finally {
-		logged.mockRestore();
-	}
 });
 
 test("a side that declined solicit takes an unsolicited announce", async () => {

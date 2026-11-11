@@ -3,9 +3,10 @@
 
 type Vars = {
 	net: "connecting" | "connected" | "retrying" | "refused";
+	heard: boolean;
 	live: boolean;
 	active: boolean;
-	status: "offline" | "loading" | "live" | "unsupported";
+	status: "connecting" | "offline" | "loading" | "live" | "unsupported";
 	media: "none" | "playing" | "stalled";
 	paused: boolean;
 };
@@ -13,6 +14,8 @@ type Vars = {
 const connection = { connecting: "dialing", connected: "connected", retrying: "waiting to redial", refused: "refused" };
 
 const screen = (v: Vars) => {
+	if (v.net === "refused") return "could not connect, and why";
+	if (v.status === "connecting") return "CONNECTING";
 	if (v.status === "unsupported") return "UPDATE YOUR PLAYER";
 	if (v.status === "offline") return "OFFLINE";
 	if (v.paused) return "paused";
@@ -33,10 +36,10 @@ const steps: Record<string, string> = {
 	DialFails: "a dial fails",
 	Redial: "the backoff ends",
 	Refused: "the relay refuses the token",
+	Initial: "the relay's announcements arrive",
 	Drop: "the connection drops",
 	Start: "the publisher goes live",
 	Stop: "the publisher stops",
-	Announced: "the broadcast's announcement arrives",
 	CatalogArrives: "the catalog arrives",
 	CatalogTooNew: "the catalog needs a newer player",
 	Frames: "frames arrive",

@@ -7,6 +7,7 @@
 
 mod handoff;
 mod routing;
+mod rtt;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -386,6 +387,22 @@ impl Sim {
 	pub fn collect(&mut self, node: Node, id: Id) {
 		self.nodes[node].collect(id);
 		self.flush();
+	}
+
+	/// `node` measures its link to `peer` at `ms`, or nothing.
+	pub fn rtt(&mut self, node: Node, peer: Node, ms: Option<u64>) {
+		self.nodes[node].rtt(peer, ms.map(std::time::Duration::from_millis));
+		self.flush();
+	}
+
+	/// What `node` last sent `peer` for `id`.
+	pub fn sent(&self, node: Node, peer: Node, id: Id) -> Option<Reach> {
+		self.nodes[node].sent.get(&(id, peer)).cloned()
+	}
+
+	/// The streams `node` sends a route for `id` on.
+	pub fn sending(&self, node: Node, id: Id) -> usize {
+		Router::<Node, Item>::of(&self.nodes[node].sent, id).count()
 	}
 
 	pub fn hold(&mut self, from: Node, to: Node) {

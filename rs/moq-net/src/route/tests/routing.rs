@@ -783,6 +783,7 @@ fn a_newer_request_raises_the_pending_one() {
 		seqno: 0,
 		metric: 1,
 		down_only: false,
+		rtt: None,
 		hops: [].into(),
 	};
 	relay.route(up, 7, Some(Reach::Finite(advert)));
@@ -871,6 +872,7 @@ fn an_overflowing_route_neither_certifies_nor_holds() {
 			seqno: 0,
 			metric,
 			down_only: false,
+			rtt: None,
 			hops: [].into(),
 		}))
 	};
@@ -923,6 +925,7 @@ fn a_fresh_uncertified_claim_waits_on_an_older_floor() {
 			seqno: 0,
 			metric,
 			down_only: false,
+			rtt: None,
 			hops: [].into(),
 		}))
 	};

@@ -24,6 +24,7 @@ mod drained_claim;
 mod empty_group;
 mod errored_end;
 mod extensions;
+mod failover_chain;
 mod fastest_reader;
 mod fetch_cancel;
 mod fetch_fanout;

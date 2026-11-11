@@ -7,6 +7,7 @@ import * as Moq from "@moq/net";
 import { Origin, Path } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Mint from "../../net/src/mint.ts";
+import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
 
 function publish(origin: Origin.Producer, path: Path.Valid) {
@@ -146,6 +147,8 @@ describe("unsupported catalog", () => {
 // broadcast cut every viewer off before it drained the tail the broadcast still served.
 it("keeps playing a finished catalog until the broadcast ends", async () => {
 	const owner = new Origin.Producer();
+	// A session that could announce the broadcast, so its absence reads offline.
+	wireOf(owner).attach(true);
 	const name = Path.from("room/live.hang");
 	const published = publish(owner, name);
 	const producer = new Json.Snapshot.Producer<Catalog.Root>({
@@ -177,6 +180,7 @@ it("keeps playing a finished catalog until the broadcast ends", async () => {
 // A catalog track that ends before its first snapshot has nothing to play, so it reads as offline.
 it("reports a catalog that ends empty as offline", async () => {
 	const owner = new Origin.Producer();
+	wireOf(owner).attach(true);
 	const name = Path.from("room/live.hang");
 	const published = publish(owner, name);
 	const producer = new Json.Snapshot.Producer<Catalog.Root>({
@@ -765,6 +769,7 @@ describe("refusal", () => {
 	for (const follow of [true, false]) {
 		it(`reports a refusal until a fresh request (follow: ${follow})`, async () => {
 			const owner = new Origin.Producer();
+			wireOf(owner).attach(true);
 			const route = owner.claim(Path.from("room"));
 			const requests = route.requested();
 			const name = new Signal(Path.from("room/refused.hang"));
