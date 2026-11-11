@@ -126,8 +126,23 @@ impl Skipped {
 		}
 	}
 
+	/// One past the last sequence of the run holding `sequence`, if it was skipped.
+	pub fn run_end(&self, sequence: u64) -> Option<u64> {
+		let skipped = self.0.as_ref()?;
+		skipped.runs.get_key_value(&sequence).map(|(run, _)| run.end().saturating_add(1))
+	}
+
+	/// Forget every run below `floor`, which a fold settled.
+	pub fn forget_below(&mut self, floor: u64) {
+		if let Some(skipped) = &mut self.0
+			&& let Some(below) = floor.checked_sub(1)
+			&& !skipped.runs.is_empty()
+		{
+			skipped.runs.remove(0..=below);
+		}
+	}
+
 	/// How many runs it holds.
-	#[cfg(test)]
 	pub fn runs(&self) -> usize {
 		self.0.as_ref().map_or(0, |skipped| skipped.runs.len())
 	}

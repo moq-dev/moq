@@ -1,11 +1,21 @@
 //! What one reader did with each group sequence, as runs: handed out, skipped as stale, given
 //! up, and what its wire was told.
 
+use std::ops::Range;
+use std::sync::Arc;
+
 use rangemap::{RangeMap, RangeSet};
 
+use super::cache;
 use super::delivered::Delivered;
 use super::skipped::Skipped;
 use super::track::Hole;
+use crate::Error;
+
+/// Heap a record keeps per run: its widest entry, doubled for half-full `BTreeMap` nodes as
+/// the cache's own overheads are. Billed to the pool, so a peer fragmenting what a reader
+/// settles costs what the cache would hold, never more.
+pub(super) const RUN_OVERHEAD: u64 = 2 * size_of::<(Range<u64>, Pending)>() as u64;
 
 /// One reader's record of every sequence it settled, as runs.
 #[derive(Default)]
@@ -24,6 +34,13 @@ pub(crate) struct Record {
 	pub(super) pending: RangeMap<u64, Pending>,
 	/// Every sequence already reported, with how.
 	pub(super) reported: RangeMap<u64, Report>,
+	/// Everything below was settled for good and folded away under pool pressure: handed
+	/// out, or reported final, so none is handed out or reported again.
+	floor: u64,
+	/// What the runs above the floor bill to the track's account, opened on the first run.
+	bill: Option<cache::Reader>,
+	/// The pool needed a run this reader was promised, so it ended.
+	failed: bool,
 }
 
 /// A run a reader has yet to report, and whether it was copied from the track's runs, which a
@@ -90,6 +107,15 @@ impl Report {
 		}
 	}
 
+	/// Whether it settles its run for good, so a fold may forget it: served, skipped, dropped
+	/// for good, or stale with its group handed out since.
+	fn is_final(self) -> bool {
+		match self {
+			Self::Settled | Self::Skip | Self::Dropped => true,
+			Self::Stale { taken, .. } => taken,
+		}
+	}
+
 	/// Whether an update reopens it: a stale drop nothing settled since.
 	pub fn reopens(self) -> bool {
 		matches!(
@@ -106,7 +132,11 @@ impl Report {
 impl Record {
 	/// Report the first part of `range` nothing already reported blocks, as `hole` says,
 	/// replacing what it goes out over. `None` when every part is blocked.
-	pub fn report(&mut self, range: std::ops::Range<u64>, hole: &Hole, received: bool) -> Option<std::ops::Range<u64>> {
+	pub fn report(&mut self, range: Range<u64>, hole: &Hole, received: bool) -> Option<Range<u64>> {
+		let range = range.start.max(self.floor)..range.end;
+		if range.is_empty() {
+			return None;
+		}
 		let blocked: RangeSet<u64> = self
 			.reported
 			.overlapping(&range)
@@ -121,7 +151,7 @@ impl Record {
 	/// The lowest pending run's first part nothing already reported blocks, now reported, with
 	/// why; the rest of that run waits its turn.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn next_pending(&mut self) -> Option<(std::ops::Range<u64>, Hole)> {
+	pub fn next_pending(&mut self) -> Option<(Range<u64>, Hole)> {
 		while let Some((range, pending)) = self.pending.iter().next().map(|(range, pending)| (range.clone(), pending.clone())) {
 			self.pending.remove(range.clone());
 			if let Some(gap) = self.report(range.clone(), &pending.hole, pending.received) {
@@ -156,7 +186,7 @@ impl Record {
 impl Record {
 	/// Whether the wire was told of `sequence`: served, or given up.
 	pub fn told(&self, sequence: u64) -> bool {
-		self.reported.contains_key(&sequence)
+		sequence < self.floor || self.reported.contains_key(&sequence)
 	}
 
 	/// Whether `sequence` went out as a stale drop, which a group still replaces.
@@ -165,13 +195,17 @@ impl Record {
 	}
 
 	/// The parts of `range` the wire was told nothing of.
-	pub fn untold(&self, range: std::ops::Range<u64>) -> RangeSet<u64> {
-		self.reported.gaps(&range).collect()
+	pub fn untold(&self, range: Range<u64>) -> RangeSet<u64> {
+		let range = range.start.max(self.floor)..range.end;
+		match range.is_empty() {
+			true => RangeSet::new(),
+			false => self.reported.gaps(&range).collect(),
+		}
 	}
 
 	/// Record that the wire was told `report` of `range`. A stale report keeps the parts an
 	/// upstream's stale run decided, which stay the upstream's to judge again.
-	pub fn tell(&mut self, range: std::ops::Range<u64>, report: Report) {
+	pub fn tell(&mut self, range: Range<u64>, report: Report) {
 		if range.is_empty() {
 			return;
 		}
@@ -200,14 +234,14 @@ impl Record {
 	}
 
 	/// Forget what the wire was told of `range`, which is owed again.
-	pub fn untell(&mut self, range: std::ops::Range<u64>) {
+	pub fn untell(&mut self, range: Range<u64>) {
 		if !range.is_empty() {
 			self.reported.remove(range);
 		}
 	}
 
 	/// Forget the drops of `range` the wire was told, which a verdict or group replaces.
-	pub fn replace_drops(&mut self, range: std::ops::Range<u64>) {
+	pub fn replace_drops(&mut self, range: Range<u64>) {
 		let drops: Vec<_> = self
 			.reported
 			.overlapping(&range)
@@ -227,5 +261,252 @@ impl Record {
 			.filter(|(_, report)| matches!(report, Report::Stale { expired: true, .. }))
 			.map(|(run, _)| run.clone())
 			.collect()
+	}
+}
+
+/// What a record bills, and the debt its track left to its readers.
+impl Record {
+	/// How many runs it holds above its floor, each billed [`RUN_OVERHEAD`]: the handed-out
+	/// prefix is one run that bills nothing.
+	fn runs(&self) -> u64 {
+		(self.delivered.runs().saturating_sub(1)
+			+ self.skipped.runs()
+			+ self.written_off.len()
+			+ self.pending.len()
+			+ self.reported.len()) as u64
+	}
+
+	/// Whether the pool needed a run this reader was promised, which ended it.
+	pub(super) fn failed(&self) -> bool {
+		self.failed
+	}
+
+	/// Bill this record to `account`, opened on its first run, and pay what it can of the
+	/// debt the track left its readers by folding what it settled for good into its floor.
+	/// Ends the reader with [`Error::Lagged`] when a debt is left that only a run it was
+	/// promised could pay, and its record is one to end (see [`cache::Reader::ends`]).
+	///
+	/// Call with no track lock held: a growing bill settles the track's debt.
+	pub(super) fn settle(&mut self, account: impl FnOnce() -> Arc<cache::Track>) -> Result<(), Error> {
+		if self.failed {
+			return Err(Error::Lagged);
+		}
+		let bytes = self.runs() * RUN_OVERHEAD;
+		let bill = match &mut self.bill {
+			Some(bill) => bill,
+			None if bytes == 0 => return Ok(()),
+			None => self.bill.insert(account().reader()),
+		};
+		bill.set(bytes);
+		if bill.debt() == 0 {
+			return Ok(());
+		}
+		self.fold();
+		let bytes = self.runs() * RUN_OVERHEAD;
+		let bill = self.bill.as_mut().expect("opened above");
+		let freed = bill.size().saturating_sub(bytes);
+		bill.set(bytes);
+		bill.pay(freed);
+		if bill.debt() > 0 && bill.ends() {
+			self.fail();
+			return Err(Error::Lagged);
+		}
+		Ok(())
+	}
+
+	/// Raise the floor over the final prefix: each run from it up to the lowest one that is
+	/// not final. Final are the groups handed out, the reports nothing reopens, and this
+	/// reader's own stale skips, which a wider budget would offer again only while the pool
+	/// still held their groups. Not final are the reports an update reopens, the runs given
+	/// up and not reported yet, and the sequences nothing settled.
+	fn fold(&mut self) {
+		let mut floor = self.floor;
+		loop {
+			let next = match self.reported.get_key_value(&floor) {
+				Some((run, report)) if report.is_final() => run.end,
+				Some(_) => break,
+				None if self.pending.contains_key(&floor) => break,
+				None => {
+					let local = [
+						self.delivered.run_end(floor),
+						self.written_off.get(&floor).map(|run| run.end),
+						self.skipped.run_end(floor),
+					];
+					let Some(end) = local.into_iter().flatten().max() else {
+						break;
+					};
+					// A report or a run given up inside it is judged on its own.
+					let span = floor..end;
+					[
+						self.reported.overlapping(&span).next().map(|(run, _)| run.start),
+						self.pending.overlapping(&span).next().map(|(run, _)| run.start),
+					]
+					.into_iter()
+					.flatten()
+					.fold(end, |end, start| end.min(start.max(floor)))
+				}
+			};
+			if next <= floor {
+				break;
+			}
+			floor = next;
+		}
+		if floor == self.floor {
+			return;
+		}
+		self.floor = floor;
+		self.delivered.forget_below(floor);
+		self.skipped.forget_below(floor);
+		self.written_off.remove(0..floor);
+		self.pending.remove(0..floor);
+		self.reported.remove(0..floor);
+	}
+
+	/// End this reader: forget every run, releasing its bill against the debt.
+	fn fail(&mut self) {
+		let bill = self.bill.take();
+		*self = Self {
+			failed: true,
+			..Self::default()
+		};
+		drop(bill);
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use std::time::Duration;
+
+	use super::*;
+	use crate::StreamError;
+
+	fn account() -> (cache::Pool, Arc<cache::Track>) {
+		let pool = cache::Pool::unbounded();
+		let track = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		(pool, track)
+	}
+
+	/// Leave the track's readers `debt` to pay.
+	fn owe(track: &cache::Track, mut debt: u64) {
+		track.owe_readers(&mut debt);
+	}
+
+	/// Each run past the handed-out prefix bills a fixed cost, released when the record goes.
+	#[test]
+	fn a_record_bills_each_run() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		for sequence in 0..4 {
+			record.delivered.insert(sequence);
+		}
+		record.settle(|| track.clone()).unwrap();
+		assert_eq!(pool.used(), 0, "a lone prefix bills nothing");
+		for sequence in (10..1_000).step_by(2) {
+			record.reported.insert(sequence..sequence + 1, Report::Dropped);
+		}
+		record.settle(|| track.clone()).unwrap();
+		assert_eq!(pool.used(), 495 * RUN_OVERHEAD);
+		drop(record);
+		assert_eq!(pool.used(), 0);
+	}
+
+	/// Under a debt its track could not pay, a record folds what is final into its floor:
+	/// handed-out groups and reports nothing reopens, however many sequences a run spans.
+	/// Folded sequences count as handed out and reported.
+	#[test]
+	fn a_debt_folds_the_final_prefix() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.delivered.insert(0);
+		record.reported.insert(1..u64::MAX / 2, Report::Dropped);
+		record.delivered.insert(u64::MAX / 2);
+		record.reported.insert(u64::MAX / 2 + 1..u64::MAX / 2 + 2, Report::Skip);
+		record.settle(|| track.clone()).unwrap();
+		assert_eq!(pool.used(), 3 * RUN_OVERHEAD);
+		owe(&track, pool.used());
+		record.settle(|| track.clone()).unwrap();
+		assert_eq!(pool.used(), 0, "all of it folded");
+		assert!(record.told(7) && record.delivered.contains(7), "a folded drop stays dropped");
+		assert_eq!(record.report(0..u64::MAX / 2 + 2, &Hole::Skip, false), None);
+		let mut untold = RangeSet::new();
+		untold.insert(u64::MAX / 2 + 2..u64::MAX / 2 + 3);
+		assert_eq!(record.untold(0..u64::MAX / 2 + 3), untold);
+	}
+
+	/// A debt that needs a run this reader was promised ends it with `TooFarBehind`: a stale
+	/// report an update reopens, or a run above one. What is final below it still folds.
+	#[test]
+	fn a_debt_on_a_promise_ends_the_reader() {
+		for promise in [
+			Report::Stale {
+				received: false,
+				expired: false,
+				taken: false,
+			},
+			Report::Stale {
+				received: false,
+				expired: true,
+				taken: false,
+			},
+		] {
+			let (pool, track) = account();
+			let mut record = Record::default();
+			record.delivered.insert(0);
+			record.reported.insert(1..2, Report::Dropped);
+			record.reported.insert(2..3, promise);
+			// Enough runs above it that ending the reader frees more than evicting a group.
+			for sequence in (5..1_000).step_by(2) {
+				record.reported.insert(sequence..sequence + 1, Report::Dropped);
+			}
+			record.settle(|| track.clone()).unwrap();
+			owe(&track, pool.used());
+			let err = record.settle(|| track.clone()).unwrap_err();
+			assert_eq!(StreamError::from(&err), StreamError::TooFarBehind, "{promise:?}");
+			assert_eq!(pool.used(), 0, "{promise:?}: its record went with it");
+			assert!(record.failed());
+			assert!(record.settle(|| track.clone()).is_err(), "{promise:?}: it stays ended");
+		}
+	}
+
+	/// A run given up and not reported yet, or a sequence nothing settled, is no fold's to
+	/// forget either; a debt the fold pays leaves the reader running.
+	#[test]
+	fn a_debt_the_fold_pays_leaves_the_reader() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.delivered.insert(0);
+		record.reported.insert(1..2, Report::Dropped);
+		record.pending.insert(2..3, Pending::own(Hole::drop(StreamError::NotFound)));
+		record.skipped.insert(4, Duration::from_secs(1));
+		record.settle(|| track.clone()).unwrap();
+		owe(&track, RUN_OVERHEAD);
+		record.settle(|| track.clone()).unwrap();
+		assert_eq!(pool.used(), 2 * RUN_OVERHEAD, "the drop folded");
+		assert!(!record.told(2), "the run given up is still owed");
+	}
+
+	/// Of a track's readers, one holding little never ends for one holding much, nor one
+	/// holding less than a cached group costs.
+	#[test]
+	fn a_debt_ends_only_a_reader_holding_much() {
+		let (pool, track) = account();
+		let stale = Report::Stale {
+			received: false,
+			expired: false,
+			taken: false,
+		};
+		let mut small = Record::default();
+		small.reported.insert(1..2, stale);
+		let mut large = Record::default();
+		for sequence in (1..1_000).step_by(2) {
+			large.reported.insert(sequence..sequence + 1, stale);
+		}
+		small.settle(|| track.clone()).unwrap();
+		large.settle(|| track.clone()).unwrap();
+		owe(&track, RUN_OVERHEAD);
+		small.settle(|| track.clone()).unwrap();
+		assert!(large.settle(|| track.clone()).is_err());
+		assert_eq!(pool.used(), RUN_OVERHEAD);
+		small.settle(|| track.clone()).unwrap();
 	}
 }

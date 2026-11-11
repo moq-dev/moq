@@ -2872,8 +2872,12 @@ impl TrackState {
 		let mut paid = 0u64;
 		let mut scanned = 0usize;
 		let mut fresh = Vec::new();
+		// Whether every cold group was offered, so a debt left at the end is one the track
+		// itself cannot pay.
+		let mut swept = true;
 		for _ in 0..self.evict.len() {
 			if self.debt == 0 || paid >= cap || scanned >= EVICT_SCAN {
+				swept = self.debt == 0 || paid >= cap;
 				break;
 			}
 			let Some((sequence, stamp)) = self.evict.pop_front() else {
@@ -2956,6 +2960,11 @@ impl TrackState {
 				self.debt -= freed.min(self.debt);
 				paid = paid.saturating_add(freed);
 			}
+		}
+		// Last, the readers' records: nothing cheaper is left, so each reader folds what it
+		// settled for good, and one that cannot ends rather than forgo a promise.
+		if swept && self.debt > 0 && paid < cap {
+			self.cache.owe_readers(&mut self.debt);
 		}
 		paid
 	}
@@ -9508,6 +9517,18 @@ impl Subscriber {
 	/// The next group in arrival order, or in sequence order for `ordered`, skipping any
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		let res = self.poll_group_unsettled(ordered, waiter);
+		// What the read settled is billed now, and pays what it can of its readers' debt.
+		match self.settle_record() {
+			Ok(()) => res,
+			Err(err) => Poll::Ready(Err(err)),
+		}
+	}
+
+	fn poll_group_unsettled(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		if self.record().failed() {
+			return Poll::Ready(Err(Error::Lagged));
+		}
 		// Ahead of the meter: a read that parks again counts only what a peek skipped.
 		let walk = idle::Walk::new(ordered);
 		match &self.inner {
@@ -9692,8 +9713,17 @@ impl Subscriber {
 		self.record().delivered.runs()
 	}
 
+	/// Bill what this reader settled, and pay what it can of the debt its track left its
+	/// readers; [`Error::Lagged`] once that needed a run it was promised.
+	fn settle_record(&mut self) -> Result<()> {
+		let (state, record) = match &mut self.inner {
+			Inner::Plain(cursor) => (&cursor.state, &mut cursor.record),
+			Inner::Resume(_, logical) => (&logical.state, &mut logical.record),
+		};
+		record.settle(|| state.read().cache.clone())
+	}
+
 	/// What this reader settled.
-	#[cfg(test)]
 	fn record(&self) -> &Record {
 		match &self.inner {
 			Inner::Plain(cursor) => &cursor.record,
@@ -9973,6 +10003,11 @@ impl Subscriber {
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_drop_probing(&mut self, probe: bool, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, Hole)> {
+		// What a publisher told its wire since is billed now. A reader the pool ended reports
+		// nothing more: its reads fail with the reason.
+		if self.settle_record().is_err() {
+			return Poll::Pending;
+		}
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.poll_drop(probe, waiter),
 			// Each copy reports to its own route; the logical record keeps one route's run from
@@ -10138,6 +10173,8 @@ impl Subscriber {
 			// sources even while nobody reads.
 			Inner::Resume(resume, _) => resume.mirror().sync(),
 		}
+		// A reader the pool ended reports it on its next read.
+		let _ = self.settle_record();
 		Ok(())
 	}
 
@@ -24161,6 +24198,75 @@ mod test {
 		);
 	}
 
+	/// A flood a reader reported, fragmented into runs alternating with upstream skips,
+	/// bills its record too. Once the pool shrinks under it and its track has shed what it
+	/// can, the reader folds the final runs into its floor and stays within the pool, while
+	/// one holding stale reports an update would reopen ends with `TooFarBehind` rather than
+	/// forgo the re-offer.
+	#[test]
+	fn a_reported_flood_folds_or_ends_the_reader() {
+		const RUNS: u64 = 1000;
+		let budget = Duration::from_secs(1);
+		for stale in [false, true] {
+			let (producer, pool) = pooled_producer(1 << 30);
+			producer.received();
+			let waiter = kio::Waiter::noop();
+			let mut subscriber = producer.subscribe(
+				Subscription::default()
+					.with_delay(crate::track::Delay::default().with_max(budget))
+					.with_range(0..),
+			);
+			let hole = match stale {
+				true => Hole::stale(budget),
+				false => Hole::drop(StreamError::Cancel),
+			};
+			let mut reported = RangeSet::new();
+			let flood = |run: u64| {
+				producer.give_up(2 * run..2 * run + 1, hole.clone());
+				producer.give_up(2 * run + 1..2 * run + 2, Hole::Skip);
+			};
+			for run in 0..RUNS {
+				flood(run);
+			}
+			while let Poll::Ready((run, _)) = subscriber.poll_drop(&waiter) {
+				assert!(!reported.overlaps(&run), "stale={stale}: {run:?} reported twice");
+				reported.insert(run);
+			}
+			assert_eq!(reported.iter().map(|run| run.end - run.start).sum::<u64>(), 2 * RUNS, "stale={stale}");
+			assert!(subscriber.poll_recv_group(&waiter).is_pending(), "stale={stale}");
+			let used = pool.used();
+			assert!(used >= 2 * RUNS * super::super::record::RUN_OVERHEAD, "stale={stale}: the record is billed");
+
+			// The flood goes on into a smaller pool, whose debt each drop accrues.
+			let capacity = 64 * (RUN_OVERHEAD + BORN_OVERHEAD);
+			pool.resize(capacity);
+			let mut read = Poll::Pending;
+			for run in RUNS..2 * RUNS {
+				flood(run);
+				read = subscriber.poll_recv_group(&waiter);
+				if read.is_ready() {
+					break;
+				}
+				while let Poll::Ready((run, _)) = subscriber.poll_drop(&waiter) {
+					assert!(!reported.overlaps(&run), "{run:?}, folded, was reported again");
+					reported.insert(run);
+				}
+			}
+			match stale {
+				true => assert!(
+					matches!(read, Poll::Ready(Err(Error::Lagged))),
+					"the stale reports could not fold"
+				),
+				false => assert!(read.is_pending(), "the reader runs on"),
+			}
+			assert!(
+				pool.used() <= capacity + 4 * (RUN_OVERHEAD + BORN_OVERHEAD),
+				"stale={stale}: the pool holds {} past {capacity}",
+				pool.used()
+			);
+		}
+	}
+
 	/// A drop-only flood of disjoint runs bills the pool and sheds its lowest runs to stay
 	/// within it, with no cached group to evict; a shed run is unknown again, so a wire cursor
 	/// reports only the runs the track still holds.
@@ -24212,6 +24318,8 @@ mod test {
 		while let Poll::Ready((run, _)) = subscriber.poll_drop(&waiter) {
 			reported.push(run);
 		}
+		// Billing the reader's record shed the track's lowest runs before it reported them.
+		let held: Vec<_> = producer.state.read().drops.iter().map(|(run, _)| run.clone()).collect();
 		assert_eq!(reported[1..], held[..]);
 	}
 
