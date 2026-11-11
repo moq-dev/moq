@@ -56,21 +56,23 @@ function setup() {
 
 // Replays LeavingStopsPublishing in `verify/Room.tla`: the screen broadcast is enabled by a live
 // share alone, so a participant who never joined, or who left, still publishes their screen.
-test("residual: a screen share publishes while not joined and after leaving", async () => {
+test("a screen share publishes only while joined", async () => {
 	const { local, screen, broadcasts } = setup();
 	try {
 		local.screenEnabled.set(true);
 		screen.out.state.set({ kind: "live", media: { video: {} } });
 		await flush();
 		expect(broadcasts.camera.enabled.peek()).toBe(false);
-		expect(broadcasts.screen.enabled.peek()).toBe(true);
+		expect(broadcasts.screen.enabled.peek()).toBe(false);
 
 		local.enabled.set(true);
 		await flush();
+		expect(broadcasts.screen.enabled.peek()).toBe(true);
+
 		local.enabled.set(false);
 		await flush();
 		expect(broadcasts.camera.enabled.peek()).toBe(false);
-		expect(broadcasts.screen.enabled.peek()).toBe(true);
+		expect(broadcasts.screen.enabled.peek()).toBe(false);
 	} finally {
 		local.close();
 	}
