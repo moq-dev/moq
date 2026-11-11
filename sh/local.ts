@@ -19,13 +19,41 @@ const child = Bun.spawn(command, {
 	stderr: "inherit",
 	env: { ...process.env, LOCAL_SUPERVISED: "1" },
 });
+// Every process below `root`, from one process table snapshot.
+function descendants(root: number): number[] {
+	const children = new Map<number, number[]>();
+	for (const line of Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid="]).stdout.toString().split("\n")) {
+		const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+		if (pid && ppid !== undefined) children.set(ppid, [...(children.get(ppid) ?? []), pid]);
+	}
+	const found: number[] = [];
+	for (let queue = [root]; queue.length; ) {
+		for (const pid of children.get(queue.pop() as number) ?? []) {
+			found.push(pid);
+			queue.push(pid);
+		}
+	}
+	return found;
+}
+
 // Forward cancellation and let the child clean up; once it exits, every survivor is ours.
+// Without a subreaper (macOS), a descendant whose parent dies leaves the tree before
+// --no-orphans sweeps it, so record the tree when cancellation arrives.
 let signaled: number | undefined;
+const tree = new Set<number>();
 for (const name of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
 	process.on(name, () => {
 		signaled ??= 128 + constants.signals[name];
+		if (process.platform !== "linux") for (const pid of descendants(process.pid)) tree.add(pid);
 		child.kill(name);
 	});
 }
 const code = await child.exited;
+for (const pid of tree) {
+	try {
+		process.kill(pid, "SIGKILL");
+	} catch {
+		// Already gone.
+	}
+}
 process.exit(signaled ?? code);
