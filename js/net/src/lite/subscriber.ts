@@ -172,9 +172,9 @@ interface SubscribeEntry {
 	tail: Tail;
 	// The first group the SUBSCRIBE asked for, if any.
 	requested?: bigint;
-	// The first group the publisher serves (SUBSCRIBE_START) and the track's exclusive end
-	// (SUBSCRIBE_FINISH), once it declares them.
-	start?: bigint;
+	// The first group the publisher serves, once SUBSCRIBE_START says: null when it starts no
+	// range. And the track's exclusive end, once SUBSCRIBE_FINISH declares it.
+	start?: bigint | null;
 	end?: bigint;
 	// The ranges on the wire by Range ID (lite-07), which each update edits.
 	live: LiveRanges;
@@ -187,9 +187,9 @@ interface SubscribeEntry {
 	declared?: { start?: bigint | null; requested?: bigint };
 	// Whether a SUBSCRIBE_UPDATE went out, which the publisher may have read before answering.
 	updated?: boolean;
-	// The number of the latest SUBSCRIBE or SUBSCRIBE_UPDATE sent: a stale drop given up under an
-	// earlier one is no verdict on the current terms. Undefined is the SUBSCRIBE's 0.
-	update?: bigint;
+	// The number of the latest SUBSCRIBE (0) or SUBSCRIBE_UPDATE sent: a stale drop given up under
+	// an earlier one is no verdict on the current terms.
+	update: bigint;
 	// The max delay the latest SUBSCRIBE or SUBSCRIBE_UPDATE asked for, in milliseconds: the budget
 	// a stale drop under it was judged by.
 	maxDelay?: number;
@@ -197,27 +197,37 @@ interface SubscribeEntry {
 	// since the publisher re-offers or drops them again under it.
 	// Coalesced, so a peer repeating a drop holds one run, not one per message.
 	stale?: DropRun[];
-	// Whether SUBSCRIBE_START arrived, which `start` alone cannot say when no range starts.
-	started?: boolean;
-	// Whether our side is FINned, which lite-07 does once the tail settles past SUBSCRIBE_FINISH.
-	fin?: boolean;
+	// The subscribe stream, from the setup that registered this entry to its end.
+	stream: SubscribeStream;
 	// How many SUBSCRIBE_UPDATEs went out, so a tail settling past SUBSCRIBE_FINISH waits a fresh
 	// grace for what one sent meanwhile asks for.
-	sent?: number;
-	// Set by the subscribe stream's FIN before lite-05, the track's only end there.
-	finished?: boolean;
-	// Settles once the subscribe stream's responses are read to its FIN or reset, which
-	// Subscriber.drain waits on.
-	responses?: Promise<void>;
+	sent: number;
 	// The ranges the SUBSCRIBE asked for, as `wireRanges` gives them.
 	asked: track.Range[];
-	// The TRACK stream that answered (lite-05+), held open as interest in the track until
-	// the SUBSCRIBE has its first response, so the publisher's demand never lapses between
-	// the two.
-	held?: Stream;
-	// Called at the SUBSCRIBE's first response (lite-05+). Until then a SUBSCRIBE without an
-	// instance may be answered by whichever stream won the path, so a replacement refuses it.
-	answered?: () => void;
+	// Until the SUBSCRIBE's first response (lite-05+); see `Unanswered`.
+	unanswered?: Unanswered;
+}
+
+// A subscribe stream's phases. Every SUBSCRIBE_UPDATE and our FIN go out on it.
+type SubscribeStream =
+	// Being set up: its responses are not read yet.
+	| { kind: "setup" }
+	// Its responses are read until the publisher's FIN or reset, which Subscriber.drain waits on.
+	| { kind: "reading"; responses: Promise<void> }
+	// Our side is FINned too, which lite-05+ does once the tail settles past the publisher's end.
+	| { kind: "fin"; responses: Promise<void> }
+	// The publisher's FIN finished the track, as only it does before lite-05, where our side
+	// never FINs.
+	| { kind: "finished"; responses: Promise<void> };
+
+// A lite-05+ SUBSCRIBE waiting for its first response.
+interface Unanswered {
+	// The TRACK stream that answered, held open as interest in the track, so the publisher's
+	// demand never lapses between the two.
+	held: Stream;
+	// Aborted at the first response. Until then a SUBSCRIBE without an instance may be answered
+	// by whichever stream won the path, so a replacement refuses it.
+	answered: AbortController;
 }
 
 /**
@@ -1349,9 +1359,8 @@ export class Subscriber {
 		// Sent but unanswered (lite-05+; older drafts already waited for SUBSCRIBE_OK), only a
 		// replacement refuses it, since that instance may be the one answering.
 		const replaced = this.#retirer(state, answering);
-		if (hasTrackStream(this.version) && answering) {
-			answering.addEventListener("abort", replaced);
-			entry.answered = () => answering.removeEventListener("abort", replaced);
+		if (entry.unanswered && answering) {
+			answering.addEventListener("abort", replaced, { signal: entry.unanswered.answered.signal });
 			if (answering.aborted) replaced();
 		}
 		try {
@@ -1362,8 +1371,7 @@ export class Subscriber {
 			// The publisher sends responses on this stream until its FIN. Group streams can
 			// still be in flight, so the track ends only once the tail is accounted for. A reset
 			// rejects instead, so the track ends with that error rather than a clean tail.
-			const responses = this.runResponses(stream, entry);
-			entry.responses = responses.catch(() => {});
+			const responses = this.#read(stream, entry);
 			let tailSettled = false;
 			const closed = responses.then(async () => {
 				await this.#settleTail(entry);
@@ -1406,12 +1414,12 @@ export class Subscriber {
 			// A settled lite-05+ tail acknowledges completion with FIN, without cancelling
 			// the publisher's already-finished receive half.
 			if (tailSettled && waitsForSubscriberFin(this.version)) this.#fin(stream, entry);
-			else if (!entry.fin) stream.close();
+			else if (entry.stream.kind !== "fin") stream.close();
 			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${producer.name}`);
 
 			// Only a received SUBSCRIBE_FINISH, or before lite-05 a FIN, declares the track's end: a
 			// subscription nobody wants anymore is a released copy, not finished content.
-			if (tailSettled && entry.finished) producer.finish();
+			if (tailSettled && entry.stream.kind === "finished") producer.finish();
 			hooks.releaseTrack(producer);
 		} catch (err) {
 			const e = await sessionCause(this.#quic, err);
@@ -1420,7 +1428,7 @@ export class Subscriber {
 			stream.abort(e);
 		} finally {
 			answering?.removeEventListener("abort", replaced);
-			entry.held?.close();
+			entry.unanswered?.held.close();
 			entry.datagramDemand?.();
 			if (entry.datagrams) {
 				// The stream track's end is its datagrams' end: those received with it route first.
@@ -1518,7 +1526,7 @@ export class Subscriber {
 				scale: model.timescale ?? undefined,
 			};
 			const entry = this.#register(id, msg, ranges, producer, framing, state);
-			entry.held = state.track;
+			entry.unanswered = { held: answered.stream, answered: new AbortController() };
 			settle(entry);
 			return { stream, entry };
 		} catch (err) {
@@ -1580,6 +1588,9 @@ export class Subscriber {
 			asked: [...ranges],
 			live: new LiveRanges(this.version, msg.ranges ?? []),
 			starts: new Map(),
+			update: 0n,
+			sent: 0,
+			stream: { kind: "setup" },
 		};
 		if (hasDatagrams(this.version) && !hasDatagramTracks(this.version) && state.consumer && state.legacyKey) {
 			const info = { priority: producer.priority, timescale: framing.scale };
@@ -2079,6 +2090,13 @@ export class Subscriber {
 		}
 	}
 
+	// Start reading the subscribe stream's responses; see `runResponses`.
+	#read(stream: Stream, entry: SubscribeEntry): Promise<void> {
+		const responses = this.runResponses(stream, entry);
+		entry.stream = { kind: "reading", responses: responses.catch(() => {}) };
+		return responses;
+	}
+
 	// Reads the subscribe stream's responses until FIN, recording the range the tail is
 	// accounted against: SUBSCRIBE_START/END/DROP on lite-05+, and any SUBSCRIBE_DROP after the
 	// OK before then, where the FIN itself ends the track. Reading to the FIN, rather than
@@ -2090,14 +2108,17 @@ export class Subscriber {
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
 			// The publisher answered, so its demand stands on the subscription from here.
-			entry.held?.close();
-			entry.held = undefined;
-			entry.answered?.();
-			entry.answered = undefined;
+			if (entry.unanswered) {
+				entry.unanswered.held.close();
+				entry.unanswered.answered.abort();
+				entry.unanswered = undefined;
+			}
 			if (!resp) {
 				// Before lite-05 the FIN is the track's only end.
 				if (!hasTrackStream(this.version)) {
-					entry.finished = true;
+					// Our side never FINs there, so the stream is still being read.
+					if (entry.stream.kind === "reading")
+						entry.stream = { kind: "finished", responses: entry.stream.responses };
 					return;
 				}
 				if (entry.end === undefined && hooks.trackReleased(entry.track).peek() === undefined)
@@ -2108,7 +2129,7 @@ export class Subscriber {
 			if ("ok" in resp) throw new ProtocolViolation("duplicate SUBSCRIBE_OK");
 			if ("start" in resp) {
 				if (hasRanges(this.version)) {
-					if (entry.started) throw new ProtocolViolation("duplicate SUBSCRIBE_OK");
+					if (entry.start !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_OK");
 					// One start per range the SUBSCRIBE carried, by Range ID.
 					if (BigInt(resp.start.starts.length) !== entry.live.initial)
 						throw new ProtocolViolation(
@@ -2120,23 +2141,22 @@ export class Subscriber {
 					});
 				}
 				// The lowest range start is the first group served; none leaves nothing owed.
-				entry.start = resp.start.starts.reduce<bigint | undefined>(
+				const start = resp.start.starts.reduce<bigint | undefined>(
 					(lowest, start) =>
 						start === undefined || (lowest !== undefined && lowest <= start) ? lowest : start,
 					undefined,
 				);
-				entry.started = true;
+				entry.start = start ?? null;
 				// A lite-07 tail waits for SUBSCRIBE_START to say where delivery starts.
 				entry.tail.touch();
 				// Lite-07 says where every live range starts, so the declaration follows them
 				// whatever an update changed since.
 				if (hasRanges(this.version)) this.#declare(entry);
-				else hooks.startTrack(entry.track, { start: entry.start ?? null, requested: entry.requested });
+				else hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
 				hooks.reportedLargest(entry.track, resp.start.largest);
 				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
 				// demand asks later. One that still arrives is delivered.
-				if (entry.requested !== undefined && entry.start !== undefined)
-					entry.tail.account(entry.requested, entry.start);
+				if (entry.requested !== undefined && start !== undefined) entry.tail.account(entry.requested, start);
 			} else if ("finish" in resp) {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_FINISH");
 				entry.end = resp.finish.group;
@@ -2161,7 +2181,12 @@ export class Subscriber {
 			} else if ("started" in resp) {
 				// Where a range an update added starts, from which its groups are owed.
 				const { id, start } = resp.started;
-				if (!entry.started || !entry.live.assigned(id) || id < entry.live.initial || entry.starts.has(id))
+				if (
+					entry.start === undefined ||
+					!entry.live.assigned(id) ||
+					id < entry.live.initial ||
+					entry.starts.has(id)
+				)
 					throw new ProtocolViolation(`unexpected SUBSCRIBE_STARTED: ${id}`);
 				// One retired since is owed nothing.
 				if (entry.live.get(id)) {
@@ -2176,7 +2201,7 @@ export class Subscriber {
 				// stale drop leaves a group whose stream arrived, since the stream wins over it.
 				const { start, end, update } = resp.drop;
 				// It can only echo an update this subscriber sent.
-				if (update > (entry.update ?? 0n))
+				if (update > entry.update)
 					throw new ProtocolViolation(`SUBSCRIBE_DROP names update ${update}, which was never sent`);
 				const error = resp.drop.cause(this.version);
 				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every other
@@ -2185,7 +2210,7 @@ export class Subscriber {
 				// One given up under an update since replaced says nothing of the current terms: the
 				// publisher re-offers it or drops it again under the new number, so it is still owed,
 				// and a reader that wants it fills it meanwhile.
-				if (stale && update < (entry.update ?? 0n)) continue;
+				if (stale && update < entry.update) continue;
 				entry.tail.account(start, end);
 				// Judged under the budget this subscriber sent with that update.
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
@@ -2222,17 +2247,17 @@ export class Subscriber {
 	// which waits a fresh grace rather than one that may have passed while a stream was read.
 	async #finishTail(stream: Stream, entry: SubscribeEntry): Promise<void> {
 		for (;;) {
-			const sent = entry.sent ?? 0;
+			const sent = entry.sent;
 			await this.#settleTail(entry);
-			if ((entry.sent ?? 0) === sent) break;
+			if (entry.sent === sent) break;
 		}
 		this.#fin(stream, entry);
 	}
 
 	// FIN our side once, acknowledging a settled tail without cancelling the publisher's half.
 	#fin(stream: Stream, entry: SubscribeEntry): void {
-		if (entry.fin) return;
-		entry.fin = true;
+		if (entry.stream.kind !== "reading") return;
+		entry.stream = { kind: "fin", responses: entry.stream.responses };
 		stream.writer.close();
 	}
 
@@ -2259,7 +2284,7 @@ export class Subscriber {
 		// SUBSCRIBE_STARTED named, which accounts for a skipped prefix and resolves a relative or
 		// time start; one whose SUBSCRIBE_STARTED is still on its way owes what nothing says yet.
 		if (hasRanges(this.version)) {
-			if (!entry.started) return !(end > (floor ?? 0n));
+			if (entry.start === undefined) return !(end > (floor ?? 0n));
 			const owed: track.Range[] = [];
 			for (const [id, range] of entry.live.entries()) {
 				if (!entry.starts.has(id)) return false;
@@ -2275,7 +2300,7 @@ export class Subscriber {
 		// from the floor the demand last asked for, which an update can move either way, or where
 		// SUBSCRIBE_START resolved a live-edge one. The groups the SUBSCRIBE asked for below its
 		// SUBSCRIBE_START were accounted for when it arrived.
-		if (entry.start === undefined) return true;
+		if (entry.start === undefined || entry.start === null) return true;
 		const window = new Window(ranges, entry.track.largest()?.group);
 		return window.runs(floor ?? entry.start, end).every((run) => entry.tail.covers(run.start, run.end));
 	}
@@ -2374,7 +2399,7 @@ export class Subscriber {
 				endGroup: inclusiveGroupEnd(span.end),
 				ranges: edit?.add,
 				remove: edit?.remove,
-				update: (entry.update ?? 0n) + 1n,
+				update: entry.update + 1n,
 			});
 			// A stale drop given up under the previous update may still be in flight, and this one
 			// may move the range or budget it was judged against, so the runs held as stale become
@@ -2406,7 +2431,7 @@ export class Subscriber {
 			}
 			if (refresh !== undefined) sentWanted = refresh;
 			entry.updated = true;
-			entry.sent = (entry.sent ?? 0) + 1;
+			entry.sent += 1;
 			// A tail settling past SUBSCRIBE_FINISH re-judges what the update now asks for.
 			entry.tail.touch();
 			lastSent = { ...current };
@@ -2419,7 +2444,8 @@ export class Subscriber {
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
 		let start: bigint | null = null;
-		let pending = !entry.started;
+		let pending = entry.start === undefined;
+
 		for (const id of entry.live.ids()) {
 			if (!entry.starts.has(id)) {
 				pending = true;
@@ -2793,7 +2819,9 @@ export class Subscriber {
 	 * @internal
 	 */
 	async drain(): Promise<void> {
-		await Promise.all(Array.from(this.#subscribes.values(), (entry) => entry.responses));
+		await Promise.all(
+			Array.from(this.#subscribes.values(), (entry) => entry.stream.kind !== "setup" && entry.stream.responses),
+		);
 	}
 
 	/**
@@ -2804,8 +2832,8 @@ export class Subscriber {
 	close(err: Error = new SessionError(SessionCode.Cancel)) {
 		this.#closed.abort(err);
 
-		for (const { track, finished, end, datagrams } of this.#subscribes.values()) {
-			if (finished) track.finish();
+		for (const { track, stream, end, datagrams } of this.#subscribes.values()) {
+			if (stream.kind === "finished") track.finish();
 			track.abort(err);
 			// Lite-05/06: the stream track's end is its datagrams' end. An abort after the declared
 			// end settled ends it cleanly, even while the FIN that would finalize it is in flight.

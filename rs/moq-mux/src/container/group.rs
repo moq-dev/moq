@@ -112,7 +112,7 @@ mod tests {
 		let mut media = crate::container::Producer::new(track, Hang::Legacy(crate::container::Kind::Data));
 		media.write(frame(1_000_000, b"keyframe", true)).unwrap();
 		media.write(frame(1_020_000, b"delta", false)).unwrap();
-		media.finish().unwrap();
+		let _finished = media.finish().unwrap();
 
 		let group = consumer.track("media").unwrap().fetch_group(0, None).await.unwrap();
 		let mut group = GroupConsumer::new(group, Hang::Legacy(crate::container::Kind::Data));
@@ -140,7 +140,7 @@ mod tests {
 				crate::container::Producer::new(track, Hang::new(&config, crate::container::Kind::Data).unwrap());
 			producer.write(frame(0, b"", true)).unwrap();
 			producer.write(frame(10_000, b"data", false)).unwrap();
-			producer.finish().unwrap();
+			let _finished = producer.finish().unwrap();
 			let mut live = crate::container::Consumer::new(
 				subscription,
 				Hang::new(&config, crate::container::Kind::Data).unwrap(),
@@ -171,7 +171,7 @@ mod tests {
 		media
 			.cut(Some(moq_net::Timestamp::from_micros(1_053_000).unwrap()))
 			.unwrap();
-		media.finish().unwrap();
+		let _finished = media.finish().unwrap();
 
 		let group = consumer.track("media").unwrap().fetch_group(0, None).await.unwrap();
 		let mut group = GroupConsumer::new(group, Hang::Legacy(crate::container::Kind::Video));
@@ -248,7 +248,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		media.finish().unwrap();
+		let _finished = media.finish().unwrap();
 
 		let group = consumer.track("video").unwrap().fetch_group(0, None).await.unwrap();
 		let mut group = GroupConsumer::new(group, Hang::new(&cmaf, crate::container::Kind::Video).unwrap());

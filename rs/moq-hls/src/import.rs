@@ -455,6 +455,8 @@ struct TrackState {
 	sink: Sink,
 	/// The current init segment's importer, minted by [`Self::ensure_map`].
 	generation: Option<Generation>,
+	/// The last generation's tracks once [`Import::finish`] ended them, kept servable while held.
+	finished: Option<moq_mux::container::fmp4::Finished>,
 	next_sequence: Option<u64>,
 	media_range: RangeCursor,
 	/// Consecutive failed ingest attempts, reset by any successful one. See
@@ -484,6 +486,7 @@ impl TrackState {
 			select,
 			sink,
 			generation: None,
+			finished: None,
 			next_sequence: None,
 			media_range: RangeCursor::default(),
 			failures: 0,
@@ -674,8 +677,8 @@ impl TrackState {
 
 		// The old generation must finish before retiring its catalog entries, so a subscriber
 		// draining its final group sees a clean end instead of a dropped producer.
-		if let Some(previous) = self.generation.as_mut() {
-			previous.importer.finish()?;
+		if let Some(previous) = self.generation.take() {
+			drop(previous.importer.finish()?);
 		}
 		self.generation = Some(Generation {
 			map: resource,
@@ -774,6 +777,19 @@ impl TrackState {
 		self.next_sequence = Some(sequence + 1);
 
 		Ok(())
+	}
+}
+
+/// An [`Import`] whose tracks and catalog finished, keeping them servable while held.
+#[must_use = "dropping it releases the finished tracks and catalog"]
+pub struct Finished {
+	import: Import,
+}
+
+impl Finished {
+	/// Abort every finished track and the catalog with `err`.
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
 	}
 }
 
@@ -919,14 +935,25 @@ impl Import {
 	///
 	/// The finished tracks stay servable while the import is held, so hand it and the
 	/// broadcast to a [`moq_mux::Linger`] to keep them up for late subscribers.
-	pub fn finish(&mut self) -> Result<()> {
-		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
-			if let Some(generation) = &mut track.generation {
-				generation.importer.finish()?;
+	///
+	/// A rendition that fails to finish fails the whole import: every other track and the catalog
+	/// end with that error instead of a clean finish.
+	pub fn finish(mut self) -> Result<Finished> {
+		let result = (|| {
+			for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
+				if let Some(generation) = track.generation.take() {
+					track.finished = Some(generation.importer.finish()?);
+				}
+			}
+			self.sink.catalog.finish()
+		})();
+		match result {
+			Ok(()) => Ok(Finished { import: self }),
+			Err(err) => {
+				self.abort(moq_net::Error::Transport(format!("{err:#}")));
+				Err(err.into())
 			}
 		}
-		self.sink.catalog.finish()?;
-		Ok(())
 	}
 
 	/// Abort every rendition's importer and the catalog with `err` so subscribers see the real
@@ -936,15 +963,13 @@ impl Import {
 	/// [`Import`] instead lets its tracks end as [`moq_net::Error::Dropped`]. Consumes
 	/// the import: every rendition is dead afterwards.
 	pub fn abort(mut self, err: moq_net::Error) {
-		for track in &mut self.video {
+		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
 			if let Some(generation) = track.generation.take() {
 				generation.importer.abort(err.clone());
 			}
-		}
-		if let Some(track) = &mut self.audio
-			&& let Some(generation) = track.generation.take()
-		{
-			generation.importer.abort(err.clone());
+			if let Some(finished) = track.finished.take() {
+				finished.abort(err.clone());
+			}
 		}
 		self.sink.catalog.clone().abort(err);
 	}
@@ -2148,7 +2173,7 @@ mod tests {
 			.expect("an ended playlist ends the import")
 			.unwrap();
 		assert_eq!(import.video[0].next_sequence, Some(4), "the final segment was imported");
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let mut listed = consumer.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			listed.recv_group().await.unwrap().is_some(),
@@ -2226,7 +2251,7 @@ mod tests {
 			let snapshot = catalog.snapshot();
 			assert_eq!(snapshot.video.renditions.len(), 1);
 			assert_ne!(*snapshot.video.renditions.keys().next().unwrap(), previous);
-			import.finish().unwrap();
+			drop(import.finish().unwrap());
 			std::fs::remove_dir_all(dir).unwrap();
 		}
 	}
@@ -2274,7 +2299,7 @@ mod tests {
 		let step = import.step(OnError::Warn).await.unwrap();
 		assert!(step.failed.is_none());
 		assert!(import.video[0].generation.is_some());
-		import.finish().unwrap();
+		drop(import.finish().unwrap());
 		std::fs::remove_dir_all(dir).unwrap();
 	}
 

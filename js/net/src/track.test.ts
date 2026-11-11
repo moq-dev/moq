@@ -50,7 +50,7 @@ function settle(): Promise<void> {
 function manualTime(initial: number) {
 	const clock = new Manual();
 	const installed = clock.install();
-	const to = (ms: number) => Instant.ZERO.add(Duration.millis(ms)).since(clock.now());
+	const to = (ms: number) => Instant.ZERO.saturatingAdd(Duration.millis(ms)).since(clock.now());
 	clock.jump(to(initial));
 	return {
 		set: (ms: number) => clock.jump(to(ms)),

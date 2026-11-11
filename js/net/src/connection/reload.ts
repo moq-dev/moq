@@ -842,7 +842,7 @@ export class Reload {
 	// When a retry window starting `at` expires.
 	#window(at: Instant): Instant | null {
 		const { timeout } = this.#pacing();
-		return timeout === null ? null : at.add(timeout);
+		return timeout === null ? null : at.saturatingAdd(timeout);
 	}
 
 	/**

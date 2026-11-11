@@ -66,6 +66,15 @@ test("Socket namespace exposes endpoint and both stream roles", () => {
 	expect(Socket.TrackStream).toBeFunction();
 });
 
+test("isEndpoint tells an endpoint's broadcast from media", () => {
+	for (const role of [".server", ".client"]) {
+		expect(Socket.isEndpoint(Path.from("room", role, "alice"))).toBeTrue();
+	}
+	for (const path of ["room/alice", ".server", "room/.server", "room/.server/alice/cam", "room/server/alice"]) {
+		expect(Socket.isEndpoint(Path.from(path))).toBeFalse();
+	}
+});
+
 test("an endpoint closes with its origin before it dials or accepts", async () => {
 	const origin = new Origin.Producer();
 	const endpoint = new Socket.Endpoint(origin, Path.from("room"), "alice");

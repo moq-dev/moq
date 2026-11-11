@@ -33,7 +33,7 @@ class Ticker {
 		const abort = new AbortController();
 		this.#abort = abort;
 		void (async () => {
-			let next = now().add(this.#period);
+			let next = now().saturatingAdd(this.#period);
 			for (;;) {
 				await sleepUntil(next, { signal: abort.signal }).catch(() => {});
 				if (abort.signal.aborted) return;
@@ -45,7 +45,7 @@ class Ticker {
 						console.error("ticker callback error", err);
 					}
 				}
-				next = now().add(this.#period);
+				next = now().saturatingAdd(this.#period);
 			}
 		})();
 	}

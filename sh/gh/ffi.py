@@ -87,16 +87,12 @@ def published(jobs, language, started):
 
 
 def completed(language):
-    group, _ = LANGUAGES[language]
-    # Existing direct triggers and the old per-language workflow retain their
-    # own gates. Only the shared coordinator needs per-language attribution.
+    # Direct triggers retain their own gates. Only the shared coordinator needs
+    # per-language attribution.
     if os.environ["GITHUB_EVENT_NAME"] != "workflow_run":
         output("ready", "true")
         return
     name = os.environ["UPSTREAM_NAME"]
-    if name == group:
-        output("ready", "true")
-        return
     if name != "Release FFI":
         raise ValueError(f"unexpected upstream workflow: {name}")
     run = os.environ["UPSTREAM_RUN_ID"]

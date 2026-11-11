@@ -49,8 +49,7 @@ Components follow one shape: `in` (wired inputs), `out` (read-only derived
 state), and public writable knobs. An input accepts a raw value, a signal, or
 another component's output interchangeably.
 
-Adapters: `@moq/signals/react` (`useValue`, `useSignal`), `@moq/signals/solid`
-(`createAccessor`, `createPair`), and `@moq/signals/dom` for building reactive
+Adapters: `@moq/signals/react` (`useValue`, `useSignal`) and `@moq/signals/dom` for building reactive
 DOM without a framework, which is what the UI overlays use.
 
 ```tsx
