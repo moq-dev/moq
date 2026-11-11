@@ -4,9 +4,11 @@
 Each row's Code cell is a repo-relative Rust path, then the symbols it covers,
 each in backticks; another path starts that file's symbols. Parenthesized notes
 are prose and go unchecked. A symbol `A::b` must define `A` and `b` in its file:
-an item (`fn`, `struct`, `enum`, ...), a field, or a variant. Lowercase leading
-segments name modules and are skipped. A rename or deletion of modelled code
-fails here until the table, and so the model's mapping, follows it.
+an item (`fn`, `struct`, `enum`, ...), a field, or a variant, and `b` must sit
+inside `A`'s own definition or `impl` blocks, so a same-named member of another
+type does not count. Lowercase leading segments name modules and are skipped.
+A rename or deletion of modelled code fails here until the table, and so the
+model's mapping, follows it.
 
 `--root DIR` checks another tree, for the tests.
 """
@@ -18,6 +20,8 @@ from pathlib import Path
 TICKED = re.compile(r"`([^`]+)`")
 PAREN = re.compile(r"\([^()]*\)")
 ITEM = r"\b(?:fn|struct|enum|trait|type|mod|const|static|union)\s+{}\b"
+# Where a type's members live: its definition, and each `impl` of it or a trait for it.
+OWNER = r"\b(?:(?:struct|enum|union|trait)\s+{0}\b|impl\b[^;{{]*?\b{0}\b)[^;{{]*\{{"
 # A field or variant: `name: T`, `Name,`, `Name(..)`, `Name {{`, or `Name` alone.
 MEMBER = r"^\s*(?:pub(?:\([^)]*\))?\s+)?{}\s*(?::|,|\(|\{{|$)"
 
@@ -40,6 +44,19 @@ def rows(skill: Path):
 def defines(source: str, name: str) -> bool:
     escaped = re.escape(name)
     return bool(re.search(ITEM.format(escaped), source) or re.search(MEMBER.format(escaped), source, re.MULTILINE))
+
+
+def bodies(source: str, owner: str) -> str:
+    """Join the brace-matched bodies of `owner`'s definition and `impl` blocks."""
+    spans = []
+    for match in re.finditer(OWNER.format(re.escape(owner)), source):
+        depth, start = 0, match.end() - 1
+        for end in range(start, len(source)):
+            depth += {"{": 1, "}": -1}.get(source[end], 0)
+            if depth == 0:
+                spans.append(source[start + 1 : end])
+                break
+    return "\n".join(spans)
 
 
 def check(root: Path) -> list[str]:
@@ -70,8 +87,10 @@ def check(root: Path) -> list[str]:
                 for index, segment in enumerate(segments):
                     if index < len(segments) - 1 and not segment[:1].isupper():
                         continue
-                    if not defines(source, segment):
-                        errors.append(f"{where}:{number}: `{token}`: no `{segment}` defined in its file")
+                    owner = segments[index - 1] if index else ""
+                    scope = bodies(source, owner) if owner[:1].isupper() else source
+                    if not defines(scope, segment):
+                        errors.append(f"{where}:{number}: `{token}`: no `{segment}` defined in its {f'`{owner}`' if owner[:1].isupper() else 'file'}")
             if not tokens:
                 errors.append(f"{where}:{number}: the Code cell names no code")
         if not found:

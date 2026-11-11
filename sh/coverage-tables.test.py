@@ -19,6 +19,10 @@ pub struct Reader {
 impl Reader {
     pub fn sync(&mut self) {}
 }
+pub struct Mirror;
+impl Mirror {
+    fn sync(&self) {}
+}
 """
 SKILL = """\
 # Verify
@@ -59,6 +63,10 @@ class CoverageTablesTests(unittest.TestCase):
         result = self.check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("SKILL.md:7: `Reader::sync`: no `sync` defined", result.stderr)
+
+    def test_a_rename_is_not_hidden_by_another_types_member(self):
+        self.write("src/lib.rs", SOURCE.replace("pub fn sync", "pub fn resync"))
+        self.assertIn("`Reader::sync`: no `sync` defined in its `Reader`", self.check().stderr)
 
     def test_a_renamed_type_fails(self):
         self.write("src/lib.rs", SOURCE.replace("enum Restart", "enum Policy"))

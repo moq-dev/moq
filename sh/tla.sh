@@ -16,19 +16,26 @@ fi
 
 failed=()
 for cfg in "${configs[@]}"; do
-    # The directory's spec, or where it holds several, the one the config's name starts with.
+    # The index still lists a config deleted but not yet staged.
+    [ -f "$cfg" ] || continue
+    # The directory's spec, or where it holds several, the one the config's name
+    # starts with. TLC's trace-exploration output (`*_TTrace_*.tla`) is no spec.
     dir=$(dirname "$cfg")
-    specs=("$dir"/*.tla)
+    name=$(basename "$cfg")
+    specs=()
+    for spec in "$dir"/*.tla; do
+        [[ "$spec" == *_TTrace_* ]] || specs+=("$spec")
+    done
     if [ ${#specs[@]} -gt 1 ]; then
-        name=$(basename "$cfg")
+        all=("${specs[@]}")
         specs=()
-        for spec in "$dir"/*.tla; do
+        for spec in "${all[@]}"; do
             [[ "$name" != "$(basename "$spec" .tla)"* ]] || specs+=("$spec")
         done
     fi
     if [ ${#specs[@]} -ne 1 ]; then
-        echo "error: no single spec in $dir for $cfg" >&2
-        exit 1
+        failed+=("$cfg: no single spec in $dir")
+        continue
     fi
     lang=${cfg%%/*}
     finding=false
