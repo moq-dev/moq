@@ -1822,7 +1822,7 @@ export class Publisher {
 					ns.active.delete(key);
 					const wait = lapses.get(key)?.wait ?? RETRY_BASE;
 					lapses.set(key, { snap, wait: Math.min(wait * 2, RETRY_MAX) });
-					ns.refused.set(key, now().add(Duration.millis(wait)));
+					ns.refused.set(key, now().saturatingAdd(Duration.millis(wait)));
 					ns.offered.set(key, snap);
 				}
 
@@ -1994,10 +1994,11 @@ export class Publisher {
 
 	/**
 	 * What a REQUEST_ERROR's retry interval, in milliseconds, says about re-offering the
-	 * namespace: 0 means the peer does not want this again.
+	 * namespace: 0, or an interval past the clock's range, means the peer does not want this again.
 	 */
 	#refusal(err: RequestError): Answer {
-		return err.retryInterval === 0n ? "never" : now().add(Duration.millis(toNumber(err.retryInterval)));
+		if (err.retryInterval === 0n) return "never";
+		return now().checkedAdd(Duration.millis(toNumber(err.retryInterval))) ?? "never";
 	}
 
 	/**

@@ -197,7 +197,7 @@ export class Pool {
 		if (this.#sweep !== undefined || this.#expiry === undefined || this.#tracks.size === 0) return;
 		const sweep = new AbortController();
 		this.#sweep = sweep;
-		const at = now().add(TICK.mul(this.#expiry / 2));
+		const at = now().saturatingAdd(TICK.mul(this.#expiry / 2));
 		void sleepUntil(at, { signal: sweep.signal, ref: false }).then(
 			() => {
 				if (this.#sweep !== sweep) return;
@@ -235,6 +235,8 @@ export interface Owner<E extends Entry> {
 	settle(): void;
 	/** Forget the lowest runs of the track's drop set toward `debt`, freeing about `cap` at most, and return the bytes freed. */
 	shedDrops(debt: number, cap: number): number;
+	/** Fold the oldest gaps of the track's arrivals toward `debt`, freeing about `cap` at most, and return the bytes freed. */
+	shedArrivals(debt: number, cap: number): number;
 	/** Forget the runs of the drop set given up longer than the pool's idle window before tick `now`, returning whether any went. */
 	expireDrops(now: number): boolean;
 	/** Whether the track holds a drop run a reclaim may forget, which keeps its account in the idle sweep. */
@@ -400,6 +402,13 @@ export class Track<E extends Entry> {
 			paid += size;
 			evicted = true;
 			this.#owner.evict(entry, "evicted");
+		}
+		// Then the arrivals' oldest gaps, which costs a reader only the wait for a late group, as
+		// the grace passing would.
+		if (this.#debt > 0 && paid < cap) {
+			const freed = this.#owner.shedArrivals(this.#debt, cap - paid);
+			this.#debt -= Math.min(freed, this.#debt);
+			paid += freed;
 		}
 		// Then the drop set, oldest sequences first: losing a run costs a reader a judgment or a
 		// fill, never content being read.

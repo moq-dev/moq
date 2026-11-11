@@ -46,4 +46,4 @@ AGENTS.md's IETF rule is reworded only if the maintainer asks.
 
 ## Related
 
-- [Simplification audit](/quest/m3/audit-simplify.md) - owns duplication inside the IETF code that remains
+- [Code audit](/quest/m3/audit-code.md) - owns duplication inside the IETF code that remains

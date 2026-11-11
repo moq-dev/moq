@@ -535,6 +535,8 @@ export const hooks: {
 	releaseTrack: (producer: Producer) => void;
 	/** Cache a new track's groups into its broadcast's `pool`, before it caches any. Assigned by `track.ts`. */
 	poolTrack: (producer: Producer, pool: Pool) => void;
+	/** How many runs a track's arrivals hold, for tests. Assigned by `track.ts`. */
+	arrivalRuns: (producer: Producer) => number;
 	/**
 	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
 	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
@@ -906,6 +908,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	poolTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	arrivalRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
 	trackReleased: () => {

@@ -53,6 +53,11 @@ fix-changed list:
     uv run --no-project python ../sh/js/install.py update
     MOQ_API_REPORT=update python3 ../sh/js/workspace.py build '{{ list }}'
 
+# Model-check a TLA+ spec with TLC, e.g. `just js tla watch/verify/Watch.tla`.
+# Pass `-config js/<path>.cfg` for a config not named after the spec.
+tla spec *args:
+    cd .. && nix shell --inputs-from . nixpkgs#tlaplus --command tlc -workers auto -cleanup -metadir "$(mktemp -d)" {{ args }} js/{{ spec }}
+
 # Run all unit tests.
 test:
     python3 ../sh/js/workspace.py test --all

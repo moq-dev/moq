@@ -10,6 +10,7 @@ export class Duration {
 	asMillis(): number;
 	asNanos(): number;
 	asSecs(): number;
+	checkedAdd(other: Duration): Duration | undefined;
 	clamp(lo: Duration, hi: Duration): Duration;
 	cmp(other: Duration): -1 | 0 | 1;
 	div(divisor: number): Duration;
@@ -26,6 +27,7 @@ export class Duration {
 	min(other: Duration): Duration;
 	mul(factor: number): Duration;
 	static nanos(value: number): Duration;
+	saturatingAdd(other: Duration): Duration;
 	saturatingSub(other: Duration): Duration;
 	static secs(value: number): Duration;
 	sub(other: Duration): Duration;
@@ -45,7 +47,8 @@ export interface Installed {
 export class Instant {
 	static readonly ZERO: Instant;
 	[Symbol.toPrimitive](hint: string): string;
-	add(duration: Duration): Instant;
+	checkedAdd(duration: Duration): Instant | undefined;
+	checkedSub(duration: Duration): Instant | undefined;
 	cmp(other: Instant): -1 | 0 | 1;
 	eq(other: Instant): boolean;
 	ge(other: Instant): boolean;
@@ -54,8 +57,9 @@ export class Instant {
 	lt(other: Instant): boolean;
 	max(other: Instant): Instant;
 	min(other: Instant): Instant;
+	saturatingAdd(duration: Duration): Instant;
+	saturatingSub(duration: Duration): Instant;
 	since(earlier: Instant): Duration;
-	sub(duration: Duration): Instant;
 	toJSON(): never;
 	toString(): string;
 	valueOf(): never;

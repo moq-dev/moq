@@ -6,7 +6,6 @@
 	"//": "The documented packages are the @moq/* dependencies, so changing one checks the site. TypeDoc does not support TypeScript 7 yet (TypeStrong/typedoc#3098), so this workspace pins the 6.0 it resolves, for the reference and every package's API report.",
 	"devDependencies": {
 		"@moq/auth": "workspace:*",
-		"@moq/boy": "workspace:*",
 		"@moq/clock": "workspace:*",
 		"@moq/hang": "workspace:*",
 		"@moq/json": "workspace:*",

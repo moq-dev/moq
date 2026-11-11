@@ -2012,7 +2012,7 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 /** Poll until `pred` holds, so a regression fails the test instead of hanging it. */
 // Yields rather than sleeps, so it also polls under a Manual clock, where only the suite timeout bounds it.
 async function until(pred: () => boolean): Promise<void> {
-	const deadline = now().add(Duration.millis(1000));
+	const deadline = now().saturatingAdd(Duration.millis(1000));
 	while (!pred()) {
 		if (now().gt(deadline)) throw new Error("timed out waiting for condition");
 		await yieldNow();

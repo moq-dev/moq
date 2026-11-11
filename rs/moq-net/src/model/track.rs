@@ -652,6 +652,10 @@ pub(crate) struct TrackState {
 	// away a subscription's grace after a later arrival opened it, as the session's tail
 	// does, so this holds only the gaps still worth waiting for.
 	arrivals: Ledger,
+	// What `arrivals` bills to the pool, [`ledger::RUN_OVERHEAD`] per gap. Paying eviction
+	// debt folds its oldest gaps early, so an unbounded grace holds no more gaps than the
+	// pool would.
+	arrivals_bill: cache::Extra,
 
 	// The first sequence the live feed serves, as the publisher declared it (the wire's
 	// SUBSCRIBE_START). Lower groups are not waited for, though one may still arrive late
@@ -1570,6 +1574,7 @@ impl TrackState {
 			.and_then(|end| end.tail)
 			.map_or(now, |tail| tail.min(now));
 		self.arrivals.account(start..run.end, since);
+		self.bill_arrivals();
 		self.cache.wakes().arrived(start..run.end);
 	}
 
@@ -2505,11 +2510,42 @@ impl TrackState {
 	/// the session's tail uses, from the max delay the track's subscribers ask for.
 	fn fold_arrivals(&mut self, now: crate::time::Instant) {
 		// Only a gap folds, so an in-order feed never reads the subscriptions.
-		if !self.arrivals.has_gaps() {
-			return;
+		if self.arrivals.has_gaps() {
+			self.arrivals.set_grace(self.arrival_grace());
+			self.arrivals.expire(now);
 		}
-		self.arrivals.set_grace(self.arrival_grace());
-		self.arrivals.expire(now);
+		self.bill_arrivals();
+	}
+
+	/// Bill the arrivals' gaps to the pool, after any change to them. The run they split is
+	/// the track's own, so an in-order feed bills nothing.
+	fn bill_arrivals(&mut self) {
+		let billed = self.arrivals.len().saturating_sub(1) as u64 * ledger::RUN_OVERHEAD;
+		let before = self.arrivals_bill.size();
+		if billed > before {
+			self.arrivals_bill.add(billed - before);
+		} else if billed < before {
+			self.arrivals_bill.sub(before - billed);
+		}
+	}
+
+	/// Fold the oldest gaps of the arrivals until the debt is paid or `cap` bytes are freed,
+	/// returning the bytes freed: nothing waits on them any longer, as when their grace
+	/// passes, so a reader parked on one judges it missing.
+	fn shed_arrivals(&mut self, cap: u64) -> u64 {
+		let mut paid = 0u64;
+		while self.debt > 0 && paid < cap {
+			let Some(gap) = self.arrivals.fold_oldest() else {
+				break;
+			};
+			let billed = self.arrivals_bill.size();
+			self.bill_arrivals();
+			let freed = billed.saturating_sub(self.arrivals_bill.size());
+			self.debt -= freed.min(self.debt);
+			paid = paid.saturating_add(freed);
+			self.cache.wakes().arrived(gap);
+		}
+		paid
 	}
 
 	/// How long a missing live group is waited for, from the max delay the track's
@@ -2557,6 +2593,7 @@ impl TrackState {
 		let cache = cache::Track::new(broadcast.pool.clone(), broadcast.frames.clone(), state.downgrade());
 		let mut new = state.write().ok().expect("a new track is open");
 		new.drops_bill = cache.extra();
+		new.arrivals_bill = cache.extra();
 		new.cache = cache;
 		drop(new);
 		state
@@ -2881,6 +2918,11 @@ impl TrackState {
 			self.debt -= size;
 			paid = paid.saturating_add(size);
 			self.evict_group(sequence, Error::Evicted);
+		}
+		// Then the arrivals' oldest gaps, which costs a reader only the wait for a late group, as
+		// the grace passing would.
+		if self.debt > 0 && paid < cap {
+			paid = paid.saturating_add(self.shed_arrivals(cap - paid));
 		}
 		// Then the drop set, oldest sequences first: losing a run costs a reader a judgment or
 		// a fill, never content being read.
@@ -7687,21 +7729,43 @@ struct DropCursor {
 	/// until the next: a queue-only poll judges none, and must not unsettle them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	drift: Option<(Duration, Coverage)>,
-	/// Every sequence this cursor already reported.
+	/// Every sequence this cursor already reported, with how.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	reported: RangeSet<u64>,
-	/// The reported runs judged stale, for a wire whose update re-offers them; see
-	/// [`Subscriber::reoffer_stale`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	reported_stale: RangeSet<u64>,
-	/// The part of [`Self::reported_stale`] an upstream's received stale run decided, which
-	/// is the upstream's to judge again once an update reopens it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	reported_received: RangeSet<u64>,
-	/// The reported runs skipped. A skip replaces a drop, so a run reported dropped is
-	/// reported again once it is skipped, and only a skip already reported stops it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	reported_skip: RangeSet<u64>,
+	reported: RangeMap<u64, Report>,
+}
+
+/// How a [`DropCursor`] reported a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Report {
+	/// Dropped for good, or stale until its group was handed out: no update reopens it.
+	Dropped,
+	/// Dropped as stale, which an update reopens; see [`Subscriber::reoffer_stale`].
+	/// `received` when an upstream's stale run decided it, which is the upstream's to judge
+	/// again then.
+	Stale { received: bool },
+	/// Skipped, which replaces a drop.
+	Skip,
+}
+
+impl Report {
+	/// How `hole` reports, as it came from upstream when `received`.
+	fn of(hole: &Hole, received: bool) -> Self {
+		match hole {
+			Hole::Skip => Self::Skip,
+			hole if hole.stale_budget().is_some() => Self::Stale { received },
+			_ => Self::Dropped,
+		}
+	}
+
+	/// Whether this report stops `hole` going out over it: a skip goes out over a drop, and
+	/// a final drop over a stale one, since each replaces what it goes out over.
+	fn blocks(self, hole: &Hole) -> bool {
+		match hole {
+			Hole::Skip => self == Self::Skip,
+			Hole::Drop { stale: None, .. } => !matches!(self, Self::Stale { .. }),
+			Hole::Drop { .. } => true,
+		}
+	}
 }
 
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -7714,10 +7778,7 @@ impl DropCursor {
 			scanned: None,
 			seen: 0,
 			drift: None,
-			reported: RangeSet::new(),
-			reported_stale: RangeSet::new(),
-			reported_received: RangeSet::new(),
-			reported_skip: RangeSet::new(),
+			reported: RangeMap::new(),
 		}
 	}
 
@@ -7726,7 +7787,7 @@ impl DropCursor {
 	/// the part an upstream's received stale run decided.
 	fn take_stale(&mut self) -> (Vec<ops::Range<u64>>, RangeSet<u64>) {
 		let mut stale = RangeSet::new();
-		let mut received = std::mem::take(&mut self.reported_received);
+		let mut received = RangeSet::new();
 		let queued: Vec<_> = self
 			.pending
 			.iter()
@@ -7740,9 +7801,20 @@ impl DropCursor {
 			}
 			stale.insert(run);
 		}
-		for run in std::mem::take(&mut self.reported_stale).iter() {
+		let reported: Vec<_> = self
+			.reported
+			.iter()
+			.filter_map(|(run, report)| match report {
+				Report::Stale { received } => Some((run.clone(), *received)),
+				_ => None,
+			})
+			.collect();
+		for (run, from_upstream) in reported {
 			self.reported.remove(run.clone());
-			stale.insert(run.clone());
+			if from_upstream {
+				received.insert(run.clone());
+			}
+			stale.insert(run);
 		}
 		// A received stale run is folded in again by the next scan, if the track still holds it.
 		self.scanned = None;
@@ -7752,9 +7824,10 @@ impl DropCursor {
 	/// Retire a stale report on `sequence` once its group is handed out: the group won over
 	/// the drop, so no update reopens it.
 	fn retire(&mut self, sequence: u64) {
-		if let Some(end) = sequence.checked_add(1) {
-			self.reported_stale.remove(sequence..end);
-			self.reported_received.remove(sequence..end);
+		if let Some(end) = sequence.checked_add(1)
+			&& matches!(self.reported.get(&sequence), Some(Report::Stale { .. }))
+		{
+			self.reported.insert(sequence..end, Report::Dropped);
 		}
 	}
 
@@ -7882,41 +7955,20 @@ impl DropCursor {
 			if clipped.end < range.end {
 				self.pending.insert(clipped.end..range.end, pending.clone());
 			}
-			// A skip goes out over a drop already reported, and a final drop over a stale one,
-			// since each replaces what it goes out over.
-			let mut blocked = match pending.hole {
-				Hole::Skip => self.reported_skip.overlapping(&clipped).cloned().collect(),
-				Hole::Drop { .. } => self.reported.overlapping(&clipped).cloned().collect::<RangeSet<u64>>(),
-			};
-			if matches!(pending.hole, Hole::Drop { stale: None, .. }) {
-				for stale in self.reported_stale.overlapping(&clipped) {
-					blocked.remove(stale.clone());
-				}
-			}
+			let blocked: RangeSet<u64> = self
+				.reported
+				.overlapping(&clipped)
+				.filter(|(_, report)| report.blocks(&pending.hole))
+				.map(|(run, _)| run.clone())
+				.collect();
 			if let Some(gap) = blocked.gaps(&clipped).next() {
 				if gap.end < range.end {
 					self.pending.insert(gap.end..range.end, pending.clone());
 				}
-				let hole = pending.hole;
-				self.reported.insert(gap.clone());
-				match &hole {
-					hole if hole.stale_budget().is_some() => {
-						self.reported_stale.insert(gap.clone());
-						match pending.received {
-							true => self.reported_received.insert(gap.clone()),
-							false => self.reported_received.remove(gap.clone()),
-						}
-					}
-					// Final, so no update reopens a stale report it replaced.
-					hole => {
-						if matches!(hole, Hole::Skip) {
-							self.reported_skip.insert(gap.clone());
-						}
-						self.reported_stale.remove(gap.clone());
-						self.reported_received.remove(gap.clone());
-					}
-				}
-				return Some((gap, hole));
+				// Replacing what it goes out over: a final report is never reopened by an update.
+				self.reported
+					.insert(gap.clone(), Report::of(&pending.hole, pending.received));
+				return Some((gap, pending.hole));
 			}
 		}
 		None
@@ -24134,6 +24186,33 @@ mod test {
 			reported.push(run);
 		}
 		assert_eq!(reported[1..], held[..]);
+	}
+
+	/// A peer fragmenting its arrivals under a grace that never folds a gap bills each run to
+	/// the pool, which folds the oldest gaps early to stay within it.
+	#[test]
+	fn an_arrival_flood_stays_within_the_pool() {
+		const GROUPS: u64 = 1000;
+		let capacity = 64 * ledger::RUN_OVERHEAD;
+		let (producer, pool) = pooled_producer(capacity);
+		producer.received();
+		// A reader that waits an hour for a late group, so no gap folds by its grace.
+		let _subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(3600))));
+		for group in 0..GROUPS {
+			write_group(&producer, 2 * group);
+		}
+		let state = producer.state.read();
+		let runs = state.arrivals.len() as u64;
+		assert!(runs > 1, "the youngest gaps are still waited for");
+		assert!(runs < GROUPS, "the oldest gaps were folded");
+		assert_eq!(state.arrivals_bill.size(), (runs - 1) * ledger::RUN_OVERHEAD);
+		assert!(
+			pool.used() <= capacity + 2 * cache::ENTRY_OVERHEAD,
+			"the arrivals took the pool to {}",
+			pool.used()
+		);
+		assert!(state.arrivals.covers(0..3), "a folded gap is no longer waited for");
 	}
 
 	/// A local skip kept above the track's edge is dated once the edge passes it, so the next

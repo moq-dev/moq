@@ -45,9 +45,8 @@ What it demonstrates:
 - **Split trust.** In production only the server publishes games and their server endpoints, while anonymous viewers may publish only client endpoints.
 
 Code: [`rs/moq-boy`](https://github.com/moq-dev/moq/tree/main/rs/moq-boy) (emulator
-and publisher), [`js/moq-boy`](https://github.com/moq-dev/moq/tree/main/js/moq-boy)
-(the `<moq-boy>` element, published as `@moq/boy`), and
-[`demo/boy`](https://github.com/moq-dev/moq/tree/main/demo/boy). The same
+and publisher) and [`demo/boy`](https://github.com/moq-dev/moq/tree/main/demo/boy)
+(the `<moq-boy>` element and page). The same
 shape covers teleoperation: swap the emulator for a robot.
 
 ## CARLA
