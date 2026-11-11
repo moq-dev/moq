@@ -38,6 +38,14 @@ frame above zero on any row but `step`, or a nonzero `player_skips_per_min`
 on a row whose stalls fit inside the `stretch` bound. Either means the model
 is not doing its job there.
 
+Watch native-opus near-zero: at [moq-dev/moq#8507](https://github.com/moq-dev/moq/pull/8507)'s
+head a developer host at load average about 43 filed 64 to 77 tap underruns
+a minute against its ceiling of 42, where two earlier runs filed 0. Decided
+2026-11-11 (maintainer, /quest-merge pick of #8507): ✅ merge and treat it as
+host noise for these nightlies to settle (rejected: re-measure on a quiet
+host first; investigate #8507's review fixes first). If the nightlies
+reproduce it, report it rather than budget it.
+
 Native rows stay report-only; enforcing them belongs to
 [Audio outlives video under bufferbloat](/quest/m4/audio-bufferbloat-av.md).
 
