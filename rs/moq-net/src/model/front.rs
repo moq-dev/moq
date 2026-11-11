@@ -1091,22 +1091,28 @@ mod tests {
 		);
 	}
 
-	/// The serving source closes while its copy is still open, and the replacement
-	/// refuses the track: the detached copy's end, not the refusal, ends it.
+	/// The serving copy detaches while still open, because its source closed or a
+	/// better route replaced it, and the replacement refuses the track: the detached
+	/// copy's end, not the refusal, ends it.
 	#[test]
 	fn a_refusal_waits_for_the_detached_copy() {
-		for (end, expected) in [
-			(Ok(()), Action::Finish { track: name("video") }),
-			(
-				Err(Error::Dropped),
-				Action::Abort {
-					track: name("video"),
-					err: Error::Unroutable,
-				},
-			),
-		] {
+		for (closed, end, expected) in [true, false].into_iter().flat_map(|closed| {
+			[
+				(closed, Ok(()), Action::Finish { track: name("video") }),
+				(
+					closed,
+					Err(Error::Dropped),
+					Action::Abort {
+						track: name("video"),
+						err: Error::Unroutable,
+					},
+				),
+			]
+		}) {
 			let mut front = serving(remote(1, 10), 100);
-			front.step(Event::SourceClosed { source: 100 });
+			if closed {
+				front.step(Event::SourceClosed { source: 100 });
+			}
 			front.step(Event::Selected {
 				best: Some(remote(2, 10)),
 				serving_closing: false,
