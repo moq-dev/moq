@@ -1,4 +1,4 @@
-# [S] More tests hold up under load
+# More tests hold up under load
 
 ## Goal
 
@@ -265,5 +265,11 @@ that yielded after handing DATAGRAMS_INFO over left the first track's queue
 unopened while the reader went on. The test now reads a datagram through that
 queue before counting queues, fixed by
 [moq-dev/moq#8396](https://github.com/moq-dev/moq/pull/8396).
+
+Added 2026-11-10 (maintainer's standing rule that flakes join this epic):
+interop's `python -> go` media cell, whose Go subscriber closed its lite-07
+session as publishing outside its grant once in
+[moq-dev/moq#8444](https://github.com/moq-dev/moq/pull/8444)'s local run and
+passed on rerun. It is quarantined until its child fixes it.
 
 Public API: none. Wire: none.

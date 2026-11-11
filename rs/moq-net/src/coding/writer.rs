@@ -502,7 +502,11 @@ mod tests {
 			vec![(
 				Tier::new(crate::Path::from_static("internal")),
 				Message::Probe,
-				Totals { tx: size, rx: 0 }
+				Totals {
+					tx: size,
+					tx_messages: 1,
+					..Default::default()
+				}
 			)]
 		);
 		writer

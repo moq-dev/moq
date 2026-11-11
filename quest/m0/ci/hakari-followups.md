@@ -82,4 +82,8 @@ Public API: none. Wire: none.
   baseline and 2026-11-06 numbers in the Plan. If the cache
   cost is material, present the measured tradeoff to the maintainer; recommend
   keeping the narrow final exclusions unless the measurements justify another
-  design.
+  design. That job timed out on five of the six scheduled runs from
+  2026-11-05 to 11-10 and on every one since 11-07, so a complete run waits on
+  [it fitting its hour](/quest/m0/ci/nightly-rust-test-hour.md). That change
+  regroups the job's builds, so compare only the mbx summaries of builds whose
+  crates, features, and profile match the baseline's.
