@@ -48,8 +48,11 @@ check() {
 }
 
 check base ""
-variants=$(sed -nE 's/^ \* ([A-Z_]+) +Breaks: (.*)$/\1 \2/p' "rs/$spec")
-[ -n "$variants" ] || failed+=("no variant has a Breaks: line")
+variants=$(sed -nE 's/^ \* ([A-Za-z0-9_]+) +Breaks: (.*)$/\1 \2/p' "rs/$spec")
+# Every #ifdef is a variant, so a header that stops parsing cannot retire its negative control.
+while read -r variant; do
+    grep -q "^$variant " <<<"$variants" || failed+=("$variant: no Breaks: line")
+done < <(sed -nE 's/^#ifn?def ([A-Za-z0-9_]+).*/\1/p' "rs/$spec" | sort -u)
 while read -r variant breaks; do
     [ -n "$variant" ] || continue
     check "$variant" "$breaks" "-D=$variant"
