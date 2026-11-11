@@ -486,15 +486,15 @@ export class AudioRingBuffer {
 			this.#joined = true;
 			if (!this.#ending()) {
 				if (inputs.lag > bound + this.#stretch.window) skip = inputs.lag - bound;
-				else if (this.#jumped > this.#stretch.window) skip = this.#jumped;
+				if (this.#jumped > this.#stretch.window) skip = Math.max(skip, this.#jumped);
 			}
 		}
 		if (skip > 0) {
-			const target = this.#playhead() + skip;
-			const index = Math.min(this.#writeIndex, Math.ceil(target));
-			// A jump past what is decoded skips the rest once it lands, rather than leaving it inside the
-			// bound for the stretch.
-			this.#jumped = skip === this.#jumped ? Math.max(0, target - index) : 0;
+			const playhead = this.#playhead();
+			const index = Math.min(this.#writeIndex, Math.ceil(playhead + skip));
+			// What a skip leaves of a jump, as past what is decoded, skips once it lands rather than
+			// staying inside the bound for the stretch.
+			this.#jumped = Math.max(0, this.#jumped - (index - playhead));
 			if (!this.#skipping) this.#skips++;
 			this.#skipping = true;
 			this.#skip(index, this.#writeIndex);

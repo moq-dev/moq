@@ -1081,24 +1081,27 @@ describe("time stretch", () => {
 		expect(buffer.accelerated).toBe(0);
 	});
 
-	// A jump past what is decoded skips the rest once it lands.
-	it("skips the rest of a jump past what is decoded once it lands", () => {
-		const buffer = live(100, { bound: 2000 });
-		write(buffer, 0, frames(100), { value: 0.5 });
-		buffer.clock(0);
-		read(buffer, QUANTUM, 1);
+	// A jump past what is decoded skips the rest once it lands, whether or not the lag past the bound
+	// skipped first.
+	for (const bound of [2000, 200]) {
+		it(`skips the rest of a jump past what is decoded once it lands, at a ${bound} ms bound`, () => {
+			const buffer = live(100, { bound });
+			write(buffer, 0, frames(100), { value: 0.5 });
+			buffer.clock(0);
+			read(buffer, QUANTUM, 1);
 
-		buffer.jumped(500_000);
-		const clock = buffer.timestamp + 500_000;
-		buffer.clock(clock);
-		read(buffer, QUANTUM, 1);
-		expect(buffer.skips).toBe(1);
+			buffer.jumped(500_000);
+			const clock = buffer.timestamp + 500_000;
+			buffer.clock(clock);
+			read(buffer, QUANTUM, 1);
+			expect(buffer.skips).toBe(1);
 
-		write(buffer, 100, frames(800), { value: 0.9 });
-		buffer.clock(clock);
-		read(buffer, QUANTUM, 1);
-		expect(Math.abs(buffer.timestamp - clock - (QUANTUM * 1_000_000) / RATE)).toBeLessThan(50);
-	});
+			write(buffer, 100, frames(800), { value: 0.9 });
+			buffer.clock(clock);
+			read(buffer, QUANTUM, 1);
+			expect(Math.abs(buffer.timestamp - clock - (QUANTUM * 1_000_000) / RATE)).toBeLessThan(50);
+		});
+	}
 
 	// Nothing trailing the clock was heard before the first read on it, so a join lands on the clock
 	// past a backlog the bound would otherwise keep.

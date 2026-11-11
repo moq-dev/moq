@@ -749,20 +749,25 @@ impl Consumer {
 			0
 		};
 		self.joined |= clocked && self.prime == 0;
-		let jump = inputs.lag <= bound.saturating_add(window as i64);
-		let skip = if !jump {
+		let late = if inputs.lag > bound.saturating_add(window as i64) {
 			(inputs.lag - bound) as usize
-		} else if self.jumped > window {
-			self.jumped
 		} else {
-			return 0;
+			0
 		};
+		let skip = if self.jumped > window {
+			late.max(self.jumped)
+		} else {
+			late
+		};
+		if skip == 0 {
+			return 0;
+		}
 		let available = self.available();
 		let pushed = self.discard(skip);
 		let skipped = available - self.available();
-		// A jump past what is queued skips the rest once it arrives, rather than
-		// leaving it inside the bound for the stretch.
-		self.jumped = if jump { skip - skipped } else { 0 };
+		// What a skip leaves of a jump, as past what is queued, skips once it
+		// arrives rather than staying inside the bound for the stretch.
+		self.jumped = self.jumped.saturating_sub(skipped);
 		if skipped > 0 {
 			self.skips += 1;
 			self.trimmed += pushed as u64;
@@ -1422,34 +1427,36 @@ mod tests {
 		}
 	}
 
-	/// A jump past what is queued skips the rest once it arrives.
+	/// A jump past what is queued skips the rest once it arrives, whether or
+	/// not the lag past the bound skipped first.
 	#[test]
 	fn a_jump_past_the_queue_skips_the_rest_once_it_arrives() {
-		let rate = 48_000;
-		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(10));
-		let base = prod.base;
-		let late = Duration::from_secs(2);
-		let mut out = vec![0.0; 480 * 2];
-		for _ in 0..5 {
-			assert_eq!(prod.push(&pcm), Push::Ok);
+		for late in [Duration::from_secs(2), Duration::from_millis(200)] {
+			let rate = 48_000;
+			let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(10));
+			let base = prod.base;
+			let mut out = vec![0.0; 480 * 2];
+			for _ in 0..5 {
+				assert_eq!(prod.push(&pcm), Push::Ok);
+			}
+			// On time through the 10 ms prime, which joins the clock.
+			prod.due(base + Duration::from_millis(110), late, Duration::ZERO);
+			assert_eq!(pull(&mut cons, &mut out, base), Read::Ok);
+			assert_eq!(pull(&mut cons, &mut out, base + Duration::from_millis(10)), Read::Ok);
+			// The reference jumps 500 ms, past the 90 ms queued.
+			let shift = Duration::from_millis(500);
+			prod.due(base + Duration::from_millis(110) - shift, late, shift);
+			let read = pull(&mut cons, &mut out, base + Duration::from_millis(20));
+			assert!(matches!(read, Read::Underflow { .. }), "{read:?}");
+			for _ in 0..50 {
+				assert_eq!(prod.push(&pcm), Push::Ok);
+			}
+			prod.due(base + Duration::from_millis(1110) - shift, late, Duration::ZERO);
+			let now = base + Duration::from_millis(30);
+			assert!(matches!(pull(&mut cons, &mut out, now), Read::Trimmed { .. }));
+			let lag = cons.inputs(0).lag as f64 * 1000.0 / rate as f64;
+			assert!((-20.0..=5.0).contains(&lag), "{late:?}: {lag} ms behind");
 		}
-		// On time through the 10 ms prime, which joins the clock.
-		prod.due(base + Duration::from_millis(110), late, Duration::ZERO);
-		assert_eq!(pull(&mut cons, &mut out, base), Read::Ok);
-		assert_eq!(pull(&mut cons, &mut out, base + Duration::from_millis(10)), Read::Ok);
-		// The reference jumps 500 ms, past the 90 ms queued.
-		let shift = Duration::from_millis(500);
-		prod.due(base + Duration::from_millis(110) - shift, late, shift);
-		let read = pull(&mut cons, &mut out, base + Duration::from_millis(20));
-		assert!(matches!(read, Read::Underflow { .. }), "{read:?}");
-		for _ in 0..50 {
-			assert_eq!(prod.push(&pcm), Push::Ok);
-		}
-		prod.due(base + Duration::from_millis(1110) - shift, late, Duration::ZERO);
-		let now = base + Duration::from_millis(30);
-		assert!(matches!(pull(&mut cons, &mut out, now), Read::Trimmed { .. }));
-		let lag = cons.inputs(0).lag as f64 * 1000.0 / rate as f64;
-		assert!((-20.0..=5.0).contains(&lag), "{lag} ms behind");
 	}
 
 	/// A refill after an underrun waits for the whole device callback, not
