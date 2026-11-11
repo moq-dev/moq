@@ -362,7 +362,7 @@ impl Routed {
 		if self.drained {
 			stream.goaway();
 		}
-		drop(std::mem::replace(&mut self.stream, stream));
+		std::mem::replace(&mut self.stream, stream).replaced();
 		self.previous = previous;
 		self.outputs(subscriber);
 		// What the new stream no longer serves is let go here, not ended by its origin.

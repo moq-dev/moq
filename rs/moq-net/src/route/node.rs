@@ -15,7 +15,7 @@
 //! only once another serves it, so the origin always holds a route for it.
 
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	sync::{Arc, Mutex, MutexGuard},
 	task::{Poll, ready},
 };
@@ -354,6 +354,11 @@ struct State {
 	/// with the name each stream's peer gives it: while they stay the same, only a
 	/// claim whose shown state changed is served differently.
 	routes: HashMap<Id, Routes>,
+	/// The streams whose close changes a path to this node, which then advances its
+	/// seqno so a node remembering a shorter path accepts the longer one without a
+	/// ROUTE_REQUEST: one whose peer forwarded it a route, or, on a node that does
+	/// not forward, one this node's route goes out on. A new stream lengthens no path.
+	links: HashSet<Key>,
 }
 
 /// An identity's usable feasible routes: each stream, its metric, and the peer's name.
@@ -414,6 +419,7 @@ impl Node {
 				queues: HashMap::new(),
 				homes: BTreeMap::new(),
 				routes: HashMap::new(),
+				links: HashSet::new(),
 			})),
 		}
 	}
@@ -466,7 +472,14 @@ impl Node {
 
 	/// Register a stream answering the peer's request for `prefix`.
 	pub fn answer(&self, link: Link, prefix: Path) -> Result<Stream, Error> {
-		self.register(link, |router, key| router.peer_interest(key, prefix))
+		// A node that forwards nothing knows no better than that every stream carrying
+		// its route is a path to it.
+		let origin = !link.proxy;
+		let stream = self.register(link, |router, key| router.peer_interest(key, prefix))?;
+		if origin {
+			self.lock().links.insert(stream.key);
+		}
+		Ok(stream)
 	}
 
 	fn register(
@@ -485,8 +498,6 @@ impl Node {
 			state.queues.remove(&key);
 			return Err(err);
 		}
-		// The node's own set of sessions changed.
-		let _ = state.router.bump();
 		state.flush();
 		Ok(Stream {
 			node: self.clone(),
@@ -561,7 +572,19 @@ impl Stream {
 	/// ROUTE_START, ROUTE_UPDATE, ROUTE_HOLD (`Held`), or ROUTE_END (`None`) for
 	/// the identity the peer names `named`.
 	pub fn route(&self, named: Id, reach: Option<Reach>) {
-		self.with(|router, key| router.route(key, named, reach));
+		let mut state = self.node.lock();
+		// Only the peer's own route has metric 0: any other means the peer forwards.
+		if matches!(reach, Some(Reach::Finite(advert)) if advert.metric > 0) {
+			state.links.insert(self.key);
+		}
+		state.router.route(self.key, named, reach);
+		state.flush();
+	}
+
+	/// Another stream of the same session took this one's place, so closing this one
+	/// changes no path.
+	pub fn replaced(&self) {
+		self.node.lock().links.remove(&self.key);
 	}
 
 	/// A batch of claim changes for the route the peer names `named`, closed by
@@ -616,7 +639,9 @@ impl Drop for Stream {
 		for home in state.homes.values_mut() {
 			home.keys.remove(&self.key);
 		}
-		let _ = state.router.bump();
+		if state.links.remove(&self.key) {
+			let _ = state.router.bump();
+		}
 		state.flush();
 	}
 }
@@ -1294,6 +1319,79 @@ mod tests {
 		let read = outputs(&edge);
 		assert!(matches!(read[0], Output::Route { id: 1, reach: Some(_) }), "{read:?}");
 		assert_eq!(read.len(), 2, "the route, then its claim");
+	}
+
+	/// The ROUTE messages for `id` a stream would send.
+	fn routes(stream: &Stream, id: Id) -> Vec<Option<Reach>> {
+		(outputs(stream).into_iter())
+			.filter_map(|output| match output {
+				Output::Route { id: to, reach } if to == id => Some(reach),
+				_ => None,
+			})
+			.collect()
+	}
+
+	fn finite(seqno: Seqno, metric: Metric) -> Option<Reach> {
+		Some(Reach::Finite(Advert {
+			seqno,
+			metric,
+			down_only: false,
+		}))
+	}
+
+	/// A relay's own seqno advances only when a session over which another node
+	/// learned a path to it closes: a client that forwards nothing costs no ROUTE.
+	#[test]
+	fn a_relay_bumps_only_when_a_route_link_closes() {
+		let relay = Node::new(2, 2);
+		relay.own(p("live/r"), Some(claim(&Instance::random(), 0)));
+		let forwarding = Link::default();
+		// Two peer relays, each forwarding a route of a third node.
+		let to_a = relay.answer(forwarding.clone(), Path::empty()).unwrap();
+		let from_a = relay.receive(Link::default(), Path::empty()).unwrap();
+		let to_b = relay.answer(forwarding.clone(), Path::empty()).unwrap();
+		let from_b = relay.receive(Link::default(), Path::empty()).unwrap();
+		from_a.route(5, finite(0, 1));
+		from_b.route(6, finite(0, 1));
+		assert_eq!(routes(&to_b, 2), [finite(0, 0)]);
+		outputs(&to_a);
+
+		// A client sending only its own route connects and leaves.
+		let to_client = relay.answer(forwarding, Path::empty()).unwrap();
+		let from_client = relay.receive(Link::default(), Path::empty()).unwrap();
+		from_client.route(9, finite(0, 0));
+		drop((to_client, from_client));
+		assert!(routes(&to_a, 2).is_empty());
+		assert!(routes(&to_b, 2).is_empty());
+
+		// A permit change refiling a peer's stream is no link change either.
+		let refiled = relay.receive(Link::default(), Path::empty()).unwrap();
+		refiled.route(5, finite(0, 1));
+		from_a.replaced();
+		drop(from_a);
+		assert!(routes(&to_b, 2).is_empty());
+
+		// Losing a forwarding peer does change a path.
+		drop((to_a, refiled));
+		assert_eq!(routes(&to_b, 2), [finite(1, 0)]);
+		drop(from_b);
+	}
+
+	/// A node that forwards nothing advances its seqno whenever a session carrying
+	/// its route closes, so moving to a farther relay needs no ROUTE_REQUEST.
+	#[test]
+	fn a_publisher_bumps_when_any_session_closes() {
+		let publisher = Node::new(9, 9);
+		publisher.own(p("live/p"), Some(claim(&Instance::random(), 0)));
+		let origin = Link {
+			proxy: false,
+			..Link::default()
+		};
+		let first = publisher.answer(origin.clone(), Path::empty()).unwrap();
+		let second = publisher.answer(origin, Path::empty()).unwrap();
+		assert_eq!(routes(&second, 9), [finite(0, 0)]);
+		drop(first);
+		assert_eq!(routes(&second, 9), [finite(1, 0)]);
 	}
 
 	#[test]

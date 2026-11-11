@@ -25,6 +25,10 @@ fixtures, not a random sweep.
   and settled. Count ROUTE and announce messages per external change against
   the same budget the model states, and report the counts as a benchmark swept
   over mesh size and churn.
+- The seqno budget per session event: a client that forwards nothing joining
+  or leaving a relay costs that relay no ROUTE for its own identity; closing a
+  session whose peer forwarded a route costs one ROUTE_UPDATE of the node's own
+  identity on each other link carrying it; opening any session costs none.
 - Seeds follow the repo's `MOQ_*_SEED` convention; the merge gate runs a few
   fixed seeds only if they stay fast, and Nightly sweeps fresh ones.
 
