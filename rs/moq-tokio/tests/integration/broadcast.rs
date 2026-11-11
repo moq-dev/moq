@@ -1744,13 +1744,7 @@ async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Dura
 
 #[tokio::test]
 async fn broadcast_max_age() {
-	for version in [
-		"moq-lite-05",
-		"moq-lite-06",
-		"moq-lite-07-wip",
-		"moq-transport-18",
-		"moq-transport-22",
-	] {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		for age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
 			assert_eq!(max_age_test(version, age).await, age, "{version}");
 		}
@@ -1758,8 +1752,9 @@ async fn broadcast_max_age() {
 }
 
 #[tokio::test]
-async fn broadcast_max_age_legacy_omits_property() {
-	for version in ["moq-lite-01"] {
+async fn broadcast_max_age_omitted() {
+	// moq-transport's MAX_CACHE_DURATION would expire the newest group too, so it is never sent.
+	for version in ["moq-lite-01", "moq-transport-18", "moq-transport-22"] {
 		assert_eq!(
 			max_age_test(version, Some(Duration::from_secs(30))).await,
 			None,

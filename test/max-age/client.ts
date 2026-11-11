@@ -46,10 +46,11 @@ try {
 		let broadcast = request.active.peek();
 		while (!broadcast) broadcast = await request.active.changed();
 		assert(broadcast);
-		for (const [i, age] of ages.entries()) {
+		for (const i of ages.keys()) {
 			const track = broadcast.track(String(i)).subscribe();
-			// A track received without a max age has no publisher limit.
-			assert.equal((await track.info()).maxAge?.asMillis(), age?.asMillis(), `${protocol} track ${i}`);
+			// moq-transport never sends MAX_CACHE_DURATION (it would expire the newest group too),
+			// so every track arrives without a publisher limit.
+			assert.equal((await track.info()).maxAge?.asMillis(), undefined, `${protocol} track ${i}`);
 			track.close();
 		}
 		request.close();

@@ -709,8 +709,8 @@ test("draft-18: a joining FETCH serves the head its subscription starts after", 
 		new FetchOk({
 			endOfTrack: false,
 			endLocation: at(5, 3),
-			// The zero authored default max age, advertised as MAX_CACHE_DURATION.
-			properties: { timescale: Timescale.MILLI, priority: 127, groupOrder: 0x2, maxCacheDuration: 0n },
+			// The max age is never advertised as MAX_CACHE_DURATION.
+			properties: { timescale: Timescale.MILLI, priority: 127, groupOrder: 0x2 },
 		}),
 	);
 	expect(head.requestId).toBe(FETCH_ID);
