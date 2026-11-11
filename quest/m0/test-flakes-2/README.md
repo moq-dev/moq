@@ -267,7 +267,3 @@ queue before counting queues, fixed by
 [moq-dev/moq#8396](https://github.com/moq-dev/moq/pull/8396).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Kotlin's playout-delay smoke test holds up under load](/quest/m0/test-flakes-2/kt-playout-delay.md) - the audio playout-delay smoke test passes under load, and its `@Ignore` is removed
