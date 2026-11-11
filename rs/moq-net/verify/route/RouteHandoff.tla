@@ -11,6 +11,14 @@
 (* echo arrives behind every route its sender sent before it. A session    *)
 (* opens and closes atomically, dropping what was in flight.               *)
 (*                                                                         *)
+(* Three switches compare ways for a node to forget a feasibility distance *)
+(* safely. `Echo` is "once" for an echo sent as soon as the ROUTE_END is   *)
+(* applied, "transitive" for one a node that was routing through the       *)
+(* sender defers until its own ROUTE_ENDs are echoed, or "none".           *)
+(* `EchoLane` lets an echo overtake its sender's other messages, as it can *)
+(* on a stream of its own. `Hops` makes each route name the nodes it       *)
+(* crossed, and a node never uses a route that names it.                   *)
+(*                                                                         *)
 (* Scope: every node watches the root, links cost 1 with equal priority,   *)
 (* no scoped grants, no GOAWAY, and the origin keeps its identity. Claims  *)
 (* are exact paths, and a claim's attributes are the revision that last    *)
@@ -27,9 +35,16 @@ CONSTANTS
     Claims,       \* claim paths
     MaxRev,       \* the origin's claim changes
     MaxFlaps,     \* session opens and closes
+    Echo,         \* how a ROUTE_END is echoed: "once" at once, "transitive" only
+                  \* once the echoer's own ROUTE_ENDs are, or "none" for no echo
+    EchoLane,     \* TRUE: echoes travel unordered against the sender's other messages
+    Hops,         \* TRUE: a route names the nodes it crossed, and a node refuses one naming itself
     MaxCollects   \* `collect` calls
 
 Relays == Nodes \ {Origin}
+\* Every link costs 1: a config binds `Cost <- Unit`.
+Unit == [l \in Links |-> 1]
+Transitive == Echo = "transitive"
 
 \* A claim's attributes: the revision that last set it, or None when absent.
 None == -1
@@ -41,16 +56,22 @@ EmptyView == [floor |-> None, items |-> NoItems]
 NoView == [floor |-> Absent, items |-> NoItems]
 
 \* `Reach` as sent on a stream: nothing, `Finite(Advert)`, or `Held`.
-NoReach == [kind |-> "none", seq |-> 0, met |-> 0]
-HeldReach == [kind |-> "held", seq |-> 0, met |-> 0]
-Finite(seq, met) == [kind |-> "fin", seq |-> seq, met |-> met]
+NoReach == [kind |-> "none", seq |-> 0, met |-> 0, hops |-> {}]
+HeldReach == [kind |-> "held", seq |-> 0, met |-> 0, hops |-> {}]
+Finite(seq, met, hops) == [kind |-> "fin", seq |-> seq, met |-> met, hops |-> hops]
 
 \* `rx` entry, `fd`, `heard`, and `pending` when absent.
-NoEntry == [on |-> FALSE, seq |-> 0, met |-> 0, held |-> FALSE]
+NoEntry == [on |-> FALSE, seq |-> 0, met |-> 0, held |-> FALSE, hops |-> {}, mine |-> FALSE]
 NoFd == [on |-> FALSE, seq |-> 0, met |-> 0]
 NoHeard == [on |-> FALSE, raw |-> EmptyView, kept |-> NoView, ended |-> FALSE]
 NoPending == [on |-> FALSE, seq |-> 0, from |-> {}, asked |-> None]
 NotShown == [item |-> None, avail |-> FALSE]
+\* `owed` entry: whether a neighbor's ROUTE_END awaits its echo, and the
+\* neighbors whose own echoes it waits on.
+NotOwed == [on |-> FALSE, wait |-> {}]
+\* Owed, and not yet waiting on anyone: `Update` fills that in once the node
+\* selects a route again or ends its own.
+Undecided == [on |-> TRUE, wait |-> {None}]
 
 \* Messages: one record shape so TLC can compare them.
 RouteMsg(reach) == [type |-> "route", reach |-> reach, view |-> NoView, seq |-> 0]
@@ -92,9 +113,11 @@ Serves(n) == n = Origin \/ n \notin Leaves
 Feasible(s, e) ==
     ~s.fd.on \/ e.seq > s.fd.seq \/ (e.seq = s.fd.seq /\ e.met < s.fd.met)
 
-UsableSet(s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].held /\ Feasible(s, s.rx[m])}
-InfeasibleSet(s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].held /\ ~Feasible(s, s.rx[m])}
-Certifiers(s) == {m \in Nodes : s.rx[m].on /\ Feasible(s, s.rx[m])}
+\* A route naming this node (`mine`) came from it: it is kept until it ends,
+\* and is never selected, counted as infeasible, or a certifier.
+UsableSet(s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].mine /\ ~s.rx[m].held /\ Feasible(s, s.rx[m])}
+InfeasibleSet(s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].mine /\ ~s.rx[m].held /\ ~Feasible(s, s.rx[m])}
+Certifiers(s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].mine /\ Feasible(s, s.rx[m])}
 Recoverable(s) == \E m \in Certifiers(s) : s.rx[m].held
 
 \* The lowest metric, then the lowest key: `selected`'s rank with equal priority.
@@ -104,12 +127,19 @@ Best(n, s, S) ==
             mk == s.rx[k].met + Cost[{n, k}]
         IN mm < mk \/ (mm = mk /\ m <= k)
 
-NoSel == [on |-> FALSE, next |-> None, seq |-> 0, met |-> 0]
+NoSel == [on |-> FALSE, next |-> None, seq |-> 0, met |-> 0, hops |-> {}]
 Selected(n, s, ov) ==
-    IF n = Origin THEN [on |-> TRUE, next |-> None, seq |-> ov.seq, met |-> 0]
+    IF n = Origin THEN [on |-> TRUE, next |-> None, seq |-> ov.seq, met |-> 0, hops |-> {}]
     ELSE IF UsableSet(s) = {} THEN NoSel
     ELSE LET m == Best(n, s, UsableSet(s))
-         IN [on |-> TRUE, next |-> m, seq |-> s.rx[m].seq, met |-> s.rx[m].met + Cost[{n, m}]]
+         IN [on |-> TRUE, next |-> m, seq |-> s.rx[m].seq, met |-> s.rx[m].met + Cost[{n, m}],
+             hops |-> s.rx[m].hops]
+
+\* Whether node n's route comes from neighbor m: n selected m's route, or
+\* selects nothing and holds on m's held one.
+Through(n, s, m, sel) ==
+    IF sel.on THEN sel.next = m
+    ELSE n # Origin /\ m \in Certifiers(s) /\ s.rx[m].held
 
 Live(n, s) ==
     n = Origin \/ UsableSet(s) # {} \/ InfeasibleSet(s) # {} \/ Recoverable(s)
@@ -153,11 +183,12 @@ Prune(n, s, ov) ==
 \* What `advertise` decides for one peer.
 Plan(n, s, m, sel, live, av, ov) ==
     LET was == s.sent[m]
-        reach0 == IF sel.on /\ Serves(n) THEN Finite(sel.seq, sel.met)
+        reach0 == IF sel.on /\ Serves(n)
+                  THEN Finite(sel.seq, sel.met, IF Hops THEN sel.hops \cup {n} ELSE {})
                   ELSE IF ~sel.on /\ Serves(n) /\ live /\ was.kind # "none" THEN HeldReach
                   ELSE NoReach
         \* A route starts again only once its last end was echoed.
-        reach == IF was.kind # "none" \/ s.unacked[m] = 0 THEN reach0 ELSE NoReach
+        reach == IF was.kind # "none" \/ s.unacked[m] = 0 \/ Echo = "none" THEN reach0 ELSE NoReach
         meets == HasItems(av)
         send == IF reach.kind # "none" /\ meets THEN reach ELSE NoReach
         routeOut == IF send.kind # "none" /\ was # send THEN <<RouteMsg(send)>> ELSE <<>>
@@ -169,7 +200,7 @@ Plan(n, s, m, sel, live, av, ov) ==
         endIt == send.kind = "none" /\ was.kind # "none"
     IN [sent |-> send,
         sentV |-> IF send.kind = "none" THEN NoView ELSE IF batchGo THEN now ELSE s.sentV[m],
-        unacked |-> s.unacked[m] + (IF endIt THEN 1 ELSE 0),
+        unacked |-> s.unacked[m] + (IF endIt /\ Echo # "none" THEN 1 ELSE 0),
         out |-> routeOut \o batchOut \o (IF endIt THEN <<RouteMsg(NoReach)>> ELSE <<>>)]
 
 \* `record`: the feasibility distance for a route this node sends anywhere.
@@ -246,17 +277,31 @@ Update(n, s0, ov, ups, eb) ==
         s5 == [s4 EXCEPT !.pending = req.pending]
         now == ShownNow(n, s5, sel, live, ov)
         ev == Events(n, s5, s0.shown, now, live, ov, eb1)
+        \* A deferred echo stays undecided while this node holds its route.
+        \* Once it selects another or has ended its own, the echo waits on
+        \* every ROUTE_END this node has sent that awaits an echo, and on none
+        \* it sends later. Echo what waits on nothing, ahead of what this
+        \* update sends.
+        unechoed == {m \in Nodes : s5.unacked[m] > 0}
+        holding == ~sel.on /\ live
+        owed == [m \in Nodes |->
+                   IF s5.owed[m] = Undecided
+                   THEN IF holding THEN Undecided ELSE [on |-> TRUE, wait |-> unechoed]
+                   ELSE [s5.owed[m] EXCEPT !.wait = @ \cap unechoed]]
+        ready(m) == owed[m].on /\ owed[m].wait = {}
+        s6 == [s5 EXCEPT !.owed = [m \in Nodes |-> IF ready(m) THEN NotOwed ELSE owed[m]]]
         out == [m \in Nodes |->
-                  (IF m \in Peers(n, ups) THEN plans[m].out ELSE <<>>)
+                  (IF ready(m) THEN <<EchoMsg>> ELSE <<>>)
+                  \o (IF m \in Peers(n, ups) THEN plans[m].out ELSE <<>>)
                   \o (IF m = req.to THEN <<RequestMsg(req.seq)>> ELSE <<>>)]
-    IN [s |-> [s5 EXCEPT !.shown = now], out |-> out, ev |-> ev]
+    IN [s |-> [s6 EXCEPT !.shown = now], out |-> out, ev |-> ev]
 
 \* The origin ignores every ROUTE and batch it hears for its own identity, so
 \* only ROUTE_REQUEST, ROUTE_END (which it echoes), and echoes are queued
 \* toward it.
 \* Dropping the rest changes no behavior and keeps the state space small.
 Heeded(d, m) ==
-    d[2] # Origin \/ m.type = "request" \/ (m.type = "route" /\ m.reach.kind = "none")
+    d[2] # Origin \/ m.type \in {"request", "echo"} \/ (m.type = "route" /\ m.reach.kind = "none")
 
 \* Commit the updates `rs` (a function from nodes to `Update` results), appending
 \* each node's messages to `q0`. Nodes in one step send on disjoint queues.
@@ -285,6 +330,7 @@ InitNode == [
     sent |-> [m \in Nodes |-> NoReach],
     sentV |-> [m \in Nodes |-> NoView],
     unacked |-> [m \in Nodes |-> 0],
+    owed |-> [m \in Nodes |-> NotOwed],
     pending |-> NoPending,
     shown |-> [c \in Claims |-> NotShown]
 ]
@@ -329,11 +375,12 @@ Certify(v) == IF v.floor >= 0 THEN v ELSE [floor |-> v.floor, items |-> NoItems]
 \* `route`: ROUTE_START or ROUTE_UPDATE, ROUTE_HOLD, or ROUTE_END. After an
 \* end, the next batch starts from an empty view, and the last view is kept
 \* for what it certified.
-OnRoute(s, from, reach) ==
+OnRoute(n, s, from, reach) ==
     LET h == s.heard[from]
         rx1 == CASE reach.kind = "fin" ->
                       [s.rx EXCEPT ![from] = [on |-> TRUE, seq |-> reach.seq,
-                                              met |-> reach.met, held |-> FALSE]]
+                                              met |-> reach.met, held |-> FALSE,
+                                              hops |-> reach.hops, mine |-> n \in reach.hops]]
                  [] reach.kind = "held" ->
                       IF s.rx[from].on THEN [s.rx EXCEPT ![from].held = TRUE] ELSE s.rx
                  [] OTHER -> [s.rx EXCEPT ![from] = NoEntry]
@@ -363,27 +410,42 @@ OnRequest(s, from, seq) ==
 
 Max(a, b) == IF a > b THEN a ELSE b
 
+\* The next message of a kind on a queue: its head, or with `EchoLane` the
+\* first echo or the first message that is not one.
+IsEcho(msg) == msg.type = "echo"
+Front(sq, echo) ==
+    IF EchoLane
+    THEN IF \E i \in DOMAIN sq : IsEcho(sq[i]) = echo
+         THEN CHOOSE i \in DOMAIN sq : IsEcho(sq[i]) = echo /\ \A j \in 1..(i - 1) : IsEcho(sq[j]) # echo
+         ELSE 0
+    ELSE IF sq # <<>> /\ IsEcho(sq[1]) = echo THEN 1 ELSE 0
+Without(sq, i) == SubSeq(sq, 1, i - 1) \o SubSeq(sq, i + 1, Len(sq))
+
 Deliver(d) ==
     LET m == d[1]
         n == d[2]
-        msg == Head(q[d])
+        at == Front(q[d], FALSE)
+        msg == q[d][at]
         isEnd == msg.type = "route" /\ msg.reach.kind = "none"
-        \* Every ROUTE_END is echoed once applied, ahead of what the update sends.
-        q0 == [q EXCEPT ![d] = Tail(@),
-                        ![<<n, m>>] = IF isEnd THEN Append(@, EchoMsg) ELSE @]
+        sel == Selected(n, st[n], OV)
+        \* A ROUTE_END from the neighbor this node routed through is echoed
+        \* by `Update`, once nothing this node ended awaits an echo. Any
+        \* other is echoed at once, ahead of what the update sends.
+        defer == isEnd /\ Transitive /\ Serves(n) /\ Through(n, st[n], m, sel)
+        q0 == [q EXCEPT ![d] = Without(@, at),
+                        ![<<n, m>>] = IF isEnd /\ ~defer /\ Echo # "none" THEN Append(@, EchoMsg) ELSE @]
         \* Only the origin advances its seqno to answer a request.
         ov1 == IF n = Origin /\ msg.type = "request"
                THEN [OV EXCEPT !.seq = Max(seqno, msg.seq)] ELSE OV
-        sel == Selected(n, st[n], OV)
         \* Already advertised to the requester: `request` returns before `update`.
         skip == n # Origin /\ msg.type = "request" /\ sel.on /\ sel.seq >= msg.seq
         \* The origin's own identity merges nothing it hears.
         s1 == IF n = Origin THEN st[n]
-              ELSE CASE msg.type = "route" -> OnRoute(st[n], m, msg.reach)
+              ELSE CASE msg.type = "route" ->
+                          [OnRoute(n, st[n], m, msg.reach) EXCEPT !.owed[m] = IF defer THEN Undecided ELSE @]
                      [] msg.type = "batch" -> OnBatch(st[n], m, msg.view)
                      [] OTHER -> OnRequest(st[n], m, msg.seq)
-    IN /\ q[d] # <<>>
-       /\ msg.type # "echo"
+    IN /\ at > 0
        /\ seqno' = ov1.seq
        /\ IF skip
           THEN /\ q' = q0
@@ -395,9 +457,9 @@ Deliver(d) ==
 DeliverEcho(d) ==
     LET m == d[1]
         n == d[2]
-        q0 == [q EXCEPT ![d] = Tail(@)]
-    IN /\ q[d] # <<>>
-       /\ Head(q[d]).type = "echo"
+        at == Front(q[d], TRUE)
+        q0 == [q EXCEPT ![d] = Without(@, at)]
+    IN /\ at > 0
        /\ IF st[n].unacked[m] = 0
           THEN /\ q' = q0
                /\ UNCHANGED <<st, ended, revivals, falseEnds, regressions>>
@@ -417,6 +479,7 @@ Closed(s, y) ==
     [s EXCEPT !.rx[y] = NoEntry,
               !.heard[y] = NoHeard,
               !.unacked[y] = 0,
+              !.owed[y] = NotOwed,
               !.sent[y] = NoReach,
               !.sentV[y] = NoView,
               !.pending.from = @ \ {y}]
@@ -558,5 +621,10 @@ Settled ==
     /\ \A n \in Nodes : ~st[n].pending.on
 
 QuietIsSettled == Quiet => Settled
+
+\* Once nothing is in flight, no ROUTE_END awaits an echo and no echo is
+\* owed: echoes that wait on each other never wait forever.
+QuietIsEchoed ==
+    Quiet => \A n, m \in Nodes : st[n].unacked[m] = 0 /\ ~st[n].owed[m].on
 
 =============================================================================
