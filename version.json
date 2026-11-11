@@ -1,5 +1,6 @@
 {
 	"minor": null,
+	"phase": null,
 	"exemptions": {
 		"rust": ["kio", "kio-macros", "qmux"],
 		"npm": ["@moq/qmux"]

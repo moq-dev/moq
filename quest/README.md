@@ -34,13 +34,39 @@ change for the current cycle and by priority after it. This replaces m1 as
 could bury urgent breaking work behind additive work, so urgency still wins:
 urgent work of either kind joins m0.
 
-Milestones shift after each cut (decided 2026-10-19, rule replaced
-2026-11-05). The [release cut](/quest/m3/release/cut.md) recurs and performs
-the shift: remaining release-execution quests move to m0, m3's quests split
-by kind into m1 and m2, m4's move to m3, m4 starts empty, and m5 stays the
-deferred bucket. The cut PR also re-creates the cut gate in m2. The hygiene
-audits recur once per major release in m3, behind the cut, so the shift
-brings each into m1.
+After the next cut, each release cycle runs in three phases by kind of
+change (decided 2026-11-09, maintainer): additive work, then API breaks, then
+wire changes, as [Releases](/CONTRIBUTING.md#releases) describes. `main` is
+cut on demand in the first two phases, so their cuts are no longer gated on a
+milestone; the wire phase is short and its cut ends the cycle. An API break
+is what a published consumer adapts to when it rebuilds: the public Rust, JS,
+or bindings API, CLI flags, config keys, and environment variables. A wire
+change is what a deployed peer adapts to without rebuilding: a frozen wire
+version, the hang catalog JSON, or a stored or exported container format,
+since a deployed peer parses those too. A change to an unpublished `-wip`
+wire version is wire work.
+
+The next cut performs a re-split, and each cut that ends a cycle shifts the
+milestones (decided 2026-10-19, rule replaced 2026-11-05 and 2026-11-09). The
+[release cut](/quest/m3/release/cut.md) does both:
+
+- The next cut moves remaining release-execution quests to m0 and sorts m3's
+  other quests by kind: additive into m1, API breaks into m2, wire changes
+  stay in m3. m4 keeps its quests as later work of higher priority, m5 starts
+  empty as later work of lower priority, and today's m5 moves to m6, the
+  deferred bucket. m1 is then additive work, m2 API breaks, and m3 wire
+  changes.
+- Each later cut that ends a cycle moves remaining release-execution quests
+  to m0, sorts m4's quests by kind into m1, m2, and m3, moves m5's to m4, and
+  leaves m5 empty and m6 the deferred bucket.
+
+Ordering holds the phases: m1 work ranks first, and while `phase` in
+`version.json` is `additive`, Nightly and the cut refuse a public API break on
+`main`. Wire work is held by planning alone: it waits in m3 until the
+maintainer opens the wire phase. The cut gate is re-created in m3, which the
+cycle's last cut waits on. The hygiene audits recur behind the cut in the
+higher-priority later-work milestone (m3 until the next cut, m4 after it), so
+the shift brings each into m1.
 
 The [release execution](/quest/m3/release/README.md) starts once m2 is done.
 It publishes artifacts before downstream adoption and rollout can complete.
