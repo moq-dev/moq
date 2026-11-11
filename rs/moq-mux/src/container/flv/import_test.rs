@@ -1033,5 +1033,8 @@ async fn an_unmappable_restart_refuses_later_input() {
 	let err = importer.decode(&first_frame(0)).unwrap_err();
 	assert!(matches!(err, crate::Error::UnmappableTimestamp(_)), "{err:?}");
 	let err = importer.decode(&first_frame(3_700_000)).unwrap_err();
-	assert!(matches!(err, crate::Error::UnmappableTimestamp(_)), "refused with the cause: {err:?}");
+	assert!(
+		matches!(err, crate::Error::UnmappableTimestamp(_)),
+		"refused with the cause: {err:?}"
+	);
 }
