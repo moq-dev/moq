@@ -949,3 +949,54 @@ fn a_fresh_uncertified_claim_waits_on_an_older_floor() {
 		assert_eq!(router.shows(7, &p("live/x")), Some(true), "refresh {refresh}");
 	}
 }
+
+/// Pins a count to infinity that `verify/route/RouteHandoff.tla` found. An echo
+/// travels apart from the echoing node's routes, so it can overtake an
+/// advertisement that node derived from this one's. b learned its route from a
+/// and advertised it back, then ended it on a's ROUTE_END. Its echo arrives
+/// first, so a drains its feasibility distance and accepts b's stale
+/// advertisement as a fresh, longer route to an origin neither reaches through
+/// the other. With every echo overtaking, the two relays count up without end.
+/// A fix keeps a's distance until that advertisement can no longer arrive:
+/// then a refuses it and the route is gone.
+#[test]
+fn residual_an_overtaking_echo_counts_to_infinity() {
+	let (origin, a, b) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.join(origin, a, 1);
+	sim.join(origin, b, 1);
+	sim.join(a, b, 1);
+	// b hears the origin only through a, and b's advertisement to a waits.
+	sim.hold(origin, b);
+	sim.hold(b, a);
+	originate(&mut sim, origin, 7, 0);
+	assert!(sim.run());
+	assert_eq!(next(&sim, b, 7), Some(a));
+
+	sim.disconnect(origin, a);
+	assert!(sim.run());
+	assert!(!sim.holds(b, 7), "b let go on a's ROUTE_END");
+	assert!(sim.deliver_ack(b, a), "b's echo overtakes its own advertisement");
+	assert!(!sim.remembers(a, 7), "a drained its distance");
+	assert!(sim.deliver(b, a));
+	assert_eq!(
+		sim.route(a, 7).map(|route| (route.next, route.metric)),
+		Some((Some(b), 3))
+	);
+
+	// Each round, the relay that just drained accepts the other's stale route.
+	for round in 0..6 {
+		let (from, to) = if round % 2 == 0 { (b, a) } else { (a, b) };
+		let mut peak = 0;
+		while sim.deliver(from, to) {
+			peak = peak.max(sim.route(to, 7).map_or(0, |route| route.metric));
+		}
+		// The origin echoes b's ends, and echoes overtake every route still waiting.
+		while sim.deliver(b, origin) {}
+		while [(a, b), (b, a), (origin, b)]
+			.into_iter()
+			.any(|(x, y)| sim.deliver_ack(x, y))
+		{}
+		assert_eq!(peak, 3 + round, "round {round}");
+	}
+}

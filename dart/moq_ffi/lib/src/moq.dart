@@ -7213,7 +7213,6 @@ enum MoqProtocolKind {
   timeout,
   version,
   deliveryTimeout,
-  sessionClosed,
   goingAway,
   tooFarBehind,
   malformedTrack,
@@ -7260,48 +7259,46 @@ class FfiConverterMoqProtocolKind {
       case 9:
         return LiftRetVal(MoqProtocolKind.deliveryTimeout, 4);
       case 10:
-        return LiftRetVal(MoqProtocolKind.sessionClosed, 4);
-      case 11:
         return LiftRetVal(MoqProtocolKind.goingAway, 4);
-      case 12:
+      case 11:
         return LiftRetVal(MoqProtocolKind.tooFarBehind, 4);
-      case 13:
+      case 12:
         return LiftRetVal(MoqProtocolKind.malformedTrack, 4);
-      case 14:
+      case 13:
         return LiftRetVal(MoqProtocolKind.notFound, 4);
-      case 15:
+      case 14:
         return LiftRetVal(MoqProtocolKind.unroutable, 4);
-      case 16:
+      case 15:
         return LiftRetVal(MoqProtocolKind.old, 4);
-      case 17:
+      case 16:
         return LiftRetVal(MoqProtocolKind.evicted, 4);
-      case 18:
+      case 17:
         return LiftRetVal(MoqProtocolKind.wrongSize, 4);
-      case 19:
+      case 18:
         return LiftRetVal(MoqProtocolKind.frameTooLarge, 4);
-      case 20:
+      case 19:
         return LiftRetVal(MoqProtocolKind.timestampMismatch, 4);
-      case 21:
+      case 20:
         return LiftRetVal(MoqProtocolKind.app, 4);
-      case 22:
+      case 21:
         return LiftRetVal(MoqProtocolKind.unknown, 4);
-      case 23:
+      case 22:
         return LiftRetVal(MoqProtocolKind.tooManyRequests, 4);
-      case 24:
+      case 23:
         return LiftRetVal(MoqProtocolKind.expired, 4);
-      case 25:
+      case 24:
         return LiftRetVal(MoqProtocolKind.authTokenCacheOverflow, 4);
-      case 26:
+      case 25:
         return LiftRetVal(MoqProtocolKind.malformedAuthToken, 4);
-      case 27:
+      case 26:
         return LiftRetVal(MoqProtocolKind.unknownAuthTokenAlias, 4);
-      case 28:
+      case 27:
         return LiftRetVal(MoqProtocolKind.invalidRequestId, 4);
-      case 29:
+      case 28:
         return LiftRetVal(MoqProtocolKind.invalidPath, 4);
-      case 30:
+      case 29:
         return LiftRetVal(MoqProtocolKind.invalidAuthority, 4);
-      case 31:
+      case 30:
         return LiftRetVal(MoqProtocolKind.tooManyRequestUpdates, 4);
       default:
         throw UniffiInternalError(

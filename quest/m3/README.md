@@ -124,23 +124,16 @@ federation) land.
 - [JS joining FETCH](/quest/m3/ietf-js-joining-fetch.md) - the JS publisher answers a joining FETCH that arrives after a quick finish, mirroring the Rust bound
 - [An Absolute join never races an older-history FETCH](/quest/m3/ietf-absolute-join-race.md) - reproduce #7680's suspected collision on main, then fix it or keep the test and delete
 - [A passing interop run stops publishers cleanly](/quest/m3/interop-shutdown-warnings.md) - no lingering publisher or unfinished-producer warning in a green interop run
-- [Dependency and alternatives audit](/quest/m3/audit-deps.md) - every dependency earns its weight, preferring fewer, and the rest are current, deduplicated, and the best maintained option
-- [Dead code and API surface audit](/quest/m3/audit-dead-code.md) - repeat the removal audit before the next major release
+- [Cost audit](/quest/m3/audit-cost.md) - CI jobs, tests, dependencies, build time, and artifact size each earn their cost, deleted by default
+- [Code audit](/quest/m3/audit-code.md) - unused code is deleted, overbuilt code simplified, and every lint suppression still needed
+- [Test coverage audit](/quest/m3/audit-test-coverage.md) - behavior that matters is tested and every test runs in CI
+- [Documentation audit](/quest/m3/audit-docs.md) - docs match the code, with no stale pages, broken examples or links, or undocumented exports
+- [Performance audit](/quest/m3/audit-perf.md) - benchmarks that regressed are explained, fixed, or planned, and `main` ships no slower than `release`
+- [Interop audit](/quest/m3/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
 - [Typecheck with bun check](/quest/m3/bun-check.md) - workspace packages typecheck through bun once nixpkgs ships bun 1.4.4
-- [Test coverage audit](/quest/m3/audit-test-coverage.md) - repeat the coverage audit against the m1 baselines after the next release ships
-- [Documentation audit](/quest/m3/audit-docs.md) - repeat the docs audit after the release ships, against the m1 baselines
-- [Test cost audit](/quest/m3/audit-test-cost.md) - the slowest, flakiest, and least valuable tests are deleted by default, or else fixed or planned, once the release ships
-- [Quest tree audit](/quest/m3/audit-quests.md) - repeat the whole-tree audit after the release ships, against the m1 baseline
-- [CI workflow audit](/quest/m3/audit-ci.md) - repeat the per-workflow and per-job review after the release ships, against the m1 baselines
-- [Performance audit](/quest/m3/audit-perf.md) - benchmarks that regressed since the m1 run are explained, fixed, or planned, and unbenched hot paths get coverage
-- [Simplification audit](/quest/m3/audit-simplify.md) - repeat the simplification audit, starting with the m1 leftovers, after the release ships
-- [Artifact size audit](/quest/m3/audit-size.md) - repeat the shipping, native, and browser attribution after the release ships
-- [Compile time audit](/quest/m3/audit-compile-time.md) - build-time hotspots are measured against the m1 baselines, starting with the transport share now that moq-net compiles once, and the worst are removed, made cheaper, or planned
-- [Lint override and deprecation audit](/quest/m3/audit-lints.md) - repeat the suppression and deprecation audit after the release ships, starting with clippy on the macOS and Windows targets
 - [Clean ALSA playback onset](/quest/m3/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Read a bus source's own samples](/quest/m3/audio-strip-tap.md) - a tap reads one source's samples before its delay with their bus-clock positions, for the studio's clap sync
 - [moq-audio filter chain](/quest/m3/audio-filters.md) - per-source suppression, gate, compressor, limiter, ducking, and plugins, which moq-dev/studio configures
-- [Interop audit](/quest/m3/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
 - [moq-hls exposes each rendition's bound source](/quest/m3/hls-rendition-source.md) - playlists and segments report the source path and instance they read, so a cache can key on the source
 - [The memory bench finishes at 1 MiB frames](/quest/m3/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
 - [Audio's Latest start reaches back](/quest/m3/audio-latest-reach-back.md) - moq_audio's start covers min plus warmup like other consumers
@@ -181,7 +174,7 @@ federation) land.
 - [A published capture exposes its bandwidth grant](/quest/m3/video-publish-grant.md) - a moq-video publish shows each track's granted bitrate, not only its target
 - [The test relay can enable stats](/quest/m3/relay-test-stats.md) - `moq_relay::test_relay` starts with stats on when asked
 - [macOS capture listing futures are Send](/quest/m3/capture-shareable-send.md) - ScreenCaptureKit listing and start no longer hold a non-Send block across an await
-- [A capture listing a picker can draw](/quest/m3/capture-list.md) - windows grouped by app with icons, camera kinds, low-rate pictures, and a wait for changes on macOS, Windows, and X11, for moq-dev/studio's Add page
+- [A capture listing a picker can draw](/quest/m3/capture-list.md) - windows grouped by app with icons and placed on their displays, camera kinds, low-rate pictures, and a wait for changes on macOS, Windows, and X11, for moq-dev/studio's Add page
 - [Denied macOS system audio names its settings pane](/quest/m3/audio-system-denied-hint.md) - a permission error pointing at Screen & System Audio Recording
 - [One encoder follows several connections' estimates](/quest/m3/bandwidth-multi-connection.md) - a track published to two relays tracks both estimates
 - [Bandwidth reservations ignore in-process readers](/quest/m3/reservation-local-readers.md) - a local recorder no longer counts as uplink demand
@@ -199,3 +192,8 @@ federation) land.
 - [A room keeps a participant while one of its aliases is announced](/quest/m3/room-alias-withdraw.md) - withdrawing `camera` while `camera.hang` stays announced keeps the participant
 - [@moq/auth key derivation and key sets validate like single keys](/quest/m3/auth-key-validation.md) - `Key.public` shares no scope and never yields an invalid key, and key sets and Rust refuse mismatched keys at parse
 - [Binding server helpers observe session errors and describe close truthfully](/quest/m3/serve-session-errors.md) - Python retrieves session task errors, and the Kotlin, Go, and Dart docs say close ends every connection
+- [A GOAWAY to a draining fallback session is followed](/quest/m3/reconnect-probe-redirect.md) - a redirect that reaches a draining fallback session is not lost
+- [A connection reports Migrating while its predecessor still serves](/quest/m3/reconnect-predecessor-status.md) - Disconnected means nothing serves
+- [A group read to its FIN stays finished across updates](/quest/m3/lite-finished-across-updates.md) - a lite-07 subscriber never records a group it got whole as stale
+- [A dead redirect target falls back to the configured relay](/quest/m3/net-redirect-fallback.md) - `@moq/net` stops redialing a dead redirect target
+- [Room participants survive your own connection blip](/quest/m3/room-keep-through-blip.md) - remote participants stay on screen across the local user's reconnect

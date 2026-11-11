@@ -106,3 +106,10 @@ deleted.
 - [The dev shell builds Kotlin with Gradle 9](/quest/m4/kt-gradle-9.md) - `gradle_9` in the dev shell, so the Android target builds there
 - [A hung Python test fails instead of hanging the suite](/quest/m4/py-test-timeouts.md) - one pytest-timeout bound covers every `py/` test
 - [Chromium's Opus encoder stamps chunks from their input](/quest/m4/chromium-opus-timestamps.md) - waiting on Chromium; unlocks native `usedtx` for push-to-talk
+- [Resume sweeps are checked against the TLA+ model](/quest/m4/resume-trace-validation.md) - each resume sweep case is a behaviour of `ResumeReader.tla`
+- [Reconnect runs are checked against the TLA+ model](/quest/m4/reconnect-trace-validation.md) - a seeded sweep of the connect policy whose runs are behaviours of `Handover.tla`
+- [Subscription runs are checked against the TLA+ model](/quest/m4/subscribe-trace-validation.md) - a seeded sweep of one lite-07 subscription whose runs are behaviours of `SubscribeAccounting.tla`
+- [Kani proves the varint codecs and length arithmetic for every input](/quest/m4/codec-kani.md) - bounded proofs of no panic, no overflow, and round-trip, nightly
+- [js/net decodes the Rust fuzzers' corpus the same way](/quest/m4/fuzz-corpus-js.md) - nightly, both codecs agree on acceptance and re-encoding for every corpus input
+- [No mutation of the route and resume code survives its tests](/quest/m4/mutants.md) - cargo-mutants nightly, failing on any survivor
+- [Concurrent tests run under many Miri schedules and ThreadSanitizer](/quest/m4/miri-seeds-tsan.md) - shim-free race checks on kio and moq-net, nightly
