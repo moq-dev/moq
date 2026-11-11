@@ -16,10 +16,11 @@ coming back once it reconnects.
 ## Run
 
 ```sh
-just js tla room/verify/Room.tla
+just test tla js/room
 ```
 
-TLC exits non-zero while the rule above breaks. To draw the chart, run `/statechart` with
+`Room.cfg` is marked `\* Open finding:`, so this passes, as Nightly checks, only while the rule
+breaks. The fix drops that line. To draw the chart, run `/statechart` with
 `Room.tla`, `Room.cfg`, and `Room.view.ts`. `Room.cfg` plays only Bob's camera; add `"screen"` to
 `Kinds` to play his share too.
 

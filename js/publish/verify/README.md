@@ -9,7 +9,7 @@ broadcast.
 
 | Rule | Holds when | Today |
 | --- | --- | --- |
-| `LiveMeansWatchable` | The badge says LIVE only while viewers can find the broadcast. | Breaks: the badge reads the connection and the captured sources, not the announce gate, so it says LIVE while the gate waits for the encoders to settle. Accepted 2026-11-10 (maintainer): the window is usually milliseconds. |
+| `LiveMeansWatchable` | The badge says LIVE only while viewers can find the broadcast. | Breaks: the badge reads the connection and the captured sources, not the announce gate, so it says LIVE while the gate waits for the encoders to settle. Accepted 2026-11-10 (maintainer): the window is usually milliseconds, so `Publish.cfg` leaves it out. |
 | `StopStopsPublishing` | A publisher who stopped the camera publishes nothing. | Holds. |
 | `DenialIsShown` | A publisher who refused the camera is told so. | Holds. |
 
@@ -21,10 +21,10 @@ state has.
 ## Run
 
 ```sh
-just js tla publish/verify/Publish.tla
+just test tla js/publish
 ```
 
-TLC exits non-zero while a rule above breaks. To draw the chart, run `/statechart` with
+This must pass, as Nightly checks. To draw the chart, run `/statechart` with
 `Publish.tla`, `Publish.cfg`, and `Publish.view.ts`.
 
 ## Left out

@@ -31,7 +31,7 @@ just rs tla moq-net/verify/route/RouteHandoff.tla
 just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/CountToInfinity.cfg
 ```
 
-The first checks every rule but `NoCountToInfinity`: about 3.7M states, two minutes on 32 cores, and it passes at the sync commit. The second fails at the sync commit on the open finding below.
+The first checks every rule but `NoCountToInfinity`: about 3.7M states, two minutes on 32 cores, and it passes at the sync commit. The second fails at the sync commit on the open finding below. `just test tla rs/moq-net/verify/route` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes.
 
 Read a counterexample with `/statechart`, passing it the spec, a config, and `RouteHandoff.view.ts`, which labels each relay's route and each step as the message that arrives. It gives the shortest path to each broken rule in those words.
 

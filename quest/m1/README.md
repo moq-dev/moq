@@ -44,7 +44,6 @@ moves what remains of them once their claims merge.
 - [A resumed QUIC client gives up on its own idle timer](/quest/m1/quic-resume-idle.md) - a client stopped past its idle timeout closes within about one timeout of resuming, without waiting on a stateless reset
 - [A reused moq-transport alias delivers a group that beats its SUBSCRIBE_OK](/quest/m1/ietf-alias-reuse.md) - a new SUBSCRIBE clears its track's alias tombstone, so moqxr's alias-0 catalog refetch no longer hangs
 - [A screen share publishes only while joined](/quest/m1/room-screen-joined.md) - `@moq/room` publishes no screen share before joining or after leaving
-- [The TLA+ models run nightly and reviews resync them](/quest/m1/model-checks-nightly.md) - every model config runs in Nightly, open findings must still fail, and review reruns a model whose covered code changed
 - [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - every ordering on 4-5 relay meshes with two origins and clients, with an announce budget and convergence
 - [Seeded lite-07 meshes hold the route rules and an announce budget](/quest/m1/route-mesh-sweep.md) - the route rules and message budget checked on real sessions over random meshes
 - [A model of a relay chain's failover delivers every group once](/quest/m1/failover-chain-model.md) - route, resume, and subscribe composed across a relay chain whose hops fail

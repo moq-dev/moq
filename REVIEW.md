@@ -47,6 +47,13 @@ The fix is a mocked clock or an awaited event, never a shorter or longer real wa
 The exception is a test that drives real sockets, devices, or processes, which may wait on the real clock and opts out with `host_time()` or `hostTime()`; that opt-out belongs nowhere else.
 The runtime guards fail Rust and bun tests only when a timer fires on the host clock, so they miss Go and Python tests, elapsed-time assertions, and any wait that bypasses those clocks; and Rust's `host_time()` lasts for the whole process, so it hides other tests' waits outside nextest's one-test-per-process runs.
 
+# Models
+
+A TLA+ model that no longer describes its code keeps passing while proving nothing, and Nightly cannot tell.
+When a PR changes a file in a `verify-*` skill's Coverage table, run that skill on the head.
+Flag a covered change the model does not mirror, a config whose result changed without its `\* Open finding:` line following, and a sync commit not moved to the PR's base once the model matches (PRs squash, so the base is the latest commit it can name).
+The flow models under `js/*/verify/` have no skill: give a PR that changes the code their README names the same check with `just test tla`.
+
 # Not findings
 
 Each of these has been raised and refuted repeatedly here; the rules in `AGENTS.md` already decide them:

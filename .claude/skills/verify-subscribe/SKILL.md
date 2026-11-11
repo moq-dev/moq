@@ -25,7 +25,7 @@ just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla
 just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/StreamWins.cfg
 ```
 
-The first checks every rule but `StreamWins`: about 3.0M states, 20 to 30 seconds on 32 cores, and it passes at the sync commit. The second fails at the sync commit on the open finding below. One group is enough: groups share only the order of the Subscribe Stream, and a second group multiplies the states (60M and more) without adding a race.
+The first checks every rule but `StreamWins`: about 3.0M states, 20 to 30 seconds on 32 cores, and it passes at the sync commit. The second fails at the sync commit on the open finding below. `just test tla rs/moq-net/verify/subscribe` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes. One group is enough: groups share only the order of the Subscribe Stream, and a second group multiplies the states (60M and more) without adding a race.
 
 Read a counterexample with `/statechart`, passing it the spec, a config, and `SubscribeAccounting.view.ts`, which labels what each side holds for the group, which update each side is on, and each step as the event that happens. It gives the shortest path to each broken rule in those words.
 

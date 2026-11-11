@@ -28,7 +28,7 @@ just rs tla moq-net/verify/resume/ResumeReader.tla
 just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net/verify/resume/ThreeRoutes.cfg
 ```
 
-The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 14.3M distinct states, three minutes on 32 cores. The second trades a group for a third route, so a route can come up after another failed: about 7.1M states, under two minutes. Both pass at the sync commit.
+The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 14.3M distinct states, three minutes on 32 cores. The second trades a group for a third route, so a route can come up after another failed: about 7.1M states, under two minutes. Both pass at the sync commit. `just test tla rs/moq-net/verify/resume` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes.
 
 `Chart.cfg` is for `/statechart` only: a story (`Story`) small enough to draw whole, where the reader switches to a route that holds an older group and asks it for that group. Pass it the spec, `Chart.cfg`, and `ResumeReader.view.ts`, which labels which route serves, what the reader has, and each step as what happens to a route or the reader. For a counterexample, pass the config that broke instead.
 
@@ -38,7 +38,7 @@ None at the sync commit.
 
 ## Reading a failure
 
-A counterexample is a path through the model, not yet a bug. Replay it as a test in `model/resume.rs`'s `mod test`, one call per step: `received_copy` for a route, `routes.serve(copy.consume())` for a switch, `write` for a landing group, `finish()` for a declared end, `abort(..)` for a route failing, and `drain` or `poll_recv_group` for a poll. If the code does not follow the path, the model is wrong: fix the model to match the code. If it does, report the path and the rule in the code's words, and pin it as a `residual_*` test with its own config so the others still pass. Do not weaken a rule, add a constraint, or shrink the bounds until the check passes.
+A counterexample is a path through the model, not yet a bug. Replay it as a test in `model/resume.rs`'s `mod test`, one call per step: `received_copy` for a route, `routes.serve(copy.consume())` for a switch, `write` for a landing group, `finish()` for a declared end, `abort(..)` for a route failing, and `drain` or `poll_recv_group` for a poll. If the code does not follow the path, the model is wrong: fix the model to match the code. If it does, report the path and the rule in the code's words, and pin it as a `residual_*` test with its own config, marked with an `\* Open finding:` line, so the others still pass. Do not weaken a rule, add a constraint, or shrink the bounds until the check passes.
 
 ## Coverage
 

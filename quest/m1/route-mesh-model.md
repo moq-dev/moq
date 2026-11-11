@@ -25,8 +25,9 @@ are routing's confidence gates for finalizing lite-07.
   external change, the queues empty and every relay shows what
   `QuietIsSettled` requires.
 - Keep explicit-state runs tractable with `SYMMETRY` over interchangeable
-  relays; run larger meshes with TLC's random simulation in Nightly
-  ([nightly models](/quest/m1/model-checks-nightly.md)).
+  relays; run larger meshes with TLC's random simulation in Nightly, whose
+  `just test tla` (`sh/tla.sh`) runs each config exhaustively today and needs
+  a way to mark a config for simulation.
 - Count to infinity stays in its own open-finding config until
   [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md) lands, so
   the other rules still run on larger meshes.
