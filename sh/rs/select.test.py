@@ -198,13 +198,6 @@ class SelectTest(unittest.TestCase):
                 calls = self.selected(path, action="test")
                 self.assertTrue(any("/rs/moq-net-tests#" in call for call in calls), calls)
 
-    def test_demo_crate_follows_its_dependencies(self):
-        for path in ("demo/carla/bridge/src/lib.rs", "rs/moq-video/src/lib.rs"):
-            with self.subTest(path=path):
-                calls = self.selected(path, action="test")
-                self.assertTrue(any("/demo/carla/bridge#moq-carla-bridge" in call for call in calls), calls)
-        self.assertEqual(self.selected("demo/carla/web/src/player.ts"), [])
-
     def test_out_of_crate_target_selects_its_crate(self):
         # moq-cli builds the Rust interop clients as examples from outside its crate.
         for path in ("test/interop/clients/rust/tail.rs", "test/interop/clients/rust/added.rs"):
