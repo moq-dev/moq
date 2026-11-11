@@ -7,6 +7,22 @@ import { type Config, type Encoded, Encoder } from "./encoder.ts";
 export type ProducerConfig = Config & { track: Moq.Track.Producer };
 
 /**
+ * A window its producer finished: its records can still be read, but not edited.
+ * {@link Producer.finish} returns it, mirroring the Rust `window::Finished`; the producer itself
+ * still refuses an edit after the finish.
+ *
+ * @public
+ */
+export interface Finished<T> {
+	/** The retained checkpoint suffix, oldest first; see {@link Producer.window}. */
+	readonly window: T[];
+	/** Absolute index of the oldest retained record; see {@link Producer.offset}. */
+	readonly offset: number;
+	/** Abort the track with an error; see {@link Producer.abort}. */
+	abort(err: Error): void;
+}
+
+/**
  * Publishes a sliding window of JSON records to a track.
  *
  * An {@link Encoder} that owns its track: it writes each encoded frame and rolls a group whenever
@@ -156,9 +172,10 @@ export class Producer<T> {
 		group.finish();
 	}
 
-	/** Finish the track, closing any open group. */
-	finish(): void {
+	/** Finish the track, closing any open group, and return it as {@link Finished}. */
+	finish(): Finished<T> {
 		this.#close();
+		return this;
 	}
 
 	/** Abort the track with `err`, so readers see the cause rather than a complete window. Idempotent. */

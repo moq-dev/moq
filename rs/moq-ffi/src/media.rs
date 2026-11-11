@@ -1310,14 +1310,11 @@ impl MoqMediaContainerProducer {
 		let result = (|| {
 			let _guard = crate::ffi::enter();
 			let mut guard = self.inner.lock().unwrap();
-			let mut container = guard.take().ok_or(MoqError::Closed)?;
-			if let Err(err) = container.import.finish() {
-				container.import.abort(cause(&err));
-				return Err(MoqError::Codec {
-					reason: format!("finish failed: {err}"),
-				});
-			}
-			self.children.keep(container);
+			let container = guard.take().ok_or(MoqError::Closed)?;
+			let finished = container.import.finish().map_err(|err| MoqError::Codec {
+				reason: format!("finish failed: {err}"),
+			})?;
+			self.children.keep(finished);
 			Ok(())
 		})();
 		self.driver.check()?;

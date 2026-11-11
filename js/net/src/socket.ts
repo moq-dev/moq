@@ -45,6 +45,15 @@ function endpointPath(prefix: Path.Valid, role: Role, id: string): Path.Valid {
 	return Path.encode(Path.from(prefix, SEGMENT[role], id));
 }
 
+/**
+ * Whether `path` is an endpoint's broadcast, which only routes sessions and carries no
+ * media, so a worker that acts on every announced broadcast can skip it.
+ */
+export function isEndpoint(path: Path.Valid): boolean {
+	const parent = path.split("/").at(-2);
+	return Object.values(SEGMENT).some((role) => parent === role);
+}
+
 function parse(name: string): { protocol: string; dialer: string; acceptor: string; session: string } | undefined {
 	const parts = name.split("/");
 	if (parts.length !== 4 || parts.some((part) => !part || part.includes("\\"))) return;

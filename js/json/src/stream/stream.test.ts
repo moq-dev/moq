@@ -250,3 +250,15 @@ for (const compress of [false, true]) {
 		expect(await fast.next()).toBeUndefined();
 	});
 }
+
+// Mirrors the Rust `stream::Finished` doctest: the log `finish` returns takes no record, at
+// compile time and at run time.
+test("finishing returns a log that appends nothing", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Rec>({ track });
+	producer.append({ value: { n: 0 } });
+	const finished = producer.finish();
+	// @ts-expect-error a finished log appends no record
+	expect(() => finished.append({ value: { n: 1 } })).toThrow();
+	expect(await drain(track.subscribe())).toEqual([0]);
+});

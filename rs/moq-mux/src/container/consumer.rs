@@ -1798,7 +1798,7 @@ mod tests {
 		producer.write(frame(10_000, b"")).unwrap();
 		producer.discontinuity().unwrap();
 		producer.write(frame(2_405_070_000, b"b")).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		assert_eq!(items(&mut reader).await, ["0", "10000", "end 10000", "2405070000"]);
 	}
