@@ -263,6 +263,43 @@ export function insertDrop(
 	return merged;
 }
 
+/**
+ * The parts of sorted, disjoint `runs` that sorted, disjoint `cut` leaves, each keeping its run's
+ * fields, as {@link removeRun} of each cut would, in one pass.
+ */
+export function subtractRuns<R extends Run>(runs: readonly R[], cut: readonly Run[]): R[] {
+	const kept: R[] = [];
+	let first = 0;
+	for (const run of runs) {
+		while (first < cut.length && cut[first].end <= run.start) first++;
+		let from = run.start;
+		for (let i = first; i < cut.length && cut[i].start < run.end; i++) {
+			if (cut[i].start > from) kept.push({ ...run, start: from, end: cut[i].start });
+			from = max(from, cut[i].end);
+		}
+		if (from < run.end) kept.push({ ...run, start: from, end: run.end });
+	}
+	return kept;
+}
+
+/**
+ * `drops` with each of the sorted, disjoint `runs` inserted as {@link insertDrop} inserts it, in
+ * one pass: folding in a span of many runs costs the runs, not their square.
+ */
+export function insertDrops(drops: readonly DropRun[], runs: readonly DropRun[]): DropRun[] {
+	if (runs.length === 0) return [...drops];
+	const next = subtractRuns(drops, runs);
+	next.push(...runs);
+	next.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+	const merged: DropRun[] = [];
+	for (const run of next) {
+		const last = merged[merged.length - 1];
+		if (last && last.end === run.start && sameHole(last, run)) last.end = run.end;
+		else merged.push({ ...run });
+	}
+	return merged;
+}
+
 /** The error `drops` gave `sequence` up with, if any. */
 export function dropAt(drops: readonly DropRun[], sequence: bigint): Error | undefined {
 	return drops.find((run) => run.start <= sequence && sequence < run.end)?.error;
@@ -616,6 +653,13 @@ export const hooks: {
 	stageRequest: (request: Request, info: InfoInit) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
+	/**
+	 * The error a producer gave `sequence` up for good with, when it holds no group for it: a
+	 * skip, or a drop under no budget, which none of its readers fills. A stale drop stays
+	 * fillable by a wider budget. Mirrors the Rust `poll_fetch_cached` `judges_drops`; assigned
+	 * by `track.ts`.
+	 */
+	givenUpGroup: (producer: Producer, sequence: bigint) => Error | undefined;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
 	demandPriority: (demand: Demand) => number;
 	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
@@ -977,6 +1021,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	cachedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	givenUpGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	demandPriority: () => {

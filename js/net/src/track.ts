@@ -31,6 +31,7 @@ import {
 	type Hole,
 	hooks,
 	insertDrop,
+	insertDrops,
 	insertRun,
 	type Land,
 	maxDelayOf,
@@ -44,6 +45,7 @@ import {
 	sameHole,
 	skipHole,
 	staleHole,
+	subtractRuns,
 	type TrackRequestOptions,
 } from "./internal.ts";
 import { RUN_OVERHEAD as ARRIVAL_OVERHEAD, grace, Ledger } from "./ledger.ts";
@@ -902,11 +904,9 @@ function givenUp(
 ): DropRun[] {
 	const found = drops.overlapping(start, end);
 	if (refused.length === 0) return found;
-	let own = refused.filter((run) => run.start < end && start < run.end);
-	for (const run of found) {
-		if (settles({ ...run, start: max(run.start, start) })) own = removeRun(own, run.start, run.end);
-	}
-	found.push(...own);
+	const own = refused.filter((run) => run.start < end && start < run.end);
+	const hiding = found.filter((run) => settles({ ...run, start: max(run.start, start) }));
+	found.push(...subtractRuns(own, hiding));
 	return found.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
 }
 
@@ -1381,6 +1381,11 @@ export class Producer {
 			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
 		};
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
+		hooks.givenUpGroup = (producer, sequence) => {
+			if (cachedHolds(producer, sequence)) return undefined;
+			const drop = producer.#state.drops.at(sequence);
+			return drop && (drop.skip || drop.stale === undefined) ? drop.error : undefined;
+		};
 		hooks.reportedLargest = (producer, largest) => producer.#advanceObject(largest);
 		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
 		objectLargest = (producer) => producer.#objectLargest;
@@ -3074,8 +3079,9 @@ export class Subscriber {
 
 	// Bill this reader's record, and pay what it can of the debt its track left its readers by
 	// folding what it settled for good into its floor. Returns TooFarBehind once that needed a
-	// run it was promised and its record is one to end. Mirrors the Rust `Record::settle`.
-	#settleRecord(): TooFarBehind | undefined {
+	// run it was promised and its record is one to end; `handed` stays above the fold (see
+	// #fold). Mirrors the Rust `Record::settle`.
+	#settleRecord(handed?: bigint): TooFarBehind | undefined {
 		if (this.#lagged) return new TooFarBehind();
 		const bytes = this.#recordRuns() * cache.READER_RUN_OVERHEAD;
 		if (!this.#bill) {
@@ -3086,7 +3092,7 @@ export class Subscriber {
 		const bill = this.#bill;
 		bill.set(bytes);
 		if (bill.debt === 0) return undefined;
-		this.#fold();
+		this.#fold(handed);
 		const folded = this.#recordRuns() * cache.READER_RUN_OVERHEAD;
 		const freed = Math.max(0, bill.size - folded);
 		bill.set(folded);
@@ -3110,8 +3116,9 @@ export class Subscriber {
 	// groups. Not final are the reports an update reopens, the runs given up and not reported
 	// yet, and the sequences nothing settled. The runs copied from the track's drop set go
 	// first: the next scan folds in again whatever the track still holds. Mirrors the Rust
-	// `Record::fold`.
-	#fold(): void {
+	// `Record::fold`. It stops below `handed`, a group this read hands out that its publisher has
+	// yet to tell its wire of.
+	#fold(handed?: bigint): void {
 		if (this.#pending.some((run) => run.received)) {
 			this.#pending = this.#pending.filter((run) => !run.received);
 			this.#dropsSeen = undefined;
@@ -3134,6 +3141,7 @@ export class Subscriber {
 				for (const run of this.#pending) if (run.start > floor && run.start < end) end = run.start;
 				next = end;
 			}
+			if (handed !== undefined && floor <= handed && handed < next) next = handed;
 			if (next <= floor) break;
 			floor = next;
 		}
@@ -3147,8 +3155,9 @@ export class Subscriber {
 	}
 
 	// Owe again every run this cursor gave up as stale, reported or not: an update reopens the
-	// verdict. A group still cached is offered again as a widened skip is, and whatever is still
-	// stale under the new terms is given up and reported again. Returns the runs taken back. A
+	// verdict. A group still cached is offered again as a widened skip is, a missing one is missed
+	// again (asked of a fill, or dropped as not found when none can serve it), and whatever is
+	// still stale under the new terms is given up and reported again. Returns the runs taken back. A
 	// resumed reader takes back what it queued and what its serving route's copy reported.
 	#reofferStale(): Run[] {
 		if (this.#resume) return this.#resume.reofferStale();
@@ -3168,11 +3177,18 @@ export class Subscriber {
 		this.#pending = this.#pending.filter((run) => run.stale === undefined);
 		// A received stale run is folded in again by the next scan, if the track still holds it.
 		this.#dropsSeen = undefined;
-		const sequences = [...this.#skipped.keys()].filter((sequence) =>
-			taken.some((run) => run.start <= sequence && sequence < run.end),
-		);
+		const producer = this.#state.producer;
+		const sequences: bigint[] = [];
+		for (const sequence of this.#skipped.keys()) {
+			if (!taken.some((run) => run.start <= sequence && sequence < run.end)) continue;
+			// A skip whose group left the cache can never be offered again: forgotten, so the
+			// run is judged again below, as the Rust `prune_skipped` forgets it first.
+			if (producer && !cachedHolds(producer, sequence)) this.#skipped.delete(sequence);
+			else sequences.push(sequence);
+		}
 		// What no skip offers again, such as a group written off at the track's max age bound,
-		// which no budget reverses, is still stale under the new terms: reported again. What an
+		// which no budget reverses, is still stale under the new terms: reported again, as is a
+		// missing group they still convict. What an
 		// upstream's stale run decided is the upstream's to judge again: the scan above folds it
 		// in again if the track still holds it, and it stays owed if new terms superseded it.
 		// Mirrors Rust.
@@ -3180,12 +3196,55 @@ export class Subscriber {
 		for (const sequence of sequences) kept = removeRun(kept, sequence, sequence + 1n);
 		for (const decided of received) kept = removeRun(kept, decided.start, decided.end);
 		if (kept.length > 0) {
-			const hole = staleHole(this.#drift().budget);
-			for (const run of kept) this.#pending = insertDrop(this.#pending, run.start, run.end, hole);
+			const drift = this.#drift();
+			const stale = staleHole(drift.budget);
+			for (const run of kept) {
+				for (const part of this.#missed(run)) {
+					// A miss the new terms still convict is stale again; one a fill can still bring
+					// stays owed, asked afresh; the rest no copy left here can serve.
+					if (!part.missed || this.#staleAt(part.end - 1n, drift)) {
+						this.#pending = insertDrop(this.#pending, part.start, part.end, stale);
+					} else if (!this.#retry(part)) {
+						const hole = { error: new StreamError(StreamCode.NotFound, { message: "group not found" }) };
+						this.#pending = insertDrop(this.#pending, part.start, part.end, hole);
+					}
+				}
+			}
 		}
-		const producer = this.#state.producer;
 		if (sequences.length > 0 && producer && !this.#left) reofferSequences(producer, this.#state, sequences);
 		return taken;
+	}
+
+	// `run` split into its cached groups, which no skip offers again and so stay stale, and the
+	// gaps between them, which the cache no longer holds: misses, judged as the Rust `Misses`
+	// judges a gap, by its newest sequence.
+	#missed(run: Run): (Run & { missed: boolean })[] {
+		const producer = this.#state.producer;
+		if (!producer) return [{ ...run, missed: false }];
+		const parts: (Run & { missed: boolean })[] = [];
+		let next = run.start;
+		// A failed copy holds nothing to read, so it is missed like an evicted one.
+		const held = cachedIn(producer, run.start, run.end).filter((sequence) => cachedHolds(producer, sequence));
+		for (const sequence of held.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+			if (next < sequence) parts.push({ start: next, end: sequence, missed: true });
+			parts.push({ start: sequence, end: sequence + 1n, missed: false });
+			next = sequence + 1n;
+		}
+		if (next < run.end) parts.push({ start: next, end: run.end, missed: true });
+		return parts;
+	}
+
+	// Ask a fill again for `run`, which an update reopened: no longer judged, so the next read
+	// asks it or gives it up afresh, as the Rust `Misses::retry`. False when no fill can answer.
+	#retry(run: Run): boolean {
+		const producer = this.#state.producer;
+		if (!producer || this.#left) return false;
+		const fills = fillsOf(producer);
+		if (!fills.serving && !fills.active) return false;
+		this.#givenUp = removeRun(this.#givenUp, run.start, run.end);
+		this.#asked = removeRun(this.#asked, run.start, run.end);
+		this.#refilled = removeRun(this.#refilled, run.start, run.end);
+		return true;
 	}
 
 	// Fresh reads of the cached groups in `[start, end)` this cursor admits and no longer judges
@@ -3359,8 +3418,8 @@ export class Subscriber {
 			priority: () => this.#state.update.peek()?.priority ?? 0,
 			maxDelay: () => this.#drift().budget,
 			order: () => this.#state.update.peek()?.order ?? "descending",
-			refuse: (start, end, error) =>
-				this.#state.refused.update((runs) => insertDrop(runs, start, end, { error })),
+			refuse: (start, end, error, stale) =>
+				this.#state.refused.update((runs) => insertDrop(runs, start, end, { error, stale })),
 		};
 		return this.#state.asker;
 	}
@@ -3524,9 +3583,19 @@ export class Subscriber {
 		for (const gap of runGaps(this.#asked, start, end)) {
 			for (const run of fills.ask(gap.start, gap.end, asker)) insertRun(this.#asked, run.start, run.end);
 		}
+		// Refilled and missed again, unless a fill still brings it: given up and named, never
+		// asked a third time, as the Rust `Misses` gives up a refill evicted again.
+		const lost = intersect(this.#refilled, start, end).flatMap((run) =>
+			runGaps(fills.covered(run.start, run.end, asker), run.start, run.end),
+		);
 		for (const refill of again) {
 			for (const run of fills.ask(refill.start, refill.end, asker)) insertRun(this.#refilled, run.start, run.end);
 		}
+		for (const run of lost) {
+			insertRun(this.#givenUp, run.start, run.end);
+			asker.refuse(run.start, run.end, new StreamError(StreamCode.NotFound, { message: "group evicted again" }));
+		}
+		if (lost.length > 0) this.#fillsMoved();
 	}
 
 	// Whether a held group waits on the local cap rising: one past it may still be read. A
@@ -4143,8 +4212,10 @@ export class Subscriber {
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
 	#tryRecvGroup(dispositions = false): Recv {
 		const recv = this.#tryRecvUnsettled(dispositions);
-		// What the read settled is billed now, and pays what it can of its readers' debt.
-		const lagged = this.#settleRecord();
+		// What the read settled is billed now, and pays what it can of its readers' debt. The group
+		// it hands out stays above the fold until the next read, so the publisher tells its wire of
+		// it first rather than taking it for one already served.
+		const lagged = this.#settleRecord(recv.kind === "group" ? recv.group.sequence : undefined);
 		return lagged ? { kind: "error", error: lagged } : recv;
 	}
 
@@ -4316,14 +4387,17 @@ export class Subscriber {
 			}
 			// The reader's own refusals too: clearing the span above took out those it covered.
 			const folded = givenUp(drops, refused.peek(), from, to, (run) => settles(run, budget, coverage, judged));
+			const received: DropRun[] = [];
 			for (const dropped of folded) {
 				// Judged from where it meets this cursor's span, as Rust clips it.
 				const run = { ...dropped, start: max(dropped.start, from), end: min(dropped.end, to) };
 				if (run.start >= run.end) continue;
 				// A received stale run that does not settle this reader is unknown to it.
 				if (!settles(run, budget, coverage, judged)) continue;
-				this.#pending = insertDrop(this.#pending, run.start, run.end, { ...run, received: true });
+				received.push({ ...run, received: true });
 			}
+			// Sorted and disjoint: the settling drops and the refusals they leave never overlap.
+			this.#pending = insertDrops(this.#pending, received);
 		}
 		for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
 			// A received run the track has since forgotten, shed or superseded, is unknown again:

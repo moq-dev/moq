@@ -1277,9 +1277,12 @@ export class Publisher {
 				} finally {
 					hold.abort();
 				}
-				// A group the track does not cache goes to its request handler at once, written yet
-				// or not, as in Rust; with none open it is NotFound. A pending answer holds this
-				// FETCH's slot until the requester leaves.
+				// A group the track gave up for good is refused with that drop, as its own readers
+				// are, rather than asked upstream again. One it does not cache goes to its request
+				// handler at once, written yet or not, as in Rust; with none open it is NotFound. A
+				// pending answer holds this FETCH's slot until the requester leaves.
+				const refused = wireOf(front).givenUp(msg.track, msg.group);
+				if (refused) throw refused;
 				group = await front.track(msg.track).fetchGroup(msg.group, {
 					priority: msg.priority,
 					maxDelay: msg.maxDelay === undefined ? undefined : Duration.millis(msg.maxDelay),

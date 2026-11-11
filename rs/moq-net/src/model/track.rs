@@ -2204,8 +2204,14 @@ impl TrackState {
 	/// Resolve a one-shot fetch from the track side: the cached group, or an [`Error`]
 	/// once it can never be served. A missing group is a failure ([`Error::NotFound`]), not an
 	/// end-of-stream. The handler side (a refusal, or no [`Requests`] at all) lives
-	/// in the track's fills; [`Fetching`] polls both.
-	fn poll_fetch_cached(&self, sequence: u64, frames: group::Bounds) -> Poll<Result<group::Consumer>> {
+	/// in the track's fills; [`Fetching`] polls both. `judges_drops` answers a sequence given
+	/// up for good from the drop set, as this track's readers are answered.
+	fn poll_fetch_cached(
+		&self,
+		sequence: u64,
+		frames: group::Bounds,
+		judges_drops: bool,
+	) -> Poll<Result<group::Consumer>> {
 		// A group aborted between the lookup and the consume (an abandoned fetch cut
 		// short) is a miss, not a hit that fails on its first read.
 		if let Some(group) = self.covering_range(sequence, frames)
@@ -2225,6 +2231,16 @@ impl TrackState {
 		// Past the final sequence: the group can never exist.
 		if self.final_sequence().is_some_and(|fin| sequence >= fin) {
 			return Poll::Ready(Err(Error::NotFound));
+		}
+
+		// Given up for good: skipped, or dropped under no budget, which no reader of this
+		// track fills, so a request asks nothing upstream for it either. A stale drop stays
+		// fillable by a wider budget.
+		if judges_drops
+			&& let Some(hole) = self.drops.get(&sequence)
+			&& hole.stale_budget().is_none()
+		{
+			return Poll::Ready(Err(Error::Stream(hole.error())));
 		}
 
 		Poll::Pending
@@ -6156,10 +6172,13 @@ impl Consumer {
 				options: options.into().unwrap_or_default(),
 				end: None,
 			},
+			false,
 		)
 	}
 
-	/// Fill a wire request, widening a cold or compressed group to a reusable prefix.
+	/// Fill a wire request, widening a cold or compressed group to a reusable prefix. It asks
+	/// on a reader's behalf, so a sequence the serving copy gave up for good is answered from
+	/// that drop rather than asked upstream again, as the copy's own readers are.
 	pub(crate) fn fetch_range(&self, sequence: u64, mut request: FetchOptions) -> kio::Pending<Fetching> {
 		let state = self.resolve(None).0;
 		{
@@ -6175,10 +6194,10 @@ impl Consumer {
 				request.end = None;
 			}
 		}
-		self.fetching(sequence, request)
+		self.fetching(sequence, request, true)
 	}
 
-	fn fetching(&self, sequence: u64, request: FetchOptions) -> kio::Pending<Fetching> {
+	fn fetching(&self, sequence: u64, request: FetchOptions, judges_drops: bool) -> kio::Pending<Fetching> {
 		let FetchOptions {
 			options,
 			end: frame_end,
@@ -6202,6 +6221,7 @@ impl Consumer {
 				priority: options.priority,
 				max_delay: options.max_delay,
 				judges_drift: true,
+				judges_drops,
 				result: None,
 				hit: Some(Box::new(group)),
 				stats: self.stats.clone(),
@@ -6223,6 +6243,7 @@ impl Consumer {
 				priority: options.priority,
 				max_delay: options.max_delay,
 				judges_drift: true,
+				judges_drops,
 				result: None,
 				hit: None,
 				stats: self.stats.clone(),
@@ -6245,6 +6266,7 @@ impl Consumer {
 				end: frame_end,
 			},
 			self.stats.clone(),
+			judges_drops,
 		))
 	}
 
@@ -6583,6 +6605,10 @@ pub struct Fetching {
 	// Whether this fetch refuses a group a newer cached one superseded, judged across the
 	// whole cache. A cursor's head fill leaves it to the cursor, which judges its window.
 	judges_drift: bool,
+	// Whether this fetch, a request on a reader's behalf, refuses a sequence the track gave up
+	// for good. A group already partly read is continued past a drop, which judged only the
+	// subscription.
+	judges_drops: bool,
 	// The fill this fetch joined; `None` on a cache hit, or when no handler existed to
 	// queue on. Boxed: a miss already allocates, and the handle stays small.
 	result: Option<Box<fill::Join>>,
@@ -6605,6 +6631,7 @@ impl Fetching {
 		sequence: u64,
 		request: FetchOptions,
 		stats: stats::Scope,
+		judges_drops: bool,
 	) -> Self {
 		let frames = group::Bounds {
 			start: request.options.frame_start,
@@ -6612,7 +6639,10 @@ impl Fetching {
 		};
 		let (fills, cached) = {
 			let state = state.read();
-			(state.fills.clone(), state.poll_fetch_cached(sequence, frames))
+			(
+				state.fills.clone(),
+				state.poll_fetch_cached(sequence, frames, judges_drops),
+			)
 		};
 		let result = match cached.is_pending() {
 			true => queue(&fills, sequence, &request),
@@ -6633,6 +6663,7 @@ impl Fetching {
 			priority: request.options.priority,
 			max_delay: request.options.max_delay,
 			judges_drift: true,
+			judges_drops,
 			result,
 			hit,
 			stats,
@@ -6734,7 +6765,9 @@ impl Fetching {
 			start: frame_start,
 			end: self.frame_end,
 		};
-		let cached = |waiter: &kio::Waiter| match state.poll(waiter, |state| state.poll_fetch_cached(sequence, frames))
+		let judges_drops = self.judges_drops;
+		let cached = |waiter: &kio::Waiter| match state
+			.poll(waiter, |state| state.poll_fetch_cached(sequence, frames, judges_drops))
 		{
 			Poll::Ready(Ok(res)) => Poll::Ready(res.map(resolve)),
 			Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.outcome.aborted().cloned().unwrap_or(Error::Dropped))),
@@ -9024,7 +9057,8 @@ impl Cursor {
 		};
 		// The cursor judges the answer against its window when it hands it out.
 		let mut fetching =
-			Fetching::cached_or_queued(self.state.clone(), sequence, request, stats::Scope::default()).unjudged();
+			Fetching::cached_or_queued(self.state.clone(), sequence, request, stats::Scope::default(), false)
+				.unjudged();
 		let heads = self.heads.get_or_insert_default();
 		match kio::Task::poll(&mut fetching, waiter) {
 			Poll::Pending => {
@@ -9552,8 +9586,13 @@ impl Subscriber {
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		let res = self.poll_group_unsettled(ordered, waiter);
-		// What the read settled is billed now, and pays what it can of its readers' debt.
-		match self.settle_record() {
+		// What the read settled is billed now, and pays what it can of its readers' debt. The
+		// group it hands out stays above the fold until its reader accounts for it.
+		let handed = match &res {
+			Poll::Ready(Ok(Some(group))) => Some(group.sequence),
+			_ => None,
+		};
+		match self.settle_record(handed) {
 			Ok(()) => res,
 			Err(err) => Poll::Ready(Err(err)),
 		}
@@ -9749,18 +9788,18 @@ impl Subscriber {
 
 	/// Bill what this reader settled, and pay what it can of the debt its track left its
 	/// readers; [`Error::Lagged`] once that needed a run it was promised.
-	fn settle_record(&mut self) -> Result<()> {
+	fn settle_record(&mut self, handed: Option<u64>) -> Result<()> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				let state = &cursor.state;
 				match cursor.misses.as_deref_mut() {
-					Some(misses) => cursor.record.settle(|| state.read().cache.clone(), misses),
-					None => cursor.record.settle(|| state.read().cache.clone(), &mut ()),
+					Some(misses) => cursor.record.settle(|| state.read().cache.clone(), misses, handed),
+					None => cursor.record.settle(|| state.read().cache.clone(), &mut (), handed),
 				}
 			}
 			Inner::Resume(_, logical) => {
 				let state = &logical.state;
-				logical.record.settle(|| state.read().cache.clone(), &mut ())
+				logical.record.settle(|| state.read().cache.clone(), &mut (), handed)
 			}
 		}
 	}
@@ -10047,7 +10086,7 @@ impl Subscriber {
 	fn poll_drop_probing(&mut self, probe: bool, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, Hole)> {
 		// What a publisher told its wire since is billed now. A reader the pool ended reports
 		// nothing more: its reads fail with the reason.
-		if self.settle_record().is_err() {
+		if self.settle_record(None).is_err() {
 			return Poll::Pending;
 		}
 		match &mut self.inner {
@@ -10216,7 +10255,7 @@ impl Subscriber {
 			Inner::Resume(resume, _) => resume.mirror().sync(),
 		}
 		// A reader the pool ended reports it on its next read.
-		let _ = self.settle_record();
+		let _ = self.settle_record(None);
 		Ok(())
 	}
 

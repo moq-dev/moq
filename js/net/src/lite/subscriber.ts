@@ -11,6 +11,7 @@ import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import {
 	error,
+	NotFound,
 	ProtocolViolation,
 	reason,
 	SessionCode,
@@ -21,6 +22,7 @@ import {
 	toStreamCode,
 	unauthorized,
 } from "../error.ts";
+import { fillChanged, rejectGroups, wantedRuns } from "../fill.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
@@ -154,6 +156,14 @@ interface DatagramEntry {
 	ended?: boolean;
 }
 
+// How a received copy's groups are read, and the publisher's max age, which bounds every reader.
+interface Framing {
+	compress: boolean;
+	timescale: number;
+	// Undefined while the copy has no info, and null for no bound.
+	maxAge?: Duration | null;
+}
+
 interface SubscribeEntry {
 	datagrams?: DatagramEntry;
 	/** Release the stream demand held by readers of the legacy datagram track. */
@@ -216,6 +226,8 @@ interface SubscribeEntry {
 	// Called at the SUBSCRIBE's first response (lite-05+). Until then a SUBSCRIBE without an
 	// instance may be answered by whichever stream won the path, so a replacement refuses it.
 	answered?: () => void;
+	// A fill's own subscription, whose groups are cancelled once nobody wants them, as a FETCH's.
+	filling?: boolean;
 }
 
 /**
@@ -314,6 +326,11 @@ export class Subscriber {
 	// share one FETCH stream and each get an independent mirror; the entry is evicted once the
 	// group closes.
 	#fetches = new Map<string, { group: netGroup.Producer; accepted: Promise<void> }>();
+
+	// The runs a lite-07 copy's subscription reported stale under an update it has since
+	// superseded: its publisher re-offers them, or drops them again under the new number, so a
+	// fill waits on the subscription for them rather than FETCHing a copy the re-offer duplicates.
+	#reoffers = new WeakMap<track.Producer, Signal<Run[]>>();
 
 	// The peer's PROBE estimates, written as they arrive (Lite03+ only).
 	#probe?: Signal<ProbeStats>;
@@ -1418,6 +1435,9 @@ export class Subscriber {
 			stream.abort(e);
 		} finally {
 			answering?.removeEventListener("abort", replaced);
+			// Nothing more is re-offered on this subscription.
+			this.#reoffers.get(producer)?.set([]);
+			this.#reoffers.delete(producer);
 			entry.tail.close();
 			entry.held?.close();
 			entry.datagramDemand?.();
@@ -1933,12 +1953,14 @@ export class Subscriber {
 	// Rust `FillServeRun` does.
 	async #runFills(broadcast: Path.Valid, consumed: Consumed, entry: SubscribeEntry): Promise<void> {
 		const producer = entry.track;
-		const framing = { compress: entry.compress, timescale: entry.timescale };
 		const requests = producer.requests();
 		const jobs = new Set<Promise<void>>();
 		try {
+			// Accepted before its fills run, so this only reads what TRACK_INFO said.
+			const maxAge = (await producer.info().catch(() => undefined))?.maxAge;
+			const framing = { compress: entry.compress, timescale: entry.timescale, maxAge };
 			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
-				const job = this.#serveFill(broadcast, consumed, producer.name, framing, fill);
+				const job = this.#serveFill(broadcast, consumed, producer, framing, fill);
 				jobs.add(job);
 				void job.then(() => jobs.delete(job));
 			}
@@ -1952,22 +1974,201 @@ export class Subscriber {
 	async #serveFill(
 		broadcast: Path.Valid,
 		consumed: Consumed,
-		name: string,
-		framing: { compress: boolean; timescale: number },
+		producer: track.Producer,
+		framing: Framing,
 		fill: track.Fill,
 	): Promise<void> {
 		try {
 			let last: bigint | undefined;
 			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
+				// The subscription re-offers it, or drops it again, either of which answers the fill.
+				const reoffers = this.#reoffers.get(producer);
+				const reoffered = reoffers?.peek() ?? [];
+				if (reoffers && reoffered.some((run) => run.start <= sequence && sequence < run.end)) {
+					await race([fillChanged(fill), reoffers.changed()]);
+					continue;
+				}
+				// Lite-07 asks a fill with no budget for the whole owed run around it at once, up to a
+				// re-offered group, so the publisher answers each run it gave up with one verdict
+				// however many groups it spans. A budget is judged against the whole track, which a
+				// FETCH does and a bounded range does not, so a bounded fill FETCHes a group at a time.
+				if (hasRanges(this.version) && fill.maxDelay === null) {
+					let { start, end } = wantedRuns(fill).find(
+						(run) => run.start <= sequence && sequence < run.end,
+					) ?? { start: sequence, end: sequence + 1n };
+					for (const run of reoffered) {
+						if (run.end <= sequence) start = max(start, run.end);
+						else end = min(end, run.start);
+					}
+					await this.#fillRun(broadcast, consumed, producer, framing, fill, { start, end });
+					continue;
+				}
 				// Every fetch answers its group, so the same one coming back is a bug: closing the
 				// fill names it dropped rather than fetching it forever.
 				if (sequence === last) break;
 				last = sequence;
-				await this.#fillGroup(broadcast, consumed, name, framing, fill, sequence);
+				await this.#fillGroup(broadcast, consumed, producer.name, framing, fill, sequence);
 			}
 		} finally {
 			fill.close();
 		}
+	}
+
+	// Ask `run` of `fill`, which has no budget, on a lite-07 SUBSCRIBE of its own bounded to the
+	// run, until the fill owes none of it, as the Rust `Recovery` asks: its groups land in the copy
+	// as a subscription's do, and the publisher names what it gives up by run. Whatever the
+	// subscription leaves owed when it ends is refused, so the next run is asked, not this one.
+	async #fillRun(
+		broadcast: Path.Valid,
+		consumed: Consumed,
+		producer: track.Producer,
+		framing: Framing,
+		fill: track.Fill,
+		run: Run,
+	): Promise<void> {
+		const owes = () => wantedRuns(fill).some((owed) => owed.start < run.end && run.start < owed.end);
+		const id = this.#subscribeNext++;
+		const ranges: track.Range[] = [{ start: { absolute: run.start }, end: { absolute: run.end } }];
+		const msg = this.#withRanges(
+			this.#subscribeMessage(
+				id,
+				broadcast,
+				consumed,
+				producer.name,
+				{ priority: fill.priority, order: fill.order, delay: { max: null } },
+				ranges,
+			),
+			ranges,
+			undefined,
+		);
+		const entry: SubscribeEntry = {
+			track: producer,
+			compress: framing.compress,
+			timescale: framing.timescale,
+			tail: new Tail({ grace: () => hooks.tailGrace(producer), bill: hooks.billTrack(producer) }),
+			requested: msg.startGroup,
+			floor: msg.startGroup,
+			asked: ranges,
+			live: new LiveRanges(this.version, msg.ranges ?? []),
+			starts: new Map(),
+			update: 0n,
+			sent: 0,
+			filling: true,
+		};
+		const left = new AbortController();
+		const signal = consumed.valid ? AbortSignal.any([consumed.valid, left.signal]) : left.signal;
+		let failed: Error = new StreamError(StreamCode.Cancel, { message: "fill subscription ended" });
+		let draining = Promise.resolve();
+		this.#subscribes.set(id, entry);
+		try {
+			while (
+				(await this.#auth?.ready(broadcast, "subscribe", {
+					signal: consumed.valid,
+					until: () => fillChanged(fill),
+				})) === false
+			) {
+				if (!owes()) return;
+			}
+			if (this.#denied(broadcast)) throw unauthorized(broadcast);
+			const stream = await this.#exchange(
+				{ sendOrder: sendOrder({ priority: fill.priority }), version: this.version },
+				async (stream) => {
+					await stream.writer.u53(StreamId.Subscribe);
+					await msg.encode(stream.writer, this.version);
+					return stream;
+				},
+				signal,
+				new Deadline(),
+			);
+			let ended = false;
+			const responses = this.#fillResponses(stream, entry, fill, run).then(
+				() => {
+					ended = true;
+				},
+				// A reset says why the rest is refused.
+				(err: unknown) => {
+					ended = true;
+					failed = error(err);
+				},
+			);
+			try {
+				while (owes() && !ended) await race([fillChanged(fill), responses]);
+			} catch (err) {
+				stream.abort(error(err));
+				throw err;
+			}
+			if (ended) {
+				stream.close();
+			} else {
+				// Done asking. Its streams are read to their end, or until nobody wants their group,
+				// as a FETCH's is, and only then FINned, which ends whatever the publisher still serves.
+				draining = (async () => {
+					await race([entry.tail.settle(() => true, hooks.trackReleased(producer)), responses]);
+					stream.writer.close();
+					await responses;
+					stream.close();
+				})();
+			}
+		} catch (err) {
+			failed = error(err);
+		} finally {
+			left.abort();
+			if (owes()) fill.refuseGroups(run.start, run.end, failed);
+			void draining.then(() => {
+				this.#subscribes.delete(id);
+				entry.tail.close();
+			});
+		}
+	}
+
+	// Read a fill subscription's responses to its FIN: answer the fill with what the publisher
+	// names given up, judged as the Rust `RangeFills::refuse` does.
+	async #fillResponses(stream: Stream, entry: SubscribeEntry, fill: track.Fill, run: Run): Promise<void> {
+		for (;;) {
+			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
+			if (!resp) return;
+			if ("start" in resp) {
+				// The range starts past what it skips, which it will not deliver: refused for this fill
+				// alone, since another request may still get them.
+				const start = resp.start.starts[0] ?? run.end;
+				if (run.start < start)
+					fill.refuseGroups(run.start, min(start, run.end), new NotFound(`group ${run.start}`));
+			} else if ("drop" in resp) {
+				const { start, end } = resp.drop;
+				entry.tail.account(start, end);
+				const cause = resp.drop.cause(this.version);
+				// Only a group its publisher never had is lost for every reader, and asked with no
+				// budget, an OLD one is past the publisher's max age, which binds every reader too.
+				if (toStreamCode(cause) === StreamCode.NotFound) fill.dropGroups(start, end);
+				else rejectGroups(fill, start, end, cause, undefined);
+			} else if ("skip" in resp) {
+				// Never produced: final, as the subscription feeding the copy records it.
+				const { start, end } = resp.skip;
+				entry.tail.account(start, end);
+				hooks.skipTrackGroups(entry.track, start, end);
+			} else if ("finish" in resp) {
+				// Nothing is delivered at or past the track's end.
+				const end = max(resp.finish.group, run.start);
+				if (end < run.end) fill.refuseGroups(end, run.end, new NotFound(`group ${end}`));
+			}
+		}
+	}
+
+	// The budget an OLD answer to a request carrying `asked` judged, or undefined when it
+	// reached the publisher's max age, which binds every reader, as the Rust
+	// `Inner::old_binds_everyone` judges. No budget leaves only the max age.
+	#stale(framing: Framing, asked: number | undefined): number | undefined {
+		const bound = framing.maxAge?.asMillis();
+		return asked === undefined || (bound !== undefined && asked >= bound) ? undefined : asked;
+	}
+
+	// Settle `[start, end)` of what `producer`'s subscription re-offers: a stream or a verdict
+	// under the latest update answered it.
+	#reoffered(producer: track.Producer, start: bigint, end: bigint): void {
+		const reoffers = this.#reoffers.get(producer);
+		const runs = reoffers?.peek();
+		if (!runs?.some((run) => run.start < end && start < run.end)) return;
+		reoffers?.set(removeRun(runs, start, end));
 	}
 
 	// FETCH group `sequence` of `fill` and write it into the copy once the publisher answers: lite
@@ -1978,7 +2179,7 @@ export class Subscriber {
 		broadcast: Path.Valid,
 		consumed: Consumed,
 		name: string,
-		framing: { compress: boolean; timescale: number },
+		framing: Framing,
 		fill: track.Fill,
 		sequence: bigint,
 	): Promise<void> {
@@ -1986,7 +2187,7 @@ export class Subscriber {
 		void fill
 			.unwanted(sequence)
 			.then(() => cancel.abort(new StreamError(StreamCode.Cancel, { message: "cancel" })));
-		const stream = await this.#requestFill(broadcast, consumed, name, fill, sequence, cancel.signal);
+		const stream = await this.#requestFill(broadcast, consumed, name, framing, fill, sequence, cancel.signal);
 		if (!stream) {
 			cancel.abort();
 			return;
@@ -2021,11 +2222,14 @@ export class Subscriber {
 	// Open the FETCH for group `sequence` of `fill` once the session's grant admits it, and wait
 	// for the publisher's answer. A refusal answers the readers waiting now, unless the fill's
 	// budget widened since the FETCH carried it: a reader that joined meanwhile may reach what
-	// the narrower one could not, so it asks again. Undefined once refused, or once nobody waits.
+	// the narrower one could not, so it asks again. An OLD one judged the budget the FETCH
+	// carried, which binds only readers no more tolerant, unless it reached the publisher's max
+	// age, as the Rust `Inner::reject` judges. Undefined once refused, or once nobody waits.
 	async #requestFill(
 		broadcast: Path.Valid,
 		consumed: Consumed,
 		name: string,
+		framing: Framing,
 		fill: track.Fill,
 		sequence: bigint,
 		cancel: AbortSignal,
@@ -2075,7 +2279,7 @@ export class Subscriber {
 				if (cancel.aborted || !fill.isWanted(sequence)) return undefined;
 				if (maxDelay !== undefined && (fill.maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY) > maxDelay)
 					continue;
-				fill.refuseGroups(sequence, sequence + 1n, error(err));
+				rejectGroups(fill, sequence, sequence + 1n, error(err), this.#stale(framing, maxDelay));
 				return undefined;
 			}
 		}
@@ -2192,6 +2396,7 @@ export class Subscriber {
 				// publisher re-offers it or drops it again under the new number, so it is still owed,
 				// and a reader that wants it fills it meanwhile.
 				if (stale && update < entry.update) continue;
+				this.#reoffered(entry.track, start, end);
 				entry.tail.account(start, end);
 				// Judged under the budget this subscriber sent with that update.
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
@@ -2210,6 +2415,7 @@ export class Subscriber {
 				// replaces any drop of the same groups, stale or final, so no update reopens them; a
 				// reader a drop already ended stays ended.
 				const { start, end } = resp.skip;
+				this.#reoffered(entry.track, start, end);
 				entry.tail.account(start, end);
 				entry.stale = removeRun(entry.stale ?? [], start, end);
 				// A group that arrived was produced after all, so the skip contradicts it: it keeps
@@ -2400,6 +2606,14 @@ export class Subscriber {
 					if (start < end) entry.tail.unaccount(start, end);
 				}
 			}
+			// Re-offered whether or not the copy still holds the stale verdict.
+			if (entry.stale?.length) {
+				const reoffers = this.#reoffers.get(track) ?? new Signal<Run[]>([]);
+				this.#reoffers.set(track, reoffers);
+				const runs = [...reoffers.peek()];
+				for (const run of entry.stale) insertRun(runs, run.start, run.end);
+				reoffers.set(runs);
+			}
 			entry.stale = undefined;
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
 			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
@@ -2492,6 +2706,7 @@ export class Subscriber {
 		const { track, timescale, tail } = entry;
 		let producer: netGroup.Producer | undefined;
 		const read = tail.open(group.sequence);
+		this.#reoffered(track, group.sequence, group.sequence + 1n);
 
 		try {
 			// The publisher contradicted its own end, which no later group can repair. lite-05
@@ -2515,10 +2730,8 @@ export class Subscriber {
 			}
 			producer = hooks.receiveGroup(track, { sequence: group.sequence, start: group.frameStart });
 
-			await readFrames(stream, producer, {
-				scale: timescale,
-				compress: entry.compress,
-			});
+			const reading = readFrames(stream, producer, { scale: timescale, compress: entry.compress });
+			await (entry.filling ? untilAbandoned(producer, reading) : reading);
 
 			producer.finish();
 			// Only a group that arrived whole, not one a drop or the track ended meanwhile, and only

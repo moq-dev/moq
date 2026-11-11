@@ -316,6 +316,7 @@ impl Record {
 		&mut self,
 		account: impl FnOnce() -> Arc<cache::Track>,
 		beside: &mut dyn Beside,
+		handed: Option<u64>,
 	) -> Result<(), Error> {
 		if self.failed {
 			return Err(Error::Lagged);
@@ -330,7 +331,7 @@ impl Record {
 		if bill.debt() == 0 {
 			return Ok(());
 		}
-		self.fold();
+		self.fold(handed);
 		beside.forget_below(self.floor);
 		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
 		let bill = self.bill.as_mut().expect("opened above");
@@ -349,7 +350,7 @@ impl Record {
 	/// reader's own stale skips, which a wider budget would offer again only while the pool
 	/// still held their groups. Not final are the reports an update reopens, the runs given
 	/// up and not reported yet, and the sequences nothing settled.
-	fn fold(&mut self) {
+	fn fold(&mut self, handed: Option<u64>) {
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
 		let received: Vec<_> = self
@@ -389,6 +390,12 @@ impl Record {
 					.flatten()
 					.fold(end, |end, start| end.min(start.max(floor)))
 				}
+			};
+			// The group this read hands out stays above: its publisher has yet to tell its wire
+			// of it, and would take one below the floor as told already.
+			let next = match handed {
+				Some(handed) if floor <= handed && handed < next => handed,
+				_ => next,
 			};
 			if next <= floor {
 				break;
@@ -443,12 +450,12 @@ mod test {
 		for sequence in 0..4 {
 			record.delivered.insert(sequence);
 		}
-		record.settle(|| track.clone(), &mut ()).unwrap();
+		record.settle(|| track.clone(), &mut (), None).unwrap();
 		assert_eq!(pool.used(), 0, "a lone prefix bills nothing");
 		for sequence in (10..1_000).step_by(2) {
 			record.reported.insert(sequence..sequence + 1, Report::Dropped);
 		}
-		record.settle(|| track.clone(), &mut ()).unwrap();
+		record.settle(|| track.clone(), &mut (), None).unwrap();
 		assert_eq!(pool.used(), 495 * RUN_OVERHEAD);
 		drop(record);
 		assert_eq!(pool.used(), 0);
@@ -465,10 +472,10 @@ mod test {
 		record.reported.insert(1..u64::MAX / 2, Report::Dropped);
 		record.delivered.insert(u64::MAX / 2);
 		record.reported.insert(u64::MAX / 2 + 1..u64::MAX / 2 + 2, Report::Skip);
-		record.settle(|| track.clone(), &mut ()).unwrap();
+		record.settle(|| track.clone(), &mut (), None).unwrap();
 		assert_eq!(pool.used(), 3 * RUN_OVERHEAD);
 		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut ()).unwrap();
+		record.settle(|| track.clone(), &mut (), None).unwrap();
 		assert_eq!(pool.used(), 0, "all of it folded");
 		assert!(
 			record.told(7) && record.delivered.contains(7),
@@ -478,6 +485,23 @@ mod test {
 		let mut untold = RangeSet::new();
 		untold.insert(u64::MAX / 2 + 2..u64::MAX / 2 + 3);
 		assert_eq!(record.untold(0..u64::MAX / 2 + 3), untold);
+	}
+
+	/// The group a read hands out stays above the fold: its publisher has yet to tell its wire
+	/// of it, and takes a sequence below the floor as told already.
+	#[test]
+	fn a_debt_folds_short_of_the_handed_group() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.delivered.insert(0);
+		record.reported.insert(1..3, Report::Dropped);
+		record.delivered.insert(3);
+		record.reported.insert(5..6, Report::Skip);
+		record.settle(|| track.clone(), &mut (), None).unwrap();
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), Some(3)).unwrap();
+		assert!(record.told(2), "the drops below it fold");
+		assert!(!record.told(3), "the handed group stays to be told");
 	}
 
 	/// A debt that needs a run this reader was promised ends it with `TooFarBehind`: a stale
@@ -505,14 +529,14 @@ mod test {
 			for sequence in (5..1_000).step_by(2) {
 				record.reported.insert(sequence..sequence + 1, Report::Dropped);
 			}
-			record.settle(|| track.clone(), &mut ()).unwrap();
+			record.settle(|| track.clone(), &mut (), None).unwrap();
 			owe(&track, pool.used());
-			let err = record.settle(|| track.clone(), &mut ()).unwrap_err();
+			let err = record.settle(|| track.clone(), &mut (), None).unwrap_err();
 			assert_eq!(StreamError::from(&err), StreamError::TooFarBehind, "{promise:?}");
 			assert_eq!(pool.used(), 0, "{promise:?}: its record went with it");
 			assert!(record.failed());
 			assert!(
-				record.settle(|| track.clone(), &mut ()).is_err(),
+				record.settle(|| track.clone(), &mut (), None).is_err(),
 				"{promise:?}: it stays ended"
 			);
 		}
@@ -530,9 +554,9 @@ mod test {
 			.pending
 			.insert(2..3, Pending::own(Hole::drop(StreamError::NotFound)));
 		record.skipped.insert(4, Duration::from_secs(1));
-		record.settle(|| track.clone(), &mut ()).unwrap();
+		record.settle(|| track.clone(), &mut (), None).unwrap();
 		owe(&track, RUN_OVERHEAD);
-		record.settle(|| track.clone(), &mut ()).unwrap();
+		record.settle(|| track.clone(), &mut (), None).unwrap();
 		assert_eq!(pool.used(), 2 * RUN_OVERHEAD, "the drop folded");
 		assert!(!record.told(2), "the run given up is still owed");
 	}
@@ -553,12 +577,12 @@ mod test {
 		for sequence in (1..1_000).step_by(2) {
 			large.reported.insert(sequence..sequence + 1, stale);
 		}
-		small.settle(|| track.clone(), &mut ()).unwrap();
-		large.settle(|| track.clone(), &mut ()).unwrap();
+		small.settle(|| track.clone(), &mut (), None).unwrap();
+		large.settle(|| track.clone(), &mut (), None).unwrap();
 		owe(&track, RUN_OVERHEAD);
-		small.settle(|| track.clone(), &mut ()).unwrap();
-		assert!(large.settle(|| track.clone(), &mut ()).is_err());
+		small.settle(|| track.clone(), &mut (), None).unwrap();
+		assert!(large.settle(|| track.clone(), &mut (), None).is_err());
 		assert_eq!(pool.used(), RUN_OVERHEAD);
-		small.settle(|| track.clone(), &mut ()).unwrap();
+		small.settle(|| track.clone(), &mut (), None).unwrap();
 	}
 }

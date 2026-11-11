@@ -31,6 +31,12 @@ export interface Broadcast {
 	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;
 	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
 	largest(name: string): track.Position | undefined;
+	/**
+	 * The error the track's cache gave `sequence` up for good with, read without subscribing, so
+	 * a request served for a peer asks nothing upstream for it; `undefined` while a fill may still
+	 * bring it.
+	 */
+	givenUp(name: string, sequence: bigint): Error | undefined;
 	/** Fetch one group; absent when the session's version has no FETCH, so callers never ask. */
 	fetchGroup?(name: string, sequence: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;

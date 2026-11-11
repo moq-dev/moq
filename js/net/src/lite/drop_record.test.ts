@@ -183,27 +183,38 @@ async function chain(up: Version, down: Version) {
 	};
 }
 
-/** The next thing `reader` settles: a group, a drop or skip, its end, or its error. */
-async function next(reader: TrackSubscriber): Promise<Recv> {
+/**
+ * The next thing `reader` settles: a group, a drop or skip, its end, or its error. Once `signal`
+ * aborts it stops reading and never resolves, so a read given up takes nothing from the reader.
+ */
+async function next(reader: TrackSubscriber, signal?: AbortSignal): Promise<Recv> {
 	for (;;) {
+		if (signal?.aborted) return new Promise<Recv>(() => {});
 		const recv = hooks.tryRecvGroup(reader, true);
 		if (recv.kind !== "idle" && recv.kind !== "boundary") return recv;
 		await new Promise<void>((resolve) => {
-			const dispose = hooks.groupChanged(reader, () => {
+			const wake = () => {
 				dispose();
+				signal?.removeEventListener("abort", wake);
 				resolve();
-			});
+			};
+			const dispose = hooks.groupChanged(reader, wake);
+			signal?.addEventListener("abort", wake);
 		});
 	}
 }
 
-/** `work`'s result, or undefined once `ms` of manual time passed without it. */
-async function within<T>(clock: Manual, work: Promise<T>, ms = 1000): Promise<T | undefined> {
+/** The next thing `reader` settles, or undefined once `ms` of manual time passed without it. */
+async function within(clock: Manual, reader: TrackSubscriber, ms = 1000): Promise<Recv | undefined> {
+	const controller = new AbortController();
 	try {
-		return await clock.drive(timeout(Duration.millis(ms), work));
+		return await clock.drive(timeout(Duration.millis(ms), next(reader, controller.signal)));
 	} catch (err) {
 		if (err instanceof Elapsed) return undefined;
 		throw err;
+	} finally {
+		// A read still pending would otherwise take the next group from whoever reads after.
+		controller.abort();
 	}
 }
 
@@ -233,7 +244,7 @@ function settled(recv: Recv | undefined): unknown[] {
 async function drain(clock: Manual, reader: TrackSubscriber): Promise<unknown[][]> {
 	const got: unknown[][] = [];
 	for (;;) {
-		const recv = await within(clock, next(reader));
+		const recv = await within(clock, reader);
 		if (!recv) return got;
 		got.push(settled(recv));
 		if (recv.kind === "done" || recv.kind === "error") return got;
@@ -329,8 +340,7 @@ test("a drop under the narrower update settles no reader once the widening is se
 
 // Mirrors Rust `after_a_widening_the_old_updates_drop_settles_no_reader` in
 // rs/moq-net/tests/integration/drop_record.rs.
-// Skipped: the publisher's reader re-offers an evicted stale group from its skip record, so nothing drops it again until the end sweep.
-test.skip("a widening drops again at once what the publisher evicted", () => widening(true));
+test("a widening drops again at once what the publisher evicted", () => widening(true));
 
 // Readers on the viewer while the publisher still holds groups 0 to 5 and the relay and the
 // viewer evicted all but group 5: `owed` subscribed before the eviction and read nothing, `fresh`
@@ -348,14 +358,17 @@ async function relayEvicted(readers: ("owed" | "fresh" | "widened")[]): Promise<
 	const read: unknown[][] = [];
 	for (let i = 0; i < 5; i++) read.push(settled(await next(first)));
 	expect(groupsOf(read)).toEqual([0n, 1n, 2n, 3n, 4n]);
-	// Half a second gives up groups 1 and 2 as stale, on the viewer alone.
+	// Half a second gives up groups 1 and 2 as stale, on the viewer alone. Group 0 is the
+	// reader's start or stale too, depending on which group reached it first.
 	const widened = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(500) } });
 	const stale = await drain(clock, widened);
-	expect(stale.filter((row) => row[0] === "drop")).toEqual([
-		["drop", 1n, 2n, StreamCode.Old],
-		["drop", 2n, 3n, StreamCode.Old],
-	]);
-	expect(groupsOf(stale)).toEqual([0n, 3n, 4n]);
+	const given = stale.filter((row) => row[0] === "drop");
+	expect(given.every((row) => row[3] === StreamCode.Old && row[2] === (row[1] as bigint) + 1n)).toBe(true);
+	const givenUp = given.map((row) => row[1] as bigint);
+	expect(givenUp).toEqual(expect.arrayContaining([1n, 2n]));
+	const accounted = [...givenUp, ...(groupsOf(stale) as bigint[])];
+	expect(accounted.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))).toEqual([0n, 1n, 2n, 3n, 4n]);
+	expect(groupsOf(stale)).toEqual(expect.arrayContaining([3n, 4n]));
 
 	// The relay and the viewer age out everything but the live edge; the publisher keeps it all.
 	await clock.advance(cache.DEFAULT_EXPIRY.add(Duration.millis(10_000)));
@@ -372,7 +385,7 @@ async function relayEvicted(readers: ("owed" | "fresh" | "widened")[]): Promise<
 		else {
 			reader = widened;
 			reader.update(WIDE);
-			expected = [1n, 2n, 5n];
+			expected = [...givenUp, 5n];
 		}
 		const rows = await drain(clock, reader);
 		expect(rows.filter((row) => row[0] !== "group")).toEqual([]);
@@ -397,8 +410,7 @@ test("a group the relay evicted while the publisher holds it is filled for a new
 
 // Mirrors Rust `a_group_the_relay_evicted_is_filled_never_dropped` in
 // rs/moq-net/tests/integration/drop_record.rs.
-// Skipped: the widened reader re-offers its evicted stale groups from its skip record, so their fill lags seconds and group 5 never arrives.
-test.skip("a group the relay evicted while the publisher holds it is filled for a widened reader", () =>
+test("a group the relay evicted while the publisher holds it is filled for a widened reader", () =>
 	relayEvicted(["widened"]));
 
 // Mirrors Rust `an_evicted_drop_is_forwarded_unchanged_and_never_reoffered` in
@@ -496,6 +508,42 @@ for (const down of [Version.DRAFT_06, Version.DRAFT_07]) {
 	});
 }
 
+// Mirrors Rust `a_lite06_upstream_keeps_a_reported_group_dropped_for_a_lite07_viewer` in
+// rs/moq-net/tests/integration/drop_record.rs.
+test("through a lite-06 upstream, a group reported dropped as it lands stays dropped for a lite-07 viewer", async () => {
+	using clock = manual();
+	const chained = await chain(Version.DRAFT_06, Version.DRAFT_07);
+	for (let sequence = 0n; sequence < 10n; sequence++) {
+		if (sequence !== 7n) chained.write(sequence, Number(sequence) * 1000);
+	}
+	// Reaches groups 5 and up by media time.
+	const first = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(3500) }, ranges: [{}] });
+	await chained.reached();
+	expect(groupsOf(await drain(clock, first))).toEqual([5n, 6n, 8n, 9n]);
+
+	// Group 7 lands once its successor is older than 3.5s by the clock, so the lite-06
+	// publisher reports it dropped, which lite-06 makes final.
+	await clock.advance(Duration.millis(4500));
+	chained.write(7n, 7000);
+	expect(groupsOf(await drain(clock, first))).toEqual([]);
+
+	// Reaches every group: the widened reader fills 0 to 4, and group 7 alone stays dropped,
+	// for it and for a later reader, rather than being fetched from the publisher.
+	const all = [0n, 1n, 2n, 3n, 4n, 5n, 6n, 8n, 9n];
+	first.update({ delay: { max: Duration.millis(60_000) }, ranges: [{}] });
+	expect(groupsOf(await drain(clock, first))).toEqual([0n, 1n, 2n, 3n, 4n]);
+	const second = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(60_000) }, ranges: [{}] });
+	expect(groupsOf(await drain(clock, second))).toEqual(all);
+
+	chained.track.finish();
+	for (const reader of [first, second]) expect(groupsOf(await drain(clock, reader))).toEqual([]);
+	expect(chained.ended()).toBe(false);
+
+	first.close();
+	second.close();
+	await chained.close();
+});
+
 // Mirrors Rust `pool_pressure_folds_final_runs_and_ends_a_stale_reader` in
 // rs/moq-net/tests/integration/drop_record.rs.
 for (const stale of [false, true]) {
@@ -539,7 +587,7 @@ for (const stale of [false, true]) {
 		let groups = 0;
 		for (let sequence = 2n * runs + 1n; sequence < 2n * runs + 65n && error === undefined; sequence++) {
 			chained.write(sequence, budget + Number(sequence), 16 * 1024);
-			const recv = await within(clock, next(reader));
+			const recv = await within(clock, reader);
 			if (recv?.kind === "error") error = recv.error;
 			else {
 				expect(settled(recv)).toEqual(["group", sequence]);
@@ -564,7 +612,8 @@ for (const stale of [false, true]) {
 // relay's copy shares with all its readers, then the relay `lost` that run: it aged out past the
 // pool's idle window, or the pool shed it under pressure. The readers in `readers` subscribe next:
 // a narrow one never takes groups 1 and 2, and a wide one is filled them through the relay from
-// the publisher, which still holds them.
+// the publisher, which still holds them: fetched once the viewer's copy forgot the run too, and
+// re-offered over both subscriptions by the widening update while it still holds it stale.
 async function lostRun(lost: "forgot" | "shed", readers: ("wide" | "narrow")[]): Promise<void> {
 	using clock = manual();
 	const opened = pools();
@@ -584,11 +633,14 @@ async function lostRun(lost: "forgot" | "shed", readers: ("wide" | "narrow")[]):
 	]);
 
 	// Past the pool's idle window the relay's copy and the viewer's forget the run; a pool too
-	// small for one large group sheds the relay's.
+	// small for one large group sheds the relay's. The pool then grows back, so the relay holds
+	// the groups it is filled next until its readers take them: one too small to hold any would
+	// see a refill evicted again, which its reader gives up and names dropped.
 	if (lost === "forgot") await clock.advance(cache.DEFAULT_EXPIRY.mul(2));
 	else relay.pool.resize(cache.RUN_OVERHEAD);
 	chained.write(5n, 6100, 64 * 1024);
 	expect(settled(await next(reader))).toEqual(["group", 5n]);
+	if (lost === "shed") relay.pool.resize();
 	const before = chained.fetches();
 	const heard = wire.heard.length;
 
@@ -598,7 +650,7 @@ async function lostRun(lost: "forgot" | "shed", readers: ("wide" | "narrow")[]):
 			const filled = await drain(clock, wide);
 			expect(filled.filter((row) => row[0] !== "group")).toEqual([]);
 			expect(groupsOf(filled)).toEqual(expect.arrayContaining([1n, 2n]));
-			expect(chained.fetches().up).toBeGreaterThan(before.up);
+			if (lost === "forgot") expect(chained.fetches().up).toBeGreaterThan(before.up);
 			wide.close();
 		} else {
 			// Judged stale by its own budget, or filled and then judged.
@@ -628,9 +680,7 @@ for (const lost of ["forgot", "shed"] as const) {
 
 	// Mirrors Rust `a_shed_run_is_judged_or_filled_through_the_relay` in
 	// rs/moq-net/tests/integration/drop_record.rs.
-	// Skipped: the relay refills the run by FETCH under the narrow budget and records the stale answer as a final NotFound drop for every reader.
-	test.skip(`a sequence whose run the relay ${lost} is filled for a wide reader`, () =>
-		lostRun(lost, ["narrow", "wide"]));
+	test(`a sequence whose run the relay ${lost} is filled for a wide reader`, () => lostRun(lost, ["narrow", "wide"]));
 }
 
 const BILLIONS = 1n << 40n;
@@ -653,7 +703,7 @@ test("a run of billions of sequences is settled by each reader in one step, drop
 	chained.write(1n + 2n * BILLIONS, 1000);
 	for (const reader of [narrow, wide]) {
 		const got: unknown[][] = [];
-		for (let i = 0; i < 3; i++) got.push(settled(await within(clock, next(reader))));
+		for (let i = 0; i < 3; i++) got.push(settled(await within(clock, reader)));
 		expect(got).toEqual([
 			["drop", 1n, 1n + BILLIONS, StreamCode.Cancel],
 			["skip", 1n + BILLIONS, 1n + 2n * BILLIONS, StreamCode.NotFound],
@@ -675,8 +725,7 @@ test("a run of billions of sequences is settled by each reader in one step, drop
 // Mirrors Rust `a_run_of_billions_settles_in_one_step` in
 // rs/moq-net/tests/integration/drop_record.rs.
 for (const judged of ["reopened by a widening", "forgotten by the relay"] as const) {
-	// Skipped: a run judged again is filled one lite FETCH per sequence from its top down, so a run of billions never settles.
-	test.skip(`a run of billions ${judged} is judged again in one step`, async () => {
+	test(`a run of billions ${judged} is judged again in one step`, async () => {
 		using clock = manual();
 		const chained = await chain(Version.DRAFT_07, Version.DRAFT_07);
 		const reader = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(1500) } });

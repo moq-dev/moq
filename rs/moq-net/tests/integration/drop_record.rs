@@ -319,7 +319,6 @@ async fn a_lite06_hop_keeps_a_reported_group_dropped() {
 /// it and fetches the group, and the relay fetches it from the publisher instead of answering
 /// from the drop it holds.
 #[kio::test]
-#[ignore = "a relay fetches upstream a group its copy holds as a final lite-06 drop"]
 async fn a_lite06_upstream_keeps_a_reported_group_dropped_for_a_lite07_viewer() {
 	reported_drop_through([LITE06, LITE07]).await;
 }
