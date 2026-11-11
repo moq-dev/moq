@@ -14,3 +14,7 @@ m2 ("later work"), as [m3](/quest/m3/README.md) describes. After each cut
 m4's quests move to m3 and m4 starts empty. A quest here that gains a
 consumer moves to m3; one that loses its last reason moves to m5 or is
 deleted.
+
+## Required
+
+- [moq's fuzz targets run continuously on OSS-Fuzz](/quest/m4/oss-fuzz.md) - round-the-clock fuzzing with private crash reports, after the session targets exist and the maintainer approves the application
