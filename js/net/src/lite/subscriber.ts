@@ -1418,6 +1418,7 @@ export class Subscriber {
 			stream.abort(e);
 		} finally {
 			answering?.removeEventListener("abort", replaced);
+			entry.tail.close();
 			entry.held?.close();
 			entry.datagramDemand?.();
 			if (entry.datagrams) {
@@ -1572,6 +1573,7 @@ export class Subscriber {
 			// for a late group anyway, and no longer than the publisher keeps one fresh.
 			tail: new Tail({
 				grace: () => hooks.tailGrace(producer),
+				bill: hooks.billTrack(producer),
 			}),
 			requested: msg.startGroup,
 			floor: msg.startGroup,

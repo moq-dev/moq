@@ -309,16 +309,73 @@ test("a drop flood stays within the pool", () => {
 			reported.push(first.start);
 		}
 	}
+	const used = pool.used;
+	// A probe's record bills too: an unbounded pool lets it read every run without shedding one.
+	pool.resize();
 	const held = dropsHeld(producer);
+	pool.resize(capacity);
 	// Each drop is accounted in the arrivals too, whose gaps are folded before any run is shed.
 	expect(hooks.arrivalRuns(producer)).toBeLessThanOrEqual(2);
-	expect(pool.used).toBe(held.length * cache.RUN_OVERHEAD + (hooks.arrivalRuns(producer) - 1) * ARRIVAL_OVERHEAD);
+	expect(used).toBe(held.length * cache.RUN_OVERHEAD + (hooks.arrivalRuns(producer) - 1) * ARRIVAL_OVERHEAD);
 	expect(held[0]).toBeGreaterThan(0n);
 	expect(held.every((start, i) => i === 0 || start === held[i - 1] + 2n)).toBe(true);
 	expect(held[held.length - 1]).toBe(2n * (runs - 1n));
 	for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader)) reported.push(run.start);
-	expect(reported.slice(1)).toEqual(held);
+	// Billing the reader's record shed the track's lowest runs before it reported them.
+	pool.resize();
+	expect(reported.slice(1)).toEqual(dropsHeld(producer));
 });
+
+// A flood a reader reported, fragmented into runs alternating with upstream skips, bills its
+// record too. Once the pool shrinks under it and its track has shed what it can, the reader folds
+// the final runs and the groups it read into its floor and stays within the pool, while one
+// holding stale reports an update would reopen ends with TooFarBehind rather than forgo the
+// re-offer. Mirrors Rust
+// `a_reported_flood_folds_or_ends_the_reader`.
+for (const stale of [false, true]) {
+	test(`a reported flood ${stale ? "ends" : "folds into"} the reader`, () => {
+		const runs = 1000n;
+		const budget = 1000;
+		const pool = new cache.Pool({ capacity: 1 << 30 });
+		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		const reader = producer.subscribe({ delay: { max: Duration.millis(budget) } });
+		const hole = stale ? staleHole(budget) : { error: new StreamError(StreamCode.Cancel) };
+		const flood = (run: bigint) => {
+			hooks.dropTrackGroups(producer, 2n * run, 2n * run + 1n, hole);
+			producer.skipGroups(2n * run + 1n, 2n * run + 2n);
+		};
+		for (let run = 0n; run < runs; run++) flood(run);
+		let reported = 0n;
+		for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader)) reported += run.end - run.start;
+		expect(reported).toBe(2n * runs);
+		expect(reader.tryRecvGroup()).toBeUndefined();
+		expect(pool.used).toBeGreaterThanOrEqual(Number(2n * runs) * cache.READER_RUN_OVERHEAD);
+
+		// The pool shrinks, and groups the reader reads above the flood accrue its debt: the track
+		// sheds its own drop set first, then the reader pays.
+		const capacity = 64 * cache.RUN_OVERHEAD;
+		pool.resize(capacity);
+		let error: unknown;
+		for (let sequence = 2n * runs; sequence < 2n * runs + 64n && error === undefined; sequence++) {
+			const group = producer.createGroup(sequence);
+			group.writeFrame({ payload: new Uint8Array(16 * 1024) });
+			group.finish();
+			try {
+				expect(reader.tryRecvGroup()?.sequence).toBe(sequence);
+			} catch (err) {
+				error = err;
+			}
+		}
+		if (stale) expect(error).toBeInstanceOf(TooFarBehind);
+		else {
+			expect(error).toBeUndefined();
+			expect(hooks.tryDrop(reader)).toBeUndefined();
+		}
+		expect(pool.used).toBeLessThanOrEqual(capacity + 2 * (16 * 1024 + cache.ENTRY_OVERHEAD));
+		reader.close();
+	});
+}
 
 // A peer fragmenting its arrivals under a grace that never folds a gap bills each run to the pool,
 // which folds the oldest gaps early to stay within it. Mirrors Rust `an_arrival_flood_stays_within_the_pool`.

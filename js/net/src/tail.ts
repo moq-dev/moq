@@ -1,5 +1,6 @@
 import { type Duration, now, sleep } from "@moq/clock";
 import { type GetPromise, Signal } from "@moq/signals";
+import { READER_RUN_OVERHEAD } from "./cache.ts";
 import { insertRun, type Run, runGaps } from "./internal.ts";
 import { GRACE, Ledger } from "./ledger.ts";
 
@@ -7,6 +8,8 @@ import { GRACE, Ledger } from "./ledger.ts";
 export interface TailOptions {
 	/** How long to wait for a group that cannot be accounted for. Read each time it is needed. */
 	grace?: () => Duration;
+	/** Bill the bytes the tail keeps, in all, to the subscription's copy's account. */
+	bill?: (bytes: number) => void;
 }
 
 /**
@@ -34,9 +37,23 @@ export class Tail {
 	// update names one only if it was sent before the publisher served the group, so the group won
 	// over it, even once the cache evicted it.
 	#finished: Run[] = [];
+	// What `#finished` bills, `READER_RUN_OVERHEAD` per run, so a publisher fragmenting the
+	// streams it finishes between updates costs what the cache would hold.
+	#bill?: (bytes: number) => void;
 
 	constructor(options: TailOptions = {}) {
 		this.#grace = options.grace ?? (() => GRACE);
+		this.#bill = options.bill;
+	}
+
+	#rebill(): void {
+		this.#bill?.(this.#finished.length * READER_RUN_OVERHEAD);
+	}
+
+	/** Release what the tail bills, once its subscription ended. */
+	close(): void {
+		this.#finished = [];
+		this.#rebill();
 	}
 
 	/** Group streams whose header arrived, whether they finished or were reset. */
@@ -97,6 +114,7 @@ export class Tail {
 	/** Record that the group stream for `sequence` arrived whole. */
 	finish(sequence: bigint): void {
 		insertRun(this.#finished, sequence, sequence + 1n);
+		this.#rebill();
 	}
 
 	/** The parts of `[start, end)` whose stream did not finish since the last update was sent. */
@@ -110,6 +128,7 @@ export class Tail {
 	 */
 	updated(): void {
 		this.#finished = [];
+		this.#rebill();
 	}
 
 	/** Re-check what {@link settle} waits on, after something outside the ledger changed. */

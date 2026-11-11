@@ -852,6 +852,8 @@ let resubscribe: (producer: Producer) => void;
 let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: Instant }>;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: Instant } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
+// The producer's cache account, which its readers' records bill to.
+let accountOf: (producer: Producer) => cache.Track<CachedGroup>;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
 let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
@@ -1298,6 +1300,15 @@ export class Producer {
 			producer.#account = producer.#openAccount(pool);
 		};
 		hooks.arrivalRuns = (producer) => producer.#arrivals.size;
+		accountOf = (producer) => producer.#account;
+		hooks.billTrack = (producer) => {
+			let billed = 0;
+			return (bytes) => {
+				if (bytes > billed) producer.#account.bill(bytes - billed);
+				else producer.#account.unbill(billed - bytes);
+				billed = bytes;
+			};
+		};
 		hooks.subscribing = (producer) => producer.#subscribing;
 		hooks.requested = (producer) => producer.#state.update;
 		resubscribe = (producer) => producer.#updateSubscription();
@@ -2456,9 +2467,64 @@ type Successor = { sequence: bigint; arrived: Instant; fate: () => Error | undef
 // out, so no update reopens it), dropped as stale, which an update reopens, or skipped, which
 // replaces a drop. `received` when an upstream's stale run decided it, which is the upstream's to
 // judge again then. Mirrors the Rust `Report`.
-interface Reported extends Run {
-	kind: "dropped" | "stale" | "skip";
+/**
+ * How a reader reported a run, and what its wire was told. Mirrors the Rust `record::Report`:
+ * `settled` is a group served, or a drop on a version whose drops are all final.
+ */
+export interface Reported extends Run {
+	kind: "settled" | "dropped" | "stale" | "skip";
+	/** A stale run an upstream decided, which is the upstream's to judge again. */
 	received?: boolean;
+	/** A stale run whose Group Stream expired, or that went out OLD for good: its publisher drops it again under each update. */
+	expired?: boolean;
+	/** A stale run whose group was handed out after the drop, which the group won: no update reopens it. */
+	taken?: boolean;
+}
+
+const sameReport = (a: Reported, b: Reported) =>
+	a.kind === b.kind && !a.received === !b.received && !a.expired === !b.expired && !a.taken === !b.taken;
+
+// Whether `reported` settles its run for good, so a fold may forget it.
+const finalReport = (reported: Reported) => reported.kind !== "stale" || reported.taken === true;
+
+// Whether an update reopens `reported`: a stale drop nothing settled since.
+const reopens = (reported: Reported) => reported.kind === "stale" && !reported.expired && !reported.taken;
+
+// Whether `reported` stops `hole` going out over it: a skip goes out over a drop, and a final
+// drop over a stale one, since each replaces what it goes out over. An OLD drop never goes out
+// over a stale one, which already said OLD. Mirrors the Rust `Report::blocks`.
+function blocksHole(reported: Reported, hole: Hole): boolean {
+	switch (reported.kind) {
+		case "settled":
+		case "skip":
+			return true;
+		case "dropped":
+			return !hole.skip;
+		case "stale":
+			return reported.taken ? !hole.skip : !hole.skip && toStreamCode(hole.error) === StreamCode.Old;
+	}
+}
+
+/**
+ * What a lite publisher told its wire about a reader's sequences, kept in the reader's own
+ * record so the cursor's drops and the publisher's groups consult one map. Mirrors the
+ * publisher half of the Rust `record::Record`.
+ */
+export interface WireRecord {
+	/** Whether the wire was told of `sequence`: served, or given up. */
+	told(sequence: bigint): boolean;
+	/** Whether `sequence` went out as a stale drop, which a group still replaces. */
+	toldStale(sequence: bigint): boolean;
+	/** The parts of `[start, end)` the wire was told nothing of. */
+	untold(start: bigint, end: bigint): Run[];
+	/** Record that the wire was told `report` of `[start, end)`. */
+	tell(start: bigint, end: bigint, report: Omit<Reported, "start" | "end">): void;
+	/** Forget what the wire was told of `[start, end)`, which is owed again. */
+	untell(start: bigint, end: bigint): void;
+	/** Forget the drops of `[start, end)` the wire was told, which a verdict or group replaces. */
+	replaceDrops(start: bigint, end: bigint): void;
+	/** The runs each update drops again: stale ones whose stream expired, or that went out OLD for good. */
+	expired(): Run[];
 }
 
 /**
@@ -2556,7 +2622,14 @@ export class Subscriber {
 		coverage?: Coverage;
 		judged?: readonly Run[];
 	};
-	#reported = new Runs<Reported>((a, b) => a.kind === b.kind && a.received === b.received);
+	#reported = new Runs<Reported>(sameReport);
+	// Everything below was settled for good and folded away under pool pressure: handed out, or
+	// reported final, so none is handed out or reported again. Mirrors the Rust `Record::floor`.
+	#folded = 0n;
+	// What the record bills to the track's account, opened on its first run.
+	#bill?: cache.Reader;
+	// The pool needed a run this reader was promised, so it ended with TooFarBehind.
+	#lagged = false;
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -2811,8 +2884,9 @@ export class Subscriber {
 		this.#skipped.delete(sequence);
 		// The group won over any stale report on it, so no update reopens it. A resumed reader
 		// retires its own.
-		if (this.#reported.at(sequence)?.kind === "stale")
-			this.#reported.set(sequence, sequence + 1n, { start: sequence, end: sequence + 1n, kind: "dropped" });
+		const stale = this.#reported.at(sequence);
+		if (stale?.kind === "stale")
+			this.#reported.set(sequence, sequence + 1n, { ...stale, start: sequence, end: sequence + 1n, taken: true });
 		// Another copy of it buffered here is never handed out.
 		this.#judge(sequence, sequence + 1n);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
@@ -2933,6 +3007,132 @@ export class Subscriber {
 		if (producer && !this.#left) reofferSequences(producer, this.#state, sequences);
 	}
 
+	// The publisher's view of this reader's record.
+	#wireRecord(): WireRecord {
+		const reported = this.#reported;
+		return {
+			told: (sequence) => sequence < this.#folded || reported.at(sequence) !== undefined,
+			toldStale: (sequence) => reported.at(sequence)?.kind === "stale",
+			untold: (start, end) => {
+				const from = max(start, this.#folded);
+				return from < end ? runGaps(reported.overlapping(from, end), from, end) : [];
+			},
+			tell: (start, end, report) => {
+				if (start >= end) return;
+				// A stale report keeps the parts an upstream decided, which stay its to judge again.
+				const received =
+					report.kind === "stale" && !report.received
+						? reported.overlapping(start, end).filter((run) => run.kind === "stale" && run.received)
+						: [];
+				reported.set(start, end, { ...report, start, end } as Reported);
+				for (const run of received) {
+					const from = max(run.start, start);
+					const to = min(run.end, end);
+					reported.set(from, to, { ...report, start: from, end: to, received: true } as Reported);
+				}
+			},
+			untell: (start, end) => {
+				reported.set(start, end);
+			},
+			replaceDrops: (start, end) => {
+				const drops = reported
+					.overlapping(start, end)
+					.filter((run) => run.kind === "dropped" || run.kind === "stale");
+				for (const run of drops) reported.set(max(run.start, start), min(run.end, end));
+			},
+			expired: () =>
+				reported.all
+					.filter((run) => run.kind === "stale" && run.expired)
+					.map(({ start, end }) => ({ start, end })),
+		};
+	}
+
+	// How many runs the record holds above its floor, each billed `cache.READER_RUN_OVERHEAD`:
+	// the handed-out prefix is one run that bills nothing.
+	#recordRuns(): number {
+		return (
+			Math.max(0, this.#delivered.runs - 1) +
+			this.#skipped.size +
+			this.#pending.length +
+			this.#reported.size +
+			this.#givenUp.length
+		);
+	}
+
+	// Bill this reader's record, and pay what it can of the debt its track left its readers by
+	// folding what it settled for good into its floor. Returns TooFarBehind once that needed a
+	// run it was promised and its record is one to end. Mirrors the Rust `Record::settle`.
+	#settleRecord(): TooFarBehind | undefined {
+		if (this.#lagged) return new TooFarBehind();
+		const bytes = this.#recordRuns() * cache.READER_RUN_OVERHEAD;
+		if (!this.#bill) {
+			const producer = this.#state.producer;
+			if (bytes === 0 || !producer) return undefined;
+			this.#bill = accountOf(producer).reader();
+		}
+		const bill = this.#bill;
+		bill.set(bytes);
+		if (bill.debt === 0) return undefined;
+		this.#fold();
+		const folded = this.#recordRuns() * cache.READER_RUN_OVERHEAD;
+		const freed = Math.max(0, bill.size - folded);
+		bill.set(folded);
+		bill.pay(freed);
+		if (bill.debt > 0 && bill.ends) {
+			this.#lagged = true;
+			bill.close();
+			this.#bill = undefined;
+			this.#pending = [];
+			this.#reported = new Runs<Reported>(sameReport);
+			this.#skipped.clear();
+			this.#givenUp = [];
+			return new TooFarBehind();
+		}
+		return undefined;
+	}
+
+	// Raise the floor over the final prefix: each run from it up to the lowest one that is not
+	// final. Final are the groups handed out, the reports nothing reopens, and this reader's own
+	// stale skips, which a wider budget would offer again only while the pool still held their
+	// groups. Not final are the reports an update reopens, the runs given up and not reported
+	// yet, and the sequences nothing settled. The runs copied from the track's drop set go
+	// first: the next scan folds in again whatever the track still holds. Mirrors the Rust
+	// `Record::fold`.
+	#fold(): void {
+		if (this.#pending.some((run) => run.received)) {
+			this.#pending = this.#pending.filter((run) => !run.received);
+			this.#dropsSeen = undefined;
+		}
+		let floor = this.#folded;
+		for (;;) {
+			const reported = this.#reported.at(floor);
+			let next: bigint;
+			if (reported) {
+				if (!finalReport(reported)) break;
+				next = reported.end;
+			} else {
+				if (this.#pending.some((run) => run.start <= floor && floor < run.end)) break;
+				let end = this.#delivered.runEnd(floor);
+				if (end === undefined && this.#skipped.has(floor)) end = floor + 1n;
+				if (end === undefined) break;
+				// A report or a run given up inside it is judged on its own.
+				const [inside] = this.#reported.overlapping(floor, end);
+				if (inside) end = min(end, max(inside.start, floor));
+				for (const run of this.#pending) if (run.start > floor && run.start < end) end = run.start;
+				next = end;
+			}
+			if (next <= floor) break;
+			floor = next;
+		}
+		if (floor === this.#folded) return;
+		this.#folded = floor;
+		this.#delivered.forgetBelow(floor);
+		for (const sequence of this.#skipped.keys()) if (sequence < floor) this.#skipped.delete(sequence);
+		this.#pending = this.#pending.flatMap((run) => removeRun([run], 0n, floor));
+		this.#reported.set(0n, floor);
+		this.#givenUp = removeRun(this.#givenUp, 0n, floor);
+	}
+
 	// Owe again every run this cursor gave up as stale, reported or not: an update reopens the
 	// verdict. A group still cached is offered again as a widened skip is, and whatever is still
 	// stale under the new terms is given up and reported again. Returns the runs taken back. A
@@ -2941,7 +3141,7 @@ export class Subscriber {
 		if (this.#resume) return this.#resume.reofferStale();
 		const taken: Run[] = [];
 		const received: Run[] = [];
-		const stale = this.#reported.all.filter((run) => run.kind === "stale");
+		const stale = this.#reported.all.filter(reopens);
 		for (const run of stale) {
 			insertRun(taken, run.start, run.end);
 			if (run.received) insertRun(received, run.start, run.end);
@@ -3439,9 +3639,7 @@ export class Subscriber {
 			return subscriber.#peekGroup(ordered);
 		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
-		hooks.unreport = (subscriber, start, end) => {
-			subscriber.#reported.set(start, end);
-		};
+		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.reofferStale = (subscriber) => subscriber.#reofferStale();
 		hooks.reofferGroups = (subscriber, start, end) => subscriber.#reofferGroups(start, end);
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
@@ -3809,6 +4007,8 @@ export class Subscriber {
 			}));
 		}
 		this.#left = true;
+		this.#bill?.close();
+		this.#bill = undefined;
 		this.#state.waitingOrdered = false;
 		// Settle if we're first (the producer may already have); either way drop anything
 		// still buffered. Groups parked at the withRange cap deliberately outlive a clean
@@ -3898,6 +4098,14 @@ export class Subscriber {
 	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
 	#tryRecvGroup(dispositions = false): Recv {
+		const recv = this.#tryRecvUnsettled(dispositions);
+		// What the read settled is billed now, and pays what it can of its readers' debt.
+		const lagged = this.#settleRecord();
+		return lagged ? { kind: "error", error: lagged } : recv;
+	}
+
+	#tryRecvUnsettled(dispositions: boolean): Recv {
+		if (this.#lagged) return { kind: "error", error: new TooFarBehind() };
 		if (this.#resume) return this.#tryResumed(false, dispositions);
 		const refused = this.#settle();
 		if (refused) return { kind: "error", error: refused };
@@ -3978,35 +4186,49 @@ export class Subscriber {
 		return this.#parked(groups) ? { kind: "boundary" } : { kind: "done" };
 	}
 
-	// The first part of `[from, to)` this cursor has not reported yet, now reported, with why. A
-	// skip goes out over a drop already reported, and a final drop over a stale one, since each
-	// replaces what it goes out over.
+	// The first part of `[from, to)` this cursor has not reported yet within its window, now
+	// reported, with why.
 	#report(from: bigint, to: bigint, hole: Hole & { received?: boolean }): (Recv & { kind: "drop" }) | undefined {
 		const { start, end } = this.#cursor.peek();
-		const kind = hole.skip ? "skip" : hole.stale !== undefined ? "stale" : "dropped";
-		const blocks = (reported: Reported) =>
-			kind === "skip" ? reported.kind === "skip" : kind === "dropped" ? reported.kind !== "stale" : true;
 		for (const run of this.#window.runs(max(from, start), min(to, end ?? to))) {
-			const blocked = this.#reported.overlapping(run.start, run.end).filter(blocks);
-			const [gap] = runGaps(blocked, run.start, run.end);
-			if (!gap) continue;
-			// Replacing what it goes out over: a final report is never reopened by an update.
-			this.#reported.set(gap.start, gap.end, {
-				...gap,
-				kind,
-				...(kind === "stale" && hole.received ? { received: true } : {}),
-			});
-			return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
+			const dropped = this.#reportRun(run.start, run.end, hole);
+			if (dropped) return dropped;
 		}
 		return undefined;
+	}
+
+	// The first part of `[from, to)` nothing already reported blocks, now reported, with why,
+	// replacing what it goes out over. Mirrors the Rust `Record::report`.
+	#reportRun(from: bigint, to: bigint, hole: Hole & { received?: boolean }): (Recv & { kind: "drop" }) | undefined {
+		const start = max(from, this.#folded);
+		if (start >= to) return undefined;
+		const blocked = this.#reported.overlapping(start, to).filter((reported) => blocksHole(reported, hole));
+		const [gap] = runGaps(blocked, start, to);
+		if (!gap) return undefined;
+		const kind = hole.skip ? "skip" : hole.stale !== undefined ? "stale" : "dropped";
+		this.#reported.set(gap.start, gap.end, {
+			...gap,
+			kind,
+			...(kind === "stale" && hole.received ? { received: true } : {}),
+		});
+		return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 	}
 
 	// The next run this cursor gave up and has not reported, without taking a group. From the
 	// first call on, a read without dispositions keeps its budget skips for it too. A resumed
 	// one reports what its routes' copies gave up.
 	#tryDrop(): (Recv & { kind: "drop" }) | undefined {
+		// What a publisher told its wire since is billed now. A reader the pool ended reports
+		// nothing more: its reads fail with the reason.
+		if (this.#settleRecord()) return undefined;
 		if (this.#resume) {
-			return this.#resume.tryDrop(this.#delivered);
+			for (;;) {
+				const queued = this.#nextResumedDrop();
+				if (queued) return queued;
+				const next = this.#resume.tryDrop(this.#delivered);
+				if (!next) return undefined;
+				this.#queueResumedDrop(next);
+			}
 		}
 		this.#settle();
 		const { start, end } = this.#cursor.peek();
@@ -4091,10 +4313,39 @@ export class Subscriber {
 		// A clean end leaves what the copies hold readable, as a direct reader's buffer is.
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
-		const recv = resume.tryGroup(ordered, this.#delivered, dispositions);
-		if (recv.kind === "group") this.#handOut(recv.group.sequence, ordered);
-		else if (recv.kind === "idle" && this.#exhausted()) return { kind: "done" };
-		return recv;
+		for (;;) {
+			if (dispositions) {
+				const queued = this.#nextResumedDrop();
+				if (queued) return queued;
+			}
+			const recv = resume.tryGroup(ordered, this.#delivered, dispositions);
+			if (recv.kind === "drop") {
+				this.#queueResumedDrop(recv);
+				continue;
+			}
+			if (recv.kind === "group") this.#handOut(recv.group.sequence, ordered);
+			else if (recv.kind === "idle" && this.#exhausted()) return { kind: "done" };
+			return recv;
+		}
+	}
+
+	// Queue a run a resumed reader's copy gave up. Each copy reports to its own route; this
+	// reader's record keeps one route's run from going out over what another's already settled.
+	#queueResumedDrop(dropped: Recv & { kind: "drop" }): void {
+		const { start, end, error, skip, stale } = dropped;
+		this.#pending.push({ start, end, error, skip, stale });
+	}
+
+	// The lowest queued run's first part nothing already reported blocks, now reported; the rest
+	// of that run waits its turn. Mirrors the Rust `Record::next_pending`.
+	#nextResumedDrop(): (Recv & { kind: "drop" }) | undefined {
+		for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
+			const dropped = this.#reportRun(run.start, run.end, run);
+			if (!dropped) continue;
+			if (dropped.end < run.end) this.#pending.unshift({ ...run, start: dropped.end });
+			return dropped;
+		}
+		return undefined;
 	}
 
 	// The live edge reached the end, with no hole a wire subscription's pending tail still
@@ -4229,7 +4480,10 @@ export class Subscriber {
 
 	// The synchronous half of #nextGroup.
 	#tryNextGroup(): Recv {
-		const recv = this.#resume ? this.#tryResumed(true) : this.#tryNextBuffered();
+		if (this.#lagged) return { kind: "error", error: new TooFarBehind() };
+		let recv = this.#resume ? this.#tryResumed(true) : this.#tryNextBuffered();
+		const lagged = this.#settleRecord();
+		if (lagged) recv = { kind: "error", error: lagged };
 		// One cursor: the frame helpers must not keep draining a group this read just
 		// moved past, or interleaved reads would run backwards.
 		if (recv.kind === "group" && this.#frameGroup && this.#frameGroup.sequence < recv.group.sequence) {

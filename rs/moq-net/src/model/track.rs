@@ -7847,7 +7847,7 @@ impl DropCursor {
 			self.drift = Some((drift.budget, drift.coverage.clone()));
 		}
 		let scan = (state.judged_revision, span.clone(), within.revision, self.drift.clone());
-		let full = self.scanned.as_ref() != Some(&scan);
+		let full = std::mem::take(&mut record.rescan) || self.scanned.as_ref() != Some(&scan);
 		let changed: Vec<ops::Range<u64>> = match full {
 			false => state.drops_changes.since(self.seen).collect(),
 			true => {
@@ -24237,9 +24237,9 @@ mod test {
 
 	/// A flood a reader reported, fragmented into runs alternating with upstream skips,
 	/// bills its record too. Once the pool shrinks under it and its track has shed what it
-	/// can, the reader folds the final runs into its floor and stays within the pool, while
-	/// one holding stale reports an update would reopen ends with `TooFarBehind` rather than
-	/// forgo the re-offer.
+	/// can, the reader folds the final runs and the groups it read into its floor and stays
+	/// within the pool, while one holding stale reports an update would reopen ends with
+	/// `TooFarBehind` rather than forgo the re-offer.
 	#[test]
 	fn a_reported_flood_folds_or_ends_the_reader() {
 		const RUNS: u64 = 1000;
@@ -24274,30 +24274,39 @@ mod test {
 			let used = pool.used();
 			assert!(used >= 2 * RUNS * super::super::record::RUN_OVERHEAD, "stale={stale}: the record is billed");
 
-			// The flood goes on into a smaller pool, whose debt each drop accrues.
+			// The pool shrinks, and groups the reader reads above the flood accrue its debt: the
+			// track sheds its own drop set first, then the reader pays.
 			let capacity = 64 * (RUN_OVERHEAD + BORN_OVERHEAD);
 			pool.resize(capacity);
-			let mut read = Poll::Pending;
-			for run in RUNS..2 * RUNS {
-				flood(run);
-				read = subscriber.poll_recv_group(&waiter);
-				if read.is_ready() {
-					break;
-				}
-				while let Poll::Ready((run, _)) = subscriber.poll_drop(&waiter) {
-					assert!(!reported.overlaps(&run), "{run:?}, folded, was reported again");
-					reported.insert(run);
+			let mut read = None;
+			for sequence in 2 * RUNS..2 * RUNS + 64 {
+				let mut group = producer.create_group(group::Info { sequence }).unwrap();
+				group
+					.write_frame(Timestamp::from_millis(sequence).unwrap(), vec![0u8; 16 * 1024])
+					.unwrap();
+				group.finish().unwrap();
+				match subscriber.poll_recv_group(&waiter) {
+					Poll::Ready(Ok(Some(group))) => assert_eq!(group.sequence, sequence, "stale={stale}"),
+					res => {
+						read = Some(res.map(|res| res.map(|_| ())));
+						break;
+					}
 				}
 			}
 			match stale {
 				true => assert!(
-					matches!(read, Poll::Ready(Err(Error::Lagged))),
+					matches!(read, Some(Poll::Ready(Err(Error::Lagged)))),
 					"the stale reports could not fold"
 				),
-				false => assert!(read.is_pending(), "the reader runs on"),
+				false => {
+					assert!(read.is_none(), "the reader runs on");
+					while let Poll::Ready((run, _)) = subscriber.poll_drop(&waiter) {
+						assert!(!reported.overlaps(&run), "{run:?}, folded, was reported again");
+					}
+				}
 			}
 			assert!(
-				pool.used() <= capacity + 4 * (RUN_OVERHEAD + BORN_OVERHEAD),
+				pool.used() <= capacity + 2 * (16 * 1024 + cache::ENTRY_OVERHEAD),
 				"stale={stale}: the pool holds {} past {capacity}",
 				pool.used()
 			);

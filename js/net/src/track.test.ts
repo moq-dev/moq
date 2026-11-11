@@ -4429,7 +4429,7 @@ test("an update after an idle start leaves an unreported stale skip to a widenin
 	expect(hooks.tryDrop(subscriber)).toMatchObject({ start: 0n, end: 1n });
 
 	// SUBSCRIBE_START resolved at group 1 with the skip still held for it.
-	hooks.unreport(subscriber, 0n, 1n);
+	hooks.wire(subscriber).untell(0n, 1n);
 	// An update under the same budget reopens nothing below the start.
 	expect(hooks.reofferStale(subscriber)).toEqual([]);
 	expect(hooks.tryDrop(subscriber)).toBeUndefined();

@@ -30,6 +30,7 @@ import type {
 	Request,
 	Subscriber,
 	Subscription,
+	WireRecord,
 } from "./track.ts";
 import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
@@ -706,10 +707,16 @@ export const hooks: {
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
 	/**
-	 * Take `[start, end)` back out of what a subscriber's wire cursor reported dropped: a drop
-	 * below where SUBSCRIBE_START resolved never goes out, so a wider budget may still serve it.
+	 * What a lite publisher told its wire about a subscriber's sequences, kept in the
+	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
 	 */
-	unreport: (subscriber: Subscriber, start: bigint, end: bigint) => void;
+	wire: (subscriber: Subscriber) => WireRecord;
+	/**
+	 * Open a bill against a track's cache account for what a session keeps for it beside the
+	 * cache, such as its tail's record of finished streams: each call bills that many bytes in
+	 * all. Mirrors the Rust crate-private `track::Producer::bill`.
+	 */
+	billTrack: (producer: Producer) => (bytes: number) => void;
 	/**
 	 * Re-offer what a subscriber gave up as stale through dispositions, as a wire whose every update
 	 * reopens its stale drops does: each run is judged again under the new terms. Returns the runs
@@ -1014,7 +1021,10 @@ export const hooks: {
 	forgetPastBudget: () => {
 		throw new Error("track.ts not loaded");
 	},
-	unreport: () => {
+	wire: () => {
+		throw new Error("track.ts not loaded");
+	},
+	billTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
 	supersedeStale: () => {

@@ -41,6 +41,9 @@ pub(crate) struct Record {
 	bill: Option<cache::Reader>,
 	/// The pool needed a run this reader was promised, so it ended.
 	failed: bool,
+	/// A fold forgot the runs copied from the track's drop set, which the next drop scan
+	/// folds in again in full.
+	pub(super) rescan: bool,
 }
 
 /// A run a reader has yet to report, and whether it was copied from the track's runs, which a
@@ -342,6 +345,20 @@ impl Record {
 	/// still held their groups. Not final are the reports an update reopens, the runs given
 	/// up and not reported yet, and the sequences nothing settled.
 	fn fold(&mut self) {
+		// The runs copied from the track's drop set go first: the next scan folds in again
+		// whatever the track still holds.
+		let received: Vec<_> = self
+			.pending
+			.iter()
+			.filter(|(_, pending)| pending.received)
+			.map(|(run, _)| run.clone())
+			.collect();
+		if !received.is_empty() {
+			for run in received {
+				self.pending.remove(run);
+			}
+			self.rescan = true;
+		}
 		let mut floor = self.floor;
 		loop {
 			let next = match self.reported.get_key_value(&floor) {
