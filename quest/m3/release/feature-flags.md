@@ -55,9 +55,8 @@ What to check first (seeded 2026-10-26):
 - The crates with the most features at seeding: moq-cli (21), moq-tokio (17),
   moq-relay (14), moq-native (13), and moq-video (11).
 
-Related: the [compile time audit](/quest/m3/audit-compile-time.md) owns
-per-crate build cost, and the [dependency audit](/quest/m3/audit-deps.md) owns
-which dependencies exist.
+Related: the [cost audit](/quest/m3/audit-cost.md) owns per-crate build
+cost and which dependencies exist.
 
 ## Required
 
