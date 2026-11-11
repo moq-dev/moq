@@ -1,4 +1,4 @@
-# [S] More tests hold up under load
+# More tests hold up under load
 
 ## Goal
 
