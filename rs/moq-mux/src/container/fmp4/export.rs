@@ -1477,32 +1477,20 @@ fn fallback_duration(default_frame: Duration, timescale: moq_net::Timescale) -> 
 /// Quantizing endpoints instead of each gap independently carries fractional ticks forward:
 /// a microsecond clock alternating 33,333 and 33,334 microsecond steps at 30 kHz produces
 /// consecutive 1,000-tick samples instead of either drifting or failing as inexact.
+///
+/// `None` when `end` does not land on a later tick: a backwards gap, or two instants this
+/// scale cannot tell apart, which time nothing just as a repeated timestamp does.
 pub(super) fn timestamp_gap(
 	start: Timestamp,
 	end: Timestamp,
 	timescale: moq_net::Timescale,
 ) -> Result<Option<Timestamp>> {
-	let start_scale = u128::from(start.scale().as_u64());
-	let end_scale = u128::from(end.scale().as_u64());
-	let end_numerator = u128::from(end.value()) * start_scale;
-	let start_numerator = u128::from(start.value()) * end_scale;
-	let Some(numerator) = end_numerator.checked_sub(start_numerator) else {
-		return Ok(None);
-	};
-	if numerator == 0 {
-		return Ok(None);
-	}
-
 	let start_ticks = super::timestamp_ticks(start, timescale)?;
 	let end_ticks = super::timestamp_ticks(end, timescale)?;
-	let Some(ticks) = end_ticks.checked_sub(start_ticks) else {
-		return Ok(None);
-	};
-	if ticks == 0 {
-		return Err(Error::SampleDurationTooSmall(timescale.as_u64()).into());
+	match end_ticks.checked_sub(start_ticks) {
+		Some(ticks) if ticks > 0 => Ok(Some(Timestamp::new(ticks, timescale)?)),
+		_ => Ok(None),
 	}
-
-	Ok(Some(Timestamp::new(ticks, timescale)?))
 }
 
 fn pts_monotonic(frames: &[Frame], successor: Option<&Frame>) -> bool {
@@ -1683,10 +1671,18 @@ mod tests {
 		assert_eq!(durations, vec![50_000, 10_000, 33_000]);
 	}
 
+	/// The last frame lands 11 us after its predecessor, the one-tick 90 kHz bump ffmpeg gives
+	/// a repeated DTS. Both quantize to one output tick, so the earlier frame falls back to
+	/// the cadence, as it does for a repeated timestamp.
 	#[test]
 	fn inferred_microsecond_clock_carries_fractional_ticks_forward() {
 		let timescale = moq_net::Timescale::new(30_000).unwrap();
-		let mut frames = vec![frame(0, None), frame(33_333, None), frame(66_667, None)];
+		let mut frames = vec![
+			frame(0, None),
+			frame(33_333, None),
+			frame(66_667, None),
+			frame(66_678, None),
+		];
 		infer_missing_durations(
 			&mut frames,
 			None,
@@ -1703,7 +1699,7 @@ mod tests {
 				(duration.value(), duration.scale())
 			})
 			.collect();
-		assert_eq!(durations, vec![(1_000, timescale); 3]);
+		assert_eq!(durations, vec![(1_000, timescale); 4]);
 	}
 
 	/// The regression for the stalled HLS player: a subscriber that got a stale cached group
