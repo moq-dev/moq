@@ -529,8 +529,8 @@ impl Routed {
 		if now != last {
 			self.stream.rtt(now);
 		}
-		self.read_rtt = (self.rtt.reading())
-			.then(|| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
+		self.read_rtt =
+			(self.rtt.reading()).then(|| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
 	}
 
 	/// Write the queued replies, and serve requests on every claim whose queue woke.
