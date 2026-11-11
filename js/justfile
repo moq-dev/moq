@@ -56,7 +56,7 @@ fix-changed list:
 # Model-check a TLA+ spec with TLC, e.g. `just js tla watch/verify/Watch.tla`.
 # Pass `-config js/<path>.cfg` for a config not named after the spec.
 tla spec *args:
-    cd .. && nix shell --inputs-from . nixpkgs#tlaplus --command tlc -workers auto -cleanup -metadir "$(mktemp -d)" {{ args }} js/{{ spec }}
+    cd .. && nix shell --inputs-from . nixpkgs#jdk25 --command java -XX:+UseParallelGC -cp "$(nix build --inputs-from . nixpkgs#tlaplus --no-link --print-out-paths)/share/java/tla2tools.jar" tlc2.TLC -workers 8 -cleanup -metadir "$(mktemp -d)" {{ args }} js/{{ spec }}
 
 # Run all unit tests.
 test:

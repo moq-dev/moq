@@ -41,7 +41,7 @@ just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/rout
 just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/CountToInfinity.cfg
 ```
 
-Each but the last checks every rule but `NoCountToInfinity` and passes at the sync commit. Times are on 24 shared cores.
+Each but the last checks every rule but `NoCountToInfinity` and passes at the sync commit. Times were measured with every core of a loaded 24-core host, before the recipe dropped to 8 workers.
 
 | Config | Mesh | Bounds | Run |
 | --- | --- | --- | --- |
