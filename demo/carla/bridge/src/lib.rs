@@ -18,8 +18,13 @@
 //! The worker protocol is [`protocol`].
 //!
 //! Linux only; the crate is empty elsewhere.
-// Elsewhere the items these docs link to do not exist.
-#![cfg_attr(not(target_os = "linux"), allow(rustdoc::broken_intra_doc_links))]
+#![cfg_attr(
+	not(target_os = "linux"),
+	allow(
+		rustdoc::broken_intra_doc_links,
+		reason = "the items these docs link to are Linux-only"
+	)
+)]
 #![cfg(target_os = "linux")]
 
 mod ffi;
