@@ -33,8 +33,8 @@ export class AudioRingBuffer {
 	// clock was heard, so a join lands on it rather than at the bound.
 	#joined = false;
 	// Samples the shared clock jumped ahead by moving its reference earlier since the last read on it,
-	// and those of them the ring holds audio past its target for, as far as the playhead still trails
-	// the clock, not yet skipped.
+	// and those not yet skipped, as far as the ring holds audio past its target and the playhead still
+	// trails the clock.
 	#incoming = 0;
 	#jumped = 0;
 	// Samples of media a skip dropped, and that the stretch removed by accelerating, gap zeros
@@ -487,9 +487,10 @@ export class AudioRingBuffer {
 		if (this.#clock !== undefined) {
 			const inputs = this.#inputs(0);
 			const bound = this.#joined ? inputs.bound : 0;
+			// Never more than the audio held past the target, so a skip never drains the ring below it.
 			const excess = Math.max(0, inputs.raw - inputs.target);
-			const jumped = this.#jumped + Math.min(this.#incoming, excess);
-			this.#jumped = this.#joined ? Math.min(jumped, Math.max(0, inputs.lag)) : 0;
+			const jumped = Math.min(this.#jumped + this.#incoming, excess, Math.max(0, inputs.lag));
+			this.#jumped = this.#joined ? jumped : 0;
 			this.#incoming = 0;
 			this.#joined = true;
 			if (!this.#ending()) {

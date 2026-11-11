@@ -1031,6 +1031,29 @@ describe("time stretch", () => {
 
 	// A jump counts only as far as the ring holds audio past its target, so one that left no audio to
 	// skip, as a reference moving on jitter while the buffer runs low, is the stretch's.
+	it("never skips a pending jump below its target", () => {
+		const buffer = live(20, { bound: 2000 });
+		write(buffer, 0, frames(100), { value: 0.5 });
+		buffer.clock(0);
+		read(buffer, QUANTUM, 1);
+
+		// 25 ms pending, short of a window, then 15 ms more once only 35 ms is held: one 20 ms target and
+		// 15 ms past it.
+		buffer.jumped(25_000);
+		buffer.clock(buffer.timestamp + 25_000);
+		read(buffer, QUANTUM, 1);
+		expect(buffer.skips).toBe(0);
+		while (buffer.length > frames(35) + QUANTUM) {
+			buffer.clock(buffer.timestamp + 25_000);
+			read(buffer, QUANTUM, 1);
+		}
+		buffer.jumped(15_000);
+		buffer.clock(buffer.timestamp + 40_000);
+		read(buffer, QUANTUM, 1);
+		expect(buffer.skips).toBe(0);
+		expect(buffer.stalled).toBe(false);
+	});
+
 	it("ignores a jump while it holds no audio past its target", () => {
 		const buffer = live(100, { bound: 2000 });
 		write(buffer, 0, frames(100), { value: 0.5 });

@@ -606,9 +606,9 @@ pub(crate) struct Consumer {
 	/// target's headroom. Stretch skips by the clock instead.
 	trim: bool,
 	/// Frames the writer's clock jumped ahead by moving its reference earlier,
-	/// as far as the queue held audio past its target when they came, which the
-	/// early media that moved it left, and the reader still trails the clock,
-	/// not yet skipped.
+	/// not yet skipped, as far as the queue holds audio past its target, which
+	/// the early media that moved it leaves, and the reader still trails the
+	/// clock.
 	jumped: usize,
 	/// Whether received audio has played on the clock. Until it has, nothing
 	/// trailing the clock was heard, so a join lands on it rather than at the
@@ -746,8 +746,10 @@ impl Consumer {
 		let clocked = self.shared.clocked.load(Ordering::Acquire);
 		let bound = if self.joined || !clocked { inputs.bound } else { 0 };
 		self.jumped = if self.joined {
+			// Never more than the audio held past the target, so a skip never
+			// drains the queue below it.
 			let excess = inputs.raw.saturating_sub(inputs.target);
-			(self.jumped + jumped.min(excess)).min(inputs.lag.max(0) as usize)
+			(self.jumped + jumped).min(excess).min(inputs.lag.max(0) as usize)
 		} else {
 			0
 		};
@@ -1466,6 +1468,46 @@ mod tests {
 				assert!(lag >= 30.0, "{lag} ms behind");
 			}
 		}
+	}
+
+	/// Pending jumps never add up past the audio held over the target, so a
+	/// skip never drains the queue below it.
+	#[test]
+	fn a_pending_jump_never_skips_below_the_target() {
+		let rate = 48_000;
+		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(20));
+		let base = prod.base;
+		let late = Duration::from_secs(2);
+		let mut out = vec![0.0; 480 * 2];
+		for _ in 0..5 {
+			assert_eq!(prod.push(&pcm), Push::Ok);
+		}
+		// On time through the 20 ms prime, which joins the clock.
+		let end = Duration::from_millis(120);
+		prod.due(base + end, late, Duration::ZERO);
+		let mut now = base;
+		for _ in 0..3 {
+			assert!(!matches!(pull(&mut cons, &mut out, now), Read::Trimmed { .. }));
+			now += Duration::from_millis(10);
+		}
+		// 25 ms pending, short of a window.
+		let mut shift = Duration::from_millis(25);
+		prod.due(base + end - shift, late, shift);
+		assert!(!matches!(pull(&mut cons, &mut out, now), Read::Trimmed { .. }));
+		now += Duration::from_millis(10);
+		// Drained to about 35 ms held, 15 ms past the target, then 15 ms more.
+		while cons.available() > rate as usize * 45 / 1000 {
+			assert!(!matches!(pull(&mut cons, &mut out, now), Read::Trimmed { .. }));
+			now += Duration::from_millis(10);
+		}
+		shift += Duration::from_millis(15);
+		prod.due(base + end - shift, late, Duration::from_millis(15));
+		let read = pull(&mut cons, &mut out, now);
+		assert!(
+			!matches!(read, Read::Trimmed { .. } | Read::Underflow { .. }),
+			"{read:?}"
+		);
+		assert_eq!(cons.skips(), 0);
 	}
 
 	/// A refill after an underrun waits for the whole device callback, not
