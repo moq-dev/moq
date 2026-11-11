@@ -10,7 +10,8 @@ root=$(git rev-parse --show-toplevel)
 publish=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/publish.sh
 before=$(sha256sum "$root"/drafts/draft-*.md)
 
-tmp=$(mktemp -d)
+# Real path: git reports one, and macOS's temp dir sits behind a symlink.
+tmp=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$tmp"' EXIT
 
 repo=$tmp/repo
