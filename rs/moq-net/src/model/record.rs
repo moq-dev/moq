@@ -246,10 +246,17 @@ impl Record {
 		}
 	}
 
-	/// Forget what the wire was told of `range`, which is owed again.
+	/// Forget what the wire was told of `range` that an update may reopen, which is owed again.
 	pub fn untell(&mut self, range: Range<u64>) {
-		if !range.is_empty() {
-			self.reported.remove(range);
+		// A final report stays: nothing reopens it, and a stale verdict must never go out over it.
+		let reopened: Vec<_> = self
+			.reported
+			.overlapping(&range)
+			.filter(|(_, report)| !report.is_final())
+			.map(|(run, _)| run.start.max(range.start)..run.end.min(range.end))
+			.collect();
+		for run in reopened {
+			self.reported.remove(run);
 		}
 	}
 
@@ -605,5 +612,23 @@ mod test {
 		assert_eq!(bill.debt(), 0, "within its capacity, the pool forgives the rest");
 		bill.set(5 * RUN_OVERHEAD);
 		assert_eq!(bill.debt(), 0, "a later pressure owes nothing of it");
+	}
+
+	/// Owing a run again takes back only what an update may reopen: a final report inside it
+	/// stays, so no stale verdict goes out over it.
+	#[test]
+	fn untelling_a_run_keeps_its_final_reports() {
+		let stale = Report::Stale {
+			received: false,
+			expired: false,
+			taken: false,
+		};
+		let mut record = Record::default();
+		record.tell(0..2, stale);
+		record.tell(2..3, Report::Skip);
+		record.tell(3..5, stale);
+		record.untell(0..5);
+		assert!(!record.told(0) && !record.told(4), "the stale runs are owed again");
+		assert!(record.told(2), "the skip stays");
 	}
 }

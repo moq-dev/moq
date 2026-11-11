@@ -232,6 +232,29 @@ test("fill: an answer aborted below the end does not hold the end open", async (
 	}
 });
 
+// A fill's answer is no feed arrival: one that fails leaves the gap the live feed still owes holding
+// the end, as the Rust track records arrivals only for the groups its feed delivers.
+test("fill: a failed answer to a gap the feed owes still holds the end", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	hooks.receiveTrack(track);
+	track.subscribe({ delay: { max: null } });
+	for (const sequence of [0n, 2n]) hooks.receiveGroup(track, { sequence, start: 0 }).finish();
+	const requests = track.requests();
+	const fetching = wireOf(broadcast).fetchGroup("video", 1n);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	fill.accept(1n).abort(new StreamError(StreamCode.Cancel));
+	fill.close();
+	await fetching.catch(() => undefined);
+	hooks.endTrack(track, { group: 3n, frame: 0 });
+	await yieldNow();
+	expect(track.closed.peek()).toBeUndefined();
+
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a reader reaching back for history gets the misses filled in order", async () => {
 	const { broadcast, track } = resumed(4n);
 	const requests = track.requests();

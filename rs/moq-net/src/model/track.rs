@@ -10169,7 +10169,23 @@ impl Subscriber {
 	pub(crate) fn reoffer_stale(&mut self) -> Vec<ops::Range<u64>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.reoffer_stale(),
-			Inner::Resume(resume, _) => resume.reoffer_stale(),
+			Inner::Resume(resume, logical) => {
+				let mut runs: RangeSet<u64> = resume.reoffer_stale().into_iter().collect();
+				// A stale run the logical record queued and has yet to report is owed again too, as
+				// a plain cursor takes back its own: the new terms judge it anew.
+				let queued: Vec<_> = logical
+					.record
+					.pending
+					.iter()
+					.filter(|(_, pending)| pending.hole.stale_budget().is_some())
+					.map(|(run, _)| run.clone())
+					.collect();
+				for run in queued {
+					logical.record.pending.remove(run.clone());
+					runs.insert(run);
+				}
+				runs.into_iter().collect()
+			}
 		}
 	}
 

@@ -1120,10 +1120,7 @@ export class Producer {
 			name,
 			accept: (sequence, info) => {
 				if (info !== undefined && this.#state.info.peek() === undefined) this.accept(info);
-				const group = this.#createGroup(sequence, 0);
-				const entry = this.#cached.get(sequence);
-				if (entry) entry.fetched = true;
-				return group;
+				return this.#createGroup(sequence, 0, true);
 			},
 			drop: (start, end, error) => {
 				this.#drop(start, end, { error });
@@ -1327,12 +1324,7 @@ export class Producer {
 		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#wire = { starts, served: producer.#wire?.served };
 		};
-		hooks.receiveGroup = (producer, { sequence, start, fill }) => {
-			const group = producer.#createGroup(sequence, start);
-			const entry = fill ? producer.#cached.get(sequence) : undefined;
-			if (entry) entry.fetched = true;
-			return group;
-		};
+		hooks.receiveGroup = (producer, { sequence, start, fill }) => producer.#createGroup(sequence, start, fill);
 		hooks.arrivingGroup = (producer, sequence) => {
 			const closed = producer.#cached.get(sequence)?.group.closed;
 			return closed?.peek() === undefined ? closed : undefined;
@@ -1898,7 +1890,9 @@ export class Producer {
 
 	// Retain a source group and fan it out to every live sink; its frame 0 is checked
 	// against this track when it lands.
-	#publish(group: GroupProducer): void {
+	// `fetched` marks a group a fill answered, which the live feed never delivered: it accounts
+	// for nothing the feed owes, as the Rust `insert` records arrivals only for visible groups.
+	#publish(group: GroupProducer, fetched = false): void {
 		// Before the group is cached, so the write creating it can never evict it.
 		this.#chargeDebt();
 		this.#settle();
@@ -1907,6 +1901,7 @@ export class Producer {
 			charge: this.#account.charge(),
 			mirrors: new Map<TrackState, GroupConsumer>(),
 			arrived: now(),
+			fetched: fetched || undefined,
 		};
 		hooks.chargeGroup(group, entry.charge);
 		this.#undrop(group.sequence);
@@ -1931,8 +1926,8 @@ export class Producer {
 		this.#cache.add(entry);
 		this.#cached.set(group.sequence, entry);
 		this.#fills.arrived(group.sequence);
-		this.#advance(group.sequence, true);
-		this.#arrive(group.sequence);
+		this.#advance(group.sequence, !fetched);
+		if (!fetched) this.#arrive(group.sequence);
 		this.#produce(group.sequence);
 		// A newer group demotes the live edge to an evictable one.
 		const edge = this.#edgeEntry();
@@ -1952,6 +1947,9 @@ export class Producer {
 			for (const sink of this.#sinks)
 				if (sink.waitingOrdered) sink.timelineChanged.update((revision) => revision + 1);
 			if (closed === null) this.#finishLargest(group.sequence);
+			// A failed fill answer holds no end open (see #settled), so the end may settle now, as the
+			// Rust `poll_outcome` judges again once any copy closes.
+			else if (fetched) this.#settle();
 		});
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
@@ -2130,7 +2128,7 @@ export class Producer {
 		return this.#createGroup(sequence, 0);
 	}
 
-	#createGroup(sequence: bigint, start: number): GroupProducer {
+	#createGroup(sequence: bigint, start: number, fetched = false): GroupProducer {
 		this.#writable(sequence);
 		// A skip says the sequence will never be produced, so it is final. A drop is not: a
 		// publisher may re-create a group it cut or aborted.
@@ -2150,7 +2148,7 @@ export class Producer {
 		hooks.startGroup(group, start);
 		this.#bind(group);
 		this.#cap(group);
-		this.#publish(group);
+		this.#publish(group, fetched);
 		return group;
 	}
 
@@ -2523,7 +2521,7 @@ export interface WireRecord {
 	untold(start: bigint, end: bigint): Run[];
 	/** Record that the wire was told `report` of `[start, end)`. */
 	tell(start: bigint, end: bigint, report: Omit<Reported, "start" | "end">): void;
-	/** Forget what the wire was told of `[start, end)`, which is owed again. */
+	/** Forget what the wire was told of `[start, end)` that an update may reopen, which is owed again. */
 	untell(start: bigint, end: bigint): void;
 	/** Forget the drops of `[start, end)` the wire was told, which a verdict or group replaces. */
 	replaceDrops(start: bigint, end: bigint): void;
@@ -3046,7 +3044,9 @@ export class Subscriber {
 				}
 			},
 			untell: (start, end) => {
-				reported.set(start, end);
+				// A final report stays: nothing reopens it, and a stale verdict must never go out over it.
+				const reopened = reported.overlapping(start, end).filter((run) => !finalReport(run));
+				for (const run of reopened) reported.set(max(run.start, start), min(run.end, end));
 			},
 			replaceDrops: (start, end) => {
 				const drops = reported
@@ -3170,7 +3170,14 @@ export class Subscriber {
 	// still stale under the new terms is given up and reported again. Returns the runs taken back. A
 	// resumed reader takes back what it queued and what its serving route's copy reported.
 	#reofferStale(): Run[] {
-		if (this.#resume) return this.#resume.reofferStale();
+		if (this.#resume) {
+			const taken = this.#resume.reofferStale();
+			// A stale run this reader queued and has yet to report is owed again too, as the plain
+			// path below takes back its own: the new terms judge it anew. Mirrors Rust.
+			for (const run of this.#pending) if (run.stale !== undefined) insertRun(taken, run.start, run.end);
+			this.#pending = this.#pending.filter((run) => run.stale === undefined);
+			return taken;
+		}
 		const taken: Run[] = [];
 		const received: Run[] = [];
 		const stale = this.#reported.all.filter(reopens);
