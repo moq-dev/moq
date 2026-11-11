@@ -6,13 +6,23 @@
 //!
 //! A route is one per publisher and names every relay it crossed, each with the
 //! session that relay learned the route on. A relay uses the cheapest route whose
-//! path does not name it, at once, with no distance, seqno, request, or echo. When
-//! a session closes, the relay that learned routes on it names that hop in a
-//! [`Msg::Dead`], and every relay drops every route through the hop, whichever
-//! neighbour offered it. [`Rules`] switches each part off to show what it buys.
+//! path does not name it, at once, with no distance, seqno, request, or echo.
+//! [`Rules`] switches on what the comparison showed that leaves wanting:
+//!
+//! - **Causes.** When a session closes, the relay that learned routes on it names
+//!   that hop in a [`Msg::Dead`], and every relay drops every route through the hop,
+//!   whichever neighbour offered it. One message per session covers every publisher.
+//! - **Holds.** A relay with no route left keeps its claims, unavailable, until the
+//!   neighbours that learned the route from it have answered: with another way, or
+//!   with nothing once those behind them have answered in turn. Then it lets go.
+//! - **Epochs.** A closed session casts doubt on the node at its far end, since a
+//!   dead relay is reported one neighbour at a time. No relay moves to a route
+//!   through a node in doubt until that node advances its epoch.
+//! - **Copies.** A relay with a reader for a broadcast offers a route to its copy,
+//!   which `copies.rs` exercises.
 //!
 //! Left out, since the comparison does not need them: scoped grants, qualified
-//! keys, interests, GOAWAY, priorities, and RTT.
+//! keys, interests, GOAWAY, priorities, upstream marks, and RTT.
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -48,6 +58,9 @@ pub(super) struct Rules {
 	/// route through that node until the node says it is still there, by advancing
 	/// its epoch.
 	pub epochs: bool,
+	/// A relay already pulling a broadcast moves onto another relay's copy only if
+	/// that relay ranks below it, so two relays never trade copies.
+	pub ranked: bool,
 }
 
 impl Rules {
@@ -58,10 +71,14 @@ impl Rules {
 		horizon: false,
 		holds: false,
 		epochs: false,
+		ranked: true,
 	};
 
 	/// The quest's candidate: a withdrawal names the hop that died.
-	pub const CAUSES: Self = Self { causes: true, ..Self::BARE };
+	pub const CAUSES: Self = Self {
+		causes: true,
+		..Self::BARE
+	};
 
 	/// Causes, one message per cause and session, and holds.
 	pub const HOLDS: Self = Self {
@@ -101,6 +118,18 @@ pub(super) enum Msg {
 	/// `node` is at `epoch`: it was still there after every session it saw close
 	/// before that.
 	Epoch { node: Id, epoch: u64 },
+	/// A copy of one broadcast is `cost` away through the sender, having come from
+	/// its publisher along `path`: 0 where the sender carries it.
+	/// `carrier` is the relay that carries it.
+	Warm {
+		id: Id,
+		claim: Path,
+		path: Arc<[Hop]>,
+		cost: Metric,
+		carrier: Id,
+	},
+	/// The sender offers no copy of that broadcast any more.
+	Cold { id: Id, claim: Path },
 	/// Changes to a route's claims, complete as of the publisher's revision `rev`.
 	Claims {
 		id: Id,
@@ -148,6 +177,8 @@ struct Session {
 	id: u32,
 	/// How the neighbour names itself in a path.
 	hop: Id,
+	/// Whether the neighbour passes routes on, as a relay does and a client does not.
+	forwards: bool,
 	cost: Metric,
 	rx: BTreeMap<Id, Heard>,
 	tx: BTreeMap<Id, Sent>,
@@ -155,6 +186,10 @@ struct Session {
 	told: BTreeSet<Hop>,
 	/// The epoch this neighbour was told each node is at.
 	epochs: BTreeMap<Id, u64>,
+	/// The copies this neighbour offers.
+	copies: BTreeMap<Cast, Copy>,
+	/// The copies this neighbour was offered.
+	casts: BTreeMap<Cast, (Arc<[Hop]>, Metric, Id)>,
 }
 
 /// The route a relay uses for a publisher, and the claims it shows.
@@ -168,6 +203,33 @@ struct Route {
 	cost: Metric,
 	claims: Claims,
 	rev: Rev,
+}
+
+/// One broadcast: its publisher and its claim.
+pub(super) type Cast = (Id, Path);
+
+/// A copy of a broadcast a neighbour offers.
+#[derive(Clone, Debug)]
+struct Copy {
+	/// The path the copy took from its publisher to that neighbour.
+	path: Arc<[Hop]>,
+	cost: Metric,
+	carrier: Id,
+	/// Its path holds a hop this relay knows is dead.
+	dead: bool,
+}
+
+/// Where a relay would pull a broadcast from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Source {
+	pub next: Node,
+	pub cost: Metric,
+	/// The path the broadcast then took to this relay.
+	pub path: Arc<[Hop]>,
+	/// Whether it joins a copy, rather than follow the publisher's route.
+	pub warm: bool,
+	/// The relay carrying that copy.
+	pub carrier: Id,
 }
 
 /// What a relay sends one neighbour for a route.
@@ -195,6 +257,9 @@ pub(super) struct Relay {
 	epochs: BTreeMap<Id, u64>,
 	/// The epoch each such node was at when a session of its was last seen to close.
 	doubt: BTreeMap<Id, u64>,
+	/// The broadcasts this relay has a reader for, so it carries a copy, each with
+	/// the neighbour it pulls from and whether that is a copy.
+	readers: BTreeMap<Cast, Option<(Node, bool)>>,
 	shown: BTreeMap<(Id, Path), (Rev, bool)>,
 	out: Vec<(Node, Msg)>,
 	events: Vec<(Id, Path, Kind)>,
@@ -229,6 +294,7 @@ impl Relay {
 			dead: BTreeSet::new(),
 			epochs: BTreeMap::new(),
 			doubt: BTreeMap::new(),
+			readers: BTreeMap::new(),
 			shown: BTreeMap::new(),
 			out: Vec::new(),
 			events: Vec::new(),
@@ -243,22 +309,26 @@ impl Relay {
 		std::mem::take(&mut self.events)
 	}
 
-	pub fn connect(&mut self, peer: Node, hop: Id, cost: Metric) {
+	pub fn connect(&mut self, peer: Node, hop: Id, forwards: bool, cost: Metric) {
 		self.opened += 1;
 		let session = Session {
 			id: self.opened,
 			hop,
+			forwards,
 			cost,
 			rx: BTreeMap::new(),
 			tx: BTreeMap::new(),
 			told: BTreeSet::new(),
 			epochs: BTreeMap::new(),
+			copies: BTreeMap::new(),
+			casts: BTreeMap::new(),
 		};
 		self.sessions.insert(peer, session);
 		let ids: Vec<Id> = self.routes.keys().copied().collect();
 		for id in ids {
 			self.advertise(id);
 		}
+		self.warm(None);
 	}
 
 	/// The session to `peer` closed: every route learned on it is dead.
@@ -272,8 +342,9 @@ impl Relay {
 		};
 		let lost = session.rx.keys().copied().collect();
 		let far = (session.hop, self.epochs.get(&session.hop).copied().unwrap_or(0));
-		if self.rules.epochs {
-			// This relay is still here, whatever its neighbour concludes.
+		if self.rules.epochs && session.forwards {
+			// This relay is still here, whatever its neighbour tells the others. A
+			// neighbour that passes nothing on tells nobody.
 			*self.epochs.entry(self.hop).or_default() += 1;
 		}
 		self.fail(hop, far, None, Vec::new(), false, lost);
@@ -376,6 +447,30 @@ impl Relay {
 				for id in self.heard() {
 					self.update(id);
 				}
+				self.warm(None);
+			}
+			Msg::Warm {
+				id,
+				claim,
+				path,
+				cost,
+				carrier,
+			} => {
+				let dead = state(&self.dead, &path) == State::Dead;
+				let copy = Copy {
+					path,
+					cost,
+					carrier,
+					dead,
+				};
+				session.copies.insert((id, claim), copy);
+				self.warm(Some(id));
+				self.collect();
+			}
+			Msg::Cold { id, claim } => {
+				session.copies.remove(&(id, claim));
+				self.warm(Some(id));
+				self.collect();
 			}
 		}
 	}
@@ -419,6 +514,11 @@ impl Relay {
 				}
 			}
 		}
+		for session in self.sessions.values_mut() {
+			for copy in session.copies.values_mut() {
+				copy.dead |= copy.path.contains(&hop);
+			}
+		}
 		self.dead.insert(hop);
 		if rules.epochs {
 			let doubt = self.doubt.entry(far.0).or_default();
@@ -436,6 +536,7 @@ impl Relay {
 		for &id in &touched {
 			self.advertise(id);
 		}
+		self.warm(None);
 		self.collect();
 	}
 
@@ -449,6 +550,12 @@ impl Relay {
 				.map(|(id, _)| *id)
 				.collect();
 			if through.is_empty() {
+				let session = self.sessions.get_mut(&peer).unwrap();
+				let copied = session.casts.values().any(|(path, ..)| path.contains(&hop));
+				if copied && from != Some(peer) && session.told.insert(hop) {
+					let (moved, gone) = (Vec::new(), true);
+					self.out.push((peer, Msg::Dead { hop, far, moved, gone }));
+				}
 				continue;
 			}
 			let first = self.sessions.get_mut(&peer).unwrap().told.insert(hop);
@@ -476,7 +583,10 @@ impl Relay {
 						let sent = session.tx.get_mut(&id).unwrap();
 						if !sent.held {
 							sent.held = true;
-							held.push(id);
+							// The neighbour it learned the route from takes silence to mean
+							// this relay holds under it, so it is told outright.
+							let parent = child(&sent.path, session.hop);
+							held.push((id, parent));
 						}
 						rest += 1;
 					}
@@ -488,19 +598,28 @@ impl Relay {
 				}
 			}
 			let gone = rest == 0;
-			for (_, path, _) in &moved {
-				self.tell(peer, path);
-			}
+			let paths: Vec<Arc<[Hop]>> = moved.iter().map(|(_, path, _)| path.clone()).collect();
 			if first || (gone && !ended.is_empty()) {
 				self.out.push((peer, Msg::Dead { hop, far, moved, gone }));
 				if !gone {
+					let held = held.into_iter().filter(|(_, parent)| *parent);
+					self.out.extend(held.map(|(id, _)| (peer, Msg::Hold { id })));
 					self.out.extend(ended.into_iter().map(|id| (peer, Msg::End { id })));
 				}
 			} else {
+				self.out.extend(
+					moved
+						.into_iter()
+						.map(|(id, path, cost)| (peer, Msg::Offer { id, path, cost })),
+				);
 				self.out
-					.extend(moved.into_iter().map(|(id, path, cost)| (peer, Msg::Offer { id, path, cost })));
-				self.out.extend(held.into_iter().map(|id| (peer, Msg::Hold { id })));
+					.extend(held.into_iter().map(|(id, _)| (peer, Msg::Hold { id })));
 				self.out.extend(ended.into_iter().map(|id| (peer, Msg::End { id })));
+			}
+			// An epoch follows the route that names its node, or it would name nothing
+			// the neighbour holds yet.
+			for path in paths {
+				self.tell(peer, &path);
 			}
 		}
 	}
@@ -509,31 +628,173 @@ impl Relay {
 		self.select(id);
 		self.show(id);
 		self.advertise(id);
+		self.warm(Some(id));
 		self.collect();
+	}
+
+	/// A reader for `cast` arrives at this relay, which carries a copy from now on.
+	pub fn carry(&mut self, cast: Cast) {
+		let id = cast.0;
+		self.readers.insert(cast, None);
+		self.warm(Some(id));
+	}
+
+	/// The reader for `cast` leaves.
+	pub fn uncarry(&mut self, cast: &Cast) {
+		self.readers.remove(cast);
+		self.warm(Some(cast.0));
+	}
+
+	/// Where this relay pulls `cast` from: the cheapest of its publisher's route and
+	/// any copy whose path does not name this relay. A tie goes to the copy. A relay
+	/// that already pulls it stays put unless the cheaper way is the publisher's
+	/// route, the same neighbour, or a copy whose carrier ranks below this relay.
+	pub fn source(&self, cast: &Cast) -> Option<Source> {
+		let mut options = Vec::new();
+		options.extend(self.routes.get(&cast.0).and_then(|route| {
+			Some(Source {
+				next: route.next?,
+				cost: route.cost,
+				path: route.path.clone()?,
+				warm: false,
+				carrier: 0,
+			})
+		}));
+		for (&peer, session) in &self.sessions {
+			let Some(copy) = session.copies.get(cast) else {
+				continue;
+			};
+			if copy.dead || names(&copy.path, self.hop) || self.doubted(&copy.path) {
+				continue;
+			}
+			let Some(cost) = copy.cost.checked_add(session.cost) else {
+				continue;
+			};
+			let mut path = copy.path.to_vec();
+			path.push(Hop {
+				node: self.hop,
+				session: session.id,
+			});
+			options.push(Source {
+				next: peer,
+				cost,
+				path: path.into(),
+				warm: true,
+				carrier: copy.carrier,
+			});
+		}
+		let pull = self.readers.get(cast).copied().flatten();
+		let pull = pull.filter(|pull| options.iter().any(|source| (source.next, source.warm) == *pull));
+		let rank = |node: Id| fnv(cast.1.as_str(), &[cast.0, node]);
+		let free = |source: &Source| match pull {
+			Some((next, _)) if self.rules.ranked => {
+				!source.warm || source.next == next || rank(source.carrier) < rank(self.hop)
+			}
+			_ => true,
+		};
+		(options.into_iter())
+			.filter(free)
+			.min_by_key(|source| (source.cost, !source.warm, source.next))
+	}
+
+	/// What this relay offers its neighbours for `cast`: its own copy at no cost, or
+	/// a copy it would join, for as long as that is cheaper than the publisher's route.
+	fn copy(&self, cast: &Cast) -> Option<(Arc<[Hop]>, Metric, Id)> {
+		if self.own == Some(cast.0) || self.leaf {
+			return None;
+		}
+		let source = self.source(cast)?;
+		match self.readers.contains_key(cast) {
+			true => Some((source.path, 0, self.hop)),
+			false if source.warm => Some((source.path, source.cost, source.carrier)),
+			false => None,
+		}
+	}
+
+	/// Bring what each neighbour was offered up to date, for the copies of `id` or
+	/// for every copy. A neighbour is offered no copy whose path names it.
+	fn warm(&mut self, id: Option<Id>) {
+		let mut casts: BTreeSet<Cast> = self.readers.keys().cloned().collect();
+		for session in self.sessions.values() {
+			casts.extend(session.copies.keys().cloned());
+			casts.extend(session.casts.keys().cloned());
+		}
+		for cast in casts {
+			if id.is_some_and(|id| id != cast.0) {
+				continue;
+			}
+			let pull = self.source(&cast).map(|source| (source.next, source.warm));
+			if let Some(reader) = self.readers.get_mut(&cast) {
+				*reader = pull;
+			}
+			let copy = self.copy(&cast);
+			let peers: Vec<Node> = self.sessions.keys().copied().collect();
+			for peer in peers {
+				let session = &self.sessions[&peer];
+				let want = copy.clone().filter(|(path, ..)| !names(path, session.hop));
+				if session.casts.get(&cast) == want.as_ref() {
+					continue;
+				}
+				let (id, claim) = cast.clone();
+				match want {
+					Some((path, cost, carrier)) => {
+						let session = self.sessions.get_mut(&peer).unwrap();
+						session.casts.insert(cast.clone(), (path.clone(), cost, carrier));
+						let msg = Msg::Warm {
+							id,
+							claim,
+							path: path.clone(),
+							cost,
+							carrier,
+						};
+						self.out.push((peer, msg));
+						self.tell(peer, &path);
+					}
+					None => {
+						self.sessions.get_mut(&peer).unwrap().casts.remove(&cast);
+						self.out.push((peer, Msg::Cold { id, claim }));
+					}
+				}
+			}
+		}
 	}
 
 	/// Forget each dead hop no neighbour's route names any more.
 	fn collect(&mut self) {
 		let sessions = &self.sessions;
 		self.dead.retain(|hop| {
-			(sessions.values()).any(|session| session.rx.values().any(|heard| heard.path.contains(hop)))
+			(sessions.values()).any(|session| {
+				let routes = session.rx.values().any(|heard| heard.path.contains(hop));
+				routes || session.copies.values().any(|copy| copy.path.contains(hop))
+			})
 		});
 		let me = self.hop;
 		let named = |node: &Id| {
-			*node == me || (sessions.values()).any(|session| session.rx.values().any(|heard| names(&heard.path, *node)))
+			*node == me
+				|| (sessions.values()).any(|session| {
+					let routes = session.rx.values().any(|heard| names(&heard.path, *node));
+					routes || session.copies.values().any(|copy| names(&copy.path, *node))
+				})
 		};
 		self.epochs.retain(|node, _| named(node));
 		self.doubt.retain(|node, _| named(node));
 		for session in self.sessions.values_mut() {
 			let tx = &session.tx;
-			session.told.retain(|hop| tx.values().any(|sent| sent.path.contains(hop)));
-			session.epochs.retain(|node, _| tx.values().any(|sent| names(&sent.path, *node)));
+			let casts = &session.casts;
+			session.told.retain(|hop| {
+				tx.values().any(|sent| sent.path.contains(hop)) || casts.values().any(|(path, ..)| path.contains(hop))
+			});
+			session.epochs.retain(|node, _| {
+				tx.values().any(|sent| names(&sent.path, *node)) || casts.values().any(|(path, ..)| names(path, *node))
+			});
 		}
 	}
 
 	/// Every publisher a neighbour offered a route to.
 	fn heard(&self) -> BTreeSet<Id> {
-		(self.sessions.values()).flat_map(|session| session.rx.keys().copied()).collect()
+		(self.sessions.values())
+			.flat_map(|session| session.rx.keys().copied())
+			.collect()
 	}
 
 	/// Whether `path` crosses a node that a closed session cast doubt on, and that
@@ -561,7 +822,8 @@ impl Relay {
 	fn spread(&mut self, node: Id) {
 		let epoch = self.epochs.get(&node).copied().unwrap_or(0);
 		for (&peer, session) in self.sessions.iter_mut() {
-			let named = session.tx.values().any(|sent| names(&sent.path, node));
+			let named = session.tx.values().any(|sent| names(&sent.path, node))
+				|| session.casts.values().any(|(path, ..)| names(path, node));
 			if named && epoch > session.epochs.get(&node).copied().unwrap_or(0) {
 				session.epochs.insert(node, epoch);
 				self.out.push((peer, Msg::Epoch { node, epoch }));
@@ -577,6 +839,7 @@ impl Relay {
 		}
 		let was = self.routes.remove(&id);
 		let current = was.as_ref().and_then(|route| route.next);
+		let using = current.filter(|_| was.as_ref().is_some_and(|route| route.path.is_some()));
 		// Stay on the next hop among equals.
 		type Rank = (Metric, bool, Node);
 		let mut best: Option<(Rank, Arc<[Hop]>)> = None;
@@ -588,7 +851,9 @@ impl Relay {
 			if heard.state != State::Live || names(&heard.path, self.hop) {
 				continue;
 			}
-			if self.doubted(&heard.path) {
+			// Doubt keeps a relay from moving to a route, not on the one it uses: that
+			// one's own neighbour says when it goes.
+			if Some(peer) != using && self.doubted(&heard.path) {
 				// It may come back: the node in doubt has yet to say it is there.
 				hope = true;
 				continue;
@@ -659,6 +924,15 @@ impl Relay {
 		})
 	}
 
+	/// Whether a neighbour offers a route to `id` that only doubt keeps this relay off.
+	fn hopes(&self, id: Id) -> bool {
+		self.sessions.values().any(|session| {
+			(session.rx.get(&id)).is_some_and(|heard| {
+				heard.state == State::Live && !names(&heard.path, self.hop) && self.doubted(&heard.path)
+			})
+		})
+	}
+
 	fn want(&self, id: Id, peer: Node) -> Want {
 		let Some(route) = self.routes.get(&id) else {
 			return Want::End;
@@ -670,7 +944,7 @@ impl Relay {
 			Some(path) if self.rules.horizon && names(path, self.sessions[&peer].hop) => Want::End,
 			Some(path) => Want::Path(path.clone(), route.cost),
 			// The next hop it holds under hears nothing until those behind this relay answered.
-			None if route.next == Some(peer) => match self.pending(id) {
+			None if route.next == Some(peer) => match self.pending(id) || self.hopes(id) {
 				true => Want::Keep,
 				false => Want::End,
 			},
@@ -708,9 +982,16 @@ impl Relay {
 			let offer = sent.is_none_or(|sent| sent.held || sent.path != path || sent.cost != cost);
 			let (was, at) = sent.map_or((Claims::new(), 0), |sent| (sent.claims.clone(), sent.rev));
 			if offer {
+				let offered = path.clone();
+				self.out.push((
+					peer,
+					Msg::Offer {
+						id,
+						path: offered,
+						cost,
+					},
+				));
 				self.tell(peer, &path);
-				let path = path.clone();
-				self.out.push((peer, Msg::Offer { id, path, cost }));
 			}
 			let route = &self.routes[&id];
 			let session = self.sessions.get_mut(&peer).unwrap();
@@ -791,9 +1072,11 @@ impl Relay {
 		self.shown.get(&(id, claim.clone())).map(|(_, available)| *available)
 	}
 
-	/// Dead hops remembered, and routes heard.
+	/// Dead hops remembered, and routes and copies heard.
 	pub fn retained(&self) -> (usize, usize) {
-		let heard = self.sessions.values().map(|session| session.rx.len()).sum();
+		let heard = (self.sessions.values())
+			.map(|session| session.rx.len() + session.copies.len())
+			.sum();
 		(self.dead.len(), heard)
 	}
 }
@@ -807,6 +1090,8 @@ pub(super) struct PathStats {
 	pub route_items: usize,
 	pub claim_msgs: usize,
 	pub claim_items: usize,
+	/// Copy offers and their ends, also counted as route messages.
+	pub warm_msgs: usize,
 	pub delivered: usize,
 }
 
@@ -863,7 +1148,8 @@ impl PathSim {
 		for (x, y) in [(a, b), (b, a)] {
 			let cost = self.links[x][y].expect("a configured link");
 			let peer = hop(y, self.restarts[y]);
-			self.nodes[x].connect(y, peer, cost);
+			let forwards = !self.nodes[y].leaf;
+			self.nodes[x].connect(y, peer, forwards, cost);
 		}
 		self.flush();
 	}
@@ -924,16 +1210,28 @@ impl PathSim {
 		self.flush();
 	}
 
+	/// A reader for `claim` of `id` arrives at `node`.
+	pub fn carry(&mut self, node: Node, id: Id, claim: &str) {
+		self.nodes[node].carry((id, p(claim)));
+		self.flush();
+	}
+
+	pub fn uncarry(&mut self, node: Node, id: Id, claim: &str) {
+		self.nodes[node].uncarry(&(id, p(claim)));
+		self.flush();
+	}
+
+	/// Where `node` pulls `claim` of `id` from.
+	pub fn source(&self, node: Node, id: Id, claim: &str) -> Option<Source> {
+		self.nodes[node].source(&(id, p(claim)))
+	}
+
 	pub fn hold(&mut self, from: Node, to: Node) {
 		self.held.insert((from, to));
 	}
 
 	pub fn release(&mut self, from: Node, to: Node) {
 		self.held.remove(&(from, to));
-	}
-
-	pub fn front(&self, from: Node, to: Node) -> String {
-		format!("{:?}", self.queues.get(&(from, to)).and_then(|queue| queue.front()))
 	}
 
 	pub fn queued(&self, from: Node, to: Node) -> usize {
@@ -980,6 +1278,11 @@ impl PathSim {
 						self.stats.route_msgs += 1;
 						self.stats.route_items += 1;
 					}
+					Msg::Warm { .. } | Msg::Cold { .. } => {
+						self.stats.route_msgs += 1;
+						self.stats.route_items += 1;
+						self.stats.warm_msgs += 1;
+					}
 					Msg::Dead { moved, .. } => {
 						self.stats.route_msgs += 1;
 						self.stats.route_items += 1 + moved.len();
@@ -1006,11 +1309,13 @@ impl PathSim {
 	}
 }
 
-/// A chain delivers a publisher's route and claims, a closed link ends them, and
-/// the relay behind it takes the other way round at once.
+/// A relay on a ring loses its link toward the publisher. The only other way runs
+/// through the neighbour that routed through it, so that neighbour moves first.
+/// With no holds the relay lets its claims go and gets them back; with holds they
+/// turn unavailable and back, and no claim is sent again.
 #[test]
-fn a_ring_takes_the_other_way_round_at_once() {
-	for rules in [Rules::BARE, Rules::CAUSES] {
+fn a_ring_takes_the_other_way_round() {
+	for rules in [Rules::BARE, Rules::CAUSES, Rules::HOLDS, Rules::EPOCHS] {
 		let origin = 4;
 		let mut sim = PathSim::new(5, rules);
 		for (a, b) in [(0, 1), (1, 2), (2, 3), (3, 0)] {
@@ -1021,13 +1326,25 @@ fn a_ring_takes_the_other_way_round_at_once() {
 		sim.announce(origin, "a");
 		assert!(sim.run());
 		assert_eq!(sim.next(1, 7), Some(Some(0)));
-		assert_eq!(sim.shows(2, 7, "a"), Some(true));
+		assert_eq!(sim.next(2, 7), Some(Some(1)));
 
+		let (events, claims) = (sim.events.len(), sim.stats.claim_items);
 		sim.disconnect(0, 1);
-		assert_eq!(sim.next(1, 7), Some(Some(2)), "relay 2 had offered its own way");
 		assert!(sim.run());
+		assert_eq!(sim.next(1, 7), Some(Some(2)), "{rules:?}");
 		assert_eq!(sim.nodes[1].cost(7), Some(4));
 		assert_eq!(sim.shows(1, 7, "a"), Some(true));
+		let seen: Vec<Kind> = (sim.events[events..].iter())
+			.filter(|(node, ..)| *node == 1)
+			.map(|(.., kind)| *kind)
+			.collect();
+		match rules.holds {
+			true => {
+				assert_eq!(seen, [Kind::Unavailable, Kind::Available], "{rules:?}");
+				assert_eq!(sim.stats.claim_items, claims, "{rules:?}: no claim is sent again");
+			}
+			false => assert_eq!(seen, [Kind::Offline, Kind::Start], "{rules:?}"),
+		}
 
 		sim.disconnect(origin, 0);
 		assert!(sim.run());
@@ -1041,28 +1358,28 @@ fn a_ring_takes_the_other_way_round_at_once() {
 
 impl Relay {
 	pub fn dump(&self, id: Id) -> String {
-		let mut out = format!("route {:?} dead {:?}", self.routes.get(&id).map(|r| (r.next, r.path.is_some())), self.dead);
+		let mut out = format!(
+			"hop {} route {:?} dead {:?} epochs {:?} doubt {:?}",
+			self.hop,
+			self.routes.get(&id).map(|r| (r.next, r.path.is_some())),
+			self.dead,
+			self.epochs,
+			self.doubt
+		);
 		for (peer, session) in &self.sessions {
 			out += &format!(
 				"\n    {peer}: rx {:?} tx {:?} told {:?}",
-				session.rx.get(&id).map(|h| (h.state, h.path.iter().map(|x| (x.node, x.session)).collect::<Vec<_>>())),
-				session.tx.get(&id).map(|s| (s.held, s.path.iter().map(|x| (x.node, x.session)).collect::<Vec<_>>())),
+				session
+					.rx
+					.get(&id)
+					.map(|h| (h.state, h.path.iter().map(|x| (x.node, x.session)).collect::<Vec<_>>())),
+				session
+					.tx
+					.get(&id)
+					.map(|s| (s.held, s.path.iter().map(|x| (x.node, x.session)).collect::<Vec<_>>())),
 				session.told
 			);
 		}
 		out
-	}
-}
-
-#[test]
-fn debug_ring_home() {
-	use super::compare::*;
-	let mesh = Mesh::ring(6);
-	let mut lab = Lab::new(Rule::Holds, &mesh);
-	lab.trace = true;
-	let cost = lab.measure(&|lab| lab.crash(0));
-	eprintln!("{cost:?} {:?}", lab.check());
-	for relay in 0..6 {
-		eprintln!("relay {relay}: {}", lab.net.dump(relay, 100));
 	}
 }
