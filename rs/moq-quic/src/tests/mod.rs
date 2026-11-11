@@ -2162,6 +2162,66 @@ fn idle_timeout() {
 	assert_matches!(pair.server_conn_mut(server_ch).error(), Some(ConnectionError::TimedOut));
 }
 
+/// A client stopped past its idle timeout, as by SIGSTOP or a VM pause, times out on resuming
+/// rather than letting the datagrams buffered while it was stopped revive the connection.
+#[test]
+fn resumed_client_times_out() {
+	let _guard = subscribe();
+	const IDLE_TIMEOUT: Duration = Duration::from_millis(100);
+	let server = server::Config {
+		transport: transport::Config {
+			idle_timeout: Some(IDLE_TIMEOUT),
+			..transport::Config::default()
+		},
+		..server_config()
+	};
+	let mut pair = Pair::new(Default::default(), server);
+	pair.latency = Duration::from_millis(5);
+	let (client_ch, server_ch) = pair.connect();
+
+	// The client sends and stops: the server's ACKs and keep-alives queue at the client's
+	// socket until the server times out.
+	let stream = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, stream).write(&mut &b"hello"[..]).unwrap();
+	pair.drive_client();
+	let stopped = pair.time;
+	loop {
+		pair.drive_server();
+		if pair.server_conn_mut(server_ch).is_drained() {
+			break;
+		}
+		pair.time = pair.server.next_wakeup().expect("the server times out");
+	}
+	assert_matches!(pair.server_conn_mut(server_ch).error(), Some(ConnectionError::TimedOut));
+	assert!(!pair.client.inbound.is_empty());
+
+	// The client resumes and reads its socket before its overdue timer fires, as a driver that
+	// handles received datagrams before timers does.
+	let resumed = stopped.saturating_add(4 * IDLE_TIMEOUT);
+	pair.time = resumed;
+	let mut buf = Vec::new();
+	for (arrival, ecn, data) in mem::take(&mut pair.client.inbound) {
+		let received = Received {
+			remote: pair.server.addr,
+			local_ip: None,
+			ecn,
+			data,
+			arrival: Some(arrival),
+		};
+		if let Some(DatagramEvent::ConnectionEvent(_, event)) = pair.client.endpoint.handle(resumed, received, &mut buf)
+		{
+			pair.client_conn_mut(client_ch).handle_event(event);
+		}
+	}
+
+	let conn = pair.client_conn_mut(client_ch);
+	assert!(conn.is_drained());
+	assert_matches!(conn.error(), Some(ConnectionError::TimedOut));
+}
+
 #[test]
 fn unreachable_handshake_fails_with_no_viable_path() {
 	let _guard = subscribe();

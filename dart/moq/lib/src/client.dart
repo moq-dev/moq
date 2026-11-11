@@ -60,8 +60,9 @@ final class ConnectOptions {
   /// The WebSocket fallback raced against QUIC for `http(s)` URLs.
   final WebSocketConfig? websocket;
 
-  /// Set true for a one-shot dial. By default the session redials with
-  /// backoff whenever the transport drops.
+  /// Set true for a one-shot dial. By default an established session redials
+  /// with backoff whenever the transport drops; a first dial that reaches no
+  /// session ends it with that error instead.
   final bool once;
 
   /// Retry pacing for the automatic reconnect.

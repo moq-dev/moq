@@ -74,13 +74,11 @@ pub(crate) fn implementation(value: &str) -> Option<String> {
 /// The SETUP extensions this side offers.
 ///
 /// Turning one off connects as a peer that does not speak that extension. moq-lite carries
-/// auth and solicit in its core, so those only change moq-transport sessions.
+/// solicit in its core, so that one only changes moq-transport sessions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Extensions {
-	/// The MoQ Auth extension: tokens presented and granted on their own stream.
-	pub auth: bool,
 	/// The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than
 	/// announcing unasked (moq-transport only).
 	pub solicit: bool,
@@ -92,7 +90,6 @@ pub struct Extensions {
 impl Default for Extensions {
 	fn default() -> Self {
 		Self {
-			auth: true,
 			solicit: true,
 			ietf: false,
 		}
@@ -206,7 +203,18 @@ impl Client {
 			.find(|v| supported.contains(v));
 		match version {
 			Some(Version::Lite(version)) => Ok(version),
-			_ => Err(crate::Error::Version),
+			_ => {
+				// The client only learns that the session closed, so this is the one place
+				// that can name both sides of the mismatch.
+				let offered: Vec<String> = self
+					.versions
+					.iter()
+					.map(|v| Version::try_from(*v).map_or_else(|_| format!("{v:?}"), |v| v.to_string()))
+					.collect();
+				let accepted: Vec<String> = supported.iter().map(ToString::to_string).collect();
+				tracing::warn!(?offered, ?accepted, "client shares no MoQ version with this server");
+				Err(crate::Error::Version)
+			}
 		}
 	}
 }
@@ -343,12 +351,6 @@ mod tests {
 			assert_eq!(lite::Auth::decode_slice(&wire, lite::Version::Lite07).unwrap().0, auth);
 
 			let version = crate::ietf::Version::Draft22;
-			let auth = crate::ietf::auth::Auth {
-				request_id: crate::ietf::RequestId(0),
-				token: Bytes::copy_from_slice(secret.as_bytes()),
-			};
-			let wire = auth.encode_bytes(version).unwrap();
-			assert_eq!(crate::ietf::auth::Auth::decode_slice(&wire, version).unwrap().0, auth);
 			let mut params = crate::ietf::Parameters::default();
 			crate::ietf::token::into_setup(&mut params, &token, version).unwrap();
 			params.set_bytes(

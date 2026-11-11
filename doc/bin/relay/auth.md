@@ -168,9 +168,9 @@ key can itself be **scoped** at generation (`--root`, `--publish`,
 
 ### In-band renewal
 
-On moq-lite-07-wip or moq-transport draft-18 and later with MoQ Auth negotiated,
-a client can present another JWT without reconnecting. Present its replacement
-before the current grant expires and keep the returned token handle alive.
+On moq-lite-07-wip a client can present another JWT without reconnecting.
+Present its replacement before the current grant expires and keep the returned
+token handle alive.
 The auth handle a reconnecting connection owns (native `Connection::auth()`,
 JavaScript `connection.auth`) presents its tokens again on every reconnect.
 A native client can instead replace its configured tokens through its
