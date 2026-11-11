@@ -18,9 +18,8 @@ large to review alongside become follow-ups.
 
 Removing or reshaping a public item, narrowing a feature, or removing one of
 our deprecated exports or hidden CLI spellings is the maintainer's call, so
-each is a follow-up with a recommendation. The public-item pass before a cut
-belongs to [API shape](/quest/m2/api-shape/README.md); this audit keeps
-private code.
+each is a follow-up with a recommendation. The public-item pass before the m2 cut
+ran as the api-shape epic's own work; this audit keeps private code.
 
 Previous runs: dead code [moq-dev/moq#6166](https://github.com/moq-dev/moq/pull/6166),
 simplification [moq-dev/moq#6527](https://github.com/moq-dev/moq/pull/6527),
