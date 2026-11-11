@@ -3759,8 +3759,6 @@ impl Drop for AnnounceProducer {
 	}
 }
 
-/// Drives origin lifecycle work and cache expiration with caller-supplied time.
-///
 /// Feeds a route layer node the routes this node serves itself, best per prefix,
 /// for as long as the origin lives.
 struct OwnClaims {
@@ -3775,16 +3773,24 @@ struct OwnClaims {
 }
 
 /// The driver's task feeding [`OwnClaims`], which [`Consumer::route_node`] also catches up.
-struct FeedOwnClaims(Arc<std::sync::Mutex<OwnClaims>>);
+/// It ends once nothing owns the origin: its cursors end only in the driver's teardown,
+/// which waits for this task.
+struct FeedOwnClaims {
+	claims: Arc<std::sync::Mutex<OwnClaims>>,
+	origin: TasksWeak,
+}
 
 impl kio::Task for FeedOwnClaims {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.origin.poll_orphaned(waiter).is_ready() {
+			return Poll::Ready(());
+		}
 		// Wakes wait for the feeder's lock, which a tail expression's guard drops before
 		// the hold; see `Consumer::route_node`.
 		let _hold = kio::hold();
-		lock_own(&self.0).poll(waiter)
+		lock_own(&self.claims).poll(waiter)
 	}
 }
 
@@ -3892,6 +3898,8 @@ impl OwnClaims {
 	}
 }
 
+/// Drives origin lifecycle work and cache expiration with caller-supplied time.
+///
 /// Returned by [`Producer::new`]. Poll on external activity or at the deadline
 /// it returns, supplying nondecreasing instants. RouteInfo changes, track serving, linger,
 /// failover, and teardown run here; the route table and announce cursors update
@@ -7375,7 +7383,10 @@ impl Consumer {
 		let created = (node, Arc::downgrade(&claims));
 		shared.route_node = Some(created.clone());
 		drop(shared);
-		self.tasks.push(FeedOwnClaims(claims));
+		self.tasks.push(FeedOwnClaims {
+			claims,
+			origin: self.tasks.clone(),
+		});
 		created
 	}
 
@@ -15683,6 +15694,19 @@ mod tests {
 			"the broadcast is lifecycle work"
 		);
 		drop(broadcast);
+		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
+	}
+
+	/// The task feeding a route node never keeps the driver running: it finishes once
+	/// the last producer handle drops, whatever read handles remain.
+	#[kio::test]
+	async fn a_route_node_never_keeps_the_driver_running() {
+		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
+		let waiter = kio::Waiter::noop();
+		let consumer = producer.consume();
+		let _node = consumer.route_node();
+		assert!(driver.poll(Instant::now(), &waiter).is_ok(), "the producer owns the origin");
+		drop(producer);
 		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
 	}
 
