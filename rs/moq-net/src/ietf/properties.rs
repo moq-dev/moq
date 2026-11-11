@@ -84,9 +84,13 @@ impl Properties {
 	/// The properties a relay states for a track it serves, from the `info` it acts on.
 	///
 	/// We serve the newest group first by default, matching moq-lite.
+	///
+	/// The max age is never stated: ours expires only superseded groups, while
+	/// MAX_CACHE_DURATION expires every object, the newest included, so any value would
+	/// make a conformant relay drop a long-lived group such as a catalog.
 	pub(crate) fn restated(info: &crate::track::Info) -> Self {
 		Self {
-			max_cache_duration: info.max_age,
+			max_cache_duration: None,
 			timescale: info.timescale,
 			priority: Some(super::priority::to_wire(info.priority)),
 			group_order: Some(GroupOrder::Descending),
@@ -360,11 +364,11 @@ impl TrackProperties {
 			return true;
 		}
 		seen.into_iter().any(|id| match id {
-			MAX_CACHE_DURATION => sealed.max_cache_duration != restated.max_cache_duration,
 			TIMESCALE => sealed.timescale != restated.timescale,
 			DEFAULT_PUBLISHER_PRIORITY => sealed.priority != restated.priority,
-			// Advisory: a relay serves its own order and forwards the publisher's preference.
-			DEFAULT_PUBLISHER_GROUP_ORDER => false,
+			// Advisory: a relay serves its own order and cache lifetime, and forwards the
+			// publisher's values as sent.
+			MAX_CACHE_DURATION | DEFAULT_PUBLISHER_GROUP_ORDER => false,
 			DYNAMIC_GROUPS => sealed.dynamic_groups != restated.dynamic_groups,
 			super::flate::COMPRESSION => sealed.compress != restated.compress,
 			_ => unreachable!("only the understood properties are seen"),
@@ -751,15 +755,24 @@ mod tests {
 		unknown.refused(&info)
 	}
 
-	/// A sealed value of a property the relay restates must be the one it acts on, since
-	/// egress forwards the sealed one in its place.
+	/// A sealed MAX_CACHE_DURATION is advisory, forwarded as sent rather than compared.
 	#[test]
-	fn a_sealed_max_cache_duration_matches_the_track() {
-		assert!(seal(MAX_CACHE_DURATION, 7000).is_none());
-		assert!(matches!(
-			seal(MAX_CACHE_DURATION, 7001),
-			Some(crate::Error::Unsupported)
-		));
+	fn a_sealed_max_cache_duration_is_forwarded() {
+		for value in [0, 7000, 7001] {
+			assert!(seal(MAX_CACHE_DURATION, value).is_none(), "{value}");
+		}
+	}
+
+	/// A track's max age never reaches the wire, since MAX_CACHE_DURATION would expire
+	/// its newest group too.
+	#[test]
+	fn the_max_age_is_not_restated() {
+		let info = crate::track::Info::default().with_max_age(Duration::from_secs(7));
+		let mut buf = Vec::new();
+		Properties::restated(&info)
+			.encode(&mut Encoder::new(&mut buf, Version::Draft22.into()), Version::Draft22)
+			.unwrap();
+		assert_eq!(decode_draft22(&buf).unwrap().max_cache_duration, None);
 	}
 
 	#[test]

@@ -35,4 +35,3 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [just check passes on macOS](/quest/m0/macos-check.md) - the version test, the doc re-export link test, and the carla bridge docs pass on a macOS host
 - [Agent build output can't fill the desktop's disk](/quest/m0/agent-disk-budget.md) - finished agent checkouts reclaim their mbx targets automatically, so parallel agent builds stop filling the root disk
 - [MoQ builds against rind 0.4 and its corrected adapters](/quest/m0/rind-adapters.md) - the calls rind 0.4 and its adapter patch releases change, adapted the day they publish
-- [moq-transport stops sending our max age as MAX_CACHE_DURATION](/quest/m0/ietf-max-age.md) - a late joiner reads the newest catalog through any draft-18 relay, fixing the regression from moq-dev/moq#7729 before the cut ships it

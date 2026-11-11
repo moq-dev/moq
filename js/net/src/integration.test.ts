@@ -1209,7 +1209,8 @@ test("integration: lite draft-07 track info follows a republished broadcast", as
 
 // An authored track omitting maxAge advertises the zero default, an explicit null advertises no
 // limit, which a consumer decodes as absence, and a number goes out as itself. Before lite-05
-// nothing is carried, and a received track without one has no publisher limit.
+// nothing is carried, nor over moq-transport, whose MAX_CACHE_DURATION would expire the newest
+// group too. A received track without one has no publisher limit.
 test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 	"integration: %s carries the authored max age default, null, and a value",
 	async (alpn) => {
@@ -1240,7 +1241,7 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 				sub.close();
 			}
 		};
-		const carried = alpn !== Lite.ALPN_03;
+		const carried = alpn !== Lite.ALPN_03 && alpn !== Ietf.ALPN.DRAFT_22;
 		expect((await info("omitted")).maxAge).toEqual(carried ? Duration.ZERO : null);
 		expect((await info("unlimited")).maxAge).toBeNull();
 		expect((await info("explicit")).maxAge).toEqual(carried ? Duration.millis(5000) : null);

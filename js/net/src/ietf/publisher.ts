@@ -3023,7 +3023,8 @@ export function trackProperties(info: Info, wanted: boolean): Properties.Propert
 		priority: toWire(info.priority),
 		// The publisher's default, newest first.
 		groupOrder: Properties.DESCENDING,
-		maxCacheDuration: info.maxAge === null ? undefined : BigInt(Math.ceil(info.maxAge.asMillis())),
+		// No MAX_CACHE_DURATION: our max age expires only superseded groups, while that
+		// property expires every object, the newest included, after the given time.
 	};
 }
 
