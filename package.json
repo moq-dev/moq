@@ -45,6 +45,7 @@
 		"js/auth",
 		"js/crypto",
 		"js/json",
+		"js/stats",
 		"js/libav",
 		"js/hang",
 		"js/loc",

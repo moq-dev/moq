@@ -8,29 +8,23 @@
  * let you drill into one. A restarted relay announces a new instance at the same
  * path, which each node's follower hands out afresh, so its history starts over.
  *
- * Per node we read the listed `bucket.<epoch>.json`, the whole node's bucket at
- * the relay's default `depth = 0`, following the track listing to each new run: `{ epoch, tiers: { <tier>: { paths, labels } } }`, a JSON snapshot
- * with merge-patch deltas. From the default tier we take each path's `publisher`
- * (egress, relay -> downstream viewers) and `subscriber` (ingress, upstream
- * publishers -> relay), and each stats label's sessions.
+ * Per node we read the whole node's bucket at the relay's default `depth = 0` through
+ * `@moq/stats`, which follows the track listing to each new counter run. From the default tier
+ * we take each path's `publisher` (egress, relay -> downstream viewers) and `subscriber`
+ * (ingress, upstream publishers -> relay), and each stats label's sessions.
  *
  * Counters are cumulative; "active" = started - ended. The relay includes every
  * entry it still holds counters for, idle ones too, so the latest frame is a
  * snapshot of now. We sample the aggregate on an interval to derive per-second
- * throughput rates for the charts. A relay built after the started/ended rename
- * still writes the legacy names beside the new ones; this dashboard prefers the
- * canonical spelling and falls back so it also reads an older relay.
+ * throughput rates for the charts.
  */
 
 import "./highlight";
 import { Duration, wall } from "@moq/clock";
 import { Net, Signals } from "@moq/hang";
-import * as Json from "@moq/json";
+import * as Stats from "@moq/stats";
 
 const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? "http://localhost:4443";
-
-// Broadcasts under this prefix are per-node stats broadcasts.
-const STATS_PREFIX = ".stats/node";
 
 // Rolling history window for the charts.
 const SAMPLE = Duration.millis(1000);
@@ -44,39 +38,8 @@ const $ = <T extends HTMLElement>(id: string): T => {
 
 // ---- Frame shapes (see module comment) ------------------------------------
 
-interface Snapshot {
-	announces_started?: number;
-	announced?: number;
-	announces_ended?: number;
-	announced_closed?: number;
-	// Broadcast-name bytes charged for each announce/unannounce, separate from payload `bytes`.
-	announced_bytes?: number;
-	broadcasts_started?: number;
-	broadcasts?: number;
-	broadcasts_ended?: number;
-	broadcasts_closed?: number;
-	subscriptions_started?: number;
-	subscriptions?: number;
-	subscriptions_ended?: number;
-	subscriptions_closed?: number;
-	// One-shot group fetches requested (counted at request time, not on resolution).
-	fetches?: number;
-	bytes?: number;
-	frames?: number;
-	groups?: number;
-	// Datagrams of datagram tracks: they belong to no group, so they count in neither
-	// `groups` nor `frames`, while their payload is in `bytes`.
-	datagrams?: number;
-}
-type BroadcastFrame = Record<string, Snapshot>;
-
-interface SessionCounters {
-	sessions_started?: number;
-	sessions?: number;
-	sessions_ended?: number;
-	sessions_closed?: number;
-}
-type SessionFrame = Record<string, SessionCounters>;
+type BroadcastFrame = Record<string, Stats.Traffic>;
+type SessionFrame = Record<string, Stats.Presence>;
 
 interface NodeStats {
 	egress: BroadcastFrame; // each path's `publisher`
@@ -84,41 +47,23 @@ interface NodeStats {
 	sessions: SessionFrame; // `labels`
 }
 
-// One tier of a `bucket.<epoch>.json` frame.
-interface BucketTier {
-	paths?: Record<string, { publisher?: Snapshot; subscriber?: Snapshot }>;
-	labels?: SessionFrame;
-}
-
-interface BucketFrame {
-	tiers?: Record<string, BucketTier>;
-}
+// A side that never moved is left off the wire and reads as zeros, so it lists no row.
+const moved = (t: Stats.Traffic) =>
+	Object.values(t).some((v) => (typeof v === "number" ? v !== 0 : Object.values(v).some((n) => n !== 0)));
 
 // The default tier's egress, ingress, and sessions from a bucket frame.
-function nodeStatsOf(frame: BucketFrame): NodeStats {
-	const tier = frame.tiers?.[""] ?? {};
+function nodeStatsOf(frame?: Stats.BucketFrame): NodeStats {
+	const tier = frame?.tiers[""];
 	const egress: BroadcastFrame = {};
 	const ingress: BroadcastFrame = {};
-	for (const [path, usage] of Object.entries(tier.paths ?? {})) {
-		// The relay leaves out a side that never moved.
-		if (usage.publisher) egress[path] = usage.publisher;
-		if (usage.subscriber) ingress[path] = usage.subscriber;
+	for (const [path, usage] of Object.entries(tier?.paths ?? {})) {
+		if (moved(usage.publisher)) egress[path] = usage.publisher;
+		if (moved(usage.subscriber)) ingress[path] = usage.subscriber;
 	}
-	return { egress, ingress, sessions: tier.labels ?? {} };
+	return { egress, ingress, sessions: tier?.labels ?? {} };
 }
 
-// Canonical spelling wins when a frame carries both names.
-const edge = (started?: number, legacy?: number) => started ?? legacy ?? 0;
-const active = (started?: number, ended?: number) => (started ?? 0) - (ended ?? 0);
-
-const announcesStarted = (s: Snapshot) => edge(s.announces_started, s.announced);
-const announcesEnded = (s: Snapshot) => edge(s.announces_ended, s.announced_closed);
-const broadcastsStarted = (s: Snapshot) => edge(s.broadcasts_started, s.broadcasts);
-const broadcastsEnded = (s: Snapshot) => edge(s.broadcasts_ended, s.broadcasts_closed);
-const subscriptionsStarted = (s: Snapshot) => edge(s.subscriptions_started, s.subscriptions);
-const subscriptionsEnded = (s: Snapshot) => edge(s.subscriptions_ended, s.subscriptions_closed);
-const sessionsStarted = (s: SessionCounters) => edge(s.sessions_started, s.sessions);
-const sessionsEnded = (s: SessionCounters) => edge(s.sessions_ended, s.sessions_closed);
+const active = (started: number, ended: number) => started - ended;
 
 // Broadcasts whose path starts with "." are system broadcasts (e.g. the `.stats` feed
 // this dashboard itself reads). We exclude them from the user-facing counters.
@@ -143,9 +88,8 @@ discovery.run((effect) => {
 	nodeStats.set({});
 	if (!origin) return;
 
-	const prefix = Net.Path.from(STATS_PREFIX);
-	const announced = origin.announced(Net.Path.Pattern.subtree(prefix));
-	effect.cleanup(() => announced.close());
+	const nodes = new Stats.Nodes(origin);
+	effect.cleanup(() => nodes.close());
 
 	// One sub-effect per node so we can tear a node's subscriptions down when it
 	// goes away (e.g. a cluster peer disconnects).
@@ -156,13 +100,11 @@ discovery.run((effect) => {
 
 	effect.spawn(async () => {
 		for (;;) {
-			const entry = await effect.race(announced.next());
-			if (!entry) break;
-			const path = entry.prefix;
-			const node = Net.Path.stripPrefix(prefix, path);
-			if (!node) continue;
+			const event = await effect.race(nodes.next());
+			if (!event) break;
+			const node = event.node;
 
-			if (entry.kind === "absent") {
+			if (!event.active) {
 				subs.get(node)?.close();
 				subs.delete(node);
 				nodeStats.mutate((s) => {
@@ -176,13 +118,10 @@ discovery.run((effect) => {
 
 			const ne = new Signals.Effect();
 			subs.set(node, ne);
-			subscribeNode(ne, origin, path, node);
+			subscribeNode(ne, origin, event.path, node);
 		}
 	});
 });
-
-// The depth-0 bucket's track, one per counter run.
-const BUCKET_TRACK = /^bucket\.[^/]+\.json$/;
 
 function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: Net.Path.Valid, node: string) {
 	// Follow the node across instances: a restarted one counts from zero, so its series starts
@@ -190,60 +129,45 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 	const following = origin.follow(path);
 	effect.cleanup(() => following.close());
 	effect.run((instance) => {
-		const consumer = instance.get(following.active);
-		nodeStats.mutate((s) => {
-			s[node] = {
-				egress: {},
-				ingress: {},
-				sessions: {},
-			};
-		});
-		history.delete(node);
-		// The aggregate spans every node, so a restarted node's counters must not splice into
-		// its history either.
-		clusterMembership = "";
-		if (!consumer) return;
+		const broadcast = instance.get(following.active);
+		// A new instance or run counts from zero, so neither its node series nor the aggregate
+		// (which spans every node) may splice onto the old counts.
+		const reset = () => {
+			nodeStats.mutate((s) => {
+				s[node] = nodeStatsOf();
+			});
+			history.delete(node);
+			clusterMembership = "";
+		};
+		reset();
+		if (!broadcast) return;
 
-		// Each counter run is its own `bucket.<epoch>.json` track, found through the listing.
-		const tracks = consumer.tracks();
-		instance.cleanup(() => tracks.close());
-		let bucket: Json.Snapshot.Consumer<BucketFrame> | undefined;
-		instance.cleanup(() => {
-			bucket?.close();
-			bucket = undefined;
-		});
-
+		const bucket = new Stats.Consumer(broadcast).bucket("");
+		instance.cleanup(() => bucket.close());
 		instance.spawn(async () => {
+			let epoch: string | undefined;
 			for (;;) {
-				const event = await instance.race(tracks.next());
-				if (!event) break;
-				if (event.kind !== "added" || !BUCKET_TRACK.test(event.name)) continue;
-				if (bucket) {
-					// A new run counts from zero, so its series must not splice onto the old run's.
-					bucket.close();
-					history.delete(node);
-					clusterMembership = "";
+				let update: Stats.BucketUpdate | undefined;
+				try {
+					update = await instance.race(bucket.next());
+				} catch (err) {
+					console.warn("stats: bucket track failed", node, err);
+					update = { kind: "ended" };
 				}
-				const reader = new Json.Snapshot.Consumer<BucketFrame>({ track: consumer.track(event.name) });
-				bucket = reader;
-				instance.spawn(async () => {
-					try {
-						for (;;) {
-							const state = await instance.race(reader.latest());
-							if (state === undefined || bucket !== reader) break;
-							nodeStats.mutate((s) => {
-								if (s[node]) s[node] = nodeStatsOf(state.value ?? {});
-							});
-						}
-					} catch (err) {
-						console.warn("stats: bucket track failed", node, err);
-					}
+				if (!update) break;
+				if (update.kind === "ended") {
 					// The run ended (unlisted, or aborted as too large): its counts are no longer live.
-					if (bucket === reader) {
-						nodeStats.mutate((s) => {
-							if (s[node]) s[node] = nodeStatsOf({});
-						});
-					}
+					epoch = undefined;
+					nodeStats.mutate((s) => {
+						if (s[node]) s[node] = nodeStatsOf();
+					});
+					continue;
+				}
+				if (epoch !== undefined && update.frame.epoch !== epoch) reset();
+				epoch = update.frame.epoch;
+				const stats = nodeStatsOf(update.frame);
+				nodeStats.mutate((s) => {
+					if (s[node]) s[node] = stats;
 				});
 			}
 		});
@@ -268,26 +192,26 @@ function aggregate(ingress: BroadcastFrame, egress: BroadcastFrame) {
 
 	for (const [path, s] of Object.entries(ingress)) {
 		if (isSystem(path)) continue;
-		if (active(announcesStarted(s), announcesEnded(s)) > 0) broadcasters++;
-		ingressBytes += s.bytes ?? 0;
-		announceBytes += s.announced_bytes ?? 0;
-		fetches += s.fetches ?? 0;
-		datagrams += s.datagrams ?? 0;
+		if (active(s.announces_started, s.announces_ended) > 0) broadcasters++;
+		ingressBytes += s.bytes;
+		announceBytes += s.announced_bytes;
+		fetches += s.fetches;
+		datagrams += s.datagrams;
 	}
 	for (const [path, s] of Object.entries(egress)) {
 		if (isSystem(path)) continue;
-		egressBytes += s.bytes ?? 0;
-		viewers += active(broadcastsStarted(s), broadcastsEnded(s));
-		tracks += active(subscriptionsStarted(s), subscriptionsEnded(s));
-		announceBytes += s.announced_bytes ?? 0;
-		fetches += s.fetches ?? 0;
-		datagrams += s.datagrams ?? 0;
+		egressBytes += s.bytes;
+		viewers += active(s.broadcasts_started, s.broadcasts_ended);
+		tracks += active(s.subscriptions_started, s.subscriptions_ended);
+		announceBytes += s.announced_bytes;
+		fetches += s.fetches;
+		datagrams += s.datagrams;
 	}
 	return { broadcasters, viewers, tracks, ingressBytes, egressBytes, announceBytes, fetches, datagrams };
 }
 
 const countSessions = (f: SessionFrame) =>
-	Object.values(f).reduce((n, s) => n + active(sessionsStarted(s), sessionsEnded(s)), 0);
+	Object.values(f).reduce((n, s) => n + active(s.sessions_started, s.sessions_ended), 0);
 
 // ---- Time-series history ---------------------------------------------------
 
@@ -542,57 +466,56 @@ ui.run((effect) => {
 	// column: only a consumer can fetch, so the counter is egress-only. The KPI
 	// total still sums both sides in case that ever changes.
 	const ingressRows = (frame: BroadcastFrame) =>
-		paths(frame).map((path) => {
-			const i = frame[path] ?? {};
+		paths(frame).flatMap((path) => {
+			const i = frame[path];
+			if (!i) return [];
 			return {
 				key: path,
 				cells: [
 					path,
-					active(announcesStarted(i), announcesEnded(i)) > 0 ? "yes" : "no",
-					String(active(subscriptionsStarted(i), subscriptionsEnded(i))), // live tracks
-					formatBytes(i.bytes ?? 0),
-					String(i.frames ?? 0),
-					String(i.groups ?? 0),
-					String(i.datagrams ?? 0),
-					formatBytes(i.announced_bytes ?? 0),
+					active(i.announces_started, i.announces_ended) > 0 ? "yes" : "no",
+					String(active(i.subscriptions_started, i.subscriptions_ended)), // live tracks
+					formatBytes(i.bytes),
+					String(i.frames),
+					String(i.groups),
+					String(i.datagrams),
+					formatBytes(i.announced_bytes),
 				],
 			};
 		});
 
 	// Viewers: what this node serves to downstream subscribers.
 	const egressRows = (frame: BroadcastFrame) =>
-		paths(frame).map((path) => {
-			const e = frame[path] ?? {};
+		paths(frame).flatMap((path) => {
+			const e = frame[path];
+			if (!e) return [];
 			return {
 				key: path,
 				cells: [
 					path,
-					String(active(broadcastsStarted(e), broadcastsEnded(e))), // viewers / peers
-					String(active(subscriptionsStarted(e), subscriptionsEnded(e))), // live tracks
-					formatBytes(e.bytes ?? 0), // egress
-					String(e.frames ?? 0),
-					String(e.groups ?? 0),
-					String(e.datagrams ?? 0),
-					String(e.fetches ?? 0),
-					formatBytes(e.announced_bytes ?? 0),
+					String(active(e.broadcasts_started, e.broadcasts_ended)), // viewers / peers
+					String(active(e.subscriptions_started, e.subscriptions_ended)), // live tracks
+					formatBytes(e.bytes), // egress
+					String(e.frames),
+					String(e.groups),
+					String(e.datagrams),
+					String(e.fetches),
+					formatBytes(e.announced_bytes),
 				],
 			};
 		});
 
 	// Sessions connected under each stats label, counted regardless of data flow.
-	const sessionRows = Object.keys(stats.sessions)
-		.sort()
-		.map((label) => {
-			const s = stats.sessions[label] ?? {};
-			return {
-				key: label,
-				cells: [
-					label || "(none)",
-					String(active(sessionsStarted(s), sessionsEnded(s))),
-					String(sessionsStarted(s)),
-				],
-			};
-		});
+	const sessionRows = Object.entries(stats.sessions)
+		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+		.map(([label, s]) => ({
+			key: label,
+			cells: [
+				label || "(none)",
+				String(active(s.sessions_started, s.sessions_ended)),
+				String(s.sessions_started),
+			],
+		}));
 
 	renderTable(
 		$("node-publishers"),
