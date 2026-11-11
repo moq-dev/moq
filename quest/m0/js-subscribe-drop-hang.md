@@ -8,13 +8,15 @@ prints its rows, and the root cause of its hang is fixed, so
 
 ## Plan
 
-`Nightly (JS benchmarks)` was cancelled at its 60-minute timeout on the
-2026-11-08, 11-09, and 11-10 scheduled runs, where it once took about ten
-minutes. In
+`Nightly (JS benchmarks)` was cancelled at its 60-minute timeout on every
+scheduled run from 2026-11-04 to 11-10; it last passed on 11-02, in about
+eight minutes. In
 [the 11-10 run](https://github.com/moq-dev/moq/actions/runs/42842827718/job/129922278808)
 `subscribe-drop.ts` printed its CSV header
 (`publishers,subscribers,groups,drop_us`) and nothing for the job's last 57
-minutes, and the benchmarks after it never ran. Reproduce it locally; if the
+minutes, and the benchmarks after it never ran. The
+[11-04 run](https://github.com/moq-dev/moq/actions/runs/41852517544/job/126652296690)
+stalled at the same header. Reproduce it locally; if the
 hang is in `@moq/net` rather than the benchmark, a test in the merge gate
 covers it.
 

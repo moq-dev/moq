@@ -130,9 +130,11 @@ as given:
   activation only). In the Accessibility mode moq-video observes each app's
   window events, and setup refuses with `Unsupported` naming the missing
   permission rather than falling back. In the basic mode, which needs no
-  permission, moq-video re-lists windows at a documented rate only while a
+  Accessibility permission, moq-video re-lists windows at a documented rate only while a
   caller holds a watch, and wakes it on a difference; no caller polls.
-  Re-listing is wasteful, so it never runs without a watch. The Mac tests
+  Re-listing is wasteful, so it never runs without a watch. Window pictures
+  still need Screen Recording permission in either mode, as any
+  ScreenCaptureKit capture does. The Mac tests
   cover both modes.
   [The foreground app](/quest/m4/capture-foreground.md) takes the same mode,
   so one permission serves both.
