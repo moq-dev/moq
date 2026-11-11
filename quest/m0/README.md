@@ -26,13 +26,12 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 ## Required
 
-- [The C bindings accept MoqInstance again](/quest/m0/check-c-moqinstance.md) - `check c` passes on main once the C generator stops refusing `MoqInstance`'s exported `Debug`
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
-- [@moq/clock's Instant has no throwing Duration arithmetic, mirroring kio](/quest/m0/peer-arithmetic.md) - JS `Instant` drops `add`/`sub` for checked and saturating forms, so each call site states what overflow means, as kio's do
 - [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Dart `moq` 0.1.1 reaches pub.dev from `release`
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in GitHub's merge queue, one tested entry at a time, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one drops a queued PR
 - [just check passes on macOS](/quest/m0/macos-check.md) - the version test, the doc re-export link test, and the carla bridge docs pass on a macOS host
 - [Agent build output can't fill the desktop's disk](/quest/m0/agent-disk-budget.md) - finished agent checkouts reclaim their mbx targets automatically, so parallel agent builds stop filling the root disk
 - [MoQ builds against rind 0.4 and its corrected adapters](/quest/m0/rind-adapters.md) - the calls rind 0.4 and its adapter patch releases change, adapted the day they publish
+- [moq-transport stops sending our max age as MAX_CACHE_DURATION](/quest/m0/ietf-max-age.md) - a late joiner reads the newest catalog through any draft-18 relay, fixing the regression from moq-dev/moq#7729 before the cut ships it

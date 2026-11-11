@@ -1,0 +1,42 @@
+# [L] Route sweeps are checked against the TLA+ model
+
+## Goal
+
+Every run of the route layer's random sweeps (`sweep_handoff`,
+`sweep_scoped_handoff`) is also a behaviour of `RouteHandoff.tla`: a code
+change the model does not allow fails the sweep, without anyone remembering to
+resync the model.
+
+## Plan
+
+Decided 2026-11-10 (maintainer, /quest-plan), as the strongest guard against
+the route model drifting from the code ([moq-dev/moq#8447](https://github.com/moq-dev/moq/pull/8447)).
+
+Decided 2026-11-10 (maintainer, a later /quest-plan the same day):
+
+- ✅ m1 (rejected: staying in m4). The [mesh model](/quest/m1/route-mesh-model.md),
+  the [inductive invariant](/quest/m1/route-inductive.md), and the
+  [cache-aware routing proof](/quest/m3/cache-routing/README.md) all build on
+  `RouteHandoff.tla`, so drift there costs the most.
+- ✅ The other three models get trace validation too, each its own m4 quest
+  behind this one (rejected: "route only for now; judge the other models
+  after", decided earlier the same day). So the recorder's trace format and
+  the recipe that hands a trace to TLC are built here for
+  [resume](/quest/m4/resume-trace-validation.md),
+  [reconnect](/quest/m4/reconnect-trace-validation.md), and
+  [subscribe](/quest/m4/subscribe-trace-validation.md) to reuse.
+
+This is TLA+ trace validation (Cirstea, Kuppe, Loillier, Merz, 2024, used on
+CCF and etcd's raft): `route::tests::Sim` records each step as the model
+action it corresponds to, with the variables the model keeps, and TLC checks
+that the recorded trace is a behaviour of the spec. The model fixes interest
+at the root and drops scopes, so the sweeps either restrict to what it models
+or the model grows to cover them; pick whichever costs less and say which.
+
+Run it on the sweeps' existing seeds in CI only if it stays fast; otherwise in
+Nightly with the sweeps' fresh seeds.
+
+Related: [the mesh route model](/quest/m1/route-mesh-model.md), which grows
+the spec these traces are checked against.
+
+Public API: none. Wire: none.

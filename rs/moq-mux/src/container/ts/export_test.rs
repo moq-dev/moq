@@ -8213,6 +8213,12 @@ async fn export_reordered(
 	}
 	rig.finish();
 	let mut b = b.unwrap();
+	// Side by side: one left unread while the other drains would be a blocked sink.
+	while let Some(deadline) = [a.next_due(), b.next_due()].into_iter().flatten().min() {
+		kio::clock::sleep_until(deadline).await;
+		out_a.extend(poll_frames(&mut a));
+		out_b.extend(poll_frames(&mut b));
+	}
 	out_a.extend(drain_frames(&mut a).await);
 	out_b.extend(drain_frames(&mut b).await);
 	(out_a, out_b)

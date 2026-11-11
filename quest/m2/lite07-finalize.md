@@ -117,6 +117,12 @@ Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and r
 The explicit `Oldest` anchor rides [time addressing's model](/quest/m2/time-addressing/model.md),
 whose lite-07 encoding [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries.
 
+Decided 2026-11-10 (maintainer, /quest-plan on what could be proved about
+moq-net): ✅ the cut waits for the symbolic model of the Route Key Parameter
+(rejected: neither proof gating, as the TLA+ models do not; the inductive
+routing invariant gating too, which sits behind the mesh model). The signed
+transcript freezes at the cut and a flaw in it can only be fixed on the wire.
+
 ## Required
 
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
@@ -127,6 +133,7 @@ whose lite-07 encoding [lite-07 by start](/quest/m2/time-addressing/lite07.md) c
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
 - [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - may change START per update on lite-07
 - [Route latency](/quest/m2/route-latency.md) - may add a latency sum to ROUTE; leaves this list if the maintainer takes the no-wire path
+- [A symbolic model proves a route key proof binds to its session and side](/quest/m1/route-key-model.md) - may change what the Route Key Parameter signs, if the model finds a replay, reflection, or relaying attack
 
 ## Related
 

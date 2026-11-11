@@ -571,7 +571,7 @@ It sends one only while its `Serves` is not Unknown and its selected route to th
 A warm route travels one hop: a receiver never forwards it.
 It carries the sender's `Serves` and its `Warm Cost`, the price it pays for its own pull, as defined below.
 The sender sends a WARM_UPDATE when either changes, and a WARM_END once it no longer pulls the broadcast.
-A change that narrows whom the copy serves, from Alone to a Relay, from one Relay to another, or to no warm route at all, waits until the sender has kept the copy without the old demand for as long as it keeps any copy whose demand is gone, so a neighbor that just joined it does not move straight back.
+A change that narrows whom the copy serves, from Alone to a Relay, from one Relay to another, or to no warm route at all, waits until the sender has kept the copy without the old demand for as long as it keeps any copy whose demand is gone, so a neighbor that just joined it does not move straight back; until then the warm route stands as last sent, `Warm Cost` included.
 
 A receiver counts a neighbor warm for a broadcast when the neighbor's warm route serves Alone, or serves a Relay that is neither the receiver nor the root of the receiver's own pull while that pull does not serve Unknown.
 Demand a receiver causes, through any number of relays, then never warms a neighbor toward it.

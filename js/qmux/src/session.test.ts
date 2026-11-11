@@ -177,7 +177,7 @@ class FakeServerSocket implements WebSocketLike {
 
 /** Poll an observable condition with a bounded timeout (no fixed-yield sleeps). */
 async function waitFor(check: () => boolean, timeoutMs = 1000): Promise<void> {
-	const deadline = now().add(Duration.millis(timeoutMs));
+	const deadline = now().saturatingAdd(Duration.millis(timeoutMs));
 	while (!check()) {
 		if (now().gt(deadline)) throw new Error("timed out waiting for condition");
 		await yieldNow();

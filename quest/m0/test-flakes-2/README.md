@@ -270,7 +270,6 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [js/common's worklet dev-server test holds up under load](/quest/m0/test-flakes-2/worklet-dev-server.md) - the dev-server test passes on a loaded host, and its `test.skip` is removed
-- [Interop's finish cases hold up under load](/quest/m0/test-flakes-2/interop-finish.md) - every publisher's finish cells pass under load, and the scenario's quarantine is removed
+- [Kotlin's playout-delay smoke test holds up under load](/quest/m0/test-flakes-2/kt-playout-delay.md) - the audio playout-delay smoke test passes under load, and its `@Ignore` is removed
 - [Interop's go -> cpp cell holds up under load](/quest/m0/test-flakes-2/interop-go-cpp.md) - the cell passes on a loaded host, and its quarantine is removed
 - [The doc API's failing-render test holds up under load](/quest/m0/test-flakes-2/doc-api-typedoc-timeout.md) - the test passes on a loaded host, and its `test.skip` is removed

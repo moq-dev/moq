@@ -32,7 +32,7 @@ work: before the cut, run a "public item used only by its definition"
 search over the published crates and JS packages and delete each hit, starting with
 `moq_tokio::Server::serve_both`, `hang::Catalog::to_json_pretty`, and
 `moq_audio::Format::{is_planar, is_float}`, the shortlist of
-[the dead code audit](/quest/m3/audit-dead-code.md). The audit itself stays
+[the code audit](/quest/m3/audit-code.md). The audit itself stays
 in m3 for private code.
 
 Decided 2026-11-09 (maintainer, on [moq-dev/moq#8302](https://github.com/moq-dev/moq/pull/8302):
@@ -72,7 +72,3 @@ search misses or which are not items:
   `just rs macos-test` enables, and its WASI arm (`udp/wasi.rs`), which no
   target builds. Update [cmsg length on send](/quest/m3/cmsg-len-send.md),
   which names the feature.
-
-## Required
-
-- [A peer's closed session reads as Closed in the bindings](/quest/m2/api-shape/session-closed.md) - a remote SESSION_CLOSED maps to `MoqError::Closed`, as a local close does
