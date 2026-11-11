@@ -34,6 +34,9 @@ export class Own {
 	/** The current identity; a rotation replaces the node, and a seqno advance the seqno. */
 	readonly identity = new Signal<Identity>({ node: fresh(), seqno: 0n });
 
+	/** How the origin names itself in a route's Hops: the Node ID it started with, which a rotation keeps. */
+	readonly hop = this.identity.peek().node;
+
 	#table: () => object | undefined;
 	#seen?: object;
 	#revision = 0n;

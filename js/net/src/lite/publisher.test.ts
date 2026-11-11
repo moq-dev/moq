@@ -3908,7 +3908,7 @@ test("a lite-07 answer carries this origin's claims under its own route", async 
 		expect(await next()).toEqual({
 			status: "routeStart",
 			node,
-			advert: { seqno: 1n, metric: 0n, downOnly: false, rtt: 0n },
+			advert: { seqno: 1n, metric: 0n, downOnly: false, rtt: 0n, hops: [node] },
 		});
 		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
 		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 0n });
@@ -3942,7 +3942,7 @@ test("a lite-07 answer carries this origin's claims under its own route", async 
 		expect(await next()).toEqual({
 			status: "routeUpdate",
 			id: 1n,
-			advert: { seqno: 10n, metric: 0n, downOnly: false, rtt: 0n },
+			advert: { seqno: 10n, metric: 0n, downOnly: false, rtt: 0n, hops: [node] },
 		});
 
 		// An echo of a route that is not ending is a violation.

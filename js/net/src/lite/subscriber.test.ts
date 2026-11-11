@@ -38,6 +38,7 @@ import {
 	AnnounceRequest,
 	decodeAnnounceReplyMaybe,
 	encodeAnnounceBroadcast,
+	ROUTE_MAX_HOPS,
 } from "./announce.ts";
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
@@ -187,7 +188,7 @@ const PEER = HopSchema.parse(2n);
 // Lite-07 origin nodes, and the route a peer advertises to each.
 const NODE_A = 0x7an;
 const NODE_B = 0x8bn;
-const ADVERT = { seqno: 1n, metric: 0n, downOnly: false, rtt: 20n };
+const ADVERT = { seqno: 1n, metric: 0n, downOnly: false, rtt: 20n, hops: [] as bigint[] };
 
 /**
  * Write a claim the way `version` carries it: before lite-07 with its hop chain, and on lite-07
@@ -3797,6 +3798,16 @@ test("a lite-07 batch applies at its floor, and a held route turns unavailable",
 	});
 	// Nothing ranks by RTT, so a change to it alone reports nothing.
 	await send({ status: "routeUpdate", id: 0n, advert: { ...ADVERT, metric: 5n, rtt: 90n } });
+	// Nor by hops, until the route crossed as many nodes as one may, or crossed us: then it is no
+	// route at all, until it is usable again.
+	await send({ status: "routeUpdate", id: 0n, advert: { ...ADVERT, metric: 5n, hops: [NODE_A, 3n] } });
+	const full = Array.from({ length: ROUTE_MAX_HOPS }, (_, i) => BigInt(i + 1));
+	for (const hops of [full, [NODE_A, subscriber.hop]]) {
+		await send({ status: "routeUpdate", id: 0n, advert: { ...ADVERT, metric: 5n, hops } });
+		expect(await announced.next()).toMatchObject({ prefix: room, kind: "offline" });
+		await send({ status: "routeUpdate", id: 0n, advert: { ...ADVERT, metric: 5n } });
+		expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { cost: 8n } });
+	}
 
 	// A route the peer lets go takes its claims offline, and is echoed back.
 	await send({ status: "routeEnd", id: 0n });

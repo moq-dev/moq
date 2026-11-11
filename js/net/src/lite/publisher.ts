@@ -922,7 +922,14 @@ export class Publisher {
 			if (live.size === 0) await end();
 		};
 
-		const advert = (seqno: bigint): Advert => ({ seqno, metric: 0n, downOnly: false, rtt: 0n });
+		// The origin's own route: it starts its Hops, alone, and forwards no other.
+		const advert = (seqno: bigint): Advert => ({
+			seqno,
+			metric: 0n,
+			downOnly: false,
+			rtt: 0n,
+			hops: origin ? [origin.own.hop] : [],
+		});
 		// What the peer decodes for a claim: lite-07 carries its instance, epoch, and cost.
 		const onWire = (route: WireRoute): WireRoute => ({ ...route, auth: undefined });
 		const restarted = (prev: Advertised, next: Advertised): boolean =>

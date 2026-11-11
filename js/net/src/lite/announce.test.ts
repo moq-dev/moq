@@ -16,6 +16,7 @@ import {
 	encodeAnnounceBroadcast,
 	encodeAnnounceReply,
 	ROUTE_MAX,
+	ROUTE_MAX_HOPS,
 } from "./announce.ts";
 import { Version } from "./version.ts";
 
@@ -375,19 +376,28 @@ test("the literal draft-07 stream matches what Rust decodes", async () => {
 // `rs/moq-net/fixtures/lite.json` pins the same bytes on both sides.
 test("the route layer round-trips on draft-07", async () => {
 	const v = Version.DRAFT_07;
-	const advert = { seqno: 3n, metric: 5n, downOnly: true, rtt: undefined };
+	const advert = { seqno: 3n, metric: 5n, downOnly: true, rtt: undefined, hops: [7n, 9n] };
 	const cases: [AnnounceBroadcast, number[]][] = [
-		[{ status: "routeStart", node: 0x1234n, advert }, [6, 5, 0x92, 0x34, 3, 5, 1]],
-		[{ status: "routeUpdate", id: 1n, advert }, [7, 4, 1, 3, 5, 1]],
-		// Flag 0x2: an RTT follows, 0 at the origin.
+		[{ status: "routeStart", node: 0x1234n, advert }, [6, 8, 0x92, 0x34, 3, 5, 1, 2, 7, 9]],
+		[{ status: "routeUpdate", id: 1n, advert: { ...advert, hops: [] } }, [7, 5, 1, 3, 5, 1, 0]],
+		// Flag 0x2: an RTT follows, 0 at the origin, whose Hops are its own alone.
 		[
-			{ status: "routeStart", node: 0x1234n, advert: { ...advert, downOnly: false, rtt: 0n } },
-			[6, 6, 0x92, 0x34, 3, 5, 2, 0],
+			{ status: "routeStart", node: 0x1234n, advert: { ...advert, downOnly: false, rtt: 0n, hops: [0x1234n] } },
+			[6, 9, 0x92, 0x34, 3, 5, 2, 0, 1, 0x92, 0x34],
 		],
-		[{ status: "routeUpdate", id: 1n, advert: { ...advert, rtt: 25n } }, [7, 5, 1, 3, 5, 3, 25]],
+		[{ status: "routeUpdate", id: 1n, advert: { ...advert, rtt: 25n, hops: [] } }, [7, 6, 1, 3, 5, 3, 25, 0]],
 		[
-			{ status: "routeUpdate", id: 1n, advert: { ...advert, rtt: ROUTE_MAX } },
-			[7, 13, 1, 3, 5, 3, ...Array(9).fill(0xff)],
+			{ status: "routeUpdate", id: 1n, advert: { ...advert, rtt: ROUTE_MAX, hops: [ROUTE_MAX] } },
+			[7, 23, 1, 3, 5, 3, ...Array(9).fill(0xff), 1, ...Array(9).fill(0xff)],
+		],
+		// As many hops as a route may carry.
+		[
+			{
+				status: "routeUpdate",
+				id: 1n,
+				advert: { ...advert, hops: Array.from({ length: ROUTE_MAX_HOPS }, (_, i) => BigInt(i + 1)) },
+			},
+			[7, 37, 1, 3, 5, 1, ROUTE_MAX_HOPS, ...Array.from({ length: ROUTE_MAX_HOPS }, (_, i) => i + 1)],
 		],
 		[{ status: "routeHold", id: 1n }, [0xb, 1, 1]],
 		[{ status: "routeEnd", id: 1n }, [8, 1, 1]],
@@ -416,9 +426,13 @@ test("the route layer round-trips on draft-07", async () => {
 
 test("the route layer refuses the last seqno and Node ID 0", async () => {
 	const v = Version.DRAFT_07;
-	const last = { seqno: ROUTE_MAX, metric: 0n, downOnly: false, rtt: undefined };
+	const last = { seqno: ROUTE_MAX, metric: 0n, downOnly: false, rtt: undefined, hops: [] };
 	await expect(
 		bytes((w) => encodeAnnounceBroadcast(w, { status: "routeStart", node: 1n, advert: last }, v), v),
+	).rejects.toThrow();
+	const crowded = { ...last, seqno: 0n, hops: Array.from({ length: ROUTE_MAX_HOPS + 1 }, () => 1n) };
+	await expect(
+		bytes((w) => encodeAnnounceBroadcast(w, { status: "routeStart", node: 1n, advert: crowded }, v), v),
 	).rejects.toThrow();
 	await expect(
 		bytes((w) => encodeAnnounceReply(w, { kind: "request", node: 0n, seqno: 1n }, v), v),
@@ -457,6 +471,15 @@ test("the route layer refuses the last seqno and Node ID 0", async () => {
 		});
 		await expect(decodeAnnounceBroadcast(new Reader(undefined, flagged, v), v)).rejects.toThrow();
 	}
+	// More hops than a route may carry, refused before reading them.
+	const overHops = await forged(async (w) => {
+		await w.u62(1n);
+		await w.u62(0n);
+		await w.u62(0n);
+		await w.u8(0);
+		await w.u53(ROUTE_MAX_HOPS + 1);
+	});
+	await expect(decodeAnnounceBroadcast(new Reader(undefined, overHops, v), v)).rejects.toThrow(ProtocolViolation);
 });
 
 test("the subscriber's replies round-trip on draft-07", async () => {

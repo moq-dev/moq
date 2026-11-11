@@ -65,6 +65,7 @@ import {
 	AnnounceRequest,
 	decodeAnnounceBroadcastMaybe,
 	encodeAnnounceReply,
+	ROUTE_MAX_HOPS,
 } from "./announce.ts";
 import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
@@ -917,6 +918,11 @@ export class Subscriber {
 			else wire.pending.set(path, claim);
 		};
 
+		// A route is no route at all once it crossed as many nodes as one may, or crossed us: a copy
+		// of our own route, come back.
+		const usable = (wire: Route) =>
+			wire.advert.hops.length < ROUTE_MAX_HOPS && !wire.advert.hops.includes(this.hop);
+
 		// A claim through this session: its cost plus the route's metric, past this session's link
 		// cost of 1 as Rust's default, and unavailable while the route is held.
 		const candidate = (wire: Route, claim: Claim): WireRoute =>
@@ -935,7 +941,8 @@ export class Subscriber {
 		// another instance or epoch, whose consumes subscribe fresh.
 		const serve = (wire: Route, path: Path.Valid, restart: boolean) => {
 			const claim = wire.committed.get(path);
-			if (claim && visible(path)) this.#consumes.announce(path, wire.owner, candidate(wire, claim), restart);
+			if (claim && visible(path) && usable(wire))
+				this.#consumes.announce(path, wire.owner, candidate(wire, claim), restart);
 			else this.#consumes.withdraw(path, wire.owner);
 		};
 
@@ -950,7 +957,7 @@ export class Subscriber {
 				for (const id of byPath.get(path) ?? []) {
 					const wire = route(id);
 					const claim = wire.committed.get(path);
-					if (claim) candidates.push(candidate(wire, claim));
+					if (claim && usable(wire)) candidates.push(candidate(wire, claim));
 				}
 				if (perNode) {
 					for (const next of candidates) now.set(next.node, next);
@@ -1022,7 +1029,7 @@ export class Subscriber {
 						const wire = route(msg.id);
 						wire.advert = msg.advert;
 						wire.held = false;
-						refreshRoute(wire, false);
+						refreshRoute(wire, !usable(wire));
 						break;
 					}
 					case "routeHold": {

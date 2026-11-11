@@ -130,8 +130,8 @@ export class Connection implements Session {
 	// Our tokens and grants, and the answers to the peer's; see {@link Session.auth}.
 	#auth: AuthSession;
 
-	/** Random per-connection Hop ID. Shared by Publisher (for outbound hop
-	 * chains) and Subscriber (available for optional self-filtering on announces). */
+	/** This side's Hop ID, shared by Publisher (for outbound hop chains) and Subscriber (to drop
+	 * what crossed us). Random per connection, except a lite-07 publisher's, which is its origin's. */
 	readonly hop: Hop;
 
 	// The peer's SETUP, recorded once its Setup stream is read (lite-05+). Streams whose
@@ -212,7 +212,8 @@ export class Connection implements Session {
 		// Opens waiting for credit make room after about this RTT when the transport has none.
 		lines(quic).probe = this.#probe;
 
-		this.hop = randomHop();
+		this.#own = publish && wireOf(publish).own;
+		this.hop = hasRoutes(version) && this.#own ? HopSchema.parse(this.#own.hop) : randomHop();
 		// What the peer's connection credential earns by default: publishing anything to us,
 		// since we consume on demand, and subscribing to whatever we publish.
 		this.#auth = new AuthSession({
@@ -241,7 +242,6 @@ export class Connection implements Session {
 			this.#fail(err);
 		});
 
-		this.#own = publish && wireOf(publish).own;
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish, {
 			grant: this.#auth.scope,
 			ready: this.#auth.setupAnswered(),

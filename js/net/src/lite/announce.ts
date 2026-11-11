@@ -54,14 +54,18 @@ export const ROUTE_MAX = 2n ** 64n - 1n;
 export type Base = { distance: bigint; keep: number };
 
 /** How a lite-07 publisher reaches an origin node: the origin's seqno, the publisher's metric to it,
- * whether it may only travel away from an upstream, and its informational RTT to it in milliseconds,
- * `undefined` when unmeasured. */
+ * whether it may only travel away from an upstream, its informational RTT to it in milliseconds,
+ * `undefined` when unmeasured, and the Hop ID of every node it crossed, the origin first. */
 export interface Advert {
 	seqno: bigint;
 	metric: bigint;
 	downOnly: boolean;
 	rtt: bigint | undefined;
+	hops: bigint[];
 }
+
+/** The most Hops a route may carry. One that arrives with this many is unusable. */
+export const ROUTE_MAX_HOPS = 32;
 
 // ROUTE_START and ROUTE_UPDATE flags.
 const DOWN_ONLY = 0x1;
@@ -254,13 +258,17 @@ async function decodeRouteCost(r: Reader, version: Version): Promise<Cost | unde
 	return cost;
 }
 
-/** Encode a seqno, metric, flags, and RTT. No origin advertises the last seqno. */
+/** Encode a seqno, metric, flags, RTT, and hops. No origin advertises the last seqno, and no
+ * route carries more than {@link ROUTE_MAX_HOPS}. */
 async function encodeAdvert(w: Writer, advert: Advert) {
 	if (advert.seqno >= ROUTE_MAX) throw new Error("a route never advertises the last seqno");
+	if (advert.hops.length > ROUTE_MAX_HOPS) throw new Error("a route crossed too many nodes");
 	await w.u62(advert.seqno);
 	await w.u62(advert.metric);
 	await w.u8((advert.downOnly ? DOWN_ONLY : 0) | (advert.rtt === undefined ? 0 : RTT));
 	if (advert.rtt !== undefined) await w.u62(advert.rtt);
+	await w.u62(BigInt(advert.hops.length));
+	for (const hop of advert.hops) await w.u62(hop);
 }
 
 async function decodeAdvert(r: Reader): Promise<Advert> {
@@ -270,7 +278,11 @@ async function decodeAdvert(r: Reader): Promise<Advert> {
 	const flags = await r.u8();
 	if (flags & ~(DOWN_ONLY | RTT)) throw new ProtocolViolation(`unknown route flags: ${flags}`);
 	const rtt = flags & RTT ? await r.u62() : undefined;
-	return { seqno, metric, downOnly: (flags & DOWN_ONLY) !== 0, rtt };
+	const count = await r.u62();
+	if (count > BigInt(ROUTE_MAX_HOPS)) throw new ProtocolViolation(`a route crossed ${count} nodes`);
+	const hops: bigint[] = [];
+	for (let i = 0n; i < count; i++) hops.push(await r.u62());
+	return { seqno, metric, downOnly: (flags & DOWN_ONLY) !== 0, rtt, hops };
 }
 
 // lite-06 message body (no discriminator; the type is carried outside the length prefix).

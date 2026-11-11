@@ -96,7 +96,7 @@ Code this replaces, for lite-07 only:
 - `route::Node` registers one neighbour per session for both directions. Today `receive` and `answer` each take a fresh key (`route/node.rs`), so one session is two neighbours in the router; the interest set makes the router accept one key for both and this makes the sessions use it.
 - `js/net`: each `routes()` call opens its own stream today
   (`js/net/src/lite/subscriber.ts`), so JS gains the covering-prefix logic
-  `Discovery` has. its route layer keeps per-stream state, so this PR changes `js/net`
+  `Discovery` has. Its route layer keeps per-stream state, so this PR changes `js/net`
   too.
 
 Also touching the same files, to merge around:
