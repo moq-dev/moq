@@ -21,6 +21,13 @@ our deprecated exports or hidden CLI spellings is the maintainer's call, so
 each is a follow-up with a recommendation. The public-item pass before the m2 cut
 ran as the api-shape epic's own work; this audit keeps private code.
 
+Decided 2026-11-11 (maintainer, on [moq-dev/moq#8461](https://github.com/moq-dev/moq/pull/8461)):
+✅ that sweep's kept hits are this audit's baselines (rejected: a new quest).
+Vendored forks kept upstream's surface: moq-v4l 1,666 hits (mostly generated
+`videodev2.rs`), moq-vaapi 707 (mostly generated `libva.rs`), moq-nvenc's
+generated `sys`, moq-quic's `RetryError::into_incoming`, and moq-rtmp's `rml`.
+moq-c kept its 11 entry points, which mirror moq-ffi for outside C callers.
+
 Previous runs: dead code [moq-dev/moq#6166](https://github.com/moq-dev/moq/pull/6166),
 simplification [moq-dev/moq#6527](https://github.com/moq-dev/moq/pull/6527),
 lints [moq-dev/moq#6576](https://github.com/moq-dev/moq/pull/6576).
