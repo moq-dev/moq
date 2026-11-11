@@ -97,7 +97,7 @@ impl Import {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		self.track.finish()?;
+		self.track.end_with(None)?;
 		Ok(())
 	}
 

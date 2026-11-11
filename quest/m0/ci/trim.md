@@ -34,7 +34,6 @@ kept it). Joins m0 because `cache.yml` is broken now (rule: broken CI is m0).
   `quest/**`; `main` lands only through the queue, which runs the quest
   checks.
 
-Update the rows these change in [CI workflow audit](/quest/m3/audit-ci.md)
-and any doc naming the removed workflows.
+Update any doc naming the removed workflows.
 
 Public API: none. Wire: none.

@@ -718,17 +718,24 @@ impl Publish {
 
 	pub fn container_finish(&mut self, container: Id) -> Result<(), Error> {
 		let id = container;
-		let mut container = self.containers.remove(id).ok_or(Error::MediaNotFound)?;
-		if let Err(err) = container.inner.finish() {
-			container.children.forget(Child::Container(id));
-			let driver = container.driver.clone();
-			container.abort(cause(&err));
-			driver.check()?;
-			return Err(err.into());
+		let Container {
+			inner,
+			driver,
+			children,
+		} = self.containers.remove(id).ok_or(Error::MediaNotFound)?;
+		match inner.finish() {
+			Ok(finished) => {
+				driver.check()?;
+				children.keep(Child::Container(id), finished);
+				Ok(())
+			}
+			// A failed finish already ended every track, with an error where it could not finish.
+			Err(err) => {
+				children.forget(Child::Container(id));
+				driver.check()?;
+				Err(err.into())
+			}
 		}
-		container.driver.check()?;
-		container.children.keep(Child::Container(id), container.inner);
-		Ok(())
 	}
 
 	/// Insert or replace a caller-authored video rendition in the broadcast's catalog.
@@ -1487,15 +1494,17 @@ impl Publish {
 	pub fn json_window_finish(&mut self, window: Id) -> Result<(), Error> {
 		let id = window;
 		let window = self.json_window.remove(id).ok_or(Error::TrackNotFound)?;
-		let Data {
-			mut producer, children, ..
-		} = window.data;
-		if let Err(err) = producer.finish() {
-			children.forget(Child::JsonWindow(id));
-			return Err(err.into());
+		let Data { producer, children, .. } = window.data;
+		match producer.finish() {
+			Ok(finished) => {
+				children.keep(Child::JsonWindow(id), finished);
+				Ok(())
+			}
+			Err(err) => {
+				children.forget(Child::JsonWindow(id));
+				Err(err.into())
+			}
 		}
-		children.keep(Child::JsonWindow(id), producer);
-		Ok(())
 	}
 
 	/// Write a frame into a raw group, `None` when untimed.

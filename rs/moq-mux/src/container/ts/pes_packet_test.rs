@@ -182,7 +182,7 @@ struct Imported {
 fn import(data: &[u8], captured: bool) -> anyhow::Result<Imported> {
 	let mut import = start(captured);
 	import.import.decode(data)?;
-	import.import.finish()?;
+	import.import.finish_in_place()?;
 	Ok(import)
 }
 
@@ -576,7 +576,7 @@ async fn a_pes_with_a_field_no_rebase_reaches_refuses_its_stream() {
 			tokio::task::yield_now().await;
 		}
 		imported.import.decode(&feed.bytes()[head.len()..]).unwrap();
-		imported.import.finish().unwrap();
+		imported.import.finish_in_place().unwrap();
 
 		let (frames, err) = reader.await.unwrap();
 		assert_eq!(frames.len(), 1, "{why}: the PES placed before it stays published");
@@ -838,7 +838,7 @@ async fn a_pmt_naming_or_dropping_the_pcr_reroutes_private_pes() {
 		tokio::task::yield_now().await;
 	}
 	imported.import.decode(&feed.bytes()[head.len()..]).unwrap();
-	imported.import.finish().unwrap();
+	imported.import.finish_in_place().unwrap();
 
 	let (frames, err) = reader.await.unwrap();
 	assert_eq!(frames.len(), 1, "the PES placed while the PCR was named");
@@ -923,7 +923,7 @@ async fn a_revised_private_stream_publishes_under_a_fresh_name() {
 		assert_eq!(recorded(entry), descriptor_loop(revised));
 
 		let name = name.clone();
-		imported.import.finish().unwrap();
+		imported.import.finish_in_place().unwrap();
 		let (frames, err) = read(&imported.consumer, &name).await;
 		assert!(err.is_none(), "{err:?}");
 		assert_eq!(frames.len(), 1);
@@ -959,7 +959,7 @@ async fn a_dropped_private_stream_finishes_and_its_reused_pid_opens_a_new_track(
 	assert_eq!(imported.stats().quiet, None, "a PID the PMT dropped is not silent");
 
 	imported.import.decode(&feed.bytes()[dropped.len()..]).unwrap();
-	imported.import.finish().unwrap();
+	imported.import.finish_in_place().unwrap();
 	let (name, _) = imported.entry().expect("the PID is carried again");
 	assert_ne!(name, old, "a reused PID gets a new name");
 	let (frames, err) = read(&imported.consumer, &name).await;
