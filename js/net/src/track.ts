@@ -1916,11 +1916,13 @@ export class Producer {
 			// and arrivals hold only the feed's verdicts, as Rust records nothing for a failed fill.
 			// No reader is handed it either, as Rust serves no failed fetch-only slot, so its sequence
 			// is unknown again: owed while the feed owes it, else judged by budget or filled again.
+			// A reader already holding it keeps its frames and the fill's own failure.
 			if (fetched) {
-				if (current) {
-					this.#evict(entry);
-					this.#uncache(entry);
-				}
+				if (!current) return;
+				const unread = [...entry.mirrors].filter(([sink, mirror]) => sink.groups.peek().includes(mirror));
+				this.#unlink(entry);
+				this.#uncache(entry);
+				for (const [, mirror] of unread) hooks.releaseGroupReader(mirror, undefined);
 				return;
 			}
 			if (HOLES.has(toStreamCode(closed))) return;

@@ -273,6 +273,30 @@ async function failedAnswerHoldsTheEnd(error: Error) {
 	broadcast.close();
 }
 
+// A failed fill answer leaves the cache, but a reader already holding it keeps what it buffered and
+// sees the fill's own failure, never a cache eviction.
+test("fill: a held answer that fails keeps its frames and its failure", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	const requests = track.requests();
+	const fetching = wireOf(broadcast).fetchGroup("video", 1n);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	const answer = fill.accept(1n);
+	answer.writeFrame({ payload: enc.encode("fill 1") });
+	const group = await fetching;
+	const failure = new Error("archive failed");
+	answer.abort(failure);
+	fill.close();
+	await yieldNow();
+
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("fill 1");
+	await expect(group.readFrame()).rejects.toBe(failure);
+
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a reader reaching back for history gets the misses filled in order", async () => {
 	const { broadcast, track } = resumed(4n);
 	const requests = track.requests();
