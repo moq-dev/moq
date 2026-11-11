@@ -630,6 +630,7 @@ export namespace Socket {
 		readonly producer: Track.Producer;
 		readonly session: string;
 	}
+	export function isEndpoint(path: Path.Valid): boolean;
 }
 
 export const StreamCode: ((code: number) => StreamCode) & {
