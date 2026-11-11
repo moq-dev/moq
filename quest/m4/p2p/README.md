@@ -136,6 +136,12 @@ it yet. Which roster peer serves an announce stays the application's explicit
 selection. If identity or signing is wanted later, moq-lite-07's route
 identity becomes a public key, independent of P2P.
 
+Decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing): a browser
+that forwards for its peers on a local network is planned separately, in m5
+behind the Rust-to-TypeScript port
+([browser mesh](/quest/m5/browser-mesh.md)). Browsers in this epic stay
+non-transit until it lands.
+
 Decided 2026-10-13: priority then total cost selects among authorized routes;
 a direct connection does not always win. A watching tab never re-serves what
 it receives. Offloading a room of watchers is a local relay's job

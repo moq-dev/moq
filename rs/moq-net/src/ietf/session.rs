@@ -814,6 +814,8 @@ pub struct SetupOptions {
 /// send. `client` is our role, so `true` means the block came from a server.
 pub(crate) fn decode_peer_setup(parameters: &[u8], version: Version, client: bool) -> Result<SetupOptions, Error> {
 	let (params, _) = ietf::Parameters::decode_slice(parameters, version)?;
+	// Option types and varint values, but only lengths for byte options: no credential.
+	tracing::debug!(?version, ?params, "peer SETUP options");
 	let path = params.get_bytes(ietf::ParameterBytes::Path);
 	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if client && path.is_some() {

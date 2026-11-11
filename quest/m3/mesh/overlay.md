@@ -8,8 +8,11 @@ same overlay from the member list, and forwards for the rest. Any two nodes in
 a reachable group reach each other through the overlay in about log N hops,
 a departed node's links heal, an optional per-node degree cap bounds a
 constrained robot's links, and traffic crosses the relay uplink, which every
-relay node keeps, when the overlay partitions. An application embedding
-`Endpoint` reaches the overlay through a relay node.
+relay node keeps, when the overlay partitions. Every node is a core unless
+its application marks it an edge: an edge links to the cores it can reach
+and its links cost more, so traffic between edges crosses a core while one
+is reachable, and edges ring among themselves when none is. An application
+embedding `Endpoint` reaches the overlay through a relay node.
 
 ## Plan
 
@@ -32,13 +35,38 @@ join this quest:
   a loop, and the links and hops are reported. A node with no uplink has no
   fallback, so report whether the overlay stays connected whenever the reach
   graph is, and record what such a node can know about being cut off.
-- Nodes that do not forward. An embedding application may turn a node's
-  `proxy` preference off so it carries only its own traffic (a camera or a
-  constrained robot; Kixel plans a `--leaf` flag for it). Such a node cannot
-  be a finger that forwards for the rest. Recommendation, to confirm in the
-  PR: it is not a ring member, links to a small number of members, and is
-  never chosen as a finger. Expose that preference per node in the relay
-  library if the embedding application cannot set it today.
+- ~~Nodes that do not forward.~~ Superseded 2026-11-10 by the roles below:
+  Kixel dropped its `--leaf` flag, and every node forwards.
+
+Decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing, asked how a
+beefier node should attract traffic once Kixel's non-forwarding leaf is
+gone): ✅ **two roles, core and edge, and both link shaping and link
+pricing.** In the maintainer's words: "Kinda like how moq.pro wants to have
+edges and cores. Edges should prioritize connecting to cores, but if there's
+no cores, do a ring of edges? I just want this to work by default, which I
+guess means everything is a core unless stated otherwise." Rejected: pricing
+alone; shaping alone; ranking links to cheaper nodes by priority, whose
+outcome under the feasibility rule depends on which route arrived first.
+
+- Every node is a core unless the embedding application says it is an edge.
+  Every node forwards; the role only changes which links it keeps and what
+  they cost.
+- Shaping: cores ring among themselves as below. An edge links to the cores
+  it can reach, and rings with other edges only when it reaches none, so the
+  mesh works with no core at all. Settle in the PR what an edge that reaches
+  a core does for an edge that reaches none (partial reach); recommended: it
+  accepts that edge's link.
+- Pricing: a node declares a cost, 1 for a core and more for an edge, and a
+  link costs the product of its two ends' costs. A cost added per hop cannot
+  move traffic onto a core: a direct link is always cheaper than the same
+  link plus another. With a core at 1 and an edge at 3, edge to edge costs 9
+  and edge to core to edge costs 6, whichever route arrived first. This is
+  local pricing of each peer's declared cost
+  ([link costs](/doc/bin/relay/cluster.md#link-costs)) and needs no wire
+  change; confirm that, and the edge's default cost, in the PR.
+- Recommended, to confirm in the PR: an edge marks its links to cores
+  `upstream`, as moq.pro's edges do, so it never carries one core's routes to
+  another.
 
 - Ring: order the reachable peers (found through mDNS or
   [address hints](/quest/m3/mesh/addr.md)) by a hash of their endpoint ID, and

@@ -37,3 +37,4 @@ consumer asks.
 ## Required
 
 - [Miri's GenMC mode explores every schedule of kio's lock-free code](/quest/m5/miri-genmc.md) - waiting on rust-lang/miri to run `cargo miri test` in GenMC mode, then Nightly checks kio's log and channel exhaustively
+- [Browser tabs forward for their peers on a local network](/quest/m5/browser-mesh.md) - tabs on one LAN form a mesh and forward for each other, on the Rust-to-TypeScript port
