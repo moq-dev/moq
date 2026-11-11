@@ -27,7 +27,7 @@ Take the larger of the receive and send sums per family, or add a
 reasoning about which set is bigger. Drop `encode_src_ip` on Apple if it
 is still unused. Verify with cross-target `cargo check`
 (macOS, FreeBSD, Linux) or the `platform.yml` workflow, and watch the next
-macOS Nightly's `ipv4_source_address_override` (and `fast-apple-datapath`).
+macOS Nightly's `ipv4_source_address_override`.
 The Windows receive path's truncation was fixed separately in
 [moq-dev/moq#7543](https://github.com/moq-dev/moq/pull/7543).
 
