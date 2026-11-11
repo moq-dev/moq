@@ -10,6 +10,10 @@ having refused the session with the timeout code, mirroring moq-net's
 moq-relay's `incoming::Sealed` (`incoming.rs:116`) swaps `within` for
 `expired`, so the tokio and io_uring paths (`incoming.rs:259-268`,
 `uring.rs:827`) share one race in `connection.rs`.
+The same PR rewrites every other `within` reference: the
+`rs/moq-tokio/CHANGELOG.md` Unreleased entry, the `rs/moq-relay/MIGRATE.md`
+Unreleased note, and the intra-doc link in `rs/moq-relay/src/auth.rs`
+(`AuthDecider` docs), which otherwise fails `cargo doc -D warnings`.
 Public API: `Request::within` removed, `Request::poll_expired`/`expired`
 added; neither is on `release`. Wire: none.
 
