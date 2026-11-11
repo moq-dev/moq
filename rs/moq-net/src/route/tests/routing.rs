@@ -913,6 +913,51 @@ fn an_overflowing_route_neither_certifies_nor_holds() {
 	assert_eq!(router.shows(7, &p("live/x")), None);
 }
 
+/// A route grows to the hop limit with nothing else about it changed, so its sender
+/// stops certifying. What only that neighbor certified is let go at once, though a
+/// change of hops alone otherwise lets go of nothing.
+#[test]
+fn a_route_grown_to_the_hop_limit_certifies_nothing() {
+	let finite = |hops: usize| {
+		Some(Reach::Finite(Advert {
+			seqno: 0,
+			metric: 1,
+			down_only: false,
+			rtt: None,
+			hops: (1..=hops as Id).collect(),
+		}))
+	};
+	let item = Item {
+		seed: 0,
+		epoch: None,
+		since: 1,
+	};
+	let (narrow, wide) = (1, 2);
+	let mut router: Router<Node, Item> = Router::new(99, 1);
+	router.connect(narrow, Link::default()).unwrap();
+	router.connect(wide, Link::default()).unwrap();
+	router.asks(narrow, p("live/a")).unwrap();
+	router.route(narrow, 7, finite(2));
+	router.batch(narrow, 7, vec![(p("live/a/x"), Some(item))], Some(1), 0);
+	router.route(wide, 7, finite(MAX_HOPS - 2));
+	router.batch(wide, 7, vec![(p("live/b/y"), Some(item))], Some(1), 0);
+	assert_eq!(router.shows(7, &p("live/b/y")), Some(true));
+
+	router.route(wide, 7, finite(MAX_HOPS - 1));
+	assert_eq!(
+		router.shows(7, &p("live/b/y")),
+		Some(true),
+		"one hop more moves nothing"
+	);
+	router.route(wide, 7, finite(MAX_HOPS));
+	assert_eq!(
+		router.shows(7, &p("live/b/y")),
+		None,
+		"the route crossed as many nodes as one may"
+	);
+	assert_eq!(router.shows(7, &p("live/a/x")), Some(true));
+}
+
 /// A fresh claim arrives only on a stream that certifies nothing, while an
 /// older floor on another stream proves it absent. The merge rule trusts the
 /// floor, so the claim stays hidden until the certifying neighbor refreshes

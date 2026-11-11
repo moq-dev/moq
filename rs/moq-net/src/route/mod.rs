@@ -819,15 +819,18 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			};
 		}
 		let routes = self.rx.entry(id).or_default();
-		// Whether only the route's hops or RTT changed, which moves no route here.
+		// Whether only the route's hops or RTT changed, and not whether this node may
+		// use it: that moves no route here.
 		let mut same = false;
 		match reach {
 			Some(Reach::Finite(advert)) => {
 				let crossed = advert.hops.contains(&self.hop);
+				let full = |advert: &Advert| advert.hops.len() >= MAX_HOPS;
 				same = routes.get(&from).is_some_and(|was| {
 					let (old, new) = (&was.advert, &advert);
 					!was.held
 						&& was.crossed == crossed
+						&& full(old) == full(new)
 						&& (old.seqno, old.metric, old.down_only) == (new.seqno, new.metric, new.down_only)
 				});
 				let entry = Entry {
