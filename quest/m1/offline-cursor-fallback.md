@@ -34,7 +34,3 @@ Caused by: [moq-dev/moq#8375](https://github.com/moq-dev/moq/pull/8375), which
 introduced the offline reason and left this branch on End.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [A scoped JS handle that closes reports its routes offline](/quest/m1/offline-js-handle.md) - the same misreport in `js/net`
