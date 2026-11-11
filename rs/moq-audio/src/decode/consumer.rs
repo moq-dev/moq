@@ -2177,7 +2177,7 @@ mod tests {
 		assert_eq!(read(&mut consumer, Duration::from_millis(1)).await, Some(PACKET * 2));
 
 		// The track's end leaves nothing to wait for.
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut rest = 0;
 		while next_frame(&mut consumer).await.unwrap().is_some() {
 			rest += 1;
