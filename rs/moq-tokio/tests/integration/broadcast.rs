@@ -952,33 +952,12 @@ async fn announce_lifecycle_test(version: &str) {
 		.expect("server task failed");
 }
 
-/// A lite-07 route carries the publisher's min RTT, 0 at its own node, and the
-/// subscriber adds its own link's; a publisher that withholds it sends none.
+/// A lite-07 route carries the publisher's RTT, 0 at its own node, and the subscriber
+/// adds its own link's.
 #[tokio::test]
-async fn broadcast_moq_lite_07_route_min_rtt() {
-	let reported = first_route(moq_net::origin::Config::default()).await;
-	let min_rtt = reported.min_rtt();
-	assert_eq!(min_rtt.upstream, Some(std::time::Duration::ZERO));
-	let link = min_rtt.link.expect("QUIC reports an RTT");
-	assert!(link > std::time::Duration::ZERO, "rounded up to a whole millisecond");
-	assert_eq!(min_rtt.total(), Some(link));
-
-	let mut config = moq_net::origin::Config::default();
-	config.withhold_min_rtt = true;
-	let withheld = first_route(config).await;
-	assert_eq!(withheld.min_rtt().upstream, None);
-	assert!(
-		withheld.min_rtt().link.is_some(),
-		"the subscriber still measures its link"
-	);
-	assert_eq!(withheld.min_rtt().total(), None);
-}
-
-/// The route a lite-07 subscriber first sees for a broadcast an origin built from
-/// `config` serves.
-async fn first_route(config: moq_net::origin::Config) -> moq_net::origin::RouteInfo {
+async fn broadcast_moq_lite_07_route_rtt() {
 	let version = "moq-lite-07-wip";
-	let pub_origin = moq_tokio::origin::spawn_config(config);
+	let pub_origin = moq_tokio::origin::spawn();
 	let _route = pub_origin
 		.route("room/first", moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
@@ -1021,7 +1000,8 @@ async fn first_route(config: moq_net::origin::Config) -> moq_net::origin::RouteI
 		.await
 		.expect("server task panicked")
 		.expect("server task failed");
-	update.route
+	let rtt = update.route.rtt().expect("QUIC reports an RTT");
+	assert!(rtt > std::time::Duration::ZERO, "rounded up to a whole millisecond");
 }
 
 /// Read `count` groups (one frame each) off the subscriber, returning the sorted

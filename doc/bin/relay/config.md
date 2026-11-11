@@ -307,7 +307,6 @@ node = "https://us-west.example.com/"                 # This relay's own URL.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
 route_key = "route.key"                               # Route key; relays sharing the file fail over as one to scoped peers.
 max_hops = 32                                         # Longest accepted/forwarded hop path (1 to 32).
-withhold_min_rtt = false                              # Advertise no min RTT to moq-lite-07 peers.
 
 [cluster.api]
 url = "https://api.example.com/peers"                  # Live JSON peer list; a local file also works.

@@ -64,8 +64,8 @@ pub mod origin {
 	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::NodeFilter;
 	pub use super::origin_impl::{
-		Claim, Config, Consumer, Cost, Driver, Link, MinRtt, Preference, Producer, Request, Requesting, Route,
-		RouteInfo, RouteOptions, Source,
+		Claim, Config, Consumer, Cost, Driver, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
+		RouteOptions, Source,
 	};
 	pub use crate::route::RouteKey;
 

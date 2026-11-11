@@ -99,7 +99,7 @@ pub(super) struct Routed {
 	drained: bool,
 	/// The link's min RTT, which the peer's routes add.
 	rtt: route::LinkRtt,
-	/// When to read the link's RTT next, or `None` once the transport reported none.
+	/// When to read the link's RTT next, or `None` once it stopped reading.
 	read_rtt: Option<crate::time::Deadline>,
 }
 
@@ -134,10 +134,12 @@ impl Routed {
 			.receive(scoped(&link, &regions, key), prefix.clone())
 			.map_err(refused)?;
 		let mut rtt = route::LinkRtt::default();
-		let first = rtt.read(subscriber.session.metrics().rtt());
-		stream.min_rtt(first);
-		// A transport that reports no RTT never starts to, so it costs no timer.
-		let read_rtt = first.map(|_| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
+		stream.rtt(rtt.read(subscriber.session.metrics().rtt()));
+		// A transport can report its first RTT later, such as qmux after its first ping.
+		let read_rtt = Some(crate::time::Deadline::after(
+			&subscriber.runtime,
+			route::LinkRtt::INTERVAL,
+		));
 		Ok(Self {
 			node,
 			stream,
@@ -352,7 +354,7 @@ impl Routed {
 			.node
 			.receive(scoped(&self.link, &self.regions, key), self.prefix.clone())
 			.map_err(refused)?;
-		stream.min_rtt(self.rtt.reported());
+		stream.rtt(self.rtt.reported());
 		// What the old stream served stays in the origin until the new one serves it
 		// again, or lets go after.
 		let previous = std::mem::take(&mut self.served);
@@ -472,7 +474,7 @@ impl Routed {
 			.with_node(Some(id))
 			.with_draining(self.drained)
 			.with_available(served.available)
-			.with_min_rtt(served.min_rtt);
+			.with_rtt(served.rtt);
 		if let Some(entry) = self.previous.remove(&key) {
 			self.served.insert(key.clone(), entry);
 		}
@@ -518,9 +520,10 @@ impl Routed {
 			let last = self.rtt.reported();
 			let now = self.rtt.read(subscriber.session.metrics().rtt());
 			if now != last {
-				self.stream.min_rtt(now);
+				self.stream.rtt(now);
 			}
-			self.read_rtt = now.map(|_| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
+			self.read_rtt = (self.rtt.reading())
+				.then(|| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
 		}
 		while let Poll::Ready(output) = self.stream.poll_output(waiter) {
 			self.output(subscriber, output);
@@ -616,7 +619,7 @@ mod tests {
 		seqno: 0,
 		metric: 0,
 		down_only: false,
-		min_rtt: None,
+		rtt: None,
 	};
 
 	fn start(path: &'static str) -> Msg {
@@ -966,6 +969,33 @@ mod tests {
 			requests,
 			[1, 1000].map(|seqno| crate::lite::AnnounceReply::RouteRequest { node: 7, seqno })
 		);
+	}
+
+	/// A transport that reports its first RTT only after the stream opened, such as
+	/// qmux before its first ping returns, still gets its link measured.
+	#[kio::test]
+	async fn a_late_rtt_is_still_read() {
+		let session = SinkSession::new(Default::default());
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(session.clone());
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		feed(&mut routed, &mut decoder, &[]).unwrap();
+		let mut writer = crate::coding::Writer::new(
+			crate::lite::test_transport::SinkSend::new(Default::default()),
+			crate::lite::Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		kio::clock::sim::advance(super::route::LinkRtt::INTERVAL).await;
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(routed.rtt.reported(), None);
+
+		let rtt = std::time::Duration::from_millis(20);
+		session.set_stats(crate::lite::test_transport::SinkStats::default().with_rtt(rtt));
+		kio::clock::sim::advance(super::route::LinkRtt::INTERVAL).await;
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(routed.rtt.reported(), Some(rtt));
 	}
 
 	/// What the stream keeps between floors is the net change to its committed claims,

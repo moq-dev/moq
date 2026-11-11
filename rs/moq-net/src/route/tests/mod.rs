@@ -6,8 +6,8 @@
 //! lite-07 claim already covers the paths below it, so the slash is dropped.
 
 mod handoff;
-mod min_rtt;
 mod routing;
+mod rtt;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -376,13 +376,8 @@ impl Sim {
 	}
 
 	/// `node` measures its link to `peer` at `ms`, or nothing.
-	pub fn min_rtt(&mut self, node: Node, peer: Node, ms: Option<u64>) {
-		self.nodes[node].min_rtt(peer, ms.map(std::time::Duration::from_millis));
-		self.flush();
-	}
-
-	pub fn withhold(&mut self, node: Node) {
-		self.nodes[node].withhold();
+	pub fn rtt(&mut self, node: Node, peer: Node, ms: Option<u64>) {
+		self.nodes[node].rtt(peer, ms.map(std::time::Duration::from_millis));
 		self.flush();
 	}
 

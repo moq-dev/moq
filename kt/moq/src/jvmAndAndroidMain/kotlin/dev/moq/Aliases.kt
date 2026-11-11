@@ -189,15 +189,10 @@ typealias RouteOptions = uniffi.moq.MoqRouteOptions
 
 /**
  * The read-only facts on a received route: the [Instance] of the stream it serves, relay hop ids
- * (oldest first), and static production and link cost (lower wins).
+ * (oldest first), static production and link cost (lower wins), and its informational `rtt` to the
+ * origin node.
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo
-
-/**
- * The minimum round trip to a route's origin node over moq-lite-07: `upstream` past the session's
- * peer, `link` to the peer, and their `total`. Informational; it never ranks a route.
- */
-typealias MinRtt = uniffi.moq.MoqMinRtt
 
 /** Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering. */
 typealias Subscription = uniffi.moq.MoqSubscription

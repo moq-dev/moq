@@ -221,22 +221,14 @@ crosses. A live publisher seeds 0, and caching never changes it.
 
 ## Route latency
 
-A moq-lite-07-wip route also carries its min RTT: each relay adds its link's
+A moq-lite-07-wip route also carries its RTT: each relay adds its link's
 lowest smoothed RTT over the last 30 seconds to the sum it received, so an
 application reads the round trip to a publisher through any number of relays
-from the route it was announced on. It is informational and never picks a
-route; the link cost does that. A link's value changes only when its minimum
-moves past the larger of 5 ms and a quarter, so jitter and short queues send
-no route updates.
-
-Set `withhold_min_rtt` to advertise none, and every route crossing this relay
-reports none from here on. The same setting is `--cluster-withhold-min-rtt` or
-`MOQ_CLUSTER_WITHHOLD_MIN_RTT`.
-
-```toml
-[cluster]
-withhold_min_rtt = true
-```
+from the route it was announced on (`RouteInfo::rtt`). The value is absent
+while any link on the path has no RTT measurement. It is informational and
+never picks a route; the link cost does that. A link's value changes only
+when its minimum moves past the larger of 5 ms and a quarter, so jitter and
+short queues send no route updates.
 
 ## LAN discovery
 

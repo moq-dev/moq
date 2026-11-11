@@ -13,6 +13,8 @@ use std::{collections::VecDeque, time::Duration};
 pub(crate) struct LinkRtt {
 	reads: VecDeque<Duration>,
 	reported: Option<Duration>,
+	/// Reads in a row that found no RTT.
+	misses: usize,
 }
 
 impl LinkRtt {
@@ -28,14 +30,22 @@ impl LinkRtt {
 		self.reported
 	}
 
+	/// Whether to keep reading: false once a window of reads found no RTT, since a
+	/// transport that reports none that long, past a first ping, never will.
+	pub fn reading(&self) -> bool {
+		self.misses < Self::WINDOW
+	}
+
 	/// Take one read of the smoothed RTT, `None` when the transport reports none, and
 	/// return the min RTT to report.
 	pub fn read(&mut self, rtt: Option<Duration>) -> Option<Duration> {
 		let Some(rtt) = rtt else {
 			self.reads.clear();
 			self.reported = None;
+			self.misses += 1;
 			return None;
 		};
+		self.misses = 0;
 		if self.reads.len() == Self::WINDOW {
 			self.reads.pop_front();
 		}
@@ -115,6 +125,15 @@ mod tests {
 		link.read(ms(80));
 		assert_eq!(link.read(None), None);
 		assert_eq!(link.read(ms(90)), ms(90));
+	}
+
+	#[test]
+	fn a_window_without_rtt_stops_reading() {
+		let mut link = LinkRtt::default();
+		feed(&mut link, std::iter::repeat_n(None, 29));
+		assert!(link.reading());
+		link.read(None);
+		assert!(!link.reading());
 	}
 
 	#[test]

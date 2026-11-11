@@ -677,7 +677,7 @@ impl RouteRelay {
 			seqno: 0,
 			metric: 0,
 			down_only: false,
-			min_rtt: None,
+			rtt: None,
 		};
 		let receive = (0..streams)
 			.map(|_| {

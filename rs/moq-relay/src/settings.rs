@@ -77,9 +77,6 @@ struct Cluster {
 	#[usage(env = "MOQ_CLUSTER_MAX_HOPS", cli("--cluster-max-hops"))]
 	max_hops: Option<usize>,
 
-	#[usage(env = "MOQ_CLUSTER_WITHHOLD_MIN_RTT", cli("--cluster-withhold-min-rtt"))]
-	withhold_min_rtt: Option<bool>,
-
 	#[usage(env = "MOQ_CLUSTER_CONNECT", cli("--cluster-connect"), parse = "list_by_comma")]
 	connect: Option<Vec<String>>,
 

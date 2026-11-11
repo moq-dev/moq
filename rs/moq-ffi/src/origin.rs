@@ -94,33 +94,9 @@ pub struct MoqRouteInfo {
 	pub instance: Arc<MoqInstance>,
 	/// Whether a usable path reaches the route's origin; requests may fail while it is not.
 	pub available: bool,
-	/// The minimum round trip to the route's origin node, informational; never ranks a route.
-	pub min_rtt: MoqMinRtt,
-}
-
-/// The minimum round trip to a route's origin node over moq-lite-07, in two parts.
-///
-/// Each node on the path adds its link's lowest smoothed RTT over the last 30 seconds.
-/// The sum is unknown past a node that withholds it or cannot measure its link, and on
-/// any other wire.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct MoqMinRtt {
-	/// Past the session's peer: the sum the peer advertised, absent when unknown.
-	pub upstream: Option<std::time::Duration>,
-	/// The session's own link to the peer, absent when its transport reports no RTT.
-	pub link: Option<std::time::Duration>,
-	/// The whole path, present when both parts are.
-	pub total: Option<std::time::Duration>,
-}
-
-impl From<moq_net::origin::MinRtt> for MoqMinRtt {
-	fn from(min_rtt: moq_net::origin::MinRtt) -> Self {
-		Self {
-			upstream: min_rtt.upstream,
-			link: min_rtt.link,
-			total: min_rtt.total(),
-		}
-	}
+	/// The round trip to the route's origin node over moq-lite-07, absent while any link
+	/// has no measurement. Informational; it never ranks a route.
+	pub rtt: Option<std::time::Duration>,
 }
 
 impl From<moq_net::origin::RouteInfo> for MoqRouteInfo {
@@ -129,7 +105,7 @@ impl From<moq_net::origin::RouteInfo> for MoqRouteInfo {
 			cost: route.cost().value(),
 			instance: MoqInstance::wrap(route.instance().clone()),
 			available: route.available(),
-			min_rtt: route.min_rtt().into(),
+			rtt: route.rtt(),
 		}
 	}
 }
