@@ -1398,7 +1398,9 @@ impl Reader {
 			.track
 			.readers
 			.debt
-			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |debt| Some(debt.saturating_sub(bytes)));
+			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |debt| {
+				Some(debt.saturating_sub(bytes))
+			});
 	}
 
 	/// Whether this record is one to end when folding leaves a debt: it bills more than a

@@ -7820,7 +7820,8 @@ impl DropCursor {
 			&& let Some(err) = slot.group.cut_error()
 			&& let Some(end) = sequence.checked_add(1)
 		{
-			record.pending
+			record
+				.pending
 				.insert(sequence..end, Pending::own(Hole::drop(StreamError::from(err))));
 		}
 	}
@@ -8058,7 +8059,9 @@ impl Cursor {
 		let cut = drops.cuts.poll(waiter);
 		let record = &mut self.record;
 		match self.state.poll(waiter, |state| {
-			drops.next(record, state, cut, &within).map_or(Poll::Pending, Poll::Ready)
+			drops
+				.next(record, state, cut, &within)
+				.map_or(Poll::Pending, Poll::Ready)
 		}) {
 			Poll::Ready(Ok(range)) => Poll::Ready(range),
 			Poll::Ready(Err(state)) => drops
@@ -8185,7 +8188,9 @@ impl Cursor {
 	/// An open window, or one with a fill still out, always has more, and so does one its
 	/// cap keeps a group out of, since a reader may raise a cap again.
 	fn is_exhausted(&self, logical: &[&Delivered]) -> bool {
-		let taken: Vec<&Delivered> = std::iter::once(&self.record.delivered).chain(logical.iter().copied()).collect();
+		let taken: Vec<&Delivered> = std::iter::once(&self.record.delivered)
+			.chain(logical.iter().copied())
+			.collect();
 		let Some(end) = self.filter.window.end() else {
 			return false;
 		};
@@ -23123,7 +23128,10 @@ mod test {
 		write_untimed_group(&producer, 14);
 		assert_eq!(drain_groups(&mut subscriber), [14]);
 		assert_eq!(subscriber.delivered_runs(), 4, "floor through 8, then 10, 12 and 14");
-		assert!(!subscriber.record().delivered.contains(9), "the next gap is still remembered");
+		assert!(
+			!subscriber.record().delivered.contains(9),
+			"the next gap is still remembered"
+		);
 		write_untimed_group(&producer, 11);
 		assert_eq!(
 			drain_groups(&mut subscriber),
@@ -24269,10 +24277,17 @@ mod test {
 				assert!(!reported.overlaps(&run), "stale={stale}: {run:?} reported twice");
 				reported.insert(run);
 			}
-			assert_eq!(reported.iter().map(|run| run.end - run.start).sum::<u64>(), 2 * RUNS, "stale={stale}");
+			assert_eq!(
+				reported.iter().map(|run| run.end - run.start).sum::<u64>(),
+				2 * RUNS,
+				"stale={stale}"
+			);
 			assert!(subscriber.poll_recv_group(&waiter).is_pending(), "stale={stale}");
 			let used = pool.used();
-			assert!(used >= 2 * RUNS * super::super::record::RUN_OVERHEAD, "stale={stale}: the record is billed");
+			assert!(
+				used >= 2 * RUNS * super::super::record::RUN_OVERHEAD,
+				"stale={stale}: the record is billed"
+			);
 
 			// The pool shrinks, and groups the reader reads above the flood accrue its debt: the
 			// track sheds its own drop set first, then the reader pays.

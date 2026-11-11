@@ -129,7 +129,10 @@ impl Skipped {
 	/// One past the last sequence of the run holding `sequence`, if it was skipped.
 	pub fn run_end(&self, sequence: u64) -> Option<u64> {
 		let skipped = self.0.as_ref()?;
-		skipped.runs.get_key_value(&sequence).map(|(run, _)| run.end().saturating_add(1))
+		skipped
+			.runs
+			.get_key_value(&sequence)
+			.map(|(run, _)| run.end().saturating_add(1))
 	}
 
 	/// Forget every run below `floor`, which a fold settled.

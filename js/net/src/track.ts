@@ -2470,6 +2470,8 @@ type Successor = { sequence: bigint; arrived: Instant; fate: () => Error | undef
 /**
  * How a reader reported a run, and what its wire was told. Mirrors the Rust `record::Report`:
  * `settled` is a group served, or a drop on a version whose drops are all final.
+ *
+ * @internal
  */
 export interface Reported extends Run {
 	kind: "settled" | "dropped" | "stale" | "skip";
@@ -2509,6 +2511,8 @@ function blocksHole(reported: Reported, hole: Hole): boolean {
  * What a lite publisher told its wire about a reader's sequences, kept in the reader's own
  * record so the cursor's drops and the publisher's groups consult one map. Mirrors the
  * publisher half of the Rust `record::Record`.
+ *
+ * @internal
  */
 export interface WireRecord {
 	/** Whether the wire was told of `sequence`: served, or given up. */

@@ -155,7 +155,12 @@ impl Record {
 	/// why; the rest of that run waits its turn.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn next_pending(&mut self) -> Option<(Range<u64>, Hole)> {
-		while let Some((range, pending)) = self.pending.iter().next().map(|(range, pending)| (range.clone(), pending.clone())) {
+		while let Some((range, pending)) = self
+			.pending
+			.iter()
+			.next()
+			.map(|(range, pending)| (range.clone(), pending.clone()))
+		{
 			self.pending.remove(range.clone());
 			if let Some(gap) = self.report(range.clone(), &pending.hole, pending.received) {
 				if gap.end < range.end {
@@ -465,7 +470,10 @@ mod test {
 		owe(&track, pool.used());
 		record.settle(|| track.clone(), &mut ()).unwrap();
 		assert_eq!(pool.used(), 0, "all of it folded");
-		assert!(record.told(7) && record.delivered.contains(7), "a folded drop stays dropped");
+		assert!(
+			record.told(7) && record.delivered.contains(7),
+			"a folded drop stays dropped"
+		);
 		assert_eq!(record.report(0..u64::MAX / 2 + 2, &Hole::Skip, false), None);
 		let mut untold = RangeSet::new();
 		untold.insert(u64::MAX / 2 + 2..u64::MAX / 2 + 3);
@@ -503,7 +511,10 @@ mod test {
 			assert_eq!(StreamError::from(&err), StreamError::TooFarBehind, "{promise:?}");
 			assert_eq!(pool.used(), 0, "{promise:?}: its record went with it");
 			assert!(record.failed());
-			assert!(record.settle(|| track.clone(), &mut ()).is_err(), "{promise:?}: it stays ended");
+			assert!(
+				record.settle(|| track.clone(), &mut ()).is_err(),
+				"{promise:?}: it stays ended"
+			);
 		}
 	}
 
@@ -515,7 +526,9 @@ mod test {
 		let mut record = Record::default();
 		record.delivered.insert(0);
 		record.reported.insert(1..2, Report::Dropped);
-		record.pending.insert(2..3, Pending::own(Hole::drop(StreamError::NotFound)));
+		record
+			.pending
+			.insert(2..3, Pending::own(Hole::drop(StreamError::NotFound)));
 		record.skipped.insert(4, Duration::from_secs(1));
 		record.settle(|| track.clone(), &mut ()).unwrap();
 		owe(&track, RUN_OVERHEAD);
