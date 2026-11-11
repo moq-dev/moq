@@ -187,7 +187,8 @@ A message that breaks either rule is malformed.
 A relay restates up to four of those from TRACK_INFO, never MAX_CACHE_DURATION, and it forwards at most 59 properties, and it refuses a track with more, from a {{moqt}} publisher or over this extension, as unsupported.
 Dropping those five can widen the delta that spans them, so a relay also refuses a {{moqt}} track whose remaining list would not fit a TRACK_PROPERTIES message beside its Version, as unsupported.
 
-The Immutable Properties may still hold one of those five, which a relay forwards in place of the one it would restate.
+The Immutable Properties may still hold one of the properties a relay restates, which it forwards in place of the one it would restate.
+A sealed MAX_CACHE_DURATION has no restated counterpart, so it travels beside none and is never compared.
 A relay acts on TRACK_INFO, so a sealed TIMESCALE MUST equal the Timescale, DEFAULT_PUBLISHER_PRIORITY the priority, and DYNAMIC_GROUPS whether its Refresh is nonzero.
 A sealed DEFAULT_PUBLISHER_GROUP_ORDER or MAX_CACHE_DURATION is advisory: a relay serves its own order and Max Age and forwards the sealed value unchanged, whatever it says.
 A relay refuses a track whose sealed value breaks that rule, from a {{moqt}} publisher or over this extension, as unsupported.
