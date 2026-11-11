@@ -3952,7 +3952,7 @@ impl crate::time::Driver for Driver {
 
 /// What an origin holds on behalf of its sessions and readers, for the session fuzz target's
 /// leak check.
-#[cfg(feature = "fuzz")]
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Footprint {
 	tasks: usize,
@@ -3963,7 +3963,7 @@ pub(crate) struct Footprint {
 	withheld: usize,
 }
 
-#[cfg(feature = "fuzz")]
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 impl Driver {
 	/// Count what this origin holds; see [`Footprint`].
 	pub(crate) fn footprint(&self) -> Footprint {

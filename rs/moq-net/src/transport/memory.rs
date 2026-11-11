@@ -345,14 +345,14 @@ impl Session {
 
 /// What one side of a pair still holds, read without keeping it alive, for the session fuzz
 /// target's leak check.
-#[cfg(feature = "fuzz")]
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 pub(crate) struct Held {
 	side: std::sync::Weak<Side>,
 	conn: Arc<Conn>,
 	local: usize,
 }
 
-#[cfg(feature = "fuzz")]
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 impl Held {
 	/// Whether any handle to this side's session is alive.
 	pub(crate) fn session(&self) -> bool {
@@ -367,7 +367,7 @@ impl Held {
 	}
 }
 
-#[cfg(feature = "fuzz")]
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 impl Session {
 	/// Watch what this side holds; see [`Held`].
 	pub(crate) fn held(&self) -> Held {

@@ -188,7 +188,7 @@ impl TaskSet {
 	}
 
 	/// The children queued or running.
-	#[cfg(feature = "fuzz")]
+	#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 	pub fn len(&self) -> usize {
 		self.state.read().queued.len() + self.active.len()
 	}
