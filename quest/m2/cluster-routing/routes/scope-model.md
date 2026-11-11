@@ -61,6 +61,11 @@ why:
 - Keep the counterexample that broke the first plan: two relays behind a
   scoped relay must not keep a wider route alive through each other after
   its path closed.
+- Keep the lagging neighbour: a relay learns a withdrawal from one route,
+  that route ends, and a second route still carries the claim at the older
+  revision. The relay must not show the claim again
+  (`an_older_complete_snapshot_revives_no_known_withdrawal`). Give it a
+  config, with the second route covering the same prefix and a wider one.
 
 Work:
 
