@@ -37,4 +37,3 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A scoped JS handle that closes reports its routes offline](/quest/m1/offline-js-handle.md) - the same misreport in `js/net`
