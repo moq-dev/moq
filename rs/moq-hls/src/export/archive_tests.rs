@@ -171,7 +171,7 @@ impl Recording {
 
 	/// End the source cleanly, then wait for the recorder to mark the archive complete.
 	async fn finish(mut self) -> Store<Counting> {
-		self.catalog.finish().unwrap();
+		drop(self.catalog.clone().finish().unwrap());
 		for source in self.sources.values_mut() {
 			drop(source.media.clone().finish().unwrap());
 		}

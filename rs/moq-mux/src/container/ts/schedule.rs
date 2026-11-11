@@ -689,6 +689,11 @@ impl Schedule {
 		self.ended = ended;
 	}
 
+	/// Whether every source has ended ([`Self::set_ended`]).
+	pub fn ended(&self) -> bool {
+		self.ended
+	}
+
 	/// Pad to `rate` bits per second from the next slot on, or stop padding.
 	pub fn set_rate(&mut self, rate: Option<u64>) {
 		if self.rate != rate {

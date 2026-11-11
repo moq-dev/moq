@@ -643,11 +643,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Finish every track, flushing the current group.
+	/// Finish every track, flushing the current group, and return the [`Finished`] import.
 	///
-	/// Every track ends even when one fails to, aborting with the cause, and a finish that failed
-	/// returns the same error to every later call. Calling it again after a success does nothing.
-	pub fn finish(&mut self) -> crate::Result<()> {
+	/// Every track ends even when one fails to, aborting with the cause, so a failed finish can't
+	/// be retried.
+	pub fn finish(mut self) -> crate::Result<Finished<E>> {
+		self.finish_in_place()?;
+		Ok(Finished { import: self })
+	}
+
+	fn finish_in_place(&mut self) -> crate::Result<()> {
 		match &self.input {
 			crate::container::Input::Finished => return Ok(()),
 			crate::container::Input::Failed(err) => return Err(err.clone()),
@@ -687,6 +692,29 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for stream in std::mem::take(&mut self.audio).into_values() {
 			stream.track.abort(err.clone());
 		}
+	}
+}
+
+/// An FLV import that [finished](Import::finish): every track has ended, and they can still be
+/// read or aborted, but it takes no more input.
+///
+/// Dropping it retires the tracks and their catalog renditions, as dropping the [`Import`] does.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut import: moq_mux::container::flv::Finished) {
+/// import.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it retires the tracks and their catalog renditions"]
+pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
+	import: Import<E>,
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
+	/// Release every track's cache, reporting `err` to readers that have not drained it; see
+	/// [`Import::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
 	}
 }
 

@@ -11,7 +11,20 @@ resync the model.
 
 Decided 2026-11-10 (maintainer, /quest-plan), as the strongest guard against
 the route model drifting from the code ([moq-dev/moq#8447](https://github.com/moq-dev/moq/pull/8447)).
-Route only for now; judge the other models after.
+
+Decided 2026-11-10 (maintainer, a later /quest-plan the same day):
+
+- ✅ m1 (rejected: staying in m4). The [mesh model](/quest/m1/route-mesh-model.md),
+  the [inductive invariant](/quest/m1/route-inductive.md), and the
+  [cache-aware routing proof](/quest/m2/cache-routing-proof.md) all build on
+  `RouteHandoff.tla`, so drift there costs the most.
+- ✅ The other three models get trace validation too, each its own m4 quest
+  behind this one (rejected: "route only for now; judge the other models
+  after", decided earlier the same day). So the recorder's trace format and
+  the recipe that hands a trace to TLC are built here for
+  [resume](/quest/m4/resume-trace-validation.md),
+  [reconnect](/quest/m4/reconnect-trace-validation.md), and
+  [subscribe](/quest/m4/subscribe-trace-validation.md) to reuse.
 
 This is TLA+ trace validation (Cirstea, Kuppe, Loillier, Merz, 2024, used on
 CCF and etcd's raft): `route::tests::Sim` records each step as the model
