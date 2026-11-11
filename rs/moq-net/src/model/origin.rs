@@ -3773,8 +3773,8 @@ struct OwnClaims {
 }
 
 /// The driver's task feeding [`OwnClaims`], which [`Consumer::route_node`] also catches up.
-/// It ends once nothing owns the origin: its cursors end only in the driver's teardown,
-/// which waits for this task.
+/// It ends once nothing owns the origin, after feeding the withdrawals still queued: its
+/// cursors end only in the driver's teardown, which waits for this task.
 struct FeedOwnClaims {
 	claims: Arc<std::sync::Mutex<OwnClaims>>,
 	origin: TasksWeak,
@@ -3784,13 +3784,15 @@ impl kio::Task for FeedOwnClaims {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		// Wakes wait for the feeder's lock, which drops before the hold; see
+		// `Consumer::route_node`.
+		let _hold = kio::hold();
+		let mut claims = lock_own(&self.claims);
 		if self.origin.poll_orphaned(waiter).is_ready() {
+			claims.catch_up();
 			return Poll::Ready(());
 		}
-		// Wakes wait for the feeder's lock, which a tail expression's guard drops before
-		// the hold; see `Consumer::route_node`.
-		let _hold = kio::hold();
-		lock_own(&self.claims).poll(waiter)
+		claims.poll(waiter)
 	}
 }
 
@@ -15698,19 +15700,36 @@ mod tests {
 	}
 
 	/// The task feeding a route node never keeps the driver running: it finishes once
-	/// the last producer handle drops, whatever read handles remain.
+	/// the last owner drops, whatever read handles remain, and still feeds the node the
+	/// withdrawals that last drop queued.
 	#[kio::test]
 	async fn a_route_node_never_keeps_the_driver_running() {
 		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
 		let waiter = kio::Waiter::noop();
+		let link = crate::route::Link {
+			proxy: true,
+			..Default::default()
+		};
 		let consumer = producer.consume();
-		let _node = consumer.route_node();
+		let alice = producer.announce("room/alice", RouteInfo::new()).unwrap();
+		let stream = consumer.route_node().answer(link, Path::empty()).unwrap();
 		assert!(
 			driver.poll(Instant::now(), &waiter).is_ok(),
 			"the producer owns the origin"
 		);
+		while stream.try_output().is_some() {}
+		drop(alice);
 		drop(producer);
 		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
+		let output = stream.try_output();
+		assert!(
+			matches!(
+				&output,
+				Some(crate::route::node::Output::Batch { changes, .. })
+					if changes.iter().any(|(path, claim)| path.as_str() == "room/alice" && claim.is_none())
+			),
+			"the stream is sent the withdrawal: {output:?}"
+		);
 	}
 
 	/// A handler holding only its `Route` keeps serving once every producer
