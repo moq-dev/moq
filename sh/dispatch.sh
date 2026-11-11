@@ -204,6 +204,10 @@ module large_files ''
 # check; only an explicit --all has none.
 module migrate '(^|/)MIGRATE\.md$'
 module text ''
+# A verify-* skill's Coverage table against the Rust it names, so a rename
+# or deletion of modelled code fails until the table follows it.
+module coverage_tables '^(rs/|\.claude/skills/verify-|sh/coverage-tables\.py$)' \
+    tools='python3'
 module toml '' \
     tools='taplo' fix
 module nix '' \
@@ -419,6 +423,7 @@ step() {
         check:large_files) run sh/large-files.sh "$large_base" ;;
         check:migrate) [[ "$base" == --all ]] || run sh/migrate.sh "$base" ;;
         check:text) run sh/text.sh ;;
+        check:coverage_tables) run python3 sh/coverage-tables.py ;;
         check:python)
             files '*.py' '*.pyi'
             run xargs -0 ruff check --force-exclude <"$listed"

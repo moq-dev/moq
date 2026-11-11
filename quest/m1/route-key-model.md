@@ -51,5 +51,4 @@ finding changes the signed transcript.
 
 ## Related
 
-- [The TLA+ models run nightly and reviews resync them](/quest/m1/model-checks-nightly.md) - the Nightly job and Coverage-table check this model joins
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - files a peer's routes under the key this proves

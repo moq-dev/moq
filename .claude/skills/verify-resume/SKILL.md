@@ -42,17 +42,17 @@ A counterexample is a path through the model, not yet a bug. Replay it as a test
 
 ## Coverage
 
-Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit. `just check` fails when a function or type the table names no longer exists in its file (`sh/coverage-tables.py`), so each Code cell starts with a repo-relative path, then the symbols in it.
 
-| Code (`rs/moq-net/src/model/`) | Model |
+| Code | Model |
 | --- | --- |
-| `resume.rs` `Reader::sync` (reuse of a route's copy, new copy at `newest`) | `Sync`, `Serve` |
-| `resume.rs` `Reader::backfill`, `backfill_gaps` | `Backfill`, `BackfillGaps` |
-| `resume.rs` `Reader::poll_lowest`, `deliverable`, `take`, `observe` | `Poll`, `Scan`, `Peek`, `Deliverable`, `Take` |
-| `resume.rs` `Reader::bound_at_end`, `let_go`, `Copy::retains` | `BoundAtEnd`, `LetGo`, `Retains` |
-| `resume.rs` `Reader::poll_end` | `PollEnd` |
-| `resume.rs` `Producer::splice`, `serve_from`, the front's end | `Serve`, `FrontFinish`, `FrontFail` |
-| `track.rs` `TrackState::is_complete`, `may_land`, `latest_sequence`, `track::Subscriber::has_unread_group` | `Seal`, `Held`, `MayLand`, `Latest`, `HasUnread` |
+| `rs/moq-net/src/model/resume.rs` `Reader::sync` (reuse of a route's copy, new copy at `newest`) | `Sync`, `Serve` |
+| `rs/moq-net/src/model/resume.rs` `Reader::backfill`, `backfill_gaps` | `Backfill`, `BackfillGaps` |
+| `rs/moq-net/src/model/resume.rs` `Reader::poll_lowest`, `deliverable`, `take`, `observe` | `Poll`, `Scan`, `Peek`, `Deliverable`, `Take` |
+| `rs/moq-net/src/model/resume.rs` `Reader::bound_at_end`, `let_go`, `Copy::retains` | `BoundAtEnd`, `LetGo`, `Retains` |
+| `rs/moq-net/src/model/resume.rs` `Reader::poll_end` | `PollEnd` |
+| `rs/moq-net/src/model/resume.rs` `Producer::splice`, `serve_from`, the front's end | `Serve`, `FrontFinish`, `FrontFail` |
+| `rs/moq-net/src/model/track.rs` `TrackState::is_complete`, `may_land`, `latest_sequence`, `track::Subscriber::has_unread_group` | `Seal`, `Held`, `MayLand`, `Latest`, `HasUnread` |
 
 ## Not covered
 

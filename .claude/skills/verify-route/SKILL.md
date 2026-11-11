@@ -45,18 +45,18 @@ A counterexample is a path through the model, not yet a bug. Replay it on the ro
 
 ## Coverage
 
-Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/route/` to see what changed since. After a change to a covered function, mirror it in the model, rerun both configs, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/route/` to see what changed since. After a change to a covered function, mirror it in the model, rerun both configs, and move the sync commit forward only once the model describes the code at the new commit. `just check` fails when a function or type the table names no longer exists in its file (`sh/coverage-tables.py`), so each Code cell starts with a repo-relative path, then the symbols in it.
 
-| Code (`rs/moq-net/src/route/`) | Model |
+| Code | Model |
 | --- | --- |
-| `mod.rs` `feasible`, `selected`, `infeasible`, `recoverable`, `live`, `certifiers` | `Feasible`, `Selected`, `InfeasibleSet`, `Recoverable`, `Live`, `Certifiers` |
-| `mod.rs` `certified`, `prune`, `adopted` | `Certified`, `Prune`, `Adopted` |
-| `mod.rs` `update`, `record`, `advertise`, `requests` | `Update`, `Record`, `Plan`, `Requests` |
-| `mod.rs` `show`, `shown_now` | `Events`, `ShownNow` |
-| `mod.rs` `route`, `batch`, `request`, `echo` | `OnRoute`, `OnBatch`, `OnRequest`, `Deliver`, `DeliverAck` |
-| `mod.rs` `connect`, `peer_interest`, `disconnect`, `collect`, `change` | `Connect`, `Opened`, `Disconnect`, `Closed`, `Collect`, `ChangeClaim` |
-| `view.rs` `View::merge`, `View::restrict` | `Merge`, `Certify` |
-| `tests/mod.rs` `Sim` queues and `revivals`, `false_ends` | `q`, `acks`, `revivals`, `falseEnds` |
+| `rs/moq-net/src/route/mod.rs` `feasible`, `selected`, `infeasible`, `recoverable`, `live`, `certifiers` | `Feasible`, `Selected`, `InfeasibleSet`, `Recoverable`, `Live`, `Certifiers` |
+| `rs/moq-net/src/route/mod.rs` `certified`, `prune`, `adopted` | `Certified`, `Prune`, `Adopted` |
+| `rs/moq-net/src/route/mod.rs` `update`, `record`, `advertise`, `requests` | `Update`, `Record`, `Plan`, `Requests` |
+| `rs/moq-net/src/route/mod.rs` `show`, `shown_now` | `Events`, `ShownNow` |
+| `rs/moq-net/src/route/mod.rs` `route`, `batch`, `request`, `echo` | `OnRoute`, `OnBatch`, `OnRequest`, `Deliver`, `DeliverAck` |
+| `rs/moq-net/src/route/mod.rs` `connect`, `peer_interest`, `disconnect`, `collect`, `change` | `Connect`, `Opened`, `Disconnect`, `Closed`, `Collect`, `ChangeClaim` |
+| `rs/moq-net/src/route/view.rs` `View::merge`, `View::restrict` | `Merge`, `Certify` |
+| `rs/moq-net/src/route/tests/mod.rs` `Sim` queues and `revivals`, `false_ends` | `q`, `acks`, `revivals`, `falseEnds` |
 
 ## Not covered
 
