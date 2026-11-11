@@ -19,17 +19,26 @@ const child = Bun.spawn(command, {
 	stderr: "inherit",
 	env: { ...process.env, LOCAL_SUPERVISED: "1" },
 });
-// Every process below `root`, from one process table snapshot.
-function descendants(root: number): number[] {
-	const children = new Map<number, number[]>();
-	for (const line of Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid="]).stdout.toString().split("\n")) {
-		const [pid, ppid] = line.trim().split(/\s+/).map(Number);
-		if (pid && ppid !== undefined) children.set(ppid, [...(children.get(ppid) ?? []), pid]);
+// Each process's parent and start time; the start time tells a live process from a
+// later one that reused its PID.
+function table(): Map<number, { ppid: number; start: string }> {
+	const found = new Map<number, { ppid: number; start: string }>();
+	for (const line of Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid=,lstart="]).stdout.toString().split("\n")) {
+		const [pid, ppid, ...start] = line.trim().split(/\s+/);
+		if (pid && ppid && start.length) found.set(Number(pid), { ppid: Number(ppid), start: start.join(" ") });
 	}
-	const found: number[] = [];
+	return found;
+}
+
+// Every process below `root` with its start time, from one snapshot.
+function descendants(root: number): Map<number, string> {
+	const processes = table();
+	const found = new Map<number, string>();
 	for (let queue = [root]; queue.length; ) {
-		for (const pid of children.get(queue.pop() as number) ?? []) {
-			found.push(pid);
+		const parent = queue.pop() as number;
+		for (const [pid, { ppid, start }] of processes) {
+			if (ppid !== parent || found.has(pid)) continue;
+			found.set(pid, start);
 			queue.push(pid);
 		}
 	}
@@ -40,20 +49,25 @@ function descendants(root: number): number[] {
 // Without a subreaper (macOS), a descendant whose parent dies leaves the tree before
 // --no-orphans sweeps it, so record the tree when cancellation arrives.
 let signaled: number | undefined;
-const tree = new Set<number>();
+const tree = new Map<number, string>();
 for (const name of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
 	process.on(name, () => {
 		signaled ??= 128 + constants.signals[name];
-		if (process.platform !== "linux") for (const pid of descendants(process.pid)) tree.add(pid);
+		if (process.platform !== "linux") for (const [pid, start] of descendants(process.pid)) tree.set(pid, start);
 		child.kill(name);
 	});
 }
 const code = await child.exited;
-for (const pid of tree) {
-	try {
-		process.kill(pid, "SIGKILL");
-	} catch {
-		// Already gone.
+if (tree.size) {
+	// Kill only a recorded process that keeps its start time, never a PID's new owner.
+	const now = table();
+	for (const [pid, start] of tree) {
+		if (now.get(pid)?.start !== start) continue;
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {
+			// Exited since the check.
+		}
 	}
 }
 process.exit(signaled ?? code);
