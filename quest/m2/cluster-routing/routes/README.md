@@ -541,7 +541,6 @@ benchmarks.
 
 ## Required
 
-- [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - every ordering on 4-5 relay meshes with two origins and clients, with an announce budget and convergence
 - [Seeded lite-07 meshes hold the route rules and an announce budget](/quest/m1/route-mesh-sweep.md) - the route rules and message budget checked on real sessions over random meshes
 
 ## Related

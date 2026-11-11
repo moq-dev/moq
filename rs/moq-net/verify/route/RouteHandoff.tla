@@ -256,13 +256,16 @@ Update(n, s0, ov, ups, eb) ==
 Heeded(d, m) ==
     d[2] # Origin \/ m.type = "request" \/ (m.type = "route" /\ m.reach.kind = "none")
 
+\* The sum of f(x) over the finite set S.
+SumOver(S, f(_)) ==
+    LET F[T \in SUBSET S] == IF T = {} THEN 0 ELSE LET x == CHOOSE x \in T : TRUE IN f(x) + F[T \ {x}]
+    IN F[S]
+
 \* Commit the updates `rs` (a function from nodes to `Update` results), appending
 \* each node's messages to `q0`. Nodes in one step send on disjoint queues.
 Commit(rs, q0) ==
     LET ns == DOMAIN rs
-        Sum(f(_)) == LET F[S \in SUBSET ns] ==
-                            IF S = {} THEN 0 ELSE LET x == CHOOSE x \in S : TRUE IN f(x) + F[S \ {x}]
-                     IN F[ns]
+        Sum(f(_)) == SumOver(ns, f)
     IN /\ st' = [n \in Nodes |-> IF n \in ns THEN rs[n].s ELSE st[n]]
        /\ q' = [d \in Dirs |-> IF d[1] \in ns THEN q0[d] \o SelectSeq(rs[d[1]].out[d[2]], LAMBDA m : Heeded(d, m))
                                  ELSE q0[d]]
@@ -274,15 +277,7 @@ Commit(rs, q0) ==
 Quiet == \A d \in Dirs : q[d] = <<>> /\ acks[d] = 0
 
 \* The messages the updates `rs` send, counted before `Heeded` drops any.
-Sent(rs) ==
-    LET ns == DOMAIN rs
-        F[S \in SUBSET ns] ==
-            IF S = {} THEN 0
-            ELSE LET x == CHOOSE x \in S : TRUE
-                     G[T \in SUBSET Nodes] ==
-                         IF T = {} THEN 0 ELSE LET m == CHOOSE m \in T : TRUE IN Len(rs[x].out[m]) + G[T \ {m}]
-                 IN G[Nodes] + F[S \ {x}]
-    IN F[ns]
+Sent(rs) == SumOver(DOMAIN rs, LAMBDA n : SumOver(Nodes, LAMBDA m : Len(rs[n].out[m])))
 
 \* A burst runs from one quiet point to the next. An external change (a claim
 \* change, a session opening or closing, a collection) made while quiet starts
@@ -595,12 +590,11 @@ PerChange == 4 * Cardinality(Dirs)
 Budget == burst <= PerChange * churn
 
 \* While anything is in flight, something is eventually delivered. This is
-\* weaker than fairness per queue (whose tableau TLC builds in time exponential
-\* in the queues), so Converges fails on any cycle of deliveries, starving a
-\* queue or not.
+\* WF_vars(Delivery) written out, since Delivery is enabled exactly when not
+\* Quiet and TLC's ENABLED on these actions does not finish. It is weaker than
+\* fairness per queue, so Converges fails on any cycle of deliveries, starving
+\* a queue or not.
 Delivery == \E d \in Dirs : Deliver(d) \/ DeliverAck(d)
-\* WF_vars(Delivery), spelled out: Delivery is enabled exactly when not Quiet,
-\* and TLC evaluates ENABLED of this action far too slowly.
 Fairness == []<>Quiet \/ []<><<Delivery>>_vars
 
 LiveSpec == Spec /\ Fairness
