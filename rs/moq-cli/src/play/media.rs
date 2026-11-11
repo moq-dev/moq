@@ -666,23 +666,23 @@ async fn play_audio<O: Output>(
 	// clock's reference is when media zero arrived, `at - end - delay`: one that
 	// moved earlier jumped the clock ahead, which the sink skips rather than
 	// speeds through, as video skips frames it passed over.
-	let anchored = std::cell::Cell::new(None::<(Instant, Duration, Duration)>);
-	let anchor = |sink: &mut <O::Speaker as Speaker>::Sink, end: Duration| {
+	let mut anchored = None::<(Instant, Duration, Duration)>;
+	let anchor = |sink: &mut <O::Speaker as Speaker>::Sink,
+	              anchored: &mut Option<(Instant, Duration, Duration)>,
+	              end: Duration| {
 		if let Some(at) = moq_net::Timestamp::try_from(end)
 			.ok()
 			.and_then(|end| presentation.due(end))
 		{
 			let delay = schedule.delay();
 			let nanos = |duration: Duration| duration.as_nanos() as i128;
-			let jumped = anchored
-				.replace(Some((at, end, delay)))
-				.map_or(0, |(was, from, before)| {
-					let earlier = match was.checked_duration_since(at) {
-						Some(ahead) => nanos(ahead),
-						None => -nanos(at.duration_since(was)),
-					};
-					earlier + nanos(end) - nanos(from) + nanos(delay) - nanos(before)
-				});
+			let jumped = anchored.replace((at, end, delay)).map_or(0, |(was, from, before)| {
+				let earlier = match was.checked_duration_since(at) {
+					Some(ahead) => nanos(ahead),
+					None => -nanos(at.duration_since(was)),
+				};
+				earlier + nanos(end) - nanos(from) + nanos(delay) - nanos(before)
+			});
 			let jumped = Duration::from_nanos(jumped.clamp(0, u64::MAX as i128) as u64);
 			sink.due(at, max_delay.saturating_sub(delay), jumped);
 		}
@@ -842,7 +842,7 @@ async fn play_audio<O: Output>(
 						steer(wrote);
 						sink.set_latency(target())?;
 						if let Some((_, end)) = wrote {
-							anchor(&mut sink, end);
+							anchor(&mut sink, &mut anchored, end);
 						}
 					}
 				}
@@ -1014,7 +1014,7 @@ async fn play_audio<O: Output>(
 				quiet -= frames as u64;
 			}
 			let written = sink.write(&frame.data)?;
-			anchor(&mut sink, timing.end);
+			anchor(&mut sink, &mut anchored, timing.end);
 			let trimmed = written.dropped_sample_frames as u64;
 			if trimmed > 0 {
 				output.send(Event::Trimmed {
