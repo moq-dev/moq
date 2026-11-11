@@ -122,19 +122,31 @@ Work, model first:
 - Wire, for the implementer to confirm or improve; list each departure in
   the PR. ROUTE_START and ROUTE_UPDATE gain a count and that many Node IDs,
   in order from the origin, the sender last and the origin itself left out.
-  A node checks the list for its own Node ID as received, before it files
-  anything a scoped peer sent under a qualified Node ID. A list longer than
-  a fixed limit makes the route unusable; reuse lite-06's hop limit unless
+  List entries are never qualified: a relay files a scoped peer's origin
+  Node ID under a qualified one as today, and carries the list's entries on
+  as received, each a bare Node ID. A relay cannot compute another relay's
+  qualification, so a qualified entry could never match the node it names.
+  A scoped peer can then add or drop entries only on routes filed under its
+  own qualified identities, which harms nothing but those routes, and a lap
+  through it is still stopped by refusing to requalify a qualified identity
+  (`scoped_connections_cannot_requalify_a_qualified_identity`). The model
+  has no scoped grants, so cover this in `Sim` with a route that crosses a
+  relay, a scoped peer, and the same relay again. A list longer than a
+  fixed limit makes the route unusable; reuse lite-06's hop limit unless
   there is a reason not to. A node that forwards declares a Node ID, since
   it has to name itself.
-- Draft: the two messages, Routing (a route that names the receiver, and
-  that forgetting is safe because of it, not because of the echo alone),
-  and the lite-07 changelog. `js/net` has no route layer yet, so
+- Draft: the two messages, Routing (a route that names the receiver, that
+  list entries are never qualified, and that forgetting is safe because of
+  the list, not because of the echo alone), the Node ID Parameter, which
+  today says an endpoint that originates no routes omits it and must now
+  say a node that forwards sends it, and the lite-07 changelog. `js/net` has no route layer yet, so
   [its quest](/quest/m2/cluster-routing/routes/js.md) decodes the list and
   sends an empty one for its own route.
 - Update the `verify-route` skill's open finding, coverage, and sync
-  commit, and the epic's loop-freedom bullet and decision 6, which say the
-  echo alone makes forgetting safe.
+  commit, and the three places in the epic that say the echo alone makes
+  forgetting safe: the loop-freedom bullet, decision 6, and the handoff
+  contract's bullet on dropping the distance ("as safe as a fresh node
+  joining").
 - [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457)'s cache
   sweep runs on the Rust router and depends on the feasibility check; rerun
   it with the list if it has landed.
