@@ -39,7 +39,7 @@ just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/rout
 | `Behind.cfg` | The origin behind relay 1, which sits in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 3,033,111 |
 | `BehindDear.cfg` | The same, with relay 3 nearer the origin than relay 2. | 1 claim change, 1 session change | 5,377,597 |
 
-All three pass at the sync commit. Each takes minutes on 4 workers, so run them last. First run what answers in seconds:
+All three pass at the sync commit, and `just test tla rs/moq-net/verify/route` runs them all, as Nightly does. Each takes minutes on 4 workers, so run them last. First run what answers in seconds:
 
 - `just rs test -p moq-net --lib -E 'test(/route::/)'`. `sweep_no_route_outgrows_a_loop_free_path` delivers every message and echo in a random order on random meshes with unequal costs, flaps, restarts, and collections, and checks the metric bound, loop freedom, and the quiet state. Raise its case count for a wider search: 40,000 cases run in 15 seconds in release.
 - TLC's simulation mode, which samples runs the exhaustive bounds do not reach. The config's `MaxRev`, `MaxFlaps`, and `MaxCollects` still bound a simulated run, so raise them in a copy of the config first, such as three session changes, two claim changes, and a collection, then add `-simulate num=3000 -depth 150`.
@@ -54,18 +54,18 @@ A counterexample is a path through the model, not yet a bug. Replay it on the ro
 
 ## Coverage
 
-Sync commit: `c916855d163ff5641ad18cfb8e14b76dababd99a`, plus the change that added a route's hops ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)). Run `git log c916855d16.. -- rs/moq-net/src/route/` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `c916855d163ff5641ad18cfb8e14b76dababd99a`, plus the change that added a route's hops ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)). Run `git log c916855d16.. -- rs/moq-net/src/route/` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit. `just check` fails when a function or type the table names no longer exists in its file (`sh/coverage-tables.py`), so each Code cell starts with a repo-relative path, then the symbols in it.
 
-| Code (`rs/moq-net/src/route/`) | Model |
+| Code | Model |
 | --- | --- |
-| `mod.rs` `feasible`, `Entry::crossed`, `eligible`, `metric`, `selected`, `infeasible`, `recoverable`, `live`, `certifiers` | `Feasible`, `Crossed`, `Eligible`, `Through`, `Selected`, `InfeasibleSet`, `Recoverable`, `Live`, `Certifiers` |
-| `mod.rs` `certified`, `prune`, `adopted` | `Certified`, `Prune`, `Adopted` |
-| `mod.rs` `update`, `recompute`, `record`, `advertise`, `requests` | `Update` and its `prune`, `Record`, `Plan`, `Requests` |
-| `mod.rs` `show`, `shown_now` | `Events`, `ShownNow` |
-| `mod.rs` `route`, `batch`, `request`, `echo` | `OnRoute`, `OnBatch`, `OnRequest`, `Deliver`, `DeliverAck` |
-| `mod.rs` `connect`, `peer_interest`, `disconnect`, `collect`, `change` | `Connect`, `Opened`, `Disconnect`, `Closed`, `Collect`, `ChangeClaim` |
-| `view.rs` `View::merge`, `View::restrict` | `Merge`, `Certify` |
-| `tests/mod.rs` `Sim` queues and `revivals`, `false_ends` | `q`, `acks`, `revivals`, `falseEnds` |
+| `rs/moq-net/src/route/mod.rs` `feasible`, `Entry::crossed`, `eligible`, `metric`, `selected`, `infeasible`, `recoverable`, `live`, `certifiers` | `Feasible`, `Crossed`, `Eligible`, `Through`, `Selected`, `InfeasibleSet`, `Recoverable`, `Live`, `Certifiers` |
+| `rs/moq-net/src/route/mod.rs` `certified`, `prune`, `adopted` | `Certified`, `Prune`, `Adopted` |
+| `rs/moq-net/src/route/mod.rs` `update`, `recompute`, `record`, `advertise`, `requests` | `Update` and its `prune`, `Record`, `Plan`, `Requests` |
+| `rs/moq-net/src/route/mod.rs` `show`, `shown_now` | `Events`, `ShownNow` |
+| `rs/moq-net/src/route/mod.rs` `route`, `batch`, `request`, `echo` | `OnRoute`, `OnBatch`, `OnRequest`, `Deliver`, `DeliverAck` |
+| `rs/moq-net/src/route/mod.rs` `connect`, `peer_interest`, `disconnect`, `collect`, `change` | `Connect`, `Opened`, `Disconnect`, `Closed`, `Collect`, `ChangeClaim` |
+| `rs/moq-net/src/route/view.rs` `View::merge`, `View::restrict` | `Merge`, `Certify` |
+| `rs/moq-net/src/route/tests/mod.rs` `Sim` queues and `revivals`, `false_ends` | `q`, `acks`, `revivals`, `falseEnds` |
 
 ## Not covered
 

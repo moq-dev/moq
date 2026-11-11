@@ -52,5 +52,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [The TLA+ models run nightly and reviews resync them](/quest/m1/model-checks-nightly.md) - the Nightly job this check joins
 - [Route sweeps are checked against the TLA+ model](/quest/m1/route-trace-validation.md) - ties the same spec to the code

@@ -25,7 +25,7 @@ just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla
 just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/StreamWins.cfg
 ```
 
-The first checks every rule but `StreamWins`: about 3.0M states, 20 to 30 seconds on 32 cores, and it passes at the sync commit. The second fails at the sync commit on the open finding below. One group is enough: groups share only the order of the Subscribe Stream, and a second group multiplies the states (60M and more) without adding a race.
+The first checks every rule but `StreamWins`: about 3.0M states, 20 to 30 seconds on 32 cores, and it passes at the sync commit. The second fails at the sync commit on the open finding below. `just test tla rs/moq-net/verify/subscribe` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes. One group is enough: groups share only the order of the Subscribe Stream, and a second group multiplies the states (60M and more) without adding a race.
 
 Read a counterexample with `/statechart`, passing it the spec, a config, and `SubscribeAccounting.view.ts`, which labels what each side holds for the group, which update each side is on, and each step as the event that happens. It gives the shortest path to each broken rule in those words.
 
@@ -39,20 +39,20 @@ A counterexample is a path through the model, not yet a bug. Replay it on the co
 
 ## Coverage
 
-Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun both configs, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun both configs, and move the sync commit forward only once the model describes the code at the new commit. `just check` fails when a function or type the table names no longer exists in its file (`sh/coverage-tables.py`), so each Code cell starts with a repo-relative path, then the symbols in it.
 
-| Code (`rs/moq-net/src/`) | Model |
+| Code | Model |
 | --- | --- |
-| `lite/publisher.rs` `TrackRun::poll_track` (`Recv::Group`, the re-offer pop), `serve`, `mark_served` | `CursorHand`, `PubReoffer`, `Serve` |
-| `lite/publisher.rs` `poll_forward_drop`, `forward_range`, `drop_range`, `replace_stale`, `sent_stale`, `hole` | `CursorGiveUp`, `ReplaceStale` |
-| `lite/publisher.rs` `TrackRun::poll_step` (outcomes, `redrop`) | `PubOutcomes`, `PubRedrop` |
-| `lite/publisher.rs` `TrackRun::update`, `owe`; `model/track.rs` `reoffer_stale`, `reoffer_groups` | `PubUpdate` |
-| `lite/publisher.rs` `GroupServe::poll_serve` (`Serve`, `Closed`), `settle_failed` | `StreamFin`, `StreamFail`, `StreamAck` |
-| `lite/subscriber.rs` `TrackEntry::open`, `reopen`, `place`; `GroupRecv::poll_serve` (the duplicate wait) | `SubHeader`, `SubFin`, `SubReset`, `SubResetHeld` |
-| `lite/subscriber.rs` `ServeLoop::apply_response` (`Drop`, `Skip`) | `OnDrop`, `OnSkip`, `SubRecv` |
-| `lite/subscriber.rs` `buffer_update`; `model/track.rs` `supersede_stale` | `SubUpdate` |
-| `tail.rs` `Reading::open`, `Reading::finish`, `Tail::finished`, `updated`, `account`, `unaccount` | `acct`, `finished` |
-| `model/track.rs` `Producer::give_up`, `skip_received` | `rec`, `cached` |
+| `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_track` (`Recv::Group`, the re-offer pop), `serve`, `mark_served` | `CursorHand`, `PubReoffer`, `Serve` |
+| `rs/moq-net/src/lite/publisher.rs` `poll_forward_drop`, `forward_range`, `drop_range`, `replace_stale`, `sent_stale`, `hole` | `CursorGiveUp`, `ReplaceStale` |
+| `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_step` (outcomes, `redrop`) | `PubOutcomes`, `PubRedrop` |
+| `rs/moq-net/src/lite/publisher.rs` `TrackRun::update`, `owe`; `rs/moq-net/src/model/track.rs` `reoffer_stale`, `reoffer_groups` | `PubUpdate` |
+| `rs/moq-net/src/lite/publisher.rs` `GroupServe::poll_serve` (`Serve`, `Closed`), `settle_failed` | `StreamFin`, `StreamFail`, `StreamAck` |
+| `rs/moq-net/src/lite/subscriber.rs` `TrackEntry::open`, `reopen`, `place`; `GroupRecv::poll_serve` (the duplicate wait) | `SubHeader`, `SubFin`, `SubReset`, `SubResetHeld` |
+| `rs/moq-net/src/lite/subscriber.rs` `ServeLoop::apply_response` (`Drop`, `Skip`) | `OnDrop`, `OnSkip`, `SubRecv` |
+| `rs/moq-net/src/lite/subscriber.rs` `buffer_update`; `rs/moq-net/src/model/track.rs` `supersede_stale` | `SubUpdate` |
+| `rs/moq-net/src/tail.rs` `Reading::open`, `Reading::finish`, `Tail::finished`, `updated`, `account`, `unaccount` | `acct`, `finished` |
+| `rs/moq-net/src/model/track.rs` `Producer::give_up`, `skip_received` | `rec`, `cached` |
 
 ## Not covered
 
