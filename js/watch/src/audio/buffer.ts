@@ -7,11 +7,12 @@ import type { Clock, Data, End, Init, Latency, Playing, Received, Reset, State, 
 const WINDOW = 30_000;
 
 // How far the clock's offset from the context's time may rise per state report: far past any drift
-// between the two clocks, and well short of the render quantum a reading can land late by.
+// between the two clocks, and well short of the render callback a reading can land within.
 const RISE = 100;
 
 // An offset that moves further than this moved for real, as a delay or a reference change moves it,
-// rather than by where a reading landed within a render quantum.
+// rather than by where a reading landed within a render callback. Readings after a longer callback
+// all land just after it, so they agree without the filter.
 const JUMP = 10_000;
 
 /**
@@ -356,7 +357,9 @@ export class AudioBuffer {
 	}
 
 	// Send where the shared clock stands, in the ring's coordinates, read together with the context's
-	// time so a late message misplaces neither.
+	// time so a late message misplaces neither. Each reading follows a state report, which lands just
+	// after the context renders a callback, when its time runs up to that callback ahead of the wall
+	// clock: the ring then trails the clock by up to one callback, the audio a callback pulls at once.
 	#clock(now: Duration | undefined): void {
 		const time = this.#worklet.context.currentTime;
 		if (now === undefined) {
