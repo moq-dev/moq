@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Reject a MIGRATE.md edit outside the release cut; deleting a package deletes its guide too. A breaking PR puts its
+# Reject a MIGRATE.md edit outside the release cut. Deleting a package deletes
+# its guide, which is not an edit. A breaking PR puts its
 # migration note in its Impact section; the cut gathers those notes into each
 # package's guide. The cut is recognized by its edit adding a version-transition
 # heading (`## 0.3 -> 0.4`) to that guide, which a diff shows in the merge queue too.

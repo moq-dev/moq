@@ -53,7 +53,7 @@ What to check first (seeded 2026-10-26):
   [Ship capture and playback](/quest/m3/cli-packaging.md)'s work, not this
   review's.
 - The crates with the most features at seeding: moq-cli (21), moq-tokio (17),
-  moq-relay (14), moq-native (13), and moq-video (11).
+  moq-relay (14), and moq-video (11).
 
 Related: the [cost audit](/quest/m3/audit-cost.md) owns per-crate build
 cost and which dependencies exist.

@@ -18,7 +18,7 @@ publishes the screen as a screen-only participant with no name.
 
 Gate the screen broadcast on `enabled && #screenLive`, fix `Local`'s doc,
 which describes today's behaviour, flip the residual test, and update the
-Room chart so its rule holds. Check `moq-room` (Rust) for the same gate.
+Room chart so its rule holds.
 
 Caused by: [moq-dev/moq#3634](https://github.com/moq-dev/moq/pull/3634), which
 extracted conferencing into `@moq/room` with this gate.
