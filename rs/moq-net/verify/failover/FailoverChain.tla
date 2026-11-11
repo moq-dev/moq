@@ -253,7 +253,9 @@ Ask(u, g) ==
     /\ UNCHANGED <<org, alive, deaths, front, left>>
 
 \* A short group nothing can continue fails (`Recover::poll` gives up): its
-\* source failed, no other copy holds it, and the front has no route left.
+\* source failed, no other copy holds it, and no fetch can reach the rest,
+\* because the front has no route left, ended with its serving copy gone, or
+\* the live serving copy is the source that gave up on the group.
 Abort(e, g) ==
     LET u == e[2] IN
     /\ u # "O"
@@ -261,7 +263,9 @@ Abort(e, g) ==
     /\ Exhausted(e, g)
     /\ SrcDead(u, cp[e].src[g], g)
     /\ Holders(u, e, g) = {}
-    /\ front[u].end = "err"
+    /\ \/ front[u].end = "err"
+       \/ front[u].end = "ok" /\ ~Live(Serving(u))
+       \/ cp[e].src[g] = front[u].cur /\ Live(Serving(u))
     /\ cp' = [cp EXCEPT ![e].bad = @ \cup {g}]
     /\ UNCHANGED <<org, alive, deaths, front, left>>
 
@@ -410,11 +414,6 @@ CleanEndIsComplete == Live(CE) /\ cp[CE].fin => \A g \in Groups : cp[CE].fr[g] >
 
 \* The client's track ends cleanly only after the origin ended it.
 CleanEndIsDeclared == cp[CE].fin => org.fin
-
-\* The client's track fails only once E has no route left: a relay dying or a
-\* route moving is E's to replace.
-FailsOnlyUnroutable ==
-    cp[CE].st = "failed" => front["E"].end = "err" /\ \A r \in Mortal : ~alive[r]
 
 \* A group the client started fails only once no route is left to continue it.
 NoSkipWhileHeld == cp[CE].bad # {} => front["E"].end = "err"
