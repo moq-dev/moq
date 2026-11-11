@@ -1692,11 +1692,7 @@ async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Dura
 
 #[tokio::test]
 async fn broadcast_max_age() {
-	for version in [
-		"moq-lite-05",
-		"moq-lite-06",
-		"moq-lite-07-wip",
-	] {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		for age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
 			assert_eq!(max_age_test(version, age).await, age, "{version}");
 		}
