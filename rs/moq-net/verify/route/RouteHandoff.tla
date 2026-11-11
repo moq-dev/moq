@@ -70,10 +70,12 @@ VARIABLES
     falseEnds,  \* reader ENDs while the origin still has that item (`false_ends`)
     regressions,\* reader UPDATEs to an older item
     flaps,
-    collects
+    collects,
+    burst,      \* ROUTE, batch, request, and echo messages sent since the last quiet point
+    churn       \* external changes since the last quiet point
 
 vars == <<up, q, acks, rev, own, seqno, hist, st, ended, revivals, falseEnds,
-          regressions, flaps, collects>>
+          regressions, flaps, collects, burst, churn>>
 
 \* The origin's view and seqno.
 OV == [rev |-> rev, items |-> own, seq |-> seqno]
@@ -269,6 +271,30 @@ Commit(rs, q0) ==
        /\ falseEnds' = falseEnds + Sum(LAMBDA n : rs[n].ev.falseEnds)
        /\ regressions' = regressions + Sum(LAMBDA n : rs[n].ev.regressions)
 
+Quiet == \A d \in Dirs : q[d] = <<>> /\ acks[d] = 0
+
+\* The messages the updates `rs` send, counted before `Heeded` drops any.
+Sent(rs) ==
+    LET ns == DOMAIN rs
+        F[S \in SUBSET ns] ==
+            IF S = {} THEN 0
+            ELSE LET x == CHOOSE x \in S : TRUE
+                     G[T \in SUBSET Nodes] ==
+                         IF T = {} THEN 0 ELSE LET m == CHOOSE m \in T : TRUE IN Len(rs[x].out[m]) + G[T \ {m}]
+                 IN G[Nodes] + F[S \ {x}]
+    IN F[ns]
+
+\* A burst runs from one quiet point to the next. An external change (a claim
+\* change, a session opening or closing, a collection) made while quiet starts
+\* a fresh one; every message sent in it counts against the changes made in it.
+External(sent) ==
+    /\ burst' = (IF Quiet THEN 0 ELSE burst) + sent
+    /\ churn' = (IF Quiet THEN 0 ELSE churn) + 1
+
+Internal(sent) ==
+    /\ burst' = burst + sent
+    /\ UNCHANGED churn
+
 -----------------------------------------------------------------------------
 (* Initial state: every session open (`Sim::join`), the origin declared     *)
 (* with no claims (`originate`), and nothing sent.                         *)
@@ -300,6 +326,8 @@ Init ==
     /\ regressions = 0
     /\ flaps = 0
     /\ collects = 0
+    /\ burst = 0
+    /\ churn = 0
 
 -----------------------------------------------------------------------------
 (* The origin changes a claim (`announce` / `unannounce` -> `change`).      *)
@@ -307,10 +335,12 @@ Init ==
 ChangeClaim(c, item) ==
     LET own1 == [own EXCEPT ![c] = item]
         ov1 == [rev |-> rev + 1, items |-> own1, seq |-> seqno]
+        rs == [n \in {Origin} |-> Update(Origin, st[Origin], ov1, up, ended[Origin])]
     IN /\ rev' = rev + 1
        /\ own' = own1
        /\ hist' = Append(hist, own1)
-       /\ Commit([n \in {Origin} |-> Update(Origin, st[Origin], ov1, up, ended[Origin])], q)
+       /\ Commit(rs, q)
+       /\ External(Sent(rs))
        /\ UNCHANGED <<up, acks, seqno, flaps, collects>>
 
 \* A new claim, or new attributes for one, under a fresh revision.
@@ -377,26 +407,32 @@ Deliver(d) ==
               ELSE CASE msg.type = "route" -> OnRoute(st[n], m, msg.reach)
                      [] msg.type = "batch" -> OnBatch(st[n], m, msg.view)
                      [] OTHER -> OnRequest(st[n], m, msg.seq)
+        rs == [x \in {n} |-> Update(n, s1, ov1, up, ended[n])]
+        echoes == IF isEnd THEN 1 ELSE 0
     IN /\ q[d] # <<>>
        \* Every ROUTE_END is echoed once applied.
        /\ acks' = IF isEnd THEN [acks EXCEPT ![<<n, m>>] = @ + 1] ELSE acks
        /\ seqno' = ov1.seq
        /\ IF skip
           THEN /\ q' = q0
+               /\ Internal(echoes)
                /\ UNCHANGED <<st, ended, revivals, falseEnds, regressions>>
-          ELSE Commit([x \in {n} |-> Update(n, s1, ov1, up, ended[n])], q0)
+          ELSE /\ Commit(rs, q0)
+               /\ Internal(echoes + Sent(rs))
        /\ UNCHANGED <<up, rev, own, hist, flaps, collects>>
 
 \* `echo`: an echoed ROUTE_END comes back (`Sim::deliver_ack`).
 DeliverAck(d) ==
     LET m == d[1]
         n == d[2]
+        rs == [x \in {n} |-> Update(n, [st[n] EXCEPT !.unacked[m] = @ - 1], OV, up, ended[n])]
     IN /\ acks[d] > 0
        /\ acks' = [acks EXCEPT ![d] = @ - 1]
        /\ IF st[n].unacked[m] = 0
-          THEN UNCHANGED <<st, q, ended, revivals, falseEnds, regressions>>
-          ELSE Commit([x \in {n} |->
-                  Update(n, [st[n] EXCEPT !.unacked[m] = @ - 1], OV, up, ended[n])], q)
+          THEN /\ Internal(0)
+               /\ UNCHANGED <<st, q, ended, revivals, falseEnds, regressions>>
+          ELSE /\ Commit(rs, q)
+               /\ Internal(Sent(rs))
        /\ UNCHANGED <<up, rev, own, seqno, hist, flaps, collects>>
 
 -----------------------------------------------------------------------------
@@ -417,42 +453,47 @@ Closed(s, y) ==
 
 Connect(l) ==
     LET up1 == up \cup {l}
+        rs == [x \in l |->
+                 LET y == CHOOSE y \in l : y # x
+                 IN Update(x, Opened(st[x], y), OV, up1, ended[x])]
     IN /\ l \notin up
        /\ flaps < MaxFlaps
        /\ up' = up1
        /\ flaps' = flaps + 1
-       /\ Commit([x \in l |->
-               LET y == CHOOSE y \in l : y # x
-               IN Update(x, Opened(st[x], y), OV, up1, ended[x])], q)
+       /\ Commit(rs, q)
+       /\ External(Sent(rs))
        /\ UNCHANGED <<acks, rev, own, seqno, hist, collects>>
 
 Disconnect(l) ==
     LET up1 == up \ {l}
         q0 == [d \in Dirs |-> IF {d[1], d[2]} = l THEN <<>> ELSE q[d]]
+        rs == [x \in l |->
+                 LET y == CHOOSE y \in l : y # x
+                 IN Update(x, Closed(st[x], y), OV, up1, ended[x])]
     IN /\ l \in up
        /\ flaps < MaxFlaps
        /\ up' = up1
        /\ flaps' = flaps + 1
        /\ acks' = [d \in Dirs |-> IF {d[1], d[2]} = l THEN 0 ELSE acks[d]]
-       /\ Commit([x \in l |->
-               LET y == CHOOSE y \in l : y # x
-               IN Update(x, Closed(st[x], y), OV, up1, ended[x])], q0)
+       /\ Commit(rs, q0)
+       /\ External(Sent(rs))
        /\ UNCHANGED <<rev, own, seqno, hist, collects>>
 
 \* `collect`, allowed once the node holds no route (`Sim::holds`). It
 \* forgets the views, so the reader's earlier ENDs no longer count.
 Collect(n) ==
+    LET rs == [x \in {n} |->
+                 Update(n, [st[n] EXCEPT !.view = NoView,
+                                         !.heard = [m \in Nodes |-> NoHeard],
+                                         !.pending = NoPending],
+                        OV, up, [c \in Claims |-> None])]
+    IN
     /\ collects < MaxCollects
     /\ \A m \in Nodes : ~st[n].rx[m].on
     /\ collects' = collects + 1
-    /\ Commit([x \in {n} |->
-            Update(n, [st[n] EXCEPT !.view = NoView,
-                                    !.heard = [m \in Nodes |-> NoHeard],
-                                    !.pending = NoPending],
-                   OV, up, [c \in Claims |-> None])], q)
+    /\ Commit(rs, q)
+    /\ External(Sent(rs))
     /\ UNCHANGED <<up, acks, rev, own, seqno, hist, flaps>>
-
-Quiet == \A d \in Dirs : q[d] = <<>> /\ acks[d] = 0
 
 \* Nothing is in flight and no more churn is allowed: the run is over.
 Done ==
@@ -504,17 +545,19 @@ Hop(n, k) == IF k = 0 THEN n ELSE Hop(NextHop(n), k - 1)
 \* Following selected next hops from any relay never cycles.
 LoopFree == \A n \in Relays : Hop(n, Cardinality(Nodes)) \notin Relays
 
-\* Every link costs 1, so a loop-free path to the origin has at most this metric.
-Longest == Cardinality(Nodes) - 1
+\* Every link costs 1 and only forwarding nodes are on a path, so a loop-free
+\* path from the origin to `n` has at most this metric.
+Forwarders == {n \in Nodes : Serves(n)}
+Longest(n) == Cardinality(Forwarders) - (IF Serves(n) THEN 1 ELSE 0)
 
 \* No relay selects a route longer than any loop-free path: a longer one is a
 \* stale route counting up as it bounces between relays (Babel's feasibility
 \* condition exists to rule this out).
-NoCountToInfinity == \A n \in Relays : Selected(n, st[n], OV).met <= Longest
+NoCountToInfinity == \A n \in Relays : Selected(n, st[n], OV).met <= Longest(n)
 
 \* Explore one step past NoCountToInfinity and no further, so a count to
 \* infinity is reported rather than explored forever.
-Bounded == \A n, m \in Nodes : st[n].rx[m].met <= Longest
+Bounded == \A n, m \in Nodes : st[n].rx[m].met <= Longest(m)
 
 \* Nodes the origin reaches over open sessions, through nodes that forward.
 RECURSIVE Grow(_, _)
@@ -539,5 +582,30 @@ Settled ==
     /\ \A n \in Nodes : ~st[n].pending.on
 
 QuietIsSettled == Quiet => Settled
+
+\* What one external change may cost: about one message of each kind (a ROUTE,
+\* a batch, a seqno request, an echo) per direction of each configured session.
+PerChange == 4 * Cardinality(Dirs)
+
+\* The messages sent since the last quiet point stay within the budget of the
+\* external changes made since then, so a change never sets off announce spam.
+\* `burst` is part of the state, so a cycle of deliveries that never goes quiet
+\* would grow it past any budget: Budget also rules out routing that never
+\* converges once the changes stop.
+Budget == burst <= PerChange * churn
+
+\* While anything is in flight, something is eventually delivered. This is
+\* weaker than fairness per queue (whose tableau TLC builds in time exponential
+\* in the queues), so Converges fails on any cycle of deliveries, starving a
+\* queue or not.
+Delivery == \E d \in Dirs : Deliver(d) \/ DeliverAck(d)
+\* WF_vars(Delivery), spelled out: Delivery is enabled exactly when not Quiet,
+\* and TLC evaluates ENABLED of this action far too slowly.
+Fairness == []<>Quiet \/ []<><<Delivery>>_vars
+
+LiveSpec == Spec /\ Fairness
+
+\* After the last external change, routing goes quiet and stays settled.
+Converges == <>[](Quiet /\ Settled)
 
 =============================================================================
