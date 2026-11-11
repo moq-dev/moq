@@ -103,7 +103,7 @@ kind.
   changes.
 - **Media types live in `@moq/hang`.** `@moq/stats` reads only the relay's
   `moq-stats` format; amended 2026-11-11, when the demo's relay-stats reader
-  moved there ([JS reader for relay stats](/quest/m1/stats-reader.md)).
+  moved there.
 - Docs stay inline: `doc/concept/hang.md` documents both catalog sections,
   `doc/concept/stats.md` gains a media section beside the relay's, and
   `drafts/draft-lcurley-moq-hang.md` specs the wire.
