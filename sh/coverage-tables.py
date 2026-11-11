@@ -87,10 +87,10 @@ def check(root: Path) -> list[str]:
                 for index, segment in enumerate(segments):
                     if index < len(segments) - 1 and not segment[:1].isupper():
                         continue
-                    owner = segments[index - 1] if index else ""
-                    scope = bodies(source, owner) if owner[:1].isupper() else source
-                    if not defines(scope, segment):
-                        errors.append(f"{where}:{number}: `{token}`: no `{segment}` defined in its {f'`{owner}`' if owner[:1].isupper() else 'file'}")
+                    owner = segments[index - 1] if index and segments[index - 1][:1].isupper() else None
+                    if not defines(bodies(source, owner) if owner else source, segment):
+                        place = f"`{owner}`" if owner else "file"
+                        errors.append(f"{where}:{number}: `{token}`: no `{segment}` defined in its {place}")
             if not tokens:
                 errors.append(f"{where}:{number}: the Code cell names no code")
         if not found:
