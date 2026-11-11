@@ -344,9 +344,8 @@ async fn the_first_walk_fails_fast() {
 async fn a_zero_timeout_gives_up_at_the_first_retry() {
 	let peer = url("tcp://peer:1/");
 	let started = kio::clock::now();
-	let mut machine = established(
-		Reconnect::new(config(INITIAL, Some(Duration::ZERO)), vec![peer.clone()], started).unwrap(),
-	);
+	let mut machine =
+		established(Reconnect::new(config(INITIAL, Some(Duration::ZERO)), vec![peer.clone()], started).unwrap());
 	let mut run = Run::default();
 	let err = drive(
 		&mut machine,
@@ -1097,14 +1096,9 @@ fn dialing_never_logs_the_credential() {
 			Action::Dial(_)
 		));
 		machine.failed(started.saturating_add(ATTEMPT), TestError::Dial, Verdict::Retry);
-		loop {
-			match machine.poll(started.saturating_add(ATTEMPT), &waiter) {
-				Action::Done(Err(err)) => {
-					reported.push(err.to_string());
-					break;
-				}
-				action => panic!("unexpected {action:?}"),
-			}
+		match machine.poll(started.saturating_add(ATTEMPT), &waiter) {
+			Action::Done(Err(err)) => reported.push(err.to_string()),
+			action => panic!("unexpected {action:?}"),
 		}
 	});
 
