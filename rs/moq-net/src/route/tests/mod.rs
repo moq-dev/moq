@@ -104,6 +104,10 @@ enum Msg {
 		id: Id,
 		seqno: Seqno,
 	},
+	/// The echo of a ROUTE_END, behind every route its sender sent before it.
+	Echo {
+		id: Id,
+	},
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,8 +153,6 @@ pub(super) struct Sim {
 	grants: BTreeSet<&'static str>,
 	up: BTreeSet<(Node, Node)>,
 	queues: BTreeMap<(Node, Node), VecDeque<Msg>>,
-	/// Echoed ROUTE_ENDs: unordered against the echoing node's own routes.
-	acks: BTreeMap<(Node, Node), VecDeque<Id>>,
 	held: BTreeSet<(Node, Node)>,
 	history: BTreeMap<Id, Vec<Change>>,
 	/// Every request sent, to spot a repeat.
@@ -171,7 +173,6 @@ impl Sim {
 			grants: BTreeSet::new(),
 			up: BTreeSet::new(),
 			queues: BTreeMap::new(),
-			acks: BTreeMap::new(),
 			held: BTreeSet::new(),
 			history: BTreeMap::new(),
 			requested: BTreeSet::new(),
@@ -242,7 +243,6 @@ impl Sim {
 		self.up.remove(&Self::pair(a, b));
 		for (x, y) in [(a, b), (b, a)] {
 			self.queues.remove(&(x, y));
-			self.acks.remove(&(x, y));
 			self.held.remove(&(x, y));
 			self.nodes[y].disconnect(x);
 		}
@@ -397,18 +397,8 @@ impl Sim {
 				interest,
 			} => router.batch(from, id, changes, floor, interest),
 			Msg::Request { id, seqno } => router.request(from, id, seqno),
+			Msg::Echo { id } => router.echo(from, id),
 		}
-		self.stats.delivered += 1;
-		self.flush();
-		true
-	}
-
-	/// Deliver one echoed ROUTE_END from `from` to `to`, even if held.
-	pub fn deliver_ack(&mut self, from: Node, to: Node) -> bool {
-		let Some(id) = self.acks.get_mut(&(from, to)).and_then(VecDeque::pop_front) else {
-			return false;
-		};
-		self.nodes[to].echo(from, id);
 		self.stats.delivered += 1;
 		self.flush();
 		true
@@ -418,21 +408,8 @@ impl Sim {
 		self.queues.get(&(from, to)).map_or(0, VecDeque::len)
 	}
 
-	pub fn queued_acks(&self, from: Node, to: Node) -> usize {
-		self.acks.get(&(from, to)).map_or(0, VecDeque::len)
-	}
-
 	pub fn busy(&self) -> Vec<(Node, Node)> {
-		Self::nonempty(&self.queues)
-	}
-
-	pub fn busy_acks(&self) -> Vec<(Node, Node)> {
-		Self::nonempty(&self.acks)
-	}
-
-	fn nonempty<T>(queues: &BTreeMap<(Node, Node), VecDeque<T>>) -> Vec<(Node, Node)> {
-		queues
-			.iter()
+		(self.queues.iter())
 			.filter(|(_, queue)| !queue.is_empty())
 			.map(|(key, _)| *key)
 			.collect()
@@ -447,19 +424,11 @@ impl Sim {
 	pub fn settle(&mut self, rounds: usize) -> bool {
 		for _ in 0..rounds {
 			let ready: Vec<(Node, Node)> = self.busy().into_iter().filter(|key| !self.held.contains(key)).collect();
-			let acks: Vec<(Node, Node)> = self
-				.busy_acks()
-				.into_iter()
-				.filter(|key| !self.held.contains(key))
-				.collect();
-			if ready.is_empty() && acks.is_empty() {
+			if ready.is_empty() {
 				return true;
 			}
 			for (from, to) in ready {
 				self.deliver(from, to);
-			}
-			for (from, to) in acks {
-				self.deliver_ack(from, to);
 			}
 		}
 		false
@@ -497,8 +466,7 @@ impl Sim {
 					}
 					Out::Echo { to, id } => {
 						self.stats.route_msgs += 1;
-						self.acks.entry((node, to)).or_default().push_back(id);
-						continue;
+						(to, Msg::Echo { id })
 					}
 				};
 				self.queues.entry((node, to)).or_default().push_back(msg);

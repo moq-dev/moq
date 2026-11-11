@@ -1215,18 +1215,13 @@ fn churn(rng: &mut XorShift) -> Sim {
 				sim.reconnect(first + origin);
 			}
 			_ => {
-				// Echoed ROUTE_ENDs interleave freely with the echoing node's routes.
 				for _ in 0..rng.next(6) {
-					let busy: Vec<(bool, usize, usize)> = (sim.busy().into_iter().map(|(from, to)| (false, from, to)))
-						.chain(sim.busy_acks().into_iter().map(|(from, to)| (true, from, to)))
-						.collect();
+					let busy = sim.busy();
 					if busy.is_empty() {
 						break;
 					}
-					match busy[rng.next(busy.len() as u64) as usize] {
-						(false, from, to) => sim.deliver(from, to),
-						(true, from, to) => sim.deliver_ack(from, to),
-					};
+					let (from, to) = busy[rng.next(busy.len() as u64) as usize];
+					sim.deliver(from, to);
 				}
 			}
 		}
@@ -1429,7 +1424,7 @@ fn a_restarted_floorless_route_drops_what_it_no_longer_carries() {
 	assert!(sim.run());
 	sim.unannounce(origin, "live/a/x");
 	assert!(sim.run());
-	while sim.deliver_ack(z, x) {}
+	while sim.deliver(z, x) {}
 	sim.connect(x, local);
 	assert!(sim.run());
 	sim.release(z, x);
