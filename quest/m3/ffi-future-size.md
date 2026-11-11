@@ -30,6 +30,6 @@ futures in the FFI layers may sit just under the edge the same way.
   `accept_on_a_foreign_thread` in `rs/moq-ffi/src/server.rs` uses
   512 KiB) and record the margin.
 - If the lint proves useful, consider it workspace-wide in
-  [audit lints](/quest/m3/audit-lints.md) instead.
+  the [code audit](/quest/m3/audit-code.md) instead.
 
 Public API: none. Wire: none.
