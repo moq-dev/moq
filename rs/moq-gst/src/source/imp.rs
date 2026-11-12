@@ -6163,10 +6163,13 @@ mod session_tests {
 		assert_played_cleanly(pipeline);
 	}
 
-	/// A real moqsink restart negotiates audio after video, keeping both held moqsrc pads.
+	/// A real moqsink restart negotiates audio after video, keeping both held moqsrc pads. Each
+	/// generation's frames carry their own pts range, which tells them apart: a stream-start count
+	/// would not, since moqsink redialing mid-generation is a new stream on every pad.
 	#[test]
-	#[ignore = "flaky: the dropped audio pad sometimes plays a third stream; quest/m0/test-flakes-2/gst-moqsink-restart-pads.md"]
 	fn a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times() {
+		// Each generation's pts start here times its number.
+		const GENERATION: Duration = Duration::from_secs(10);
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
 		let element = element();
@@ -6176,24 +6179,18 @@ mod session_tests {
 		element.connect_pad_added(move |_, pad| {
 			count.fetch_add(1, Ordering::Relaxed);
 			let sent = sent.clone();
-			let generation = std::sync::atomic::AtomicUsize::new(0);
 			pad.add_probe(
 				gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
 				move |pad, info| {
 					match &info.data {
-						Some(gst::PadProbeData::Event(event)) => match event.view() {
-							gst::EventView::StreamStart(_) => {
-								generation.fetch_add(1, Ordering::Relaxed);
+						Some(gst::PadProbeData::Event(event)) => {
+							if let gst::EventView::Eos(_) = event.view() {
+								sent.send((pad.name().to_string(), None)).unwrap();
 							}
-							gst::EventView::Eos(_) => {
-								sent.send((pad.name().to_string(), generation.load(Ordering::Relaxed), true))
-									.unwrap();
-							}
-							_ => {}
-						},
-						Some(gst::PadProbeData::Buffer(_)) => {
-							sent.send((pad.name().to_string(), generation.load(Ordering::Relaxed), false))
-								.unwrap();
+						}
+						Some(gst::PadProbeData::Buffer(buffer)) => {
+							let generation = buffer.pts().unwrap().seconds() / GENERATION.as_secs();
+							sent.send((pad.name().to_string(), Some(generation))).unwrap();
 							return gst::PadProbeReturn::Drop;
 						}
 						_ => {}
@@ -6228,10 +6225,14 @@ mod session_tests {
 			assert!(video.send_event(gst::event::StreamStart::new("video")));
 			assert!(video.send_event(gst::event::Caps::new(&caps)));
 			assert!(video.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
+			let base = GENERATION.as_millis() as u64 * generation;
 			let keyframe = crate::sink::h264_keyframe_au();
 			for pts in [0, 20, 40] {
 				let mut frame = gst::Buffer::from_slice(keyframe.clone());
-				frame.get_mut().unwrap().set_pts(gst::ClockTime::from_mseconds(pts));
+				frame
+					.get_mut()
+					.unwrap()
+					.set_pts(gst::ClockTime::from_mseconds(base + pts));
 				assert_eq!(video.chain(frame), Ok(gst::FlowSuccess::Ok));
 			}
 			if generation < 2 {
@@ -6240,26 +6241,29 @@ mod session_tests {
 				assert!(audio.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
 				for pts in [0, 20, 40] {
 					let mut frame = gst::Buffer::from_slice([0xf8, 0xff, 0xfe]);
-					frame.get_mut().unwrap().set_pts(gst::ClockTime::from_mseconds(pts));
+					frame
+						.get_mut()
+						.unwrap()
+						.set_pts(gst::ClockTime::from_mseconds(base + pts));
 					assert_eq!(audio.chain(frame), Ok(gst::FlowSuccess::Ok));
 				}
 			}
 			let mut playing = std::collections::BTreeSet::new();
-			// Every (pad, stream, eos) this generation saw, for a failure to show which pad replayed.
+			// Every (pad, generation or EOS) this generation saw, for a failure to show which pad replayed.
 			let mut seen = Vec::new();
 			let mut dropped = false;
 			let returning = if generation == 2 { 1 } else { 2 };
 			while playing.len() < returning || (generation == 2 && !dropped) {
-				let (pad, run, eos) = received
+				let (pad, run) = received
 					.recv_timeout(Duration::from_secs(10))
 					.expect("both renditions should resume");
-				seen.push((pad.clone(), run, eos));
-				if eos {
+				seen.push((pad.clone(), run));
+				if run.is_none() {
 					assert_eq!(generation, 2, "a returning rendition received EOS");
 					assert!(pad.starts_with("audio_"), "the returning video received EOS");
 					assert!(!dropped, "the dropped rendition ended twice");
 					dropped = true;
-				} else if run == generation {
+				} else if run == Some(generation) {
 					playing.insert(pad);
 				}
 			}
@@ -6280,7 +6284,7 @@ mod session_tests {
 		assert_eq!(added.load(Ordering::Relaxed), 2);
 		sink.set_state(gst::State::Null).unwrap();
 		stop(session);
-		assert!(received.try_iter().all(|(_, _, eos)| !eos));
+		assert!(received.try_iter().all(|(_, run)| run.is_some()));
 	}
 
 	/// End to end through a relay: the publisher's session closes without finishing its
