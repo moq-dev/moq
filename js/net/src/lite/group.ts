@@ -1,5 +1,5 @@
 import { race } from "@moq/signals";
-import { FrameTooLarge, ProtocolViolation } from "../error.ts";
+import { FrameTooLarge, StreamCode, StreamError } from "../error.ts";
 import type { Producer as FrameProducer } from "../frame.ts";
 import type * as netGroup from "../group.ts";
 import { hooks } from "../internal.ts";
@@ -70,6 +70,14 @@ export class Group {
 	}
 }
 
+/**
+ * A malformed FRAME on a Group Stream, which ends only that stream while the session and its other
+ * streams go on (lite-07). Mirrors the Rust `UniState::Group`, which aborts only the stream.
+ */
+function malformed(message: string): StreamError {
+	return new StreamError(StreamCode.MalformedTrack, { message });
+}
+
 /** Decode an unsigned zigzag varint back to a signed delta (mirrors Rust `varint::unzigzag`). */
 function unzigzag(v: bigint): bigint {
 	return (v >> 1n) ^ -(v & 1n);
@@ -107,7 +115,7 @@ export function frameDecoder({ scale, compress = false, lengthFirst = false }: F
 		if (lengthFirst) {
 			const length = c.u53();
 			// 0 is reserved for GROUP_END, which no version defines yet.
-			if (length === 0) throw new ProtocolViolation("FRAME payload length of 0");
+			if (length === 0) throw malformed("FRAME payload length of 0");
 			size = length - 1;
 		}
 		const delta = timescale === undefined ? 0n : unzigzag(c.u62());
@@ -144,7 +152,7 @@ export interface Ingest {
  * Write a group stream's frames into `producer` until the stream ends or the producer closes.
  *
  * With `ingest`, a stream continuing a paused group skips the frames the group holds, and
- * completes the one a YIELDED reset cut short; ending before completing it is a protocol violation.
+ * completes the one a YIELDED reset cut short; ending before completing it is malformed.
  */
 export async function readFrames(
 	stream: Reader,
@@ -160,7 +168,7 @@ export async function readFrames(
 		// that closes first has already closed (or aborted) this group through its cache.
 		const frame = stream.tryDecode(decode) ?? (await race([stream.decodeMaybe(decode), producer.closed]));
 		if (frame === undefined && ingest?.partial)
-			throw new ProtocolViolation("a continuation ended before completing the frame it resumed");
+			throw malformed("a continuation ended before completing the frame it resumed");
 		if (!frame || frame instanceof Error) return;
 		if (ingest) {
 			const index = ingest.index++;
@@ -192,21 +200,25 @@ async function skipHeld(
 	last: boolean,
 ): Promise<boolean> {
 	const partial = last ? ingest.partial : undefined;
-	if (!partial) {
-		if (!frame.payload) await skipPayload(stream, frame.size);
-		return true;
-	}
+	if (!partial) return frame.payload !== undefined || (await skipUnlessClosed(stream, producer, frame.size));
 	// The same frame, so the same size: a publisher reusing the group's identity is refused
 	// rather than written past.
-	if (partial.size !== frame.size) throw new ProtocolViolation("a continuation resent a frame at another size");
+	if (partial.size !== frame.size) throw malformed("a continuation resent a frame at another size");
 	const skip = partial.size - partial.remaining;
 	if (frame.payload) {
 		partial.write(frame.payload.subarray(skip));
 		partial.finish();
 	} else {
-		await skipPayload(stream, skip);
+		if (!(await skipUnlessClosed(stream, producer, skip))) return false;
 		if (!(await fillFrame(stream, producer, partial))) return false;
 	}
 	ingest.partial = undefined;
 	return true;
+}
+
+// Read past `size` bytes of a held payload, as `fillFrame` reads one in: resolves false if the group
+// closed first, so a peer that stops sending holds neither the stream nor its task.
+async function skipUnlessClosed(stream: Reader, producer: netGroup.Producer, size: number): Promise<boolean> {
+	await race([skipPayload(stream, size), producer.closed]);
+	return producer.closed.peek() === undefined;
 }

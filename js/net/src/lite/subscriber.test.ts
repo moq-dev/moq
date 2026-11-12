@@ -1556,6 +1556,66 @@ test("a yielded group a drop named ends", async () => {
 	}
 });
 
+// Lite-07: a malformed FRAME on a Group Stream ends only that stream and its group, never the
+// session: a Payload Length of 0, or a continuation that resends the cut frame at another size, ends
+// before completing it, or starts past the frames held. Mirrors the Rust `UniState::Group`.
+test.each(["zero length", "resized", "unfinished", "past held"] as const)(
+	"a malformed lite-07 group stream ends only its group (%s)",
+	async (fault) => {
+		const version = Version.DRAFT_07;
+		const { quic, streams, opened } = fakeSession();
+		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+		const track = subscriber
+			.consume(Path.from("room"))
+			.track("video")
+			.subscribe({ delay: { max: Duration.millis(60_000) } });
+		try {
+			await opened(0);
+			await answerTrackInfo(streams[0], version, 1000);
+			await (await opened(1)).reading;
+
+			const zero = new TextEncoder().encode("zero");
+			// Past one segment, so the reset cuts it short partway.
+			const cut = new Uint8Array(SEGMENT_BYTES + 7);
+			const header = new Group({ subscribe: 0n, sequence: 3n, frameStart: 0 });
+			const first = handStream(version);
+			first.write(await liteFrame(300, zero));
+			if (fault === "zero length") first.write(await Writer.collect(version, (w) => w.u53(0)));
+			else first.write(await liteFrame(10, cut, SEGMENT_BYTES / 2));
+			let running = subscriber.runGroup(header, first.reader);
+			const group = await track.recvGroup();
+			expect((await group?.readFrame())?.payload).toEqual(zero);
+
+			if (fault !== "zero length") {
+				first.reset(StreamCode.Yielded);
+				await running;
+				await drainReactions();
+				expect(group?.closed.peek()).toBeUndefined();
+				const second = handStream(version);
+				if (fault === "past held") {
+					// Only frame 0 is held whole, so frame 2 would leave a hole.
+					running = subscriber.runGroup(
+						new Group({ subscribe: 0n, sequence: 3n, frameStart: 2 }),
+						second.reader,
+					);
+				} else {
+					second.write(await liteFrame(300, zero));
+					if (fault === "resized") second.write(await liteFrame(10, new Uint8Array(cut.byteLength + 1)));
+					running = subscriber.runGroup(header, second.reader);
+				}
+				second.finish();
+			}
+
+			// The stream ends without the session: nothing escapes for the connection to close it with.
+			await expect(running).resolves.toBeUndefined();
+			expect(await group?.closed).toMatchObject({ code: StreamCode.MalformedTrack });
+		} finally {
+			track.close();
+			subscriber.close();
+		}
+	},
+);
+
 // Before lite-07 a YIELDED reset is no pause: the group ends with it, as with any other reset.
 test("a lite-06 group reset with YIELDED ends", async () => {
 	const version = Version.DRAFT_06;

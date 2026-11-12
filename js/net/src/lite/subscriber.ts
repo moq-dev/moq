@@ -2653,6 +2653,8 @@ export class Subscriber {
 				const { start, end } = resp.drop;
 				entry.tail.account(start, end);
 				const cause = resp.drop.cause(this.version);
+				// A paused group the drop names ends there: no continuation follows.
+				this.#dropPaused(entry, start, end, cause);
 				// Only a group its publisher never had is lost for every reader; anything else,
 				// OLD included, is refused for now, as the Rust `Refusal::answer` does.
 				if (toStreamCode(cause) === StreamCode.NotFound) fill.dropGroups(start, end);
@@ -3351,14 +3353,15 @@ export class Subscriber {
 		// The stream that paused it is replaced, so it no longer holds the end.
 		paused.read();
 		if (paused.group.closed.peek() !== undefined) return undefined;
-		// A continuation starting past the frames held whole would leave a hole in the group.
+		// A continuation starting past the frames held whole would leave a hole in the group, which
+		// ends with only this stream, as a malformed FRAME does.
 		const held = hooks.groupFrameCount(paused.group) - (paused.partial ? 1 : 0);
 		if (hdr.frameStart > held) {
-			const violation = new ProtocolViolation(
-				`group ${hdr.sequence} continued at frame ${hdr.frameStart}, past the ${held} held`,
-			);
-			paused.group.abort(violation);
-			throw violation;
+			const malformed = new StreamError(StreamCode.MalformedTrack, {
+				message: `group ${hdr.sequence} continued at frame ${hdr.frameStart}, past the ${held} held`,
+			});
+			paused.group.abort(malformed);
+			throw malformed;
 		}
 		return paused;
 	}

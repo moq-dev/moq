@@ -1656,7 +1656,8 @@ export class Publisher {
 		// stream's cursor instead, which a read handle here cannot make.
 		const continuation = (serving: RunGroup): RunGroup | undefined => {
 			const sequence = serving.group.sequence;
-			const [resumed, ...extra] = hooks.reofferGroups(track, sequence, sequence + 1n).groups;
+			// From the reset stream's Frame Start, which a cache holding only the group's tail can serve.
+			const [resumed, ...extra] = hooks.reofferGroups(track, sequence, sequence + 1n, serving.start).groups;
 			for (const other of extra) other.close();
 			if (!resumed) return undefined;
 			return { ...serving, group: resumed, givenUp: new GivenUp(resumed) };

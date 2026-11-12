@@ -8,6 +8,7 @@ import type { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks, staleHole } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame } from "../mock.ts";
+import { lines } from "../open.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
@@ -805,6 +806,8 @@ async function servedSubscription(
 
 	return {
 		client,
+		// The publisher's end of the session.
+		quic: pair.server,
 		datagrams: pair.client.datagrams.readable,
 		get track() {
 			return resolved();
@@ -928,6 +931,37 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		const resp = await decodeSubscribeResponse(sub.client.reader, version);
 		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
 		expect(resp.start.starts).toEqual([3n, 1n, undefined, undefined]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// Lite-07: a group whose stream the session reset to make room continues on a new stream from the
+// reset one's Frame Start, even where the cache holds only the group's tail from there, rather than
+// being dropped as OLD.
+test("lite-07 continues a yielded cached tail from its Frame Start", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n, startFrame: 5 });
+	try {
+		// A received tail: the cache holds the group from frame 5, where the subscription starts.
+		const group = hooks.receiveGroup(sub.track, { sequence: 0n, start: 5 });
+		group.writeFrame(textFrame("a", Timestamp.fromMillis(0)));
+		expect(await sub.servedHeader()).toBe(0n);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+		// Unfinished, so its stream is still open when the session resets it to make room.
+		const [open] = lines(sub.quic).streams.list();
+		if (!open) throw new Error("the group stream is not open");
+		open.preempt();
+		group.writeFrame(textFrame("b", Timestamp.fromMillis(1)));
+		group.finish();
+
+		// A drop would name the group on the subscribe stream instead.
+		const next = await Promise.race([
+			sub.servedGroup(),
+			decodeSubscribeResponse(sub.client.reader, version).then((resp) => ({ resp })),
+		]);
+		expect(next).toEqual({ sequence: 0n, frameStart: 5, payloads: ["a", "b"] });
 	} finally {
 		await sub.close();
 	}

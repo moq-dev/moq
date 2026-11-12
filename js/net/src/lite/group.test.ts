@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
-import { ProtocolViolation } from "../error.ts";
+import { StreamCode, StreamError } from "../error.ts";
 import { Producer } from "../group.ts";
 import { concat, encodeVarint, Reader } from "../stream.ts";
+import { SEGMENT_BYTES } from "../util/limits.ts";
 import * as Varint from "../varint.ts";
 import { frameDecoder, readFrames } from "./group.ts";
 import { frameHeader } from "./publisher.ts";
@@ -143,13 +144,77 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("a FRAME round-trips on %s", asy
 	expect(decoded.payload).toEqual(new Uint8Array([5, 6]));
 });
 
-// A lite-07 Payload Length of 0 is reserved for GROUP_END, which no version defines yet.
-test("a lite-07 FRAME with a Payload Length of 0 is a protocol violation", async () => {
+// A lite-07 Payload Length of 0 is reserved for GROUP_END, which no version defines yet. A malformed
+// FRAME ends only its stream, so it is a stream error rather than a session's protocol violation.
+test("a lite-07 FRAME with a Payload Length of 0 is malformed", async () => {
 	const producer = new Producer(0n);
 	const bytes = concat([encodeVarint(0, Version.DRAFT_07), encodeVarint(0, Version.DRAFT_07)]);
-	await expect(
-		readFrames(streamOf([bytes], Version.DRAFT_07), producer, { scale: SCALE, lengthFirst: true }),
-	).rejects.toBeInstanceOf(ProtocolViolation);
+	const err = await readFrames(streamOf([bytes], Version.DRAFT_07), producer, {
+		scale: SCALE,
+		lengthFirst: true,
+	}).then(
+		() => undefined,
+		(err: unknown) => err,
+	);
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.MalformedTrack);
+});
+
+// One macrotask, so every reaction queued before it has run.
+function nextTask(): Promise<void> {
+	return new Promise((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
+}
+
+// Whether `work` settles within a few event-loop turns.
+async function settles(work: Promise<unknown>): Promise<boolean> {
+	let settled = false;
+	const done = () => {
+		settled = true;
+	};
+	work.then(done, done);
+	for (let i = 0; i < 10 && !settled; i++) await nextTask();
+	return settled;
+}
+
+// A lite-07 continuation re-sending a held frame past one segment skips its payload. Once the group
+// closes, the skip stops waiting on a peer that stopped sending, for a frame held whole and for the
+// one a YIELDED reset cut short alike.
+test.each([false, true])("a continuation's held-frame skip stops once the group closes (cut: %p)", async (cut) => {
+	const version = Version.DRAFT_07;
+	const size = SEGMENT_BYTES + 10;
+	const producer = new Producer(0n);
+	let partial: ReturnType<Producer["createFrame"]> | undefined;
+	if (cut) {
+		partial = producer.createFrame({ size });
+		partial.write(new Uint8Array(5));
+	} else producer.writeFrame({ payload: new Uint8Array([1]) });
+
+	// The frame again, with fewer bytes than the skip needs, then nothing: the stream never ends.
+	let controller!: ReadableStreamDefaultController<Uint8Array>;
+	const stream = new Reader(
+		new ReadableStream<Uint8Array>({
+			start: (c) => {
+				controller = c;
+			},
+		}),
+		undefined,
+		version,
+	);
+	controller.enqueue(concat([frameHeader(version, undefined, undefined, size, true), new Uint8Array(2)]));
+	const done = readFrames(stream, producer, { scale: 0, lengthFirst: true }, { index: 0, partial });
+	expect(await settles(done)).toBe(false);
+
+	producer.abort(new StreamError(StreamCode.Cancel));
+	expect(await settles(done)).toBe(true);
+	await done;
 });
 
 // Stream end at the Payload Length ends a lite-07 group; within the rest of the header, it cut a frame.
