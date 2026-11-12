@@ -135,6 +135,10 @@ export class DropSet {
 	// the log is rebuilt once dead entries clearly outnumber live ones.
 	#log: { revision: number; run: DropRun }[] = [];
 	#live = new Set<DropRun>();
+	// The extent of each run replaced or forgotten, oldest first, kept for {@link removedSince}
+	// back to `#removedFrom`: cleared once it clearly outnumbers the live runs.
+	#removed: { revision: number; start: bigint; end: bigint }[] = [];
+	#removedFrom = 0;
 	#revision = 0;
 
 	/** Bumped on every change, for a reader to wake on. */
@@ -183,8 +187,13 @@ export class DropSet {
 			this.#log.push({ revision: ++this.#revision, run: fresh });
 		}
 		if (added.length === 0) this.#revision++;
+		for (const old of removed) this.#removed.push({ revision: this.#revision, start: old.start, end: old.end });
 		if (this.#log.length > 2 * this.#live.size + LOG_SLACK) {
 			this.#log = this.#log.filter((entry) => this.#live.has(entry.run));
+		}
+		if (this.#removed.length > 2 * this.#live.size + LOG_SLACK) {
+			this.#removed = [];
+			this.#removedFrom = this.#revision;
 		}
 		this.version.update((version) => version + 1);
 	}
@@ -207,5 +216,21 @@ export class DropSet {
 			if (this.#live.has(run)) changed.push({ start: run.start, end: run.end });
 		}
 		return changed;
+	}
+
+	/**
+	 * The extents of the runs replaced or forgotten since `revision`, oldest first, or undefined
+	 * once that is further back than the set remembers.
+	 */
+	removedSince(revision: number): Run[] | undefined {
+		if (revision < this.#removedFrom) return undefined;
+		let lo = 0;
+		let hi = this.#removed.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (this.#removed[mid].revision <= revision) lo = mid + 1;
+			else hi = mid;
+		}
+		return this.#removed.slice(lo);
 	}
 }

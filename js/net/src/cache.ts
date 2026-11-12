@@ -36,6 +36,10 @@ export const MIRROR_OVERHEAD = 4 * 1024;
 export const RUN_OVERHEAD = 336;
 /** Bookkeeping billed per entry of a drop set's expiry index. */
 export const BORN_OVERHEAD = 64;
+// A reader's record keeps an object per run in a sorted array, about what a drop run costs
+// without its change-log entry.
+/** Bookkeeping billed per run of a reader's record. */
+export const READER_RUN_OVERHEAD = 256;
 
 // The coarse clock behind access stamps, as Rust's: the expiry window rounds up to it.
 const TICK = Duration.millis(100);
@@ -267,6 +271,9 @@ export class Track<E extends Entry> {
 	// Where the next bounded idle scan starts, rotating so fresh groups at the front do not
 	// starve the ones behind them.
 	#cursor = 0;
+	// What this track's readers' records bill, how many bill anything, and the debt the track
+	// could not pay itself, which those readers pay; see {@link Reader}.
+	#readers = { bytes: 0, count: 0, debt: 0 };
 
 	constructor(pool: Pool, owner: Owner<E>) {
 		this.pool = pool;
@@ -293,6 +300,11 @@ export class Track<E extends Entry> {
 	/** Release `n` bytes {@link bill} billed. */
 	unbill(n: number): void {
 		this.pool.sub(n);
+	}
+
+	/** Open an empty bill for one reader's record. */
+	reader(): Reader {
+		return new Reader(this as Track<Entry>, this.#readers);
 	}
 
 	/** Whether the account caches any group. */
@@ -373,9 +385,15 @@ export class Track<E extends Entry> {
 		let paid = 0;
 		let scanned = 0;
 		let evicted = false;
+		// Whether every cold group was offered, so a debt left at the end is one the track
+		// itself cannot pay.
+		let swept = true;
 		const fresh: E[] = [];
 		for (let i = this.#order.length - this.#head; i > 0; i--) {
-			if (this.#debt === 0 || paid >= cap || scanned >= EVICT_SCAN) break;
+			if (this.#debt === 0 || paid >= cap || scanned >= EVICT_SCAN) {
+				swept = this.#debt === 0 || paid >= cap;
+				break;
+			}
 			// An eviction that emptied the account reset the order.
 			if (this.#head >= this.#order.length) break;
 			const slot = this.#order[this.#head++];
@@ -426,8 +444,26 @@ export class Track<E extends Entry> {
 			this.#debt -= Math.min(freed, this.#debt);
 			paid += freed;
 		}
+		// Last, the readers' records: nothing cheaper is left, so each reader folds what it
+		// settled for good, and one that cannot ends rather than forgo a promise.
+		if (swept && this.#debt > 0 && paid < cap) {
+			const readers = this.#readers;
+			const shifted = Math.min(this.#debt, Math.max(0, readers.bytes - readers.debt));
+			readers.debt += shifted;
+			this.#debt -= shifted;
+		}
 		this.#compact();
 		return evicted;
+	}
+
+	/**
+	 * Pay the eviction debt now if the pool is over its capacity, without waiting for the write
+	 * threshold: a reader's record grows by runs, never by enough bytes to cross it.
+	 */
+	chargeOver(): void {
+		const capacity = this.pool.capacity;
+		if (capacity === undefined || this.pool.used <= capacity) return;
+		if (this.chargeDebt()) this.#owner.settle();
 	}
 
 	/**
@@ -502,6 +538,77 @@ export class Track<E extends Entry> {
 }
 
 let makeCharge: (track: Track<Entry>) => Charge;
+
+/**
+ * What one reader's record bills to its track's account, and its share of the debt the track
+ * could not pay. Mirrors the Rust `cache::Reader`; {@link close} releases it.
+ */
+export class Reader {
+	#track: Track<Entry>;
+	#readers: { bytes: number; count: number; debt: number };
+	#bytes = 0;
+
+	constructor(track: Track<Entry>, readers: { bytes: number; count: number; debt: number }) {
+		this.#track = track;
+		this.#readers = readers;
+	}
+
+	/** Bytes currently billed. */
+	get size(): number {
+		return this.#bytes;
+	}
+
+	/** Whether this bills `account`. */
+	bills(account: unknown): boolean {
+		return this.#track === account;
+	}
+
+	/**
+	 * The debt the track's readers owe, forgiven once the pool is back within its capacity:
+	 * nothing needs the room any more, as the track forgives its own debt.
+	 */
+	get debt(): number {
+		const pool = this.#track.pool;
+		const capacity = pool.capacity;
+		if (capacity === undefined || pool.used <= capacity) this.#readers.debt = 0;
+		return this.#readers.debt;
+	}
+
+	/** Bill `bytes` in all, paying the track's debt after a growth. */
+	set(bytes: number): void {
+		const before = this.#bytes;
+		if (bytes === before) return;
+		const readers = this.#readers;
+		if (before === 0) readers.count++;
+		else if (bytes === 0) readers.count--;
+		readers.bytes += bytes - before;
+		this.#bytes = bytes;
+		if (bytes > before) {
+			this.#track.pool.add(bytes - before);
+			this.#track.wrote(bytes - before);
+			this.#track.chargeOver();
+		} else {
+			// Whatever a record frees pays toward its readers' debt, however it shrank.
+			readers.debt = Math.max(0, readers.debt - (before - bytes));
+			this.#track.pool.sub(before - bytes);
+		}
+	}
+
+	/**
+	 * Whether this record is one to end when folding leaves a debt: it bills more than a cached
+	 * group's overhead, so ending it frees more than evicting a group would, and at least its
+	 * readers' average, so a reader holding little never ends for one holding much.
+	 */
+	get ends(): boolean {
+		const readers = this.#readers;
+		return this.#bytes > ENTRY_OVERHEAD && this.#bytes * readers.count >= readers.bytes;
+	}
+
+	/** Release the bill, paying the readers' debt with it. */
+	close(): void {
+		this.set(0);
+	}
+}
 
 /**
  * What one cached group bills to its track's account: its bytes, overhead included, and its

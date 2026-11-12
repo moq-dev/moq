@@ -2706,6 +2706,7 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 		track: Producer;
 		tail: {
 			covers(start: bigint, end: bigint): boolean;
+			fold(): boolean;
 		};
 	};
 	let entry: Entry | undefined;
@@ -2767,6 +2768,18 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 		await send(old(2n, 2n));
 		await update();
 		expect(entry.tail.covers(2n, 3n)).toBe(false);
+
+		// Under the pool's debt the tail folds what finished, gaps and all. A group in the span whose
+		// stream arrived before its stale drop still wins over it, as does a gap the grace gave up
+		// on; a gap there the drop accounted first is owed again.
+		for (const sequence of [3n, 5n]) await arrive(sequence);
+		await evict();
+		for (const sequence of [11n, 13n, 15n]) await arrive(sequence);
+		expect(entry.tail.fold()).toBe(true);
+		await send(old(3n, 3n), old(4n, 3n), old(12n, 3n));
+		await update();
+		expect(entry.tail.covers(3n, 5n)).toBe(true);
+		expect(entry.tail.covers(12n, 13n)).toBe(false);
 	} finally {
 		responses.mockRestore();
 		track.close();

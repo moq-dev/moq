@@ -1794,9 +1794,15 @@ for (const skipped of ["failed", "stale"] as const) {
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
 			expect(response.start.starts[0]).toBe(6n);
 			if (skipped === "failed") {
-				const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
-				if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
-				expect([dropped.drop.start, dropped.drop.end]).toEqual([7n, 8n]);
+				// The failed group below the start is final, so it is named all the same.
+				for (const run of [
+					[5n, 6n],
+					[7n, 8n],
+				]) {
+					const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+					if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
+					expect([dropped.drop.start, dropped.drop.end]).toEqual(run);
+				}
 			}
 			expect(await sub.servedSequence()).toBe(6n);
 		} finally {
