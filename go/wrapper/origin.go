@@ -147,6 +147,15 @@ func (r *Route) SetCost(cost uint64) error {
 	return r.inner.SetCost(cost)
 }
 
+// SetAuth swaps the credential the route's announcing request carries,
+// renewing that request in place, or nil to announce under the session's
+// scope. Only the session it was minted on carries it. Errors with ErrClosed
+// once its broadcast closed, keeping the credential it had, and with
+// ErrCancelled for a cancelled credential.
+func (r *Route) SetAuth(credential *Credential) error {
+	return r.inner.SetAuth(credential.ffi())
+}
+
 // Cancel retracts the route now, rather than when the collector reclaims it.
 // Later calls fail with ErrCancelled. Its broadcast lives on until
 // [BroadcastProducer.Close].
@@ -186,6 +195,14 @@ func (c *Claim) Withdraw() error {
 // same prefix. A hidden claim keeps the price for when it next announces.
 func (c *Claim) SetCost(cost uint64) error {
 	return c.inner.SetCost(cost)
+}
+
+// SetAuth swaps the credential the claim's announcing request carries,
+// renewing that request in place, or nil to announce under the session's
+// scope. Only the session it was minted on carries it. Errors with
+// ErrCancelled for a cancelled credential.
+func (c *Claim) SetAuth(credential *Credential) error {
+	return c.inner.SetAuth(credential.ffi())
 }
 
 // Requested blocks until a consumer requests a path beneath this claim,

@@ -1813,88 +1813,112 @@ impl Play {
 		let mut clip = OpusClip::new(&shape.caps, shape.warmup);
 		let mut first = true;
 		loop {
-			tokio::select! {
-				// The follower stopped this reader (the instance changed, the rendition was
-				// reshaped or delisted, or the run ended). An end or failure that arrived alongside
-				// is recorded as the arms below would, or the play queued behind this one would
-				// replay it.
-				_ = cancel.changed() => {
-					if let Some(end) = ended(&mut track) {
-						finished.insert(rendition, &shape.track, attached, end.is_err());
+			// The track wins over the cancel, so an end that arrived alongside one is still recorded.
+			let read = {
+				let mut cancelled = std::pin::pin!(cancel.changed());
+				kio::wait(|waiter| match track.poll_read(waiter) {
+					std::task::Poll::Ready(read) => std::task::Poll::Ready(Some(read)),
+					std::task::Poll::Pending => waiter.poll_future(cancelled.as_mut()).map(|_| None),
+				})
+				.await
+			};
+			// The follower stopped this reader (the instance changed, the rendition was reshaped or
+			// delisted, or the run ended).
+			let Some(read) = read else {
+				return;
+			};
+			match read {
+				Ok(Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. })) => {}
+				Ok(Some(moq_mux::container::Read::Frame { frame, group })) => {
+					// A frame yields to a cancel, so a backlog never keeps a stopped reader playing.
+					if cancel.has_changed().unwrap_or(true) {
+						return;
 					}
-					return;
-				}
-				frame = track.read() => match frame {
-					Ok(Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. })) => {}
-					Ok(Some(moq_mux::container::Read::Frame { frame, group })) => {
-						// Nothing precedes group 0, and a group delivers from its frame 0 or not at
-						// all, so a play that reads it first decodes from the encoder's first packet,
-						// which has no history to warm up from.
-						if std::mem::take(&mut first)
-							&& group == 0
-							&& let Some(clip) = &mut clip
-						{
-							clip.track_start();
-						}
-						let mut buffer = match build_buffer(frame, kind) {
-							Ok(buffer) => buffer,
-							Err(err) => {
-								if let Some(obj) = element.upgrade() {
-									gst::element_error!(obj, gst::StreamError::Format, ("track {name} has an invalid timestamp"), ["{err:#}"]);
-								}
-								return;
-							}
-						};
-						if let Some(clip) = &mut clip
-							&& let Err(err) = clip.apply(buffer.get_mut().unwrap())
-						{
+					// Nothing precedes group 0, and a group delivers from its frame 0 or not at
+					// all, so a play that reads it first decodes from the encoder's first packet,
+					// which has no history to warm up from.
+					if std::mem::take(&mut first)
+						&& group == 0 && let Some(clip) = &mut clip
+					{
+						clip.track_start();
+					}
+					let mut buffer = match build_buffer(frame, kind) {
+						Ok(buffer) => buffer,
+						Err(err) => {
 							if let Some(obj) = element.upgrade() {
-								gst::element_error!(obj, gst::StreamError::Format, ("track {name} has an invalid Opus packet"), ["{err:#}"]);
+								gst::element_error!(
+									obj,
+									gst::StreamError::Format,
+									("track {name} has an invalid timestamp"),
+									["{err:#}"]
+								);
 							}
 							return;
 						}
-						let segment = (!sent_segment).then(|| {
-							let base = element.upgrade().and_then(|obj| obj.current_running_time()).unwrap_or(gst::ClockTime::ZERO);
-							sent_segment = true;
-							gst::event::Segment::new(timeline.segment(buffer.pts().unwrap(), base))
-						});
-						// pad.push() blocks until downstream accepts the buffer (full queues, a
-						// clock-synced sink). block_in_place hands our sibling tasks to another
-						// worker so a stalled downstream can't pin a runtime thread and starve
-						// the session loop or other readers.
-						let pushed = tokio::task::block_in_place(|| {
-							if let Some(segment) = segment {
-								pad.push_event(segment);
-							}
-							pad.push(buffer)
-						});
-						match pushed {
-							Ok(_) => {}
-							Err(gst::FlowError::NotNegotiated) => {
-								if let Some(obj) = element.upgrade() {
-									gst::element_error!(obj, gst::StreamError::Format, ("track {name} was not negotiated"), ["caps {}", shape.caps]);
-								}
-								return;
-							}
-							Err(_) => return,
+					};
+					if let Some(clip) = &mut clip
+						&& let Err(err) = clip.apply(buffer.get_mut().unwrap())
+					{
+						if let Some(obj) = element.upgrade() {
+							gst::element_error!(
+								obj,
+								gst::StreamError::Format,
+								("track {name} has an invalid Opus packet"),
+								["{err:#}"]
+							);
 						}
-					}
-					// The track stopping with its instance is that instance's end, which idles the
-					// pad for the next one rather than ending the rendition.
-					Ok(None) | Err(_) if instance.is_closed() => return,
-					// Recorded before the actor takes the next play,
-					// so a reshape on this instance does not replay it.
-					Ok(None) => {
-						finished.insert(rendition, &shape.track, attached, false);
 						return;
 					}
-					// The instance may still hand a new subscription the groups already played,
-					// such as a relay's copy cut off by its publisher's session closing.
-					Err(err) => {
-						gst::warning!(CAT, "track {name} failed: {err:?}");
-						finished.insert(rendition, &shape.track, attached, true);
-						return;
+					let segment = (!sent_segment).then(|| {
+						let base = element
+							.upgrade()
+							.and_then(|obj| obj.current_running_time())
+							.unwrap_or(gst::ClockTime::ZERO);
+						sent_segment = true;
+						gst::event::Segment::new(timeline.segment(buffer.pts().unwrap(), base))
+					});
+					// pad.push() blocks until downstream accepts the buffer (full queues, a
+					// clock-synced sink). block_in_place hands our sibling tasks to another
+					// worker so a stalled downstream can't pin a runtime thread and starve
+					// the session loop or other readers.
+					let pushed = tokio::task::block_in_place(|| {
+						if let Some(segment) = segment {
+							pad.push_event(segment);
+						}
+						pad.push(buffer)
+					});
+					match pushed {
+						Ok(_) => {}
+						Err(gst::FlowError::NotNegotiated) => {
+							if let Some(obj) = element.upgrade() {
+								gst::element_error!(
+									obj,
+									gst::StreamError::Format,
+									("track {name} was not negotiated"),
+									["caps {}", shape.caps]
+								);
+							}
+							return;
+						}
+						Err(_) => return,
 					}
+				}
+				// Recorded before the actor takes the next play, so a reshape on this instance
+				// does not replay it, even when the instance closed before the end was read: the
+				// same instance announced again would hand a new subscription its last group.
+				Ok(None) => {
+					finished.insert(rendition, &shape.track, attached, false);
+					return;
+				}
+				// The track failing with its instance is that instance's end, which idles the
+				// pad for the next one rather than ending the rendition.
+				Err(_) if instance.is_closed() => return,
+				// The instance may still hand a new subscription the groups already played,
+				// such as a relay's copy cut off by its publisher's session closing.
+				Err(err) => {
+					gst::warning!(CAT, "track {name} failed: {err:?}");
+					finished.insert(rendition, &shape.track, attached, true);
+					return;
 				}
 			}
 		}
@@ -1966,24 +1990,6 @@ impl Timeline {
 			segment.set_base(base);
 			segment
 		})
-	}
-}
-
-/// The track's end, or its failure, if that is the next media item, without waiting for it.
-/// Markers ready before it are passed over; a frame or anything not ready yet means it has not
-/// ended.
-fn ended(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Container>) -> Option<moq_mux::Result<()>> {
-	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-	loop {
-		let mut read = std::pin::pin!(track.read());
-		match read.as_mut().poll(&mut cx) {
-			std::task::Poll::Ready(Ok(None)) => return Some(Ok(())),
-			std::task::Poll::Ready(Ok(Some(
-				moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. },
-			))) => continue,
-			std::task::Poll::Ready(Err(err)) => return Some(Err(err)),
-			std::task::Poll::Pending | std::task::Poll::Ready(Ok(Some(_))) => return None,
-		}
 	}
 }
 
@@ -2234,46 +2240,9 @@ fn opus_caps(config: &hang::catalog::AudioConfig, rate: i32, channels: i32) -> R
 
 #[cfg(test)]
 mod tests {
-	use super::{Timeline, ended};
+	use super::Timeline;
 	use moq_net::Timestamp;
 	use std::time::Duration;
-
-	/// A reader cancelled as its track ends or fails records it only when no media is left to read,
-	/// passing over the markers a publisher closes with.
-	#[test]
-	fn ended_sees_only_an_end_with_no_media_before_it() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("video", hang::container::track_info(0)).unwrap();
-		let legacy = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let mut producer = moq_mux::container::Producer::new(track, legacy());
-		let mut consumer = moq_mux::container::Consumer::new(producer.consume(), legacy());
-		assert!(ended(&mut consumer).is_none(), "an open track has not ended");
-
-		producer
-			.write(moq_mux::container::Frame {
-				timestamp: Timestamp::ZERO,
-				payload: bytes::Bytes::from_static(&[0]),
-				keyframe: true,
-				duration: None,
-			})
-			.unwrap();
-		assert!(ended(&mut consumer).is_none(), "a frame was still unread");
-
-		producer.discontinuity().unwrap();
-		let _finished = producer.finish().unwrap();
-		assert!(
-			matches!(ended(&mut consumer), Some(Ok(()))),
-			"the closing marker hid the end"
-		);
-
-		let track = broadcast
-			.create_track("failed", hang::container::track_info(0))
-			.unwrap();
-		let producer = moq_mux::container::Producer::new(track, legacy());
-		let mut consumer = moq_mux::container::Consumer::new(producer.consume(), legacy());
-		producer.abort(moq_net::Error::Cancel);
-		assert!(matches!(ended(&mut consumer), Some(Err(_))), "a failure is an end too");
-	}
 
 	#[test]
 	fn video_caps_preserve_nal_framing() {
@@ -4703,7 +4672,6 @@ mod session_tests {
 	/// The same sibling instance announced again resumes its state, whether or not its end reached
 	/// the follower first: a track it finished does not replay on its pad.
 	#[test]
-	#[ignore = "flaky: replayed a finished track once under host load; owned by /quest/m0/test-flakes-2/README.md"]
 	fn a_reannounced_sibling_instance_does_not_replay_its_finish() {
 		let _pad_ids = pad_ids();
 		let element = element();
@@ -4760,6 +4728,60 @@ mod session_tests {
 		assert_eq!(recorder.count(|seen| *seen == Seen::Start(pad.clone())), 1, "{seen:?}");
 		recorder.assert_one_pad_held();
 		drop(first);
+	}
+
+	/// A track's end read after its instance closed is still recorded, with or without a cancel
+	/// alongside it: the same instance announced again would replay its last group to a new
+	/// subscription.
+	#[test]
+	fn an_end_read_after_its_instance_closed_is_recorded() {
+		let element = element();
+		for cancelled in [false, true] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let legacy = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+			let producer = moq_mux::container::Producer::new(
+				broadcast.create_track("video", hang::container::track_info(0)).unwrap(),
+				legacy(),
+			);
+			let track = moq_mux::container::Consumer::new(producer.consume(), legacy());
+			let _finished = producer.finish().unwrap();
+			let instance = broadcast.consume();
+			broadcast.close();
+			assert!(instance.is_closed());
+
+			let rendition = (TrackKind::Video, "video".to_string());
+			let finished = super::Finished::default();
+			let (cancelling, cancel) = watch::channel(false);
+			if cancelled {
+				cancelling.send_replace(true);
+			}
+			let (_shutdown, shutdown) = watch::channel(false);
+			let play = super::Play {
+				element: element.downgrade(),
+				shape: super::Shape {
+					caps: gst::Caps::new_empty_simple("video/x-h264"),
+					container: Container::Legacy,
+					track: "video".into(),
+					broadcast: None,
+					instance: None,
+					warmup: Duration::ZERO,
+				},
+				track,
+				instance,
+				attached: super::Attached { serial: 1, start: 1 },
+				timeline: Arc::default(),
+				finished: finished.clone(),
+				live: Arc::default(),
+				cancel,
+				shutdown,
+			};
+			let pad = gst::Pad::builder(gst::PadDirection::Src).build();
+			super::RUNTIME.block_on(play.stream(&pad, &rendition));
+			assert!(
+				finished.contains(&rendition, "video", super::Attached { serial: 1, start: 2 }),
+				"the end was not recorded for the instance's next start (cancelled: {cancelled})"
+			);
+		}
 	}
 
 	/// A track failing may be its instance going away before the instance reports closed, as a

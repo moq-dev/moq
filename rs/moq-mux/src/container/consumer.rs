@@ -66,11 +66,11 @@ pub(crate) enum Item {
 /// [`Delay::max`] measures. With the default max delay of zero,
 /// the consumer skips aggressively: any group that has a newer alternative is dropped.
 /// With a non-zero max delay, slow groups are tolerated up to that budget before being
-/// skipped. A missing sequence gets the same tolerance: there is no way to tell a stream
-/// that lost the delivery race from one the cache evicted.
-/// Its budget also expires that much monotonic time after the first group past it arrived, so
-/// a marker behind a hole is delivered even when the track is paused, and the holes a stalled
-/// source left behind expire together rather than one budget each.
+/// skipped. A missing sequence gets the same tolerance, or the shorter
+/// [`set_wait`](Self::set_wait): there is no way to tell a stream that lost the delivery race
+/// from one the cache evicted. Its wait also expires that much monotonic time after the first
+/// group past it arrived, so a marker behind a hole is delivered even when the track is paused,
+/// and the holes a stalled source left behind expire together rather than one wait each.
 ///
 /// Delivery starts at the floor the
 /// [`Subscription::ranges`](moq_net::track::Subscription::ranges) name, raised to where the
@@ -169,6 +169,9 @@ pub struct Consumer<F: Container> {
 
 	// How far we may drift from the live edge before skipping a group.
 	max_delay: std::time::Duration,
+
+	// How long a missing group is waited for, capped at the max delay; `None` waits the max delay.
+	wait: Option<std::time::Duration>,
 
 	// Wakes the reader once the hole at the cursor, or the start's wait, expires.
 	hole_timer: Option<std::pin::Pin<Box<kio::clock::Sleep>>>,
@@ -393,6 +396,7 @@ impl<F: Container> Consumer<F> {
 			target: None,
 			warmed: None,
 			max_delay,
+			wait: None,
 			hole_timer: None,
 			edge: None,
 			start: None,
@@ -735,8 +739,9 @@ impl<F: Container> Consumer<F> {
 				// stops moving, a backlog with every other group missing would otherwise drain one
 				// budget per hole, which reads downstream as a source far slower than real time.
 				let since = front.late;
-				let elapsed = since.elapsed() >= self.max_delay;
-				let aged = next_group.is_some_and(|(_, start)| max_timestamp.saturating_sub(start) >= self.max_delay);
+				let wait = self.wait.map_or(self.max_delay, |wait| wait.min(self.max_delay));
+				let elapsed = since.elapsed() >= wait;
+				let aged = next_group.is_some_and(|(_, start)| max_timestamp.saturating_sub(start) >= wait);
 				let excluded = match &self.reader {
 					Reader::Reading(track) | Reader::Failed(track, _) => {
 						track.next_in_range(self.current).is_none_or(|next| next >= sequence)
@@ -760,7 +765,7 @@ impl<F: Container> Consumer<F> {
 					self.note_group_edge();
 					continue;
 				}
-				if let Some(wake) = since.checked_add(self.max_delay) {
+				if let Some(wake) = since.checked_add(wait) {
 					let timer = self
 						.hole_timer
 						.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(wake)));
@@ -1194,6 +1199,15 @@ impl<F: Container> Consumer<F> {
 			let subscription = track.subscription().with_delay(delay);
 			let _ = track.update(subscription);
 		}
+	}
+
+	/// Wait at most `wait` for a missing group before skipping past it (default: the max delay).
+	///
+	/// It never exceeds [`Delay::max`]. Groups that did arrive still play until they age past the
+	/// max delay, so a player can wait on holes for its playout delay alone while still receiving
+	/// the late media it catches up on.
+	pub fn set_wait(&mut self, wait: std::time::Duration) {
+		self.wait = Some(wait);
 	}
 
 	/// Cap the bytes of decoded frames held ahead of the reader, counting the wire payload they share
@@ -1963,6 +1977,59 @@ mod tests {
 			});
 		}
 		assert_eq!(read, ["gap", "frame 2", "gap", "frame 4"]);
+	}
+
+	/// A player waits on a hole for its playout delay, while groups that did arrive play until the
+	/// max delay.
+	#[tokio::test(start_paused = true)]
+	async fn a_hole_is_waited_for_the_wait_while_an_arrived_group_plays_up_to_the_max_delay() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+		);
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+		reader.set_wait(Duration::from_millis(100));
+		let drain = |reader: &mut Consumer<Container>| {
+			let mut read = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = reader.poll_read(&kio::Waiter::noop()) {
+				read.push(match item {
+					Read::Frame { group, .. } => format!("frame {group}"),
+					Read::Gap { .. } => "gap".to_string(),
+					Read::End { .. } => "end".to_string(),
+				});
+			}
+			read
+		};
+
+		// A stalled group 500 ms behind the newest content is still within the max delay.
+		let mut stalled = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let frame = Frame {
+			timestamp: ts(0),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: false,
+			duration: None,
+		};
+		Container::Legacy(crate::container::Kind::Data)
+			.write(&mut stalled, &[frame])
+			.unwrap();
+		write_group(&mut track, 1, &[ts(500_000)]);
+		tokio::time::advance(Duration::from_millis(500)).await;
+		assert_eq!(drain(&mut reader), ["frame 0"]);
+		stalled.finish().unwrap();
+		assert_eq!(drain(&mut reader), ["frame 1"]);
+
+		// A missing group expires the wait after the first group past it arrived.
+		write_group(&mut track, 3, &[ts(520_000)]);
+		tokio::time::advance(Duration::from_millis(99)).await;
+		assert!(drain(&mut reader).is_empty());
+		tokio::time::advance(Duration::from_millis(1)).await;
+		assert_eq!(drain(&mut reader), ["gap", "frame 3"]);
+
+		// Or at once, when the newest content is already the wait past where the group after it
+		// begins.
+		write_group(&mut track, 5, &[ts(700_000)]);
+		write_group(&mut track, 6, &[ts(800_000)]);
+		assert_eq!(drain(&mut reader), ["gap", "frame 5", "frame 6"]);
 	}
 
 	/// A malformed data marker group found while looking ahead fails the reader, rather than

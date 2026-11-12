@@ -26,7 +26,7 @@ Carried decisions:
   [moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308#issuecomment-6730322286)):
   ✅ budget `trimmed_ms_per_min` and `player_skips_per_min` (rejected:
   budgeting accelerates as discarded audio), and ✅ the nightly runner's
-  `bench-playback` counts as the quiet-host run (rejected: naming another
+  playback benchmarks count as the quiet-host run (rejected: naming another
   host).
 
 The rule: the worst of seven clean nights times 1.25, plus the documented

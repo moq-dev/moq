@@ -207,6 +207,14 @@ class InventoryTest(unittest.TestCase):
         self.assertNotIn("recipe rs::sweep", orphans)
         self.assertNotIn("ignore media::probe::long_sweep", orphans)
 
+    def test_a_renamed_binary_is_selected_by_its_own_name(self):
+        # A `[[bin]]` naming src/main.rs replaces the package-named binary Cargo would infer.
+        self.write("rs/tool/Cargo.toml", '[package]\nname = "tool"\n\n[[bin]]\nname = "t"\npath = "src/main.rs"\n')
+        self.write("rs/tool/src/main.rs", '#[test]\n#[ignore = "slow"]\nfn sweep() {}\n')
+        self.assertIn("ignore tool::sweep", self.orphans())
+        self.write("justfile", JUSTFILE + "        cargo nextest run -p tool --bin t --run-ignored only\n")
+        self.assertNotIn("ignore tool::sweep", self.orphans())
+
     def test_cargo_ndk_options_are_not_test_filters(self):
         caller = "just rs test -p media --lib --run-ignored only -E 'test(/^gpu::tests::(renders|exports)$/)'"
         ndk = 'cargo ndk -t "$abi" --platform 26 test -p media --lib -- --ignored gpu::tests::renders'
