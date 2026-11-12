@@ -583,9 +583,9 @@ pub(crate) struct TrackState {
 	// the readers riding them; see [`Self::board`]. Held weakly, so the last rider leaving
 	// frees one, and pruned as they are looked up.
 	flights: BTreeMap<u64, Vec<group::Detached>>,
-	// How many received copies wait on another copy of each sequence still arriving (see
-	// [`Hold`]), which a reader of that copy waits out when it fails; see [`Self::successor`].
-	holds: BTreeMap<u64, usize>,
+	// The copies of each sequence still arriving that another received copy waits on, once per
+	// [`Hold`], which a reader of that copy waits out when it fails; see [`successor`].
+	holds: BTreeMap<u64, Vec<group::Handle>>,
 
 	// Publisher-produced groups in arrival order as (sequence, stamp), walked by
 	// subscriptions; an entry only resolves while its stamp matches the slot's.
@@ -3793,7 +3793,12 @@ pub(super) fn successor(
 ) -> Poll<Option<group::Consumer>> {
 	let sequence = reader.sequence;
 	let found = track.poll_ref(waiter, |state| {
-		if state.holds.contains_key(&sequence) {
+		// Only a hold on the copy read: one on a copy that took over from it waits on that one.
+		if state
+			.holds
+			.get(&sequence)
+			.is_some_and(|held| held.iter().any(|copy| copy.is_read_by(reader)))
+		{
 			return Poll::Pending;
 		}
 		Poll::Ready(
@@ -4055,8 +4060,10 @@ impl Drop for Hold {
 			return;
 		};
 		if let btree_map::Entry::Occupied(mut holds) = state.holds.entry(self.sequence) {
-			*holds.get_mut() -= 1;
-			if *holds.get() == 0 {
+			if let Some(at) = holds.get().iter().position(|held| held.is_copy(&self.arriving)) {
+				holds.get_mut().swap_remove(at);
+			}
+			if holds.get().is_empty() {
 				holds.remove();
 			}
 		}
@@ -4220,7 +4227,7 @@ impl Producer {
 					return Err(Error::Duplicate);
 				}
 				let arriving = holding.clone();
-				*state.holds.entry(info.sequence).or_default() += 1;
+				state.holds.entry(info.sequence).or_default().push(arriving.clone());
 				return Ok(Received::Held(Hold {
 					arriving,
 					track: self.state.downgrade(),
@@ -17171,8 +17178,9 @@ mod test {
 	}
 
 	/// A reader on a received copy that fails waits out a re-offer still held for its group,
-	/// then continues on it from its frame with nothing repeated or missed. A released hold
-	/// leaves the failure, as does a re-offer starting past the reader's frame.
+	/// then continues on it from its frame with nothing repeated or missed, even while another
+	/// duplicate waits on that re-offer. A released hold leaves the failure, as does a re-offer
+	/// starting past the reader's frame.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_failed_copy_continues_on_its_held_reoffer() {
@@ -17189,6 +17197,9 @@ mod test {
 			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
 				panic!("the re-offer waits on the copy still arriving");
 			};
+			let Ok(Received::Held(second)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("a second duplicate waits too");
+			};
 			first.abort(Error::Cancel).unwrap();
 			let waiter = kio::Waiter::noop();
 			assert!(
@@ -17197,7 +17208,7 @@ mod test {
 			);
 
 			if case == "released" {
-				drop(hold);
+				drop((hold, second));
 				assert!(reader.read_frame().await.is_err(), "{case}");
 				continue;
 			}
@@ -17206,6 +17217,16 @@ mod test {
 				panic!("the re-offer takes the group");
 			};
 			drop(hold);
+			assert!(
+				reader.poll_read_frame(&waiter).is_pending(),
+				"{case}: the second still holds"
+			);
+			// The second duplicate now waits on the re-offer, which holds nobody reading the
+			// failed copy.
+			let Ok(Received::Held(third)) = producer.create_group_at(group::Info { sequence: 3 }, start) else {
+				panic!("the second duplicate waits on the re-offer still arriving");
+			};
+			drop(second);
 			if case == "past" {
 				assert!(reader.read_frame().await.is_err(), "{case}: frame 1 is in no copy");
 				continue;
@@ -17214,8 +17235,9 @@ mod test {
 			assert!(reader.poll_read_frame(&waiter).is_pending());
 			again.write_frame(at(300), &b"a"[..]).unwrap();
 			again.write_frame(at(301), &b"b"[..]).unwrap();
-			again.finish().unwrap();
 			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"b");
+			again.finish().unwrap();
+			drop(third);
 			assert!(reader.read_frame().await.unwrap().is_none());
 		}
 	}

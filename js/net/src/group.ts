@@ -1367,9 +1367,11 @@ export class Consumer {
 			}
 			if (this.#ready()) return;
 			const closed = this.#state.closed.peek();
-			if (closed instanceof Error && (await this.#resume(closed))) continue;
+			if (closed instanceof Error && ((await this.#succeed()) || (await this.#resume(closed)))) continue;
 			if (closed !== undefined) {
 				this.#abandon();
+				// Ends the reader, whose failure a copy that might have taken over left open.
+				if (closed instanceof Error) this.#fail(closed);
 				this.#closed?.refresh();
 				return;
 			}
@@ -1514,9 +1516,11 @@ export class Consumer {
 	// Release this reader, failing it with `abort` if given. Every reader owns its mirrored
 	// state, so closing that state drops its demand without touching the producer.
 	#release(abort: Error | undefined): void {
-		// A copy failure recovery was continuing past ends with the abort instead.
-		if (abort && this.#recover && this.#state.closed.peek() instanceof Error) {
-			this.#fail(abort);
+		// A copy failure recovery was continuing past ends with the abort instead, and one a copy
+		// that might take over left open ends with it, which also ends a read waiting on that copy.
+		const failed = this.#state.closed.peek();
+		if (failed instanceof Error && (this.#succeeds() || (abort && this.#recover))) {
+			this.#fail(abort ?? failed);
 		}
 		this.#abandon();
 		this.#recover?.close?.();

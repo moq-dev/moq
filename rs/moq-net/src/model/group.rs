@@ -2499,6 +2499,11 @@ impl Handle {
 		Arc::ptr_eq(&self.alive, &reader.cursor.alive)
 	}
 
+	/// Whether `other` is a handle of this same copy.
+	pub(super) fn is_copy(&self, other: &Handle) -> bool {
+		Arc::ptr_eq(&self.alive, &other.alive)
+	}
+
 	/// Abort the group without taking ownership of its writer.
 	// Sessions cancel a group while its writer is in a frame.
 	pub(crate) fn abort(&self, err: Error) -> Result<()> {
