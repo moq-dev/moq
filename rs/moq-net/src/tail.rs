@@ -35,7 +35,8 @@ pub(crate) struct Tail {
 	// group won over it, even once the cache evicted it.
 	finished: RangeSet<u64>,
 	// The span of the finished runs a fold under the pool's debt forgot since the last update.
-	// A stale drop in it may be one its stream overtook, so the update owes none of it again.
+	// A stale drop there for a group the ledger already accounted may be one its stream
+	// overtook, so the next update owes none of it again.
 	folded: Option<Range<u64>>,
 	// What `finished` bills to the track's account, [`FINISHED_OVERHEAD`] per run, once the
 	// subscription has a copy to bill.
@@ -73,10 +74,7 @@ impl Tail {
 		self.rebill();
 	}
 
-	/// Bill what `finished` keeps, and under the pool's debt fold all but its newest run into
-	/// `folded`: a stale drop under this update then stands as the publisher judged it, but the
-	/// update owes none of the folded span again. The newest run stays, so streams finishing in
-	/// sequence grow nothing to charge again.
+	/// Bill what `finished` keeps, and under the pool's debt [`Self::fold`] it.
 	fn rebill(&mut self) {
 		let Some(bill) = &mut self.bill else {
 			return;
@@ -84,21 +82,33 @@ impl Tail {
 		let runs = self.finished.len() + usize::from(self.folded.is_some());
 		bill.set(runs as u64 * FINISHED_OVERHEAD);
 		if bill.debt() > 0
-			&& self.finished.len() > 1
-			&& let (Some(first), Some(older), Some(newest)) = (
-				self.finished.iter().next().cloned(),
-				self.finished.iter().nth_back(1).cloned(),
-				self.finished.iter().next_back().cloned(),
-			) {
-			let span = match self.folded.take() {
-				Some(folded) => folded.start.min(first.start)..folded.end.max(older.end),
-				None => first.start..older.end,
-			};
-			self.folded = Some(span);
-			self.finished = RangeSet::new();
-			self.finished.insert(newest);
+			&& self.fold()
+			&& let Some(bill) = &mut self.bill
+		{
 			bill.set(2 * FINISHED_OVERHEAD);
 		}
+	}
+
+	/// Fold all but the newest finished run into `folded`, returning whether any was: a stale
+	/// drop under this update then stands as the publisher judged it, but the update owes none
+	/// of what it names that [`Self::overtaken`] reports. The newest run stays, so streams
+	/// finishing in sequence grow nothing to charge again.
+	pub fn fold(&mut self) -> bool {
+		let (Some(first), Some(older), Some(newest)) = (
+			self.finished.iter().next().cloned(),
+			self.finished.iter().nth_back(1).cloned(),
+			self.finished.iter().next_back().cloned(),
+		) else {
+			return false;
+		};
+		let span = match self.folded.take() {
+			Some(folded) => folded.start.min(first.start)..folded.end.max(older.end),
+			None => first.start..older.end,
+		};
+		self.folded = Some(span);
+		self.finished = RangeSet::new();
+		self.finished.insert(newest);
+		true
 	}
 
 	/// Record that the publisher's FIN ended the track.
@@ -162,14 +172,24 @@ impl Tail {
 		self.finished.overlapping(groups).cloned()
 	}
 
+	/// The runs of `groups` inside the span a fold forgot that the ledger accounts for, asked
+	/// before a stale drop of `groups` is accounted: the header of each arrived, or the grace gave
+	/// up on it, before the drop, so the drop may be one a finished stream overtook.
+	pub fn overtaken(&self, groups: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
+		let span = self
+			.folded
+			.as_ref()
+			.map(|folded| groups.start.max(folded.start)..groups.end.min(folded.end))
+			.filter(|span| !span.is_empty());
+		span.into_iter().flat_map(|span| self.ledger.accounted(span))
+	}
+
 	/// Forget which streams finished, for an update being sent: a stale drop under an earlier
-	/// one is no verdict, so none needs them. Returns the span a fold forgot since the last
-	/// update, which the update owes none of again.
-	pub fn updated(&mut self) -> Option<Range<u64>> {
+	/// one is no verdict, so none needs them.
+	pub fn updated(&mut self) {
 		self.finished = RangeSet::new();
-		let folded = self.folded.take();
+		self.folded = None;
 		self.rebill();
-		folded
 	}
 
 	/// Whether a data stream whose header arrived is still being read.

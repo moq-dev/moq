@@ -5679,6 +5679,21 @@ mod tests {
 			!covers(2..3),
 			"a drop under a later update is the publisher's to re-offer"
 		);
+
+		// Under the pool's debt the tail folds what finished, gaps and all. A group in the span
+		// whose stream arrived before its stale drop still wins over it; a gap there the drop
+		// accounted first is owed again.
+		for sequence in [3, 5, 7] {
+			arrive(&mut serving, sequence).await;
+		}
+		if let Ok(mut state) = tail.write() {
+			assert!(state.fold());
+		}
+		serving.apply_response(&serve, old(3, 3)).unwrap();
+		serving.apply_response(&serve, old(4, 3)).unwrap();
+		update(&mut serving);
+		assert!(covers(3..4), "the folded group that arrived stays accounted for");
+		assert!(!covers(4..5), "the folded gap is the publisher's to re-offer");
 	}
 
 	/// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it: an
@@ -10542,18 +10557,10 @@ fn buffer_update(
 	let held = serving.supersede_stale(judged(active.live.iter().map(|(_, range)| range)));
 	let recorded = std::mem::take(&mut active.stale);
 	if let Ok(mut tail) = active.tail.write() {
-		// What a fold forgot finishing may have overtaken its drop, so none of it is owed again.
-		let folded = tail.updated();
+		tail.updated();
 		for run in recorded.iter() {
 			for reopened in held.overlapping(run) {
-				let mut owed = RangeSet::new();
-				owed.insert(reopened.start.max(run.start)..reopened.end.min(run.end));
-				if let Some(folded) = &folded {
-					owed.remove(folded.clone());
-				}
-				for owed in owed.iter() {
-					tail.unaccount(owed.clone(), now);
-				}
+				tail.unaccount(reopened.start.max(run.start)..reopened.end.min(run.end), now);
 			}
 		}
 	}
@@ -11946,6 +11953,12 @@ impl ServeLoop {
 				// the publisher re-offers it or drops it again under the new number, so it is
 				// still owed, and a reader that wants it fills it by range meanwhile.
 				if !(stale && dropped.update < active.update) {
+					// Asked before this drop is accounted: what a fold forgot finishing that the
+					// ledger already accounted may be a stream this drop overtook.
+					let overtaken: Vec<_> = match stale {
+						true => active.tail.read().overtaken(groups.clone()).collect(),
+						false => Vec::new(),
+					};
 					if let Ok(mut tail) = active.tail.write() {
 						tail.account(groups.clone(), serve.subscriber.runtime.now());
 					}
@@ -11965,12 +11978,18 @@ impl ServeLoop {
 							for finished in active.tail.read().finished(groups.clone()) {
 								given.remove(finished);
 							}
+							let mut owed = rangemap::RangeSet::new();
 							for given in given.iter() {
-								let recorded = self
-									.serving
-									.give_up(given.clone(), track::Hole::stale(active.max_delay));
-								active.stale.extend(recorded);
+								owed.extend(
+									self.serving
+										.give_up(given.clone(), track::Hole::stale(active.max_delay)),
+								);
 							}
+							// Owed again by the next update, save what a stream may have won.
+							for overtaken in overtaken {
+								owed.remove(overtaken);
+							}
+							active.stale.extend(owed);
 						}
 						// Final, so no update reopens it, even where it replaces a stale drop.
 						false => {

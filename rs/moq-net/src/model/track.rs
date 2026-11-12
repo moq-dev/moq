@@ -24383,12 +24383,19 @@ mod test {
 			"forgotten under debt"
 		);
 		assert!(pool.used() <= capacity, "within the pool: {}", pool.used());
-		// The update owes none of what the fold forgot again, since a stale drop there may be
-		// one its stream overtook.
+		// A stale drop inside what the fold forgot is owed again only where the ledger had not
+		// accounted for it: there a stream may have finished and overtaken the drop.
+		let overtaken: Vec<_> = tail.read().overtaken(0..4).collect();
+		assert_eq!(overtaken, vec![0..1, 2..3], "the gap between them is still owed");
+		assert_eq!(
+			tail.read().overtaken(2 * RUNS..2 * RUNS + 1).count(),
+			0,
+			"the newest run stays"
+		);
 		if let Ok(mut state) = tail.write() {
-			assert_eq!(state.updated(), Some(0..2 * RUNS - 1));
-			assert_eq!(state.updated(), None, "each update starts over");
+			state.updated();
 		}
+		assert_eq!(tail.read().overtaken(0..4).count(), 0, "each update starts over");
 	}
 
 	/// A flood a reader reported, fragmented into runs alternating with upstream skips,

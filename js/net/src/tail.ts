@@ -39,7 +39,8 @@ export class Tail {
 	// over it, even once the cache evicted it.
 	#finished: Run[] = [];
 	// The span of the finished runs a fold under the pool's debt forgot since the last update. A
-	// stale drop in it may be one its stream overtook, so the update owes none of it again.
+	// stale drop there for a group the ledger already accounted may be one its stream overtook, so
+	// the next update owes none of it again.
 	#folded?: Run;
 	// What `#finished` bills, `READER_RUN_OVERHEAD` per run, so a publisher fragmenting the
 	// streams it finishes between updates costs what the cache would hold.
@@ -50,22 +51,28 @@ export class Tail {
 		this.#bill = options.bill;
 	}
 
-	// Bill what `#finished` keeps, and under the pool's debt fold all but its newest run into
-	// `#folded`: a stale drop under this update then stands as the publisher judged it, but the
-	// update owes none of the folded span again. The newest run stays, so streams finishing in
-	// sequence grow nothing to charge again. Mirrors the Rust `Tail::rebill`.
+	// Bill what `#finished` keeps, and under the pool's debt fold it. Mirrors the Rust `Tail::rebill`.
 	#rebill(): void {
 		const bill = this.#bill;
 		if (!bill) return;
 		bill.set((this.#finished.length + (this.#folded ? 1 : 0)) * READER_RUN_OVERHEAD);
-		if (bill.debt > 0 && this.#finished.length > 1) {
-			const start = this.#finished[0].start;
-			const end = this.#finished[this.#finished.length - 2].end;
-			const folded = this.#folded;
-			this.#folded = folded ? { start: min(folded.start, start), end: max(folded.end, end) } : { start, end };
-			this.#finished = this.#finished.slice(-1);
-			bill.set(2 * READER_RUN_OVERHEAD);
-		}
+		if (bill.debt > 0 && this.fold()) bill.set(2 * READER_RUN_OVERHEAD);
+	}
+
+	/**
+	 * Fold all but the newest finished run into the span a fold forgot, returning whether any was:
+	 * a stale drop under this update then stands as the publisher judged it, but the update owes
+	 * none of what it names that {@link overtaken} reports. The newest run stays, so streams
+	 * finishing in sequence grow nothing to charge again.
+	 */
+	fold(): boolean {
+		if (this.#finished.length < 2) return false;
+		const start = this.#finished[0].start;
+		const end = this.#finished[this.#finished.length - 2].end;
+		const folded = this.#folded;
+		this.#folded = folded ? { start: min(folded.start, start), end: max(folded.end, end) } : { start, end };
+		this.#finished = this.#finished.slice(-1);
+		return true;
 	}
 
 	/** Release what the tail bills, once its subscription ended. */
@@ -144,16 +151,27 @@ export class Tail {
 	}
 
 	/**
-	 * Forget which streams finished, for an update being sent: a stale drop under an earlier one is
-	 * no verdict, so none needs them. Returns the span a fold forgot since the last update, which
-	 * the update owes none of again.
+	 * The parts of `[start, end)` inside the span a fold forgot that the ledger accounts for, asked
+	 * before a stale drop of them is accounted: the header of each arrived, or the grace gave up on
+	 * it, before the drop, so the drop may be one a finished stream overtook.
 	 */
-	updated(): Run | undefined {
-		this.#finished = [];
+	overtaken(start: bigint, end: bigint): Run[] {
 		const folded = this.#folded;
+		if (!folded) return [];
+		const from = max(start, folded.start);
+		const to = min(end, folded.end);
+		if (from >= to) return [];
+		return runGaps(this.#ledger.gaps(from, to), from, to);
+	}
+
+	/**
+	 * Forget which streams finished, for an update being sent: a stale drop under an earlier one is
+	 * no verdict, so none needs them.
+	 */
+	updated(): void {
+		this.#finished = [];
 		this.#folded = undefined;
 		this.#rebill();
-		return folded;
 	}
 
 	/** Re-check what {@link settle} waits on, after something outside the ledger changed. */

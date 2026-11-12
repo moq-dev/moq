@@ -330,7 +330,8 @@ Evict(g) ==
 
 \* The pool hands the tail debt and `Tail::rebill` folds every finished run but the newest
 \* into the span it forgot: one group stands for any of them, since a later group may have
-\* finished, and the span takes in the gaps between them, so g need not have finished.
+\* finished, and the span takes in the gaps between them, so g need not have finished or
+\* even arrived.
 TailFold(g) ==
     /\ Pressure
     /\ g \notin forgot
@@ -342,6 +343,9 @@ TailFold(g) ==
 \* verdict. Otherwise the tail accounts for the group; a stale drop records it in the
 \* copy unless its stream finished under this update or the copy holds it
 \* (`give_up` keeps an open group), and a final drop records it and ends its readers.
+\* A stale drop of a group inside the span a fold forgot that the ledger already
+\* accounted (`Tail::overtaken`) may be one a finished stream overtook, so the next
+\* update owes it nothing again.
 OnDrop(m) ==
     LET g == m.g
         stale == m.err = "old"
@@ -354,9 +358,10 @@ OnDrop(m) ==
        THEN LET recorded == g \notin finished
                             /\ cached[g] \notin {"open", "whole"}
                             /\ rec[g] # "skip"
+                owed == recorded /\ ~(g \in forgot /\ g \in acct)
             IN /\ acct' = acct \cup {g}
                /\ rec' = IF recorded THEN [rec EXCEPT ![g] = "stale"] ELSE rec
-               /\ sstale' = IF recorded THEN sstale \cup {g} ELSE sstale
+               /\ sstale' = IF owed THEN sstale \cup {g} ELSE sstale
                /\ UNCHANGED <<cached, violation>>
        ELSE /\ acct' = acct \cup {g}
             /\ sstale' = sstale \ {g}
@@ -382,7 +387,7 @@ SubRecv ==
 
 \* `buffer_update`: the copy forgets every stale record (`supersede_stale`), the tail
 \* owes again each stale run this subscription accounted that the copy still held,
-\* save the span a fold forgot, and `Tail::updated` forgets which streams finished.
+\* and `Tail::updated` forgets which streams finished and what a fold forgot.
 SubUpdate ==
     /\ sup < MaxUpdates
     /\ ~violation
@@ -390,7 +395,7 @@ SubUpdate ==
        IN /\ sup' = sup + 1
           /\ ctrl' = Append(ctrl, sup + 1)
           /\ rec' = [g \in Groups |-> IF rec[g] = "stale" THEN "none" ELSE rec[g]]
-          /\ acct' = acct \ ((sstale \cap held) \ forgot)
+          /\ acct' = acct \ (sstale \cap held)
           /\ sstale' = {}
           /\ finished' = {}
           /\ forgot' = {}
