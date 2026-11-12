@@ -857,13 +857,13 @@ impl Slot {
 	}
 
 	/// Why the publisher gave this group up, whichever copy serves it: the live copy's cut,
-	/// or a final drop that a fetched head outlived only while it filled. A head that
+	/// or a final drop that a fetched head outlived only while it filled. A copy that
 	/// finished won over the drop, even once freed.
 	fn verdict(&self) -> Option<&Error> {
 		self.group.cut_error().or_else(|| {
 			self.dropped
 				.as_ref()
-				.filter(|_| !self.head.as_deref().is_some_and(group::Handle::is_settled))
+				.filter(|_| !self.copies().any(group::Handle::is_settled))
 		})
 	}
 
@@ -4485,12 +4485,13 @@ impl Producer {
 		if groups.is_empty() {
 			return RangeSet::new();
 		}
-		let (runs, open): (_, Vec<group::Handle>) = match self.modify() {
+		let (runs, open, carried, cache): (_, Vec<group::Handle>, Vec<u64>, _) = match self.modify() {
 			Ok(mut state) => {
 				let stale = hole.stale_budget().is_some();
 				let mut left = RangeSet::new();
 				left.insert(groups.clone());
 				let mut open = Vec::new();
+				let mut carried = Vec::new();
 				for (&sequence, slot) in state.lookup.range_mut(groups) {
 					if !slot.visible {
 						continue;
@@ -4512,9 +4513,17 @@ impl Producer {
 					{
 						left.remove(sequence..end);
 						// A fetched head still filling may yet die, leaving the live copy this
-						// drop ended: the slot keeps the drop to surface as its cut then.
-						if !stale && !slot.is_settled() {
+						// drop ended: the slot keeps the drop to surface as its cut then, and
+						// the head announces its death to cut watchers. A copy that finished
+						// already won.
+						if !stale
+							&& !slot.copies().any(group::Handle::is_settled)
+							&& let Some(head) = slot.head.as_deref()
+						{
 							slot.dropped = Some(Error::Stream(error.clone()));
+							if head.carry_drop() {
+								carried.push(sequence);
+							}
 						}
 					}
 				}
@@ -4523,7 +4532,8 @@ impl Producer {
 					runs.extend(state.drop_groups(run.clone(), hole.clone()).iter().cloned());
 				}
 				state.charge_debt();
-				(runs, open)
+				let cache = state.cache.clone();
+				(runs, open, carried, cache)
 			}
 			Err(_) => return RangeSet::new(),
 		};
@@ -4531,6 +4541,10 @@ impl Producer {
 		// reset lands, with the track guard released.
 		for group in open {
 			group.abort_open(Error::Stream(error.clone()));
+		}
+		// A head that died before it carried the drop announced nothing: the drop is its cut.
+		for sequence in carried {
+			cache.aborted(sequence, true);
 		}
 		runs
 	}
@@ -11062,6 +11076,45 @@ mod test {
 		let state = producer.state.read();
 		assert!(state.lookup[&0].is_read(), "a reader is handed the drop");
 		assert!(matches!(state.given_up(0), Some(Error::Stream(StreamError::Old))));
+	}
+
+	/// A drop cursor that scanned while the head filled hears the drop once the head dies:
+	/// the head's abort is announced as the cut it leaves.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_drop_cursor_hears_a_final_drop_a_dying_head_leaves() {
+		let producer = track_producer("test", Info::timed());
+		let (_live, head) = arriving_head(&producer).await;
+		let mut sub = producer.subscribe(None);
+
+		producer.drop_groups(0..1, StreamError::Old);
+		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+
+		head.abort(Error::Cancel).unwrap();
+		match sub.poll_drop(&kio::Waiter::noop()) {
+			Poll::Ready((run, hole)) => {
+				assert_eq!(run, 0..1);
+				assert!(matches!(hole.error(), StreamError::Old));
+			}
+			Poll::Pending => panic!("the drop the head left is reported"),
+		}
+	}
+
+	/// A live copy that finished wins over a final drop for good, even while a fetched head
+	/// still fills, and even once both copies are gone.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_finished_live_copy_wins_over_a_final_drop_a_head_waits_on() {
+		let producer = track_producer("test", Info::timed());
+		let (live, head) = arriving_head(&producer).await;
+		let live = live.finish().unwrap();
+
+		producer.drop_groups(0..1, StreamError::Old);
+		head.abort(Error::Cancel).unwrap();
+		live.abort(Error::Evicted).unwrap();
+		let state = producer.state.read();
+		assert!(state.drops.iter().next().is_none());
+		assert!(state.given_up(0).is_none());
 	}
 
 	/// A fetched head that finishes after a final drop of its group wins over the drop, even
