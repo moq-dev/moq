@@ -68,6 +68,10 @@ pub(super) trait Net {
 	/// The queues with something to deliver, and how much.
 	fn ready(&self) -> Vec<(Chan, usize)>;
 	fn step(&mut self, chan: Chan);
+	/// One hop of delay passes. Whether a timer still runs.
+	fn tick(&mut self) -> bool {
+		false
+	}
 	/// What `node` holds for `id`, for a failure report.
 	fn dump(&self, _node: Node, _id: Id) -> String {
 		String::new()
@@ -231,6 +235,10 @@ impl Net for PathSim {
 		self.deliver(from, to);
 	}
 
+	fn tick(&mut self) -> bool {
+		PathSim::tick(self)
+	}
+
 	fn next(&self, node: Node, id: Id) -> Option<Option<Node>> {
 		PathSim::next(self, node, id)
 	}
@@ -263,12 +271,24 @@ pub(super) enum Rule {
 	Causes,
 	/// Causes, one message per cause and session, and holds.
 	Holds,
-	/// Holds, and no move to a route through a node in doubt.
+	/// Holds, and no move to a route through a node in doubt for 4 hops of delay.
+	Wait4,
+	/// The same for 32 hops of delay.
+	Wait32,
+	/// Holds, and no move to a route through a node in doubt until it advances its epoch.
 	Epochs,
 }
 
 impl Rule {
-	pub const ALL: [Self; 5] = [Self::Distance, Self::Paths, Self::Causes, Self::Holds, Self::Epochs];
+	pub const ALL: [Self; 7] = [
+		Self::Distance,
+		Self::Paths,
+		Self::Causes,
+		Self::Holds,
+		Self::Wait4,
+		Self::Wait32,
+		Self::Epochs,
+	];
 
 	pub fn as_str(self) -> &'static str {
 		match self {
@@ -276,6 +296,8 @@ impl Rule {
 			Self::Paths => "paths",
 			Self::Causes => "paths+cause",
 			Self::Holds => "paths+cause+hold",
+			Self::Wait4 => "paths+cause+hold+wait4",
+			Self::Wait32 => "paths+cause+hold+wait32",
 			Self::Epochs => "paths+cause+hold+epoch",
 		}
 	}
@@ -286,6 +308,8 @@ impl Rule {
 			Self::Paths => Box::new(PathSim::new(nodes, Rules::BARE)),
 			Self::Causes => Box::new(PathSim::new(nodes, Rules::CAUSES)),
 			Self::Holds => Box::new(PathSim::new(nodes, Rules::HOLDS)),
+			Self::Wait4 => Box::new(PathSim::new(nodes, Rules::waits(4))),
+			Self::Wait32 => Box::new(PathSim::new(nodes, Rules::waits(32))),
 			Self::Epochs => Box::new(PathSim::new(nodes, Rules::EPOCHS)),
 		}
 	}
@@ -520,12 +544,14 @@ impl Lab {
 		(loops, stale, dark)
 	}
 
-	/// Deliver everything queued now: one hop of delay. False if nothing was.
+	/// Deliver everything queued now: one hop of delay. False if nothing was and no
+	/// timer runs.
 	pub fn round(&mut self) -> bool {
 		let mut ready = self.net.ready();
-		if ready.is_empty() {
+		if ready.is_empty() && !self.net.tick() && self.net.ready().is_empty() {
 			return false;
 		}
+		let idle = ready.is_empty();
 		// Queues drain in a seeded random order, each in its own.
 		for i in (1..ready.len()).rev() {
 			ready.swap(i, self.order.next(i as u64 + 1) as usize);
@@ -535,6 +561,9 @@ impl Lab {
 				self.net.step(chan);
 				self.cost.loops += usize::from(self.looping());
 			}
+		}
+		if !idle {
+			self.net.tick();
 		}
 		self.cost.rounds += 1;
 		let (_, stale, dark) = self.wrong();
@@ -843,6 +872,10 @@ pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>) -> Churn {
 					lab.deliver(&mut pick);
 				}
 			}
+			// A step is one delivery, so a hop of delay is several of them.
+			if total.steps % 8 == 7 {
+				lab.net.tick();
+			}
 			let (loops, stale, dark) = lab.wrong();
 			total.steps += 1;
 			total.loops += usize::from(loops > 0);
@@ -950,9 +983,19 @@ fn the_rules_differ_as_reported() {
 
 	// The publisher's relay dies, and each neighbour reports its own session. A relay
 	// told of one takes a route through another for a moment, unless the dead relay
-	// itself is in doubt.
+	// itself is in doubt: until it advances its epoch, or for a while by the clock,
+	// which costs no message.
 	assert!(cost(Rule::Holds, &ring, Change::Home).loops > 0);
 	assert_eq!(cost(Rule::Epochs, &ring, Change::Home).loops, 0);
+	let wait = cost(Rule::Wait32, &ring, Change::Home);
+	assert_eq!(wait.loops, 0);
+	assert!(wait.sent.msgs <= cost(Rule::Epochs, &ring, Change::Home).sent.msgs);
+	// The clock's price: a detour through the far end of the closed link waits it out.
+	let (wait, epochs) = (
+		cost(Rule::Wait32, &clique, Change::Detour),
+		cost(Rule::Epochs, &clique, Change::Detour),
+	);
+	assert!(wait.rounds > 32 && epochs.rounds < 8 && wait.sent.msgs < epochs.sent.msgs);
 	assert_eq!(cost(Rule::Distance, &ring, Change::Home).loops, 0);
 }
 

@@ -58,6 +58,9 @@ pub(super) struct Rules {
 	/// route through that node until the node says it is still there, by advancing
 	/// its epoch.
 	pub epochs: bool,
+	/// The same doubt on a timer: it lifts by itself after this many hops of delay,
+	/// with no epoch and so no message. 0 is off.
+	pub wait: u64,
 	/// A relay already pulling a broadcast moves onto another relay's copy only if
 	/// that relay ranks below it, so two relays never trade copies.
 	pub ranked: bool,
@@ -71,6 +74,7 @@ impl Rules {
 		horizon: false,
 		holds: false,
 		epochs: false,
+		wait: 0,
 		ranked: true,
 	};
 
@@ -86,6 +90,11 @@ impl Rules {
 		holds: true,
 		..Self::CAUSES
 	};
+
+	/// Holds, and a doubt that lifts by itself after `wait` hops of delay.
+	pub const fn waits(wait: u64) -> Self {
+		Self { wait, ..Self::HOLDS }
+	}
 
 	/// Holds, and epochs.
 	pub const EPOCHS: Self = Self {
@@ -257,6 +266,9 @@ pub(super) struct Relay {
 	epochs: BTreeMap<Id, u64>,
 	/// The epoch each such node was at when a session of its was last seen to close.
 	doubt: BTreeMap<Id, u64>,
+	/// With a timer in place of epochs: when the doubt on each node lifts.
+	until: BTreeMap<Id, u64>,
+	now: u64,
 	/// The broadcasts this relay has a reader for, so it carries a copy, each with
 	/// the neighbour it pulls from and whether that is a copy.
 	readers: BTreeMap<Cast, Option<(Node, bool)>>,
@@ -294,6 +306,8 @@ impl Relay {
 			dead: BTreeSet::new(),
 			epochs: BTreeMap::new(),
 			doubt: BTreeMap::new(),
+			until: BTreeMap::new(),
+			now: 0,
 			readers: BTreeMap::new(),
 			shown: BTreeMap::new(),
 			out: Vec::new(),
@@ -520,6 +534,11 @@ impl Relay {
 			}
 		}
 		self.dead.insert(hop);
+		if rules.wait > 0 {
+			let until = self.until.entry(far.0).or_default();
+			*until = (self.now + rules.wait).max(*until);
+			touched.extend(self.heard());
+		}
 		if rules.epochs {
 			let doubt = self.doubt.entry(far.0).or_default();
 			*doubt = far.1.max(*doubt);
@@ -778,6 +797,7 @@ impl Relay {
 		};
 		self.epochs.retain(|node, _| named(node));
 		self.doubt.retain(|node, _| named(node));
+		self.until.retain(|node, _| named(node));
 		for session in self.sessions.values_mut() {
 			let tx = &session.tx;
 			let casts = &session.casts;
@@ -801,8 +821,25 @@ impl Relay {
 	/// has not advanced its epoch since.
 	fn doubted(&self, path: &[Hop]) -> bool {
 		path.iter().any(|hop| {
-			(self.doubt.get(&hop.node)).is_some_and(|at| self.epochs.get(&hop.node).copied().unwrap_or(0) <= *at)
+			let behind =
+				(self.doubt.get(&hop.node)).is_some_and(|at| self.epochs.get(&hop.node).copied().unwrap_or(0) <= *at);
+			behind || self.until.contains_key(&hop.node)
 		})
+	}
+
+	/// One hop of delay passes. Whether a doubt is still waiting to lift.
+	pub fn tick(&mut self) -> bool {
+		self.now += 1;
+		let before = self.until.len();
+		let now = self.now;
+		self.until.retain(|_, until| *until > now);
+		if self.until.len() < before {
+			for id in self.heard() {
+				self.update(id);
+			}
+			self.warm(None);
+		}
+		!self.until.is_empty()
 	}
 
 	/// Tell `peer` the epoch of each node `path` names, where it has an older one.
@@ -1209,6 +1246,16 @@ impl PathSim {
 	/// Where `node` pulls `claim` of `id` from.
 	pub fn source(&self, node: Node, id: Id, claim: &str) -> Option<Source> {
 		self.nodes[node].source(&(id, p(claim)))
+	}
+
+	/// One hop of delay passes at every node. Whether any still waits on a timer.
+	pub fn tick(&mut self) -> bool {
+		let mut waiting = false;
+		for node in &mut self.nodes {
+			waiting |= node.tick();
+		}
+		self.flush();
+		waiting
 	}
 
 	pub fn hold(&mut self, from: Node, to: Node) {
