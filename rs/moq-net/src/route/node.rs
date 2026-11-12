@@ -31,7 +31,7 @@ use rand::RngExt;
 
 use super::{
 	Error, GENERATED, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno,
-	view::{ancestors, below},
+	view::{above, ancestors, below},
 };
 
 /// One announce stream in one direction.
@@ -520,6 +520,12 @@ struct State {
 	/// Answer streams of a node that does not forward, which join `links` once this
 	/// node's route goes out on them.
 	origins: HashSet<Key>,
+	/// How many [`Closing`] guards are held: while any is, a dropped stream joins
+	/// `closed` instead of disconnecting on its own.
+	closing: usize,
+	/// The streams dropped while a [`Closing`] guard was held, disconnected together
+	/// once the last is released.
+	closed: Vec<Key>,
 }
 
 /// Each shown claim of another identity, and the streams serving it.
@@ -589,6 +595,8 @@ impl Node {
 				routes: HashMap::new(),
 				links: HashSet::new(),
 				origins: HashSet::new(),
+				closing: 0,
+				closed: Vec::new(),
 			})),
 		}
 	}
@@ -663,7 +671,7 @@ impl Node {
 			state.origins.insert(key);
 		}
 		if let Err(err) = open(&mut state.router, key) {
-			state.router.disconnect(key);
+			state.router.disconnect([key]);
 			state.queues.remove(&key);
 			state.origins.remove(&key);
 			state.links.remove(&key);
@@ -675,6 +683,14 @@ impl Node {
 			key,
 			queue,
 		})
+	}
+
+	/// Hold back the disconnect of every stream dropped until the guard is released,
+	/// then disconnect them together: a session closing many streams at once costs the
+	/// route layer one recompute rather than one per stream.
+	pub fn closing(&self) -> Closing {
+		self.lock().closing += 1;
+		Closing { node: self.clone() }
 	}
 
 	#[cfg(test)]
@@ -820,24 +836,27 @@ impl Stream {
 impl Drop for Stream {
 	fn drop(&mut self) {
 		let mut state = self.node.lock();
-		let state = &mut *state;
-		if let Some(queue) = state.queues.remove(&self.key) {
-			for (id, (held, _)) in &queue.read().withheld {
-				for path in held.keys() {
-					unwait(&mut state.waiting, *id, path, self.key);
-				}
-			}
+		match state.closing {
+			0 => state.close(vec![self.key]),
+			_ => state.closed.push(self.key),
 		}
-		state.router.disconnect(self.key);
-		// Its session is gone, and what it served with it.
-		for home in state.homes.values_mut() {
-			home.keys.remove(&self.key);
+	}
+}
+
+/// Holds back the disconnect of each stream dropped meanwhile, then disconnects them
+/// together on drop. See [`Node::closing`].
+pub(crate) struct Closing {
+	node: Node,
+}
+
+impl Drop for Closing {
+	fn drop(&mut self) {
+		let mut state = self.node.lock();
+		state.closing -= 1;
+		if state.closing == 0 && !state.closed.is_empty() {
+			let closed = std::mem::take(&mut state.closed);
+			state.close(closed);
 		}
-		state.origins.remove(&self.key);
-		if state.links.remove(&self.key) {
-			let _ = state.router.bump();
-		}
-		state.flush();
 	}
 }
 
@@ -851,6 +870,32 @@ fn push(queues: &Queues, key: Key, output: Output) {
 impl State {
 	/// Route the router's messages and shown claims to the streams. Claims are served
 	/// before the batches carrying them go, so a batch knows what is not served yet.
+	/// Disconnect the dropped streams `keys`: their sessions are gone, and what they
+	/// served with them.
+	fn close(&mut self, keys: Vec<Key>) {
+		for &key in &keys {
+			if let Some(queue) = self.queues.remove(&key) {
+				for (id, (held, _)) in &queue.read().withheld {
+					for path in held.keys() {
+						unwait(&mut self.waiting, *id, path, key);
+					}
+				}
+			}
+		}
+		self.router.disconnect(keys.iter().copied());
+		let keys: HashSet<Key> = keys.into_iter().collect();
+		for home in self.homes.values_mut() {
+			home.keys.retain(|key, _| !keys.contains(key));
+		}
+		self.origins.retain(|key| !keys.contains(key));
+		let linked = self.links.len();
+		self.links.retain(|key| !keys.contains(key));
+		if self.links.len() != linked {
+			let _ = self.router.bump();
+		}
+		self.flush();
+	}
+
 	fn flush(&mut self) {
 		loop {
 			let outs = self.router.drain();
@@ -947,14 +992,25 @@ impl State {
 		let changed: Vec<Path> = claims.iter().cloned().collect();
 		let (shown, gone): (Vec<Path>, Vec<Path>) =
 			(claims.into_iter()).partition(|claim| self.router.shown().contains_key(&(id, claim.clone())));
+		// Each route by the prefix its stream asked for, so a claim looks up the routes
+		// that may carry it per segment rather than checking every route.
+		let mut asked: BTreeMap<Path, Vec<usize>> = BTreeMap::new();
+		for (index, (key, ..)) in routes.iter().enumerate() {
+			asked.entry(self.router.asked(*key)).or_default().push(index);
+		}
 		// Most specific first: a job continuing its claim's instance is served before
 		// the claim moves on, so a reader resolved through the claim finds the job's route.
 		for claim in shown.into_iter().rev() {
 			let shown = &self.router.shown()[&(id, claim.clone())];
 			let (item, available) = (shown.item.clone(), shown.available);
-			let carrying: Vec<(Key, Metric, Option<std::time::Duration>, Id)> = (routes.iter())
-				.filter(|(key, ..)| self.router.carries(*key, &claim))
+			let mut indices: Vec<usize> = above(&asked, &claim)
+				.flat_map(|(_, indices)| indices)
 				.copied()
+				.collect();
+			indices.sort_unstable();
+			let carrying: Vec<(Key, Metric, Option<std::time::Duration>, Id)> = (indices.into_iter())
+				.map(|index| routes[index])
+				.filter(|(key, ..)| self.router.carries(*key, &claim))
 				.collect();
 			let home = self.homes.entry((id, claim.clone())).or_default();
 			// With no route left, the router no longer knows the name a stream's peer

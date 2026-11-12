@@ -93,8 +93,9 @@ export class Floors {
 	/**
 	 * The route ended or its stream closed. What its floor certified stays while another route to
 	 * the node may still carry a claim it decides; the last route takes the node's state with it.
-	 * Every other route to the node is shown anew, since a path this one alone certified now shows
-	 * what its streams carry.
+	 * Every other route to the node whose prefix meets this one's is shown anew, since a path this
+	 * one alone certified now shows what its streams carry; a route's claims lie within its prefix,
+	 * so no other route's can change, and a session closing many prefixes costs each only its own.
 	 */
 	leave(node: bigint, carrier: Carrier): void {
 		const entry = this.#nodes.get(node);
@@ -107,7 +108,7 @@ export class Floors {
 		const { prefix, hidden, revision, claims } = carrier.view;
 		if (revision !== undefined) entry.retained.push({ prefix, hidden, revision, claims });
 		this.#prune(entry);
-		for (const other of entry.carriers) other.reshow();
+		for (const other of entry.carriers) if (meets(other.view.prefix, prefix)) other.reshow();
 	}
 
 	/**
@@ -123,9 +124,10 @@ export class Floors {
 	}
 
 	/**
-	 * A route to `node` applied a batch at its floor: every other route to it is shown anew.
-	 * Returns whether any other view of the node existed, in which case the route's own unchanged
-	 * claims may have changed state too, even if this floor pruned it.
+	 * A route to `node` applied a batch at its floor: every other route to it whose prefix meets
+	 * this one's is shown anew, as in `leave`. Returns whether any other view of the node existed,
+	 * in which case the route's own unchanged claims may have changed state too, even if this floor
+	 * pruned it.
 	 */
 	floor(node: bigint, carrier: Carrier): boolean {
 		const entry = this.#nodes.get(node);
@@ -133,7 +135,8 @@ export class Floors {
 		const retained = entry.retained.length;
 		this.#prune(entry);
 		if (entry.carriers.size === 1 && retained === 0) return false;
-		for (const other of entry.carriers) if (other !== carrier) other.reshow();
+		const prefix = carrier.view.prefix;
+		for (const other of entry.carriers) if (other !== carrier && meets(other.view.prefix, prefix)) other.reshow();
 		return true;
 	}
 
