@@ -24,6 +24,7 @@ import { type Hop, HopSchema, isAnonymous, MAX_HOPS, UNKNOWN_HOP, WireRoute } fr
 import * as Instance from "../instance.ts";
 import { hooks, rendezvousHash } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
+import * as Mint from "../mint.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
@@ -3829,6 +3830,37 @@ test("a lite-07 tie keeps its winner across a route's unusable spell", async () 
 
 	const pick = await trackRequest(x, 1);
 	expect(pick.request).toMatchObject({ instance: a, node: NODE_B });
+
+	pick.consumed.close();
+	announced.close();
+	subscriber.close();
+	await pick.info;
+});
+
+// Lite-07 carries a minted instance, as a relay forwards a legacy publisher's claim, so a consume
+// pinned to one asks for it rather than for whichever instance wins the path.
+test("a lite-07 consume pinned to a minted instance asks for it", async () => {
+	const { subscriber, announced, send, trackRequest } = await routedStream();
+	const x = Path.from("live/x");
+	const a = Instance.parse("a");
+	const minted = Mint.fresh();
+
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: x, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
+	// A dearer route carries the minted instance.
+	await send({ status: "routeStart", node: NODE_B, advert: { ...ADVERT, metric: 5n } });
+	await send({ status: "active", suffix: x, route: 1n, instance: minted });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	// Another claim marks the floor as applied.
+	const w = Path.from("live/w");
+	await send({ status: "active", suffix: w, route: 1n, instance: a });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: w, kind: "start" });
+
+	const pick = await trackRequest(x, 1, minted);
+	expect(pick.request).toMatchObject({ instance: minted, node: NODE_B });
 
 	pick.consumed.close();
 	announced.close();
