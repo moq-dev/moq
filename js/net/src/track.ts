@@ -1949,7 +1949,9 @@ export class Producer {
 			fetched: fetched || undefined,
 		};
 		hooks.chargeGroup(group, entry.charge);
-		if (succeeds) hooks.succeedGroup(group, succeeds.failed);
+		// The failed copy's frames its continued readers still hold, billed until this entry leaves
+		// the cache, which evicts the sink mirrors holding them.
+		if (succeeds) entry.charge.bill(hooks.succeedGroup(group, succeeds.failed));
 		this.#undrop(group.sequence);
 		// No reader is handed a failed fill answer (see #withhold), withheld as it aborts so a
 		// read that follows at once cannot take it: its sequence is unknown again, owed while the

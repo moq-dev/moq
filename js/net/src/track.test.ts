@@ -3577,7 +3577,7 @@ test.each([
 // into it from the frame it reached: a sink still buffering the group hands it out once, a frame cut
 // short is read whole from the successor unless a reader already took part of it, readers at
 // different frames each continue from their own, and with no takeover every mirror fails once.
-test.each(["buffered", "handed", "partial", "positions", "once"])(
+test.each(["buffered", "handed", "partial", "replay", "positions", "once"])(
 	"a held copy's mirrors continue on its successor (%p)",
 	async (kind) => {
 		const producer = new TrackProducer("video").accept({ maxAge: null });
@@ -3621,6 +3621,25 @@ test.each(["buffered", "handed", "partial", "positions", "once"])(
 			takeover();
 			for (const payload of ["a", "b", "c"]) expect(await behind.readString()).toBe(payload);
 			expect(await behind.readString()).toBeUndefined();
+		} else if (kind === "replay") {
+			// The successor fails partway through a frame the reader already has: no loss to it, so a
+			// third copy held for the group still continues it.
+			const reader = first.consume();
+			expect(await reader.readString()).toBe("a");
+			first.abort(failed);
+			const second = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+			arriving?.release();
+			const held = hooks.arrivingGroup(producer, 3n);
+			second.createFrame({ size: 2 }).write(enc.encode("a"));
+			second.abort(failed);
+			await settle();
+			expect(reader.closed.peek()).toBeUndefined();
+			const third = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+			held?.release();
+			for (const payload of ["a", "b"]) third.writeFrame({ payload: enc.encode(payload) });
+			third.finish();
+			expect(await reader.readString()).toBe("b");
+			expect(await reader.readString()).toBeUndefined();
 		} else if (kind === "positions") {
 			first.writeFrame({ payload: enc.encode("b") });
 			const readers = [first.consume(), first.consume(), first.consume()];

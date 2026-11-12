@@ -3783,17 +3783,18 @@ impl TrackState {
 	}
 }
 
-/// The copy of its group `reader` continues on once the copy it reads failed: one holding the
-/// group from the reader's frame, once no re-offer of it is still held (see [`Hold`]). A
+/// The copy of its group `reader` continues on from frame `index` once the copy it reads
+/// failed: one holding the group from there, once no re-offer of it is still held (see [`Hold`]). A
 /// group's name fixes its content, so any such copy continues it.
 pub(super) fn successor(
 	track: &kio::Producer<TrackState>,
 	reader: &group::Consumer,
+	index: usize,
 	waiter: &kio::Waiter,
 ) -> Poll<Option<group::Consumer>> {
 	let sequence = reader.sequence;
 	// A copy cut short at the back still continues a reader capped no later than the cut.
-	let frames = reader.unread();
+	let frames = reader.unread(index);
 	let found = track.poll_ref(waiter, |state| {
 		// Only a hold on the copy read: one on a copy that took over from it waits on that one.
 		if state
@@ -3812,7 +3813,7 @@ pub(super) fn successor(
 				.flat_map(Slot::copies)
 				.filter(|copy| copy.covers(frames) && !copy.is_read_by(reader))
 				.filter_map(group::Handle::try_consume)
-				.find(|copy| copy.continues(reader)),
+				.find(|copy| copy.continues(reader, index)),
 		)
 	});
 	Poll::Ready(match found {
@@ -17280,6 +17281,129 @@ mod test {
 		again.finish().unwrap();
 		assert_eq!(reader.finished().await.unwrap(), 1);
 		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"b");
+	}
+
+	/// A re-offer that fails while still sending frames the reader took from an earlier copy
+	/// hands over to the next held re-offer: only a frame the reader took from the failing copy
+	/// itself is torn. One it was streaming from that copy is lost with it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_reoffer_failing_in_its_replay_hands_over_again() {
+		for torn in [false, true] {
+			let producer = received_producer(Info::timed());
+			let at = |millis| Timestamp::from_millis(millis).unwrap();
+			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the first copy opens");
+			};
+			first.write_frame(at(300), &b"a"[..]).unwrap();
+			let mut reader = first.consume();
+			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a", "{torn}");
+
+			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the re-offer waits on the copy still arriving");
+			};
+			first.abort(Error::Cancel).unwrap();
+			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the re-offer takes the group");
+			};
+			let Ok(Received::Held(next)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("another re-offer waits on the first");
+			};
+			drop(hold);
+			let waiter = kio::Waiter::noop();
+			let handle = again.handle();
+			let streaming = if torn {
+				// The reader streams part of frame 1 from the re-offer before it fails.
+				again.write_frame(at(300), &b"a"[..]).unwrap();
+				let mut frame = again
+					.create_frame(frame::Info {
+						size: 2,
+						timestamp: Some(at(301)),
+					})
+					.unwrap();
+				frame.write(&b"b"[..]).unwrap();
+				let mut part = reader.next_frame().await.unwrap().expect("frame 1 streams");
+				assert_eq!(&part.read_chunk().await.unwrap().unwrap()[..], b"b");
+				frame
+			} else {
+				// The re-offer fails partway through frame 0, which the reader already holds.
+				let mut frame = again
+					.create_frame(frame::Info {
+						size: 2,
+						timestamp: Some(at(300)),
+					})
+					.unwrap();
+				frame.write(&b"a"[..]).unwrap();
+				assert!(reader.poll_read_frame(&waiter).is_pending());
+				frame
+			};
+			handle.abort(Error::Cancel).unwrap();
+			drop(streaming);
+			if torn {
+				drop(next);
+				assert!(reader.read_frame().await.is_err(), "frame 1 was handed out partly");
+				continue;
+			}
+			assert!(
+				reader.poll_read_frame(&waiter).is_pending(),
+				"waits on the next re-offer"
+			);
+			let Ok(Received::Group(mut last)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the next re-offer takes the group");
+			};
+			drop(next);
+			last.write_frame(at(300), &b"a"[..]).unwrap();
+			last.write_frame(at(301), &b"b"[..]).unwrap();
+			last.finish().unwrap();
+			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"b");
+			assert!(reader.read_frame().await.unwrap().is_none());
+		}
+	}
+
+	/// A failed copy's end agrees with its frame reads when the reader still has frames it
+	/// prefetched from it: a re-offer starting past the reader's frame but not past those
+	/// continues it, and one starting past both does not.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_failed_copy_finishes_past_its_prefetched_frames() {
+		for start in [2, 3] {
+			let producer = received_producer(Info::timed());
+			let at = |millis| Timestamp::from_millis(millis).unwrap();
+			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the first copy opens");
+			};
+			first.write_frame(at(300), &b"a"[..]).unwrap();
+			first.write_frame(at(301), &b"b"[..]).unwrap();
+			let mut reader = first.consume();
+			// Takes frame 1 into its prefetch with frame 0.
+			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a");
+
+			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the re-offer waits on the copy still arriving");
+			};
+			first.abort(Error::Cancel).unwrap();
+			let waiter = kio::Waiter::noop();
+			assert!(reader.poll_finished(&waiter).is_pending(), "{start}: waits on the hold");
+			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { sequence: 3 }, start) else {
+				panic!("the re-offer takes the group");
+			};
+			drop(hold);
+			if start == 3 {
+				assert!(reader.finished().await.is_err(), "frame 2 is in no copy");
+				assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"b");
+				assert!(reader.read_frame().await.is_err(), "nor can a read find it");
+				continue;
+			}
+			again.write_frame(at(302), &b"c"[..]).unwrap();
+			let res = reader.poll_finished(&waiter);
+			assert!(res.is_pending(), "the re-offer is still open: {res:?}");
+			again.finish().unwrap();
+			// From where the reader stands, with frame 1 still to read.
+			assert_eq!(reader.finished().await.unwrap(), 1);
+			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"b");
+			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"c");
+			assert!(reader.read_frame().await.unwrap().is_none());
+		}
 	}
 
 	/// A capped reader continues on a copy cut short at the back no earlier than its cap, which

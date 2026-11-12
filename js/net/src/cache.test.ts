@@ -7,6 +7,30 @@ import { RUN_OVERHEAD as ARRIVAL_OVERHEAD } from "./ledger.ts";
 import { Tail } from "./tail.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
+// A reader continued on a held re-offer keeps the frames the failed copy wrote that it has yet to
+// read, so the pool still counts them once that copy leaves the cache.
+test("a re-offer bills the failed copy's frames its readers still hold", async () => {
+	await withClock(async () => {
+		const pool = new cache.Pool({ capacity: 100 * billed(10_000) });
+		const producer = new TrackProducer("test");
+		hooks.poolTrack(producer, pool);
+		const track = producer.accept({ maxAge: null });
+		hooks.receiveTrack(track);
+		const first = hooks.receiveGroup(track, { sequence: 0n, start: 0 });
+		first.writeFrame({ payload: new Uint8Array(10_000) });
+		const reader = first.consume();
+		const arriving = hooks.arrivingGroup(track, 0n);
+		first.abort(new Error("reset"));
+		// The re-offer starts past the frame the reader still holds.
+		hooks.receiveGroup(track, { sequence: 0n, start: 1 });
+		arriving?.release();
+		expect(pool.used).toBeGreaterThan(10_000);
+		expect((await reader.readFrame())?.payload.byteLength).toBe(10_000);
+		reader.close();
+		track.close();
+	});
+});
+
 // Run `fn` on a manual clock, stepped in milliseconds.
 async function withClock(fn: (clock: { advance: (ms: number) => Promise<void> }) => Promise<void> | void) {
 	const clock = new Manual();

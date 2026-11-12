@@ -322,6 +322,8 @@ export class Producer {
 			const error = failed.#state.closed.peek();
 			if (!(error instanceof Error)) throw new Error("group has not failed");
 			const state = next.#state;
+			// The failed copy's frames the continued mirrors hold, once each though mirrors share them.
+			const kept = new Set<Frame>();
 			for (const [mirror, reads] of failed.#mirrors ?? []) {
 				failed.#unmirror(mirror);
 				// The successor continues a mirror from the frame it reached, so it must hold that
@@ -333,6 +335,7 @@ export class Producer {
 					mirror.closed.set(error);
 					continue;
 				}
+				for (const frame of mirror.frames.peek()) kept.add(frame);
 				mirror.from = mirror.total.peek();
 				mirror.charge = state.charge;
 				if (state.compressed) mirror.flate = state.flate;
@@ -340,6 +343,9 @@ export class Producer {
 				for (const frame of state.frames.peek()) if (index++ >= mirror.from) appendFrame(mirror, frame);
 				next.#attach(mirror, reads);
 			}
+			let bytes = 0;
+			for (const frame of kept) bytes += frameBytes(frame);
+			return bytes;
 		};
 		hooks.startGroup = (group, start) => {
 			if (!Number.isSafeInteger(start) || start < 0) throw new RangeError("invalid group frame start");
@@ -746,7 +752,10 @@ export class Producer {
 		// A held copy's duplicate continues each mirror from the frame it reached, so a mirror
 		// drops the frame cut short before its reader takes it. One whose reader took it lost it.
 		if (held && cut) {
+			const index = this.#state.total.peek() - 1;
 			for (const mirror of this.#mirrors?.keys() ?? []) {
+				// A mirror taken over past the cut frame never got it from this copy.
+				if (index < mirror.from) continue;
 				if (mirror.frames.peek().last === cut) {
 					mirror.frames.mutate((frames) => frames.pop());
 					mirror.total.update((total) => total - 1);

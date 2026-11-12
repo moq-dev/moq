@@ -921,9 +921,10 @@ export const hooks: {
 	holdGroup: (group: GroupProducer) => () => void;
 	/**
 	 * Hand `next` the readers `failed` kept open while held, teeing each from the frame it reached.
-	 * Fails those `next` cannot serve. Assigned by `group.ts`.
+	 * Fails those `next` cannot serve. Returns the bytes of `failed`'s frames they still hold.
+	 * Assigned by `group.ts`.
 	 */
-	succeedGroup: (next: GroupProducer, failed: GroupProducer) => void;
+	succeedGroup: (next: GroupProducer, failed: GroupProducer) => number;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
