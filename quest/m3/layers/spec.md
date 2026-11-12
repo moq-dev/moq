@@ -5,9 +5,11 @@
 `drafts/draft-lcurley-moq-hang.md`, `rs/hang`, and `js/hang` define a
 composition: a versioned catalog section that lists child broadcasts, marks
 one as main, and gives each child its offset from its PTS onto the
-composition's clock, its priority, and whether a viewer may toggle it. A
-picture child also carries its transform, crop, z-order, opacity, visibility,
-and keyframes; a sound child carries its gain, mute, pan, and delay. The
+composition's clock, its priority, whether a viewer may toggle it, and, for
+sound, its gain, mute, pan, and delay. A separate list of pictures places
+children: each picture names a child and carries its transform, crop,
+z-order, opacity, visibility, and keyframes, so one child can show in
+several places. The
 composition's catalog also lists the main child's renditions, so a consumer
 that knows no compositions plays the main alone.
 
@@ -27,6 +29,13 @@ keeps its own PTS timeline and root settings, and listing one does not
 subscribe to it. The composition's clock is the main's, so the main's offset
 is zero and the catalog lists its renditions by their `broadcast` reference,
 on the same timeline.
+
+Decided 2026-11-12 (maintainer, moq-dev/studio /quest-complete on
+[moq-dev/studio#146](https://github.com/moq-dev/studio/pull/146)): ✅
+placements are a list of pictures that each name a child, apart from the
+child entries (rejected: one placement per child). A studio source can show
+in several places at once, such as a clone or the top layer, and a player
+fetches its broadcast once however many pictures show it.
 
 Decided 2026-11-09 (maintainer, moq-dev/studio /quest-audit): a sound child
 carries pan and delay as well as gain and mute. The studio's strip has all
