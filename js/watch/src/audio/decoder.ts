@@ -14,16 +14,15 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
-import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { hosted } from "../assets";
 import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
-import type { Sync, Track } from "../sync";
+import { DELAY_MAX, type Sync, type Track } from "../sync";
 import { AudioBuffer } from "./buffer";
 import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
 import { Handover } from "./handover";
-import { AUTO_MAX_DELAY, ringHold, target } from "./latency";
+import { bound, maxDelay, ringHold, target } from "./latency";
 import { Order } from "./order";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
@@ -189,7 +188,7 @@ export class Decoder {
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
 	#measured = new Signal<Duration | undefined>(undefined);
 
-	// The subscription's max delay: the shared budget, raised to the estimator's ceiling in "auto".
+	// The subscription's max delay: the shared budget, raised to the delay plus the stretch.
 	#subscribeMaxDelay = new Signal<Duration>(Duration.ZERO);
 	// The container consumer's delay: the playout delay to start at and the shared budget. Its warmup
 	// reaches the start further back, to the media the decoder primes on.
@@ -203,9 +202,6 @@ export class Decoder {
 
 	// The broadcast instance the ring's timeline belongs to. See #runDecoder.
 	#instance?: Moq.Broadcast.Consumer["closed"];
-
-	// Fans received frames out to open `arrivals()` handles; retains nothing without one.
-	#arrivals = new ArrivalProducer();
 
 	#signals = new Effect();
 	#phase = new Signal<Phase>({ kind: "stopped" });
@@ -290,6 +286,8 @@ export class Decoder {
 
 	// Count a received frame and whether it arrived too late for playout.
 	#receive(key: Key, frame: Container.ReceivedFrame, timestamp: Duration, late: boolean): void {
+		// How far the playhead trails what arrived, decoded or not, is the level the ring steers on.
+		this.#ring.peek()?.received(timestamp.add(this.#frame.peek() ?? Duration.ZERO));
 		const bytes = frame.payload.byteLength;
 		const arrived = arrivedAt(frame.arrival);
 		this.#tally.arrive(key, timestamp, arrived);
@@ -323,17 +321,30 @@ export class Decoder {
 		});
 	}
 
-	// A group the relay expires is never observed, so a subscription cut to the target would cap the
-	// estimate at the target it already holds. The container consumer keeps the shared max delay as its
-	// local skip, since it observes each frame before applying it, and carves out the warmup the
-	// subscription adds once it has warmed, as Rust's does. See doc/concept/audio-jitter.md.
+	// The subscription reaches the stretch past the delay, so audio the ring could still catch up on
+	// arrives. A group the relay expires is never observed, so a zero stretch, which cuts the
+	// subscription to the target, leaves the estimate rising one bucket at a time. The container
+	// consumer drops aged media at the same max delay, since it observes each frame before applying
+	// it, and carves out the warmup the subscription adds once it has warmed, as Rust's does. It waits
+	// on a missing group only for the delay plus the lookahead: past that the group would play late,
+	// and a reordered backlog's holes waited out to the max would read as jitter to the estimator.
+	// See doc/concept/audio-jitter.md.
 	#runSubscribeMaxDelay(effect: Effect): void {
-		const delay = effect.get(this.sync.out.delay);
-		const maxDelay = effect.get(this.sync.out.maxDelay);
-		const auto = effect.get(this.sync.in.delay) === "auto";
-		const warmup = Duration.millis(effect.get(this.source.out.config)?.warmup ?? 0);
-		this.#delay.set({ min: delay, max: maxDelay });
-		this.#subscribeMaxDelay.set((auto ? maxDelay.max(AUTO_MAX_DELAY) : maxDelay).add(warmup));
+		const budget = this.#budget(effect);
+		const delay = budget.delay;
+		const max = maxDelay(budget);
+		const warmup = Duration.millis(effect.get(this.source.out.config)?.warmup ?? 0).min(DELAY_MAX);
+		this.#delay.set({ min: delay, max });
+		this.#subscribeMaxDelay.set(max.add(warmup));
+	}
+
+	// The terms of the subscription's max delay: the shared delay and max delay, and the stretch.
+	#budget(effect: Effect): { delay: Duration; maxDelay: Duration; stretch: Duration } {
+		return {
+			delay: effect.get(this.sync.out.delay),
+			maxDelay: effect.get(this.sync.out.maxDelay),
+			stretch: effect.get(this.sync.in.stretch),
+		};
 	}
 
 	#runShape(effect: Effect): void {
@@ -406,6 +417,7 @@ export class Decoder {
 				rate: sampleRate,
 				delay: this.sync.out.delay.peek(),
 				buffered,
+				clock: this.sync,
 				playing: this.sync.playing,
 			});
 			effect.cleanup(() => ring.close());
@@ -498,10 +510,10 @@ export class Decoder {
 		const ring = effect.get(this.#ring);
 		if (!ring) return;
 
-		// A rise parks playback until the queued media covers the new target, which is what keeps
-		// audio in step with video. The measured target moves a bucket at a time, and a rise the
-		// buffered slack already covers costs no silence at all.
-		ring.setLatency(effect.get(this.sync.out.delay));
+		// The ring plays onto the shared clock, slowing down onto a rise and speeding up onto a fall,
+		// and skips only audio trailing it past what the subscription still delivers.
+		const budget = this.#budget(effect);
+		ring.setLatency(budget.delay, bound(budget));
 	}
 
 	#runDecoder(effect: Effect): void {
@@ -607,7 +619,12 @@ export class Decoder {
 	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, { config, failure, path, key }: Attempt): void {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
-		this.#terminal.clear(preSkip, (config.warmup ?? 0) * 1000);
+		this.#terminal.clear(
+			preSkip,
+			Duration.millis(config.warmup ?? 0)
+				.min(DELAY_MAX)
+				.asMicros(),
+		);
 		const format =
 			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
@@ -660,7 +677,6 @@ export class Decoder {
 					if (this.#onRead(next)) {
 						this.#reprime(decoder, decoderConfig, order);
 					}
-					if (next.kind === "gap") this.#arrivals.write(gap(next));
 					continue;
 				}
 				const { frame } = next;
@@ -668,7 +684,6 @@ export class Decoder {
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = frame.timestamp;
 				const late = this.#track.received(timestamp, frame.arrival);
-				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -695,7 +710,12 @@ export class Decoder {
 		const init = Cmaf.decodeInitSegment(initSegment);
 		const opusDescription = config.description ? Util.Hex.toBytes(config.description) : init.description;
 		const preSkip = config.codec === "opus" && opusDescription ? Util.Opus.preSkip(opusDescription) : 0;
-		this.#terminal.clear(preSkip, (config.warmup ?? 0) * 1000);
+		this.#terminal.clear(
+			preSkip,
+			Duration.millis(config.warmup ?? 0)
+				.min(DELAY_MAX)
+				.asMicros(),
+		);
 		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
 		// The dOps box from the init segment is not a valid OGG Identification Header.
 		const description =
@@ -747,14 +767,12 @@ export class Decoder {
 					if (this.#onRead(next)) {
 						this.#reprime(decoder, decoderConfig, order);
 					}
-					if (next.kind === "gap") this.#arrivals.write(gap(next));
 					continue;
 				}
 				const { frame } = next;
 
 				const timestamp = frame.timestamp;
 				const late = this.#track.received(timestamp, frame.arrival);
-				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -849,7 +867,8 @@ export class Decoder {
 		const consumer = new Container.Consumer(sub, {
 			format,
 			delay: this.#delay,
-			warmup: Duration.millis(config.warmup ?? 0),
+			wait: this.sync.out.maxDelay,
+			warmup: Duration.millis(config.warmup ?? 0).min(DELAY_MAX),
 			predecessor: continues ? outgoing.consumer : undefined,
 		});
 		effect.cleanup(() => consumer.close());
@@ -878,12 +897,17 @@ export class Decoder {
 			const pending = inner.get(read);
 			const network = inner.get(consumer.buffered);
 			let newest = pending.newest;
+			// What the consumer holds has arrived too, so its newest end is how far the received audio
+			// reaches, though the gate keeps it encoded.
+			let arrived: Duration | undefined;
 			for (const { end } of network) {
 				const micro = end.asMicros();
 				if (newest === undefined || micro > newest) newest = micro;
+				if (arrived === undefined || end.gt(arrived)) arrived = end;
 			}
 			inner.set(this.#queued, Container.mergeBufferedRanges(network, pending.buffered));
 			ring.queued(newest);
+			if (arrived !== undefined) ring.received(arrived);
 		});
 
 		// Feed the arrival estimate into the playout target. It outlives this consumer, so the target
@@ -1054,18 +1078,8 @@ export class Decoder {
 		return true;
 	}
 
-	/**
-	 * Observe every frame and gap received from now until the handle or this decoder closes.
-	 *
-	 * Each open handle queues every entry until read, so read it continuously or close it.
-	 */
-	arrivals(): Arrivals {
-		return this.#arrivals.consume();
-	}
-
 	/** Stop and release everything this holds. */
 	close() {
-		this.#arrivals.close();
 		this.#signals.close();
 	}
 

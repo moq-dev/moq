@@ -234,6 +234,76 @@ void main() {
     server.cancel();
   });
 
+  test(
+    'a credential is answered, names a route and a claim, and cancels',
+    () async {
+      const version = ['moq-lite-07-wip'];
+      final server = MoqServer(
+        config: MoqServerConfig(
+          bind: '127.0.0.1:0',
+          versions: version,
+          tls: MoqServerTls(generate: ['localhost']),
+          quic: MoqQuicConfig(),
+        ),
+      );
+      final address = await server.listen().timeout(timeout);
+      final accepted = () async {
+        final request = await server.accept().timeout(timeout);
+        if (request == null) throw StateError('server closed before accept');
+        return request.accept().timeout(timeout);
+      }();
+
+      final client = await Moq.connect(
+        'https://$address',
+        options: ConnectOptions(
+          tls: ClientTls(insecure: true),
+          bind: '127.0.0.1:0',
+          versions: version,
+          once: true,
+        ),
+      ).timeout(timeout);
+      final serverSession = await accepted;
+
+      expect(() => client.credential(''), throwsA(isA<ConfigMoqException>()));
+      final Credential credential = client.credential('extra');
+      // The server verifies no tokens of its own, so it refuses this one.
+      await expectLater(
+        credential.answered().timeout(timeout),
+        throwsA(isA<UnsupportedMoqException>()),
+      );
+
+      final route = client.route('room/x', options: RouteOptions(hidden: true));
+      final claim = client.session.publish().claim(
+        prefix: 'live',
+        options: RouteOptions(hidden: true),
+      );
+      route.setAuth(credential: credential);
+      claim.setAuth(credential: credential);
+      route.setAuth(credential: null);
+      claim.setAuth(credential: null);
+
+      credential.cancel();
+      await expectLater(
+        credential.answered().timeout(timeout),
+        throwsA(isA<CancelledMoqException>()),
+      );
+      expect(
+        () => route.setAuth(credential: credential),
+        throwsA(isA<CancelledMoqException>()),
+      );
+      expect(
+        () => claim.setAuth(credential: credential),
+        throwsA(isA<CancelledMoqException>()),
+      );
+      route.cancel();
+      claim.cancel();
+
+      await client.close();
+      serverSession.cancel(code: 0);
+      server.cancel();
+    },
+  );
+
   test('an announced instance pins request and follow', () async {
     // moq-lite-06 carries no instance, so the session mints one for the route.
     const version = ['moq-lite-06'];

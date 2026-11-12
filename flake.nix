@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/6a18b8a815c2d15d37d7433a619f961ec5a07165";
+      url = "github:moq-dev/quest/93c9c2ef65f074e82094bf5272076db44ac19030";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -160,8 +160,6 @@
             cargo-bloat
             # The workspace-hack that gives every build one feature set per dependency.
             cargo-hakari
-            # Weekly mutation testing of the security-critical modules (`just rs mutants`).
-            cargo-mutants
             cargo-nextest
             cargo-codspeed
             # Sets versions for a release cut; `sh/version.py` needs 0.4.1 or newer.

@@ -924,7 +924,13 @@ impl Fill {
 	/// waiting for them, and the track records them so nobody asks again. Only the groups a
 	/// reader still reads count; the rest of the fill was never owed.
 	pub fn drop_groups(&self, groups: ops::Range<u64>) {
-		self.inner.drop_groups(groups, Error::NotFound, self.max_delay());
+		let owed = self.inner.owed(groups);
+		self.inner.drop_groups(
+			&owed,
+			Error::NotFound,
+			super::Hole::drop(StreamError::NotFound),
+			self.max_delay(),
+		);
 	}
 
 	/// Refuse `groups` with `err` without saying the source lost them, as when serving them
@@ -1163,7 +1169,8 @@ impl Fill {
 	}
 
 	/// Refuse `groups` with the source's answer to a request for them: only [`Error::Old`]
-	/// under the publisher's max age (with every older group of the fill) is named dropped.
+	/// under the publisher's max age (with every older group of the fill) is recorded, as a
+	/// stale verdict under that age.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reject_groups(&self, groups: ops::Range<u64>, err: Error) {
 		self.inner.reject(groups, err, self.max_delay());
@@ -1309,20 +1316,18 @@ impl Inner {
 		res
 	}
 
-	/// Refuse `groups` with `err`, as the source answered under `asked`, recording them in
-	/// the track's drops when the source no longer has them, which binds every reader. Only
-	/// what a reader still reads: a handler refusing the whole fill never checked the rest.
-	fn drop_groups(&self, groups: ops::Range<u64>, err: Error, asked: Option<Duration>) {
-		let unresolved = self.owed(groups);
-		if unresolved.is_empty() {
+	/// Refuse `groups` with `err`, as the source answered under `asked`, recording them in the
+	/// track's drops as `hole` says, so the later readers it settles do not ask again.
+	fn drop_groups(&self, groups: &RangeSet<u64>, err: Error, hole: super::Hole, asked: Option<Duration>) {
+		if groups.is_empty() {
 			return;
 		}
 		if let Ok(mut state) = TrackState::modify(&self.state) {
-			for groups in unresolved.iter() {
-				state.drop_unfed(groups.clone(), StreamError::from(&err));
+			for groups in groups.iter() {
+				state.drop_unfed(groups.clone(), hole.clone());
 			}
 		}
-		self.refuse(&unresolved, err, asked);
+		self.refuse(groups, err, asked);
 	}
 
 	/// The part of `groups` inside the fill that a reader still reads and nothing answered yet.
@@ -1364,15 +1369,16 @@ impl Inner {
 		}
 	}
 
-	/// Whether an [`Error::Old`] answer under `asked` is the publisher's max age, which binds
-	/// every reader, rather than that budget, which a more tolerant reader may exceed.
+	/// The publisher's max age, when an [`Error::Old`] answer under `asked` reached it rather
+	/// than that budget, which a more tolerant reader may exceed: the budget that binds every
+	/// reader. `None` while the max age is unknown.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn old_binds_everyone(&self, asked: Option<Duration>) -> bool {
-		let Some(max_delay) = asked else {
-			return true;
-		};
-		let bound = self.state.read().max_age_bound();
-		bound.is_some_and(|bound| clamp_max_delay(max_delay, Some(bound)) >= bound)
+	fn binding_max_age(&self, asked: Option<Duration>) -> Option<Duration> {
+		let bound = self.state.read().max_age_bound()?;
+		match asked {
+			Some(max_delay) if clamp_max_delay(max_delay, Some(bound)) < bound => None,
+			_ => Some(bound),
+		}
 	}
 
 	/// Refuse `groups` with `err`, as their source answered a request for them under `asked`.
@@ -1380,13 +1386,16 @@ impl Inner {
 	fn reject(&self, groups: ops::Range<u64>, err: Error, asked: Option<Duration>) {
 		match err {
 			// Stale under the fill's budget, and so is every group older than it: a timed
-			// track's starts never rewind. Only the publisher's max age binds every reader;
-			// under the fill's own budget they are withdrawn, for a reader with a wider one.
+			// track's starts never rewind. Under the publisher's max age it binds every reader,
+			// so the track holds it as a stale verdict under that age: retryable, it lasts only
+			// until new terms or the drop set's expiry window forget it. Under the fill's own
+			// budget, or a max age not known here, they are withdrawn, for a reader with a
+			// wider one.
 			Error::Old => {
 				let older = self.start.group..groups.end;
-				match self.old_binds_everyone(asked) {
-					true => self.drop_groups(older, Error::Old, asked),
-					false => {
+				match self.binding_max_age(asked) {
+					Some(bound) => self.drop_groups(&self.owed(older), Error::Old, super::Hole::stale(bound), asked),
+					None => {
 						let unresolved = self.unresolved(older);
 						self.refuse(&unresolved, Error::Old, asked);
 					}
@@ -1439,7 +1448,7 @@ impl Drop for Inner {
 			if let Ok(mut state) = TrackState::modify(&self.state) {
 				// Unanswered is a miss downstream, as an explicit `drop_groups` would say.
 				for groups in left.iter() {
-					state.drop_unfed(groups.clone(), StreamError::NotFound);
+					state.drop_unfed(groups.clone(), super::Hole::drop(StreamError::NotFound));
 				}
 			}
 			if let Ok(mut outcome) = self.result.write() {
@@ -1455,7 +1464,7 @@ impl Drop for Inner {
 impl TrackState {
 	/// Record `groups` as dropped, as a fill's source answered, except what the cache holds
 	/// or the live feed may still deliver: a fill refused is no verdict on the feed.
-	fn drop_unfed(&mut self, groups: ops::Range<u64>, err: StreamError) {
+	fn drop_unfed(&mut self, groups: ops::Range<u64>, hole: super::Hole) {
 		// Until the serving session resolves where the feed starts, it may deliver anything.
 		if matches!(self.start, super::Start::Pending(_)) {
 			return;
@@ -1468,7 +1477,7 @@ impl TrackState {
 			}
 		}
 		for groups in dropped.iter() {
-			self.drop_groups(groups.clone(), super::Hole::drop(err.clone()));
+			self.drop_groups(groups.clone(), hole.clone());
 		}
 		// The runs are billed, so a source refusing fills in fragments pays for them.
 		if !dropped.is_empty() {
@@ -1578,7 +1587,7 @@ impl GroupFill {
 
 	/// Refuse the group with the source's answer, for the readers waiting now. Only
 	/// [`Error::Old`] under the publisher's max age (with every older group of the fill)
-	/// names it dropped.
+	/// is recorded, as a stale verdict under that age.
 	pub(crate) fn reject(self, err: Error) {
 		self.inner.reject(self.sequence..self.sequence + 1, err, self.max_delay);
 	}

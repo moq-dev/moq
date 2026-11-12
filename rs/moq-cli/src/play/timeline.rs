@@ -130,13 +130,20 @@ impl AudioTimeline {
 		// keeps the next frame contiguous with the new timeline position.
 		let origin = *self.origin.get_or_insert(start);
 		let expected = (start.saturating_sub(origin).as_secs_f64() * sample_rate as f64).round() as u64;
+		// A hole within that rounding is the same jitter, not missing audio: the frame continues
+		// the last one rather than playing a few samples of silence ahead of it.
 		let hole = expected.saturating_sub(self.written);
+		let hole = if (hole as f64) <= tolerance.as_secs_f64() * sample_rate as f64 {
+			0
+		} else {
+			hole
+		};
 		let skipped = hole > fill_max;
 		let silence = if skipped { 0 } else { hole };
 		let reset_sink = rewound || skipped;
 		self.written = self
 			.written
-			.max(expected)
+			.saturating_add(hole)
 			.saturating_add(u64::try_from(samples).unwrap_or(u64::MAX));
 		self.end = Some(end);
 
@@ -146,27 +153,6 @@ impl AudioTimeline {
 			reset_sink,
 		}
 	}
-}
-
-/// Keep the silence before a frame unless the distance is an emergency.
-/// `buffered` excludes this frame, so normal packet cadence never skips it.
-pub(super) fn fit(buffered: u64, target: u64, slack: u64, silence: u64, frame: u64) -> Fit {
-	let ahead = buffered + silence;
-	let skip = if ahead >= 4 * (target + slack) {
-		(ahead - target).min(silence + frame)
-	} else {
-		0
-	};
-	Fit {
-		silence: silence.saturating_sub(skip),
-		skip: skip.saturating_sub(silence),
-	}
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct Fit {
-	pub silence: u64,
-	pub skip: u64,
 }
 
 #[cfg(test)]
@@ -255,6 +241,12 @@ mod tests {
 		// 1024 frames end at 23.22 ms, but an FLV timestamp carries 23 ms.
 		let rounded = timeline.push(Duration::from_millis(23), 1024, 44_100, 22_050);
 		assert!(!rounded.reset_sink);
+		assert_eq!(rounded.silence, 0);
+
+		// The third frame starts at 46.44 ms, a 47 ms stamp: no silence ahead of it either.
+		let late = timeline.push(Duration::from_millis(47), 1024, 44_100, 22_050);
+		assert!(!late.reset_sink);
+		assert_eq!(late.silence, 0);
 	}
 
 	#[test]
@@ -273,25 +265,5 @@ mod tests {
 		let next = timeline.push(Duration::from_millis(1_020), 960, 48_000, 4_800);
 		assert!(!next.reset_sink);
 		assert_eq!(next.silence, 0);
-	}
-
-	#[test]
-	fn emergency_skip_consumes_hole_silence_before_frame_audio() {
-		assert_eq!(fit(23_039, 4_800, 960, 0, 960), Fit { silence: 0, skip: 0 });
-		assert_eq!(fit(23_040, 4_800, 960, 0, 960), Fit { silence: 0, skip: 960 });
-		assert_eq!(
-			fit(6_000, 4_800, 960, 18_000, 2_400),
-			Fit {
-				silence: 0,
-				skip: 1_200
-			}
-		);
-		assert_eq!(
-			fit(1_000, 4_800, 960, 23_040, 960),
-			Fit {
-				silence: 3_800,
-				skip: 0
-			}
-		);
 	}
 }

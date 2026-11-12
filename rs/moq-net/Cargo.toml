@@ -25,8 +25,8 @@ async = ["dep:futures", "kio/async", "kio/runtime"]
 # Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, and canonical storage benches,
 # session views of an origin to the viewers bench, the lite publisher's run loop to the
 # publisher bench, and a lite-07 publisher's frame bounds to the ranges bench, through the
-# `fuzz` module. Off by default.
-fuzz = ["async"]
+# `fuzz` module. Its session targets run on kio's simulated clock. Off by default.
+fuzz = ["async", "kio/sim"]
 
 [dependencies]
 arrayvec = "0.7"

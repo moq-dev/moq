@@ -101,8 +101,9 @@ kind.
   `#[non_exhaustive]` catalog types, and new types. The line left the
   [QoS](/quest/m3/qos/README.md) line, which keeps the relay's moq-stats
   changes.
-- **No `@moq/stats` package.** Media types live in `@moq/hang`, and the
-  demo dashboard's relay-stats reader stays where it is.
+- **Media types live in `@moq/hang`.** `@moq/stats` reads only the relay's
+  `moq-stats` format; amended 2026-11-11, when the demo's relay-stats reader
+  moved there.
 - Docs stay inline: `doc/concept/hang.md` documents both catalog sections,
   `doc/concept/stats.md` gains a media section beside the relay's, and
   `drafts/draft-lcurley-moq-hang.md` specs the wire.

@@ -67,12 +67,11 @@ reach zero underruns, and some underruns during congestion are expected.
   the spec already declined as a second knob; deleting the estimator and
   letting the lag be the only network term, which underruns a 20 ms Opus
   target until the lag builds).
-- Bound: ✅ configurable, as
-  [the `stretch` setting](/quest/m1/audio-jitter-target/stretch-setting.md)
-  records.
+- Bound: ✅ configurable: the `stretch` setting (`<moq-watch stretch>`,
+  `moq play --stretch`), 2 s by default, where zero turns the stretch off.
 - Tests: no gate may reward moving away from the rule, so the audio harness
   grades steady-state lag, the player's own trims, and recovery from a stall
-  before [the model](/quest/m1/audio-jitter-target/stretch.md) lands.
+  before [the model](https://github.com/moq-dev/moq/pull/8507) lands.
 - Milestone: ✅ every new child in m1, here (rejected: the model and grading
   in m0; the setting in m2).
 

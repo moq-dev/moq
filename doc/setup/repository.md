@@ -30,7 +30,7 @@ wrap the Rust core. [Layers](/lib/layers) maps the binding namespaces.
 | Native capture, codecs, and rendering | [`rs/moq-audio`](https://github.com/moq-dev/moq/tree/main/rs/moq-audio), [`rs/moq-video`](https://github.com/moq-dev/moq/tree/main/rs/moq-video), [`rs/moq-transcode`](https://github.com/moq-dev/moq/tree/main/rs/moq-transcode) | [Audio](/lib/rs/moq-audio), [video](/lib/rs/moq-video) |
 | CLI commands and protocol gateways | [`rs/moq-cli`](https://github.com/moq-dev/moq/tree/main/rs/moq-cli), then the corresponding `rs/moq-{rtmp,srt,rtc,rtsp,hls}` crate | [Applications](/bin/) |
 | Language bindings | [`rs/moq-ffi`](https://github.com/moq-dev/moq/tree/main/rs/moq-ffi), [`rs/moq-c`](https://github.com/moq-dev/moq/tree/main/rs/moq-c), then `py/`, `swift/`, `kt/`, `go/`, `dart/`, or `cpp/moq/` | [Binding layers](/lib/layers) |
-| Rooms, chat, and application data | [`rs/moq-room`](https://github.com/moq-dev/moq/tree/main/rs/moq-room), [`js/room`](https://github.com/moq-dev/moq/tree/main/js/room), `rs/moq-json`, `js/json` | [Rooms](/lib/js/room), [JSON tracks](/lib/js/json) |
+| Rooms, chat, and application data | [`js/room`](https://github.com/moq-dev/moq/tree/main/js/room), `rs/moq-json`, `js/json` | [Rooms](/lib/js/room), [JSON tracks](/lib/js/json) |
 | End-to-end encryption | [`rs/moq-crypto`](https://github.com/moq-dev/moq/tree/main/rs/moq-crypto), [`js/crypto`](https://github.com/moq-dev/moq/tree/main/js/crypto) | [Media encryption](/concept/hang), [E2EE draft](/draft/moq-e2ee) |
 | Signed content | [`rs/moq-crypto`](https://github.com/moq-dev/moq/tree/main/rs/moq-crypto), [`js/crypto`](https://github.com/moq-dev/moq/tree/main/js/crypto) | [Signing draft](/draft/moq-sign) |
 | Async primitives and deterministic time | [`rs/kio`](https://github.com/moq-dev/moq/tree/main/rs/kio), [`js/clock`](https://github.com/moq-dev/moq/tree/main/js/clock) | [Rust conventions](/lib/rs/#conventions), [clock](/lib/js/clock) |
@@ -46,7 +46,7 @@ wrap the Rust core. [Layers](/lib/layers) maps the binding namespaces.
 | Build and check selection | [`justfile`](https://github.com/moq-dev/moq/blob/main/justfile), language justfiles, [`sh/dispatch.sh`](https://github.com/moq-dev/moq/blob/main/sh/dispatch.sh) |
 | CI and packaging | [`.github/workflows/`](https://github.com/moq-dev/moq/tree/main/.github/workflows), [`infra/`](https://github.com/moq-dev/moq/tree/main/infra), [`sh/`](https://github.com/moq-dev/moq/tree/main/sh) |
 | Generated binding ownership | [`rs/moq-ffi/AGENTS.md`](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/AGENTS.md), [FFI release layout](https://github.com/moq-dev/moq/blob/main/.github/ffi.md) |
-| Contribution and release workflow | [`CONTRIBUTING.md`](https://github.com/moq-dev/moq/blob/main/CONTRIBUTING.md) |
+| Contribution and release workflow | [`CONTRIBUTING.md`](https://github.com/moq-dev/moq/blob/main/CONTRIBUTING.md), [`RELEASE.md`](https://github.com/moq-dev/moq/blob/main/RELEASE.md) |
 
 ## Read the right version
 

@@ -27,11 +27,20 @@ export function target(props: Target): Duration {
 }
 
 /**
- * The least subscription max delay an "auto" track asks for: the estimator's ceiling.
- *
- * The measured term saturates at 100 buckets of 20 ms, so a frame later than this adds nothing.
+ * The audio subscription's max delay, less warmup: the shared `maxDelay`, raised to `delay + stretch`
+ * so audio trailing the clock by up to the stretch still arrives for the ring to catch up on.
  */
-export const AUTO_MAX_DELAY = Duration.millis(2000);
+export function maxDelay(props: { delay: Duration; maxDelay: Duration; stretch: Duration }): Duration {
+	return props.maxDelay.max(props.delay.add(props.stretch));
+}
+
+/**
+ * How far the ring lets audio trail the clock before it skips ahead: the audio max delay less the
+ * playout delay, or zero, which turns the time stretch off, when `stretch` is zero.
+ */
+export function bound(props: { delay: Duration; maxDelay: Duration; stretch: Duration }): Duration {
+	return props.stretch.isZero() ? Duration.ZERO : maxDelay(props).saturatingSub(props.delay);
+}
 
 // An AudioWorkletProcessor renders in fixed 128-sample quanta, so a ring shallower than one can
 // never be read from.

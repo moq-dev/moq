@@ -29,11 +29,11 @@ function condition(
 	return new Function("github", "needs", `return (${source});`)(github, { scope: { outputs } });
 }
 
-// Check is a diff-scoped signal on ready main PRs. Release keeps its full gate,
-// including on drafts; neither branch builds again on a close event.
+// Check is release admission only: main PRs land through the queue. Release
+// keeps its full gate, including on drafts, and never builds on a close event.
 assert.equal(check.on.merge_group, undefined);
 assert.equal(check.on.pull_request.paths, undefined, "Check must select through the dispatcher");
-assert.equal(check.on.pull_request.branches, undefined, "release PRs must report the required Check");
+assert.deepEqual(check.on.pull_request.branches, ["release"], "Check runs only for release PRs");
 for (const action of [
 	"opened",
 	"synchronize",
@@ -44,22 +44,22 @@ for (const action of [
 	"closed",
 ]) {
 	assert.ok(check.on.pull_request.types.includes(action), `${action} must trigger Check or cancel its previous run`);
-	for (const base of ["main", "release", "other"]) {
-		for (const draft of [false, true]) {
-			assert.equal(
-				condition(check.jobs.check.if, "pull_request", base, true, action, draft),
-				action !== "closed" && (base === "release" || (base === "main" && !draft)),
-				`${action} on ${base}, draft=${draft}`,
-			);
-		}
+	for (const draft of [false, true]) {
+		assert.equal(
+			condition(check.jobs.check.if, "pull_request", "release", true, action, draft),
+			action !== "closed",
+			`${action}, draft=${draft}`,
+		);
 	}
 }
-// Selection and execution share the fetched base on main; release runs all.
-assert.equal(condition(check.jobs.check.env.CI_BASE, "pull_request", "main"), "origin/main");
-assert.equal(condition(check.jobs.check.env.CI_BASE, "pull_request", "release"), "--all");
+// Release selects and runs every package.
+assert.equal(check.jobs.check.env, undefined);
+const checkRuns = check.jobs.check.steps.filter((step: { run?: string }) => step.run?.includes("just ci"));
+assert.ok(checkRuns.length >= 2);
+for (const step of checkRuns) assert.match(step.run, /just ci(-select)? --all\b/, `${step.name} must run --all`);
 // Check runs the whole gate in one job.
-assert.equal(check.jobs.check.env.CHECK_MODULES, undefined);
-for (const step of check.jobs.check.steps) assert.equal(step.env?.CI_BASE, undefined, `${step.name} overrides CI_BASE`);
+for (const step of check.jobs.check.steps)
+	assert.equal(step.env?.CHECK_MODULES, undefined, `${step.name} sets CHECK_MODULES`);
 // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
 assert.equal(check.concurrency.group, "check-${{ github.event.pull_request.number }}");
 assert.equal(check.concurrency["cancel-in-progress"], true);
@@ -70,7 +70,6 @@ const checkCheckout = check.jobs.check.steps.find((step: { uses?: string }) =>
 	step.uses?.startsWith("actions/checkout@"),
 );
 assert.equal(checkCheckout.with["persist-credentials"], false);
-assert.equal(checkCheckout.with["fetch-depth"], 0, "the dispatcher needs the PR base history");
 
 // No workflow lands around the merge queue.
 assert.equal(

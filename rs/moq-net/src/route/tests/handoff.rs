@@ -566,6 +566,54 @@ fn a_claim_above_an_interest_is_presented_at_it() {
 	sim.check().unwrap();
 }
 
+/// A client presented a claim at a narrow interest widens it after the claim
+/// changed, while cut off from the change. Its stale presentation may come
+/// back first, and moves up to the changed claim without ending.
+#[test]
+fn widening_past_a_changed_claim_moves_it_up() {
+	let (origin, relay, client) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.leaf(origin);
+	sim.leaf(client);
+	sim.join(origin, relay, 1);
+	sim.join(client, relay, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "live/", 0, None);
+	sim.watch(client, "live/b/z");
+	assert!(sim.run());
+	assert_eq!(sim.shows(client, 7, "live/b/z"), Some(true));
+
+	sim.disconnect(client, relay);
+	sim.announce(origin, "live/", 1, None);
+	sim.watch(client, "");
+	assert!(sim.run());
+	sim.connect(client, relay);
+	assert!(sim.run());
+	assert_eq!(sim.shows(client, 7, "live/"), Some(true));
+	assert_eq!(sim.shown(client).len(), 1);
+	assert_eq!(false_ends(&sim.events), 0);
+}
+
+/// A claim withdrawn below one its origin still has ends: the claim above
+/// covers its path but is not the claim it was.
+#[test]
+fn a_claim_withdrawn_under_a_live_one_ends() {
+	let (origin, relay, client) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.leaf(origin);
+	sim.leaf(client);
+	sim.join(origin, relay, 1);
+	sim.join(client, relay, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "live/", 0, None);
+	sim.announce(origin, "live/a/x", 0, None);
+	assert!(sim.run());
+
+	sim.unannounce(origin, "live/a/x");
+	assert!(sim.run());
+	assert_eq!(life(&sim, client, "live/a/x"), [Kind::Start, Kind::End]);
+}
+
 /// Two origins hold the same wildcard capability for one epoch, and a client
 /// watches a region below it. Withdrawing one origin's wildcard ends only that
 /// origin's claim, and a lagging relay's older copy of it is refused after the
@@ -1015,7 +1063,7 @@ fn sweep_scoped_handoff() {
 	let (origin, r1, r2, client) = (0, 1, 2, 3);
 	let mut rng = XorShift(0x5c0b_ed00);
 	let mut live_starts = 0;
-	for scenario in 0..150 {
+	for scenario in 0..scenarios() {
 		let mut sim = Sim::new(4);
 		sim.leaf(origin);
 		sim.leaf(client);
@@ -1132,7 +1180,7 @@ const CLAIMS: [&str; 4] = ["live/", "live/a/", "live/a/x", "live/b"];
 #[test]
 fn sweep_handoff() {
 	let mut rng = XorShift(0x4a4d_0ff5);
-	for scenario in 0..150 {
+	for scenario in 0..scenarios() {
 		let mut sim = churn(&mut rng);
 		let label = format!("scenario {scenario}");
 		assert_eq!(revivals(&sim.events), 0, "{label}");
@@ -1438,4 +1486,42 @@ fn a_restarted_floorless_route_drops_what_it_no_longer_carries() {
 	assert_eq!(sim.shows(z, id, "live/a/x"), None);
 	assert_eq!(revivals(&sim.events), 0);
 	sim.check().unwrap();
+}
+
+/// Relay 4 hears origin 7's claims from relay 0, which certifies them all, and from
+/// relay 3, which asked only for `b`. While 4's own distance sets 0 aside, 0 moves
+/// between two equal routes and says so. That change of hops moves no certifier, so
+/// 4 lets go of nothing, where pruning on it lost the root claim for good.
+#[test]
+fn a_change_of_hops_alone_lets_go_of_no_claim() {
+	let (origin, other) = (6, 7);
+	let mut sim = Sim::new(8);
+	sim.join(other, 4, 1);
+	sim.join(other, 5, 1);
+	sim.join(origin, 3, 1);
+	sim.join(origin, 2, 1);
+	sim.join(0, 1, 1);
+	sim.link(0, 2, SimLink::cost(3), SimLink::cost(1));
+	sim.join(0, 3, 1);
+	sim.join(0, 4, 1);
+	sim.link(1, 2, SimLink::cost(2), SimLink::cost(1));
+	sim.join(2, 3, 1);
+	sim.join(2, 5, 1);
+	sim.link(3, 4, SimLink::cost(1), SimLink::cost(2));
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "", 0, None);
+	sim.originate(other, 8, 0);
+	sim.announce(other, "", 0, None);
+	sim.watch(3, "b");
+	assert!(sim.run());
+	assert_eq!(sim.shows(4, 7, ""), Some(true));
+
+	let hops = sim.stats.hop_updates;
+	sim.disconnect(origin, 3);
+	assert!(sim.run());
+	assert!(sim.stats.hop_updates > hops, "a route changed its hops alone");
+	assert_eq!(sim.shows(4, 7, ""), Some(true));
+	sim.disconnect(2, 3);
+	assert!(sim.run());
+	assert_eq!(sim.shows(4, 7, ""), Some(true));
 }

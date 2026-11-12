@@ -23,11 +23,11 @@ additive. video-vaapi moved up from later work
 because a downstream iGPU transcode trial needs it now.
 
 Held here by open claims: a quest's branch is its path, so a claimed quest
-cannot move until its PR merges, and an epic moves with its children. These
-breaking epics and quests stay in m1 for now and are listed in m2's
-`Required`, so the cut still waits on them: drop-set and
-stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
-moves what remains of them once their claims merge.
+cannot move until its PR merges, and an epic moves with its children. This
+breaking epic stays in m1 for now and is listed in m2's
+`Required`, so the cut still waits on it: stream-credit. The
+[re-cut follow-up](/quest/m2/recut-held.md) moves what remains of it once
+its claims merge.
 
 ## Related
 

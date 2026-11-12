@@ -26,7 +26,6 @@ import dev.moq.video.ProducerOptions as VideoProducerOptions
 import dev.moq.video.ReadFrame as VideoReadFrame
 import java.net.DatagramSocket
 import java.net.InetAddress
-import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -39,12 +38,17 @@ import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.nanoseconds
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 import kotlinx.serialization.Serializable
 import uniffi.moq.MoqException
 
@@ -1068,6 +1072,54 @@ class SmokeTest {
             }
     }
 
+    /** A credential is answered by the peer, names a route and a claim, and cancels. */
+    @Test
+    fun `session credential lifecycle`() = runTest {
+        val version = listOf("moq-lite-07-wip")
+        Server.listen(
+                ServerConfig(
+                    bind = "127.0.0.1:0",
+                    versions = version,
+                    tls = ServerTls(generate = listOf("localhost")),
+                )
+            )
+            .use { server ->
+                val accepted = async { server.server.accept()!!.accept() }
+                val moq =
+                    Moq.connect(
+                        "https://${server.localAddr}",
+                        ClientConfig(
+                            bind = "127.0.0.1:0",
+                            versions = version,
+                            tls = ClientTls(insecure = true),
+                            once = true,
+                        ),
+                    )
+                moq.use {
+                    val session = accepted.await()
+                    assertFailsWith<MoqException.Config> { moq.credential("") }
+                    val credential: Credential = moq.credential("extra")
+                    // The server verifies no tokens of its own, so it refuses this one.
+                    assertFailsWith<MoqException.Unsupported> { credential.answered() }
+
+                    val route = moq.route("room/x", RouteOptions(hidden = true))
+                    val claim = moq.session.publish().claim("live", RouteOptions(hidden = true))
+                    route.setAuth(credential)
+                    claim.setAuth(credential)
+                    route.setAuth(null)
+                    claim.setAuth(null)
+
+                    credential.cancel()
+                    assertFailsWith<MoqException.Cancelled> { credential.answered() }
+                    assertFailsWith<MoqException.Cancelled> { route.setAuth(credential) }
+                    assertFailsWith<MoqException.Cancelled> { claim.setAuth(credential) }
+                    route.cancel()
+                    claim.cancel()
+                    session.cancel(0u)
+                }
+            }
+    }
+
     /**
      * Over moq-lite-06, whose wire carries no instance, the session mints one: passing it back pins
      * `request` and `follow`, while its text parsed is another, named instance that nothing serves.
@@ -1147,8 +1199,6 @@ class SmokeTest {
     /**
      * A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
      */
-    // Quarantined: flaky, see quest/m0/test-flakes-2/kt-playout-delay.md.
-    @Ignore
     @Test
     fun `audio consumer reports its playout delay`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
@@ -1195,17 +1245,28 @@ class SmokeTest {
                     assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
                     val initial = estimated.delay()
 
-                    // Two 20 ms Opus frames of silence at 48 kHz mono.
-                    for (i in 0 until 2) {
-                        audio.write(
-                            AudioFrame(
-                                timestamp = Timestamp(i.toULong() * 960uL, 48_000uL),
-                                data = ByteArray(960 * 4),
-                            )
-                        )
+                    // 20 ms Opus frames of silence at 48 kHz mono, fed until both consumers read
+                    // one. A max delay of zero skips groups by the native wall clock, which the
+                    // test cannot control, so a host stalled under load may skip any fixed set
+                    // of frames; a newer one always follows.
+                    val writer =
+                        launch(Dispatchers.Default) {
+                            var i = 0uL
+                            while (isActive) {
+                                audio.write(
+                                    AudioFrame(
+                                        timestamp = Timestamp(i++ * 960uL, 48_000uL),
+                                        data = ByteArray(960 * 4),
+                                    )
+                                )
+                                yield()
+                            }
+                        }
+                    // A skipped group reads as a gap before the frame after it.
+                    for (reader in listOf(fixed, estimated)) {
+                        while (assertNotNull(reader.next()) !is AudioReadFrame) {}
                     }
-                    assertIs<AudioReadFrame>(fixed.next())
-                    assertIs<AudioReadFrame>(estimated.next())
+                    writer.cancelAndJoin()
 
                     assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
                     assertTrue(

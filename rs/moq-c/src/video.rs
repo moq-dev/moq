@@ -1466,8 +1466,11 @@ mod tests {
 			.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::catalog::hang::Extra>::default());
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 		let consumer = broadcast.consume();
-		// Probed rather than hand-built, so the test track carries what a real one would.
-		let encode = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
+		// Probed rather than hand-built, so the test track carries what a real one would. Software,
+		// like the encoders the tests open: a hardware default (VideoToolbox on macOS) declares
+		// another profile, so the first software frame would already move to a new track.
+		let mut encode = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
+		encode.kind = moq_video::encode::Kind::Software;
 		let rendition = encode.probe().await.unwrap();
 		let reserved = catalog.reserve().with_interval(encode.effective_join());
 		let track = broadcast

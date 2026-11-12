@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Runs } from "./drops.ts";
+import { DropSet, Runs } from "./drops.ts";
+import { NotFound } from "./error.ts";
 import type { Run } from "./internal.ts";
 
 type Tagged = Run & { tag: number };
@@ -32,4 +33,24 @@ test("drops: clearing ranges in one pass matches clearing each", () => {
 		[31n, 35n],
 		[40n, 42n],
 	]);
+});
+
+test("drops: what a change replaced or forgot is reported since its revision, until it is cleared", () => {
+	const drops = new DropSet();
+	const hole = { error: new NotFound("gone") };
+	drops.set(0n, 10n, hole);
+	const before = drops.revision;
+	drops.set(4n, 6n);
+	drops.set(20n, 30n, hole);
+	const extents = (runs: Run[] | undefined) => runs?.map((run) => [run.start, run.end]);
+	expect(extents(drops.removedSince(before))).toEqual([[0n, 10n]]);
+	expect(drops.removedSince(drops.revision)).toEqual([]);
+	// Removals far outnumbering the live runs are cleared, so an older revision rebuilds instead.
+	const recent = drops.revision;
+	for (let i = 0; i < 100; i++) {
+		drops.set(40n, 41n, hole);
+		drops.set(40n, 41n);
+	}
+	expect(drops.removedSince(recent)).toBeUndefined();
+	expect(drops.removedSince(drops.revision)).toEqual([]);
 });

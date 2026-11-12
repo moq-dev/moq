@@ -1,6 +1,7 @@
 // A received copy asks its publisher for the groups its readers miss, over lite FETCH, as the Rust
-// lite subscriber's `FillServeRun` does: below where the copy's feed started, by the copy's start
-// rule, and inside the copy, once it evicted what it received.
+// lite subscriber's `FillServeRun` does, or on lite-07 for a reader with no budget, by run on a
+// SUBSCRIBE of its own, as its `Recovery` does: below where the copy's feed started, by the copy's
+// start rule, and inside the copy, once it evicted what it received.
 import { expect, test } from "bun:test";
 import { Duration, Elapsed, Manual, sleep, timeout } from "@moq/clock";
 import { DEFAULT_EXPIRY } from "../cache.ts";
@@ -209,7 +210,8 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			expect((await first.recvGroup())?.sequence).toBe(4n);
 			const before = peer.fetches();
 
-			// The same ranges, so nothing changes upstream: only a FETCH brings what the copy lost.
+			// The same ranges, so nothing changes upstream: only a fill brings what the copy lost, a
+			// FETCH per group, or on lite-07 one SUBSCRIBE for the run, its groups and its miss.
 			const again = peer.remote.track("video").subscribe(history);
 			const got = await take(again, 4);
 			expect(sorted(got)).toEqual([
@@ -218,7 +220,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 				[3n, "old 3"],
 				[4n, "live 4"],
 			]);
-			expect(peer.fetches()).toBe(before + 4);
+			expect(peer.fetches()).toBe(before + (alpn === Lite.ALPN_07_WIP ? 1 : 4));
 			first.close();
 			again.close();
 		} finally {

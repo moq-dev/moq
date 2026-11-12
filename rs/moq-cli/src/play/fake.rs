@@ -118,6 +118,7 @@ impl Speaker for Recorder {
 			stride: input.layout.channels() as usize * size_of::<f32>(),
 			sample_rate: input.sample_rate,
 			latency: input.latency,
+			capacity: input.latency + RING_HEADROOM,
 			refill: false,
 			declared: false,
 			next: false,
@@ -132,6 +133,15 @@ impl Speaker for Recorder {
 	}
 }
 
+/// The real ring's room past the latency it opens on, and the processing window
+/// a latency must leave free of it (`moq_audio::playback::Sink::set_latency`).
+const RING_HEADROOM: Duration = Duration::from_secs(3);
+const RING_WINDOW: Duration = Duration::from_millis(30);
+
+/// What an underrun waits for before playing again: the real ring's 30 ms
+/// stretch window and a 10 ms device period.
+const CUSHION: Duration = Duration::from_millis(40);
+
 /// A speaker draining in real time from the moment the sink opens.
 pub(super) struct FakeSink {
 	state: Arc<Mutex<State>>,
@@ -139,6 +149,8 @@ pub(super) struct FakeSink {
 	stride: usize,
 	sample_rate: u32,
 	latency: Duration,
+	/// How much the real ring holds, past which a latency fails and a write drops as there.
+	capacity: Duration,
 	refill: bool,
 	/// Running dry is a declared silence rather than an underrun.
 	declared: bool,
@@ -154,9 +166,13 @@ pub(super) struct FakeSink {
 
 impl Sink for FakeSink {
 	fn set_latency(&mut self, latency: Duration) -> anyhow::Result<()> {
+		anyhow::ensure!(latency + RING_WINDOW < self.capacity, "past the ring's capacity");
 		self.latency = latency;
 		Ok(())
 	}
+
+	/// Playing onto the clock is the real ring's stretch, which this fake leaves out.
+	fn due(&mut self, _at: Instant, _stretch: Duration, _jumped: Duration) {}
 
 	async fn finish(mut self) {
 		// A finite short tail drains even when it cannot refill the target.
@@ -174,7 +190,8 @@ impl Sink for FakeSink {
 		let now = Instant::now();
 		// DSP and clock drift are tested in moq-audio's real ring. This fake
 		// models its emergency recovery: no synthetic padding, and no PCM
-		// heard until fresh writes refill the target after a genuine gap.
+		// heard until fresh writes refill one stretch window and a device
+		// period after a genuine gap.
 		if let Some(prime) = self.prime.take() {
 			self.end = now.saturating_add(prime);
 			// The opening silence already holds the first utterance one latency out.
@@ -206,16 +223,21 @@ impl Sink for FakeSink {
 			.first_chunk::<4>()
 			.map(|bytes| f32::from_le_bytes(*bytes))
 			.unwrap_or_default();
+		let mut written = moq_audio::playback::Write::default();
+		// A write past the ring's capacity is dropped, as the real ring drops it.
+		if self.buffered() + duration > self.capacity {
+			written.dropped_sample_frames = frames as usize;
+			return Ok(written);
+		}
 		if self.refill {
 			self.pending.push((sample, duration));
 			self.queued += duration;
-			if self.queued >= self.latency {
+			if self.queued >= CUSHION {
 				self.resume();
 			}
 		} else {
 			self.play(sample, duration);
 		}
-		let mut written = moq_audio::playback::Write::default();
 		written.accepted_sample_frames = frames as usize;
 		Ok(written)
 	}
@@ -281,25 +303,24 @@ mod tests {
 	use super::*;
 
 	#[tokio::test]
-	async fn underrun_waits_for_received_audio_at_the_new_target() {
+	async fn underrun_waits_for_a_cushion_of_received_audio() {
 		tokio::time::pause();
 		let recorder = Recorder::default();
 		let mut sink = recorder.sink(Input::default()).unwrap();
 		let pcm = [0u8; 960 * 2 * 4];
 		assert_eq!(sink.write(&pcm).unwrap().accepted_sample_frames, 960);
 		tokio::time::advance(Duration::from_millis(100)).await;
-		sink.set_latency(Duration::from_millis(80)).unwrap();
+		// The cushion, not the target, however deep the target is.
+		sink.set_latency(Duration::from_millis(500)).unwrap();
 		let heard = recorder.played().len();
-		for frames in 1..4 {
-			assert_eq!(sink.write(&pcm).unwrap().accepted_sample_frames, 960);
-			assert_eq!(sink.buffered(), Duration::from_millis(frames * 20));
-			assert_eq!(recorder.played().len(), heard);
-		}
+		assert_eq!(sink.write(&pcm).unwrap().accepted_sample_frames, 960);
+		assert_eq!(sink.buffered(), Duration::from_millis(20));
+		assert_eq!(recorder.played().len(), heard);
 		assert_eq!(sink.write(&pcm).unwrap().accepted_sample_frames, 960);
 		let played = recorder.played();
-		assert_eq!(played.len(), heard + 4);
+		assert_eq!(played.len(), heard + 2);
 		assert_eq!(played[heard].from, Instant::now());
-		assert_eq!(sink.buffered(), Duration::from_millis(80));
+		assert_eq!(sink.buffered(), Duration::from_millis(40));
 	}
 
 	#[tokio::test]

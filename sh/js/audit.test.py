@@ -14,7 +14,8 @@ PROJECTS = [".", "demo/pub", "infra/apt", "infra/nix"]
 class Audit(unittest.TestCase):
     def run_audit(self, failing):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            # Resolved, since macOS's /tmp is a symlink and `bun` logs the shell's $PWD.
+            root = Path(directory).resolve()
             for project in PROJECTS:
                 (root / project).mkdir(parents=True, exist_ok=True)
             tools = root / "bin"

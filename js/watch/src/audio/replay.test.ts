@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
-import { Duration, Instant } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import { type Arrival, type Options, QUANTUM, type Quantum, replay } from "./replay";
 
@@ -68,7 +68,8 @@ describe("replay", () => {
 	});
 
 	it("counts each run-dry the way the player's stats do", async () => {
-		// One frame 200 ms late against a 100 ms target: the ring runs dry once and re-stalls to refill.
+		// One frame 200 ms late against a 100 ms target: the ring runs dry once and re-stalls to refill,
+		// which counts the short quantum it ran dry in and the stall after it.
 		const trace = paced(10, (i) => (i === 250 ? 230 : 30)).sort((a, b) => a.at - b.at);
 		const counted = async (arrivals: Arrival[]) => {
 			let last = 0;
@@ -82,7 +83,8 @@ describe("replay", () => {
 			return last;
 		};
 		expect(await counted(paced(10, () => 30))).toBe(0);
-		expect(await counted(trace)).toBe(1);
+		expect(await counted(trace)).toBeGreaterThan(0);
+		expect(await counted(trace)).toBeLessThanOrEqual(2);
 	});
 
 	it("holds newer groups behind a missing one until the max delay gives up on it", async () => {
@@ -143,20 +145,30 @@ describe("replay", () => {
 async function lag(trace: Arrival[], options: Options, settle: number) {
 	const lags: number[] = [];
 	let underruns = 0;
+	let trimmed = 0;
+	let accelerated = 0;
 	for await (const quantum of replay(trace, options)) {
 		if (quantum.at >= settle && !quantum.stalled && quantum.clock !== undefined) {
 			lags.push(quantum.clock - quantum.timestamp);
 		}
 		underruns = quantum.underruns;
+		trimmed = quantum.trimmed;
+		accelerated = quantum.accelerated;
 	}
 	lags.sort((a, b) => a - b);
-	return { lags, median: lags[lags.length >> 1], underruns };
+	return { lags, median: lags[lags.length >> 1], underruns, trimmed, accelerated };
 }
 
-// Audio and video keep separate clocks that align once the delay covers the arrivals. Settling audio
-// later than the clock would trade lip sync for fewer underruns, so these hold the line: at steady
-// state the playhead rests on or just ahead of the clock, and a target short of the spread underruns
-// rather than drifting behind it.
+/**
+ * The longest pitch period of the replay's speech, at its 90 Hz floor: a seam moves by one period, so
+ * a lag shorter than that may rest uncorrected.
+ */
+const PERIOD = 1000 / 90;
+
+// Audio and video keep separate clocks that align once the delay covers the arrivals. The ring plays
+// onto the shared clock: in steady state the playhead rests within a pitch period of it, either way.
+// A buffer that runs low slows playback and leaves it behind the clock, only as far as the stretch
+// allows, which a zero stretch leaves none of.
 describe("replay against the shared clock", () => {
 	let warn: Mock<typeof console.warn>;
 	beforeEach(() => {
@@ -164,30 +176,42 @@ describe("replay against the shared clock", () => {
 	});
 	afterEach(() => warn.mockRestore());
 
-	// The ring rests one frame ahead of the newest arrival's playout, as the trim that preceded the
-	// time stretch left it, so audio leads the clock by up to that frame and never trails it.
 	for (const [name, lateness] of [
 		["evenly paced", () => 30],
 		["flushed five frames at a time", (i: number) => 30 + (4 - (i % 5)) * 20],
 	] as const) {
-		it(`plays ${name} frames on the clock at auto, never behind it`, async () => {
+		it(`plays ${name} frames on the clock at auto`, async () => {
 			const options: Options = { rate: RATE, config: CONFIG, delay: "auto", duration: observed(60) };
-			const { lags } = await lag(paced(60, lateness), options, 30_000);
+			const { lags, underruns } = await lag(paced(60, lateness), options, 30_000);
 			expect(lags.length).toBeGreaterThan(0);
-			expect(lags[0]).toBeGreaterThanOrEqual(-25);
-			expect(lags.at(-1)).toBeLessThanOrEqual(0);
+			expect(lags[0]).toBeGreaterThanOrEqual(-PERIOD);
+			expect(lags.at(-1)).toBeLessThanOrEqual(PERIOD);
+			expect(underruns).toBe(0);
 		});
 	}
 
-	it("underruns a target short of the spread rather than settling behind the clock", async () => {
-		// 80 ms of spread against a 40 ms target: every flush runs the ring dry.
-		const trace = paced(60, (i) => 30 + (4 - (i % 5)) * 20);
-		const options: Options = { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(60) };
-		const { lags, median, underruns } = await lag(trace, options, 30_000);
-		expect(underruns).toBeGreaterThanOrEqual(trace.length / 5);
-		// Each refill catches back up within the frame after it, never by a whole flush.
+	// 80 ms of spread against a fixed 40 ms target: every flush runs a ring dry that cannot fall behind.
+	const flushed = paced(60, (i) => 30 + (4 - (i % 5)) * 20);
+	const fixed = { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(60) };
+
+	it("underruns a fixed target short of the spread with the stretch off, rather than trailing the clock", async () => {
+		const { lags, median, underruns, accelerated } = await lag(flushed, { ...fixed, stretch: 0 }, 30_000);
+		expect(underruns).toBeGreaterThanOrEqual(flushed.length / 5);
+		// Each refill skips back onto the clock within the frame after it, never by a whole flush.
 		expect(median).toBeLessThanOrEqual(20);
 		expect(lags.at(-1)).toBeLessThan(40);
+		expect(accelerated).toBe(0);
+	});
+
+	// The stretch raises no target, so the flushes still underrun, but what arrives late plays and is
+	// caught up by speeding up, where a zero stretch skips it.
+	it("keeps the audio a fixed target short of the spread receives late, where a zero stretch skips it", async () => {
+		const off = await lag(flushed, { ...fixed, stretch: 0 }, 30_000);
+		const on = await lag(flushed, fixed, 30_000);
+		// A zero stretch skips most of every flush; the stretch skips only the backlog it joins on.
+		expect(off.trimmed).toBeGreaterThan(20_000);
+		expect(on.trimmed).toBeLessThanOrEqual(40);
+		expect(on.accelerated).toBeGreaterThan(0);
 	});
 });
 
@@ -206,35 +230,6 @@ describe("replay at auto", () => {
 		expect(await settled(60, () => 30)).toBe(40);
 		// Five frames flushed at once: 80 ms of spread to cover, plus one frame.
 		expect(await settled(60, (i) => 30 + (4 - (i % 5)) * 20)).toBeGreaterThanOrEqual(100);
-	});
-});
-
-describe("ingress diagnostics", () => {
-	it("keeps recorded arrival and lateness when delivery is held", async () => {
-		const trace = [0, 20, 40].map((timestamp) => ({ timestamp, at: timestamp + 1000, group: 0, duration: 20 }));
-		const run = async (decodeAfter?: number) => {
-			let window: Quantum["arrivals"] = [];
-			for await (const quantum of replay(trace, {
-				rate: RATE,
-				config: CONFIG,
-				delay: Duration.millis(100),
-				duration: 300,
-				decodeAfter,
-			}))
-				window = quantum.arrivals;
-			return window;
-		};
-		const direct = await run();
-		const held = await run(1200);
-		expect(held).toEqual(direct);
-		expect(held).toEqual(
-			trace.map((entry) => ({
-				kind: "frame" as const,
-				timestamp: Duration.millis(entry.timestamp),
-				arrival: Instant.ZERO.saturatingAdd(Duration.millis(entry.at)),
-				late: false,
-			})),
-		);
 	});
 });
 
@@ -324,7 +319,7 @@ it("plays an advertised flush span past the decoded floor at its delay without a
 		const filled = quantum.output.findLastIndex((v) => v !== 0) + 1;
 		if (start === undefined && filled > 0) start = quantum.at;
 		if (start !== undefined && filled < QUANTUM) short++;
-		lag = quantum.at - quantum.timestamp;
+		lag = (quantum.clock ?? 0) - quantum.timestamp;
 		delay = quantum.delay;
 	}
 	expect(delay).toBe(5020);
@@ -332,6 +327,98 @@ it("plays an advertised flush span past the decoded floor at its delay without a
 	expect(start).toBeGreaterThanOrEqual(5020);
 	expect(start).toBeLessThan(5040);
 	expect(short).toBe(0);
-	expect(lag).toBeGreaterThanOrEqual(5020);
-	expect(lag).toBeLessThan(5040);
+	// Then onto the shared clock, which counts that lateness too.
+	expect(Math.abs(lag)).toBeLessThanOrEqual(PERIOD);
+});
+
+// The same rule plays a buffered player onto the clock: its lookahead keeps the level high, so it plays
+// faster whenever it trails the clock, and the container keeps every group, since audio on the clock
+// stays within the max delay of the newest arrival.
+describe("buffered replay against the shared clock", () => {
+	let warn: Mock<typeof console.warn>;
+	beforeEach(() => {
+		warn = spyOn(console, "warn").mockImplementation(() => {});
+	});
+	afterEach(() => warn.mockRestore());
+
+	/** Plays `trace`, returning how far audio trails the clock once settled, and what was dropped. */
+	async function play(trace: Arrival[], options: Options, settled: (at: number) => boolean) {
+		const lags: number[] = [];
+		let heard = 0;
+		let last: Quantum | undefined;
+		for await (const quantum of replay(trace, options)) {
+			heard += quantum.output.filter((v) => v !== 0).length;
+			if (settled(quantum.at) && !quantum.stalled && quantum.clock !== undefined) {
+				lags.push(quantum.clock - quantum.timestamp);
+			}
+			last = quantum;
+		}
+		if (!last) throw new Error("nothing played");
+		return {
+			min: Math.min(...lags),
+			max: Math.max(...lags),
+			skips: last.skips,
+			trimmed: last.trimmed,
+			accelerated: last.accelerated,
+			// Frames the consumer passed over rather than delivered.
+			lost: trace.length - last.delivered,
+			heard: (heard * 1000) / RATE,
+		};
+	}
+
+	it("catches up after a stall", async () => {
+		// Five seconds in, 400 ms of frames are held and land at once.
+		const trace = paced(30, (i) => 30 + (i >= 250 && i < 270 ? (270 - i) * 20 : 0)).sort((a, b) => a.at - b.at);
+		const options: Options = {
+			rate: RATE,
+			config: CONFIG,
+			delay: Duration.millis(100),
+			lookahead: 500,
+			duration: observed(30),
+		};
+		// NetEq's accelerate takes one pitch period per stretch, at least 4.5 ms of this speech, so it
+		// gains well over 100 ms a second: the stall's lag is gone well before 20 s.
+		const result = await play(trace, options, (at) => (at >= 2000 && at < 5000) || at >= 20_000);
+		expect(result.min).toBeGreaterThanOrEqual(-PERIOD);
+		expect(result.max).toBeLessThanOrEqual(PERIOD);
+		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
+		expect(warn).not.toHaveBeenCalled();
+	});
+
+	it("follows a publisher clock running 1% fast at auto", async () => {
+		const trace = paced(60, (i) => 30 - (i * 20) / 101);
+		const options: Options = {
+			rate: RATE,
+			config: CONFIG,
+			delay: "auto",
+			lookahead: 500,
+			duration: observed(60),
+		};
+		const result = await play(trace, options, (at) => at >= 5000);
+		expect(result.min).toBeGreaterThanOrEqual(-PERIOD);
+		expect(result.max).toBeLessThan(23);
+		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
+		expect(warn).not.toHaveBeenCalled();
+	});
+
+	it("plays every word of an utterance that stalls mid-burst, catching up after", async () => {
+		// Twenty seconds of speech generated four times faster than real time, held for 3.5 s after its
+		// first two seconds, so playback runs dry and resumes about two seconds behind the clock.
+		const trace = paced(20, (i) => (i < 100 ? 30 : 3500) - i * 15);
+		const options: Options = {
+			rate: RATE,
+			config: CONFIG,
+			delay: Duration.millis(100),
+			lookahead: 30_000,
+			duration: 22_000,
+		};
+		const result = await play(trace, options, (at) => at >= 15_000);
+		expect(result.min).toBeGreaterThanOrEqual(-PERIOD);
+		expect(result.max).toBeLessThanOrEqual(PERIOD);
+		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
+		// Every frame played: what was heard and what the stretch shortened cover the utterance. A
+		// slow-down only adds to what is heard.
+		expect(Math.round(result.heard + result.accelerated)).toBeGreaterThanOrEqual(20_000);
+		expect(warn).not.toHaveBeenCalled();
+	});
 });

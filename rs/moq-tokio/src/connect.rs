@@ -377,7 +377,7 @@ mod tests {
 	fn extensions_default_on_and_parse_off() {
 		let config: Config = toml::from_str("[extensions]\nsolicit = false\n").expect("parse");
 		assert!(!config.extensions.solicit);
-		assert!(config.extensions.auth);
+		assert!(!config.extensions.ietf);
 		assert!(toml::to_string(&config).expect("serialize").contains("solicit = false"));
 		assert!(
 			!toml::to_string(&Config::default())
@@ -509,7 +509,8 @@ pub struct Config {
 	/// (`moqt`/`moql`), and qmux over `tcp`/`unix`. The URL path is the
 	/// request/auth path (e.g. `/anon` for a public relay) and `?jwt=` supplies a
 	/// token. `http://` first fetches `/certificate.sha256` for the (insecure)
-	/// self-signed fingerprint; `https://` connects directly.
+	/// self-signed fingerprint; `https://` connects directly. With a client
+	/// certificate set, dialing `http`, `ws`, `tcp`, or `unix` fails: none can present it.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(name = "connect", long = "connect", env = "MOQ_CONNECT", setting = "connect.url")]
 	pub url: Option<Url>,

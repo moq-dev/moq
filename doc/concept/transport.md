@@ -52,6 +52,11 @@ minutes. Once a probe gets through, it moves back the way it follows a GOAWAY:
 the WebSocket session tells the relay it is leaving and keeps serving until the
 QUIC session replaces it.
 
+A `moq-tokio` client with a client certificate refuses to dial `http://`,
+`ws://`, `tcp://`, or `unix://`: none can present the certificate to a server
+it has authenticated, and `http://` trusts a fingerprint fetched over
+plaintext. Dial `https://`, `wss://`, `moqt://`, `moql://`, or `tls://` instead.
+
 Each side lets the other hold 10,000 streams open in each direction, as over
 QUIC, since MoQ holds one per subscription and per live group. Set it with
 `websocket.maxStreams` in `@moq/net` and `quic.max_streams` in `moq-tokio`.

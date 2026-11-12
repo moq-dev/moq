@@ -27,6 +27,21 @@ it; a SETUP extension needs neither before the cut, and
 from its list. Either placement is now this quest's to record, with no
 second trip to the maintainer for choosing lite-07.
 
+Reopened 2026-11-11 (maintainer, /quest-plan on the route redesign, epic
+Plan item 8): a warm route propagates, and the rule that keeps it free of
+loops and stale copies is the route's path
+([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27,
+picked 2026-11-11 on
+[moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533)). The eligibility rule
+and the fixtures below are for the one-hop warm route first decided, which
+[moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457) proves. Rewrite
+both for the pick: the fixtures keep their meshes, and gain a relay that
+joins a copy at a neighbour farther from the publisher than itself. Start
+from `rs/moq-net/src/route/tests/copies.rs`, which runs that join, two
+relays that start carrying together, and a copy that goes, on the prototype
+router. It ranks carriers by a hash of the broadcast and the carrier; the
+proof settles whether that rank is the rule.
+
 Build on the sans-IO `Router` in `rs/moq-net/src/route/`, which each
 origin's `route::Node` drives, and the harness behind its handoff sweeps,
 not the reference model in

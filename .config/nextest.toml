@@ -72,7 +72,7 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 io-uring = { max-threads = 4 }
 v4l2 = { max-threads = 1 }
 
-# Nightly's ignored benchmark tests (`just gh nightly rust-test`) keep each test's
+# Nightly's ignored benchmark tests (`just gh nightly rust-test|rust-test-apps`) keep each test's
 # printed tables in target/nextest/bench/junit.xml for the benchmark report.
 [profile.bench.junit]
 path = "junit.xml"
@@ -99,3 +99,10 @@ path = "junit.xml"
 slow-timeout = { period = "300s", terminate-after = 3 }
 retries = 0
 failure-output = "immediate-final"
+
+# A sweep run past its gate count on purpose, such as `MOQ_ROUTE_SCENARIOS=20000
+# just rs test -P sweep ...`, takes minutes. Still bounded, so a lost wakeup
+# ends in a TIMEOUT rather than a wedge.
+[profile.sweep]
+slow-timeout = { period = "60s", terminate-after = 60 }
+retries = 0

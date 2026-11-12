@@ -28,13 +28,11 @@
 //! that carried a token is held to that token's grant alone and ends with it; any other
 //! request is held to the session's scope, which a token carried by a request never joins.
 //!
-//! moq-transport carries the same exchange when both sides negotiate the MoQ Auth
-//! extension. Older moq-lite versions, and peers that do not negotiate it, carry no
-//! AUTH exchange: there the grant stays `None`. On moq-transport `add` still succeeds,
-//! with a grant that stays unknown, since a request that names the auth carries its
-//! token; on moq-lite without AUTH it fails with [`Error::Unsupported`]. Both wires carry
-//! a grant's patterns as they are, and refuse one too large for a single AUTH_OK rather
-//! than trim it.
+//! Older moq-lite versions and moq-transport carry no AUTH exchange: there the grant stays
+//! `None`. On moq-transport a [`Credential`] is still answered, with a grant that stays
+//! unknown, since a request that names it carries its token; on moq-lite without AUTH its
+//! answer is [`Error::Unsupported`]. moq-lite carries a grant's patterns as they are, and refuses one
+//! too large for a single AUTH_OK rather than trim it.
 
 use std::{
 	collections::{BTreeMap, VecDeque},
@@ -467,7 +465,7 @@ impl State {
 		self.links.values().rev().find(|link| link.closed.is_none())
 	}
 
-	/// Record a session's answer to token `id`: an acceptance settles the application's `add`,
+	/// Record a session's answer to token `id`: an acceptance settles [`Credential::answered`],
 	/// and a refusal is the verdict that ends the token on every session.
 	fn answer(&mut self, id: u64, answer: Result<Answer>) {
 		match answer {
@@ -700,29 +698,19 @@ impl Handle {
 		Watch::new(self.state.clone(), Selector::Union)
 	}
 
-	/// Present another token on every session of this handle, resolving once a peer accepts it.
+	/// Present another token on every session of this handle, returning it at once.
 	///
-	/// The grant joins the union while any clone of the returned [`Credential`] lives. With no
-	/// session live it waits for the next one. A refusal that may pass, such as an
-	/// unreachable auth server, is presented again after a backoff, and so is a token whose
-	/// stream the peer drops without a verdict. On moq-transport
-	/// without AUTH there is no answer to wait for: it resolves at once with a grant that
-	/// stays unknown, and only a request that names it carries the token.
+	/// The grant joins the union while any clone of the returned [`Credential`] lives;
+	/// dropping the last withdraws it, answered or not. With no session live it waits for the
+	/// next one. [`Credential::answered`] resolves on the first verdict. A refusal that may
+	/// pass, such as an unreachable auth server, is presented again after a backoff, and so is
+	/// a token whose stream the peer drops without a verdict.
 	///
 	/// # Errors
 	///
-	/// [`Error::Unsupported`] when neither the session nor its requests can carry a token
-	/// (moq-lite without AUTH, or a peer that takes no tokens in band), the peer's refusal
-	/// as [`Error::Session`], or the handle's end.
-	#[cfg(feature = "async")]
-	pub async fn add(&self, token: impl Into<Bytes>) -> Result<Credential> {
-		let auth = self.present(token.into())?;
-		kio::wait(|waiter| auth.poll_answered(waiter)).await?;
-		Ok(auth)
-	}
-
-	/// Register a token and queue it on every open session.
-	pub(crate) fn present(&self, token: Bytes) -> Result<Credential> {
+	/// The handle's end, or [`Error::GoingAway`] when its one session is draining.
+	pub fn add(&self, token: impl Into<Bytes>) -> Result<Credential> {
+		let token = token.into();
 		let mut guard = self.state.lock();
 		let state = &mut *guard;
 		if let Some(err) = &state.closed {
@@ -872,10 +860,10 @@ impl Link {
 		Self::bound(supported, false)
 	}
 
-	/// A moq-transport session: like [`new`](Self::new), but a request can carry a token
-	/// itself, so a token needs no AUTH to be presented.
-	pub(crate) fn ietf(supported: bool) -> Self {
-		Self::bound(supported, true)
+	/// A moq-transport session: it speaks no AUTH, but a request can carry a token itself,
+	/// so a token needs no AUTH to be presented.
+	pub(crate) fn ietf() -> Self {
+		Self::bound(false, true)
 	}
 
 	fn bound(supported: bool, requests: bool) -> Self {
@@ -970,17 +958,11 @@ impl Link {
 		self.read(|link, _| link.active())
 	}
 
-	/// Whether this side speaks AUTH: false on a version without it, on a side that does
-	/// not offer it, and once the peer turns out not to.
-	pub(crate) fn supported(&self) -> bool {
-		self.read(|link, _| link.supported)
-	}
-
 	/// Present a token: the session's own credential at setup, presented on this session
 	/// alone, or else one of the handle's, presented on every session.
 	pub(crate) fn present(&self, token: Bytes, setup: bool) -> Result<Credential> {
 		if !setup {
-			return self.handle.present(token);
+			return self.handle.add(token);
 		}
 		let id = self.with_state(|state, link| {
 			let id = state.next_id;
@@ -1431,43 +1413,6 @@ impl Link {
 		})
 	}
 
-	/// The peer turned out not to negotiate AUTH, leaving the union unknown. On
-	/// moq-transport every token we presented stays, with an unknown grant, for the
-	/// requests that name it; elsewhere each fails as unsupported, which ends the handle's
-	/// tokens for good. The peer's tokens can still ride its requests, so their queue
-	/// stays open.
-	pub(crate) fn unsupported(&self) {
-		self.with_state(|state, link| {
-			let link = attached(&mut state.links, link);
-			link.supported = false;
-			link.opening.clear();
-			let requests = link.requests;
-			// Nothing will read a withdrawn slot again.
-			link.slots
-				.retain(|_, slot| !matches!(slot.phase, Phase::Withdrawn { .. }));
-			let mut answers = Vec::new();
-			for (id, slot) in &mut link.slots {
-				let answer = match requests {
-					true => Ok(()),
-					false => Err(Error::Unsupported),
-				};
-				// Called before any stream opens, so every slot not over is still queued.
-				if !matches!(slot.phase, Phase::Ended(_)) {
-					slot.phase = match requests {
-						true => Phase::Requests,
-						false => Phase::Ended(Error::Unsupported),
-					};
-				}
-				if !slot.setup {
-					answers.push((*id, answer));
-				}
-			}
-			for (id, answer) in answers {
-				state.answer(id, answer.map(|()| Answer::Requests));
-			}
-		});
-	}
-
 	/// Why the session ended, once it has.
 	fn closed(&self) -> Option<Error> {
 		self.read(|link, _| link.closed.clone())
@@ -1599,9 +1544,22 @@ impl Credential {
 		Poll::Ready(selector.ended(&state).unwrap_or(Error::Cancel))
 	}
 
+	/// Wait for the peer's first verdict on the token: `Ok` once a peer accepts it, at once on
+	/// moq-transport without AUTH, where only a request that names it carries the token.
+	///
+	/// # Errors
+	///
+	/// [`Error::Unsupported`] when neither the session nor its requests can carry a token
+	/// (moq-lite without AUTH, or a peer that takes no tokens in band), the peer's refusal as
+	/// [`Error::Session`], or the handle's end.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_answered(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.poll_answer(waiter).map(|answer| answer.map(drop))
+	}
+
 	/// Poll for the first verdict on a handle's token: a grant on any session, or the
 	/// refusal or end that settles it.
-	fn poll_answered(&self, waiter: &kio::Waiter) -> Poll<Result<Answer>> {
+	fn poll_answer(&self, waiter: &kio::Waiter) -> Poll<Result<Answer>> {
 		let id = self.presented.id;
 		let answered = |state: &State| match state.tokens.get(&id) {
 			Some(token) => token.answered.clone(),
@@ -3212,10 +3170,10 @@ mod tests {
 	/// could carry it.
 	#[test]
 	fn a_request_carries_an_auth_without_the_auth_stream() {
-		let ietf = Link::ietf(false);
+		let ietf = Link::ietf();
 		let auth = ietf.present(Bytes::from_static(b"jwt"), false).unwrap();
 		assert!(matches!(
-			auth.poll_answered(&kio::Waiter::noop()),
+			auth.poll_answer(&kio::Waiter::noop()),
 			Poll::Ready(Ok(Answer::Requests))
 		));
 		assert_eq!(auth.grant().peek(), None);
@@ -3228,33 +3186,18 @@ mod tests {
 		let lite = Link::new(false);
 		let auth = lite.present(Bytes::from_static(b"jwt"), false).unwrap();
 		assert!(matches!(
-			auth.poll_answered(&kio::Waiter::noop()),
+			auth.poll_answer(&kio::Waiter::noop()),
 			Poll::Ready(Err(Error::Unsupported))
 		));
-	}
-
-	/// A peer that turns out not to speak AUTH leaves a moq-transport auth for its
-	/// requests rather than failing it.
-	#[test]
-	fn an_unsupported_peer_keeps_a_request_auth() {
-		let handle = Link::ietf(true);
-		let auth = handle.present(Bytes::from_static(b"jwt"), false).unwrap();
-		assert!(auth.poll_answered(&kio::Waiter::noop()).is_pending());
-		handle.unsupported();
-		assert!(matches!(
-			auth.poll_answered(&kio::Waiter::noop()),
-			Poll::Ready(Ok(Answer::Requests))
-		));
-		assert_eq!(handle.token(&auth).as_deref(), Some(b"jwt".as_slice()));
 	}
 
 	/// Only the handle that issued an auth carries it: a route naming another session's
 	/// auth goes out under this session's scope.
 	#[test]
 	fn another_handle_does_not_carry_an_auth() {
-		let issuer = Link::ietf(false);
+		let issuer = Link::ietf();
 		let auth = issuer.present(Bytes::from_static(b"jwt"), false).unwrap();
-		assert_eq!(Link::ietf(false).token(&auth), None);
+		assert_eq!(Link::ietf().token(&auth), None);
 	}
 
 	/// Every clone names one credential, which stays presented until the last drops.
@@ -3311,11 +3254,11 @@ mod tests {
 		let handle = Handle::new();
 		let first = Link::attach(&handle, true, false).unwrap();
 		assert!(matches!(Link::attach(&handle, true, false), Err(Error::Duplicate)));
-		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&first);
 		first.grant(id, Grant::all());
 		assert!(matches!(
-			auth.poll_answered(&kio::Waiter::noop()),
+			auth.poll_answer(&kio::Waiter::noop()),
 			Poll::Ready(Ok(Answer::Granted))
 		));
 		assert_eq!(auth.grant().peek(), Some(Grant::all()));
@@ -3349,20 +3292,20 @@ mod tests {
 	fn the_answer_outlives_its_session() {
 		let handle = Handle::new();
 		let session = Link::attach(&handle, true, false).unwrap();
-		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		session.grant(opened(&session), Grant::all());
 		session.close(Error::Cancel);
 		assert_eq!(auth.grant().peek(), None);
 		assert!(matches!(
-			auth.poll_answered(&kio::Waiter::noop()),
+			auth.poll_answer(&kio::Waiter::noop()),
 			Poll::Ready(Ok(Answer::Granted))
 		));
 
 		let handle = Handle::new();
 		let _session = Link::attach(&handle, false, true).unwrap();
-		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		assert!(matches!(
-			auth.poll_answered(&kio::Waiter::noop()),
+			auth.poll_answer(&kio::Waiter::noop()),
 			Poll::Ready(Ok(Answer::Requests))
 		));
 	}
@@ -3378,7 +3321,7 @@ mod tests {
 		assert_eq!(link.retry(id, &lost), None, "the application hears of a lost token");
 		link.ended(id, lost);
 		assert!(matches!(
-			auth.poll_answered(&kio::Waiter::noop()),
+			auth.poll_answer(&kio::Waiter::noop()),
 			Poll::Ready(Err(Error::Stream(_)))
 		));
 
@@ -3402,12 +3345,12 @@ mod tests {
 		draining.drain_with(std::sync::Arc::new(goaway));
 		let successor = Link::attach(&handle, true, false).unwrap();
 
-		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		assert!(Selector::Token(auth.id()).ended(&handle.state.read()).is_none());
 		let id = opened(&successor);
 		successor.grant(id, Grant::all());
 		assert!(matches!(
-			auth.poll_answered(&kio::Waiter::noop()),
+			auth.poll_answer(&kio::Waiter::noop()),
 			Poll::Ready(Ok(Answer::Granted))
 		));
 	}
@@ -3418,7 +3361,7 @@ mod tests {
 	fn a_draining_refusal_leaves_the_successors_grant() {
 		let handle = Handle::new();
 		let draining = Link::attach(&handle, true, false).unwrap();
-		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
 		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
@@ -3439,7 +3382,7 @@ mod tests {
 	fn a_draining_refusal_defers_to_the_successors_retry() {
 		let handle = Handle::new();
 		let draining = Link::attach(&handle, true, false).unwrap();
-		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
 		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
@@ -3493,7 +3436,7 @@ mod tests {
 	fn a_lost_stream_is_presented_again() {
 		let handle = Handle::new();
 		let link = Link::attach(&handle, true, true).unwrap();
-		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&link);
 		let lost = Error::Stream(crate::StreamError::Internal);
 
@@ -3529,7 +3472,7 @@ mod tests {
 	fn a_draining_session_leaves_an_undecided_token() {
 		let handle = Handle::new();
 		let draining = Link::attach(&handle, true, false).unwrap();
-		let _auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let _auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
 		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
@@ -3555,7 +3498,7 @@ mod tests {
 
 		link.refused(id);
 		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL));
-		assert!(auth.poll_answered(&kio::Waiter::noop()).is_pending());
+		assert!(auth.poll_answer(&kio::Waiter::noop()).is_pending());
 		assert_eq!(link.reopen(id).unwrap().as_ref(), b"jwt");
 		link.refused(id);
 		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL * 2));
@@ -3564,7 +3507,7 @@ mod tests {
 		link.reopen(id).unwrap();
 		link.grant(id, Grant::all());
 		assert!(matches!(
-			auth.poll_answered(&kio::Waiter::noop()),
+			auth.poll_answer(&kio::Waiter::noop()),
 			Poll::Ready(Ok(Answer::Granted))
 		));
 	}
@@ -3850,21 +3793,18 @@ mod request_token_tests {
 		);
 	}
 
-	/// A request-borne token is verified even without the MoQ Auth extension: it rides the
-	/// request message, not the AUTH stream, so `requests()` stays live on a session whose
-	/// `supported` is false, even once the peer turns out not to speak AUTH. This is the shape
-	/// a standard moq-transport peer presents when it does not negotiate the AUTH extension.
+	/// A request-borne token is verified without AUTH: it rides the request message, so
+	/// `requests()` stays live on a session that speaks no AUTH, as on moq-transport.
 	#[kio::test]
-	async fn a_request_token_is_verified_without_the_auth_extension() {
+	async fn a_request_token_is_verified_without_the_auth_stream() {
 		let handle = Link::new(false);
 		let mut requests = handle.handle().requests();
-		handle.unsupported();
 		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		let request = requests.next().await.expect("a request reaches the acceptor");
 		let _issued = request.accept(Grant::all());
 		assert!(
 			verdict.grant().await.expect("granted").publish.matches("room/alice"),
-			"admitted without the AUTH extension"
+			"admitted without AUTH"
 		);
 	}
 

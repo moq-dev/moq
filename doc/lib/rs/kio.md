@@ -94,8 +94,9 @@ timer is armed panics as a deadlock instead of hanging. `sim::advance()` and
 Draw jitter and other randomness from `kio::clock::rng()`. Inside the simulator
 it comes from one seed per run, picked at random or set with `MOQ_SIM_SEED`. A
 run that panics prints its seed, so rerunning the test with `MOQ_SIM_SEED` set to
-that seed replays it bit-exact. Outside the simulator `rng()` is rand's thread
-generator.
+that seed replays it bit-exact. A sweep that derives each case's seed itself
+passes it to `sim::run_seeded(seed, future)` instead, so one setting replays a
+case. Outside the simulator `rng()` is rand's thread generator.
 
 ## Driving a tokio runtime by hand
 

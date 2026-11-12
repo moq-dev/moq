@@ -4,8 +4,9 @@
 
 The `tla` recipes run a native TLA+ checker locally when one gives TLC's
 verdict and distinct-state count on every config in the tree and costs fewer
-core-seconds on the route and resume models. Nightly then runs both engines on
-every config and fails when they disagree. If no checker agrees, the PR
+core-seconds on the route and resume models. Nightly (`just test tla`, which
+`sh/tla.sh` drives) then runs both engines on every config and fails when they
+disagree. If no checker agrees, the PR
 records what each one failed on and adopts nothing.
 
 ## Plan
@@ -39,17 +40,17 @@ bar, not speed:
   `RECURSIVE`, `CHOOSE`, `CASE`, `LAMBDA`, `Sequences`, `FiniteSets`,
   `CONSTRAINT`, and `VIEW`, unmodified.
 - Measure both engines at equal worker counts through `quest gate` on a quiet
-  host, against TLC as the `tla` recipes run it. That baseline, measured
-  2026-11-10 on a 24-core desktop: `RouteHandoff.cfg` (17.7M states generated,
-  3.67M distinct) in about 50 s and 930 CPU-seconds on TLC 1.8.0 with Java 21,
-  down from about 118 s and 1,730 on TLC 1.7.4 with Java 8. CPU-seconds stayed
-  near flat from 2 to 24 workers. Report the table in the PR.
-- A config the checker cannot run, such as a liveness property or random
-  simulation, which [the mesh model](/quest/m1/route-mesh-model.md) plans,
-  stays on TLC; the recipe picks the engine per config and errors rather than
+  host, against TLC as the `tla` recipes run it. The 2026-11-10 baseline, on a
+  24-core desktop and the route model as it stood then (3.67M distinct
+  states): about 50 s and 930 CPU-seconds on TLC 1.8.0 with Java 21, down from
+  about 118 s and 1,730 on TLC 1.7.4 with Java 8, with CPU-seconds near flat
+  from 2 to 24 workers. The model has since changed, so remeasure TLC and
+  report the table in the PR.
+- A config the checker cannot run, such as one with a `\* Simulate:` line
+  that `sh/tla.sh` samples at random, stays on TLC; the recipe picks the engine per config and errors rather than
   falling back at runtime.
-- A broken rule must still give `/statechart` a trace it can read with the
-  spec's `*.view.ts`. Say how.
+- A broken rule must still print a trace as readable as TLC's, which the
+  Reading a failure in `rs/moq-net/verify/README.md` relies on. Say how.
 - Build each candidate from a flake input pinned to a revision, inside the Nix
   sandbox. Run none of their build scripts or binaries outside it.
 - Report upstream bugs to the maintainer rather than filing them.
@@ -58,5 +59,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [The TLA+ models run nightly and reviews resync them](/quest/m1/model-checks-nightly.md) - the Nightly job the cross-check joins
 - [Every delivery order of a small mesh runs on the real route layer](/quest/m1/route-exhaustive-sim.md) - the other spike, which checks the Rust instead of a faster model

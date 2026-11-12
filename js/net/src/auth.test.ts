@@ -1,11 +1,18 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Duration, Manual, yieldNow } from "@moq/clock";
-import { Duplicate, type Grant, Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
+import {
+	type Credential,
+	Duplicate,
+	type Grant,
+	Handle,
+	type Issued,
+	type Request,
+	type Requests,
+	Unsupported,
+} from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Session } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
-import { AuthMessage as IetfAuthMessage, IetfAuthWire } from "./ietf/auth.ts";
 import * as Ietf from "./ietf/index.ts";
-import * as IetfMessage from "./ietf/message.ts";
 import { AuthMessage as LiteAuthMessage, LiteAuthWire } from "./lite/auth.ts";
 import * as Lite from "./lite/index.ts";
 import * as LiteMessage from "./lite/message.ts";
@@ -16,6 +23,12 @@ import { Stream, Writer } from "./stream.ts";
 import { abandoned } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
+
+/** Wait for a token's first answer, returning it as `add` returned it. */
+async function answered<T extends Credential>(token: T): Promise<T> {
+	await token.answered;
+	return token;
+}
 
 const url = new URL("https://localhost:4443/test");
 
@@ -83,12 +96,12 @@ function answer(requests: Requests, answer: (token: string) => Grant): Issued[] 
 	return issued;
 }
 
-// Every case runs on moq-lite-07-wip and on moq-transport with the MoQ Auth extension.
-describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
+// Every case runs on each version with AUTH streams: moq-lite-07-wip.
+describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 	test("a shared handle presents its token on every session", async () => {
 		const handle = new Handle();
 		// Added before any session: it waits for the first.
-		const adding = handle.add("token");
+		const adding = answered(handle.add("token"));
 
 		const first = await connect({ publish: new OriginProducer(), protocol, auth: handle });
 		answer(first.server.auth.requests(), (token) => (token ? grant(["first"], []) : grant([], [])));
@@ -112,10 +125,8 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		await waitFor(token.grant, (g) => g?.publish.equals(patterns("second")) === true);
 		await waitFor(handle.grant, (g) => g?.publish.equals(patterns("second")) === true);
 		expect(ended).toBe(false);
-		// A route naming the token carries it on the new session's requests, on moq-transport.
-		const carried = wireOf(second.client).auth.carried(token);
-		if (protocol === Lite.ALPN_07_WIP) expect(carried).toBeUndefined();
-		else expect(carried).toEqual(new TextEncoder().encode("token"));
+		// Only moq-transport requests carry a token.
+		expect(wireOf(second.client).auth.carried(token)).toBeUndefined();
 
 		token.close();
 		expect(await token.closed).toBeNull();
@@ -129,7 +140,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		const installed = clock.install();
 		const warned = spyOn(console, "warn").mockImplementation(() => {});
 		// The server's side of each AUTH stream carrying our token, in arrival order.
-		const Wire = protocol === Lite.ALPN_07_WIP ? LiteAuthWire : IetfAuthWire;
+		const Wire = LiteAuthWire;
 		const original = Wire.prototype.accept;
 		const streams: Stream[] = [];
 		const accepted = spyOn(Wire.prototype, "accept").mockImplementation(async function (
@@ -144,7 +155,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		const { client, server } = await connect({ publish: new OriginProducer(), protocol, auth: handle });
 		answer(server.auth.requests(), (token) => (token ? grant(["a"], []) : grant([], [])));
 		try {
-			const token = await handle.add("token");
+			const token = await answered(handle.add("token"));
 			await waitFor(token.grant, (g) => g?.publish.equals(patterns("a")) === true);
 			let ended = false;
 			void token.closed.then(() => {
@@ -173,7 +184,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		const clock = new Manual();
 		const installed = clock.install();
 		const warned = spyOn(console, "warn").mockImplementation(() => {});
-		const Wire = protocol === Lite.ALPN_07_WIP ? LiteAuthWire : IetfAuthWire;
+		const Wire = LiteAuthWire;
 		const original = Wire.prototype.accept;
 		const streams: Stream[] = [];
 		const accepted = spyOn(Wire.prototype, "accept").mockImplementation(async function (
@@ -188,7 +199,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		const { client, server } = await connect({ publish: new OriginProducer(), protocol, auth: handle });
 		answer(server.auth.requests(), (token) => (token ? grant(["a"], []) : grant([], [])));
 		try {
-			const token = await handle.add("token");
+			const token = await answered(handle.add("token"));
 			await waitFor(token.grant, (g) => g?.publish.equals(patterns("a")) === true);
 			const first = streams[0];
 			if (!first) throw new Error("the token was never presented");
@@ -231,7 +242,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 
 		// Ending the handle ends the tokens it holds, and no session can be built on it.
 		handle.abort(new Error("done"));
-		await expect(handle.add("late")).rejects.toThrow("done");
+		expect(() => answered(handle.add("late"))).toThrow("done");
 		second.client.abort();
 		second.server.abort();
 	});
@@ -256,7 +267,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 	test("a token without an acceptor reports unsupported", async () => {
 		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 		await waitFor(client.auth.grant, (g) => g !== undefined);
-		await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
+		await expect(answered(client.auth.add("token"))).rejects.toBeInstanceOf(Unsupported);
 		client.abort();
 		server.abort();
 	});
@@ -274,7 +285,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		})();
 		try {
 			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a")) === true);
-			const token = await client.auth.add("update");
+			const token = await answered(client.auth.add("update"));
 			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a", "b")) === true);
 			const publish = new Path.Patterns(
 				Array.from({ length: 20 }, (_, i) => Path.Pattern.subtree(`${i}${"x".repeat(4000)}`)),
@@ -321,7 +332,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		if (!setup) throw new Error("missing setup token");
 		const initial = setup.accept(grant(["baz"], []));
 		await waitFor(client.auth.grant, (g) => g !== undefined);
-		const adding = client.auth.add("new");
+		const adding = answered(client.auth.add("new"));
 		try {
 			const unanswered = await requests.next();
 			if (!unanswered) throw new Error("missing token");
@@ -342,6 +353,35 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			client.abort();
 			server.abort();
 			await adding.catch(() => void 0);
+		}
+	});
+
+	test("closing a token before its answer rejects it and withdraws it", async () => {
+		// With no session live, closing withdraws it before any session presents it.
+		const handle = new Handle();
+		const offline = handle.add("offline");
+		offline.close();
+		await expect(answered(offline)).rejects.toThrow();
+		expect(await offline.closed).toBeNull();
+
+		// On a live session, closing withdraws it while the peer still holds it unanswered.
+		const { client, server } = await connect({ protocol });
+		const requests = server.auth.requests();
+		const setup = await requests.next();
+		if (!setup) throw new Error("missing setup token");
+		const initial = setup.accept(grant([], []));
+		try {
+			const waiting = client.auth.add("waiting");
+			const unanswered = await requests.next();
+			if (!unanswered) throw new Error("missing token");
+			waiting.close();
+			await expect(answered(waiting)).rejects.toThrow();
+			expect(await unanswered.closed).not.toBeUndefined();
+			expect(waiting.grant.peek()).toBeUndefined();
+		} finally {
+			initial.close();
+			client.abort();
+			server.abort();
 		}
 	});
 
@@ -375,7 +415,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		// The union is empty but still a grant, and a new token restores it.
 		const empty = await waitFor(client.auth.grant, (g) => g !== undefined && g.publish.size === 0);
 		expect(empty?.subscribe.size).toBe(0);
-		const token = await client.auth.add("again");
+		const token = await answered(client.auth.add("again"));
 		expect(token.grant.peek()?.publish.equals(patterns("a"))).toBe(true);
 		const third = await nextRoute(announced);
 		expect(third?.kind).toBe("start");
@@ -399,7 +439,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			}
 		})();
 		try {
-			await expect(client.auth.add("unsupported")).rejects.toBeInstanceOf(Unsupported);
+			await expect(answered(client.auth.add("unsupported"))).rejects.toBeInstanceOf(Unsupported);
 		} finally {
 			client.abort();
 			server.abort();
@@ -419,7 +459,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			}
 		})();
 
-		const err = await client.auth.add("forged").catch((e: unknown) => e);
+		const err = await answered(client.auth.add("forged")).catch((e: unknown) => e);
 		expect(err).toBeInstanceOf(SessionError);
 		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
 		client.abort();
@@ -458,7 +498,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		if (!setup) throw new Error("missing setup token");
 		const initial = setup.accept(grant([], []));
 		await waitFor(client.auth.grant, (g) => g !== undefined);
-		const adding = client.auth.add("first");
+		const adding = answered(client.auth.add("first"));
 		try {
 			const unanswered = await requests.next();
 			if (!unanswered) throw new Error("missing token");
@@ -472,7 +512,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			expect(
 				logged.mock.calls.filter(([line]) => String(line).startsWith("request waited for authorization:")),
 			).toEqual([["request waited for authorization: path=room/x waited=7ms"]]);
-			const renewing = client.auth.add("renewal");
+			const renewing = answered(client.auth.add("renewal"));
 			const renewal = await requests.next();
 			if (!renewal) throw new Error("missing renewal");
 			broadcast
@@ -510,7 +550,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		if (!setup) throw new Error("missing setup token");
 		const initial = setup.accept(grant([], []));
 		await waitFor(client.auth.grant, (g) => g !== undefined);
-		const adding = client.auth.add("first");
+		const adding = answered(client.auth.add("first"));
 		try {
 			const unanswered = await requests.next();
 			if (!unanswered) throw new Error("missing token");
@@ -550,7 +590,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		if (!setup) throw new Error("missing setup token");
 		const initial = setup.accept(grant([], []));
 		await waitFor(client.auth.grant, (g) => g !== undefined);
-		const adding = client.auth.add("first");
+		const adding = answered(client.auth.add("first"));
 		try {
 			const unanswered = await requests.next();
 			if (!unanswered) throw new Error("missing token");
@@ -589,7 +629,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			if (!setup) throw new Error("missing setup token");
 			const initial = setup.accept(grant([], []));
 			await waitFor(client.auth.grant, (g) => g !== undefined);
-			const adding = client.auth.add("first");
+			const adding = answered(client.auth.add("first"));
 			try {
 				const unanswered = await requests.next();
 				if (!unanswered) throw new Error("missing token");
@@ -746,7 +786,7 @@ test("lite-07 presents a transiently refused token again after a backoff", async
 		if (!setup) throw new Error("missing setup token");
 		issued.push(setup.accept(grant([], [])));
 
-		const adding = client.auth.add("token");
+		const adding = answered(client.auth.add("token"));
 		void adding.then(() => {
 			added = true;
 		});
@@ -795,7 +835,7 @@ test("lite-07 presents a shared token again when its retry stream is reset", asy
 		setup?.accept(grant([], []));
 
 		let rejected: unknown;
-		handle.add("token").catch((err) => {
+		answered(handle.add("token")).catch((err) => {
 			rejected = err;
 		});
 		const request = await requests.next();
@@ -835,7 +875,7 @@ test("lite-07 presents a token added after a GOAWAY only on the successor", asyn
 		seen.push(token);
 		return token ? grant(["first"], []) : grant([], []);
 	});
-	const token = await handle.add("token");
+	const token = await answered(handle.add("token"));
 	await waitFor(handle.grant, (g) => g?.publish.equals(patterns("first")) === true);
 
 	const stream = await Stream.open(pair.server, { version: Lite.Version.DRAFT_07 });
@@ -843,7 +883,7 @@ test("lite-07 presents a token added after a GOAWAY only on the successor", asyn
 	await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_07);
 	await settles(() => !wireOf(client).auth.active);
 
-	const late = handle.add("late");
+	const late = answered(handle.add("late"));
 	const successor = await connect({ publish: new OriginProducer(), protocol, auth: handle });
 	// The successor has not answered yet, so its predecessor's grant no longer applies.
 	expect(handle.grant.peek()).toBeUndefined();
@@ -874,8 +914,7 @@ test("lite-07 refuses a token added to a session's own handle after a GOAWAY", a
 	await settles(() => !wireOf(client).auth.active);
 
 	try {
-		const late = withTimeout(client.auth.add("late"), Duration.millis(1000), "add after GOAWAY hung");
-		await expect(late).rejects.toBeInstanceOf(StreamError);
+		expect(() => client.auth.add("late")).toThrow(StreamError);
 	} finally {
 		client.abort();
 		server.abort();
@@ -894,7 +933,7 @@ test("lite-07 ignores a draining session's late refusal once its successor grant
 	const setup = await requests.next();
 	if (!setup) throw new Error("missing setup token");
 	const issued = [setup.accept(grant([], []))];
-	const adding = handle.add("token");
+	const adding = answered(handle.add("token"));
 	const unanswered = await requests.next();
 	expect(unanswered && new TextDecoder().decode(unanswered.token)).toBe("token");
 
@@ -946,7 +985,7 @@ test("lite-07 ignores a draining session's late refusal while its successor retr
 	const setup = await requests.next();
 	if (!setup) throw new Error("missing setup token");
 	issued.push(setup.accept(grant([], [])));
-	const adding = handle.add("token");
+	const adding = answered(handle.add("token"));
 	const unanswered = await requests.next();
 	expect(unanswered && new TextDecoder().decode(unanswered.token)).toBe("token");
 
@@ -1060,7 +1099,7 @@ test("a fetch abandoned while its token waits never reaches the wire", async () 
 	if (!setup) throw new Error("missing setup token");
 	const initial = setup.accept(grant([], []));
 	await waitFor(client.auth.grant, (g) => g !== undefined);
-	const adding = client.auth.add("first");
+	const adding = answered(client.auth.add("first"));
 	try {
 		const unanswered = await requests.next();
 		if (!unanswered) throw new Error("missing token");
@@ -1100,7 +1139,7 @@ test("a listing waits for its token before reaching the wire", async () => {
 	if (!setup) throw new Error("missing setup token");
 	const initial = setup.accept(grant([], []));
 	await waitFor(client.auth.grant, (g) => g !== undefined);
-	const adding = client.auth.add("first");
+	const adding = answered(client.auth.add("first"));
 	try {
 		const unanswered = await requests.next();
 		if (!unanswered) throw new Error("missing token");
@@ -1140,7 +1179,7 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 		if (!setup) throw new Error("missing setup token");
 		const initial = setup.accept(grant([], []));
 		await waitFor(client.auth.grant, (g) => g !== undefined);
-		const adding = client.auth.add("first");
+		const adding = answered(client.auth.add("first"));
 		try {
 			const unanswered = await requests.next();
 			if (!unanswered) throw new Error("missing token");
@@ -1167,116 +1206,64 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 	},
 );
 
-test.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
-	"%s carries literal and wildcard grants exactly",
-	async (protocol) => {
-		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
-		const requests = server.auth.requests();
-		const unions: Record<string, [string[], string[]]> = {
-			"": [["a/**"], []],
-			exact: [["room/alice"], []],
-			wildcard: [["room/*/cam"], ["**/demo.hang"]],
-			mixed: [["room/**", "lobby", "cam-*.hang"], []],
-			root: [[""], ["**"]],
-		};
-		const parse = (texts: string[]) => new Path.Patterns(texts.map((text) => Path.Pattern.parse(text)));
-		const issued: Issued[] = [];
-		void (async () => {
-			for (;;) {
-				const request = await requests.next();
-				if (!request) break;
-				const [publish, subscribe] = unions[new TextDecoder().decode(request.token)] ?? [[], []];
-				issued.push(request.accept({ publish: parse(publish), subscribe: parse(subscribe) }));
-			}
-		})();
-
-		await waitFor(client.auth.grant, (g) => g !== undefined);
-		for (const token of ["exact", "wildcard", "mixed", "root"]) {
-			const [publish, subscribe] = unions[token];
-			const added = await client.auth.add(token);
-			const got = added.grant.peek();
-			expect(got?.publish.equals(parse(publish))).toBe(true);
-			expect(got?.subscribe.equals(parse(subscribe))).toBe(true);
+test.each([Lite.ALPN_07_WIP])("%s carries literal and wildcard grants exactly", async (protocol) => {
+	const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+	const requests = server.auth.requests();
+	const unions: Record<string, [string[], string[]]> = {
+		"": [["a/**"], []],
+		exact: [["room/alice"], []],
+		wildcard: [["room/*/cam"], ["**/demo.hang"]],
+		mixed: [["room/**", "lobby", "cam-*.hang"], []],
+		root: [[""], ["**"]],
+	};
+	const parse = (texts: string[]) => new Path.Patterns(texts.map((text) => Path.Pattern.parse(text)));
+	const issued: Issued[] = [];
+	void (async () => {
+		for (;;) {
+			const request = await requests.next();
+			if (!request) break;
+			const [publish, subscribe] = unions[new TextDecoder().decode(request.token)] ?? [[], []];
+			issued.push(request.accept({ publish: parse(publish), subscribe: parse(subscribe) }));
 		}
-		client.abort();
-		server.abort();
-	},
-);
+	})();
+
+	await waitFor(client.auth.grant, (g) => g !== undefined);
+	for (const token of ["exact", "wildcard", "mixed", "root"]) {
+		const [publish, subscribe] = unions[token];
+		const added = await answered(client.auth.add(token));
+		const got = added.grant.peek();
+		expect(got?.publish.equals(parse(publish))).toBe(true);
+		expect(got?.subscribe.equals(parse(subscribe))).toBe(true);
+	}
+	client.abort();
+	server.abort();
+});
 
 // moq-transport keeps the token for the requests that name it, with no grant of its own.
 test.each([
 	[Lite.ALPN_05, false],
 	[Lite.ALPN_06, false],
+	[Ietf.ALPN.DRAFT_22, true],
 ])("%s has no grant, keeping a token for requests: %p", async (protocol, kept) => {
 	const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 	expect(client.auth.grant.peek()).toBeUndefined();
 	if (kept) {
-		const token = await client.auth.add("token");
+		const token = await answered(client.auth.add("token"));
 		expect(token.grant.peek()).toBeUndefined();
 		expect(client.auth.grant.peek()).toBeUndefined();
 		// A request carries the bytes as added, whatever the caller does with its buffer after.
 		const bytes = new TextEncoder().encode("bytes");
-		const copied = await client.auth.add(bytes);
+		const copied = await answered(client.auth.add(bytes));
 		bytes.fill(0);
 		expect(wireOf(client).auth.carried(copied)).toEqual(new TextEncoder().encode("bytes"));
 		// The token ends with its session, like any other.
 		client.abort();
 		expect(await token.closed).toBeInstanceOf(Error);
 	} else {
-		await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
+		await expect(answered(client.auth.add("token"))).rejects.toBeInstanceOf(Unsupported);
 	}
 	client.abort();
 	server.abort();
-});
-
-// With MoQ Auth negotiated, a reset AUTH stream fails the token rather than keeping it for
-// requests: only a peer whose SETUP omitted the extension leaves tokens to requests.
-test("a reset AUTH stream fails the token on moq-transport", async () => {
-	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Ietf.ALPN.DRAFT_22 });
-	await waitFor(client.auth.grant, (g) => g !== undefined);
-	const read = spyOn(IetfAuthWire.prototype, "read").mockRejectedValue(
-		new StreamError(StreamCode.Cancel, { message: "reset" }),
-	);
-	try {
-		await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
-	} finally {
-		read.mockRestore();
-		client.abort();
-		server.abort();
-	}
-});
-
-test("a GOING_AWAY refusal leaves a shared token for the next session on moq-transport", async () => {
-	const protocol = Ietf.ALPN.DRAFT_22;
-	const handle = new Handle();
-	const first = await connect({ publish: new OriginProducer(), protocol, auth: handle });
-	await waitFor(handle.grant, (g) => g !== undefined);
-	const read = spyOn(IetfAuthWire.prototype, "read").mockResolvedValue({
-		refused: new StreamError(StreamCode.GoingAway),
-	});
-	const warned = spyOn(console, "warn").mockImplementation(() => {});
-	let rejected: unknown;
-	const adding = handle.add("token");
-	adding.catch((err) => {
-		rejected = err;
-	});
-	try {
-		await settles(() => warned.mock.calls.some(([line]) => line === "auth token refused"));
-		for (let i = 0; i < 10; i++) await yieldNow();
-		expect(rejected).toBeUndefined();
-	} finally {
-		read.mockRestore();
-		warned.mockRestore();
-		first.client.abort();
-		first.server.abort();
-	}
-
-	const second = await connect({ publish: new OriginProducer(), protocol, auth: handle });
-	answer(second.server.auth.requests(), (token) => (token ? grant(["second"], []) : grant([], [])));
-	const token = await adding;
-	await waitFor(token.grant, (g) => g?.publish.equals(patterns("second")) === true);
-	second.client.abort();
-	second.server.abort();
 });
 
 // lite-07 presents the connection's credential on an Auth Stream right away; lite-06 never
@@ -1373,7 +1360,7 @@ test("withdrawn queued tokens are pruned before the next application decision", 
 			await stream.writer.close();
 			await stream.reader.closed;
 		}
-		const live = client.auth.add("live");
+		const live = answered(client.auth.add("live"));
 		live.catch(() => void 0);
 		const request = await requests.next();
 		if (!request) throw new Error("live token missing");
@@ -1412,7 +1399,7 @@ test("grants issued while a reply is blocked replace the one still queued", asyn
 		const setup = await requests.next();
 		if (!setup) throw new Error("setup token missing");
 		setup.accept(grant(["a"], []));
-		const live = client.auth.add("live");
+		const live = answered(client.auth.add("live"));
 		live.catch(() => void 0);
 		const request = await requests.next();
 		if (!request) throw new Error("live token missing");
@@ -1433,15 +1420,12 @@ test("grants issued while a reply is blocked replace the one still queued", asyn
 
 // Capture the acceptor's actual AUTH writer after a valid setup grant. The following
 // bytes travel through the same connection dispatcher and presenter as a real peer.
-describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("AUTH violations %s", (protocol) => {
+describe.each([Lite.ALPN_07_WIP])("AUTH violations %s", (protocol) => {
 	test("a second presenter message closes the session", async () => {
 		const streams: Stream[] = [];
-		const prototype = protocol === Lite.ALPN_07_WIP ? LiteAuthWire.prototype : IetfAuthWire.prototype;
+		const prototype = LiteAuthWire.prototype;
 		const original = prototype.present;
-		const spy = spyOn(prototype, "present").mockImplementation(async function (
-			this: LiteAuthWire & IetfAuthWire,
-			token,
-		) {
+		const spy = spyOn(prototype, "present").mockImplementation(async function (this: LiteAuthWire, token) {
 			const stream = await original.call(this, token);
 			streams.push(stream);
 			return stream;
@@ -1466,17 +1450,12 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("AUTH violations %s", (pro
 		const pair = await connect({ protocol });
 		await waitFor(pair.client.auth.grant, (g) => g !== undefined);
 		await waitFor(pair.server.auth.grant, (g) => g !== undefined);
-		const lite = protocol === Lite.ALPN_07_WIP;
-		const prototype = lite ? LiteAuthMessage.prototype : IetfAuthMessage.prototype;
-		const spy = spyOn(prototype, "encode").mockImplementation(async (writer: Writer) => {
-			const body = async (w: Writer) => {
-				if (!lite) await w.u62(2n);
+		const spy = spyOn(LiteAuthMessage.prototype, "encode").mockImplementation(async (writer: Writer) => {
+			await LiteMessage.encode(writer, async (w: Writer) => {
 				await w.u53(2);
-			};
-			if (lite) await LiteMessage.encode(writer, body);
-			else await IetfMessage.encode(writer, body, IetfAuthMessage.id);
+			});
 		});
-		const added = pair.client.auth.add("bad").catch(() => undefined);
+		const added = answered(pair.client.auth.add("bad")).catch(() => undefined);
 		try {
 			expect(
 				(await withTimeout(pair.transport.closed, Duration.millis(100), "malformed AUTH did not close"))
@@ -1499,11 +1478,10 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("AUTH violations %s", (pro
 	] as const) {
 		test(`${fault} closes the session`, async () => {
 			const streams: Stream[] = [];
-			const lite = protocol === Lite.ALPN_07_WIP;
-			const prototype = lite ? LiteAuthWire.prototype : IetfAuthWire.prototype;
+			const prototype = LiteAuthWire.prototype;
 			const original = prototype.grant;
 			const spy = spyOn(prototype, "grant").mockImplementation(async function (
-				this: LiteAuthWire & IetfAuthWire,
+				this: LiteAuthWire,
 				stream,
 				value,
 			) {
@@ -1531,9 +1509,8 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("AUTH violations %s", (pro
 							if (fault === "extra body") await writer.u53(0);
 						}
 					};
-					const id = fault === "oversized expiry" ? (lite ? 0 : 0x40b62) : lite ? 1 : 0x40b63;
-					if (lite) await LiteMessage.encode(stream.writer, body, { id });
-					else await IetfMessage.encode(stream.writer, body, id);
+					const id = fault === "oversized expiry" ? 0 : 1;
+					await LiteMessage.encode(stream.writer, body, { id });
 				}
 				expect(
 					(await withTimeout(pair.transport.closed, Duration.millis(100), "malformed AUTH did not close"))
@@ -1547,68 +1524,3 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("AUTH violations %s", (pro
 		});
 	}
 });
-
-// AUTH takes the peer's request ID parity.
-describe.each([Ietf.ALPN.DRAFT_22])("AUTH request IDs %s", (protocol) => {
-	for (const client of [true, false]) {
-		test(`${client ? "client" : "server"} wrong parity closes the session`, async () => {
-			const pair = await connect({ protocol });
-			await waitFor(pair.client.auth.grant, (g) => g !== undefined);
-			await waitFor(pair.server.auth.grant, (g) => g !== undefined);
-			const original = IetfAuthMessage.prototype.encode;
-			const spy = spyOn(IetfAuthMessage.prototype, "encode").mockImplementation(async function (
-				this: IetfAuthMessage,
-				writer,
-				version,
-			) {
-				this.requestId = client ? 1n : 0n;
-				await original.call(this, writer, version);
-			});
-			const added = (client ? pair.client : pair.server).auth.add("bad ID").catch(() => undefined);
-			try {
-				expect(
-					(
-						await withTimeout(
-							pair.transport.closed,
-							Duration.millis(100),
-							"invalid AUTH ID left session open",
-						)
-					).closeCode,
-				).toBe(SessionCode.InvalidRequestId);
-			} finally {
-				spy.mockRestore();
-				pair.client.abort();
-				pair.server.abort();
-				await added;
-			}
-		});
-	}
-});
-
-for (const protocol of [Ietf.ALPN.DRAFT_22]) {
-	test(`AUTH accepts reordered IDs on ${protocol}`, async () => {
-		const pair = await connect({ protocol });
-		await waitFor(pair.client.auth.grant, (g) => g !== undefined);
-		await waitFor(pair.server.auth.grant, (g) => g !== undefined);
-		const original = IetfAuthMessage.prototype.encode;
-		const spy = spyOn(IetfAuthMessage.prototype, "encode").mockImplementation(async function (
-			this: IetfAuthMessage,
-			writer,
-			version,
-		) {
-			// Swap the next two independently opened request IDs, preserving endpoint parity.
-			this.requestId = this.requestId < 4n ? this.requestId + 2n : this.requestId - 2n;
-			await original.call(this, writer, version);
-		});
-		try {
-			for (const endpoint of [pair.client, pair.server]) {
-				await expect(endpoint.auth.add("first")).rejects.toBeInstanceOf(Unsupported);
-				await expect(endpoint.auth.add("second")).rejects.toBeInstanceOf(Unsupported);
-			}
-		} finally {
-			spy.mockRestore();
-			pair.client.abort();
-			pair.server.abort();
-		}
-	});
-}

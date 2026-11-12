@@ -1,12 +1,16 @@
 import { type Duration, now, sleep } from "@moq/clock";
 import { type GetPromise, Signal } from "@moq/signals";
+import { READER_RUN_OVERHEAD, type Reader } from "./cache.ts";
 import { insertRun, type Run, runGaps } from "./internal.ts";
 import { GRACE, Ledger } from "./ledger.ts";
+import { max, min } from "./util/sequence.ts";
 
 /** How a {@link Tail} measures its grace. */
 export interface TailOptions {
 	/** How long to wait for a group that cannot be accounted for. Read each time it is needed. */
 	grace?: () => Duration;
+	/** Bills the bytes the tail keeps to the subscription's copy's account, as a reader's record. */
+	bill?: Reader;
 }
 
 /**
@@ -34,9 +38,50 @@ export class Tail {
 	// update names one only if it was sent before the publisher served the group, so the group won
 	// over it, even once the cache evicted it.
 	#finished: Run[] = [];
+	// The span of the finished runs a fold under the pool's debt forgot since the last update. A
+	// stale drop there for a group the ledger already accounted may be one its stream overtook, so
+	// the next update owes none of it again.
+	#folded?: Run;
+	// What `#finished` bills, `READER_RUN_OVERHEAD` per run, so a publisher fragmenting the
+	// streams it finishes between updates costs what the cache would hold.
+	#bill?: Reader;
 
 	constructor(options: TailOptions = {}) {
 		this.#grace = options.grace ?? (() => GRACE);
+		this.#bill = options.bill;
+	}
+
+	// Bill what `#finished` keeps, and under the pool's debt fold it. Mirrors the Rust `Tail::rebill`.
+	#rebill(): void {
+		const bill = this.#bill;
+		if (!bill) return;
+		bill.set((this.#finished.length + (this.#folded ? 1 : 0)) * READER_RUN_OVERHEAD);
+		if (bill.debt > 0 && this.fold()) bill.set(2 * READER_RUN_OVERHEAD);
+	}
+
+	/**
+	 * Fold all but the newest finished run into the span a fold forgot, returning whether any was:
+	 * a stale drop under this update then stands as the publisher judged it, but the update owes
+	 * none of what it names that {@link overtaken} reports. The newest run stays, so streams
+	 * finishing in sequence grow nothing to charge again.
+	 */
+	fold(): boolean {
+		if (this.#finished.length < 2) return false;
+		const start = this.#finished[0].start;
+		const end = this.#finished[this.#finished.length - 2].end;
+		const folded = this.#folded;
+		this.#folded = folded ? { start: min(folded.start, start), end: max(folded.end, end) } : { start, end };
+		this.#finished = this.#finished.slice(-1);
+		return true;
+	}
+
+	/** Release what the tail bills, once its subscription ended. */
+	close(): void {
+		this.#finished = [];
+		this.#folded = undefined;
+		// A stream still in flight finishes after this: with no bill, it can never bill again.
+		this.#bill?.close();
+		this.#bill = undefined;
 	}
 
 	/** Group streams whose header arrived, whether they finished or were reset. */
@@ -97,6 +142,7 @@ export class Tail {
 	/** Record that the group stream for `sequence` arrived whole. */
 	finish(sequence: bigint): void {
 		insertRun(this.#finished, sequence, sequence + 1n);
+		this.#rebill();
 	}
 
 	/** The parts of `[start, end)` whose stream did not finish since the last update was sent. */
@@ -105,11 +151,27 @@ export class Tail {
 	}
 
 	/**
+	 * The parts of `[start, end)` inside the span a fold forgot that the ledger accounts for, asked
+	 * before a stale drop of them is accounted: the header of each arrived, or the grace gave up on
+	 * it, before the drop, so the drop may be one a finished stream overtook.
+	 */
+	overtaken(start: bigint, end: bigint): Run[] {
+		const folded = this.#folded;
+		if (!folded) return [];
+		const from = max(start, folded.start);
+		const to = min(end, folded.end);
+		if (from >= to) return [];
+		return runGaps(this.#ledger.gaps(from, to), from, to);
+	}
+
+	/**
 	 * Forget which streams finished, for an update being sent: a stale drop under an earlier one is
 	 * no verdict, so none needs them.
 	 */
 	updated(): void {
 		this.#finished = [];
+		this.#folded = undefined;
+		this.#rebill();
 	}
 
 	/** Re-check what {@link settle} waits on, after something outside the ledger changed. */

@@ -8,7 +8,10 @@ const HIGH: u64 = 1_000_000;
 const BOUNDARY: u64 = (HIGH + 2 * LOW) / 3;
 const NARROW: Duration = Duration::from_secs(8);
 const BELOW_LOWEST: Duration = Duration::from_secs(20);
-const RECOVER: Duration = Duration::from_secs(32);
+// BBR3's two-cycle max-bw filter forgets the 500 kbit/s samples only after the
+// cycle the drop landed in and one more retire: up to three ProbeBW cycles of a
+// 3s probe wait plus probe rounds at the 500ms queue's RTT, about 15s.
+const RECOVER: Duration = Duration::from_secs(40);
 const END: Duration = Duration::from_secs(110);
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 30);
 

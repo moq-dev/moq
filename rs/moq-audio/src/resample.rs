@@ -552,7 +552,7 @@ mod tests {
 
 	/// Measurement-only: sweep caller packetization and layout without timing gates.
 	#[test]
-	#[ignore = "run with just rs bench-playback"]
+	#[ignore = "release benchmark, run by nightly"]
 	fn benchmark_resampler() {
 		println!("input_rate,output_rate,channels,chunk,packet,ns_per_input_frame");
 		for (input_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100), (96_000, 48_000)] {

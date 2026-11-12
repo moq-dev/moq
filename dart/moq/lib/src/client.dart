@@ -60,8 +60,9 @@ final class ConnectOptions {
   /// The WebSocket fallback raced against QUIC for `http(s)` URLs.
   final WebSocketConfig? websocket;
 
-  /// Set true for a one-shot dial. By default the session redials with
-  /// backoff whenever the transport drops.
+  /// Set true for a one-shot dial. By default an established session redials
+  /// with backoff whenever the transport drops; a first dial that reaches no
+  /// session ends it with that error instead.
   final bool once;
 
   /// Retry pacing for the automatic reconnect.
@@ -277,6 +278,14 @@ final class Moq {
   /// session redials only if they changed. An empty token throws
   /// `ConfigMoqException`. Await [Tokens.answered] for the relay's verdict.
   Tokens tokens() => session.tokens()!;
+
+  /// Present a request token, for a route or [Claim] to carry with `setAuth`.
+  ///
+  /// On moq-transport it rides each naming route's announcing request; on
+  /// moq-lite it needs AUTH, where it earns a grant. The session presents it
+  /// again on every reconnect. Await [Credential.answered] for the peer's
+  /// verdict. An empty token throws `ConfigMoqException`.
+  Credential credential(String token) => session.credential(token: token);
 
   /// Drain within one second, then stop the client.
   ///

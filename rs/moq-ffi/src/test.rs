@@ -892,10 +892,9 @@ async fn raw_audio_decode_delay() {
 			"microphone".into(),
 			rendition.clone(),
 			MoqAudioDecoderOutput {
-				delay: delay.map(|min| MoqDelay {
-					min: Some(min),
-					max: Some(Duration::ZERO),
-				}),
+				// No max delay: at zero, a read that runs late under load finds group 0
+				// stale and the mid-join warmup trims the rest, so the read never returns.
+				delay: Some(MoqDelay { min: delay, max: None }),
 				estimate: delay.is_none(),
 				..audio_output()
 			},
@@ -7243,12 +7242,13 @@ async fn wait_phase(
 	Ok(state)
 }
 
-/// The session exposes repeated first-dial failures even after its Client is released.
+/// A failing first dial ends the session with its error, even after its Client is released,
+/// rather than retrying: nothing has ever connected, so the cause is likely setup.
 #[tokio::test]
 async fn session_state_names_a_failing_first_dial() {
 	let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
 	let addr = silent.local_addr().unwrap();
-	let client = MoqClient::new(MoqClientConfig {
+	let config = || MoqClientConfig {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
 		timeout: Some(Duration::from_millis(100)),
@@ -7258,26 +7258,31 @@ async fn session_state_names_a_failing_first_dial() {
 		},
 		backoff: fast_backoff(),
 		..Default::default()
-	})
-	.unwrap();
+	};
+	let client = MoqClient::new(config()).unwrap();
 	let session = client.connect(format!("https://{addr}")).await.unwrap();
-	let mut state = session.state();
+	let state = session.state();
 	assert!(matches!(state.phase, MoqConnectionPhase::Connecting { .. }));
 	assert_eq!(state.connects, 0);
 	drop(client);
-	for _ in 0..2 {
-		state = kio::clock::timeout(TIMEOUT, session.state_changed(state.revision))
-			.await
-			.unwrap()
-			.unwrap();
-		assert!(matches!(
+	let state = kio::clock::timeout(TIMEOUT, session.state_changed(state.revision))
+		.await
+		.unwrap()
+		.unwrap();
+	assert!(
+		matches!(
 			state.phase,
-			MoqConnectionPhase::Connecting {
+			MoqConnectionPhase::Closed {
 				failure: Some(MoqError::Connect { .. })
 			}
-		));
-		assert_eq!(state.connects, 0);
-	}
+		),
+		"{:?}",
+		state.phase
+	);
+	assert_eq!(state.connects, 0);
+	assert!(matches!(session.closed().await, Err(MoqError::Connect { .. })));
+
+	// The accepting side of a session reports its own lifecycle.
 	drop(silent);
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some(addr.to_string()),
@@ -7286,6 +7291,8 @@ async fn session_state_names_a_failing_first_dial() {
 	})
 	.unwrap();
 	server.listen().await.unwrap();
+	let client = MoqClient::new(config()).unwrap();
+	let session = client.connect(format!("https://{addr}")).await.unwrap();
 	let request = server.accept().await.unwrap().unwrap();
 	let accepted = request.accept(None, None).await.unwrap();
 	let connected = kio::clock::timeout(
@@ -8713,18 +8720,13 @@ async fn answered(session: &MoqSession) -> Result<(), MoqError> {
 		.expect("the tokens were never answered")
 }
 
-/// Both sides of a session read the grant their peer gave them, on lite-07 and on moq-transport
-/// with the Auth extension, and a peer that verifies no tokens of its own refuses another one as
-/// unsupported.
+/// Both sides of a lite-07 session read the grant their peer gave them, and a peer that verifies
+/// no tokens of its own refuses another one as unsupported.
 #[tokio::test]
 async fn auth_reads_the_peer_grant() {
-	for version in ["moq-lite-07-wip", "moq-transport-18"] {
-		auth_reads_the_peer_grant_on(version).await;
-	}
-}
-
-async fn auth_reads_the_peer_grant_on(version: &str) {
-	let (server, client, accepted) = kio::clock::timeout(TIMEOUT, session_pair(version)).await.expect("pair");
+	let (server, client, accepted) = kio::clock::timeout(TIMEOUT, session_pair("moq-lite-07-wip"))
+		.await
+		.expect("pair");
 
 	// Each side's origins span the root, so its peer grants it everything.
 	await_grant(&client, grant(&["**"], &["**"])).await;
@@ -8837,6 +8839,211 @@ async fn auth_tokens_join_and_leave_the_union() {
 	);
 	await_grant(&session, grant(&["setup/**"], &[])).await;
 
+	session.cancel(0);
+	kio::clock::timeout(TIMEOUT, serving)
+		.await
+		.expect("server ended")
+		.unwrap();
+}
+
+/// A TCP server for one session on `version` whose test answers every non-empty token the
+/// client presents, in band or on a request. Declines Solicit, so on moq-transport only
+/// requests carry tokens.
+async fn token_server(
+	version: &str,
+) -> (
+	std::net::SocketAddr,
+	tokio::sync::mpsc::UnboundedReceiver<moq_net::auth::Request>,
+	tokio::task::JoinHandle<()>,
+	tokio::sync::oneshot::Receiver<()>,
+) {
+	let version: moq_net::Version = version.parse().unwrap();
+	let mut config = moq_tokio::listen::Config::default();
+	config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+	config.version = vec![version];
+	config.extensions.solicit = false;
+	let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
+	let addr = listener.tcp_local_addr().unwrap();
+	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+	let (accepted_tx, accepted) = tokio::sync::oneshot::channel();
+	let serving = tokio::spawn(async move {
+		let mut request = listener.accept().await.expect("accept");
+		let mut requests = request.requests();
+		let (sink, _driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		let session = request.with_subscriber(sink).ok().await.unwrap();
+		let _ = accepted_tx.send(());
+		let mut setup = Vec::new();
+		while let Some(request) = requests.next().await {
+			if request.token().is_empty() {
+				setup.push(request.accept(moq_net::auth::Grant::all()));
+			} else if tx.send(request).is_err() {
+				break;
+			}
+		}
+		drop((session, setup));
+	});
+	(addr, rx, serving, accepted)
+}
+
+/// Dial `addr` once over TCP on `version`.
+async fn token_client(addr: std::net::SocketAddr, version: &str) -> Arc<MoqSession> {
+	let client = MoqClient::new(MoqClientConfig {
+		versions: vec![version.into()],
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
+	kio::clock::timeout(TIMEOUT, client.connect(format!("tcp://{addr}")))
+		.await
+		.expect("connect timed out")
+		.unwrap()
+}
+
+/// The next token the client presented.
+async fn next_token(
+	tokens: &mut tokio::sync::mpsc::UnboundedReceiver<moq_net::auth::Request>,
+) -> moq_net::auth::Request {
+	kio::clock::timeout(TIMEOUT, tokens.recv())
+		.await
+		.expect("no token presented")
+		.expect("the server ended")
+}
+
+/// On moq-lite 07 a credential's answer is the peer's AUTH verdict, and cancelling one the
+/// peer holds withdraws it and ends the wait.
+#[tokio::test]
+async fn a_credential_is_answered_over_auth_and_cancelled_while_held() {
+	let (addr, mut tokens, serving, _) = token_server("moq-lite-07-wip").await;
+	let session = token_client(addr, "moq-lite-07-wip").await;
+	assert!(matches!(
+		session.credential(String::new()),
+		Err(MoqError::Config { .. })
+	));
+
+	let granted = session.credential("granted".into()).unwrap();
+	let request = next_token(&mut tokens).await;
+	assert_eq!(request.token().as_ref(), b"granted");
+	let _issued = request.accept(moq_net::auth::Grant::all());
+	kio::clock::timeout(TIMEOUT, granted.answered()).await.unwrap().unwrap();
+
+	let refused = session.credential("refused".into()).unwrap();
+	next_token(&mut tokens)
+		.await
+		.reject(moq_net::SessionError::Unauthorized, "no");
+	let err = kio::clock::timeout(TIMEOUT, refused.answered())
+		.await
+		.unwrap()
+		.expect_err("refused");
+	assert_protocol(
+		&err,
+		crate::error::MoqErrorScope::Session,
+		MoqProtocolKind::Unauthorized,
+	);
+
+	let held = session.credential("held".into()).unwrap();
+	let request = next_token(&mut tokens).await;
+	let waiting = tokio::spawn({
+		let held = held.clone();
+		async move { held.answered().await }
+	});
+	held.cancel();
+	let result = kio::clock::timeout(TIMEOUT, waiting).await.unwrap().unwrap();
+	assert!(matches!(result, Err(MoqError::Cancelled)), "{result:?}");
+	kio::clock::timeout(TIMEOUT, request.closed())
+		.await
+		.expect("cancelling withdraws the token");
+	let route = session
+		.publish()
+		.route(
+			"room/x".into(),
+			MoqRouteOptions {
+				hidden: true,
+				..Default::default()
+			},
+		)
+		.unwrap();
+	assert!(matches!(route.set_auth(Some(held.clone())), Err(MoqError::Cancelled)));
+
+	session.cancel(0);
+	kio::clock::timeout(TIMEOUT, serving)
+		.await
+		.expect("server ended")
+		.unwrap();
+}
+
+/// On moq-lite before 07 nothing can carry a credential.
+#[tokio::test]
+async fn a_credential_without_auth_is_unsupported() {
+	let (addr, _tokens, serving, accepted) = token_server("moq-lite-06").await;
+	let session = token_client(addr, "moq-lite-06").await;
+	// The verdict is local and the client's Connected precedes its SETUP reaching the server,
+	// so wait for the server's accept: cancelling earlier leaves it waiting to accept.
+	kio::clock::timeout(TIMEOUT, accepted)
+		.await
+		.expect("server accepted")
+		.unwrap();
+	let credential = session.credential("token".into()).unwrap();
+	let err = kio::clock::timeout(TIMEOUT, credential.answered())
+		.await
+		.unwrap()
+		.expect_err("unsupported");
+	assert!(matches!(err, MoqError::Unsupported), "{err:?}");
+	session.cancel(0);
+	kio::clock::timeout(TIMEOUT, serving)
+		.await
+		.expect("server ended")
+		.unwrap();
+}
+
+/// On moq-transport a route's and a claim's credentials ride their announcements, and
+/// swapping one renews the request, withdrawing the old token.
+#[tokio::test]
+async fn route_and_claim_credentials_ride_the_moq_transport_announce() {
+	let (addr, mut tokens, serving, _) = token_server("moq-transport-18").await;
+	let session = token_client(addr, "moq-transport-18").await;
+	let hidden = || MoqRouteOptions {
+		hidden: true,
+		..Default::default()
+	};
+
+	let first = session.credential("first".into()).unwrap();
+	kio::clock::timeout(TIMEOUT, first.answered()).await.unwrap().unwrap();
+	let route = session.publish().route("room/x".into(), hidden()).unwrap();
+	route.set_auth(Some(first.clone())).unwrap();
+	first.cancel();
+	route.announce().unwrap();
+	let presented = next_token(&mut tokens).await;
+	assert_eq!(
+		presented.token().as_ref(),
+		b"first",
+		"the route keeps its own reference"
+	);
+	let presented = presented.accept(moq_net::auth::Grant::all());
+
+	let second = session.credential("second".into()).unwrap();
+	route.set_auth(Some(second)).unwrap();
+	let renewed = next_token(&mut tokens).await;
+	assert_eq!(renewed.token().as_ref(), b"second");
+	let _renewed = renewed.accept(moq_net::auth::Grant::all());
+	kio::clock::timeout(TIMEOUT, presented.closed())
+		.await
+		.expect("the old token is withdrawn");
+
+	let claimed = session.credential("claimed".into()).unwrap();
+	let claim = session.publish().claim("live".into(), hidden()).unwrap();
+	claim.set_auth(Some(claimed)).unwrap();
+	claim.announce().unwrap();
+	let presented = next_token(&mut tokens).await;
+	assert_eq!(presented.token().as_ref(), b"claimed");
+	let presented = presented.accept(moq_net::auth::Grant::all());
+	claim.set_auth(None).unwrap();
+	kio::clock::timeout(TIMEOUT, presented.closed())
+		.await
+		.expect("None announces under the session's scope");
+
+	route.cancel();
+	claim.cancel();
 	session.cancel(0);
 	kio::clock::timeout(TIMEOUT, serving)
 		.await

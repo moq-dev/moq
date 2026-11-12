@@ -5,6 +5,7 @@ import { Duration, type Installed, Instant, Manual, now, yieldNow } from "@moq/c
 const at = (ms: number) => Instant.ZERO.saturatingAdd(Duration.millis(ms));
 
 import { Signal } from "@moq/signals";
+import { target } from "./audio/latency";
 import { type Delay, Sync } from "./sync";
 
 // Effects in @moq/signals flush on a microtask, so let pending updates drain before asserting.
@@ -114,6 +115,27 @@ describe("auto delay", () => {
 		unregisterSecond.close();
 		await flush();
 		expect(sync.out.delay.peek()).toEqual(Duration.millis(0));
+		sync.close();
+	});
+
+	it("caps an auto delay that a catalog advertises past the ceiling", async () => {
+		// An hour of advertised jitter and catalog delay, through the audio target the decoder builds.
+		const hour = Duration.secs(3600);
+		const audio = new Signal<Duration | undefined>(
+			target({ measured: Duration.millis(0), advertised: hour, frame: Duration.millis(20), delay: hour }),
+		);
+		const sync = new Sync();
+		sync.track({ target: audio });
+		await flush();
+		expect(sync.out.delay.peek()).toEqual(Duration.secs(10));
+		expect(sync.out.maxDelay.peek()).toEqual(Duration.secs(10));
+		sync.close();
+	});
+
+	it("takes a fixed delay past the ceiling literally, since the viewer chose it", async () => {
+		const sync = new Sync({ delay: Duration.secs(20) });
+		await flush();
+		expect(sync.out.delay.peek()).toEqual(Duration.secs(20));
 		sync.close();
 	});
 

@@ -724,6 +724,18 @@ pub(super) struct Track {
 	// One finished local group's encoder, kept until another group needs it or the
 	// account drops. Raw codec only: an Extra here would keep this account alive.
 	encoder: Mutex<Option<flate::Encoder>>,
+
+	// What this track's readers' records bill, how many bill anything, and the eviction debt
+	// the track could not pay itself, which those readers pay; see [`Reader`].
+	readers: Readers,
+}
+
+/// What a track's readers bill for their records, and the debt they owe.
+#[derive(Default)]
+struct Readers {
+	bytes: AtomicU64,
+	count: AtomicU64,
+	debt: AtomicU64,
 }
 
 /// The greatest location a track has written or its source reported, followed by the track
@@ -831,6 +843,7 @@ impl Track {
 			largest: Default::default(),
 			declared: AtomicBool::new(false),
 			encoder: Mutex::default(),
+			readers: Readers::default(),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -913,6 +926,27 @@ impl Track {
 		}
 	}
 
+	/// Open an empty bill against this account for one reader's record.
+	pub(super) fn reader(self: &Arc<Self>) -> Reader {
+		Reader {
+			track: self.clone(),
+			bytes: 0,
+		}
+	}
+
+	/// Hand the part of `debt` this track could not pay to its readers, up to what their
+	/// records bill beyond what they already owe.
+	pub(super) fn owe_readers(&self, debt: &mut u64) {
+		let readers = &self.readers;
+		let mut shifted = 0;
+		let _ = readers.debt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |owed| {
+			let room = readers.bytes.load(Ordering::Relaxed).saturating_sub(owed);
+			shifted = room.min(*debt);
+			(shifted > 0).then_some(owed + shifted)
+		});
+		*debt -= shifted;
+	}
+
 	/// Bill `bytes` of a failed group's head while a hand-off holds it for a successor route.
 	///
 	/// Readers that stop polling can hold a hand-off indefinitely, so the head is billed
@@ -952,6 +986,20 @@ impl Track {
 	/// twice. `None` leaves the gate to sample it, and only if it needs it.
 	pub(super) fn settle(&self, now: Option<u64>) {
 		self.settle_inner(now, false);
+	}
+
+	/// Settle eviction debt now if the pool is over its capacity, without waiting for the
+	/// write threshold: a reader's record grows by runs, never by enough bytes to cross it.
+	/// Takes the track lock: call with none held.
+	pub(super) fn charge_over(&self) {
+		if self.pool.capacity().is_none_or(|capacity| self.pool.used() <= capacity) {
+			return;
+		}
+		if let Some(state) = self.state.upgrade()
+			&& let Ok(mut state) = state.write()
+		{
+			state.charge_debt();
+		}
 	}
 
 	/// Settle from [`Pool::sweep`], dating activity and expiring every idle candidate.
@@ -1296,6 +1344,79 @@ impl Charge {
 impl Drop for Charge {
 	fn drop(&mut self) {
 		self.clear();
+	}
+}
+
+/// What one reader's record bills to its track's account, and its share of the debt the
+/// track could not pay. Released on drop.
+pub(super) struct Reader {
+	track: Arc<Track>,
+	bytes: u64,
+}
+
+impl Reader {
+	/// Bill `bytes` in all, settling the track's debt after a growth: call with no track lock
+	/// held.
+	pub(super) fn set(&mut self, bytes: u64) {
+		if bytes == self.bytes {
+			return;
+		}
+		let readers = &self.track.readers;
+		match (self.bytes, bytes) {
+			(0, _) => readers.count.fetch_add(1, Ordering::Relaxed),
+			(_, 0) => readers.count.fetch_sub(1, Ordering::Relaxed),
+			_ => 0,
+		};
+		if bytes > self.bytes {
+			let grown = bytes - self.bytes;
+			readers.bytes.fetch_add(grown, Ordering::Relaxed);
+			self.track.pool.add(grown);
+			self.track.written.fetch_add(grown, Ordering::Relaxed);
+			self.bytes = bytes;
+			self.track.charge_over();
+		} else {
+			// Whatever a record frees pays toward its readers' debt, however it shrank.
+			let shrunk = self.bytes - bytes;
+			readers.bytes.fetch_sub(shrunk, Ordering::Relaxed);
+			let _ = readers.debt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |debt| {
+				(debt > 0).then(|| debt.saturating_sub(shrunk))
+			});
+			self.track.pool.sub(shrunk);
+			self.bytes = bytes;
+		}
+	}
+
+	/// Bytes currently billed.
+	pub(super) fn size(&self) -> u64 {
+		self.bytes
+	}
+
+	/// The debt the track's readers owe, forgiven once the pool is back within its capacity:
+	/// nothing needs the room any more, as the track forgives its own debt.
+	pub(super) fn debt(&self) -> u64 {
+		let readers = &self.track.readers;
+		let pool = &self.track.pool;
+		if pool.capacity().is_none_or(|capacity| pool.used() <= capacity) {
+			readers.debt.store(0, Ordering::Relaxed);
+			return 0;
+		}
+		readers.debt.load(Ordering::Relaxed)
+	}
+
+	/// Whether this record is one to end when folding leaves a debt: it bills more than a
+	/// cached group's overhead, so ending it frees more than evicting a group would, and at
+	/// least its readers' average, so a reader holding little never ends for one holding much.
+	pub(super) fn ends(&self) -> bool {
+		let readers = &self.track.readers;
+		let count = readers.count.load(Ordering::Relaxed);
+		self.bytes > ENTRY_OVERHEAD
+			&& u128::from(self.bytes) * u128::from(count) >= u128::from(readers.bytes.load(Ordering::Relaxed))
+	}
+}
+
+impl Drop for Reader {
+	fn drop(&mut self) {
+		self.set(0);
 	}
 }
 
