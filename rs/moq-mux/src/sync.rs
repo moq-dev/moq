@@ -637,7 +637,11 @@ impl Resume<'_> {
 		// sink underruns anyway, does it re-buffer one delay from now.
 		let starts = match (tail, arrived) {
 			(Some(end), Some(arrived)) if arrived <= end => {
-				arrived.checked_add(delay).ok_or(Error::DelayOverflow)?.max(end)
+				// One tick past the end: a tail whose last frame declared no
+				// duration ends at that frame's timestamp, which the first new
+				// frame must not share.
+				let after = end.checked_add(Duration::from_micros(1)).ok_or(Error::DelayOverflow)?;
+				arrived.checked_add(delay).ok_or(Error::DelayOverflow)?.max(after)
 			}
 			_ => now.checked_add(delay).ok_or(Error::DelayOverflow)?,
 		};
@@ -771,6 +775,8 @@ mod tests {
 	use super::*;
 
 	const DELAY: Duration = Duration::from_millis(100);
+	/// How far past the tail's end a continuing segment starts.
+	const TICK: Duration = Duration::from_micros(1);
 
 	fn ms(millis: u64) -> Timestamp {
 		Timestamp::from_millis(millis).unwrap()
@@ -1147,9 +1153,10 @@ mod tests {
 			audio.plan(transition, ms(0), Some(DELAY));
 			let mapping = audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap();
 			audio.apply(transition, mapping);
+			// Each press starts one tick past the tail it touches.
 			assert_eq!(
 				clock.state.lock().unwrap().due(audio.map(ms(0)).unwrap()),
-				arrived.checked_add(DELAY),
+				arrived.checked_add(DELAY + TICK * press as u32),
 				"press {press} drifted"
 			);
 		}
@@ -1279,7 +1286,7 @@ mod tests {
 		video.apply(next, video.resume(next, ms(5_000), None).ready().await.unwrap());
 		// The later replacement maps onto the running clock, not the audio
 		// restart's, continuing as the tail ends since it arrived before then.
-		let resumed = kio::clock::now();
+		let resumed = kio::clock::now().saturating_add(TICK);
 		assert_eq!(
 			clock.state.lock().unwrap().due(video.map(ms(5_000)).unwrap()),
 			Some(resumed)
@@ -1304,7 +1311,7 @@ mod tests {
 			video.resume(transition, ms(40), None).ready().await.unwrap(),
 		);
 		// Video arrived before the tail ended, so it continues as the tail ends.
-		let resumed = kio::clock::now();
+		let resumed = kio::clock::now().saturating_add(TICK);
 		assert_eq!(
 			clock.state.lock().unwrap().due(video.map(ms(40)).unwrap()),
 			Some(resumed)
@@ -1454,7 +1461,7 @@ mod tests {
 		assert_eq!(
 			clock.state.lock().unwrap().due(audio.map(ms(0)).unwrap()),
 			// The pair arrived before the tail ended, so it continues as the tail ends.
-			Some(now.saturating_add(Duration::from_millis(120)))
+			Some(now.saturating_add(Duration::from_millis(120) + TICK))
 		);
 	}
 }

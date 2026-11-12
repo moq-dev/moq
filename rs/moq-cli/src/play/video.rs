@@ -1610,11 +1610,9 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 		);
-		// The old segment declares its last picture's duration, so its end follows that picture.
+		// No durations: the declared end is the last picture's own timestamp.
 		for ms in [0, 33, 66] {
-			let mut frame = frame(ms, ms == 0);
-			frame.duration = Some(moq_net::Timestamp::from_millis(33).unwrap());
-			producer.write(frame).unwrap();
+			producer.write(frame(ms, ms == 0)).unwrap();
 		}
 		producer.discontinuity().unwrap();
 		for ms in [100, 133, 166] {
@@ -1632,16 +1630,16 @@ mod tests {
 		for _ in 0..1_000 {
 			tokio::task::yield_now().await;
 			if let Some(timestamp) = media.output.present(&media) {
-				shown.push(timestamp.as_millis());
+				shown.push(timestamp.as_micros());
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
 		task.await.unwrap().unwrap();
-		assert_eq!(&shown[..3], [0, 33, 66]);
+		assert_eq!(&shown[..3], [0, 33_000, 66_000]);
 		assert_eq!(shown.len(), 6);
 		assert!(shown[3] > shown[2], "the resumed segment follows every old picture");
-		assert_eq!(shown[4] - shown[3], 33);
-		assert_eq!(shown[5] - shown[4], 33);
+		assert_eq!(shown[4] - shown[3], 33_000);
+		assert_eq!(shown[5] - shown[4], 33_000);
 		assert_eq!(
 			*flushed.lock().unwrap(),
 			2,
