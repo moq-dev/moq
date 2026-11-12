@@ -20,8 +20,37 @@ default:
 
 # Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/route/RouteHandoff.tla`.
 # Pass `-config rs/<path>.cfg` for a config not named after the spec.
+[positional-arguments]
 tla spec *args:
-    nix shell --inputs-from . nixpkgs#tlaplus --command tlc -workers auto -cleanup -metadir "$(mktemp -d)" {{ args }} rs/{{ spec }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root=$PWD
+    spec=rs/$1
+    shift
+    args=()
+    while [ $# -gt 0 ]; do
+        case $1 in
+            -config) args+=("$1" "$(realpath "$2")"); shift 2 ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+    # Apalache's library lends TLC the folds a spec Apalache also checks uses.
+    # TLC reads `TLA-Library` only for a spec named without a directory.
+    lib=$(nix build "$root#apalache" --no-link --print-out-paths)/share/tla
+    cd "$(dirname "$spec")"
+    export JAVA_TOOL_OPTIONS="-DTLA-Library=$lib"
+    exec nix shell --inputs-from "$root" nixpkgs#tlaplus --command tlc -workers auto -cleanup -metadir "$(mktemp -d)" "${args[@]}" "$(basename "$spec")"
+
+# Check a TLA+ spec with Apalache, e.g. `just rs apalache typecheck moq-net/verify/route/RouteHandoff.tla`.
+# Its output goes to a temporary directory; set `JVM_ARGS=-Xmx16g` for a larger heap.
+[positional-arguments]
+apalache command spec *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command=$1
+    spec=rs/$2
+    shift 2
+    exec nix shell .#apalache --command apalache-mc "$command" --out-dir="$(mktemp -d)" "$@" "$spec"
 
 # Prove a Tamarin model's lemmas, e.g. `just rs tamarin moq-net/verify/route-key/RouteKey.spthy`.
 # Pass `-D=<VARIANT>` for a variant the model defines.

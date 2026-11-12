@@ -602,6 +602,10 @@
           # C++ dependency build out of the default shell and flake checks.
           moxygen = pkgs.callPackage ./nix/moxygen.nix { };
 
+          # `just rs tla` and `just rs apalache`: nixpkgs has no Apalache. Kept
+          # out of the dev shell like the TLC the recipes fetch themselves.
+          apalache = pkgs.callPackage ./nix/apalache.nix { };
+
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
           # Nightly's `just rs send-depth` proves native Send futures on it.

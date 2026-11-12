@@ -27,18 +27,49 @@
 (* each opening is a new session with a new hop. A claim's attributes are  *)
 (* the revision that last set them.                                        *)
 (***************************************************************************)
-EXTENDS Integers, Sequences, FiniteSets
+EXTENDS Integers, Sequences, FiniteSets, Apalache
+
+(* Types, for Apalache: TLC ignores the annotations.                        *)
+\* @typeAlias: hop = <<Int, Int, Int>>;
+\* @typeAlias: path = Seq($hop);
+\* @typeAlias: items = Str -> Int;
+\* @typeAlias: heard = {on: Bool, path: $path, state: Str, rev: Int, items: $items};
+\* @typeAlias: route = {on: Bool, held: Bool, next: Int, path: $path};
+\* @typeAlias: sent = {on: Bool, held: Bool, path: $path, rev: Int, items: $items, src: Str};
+\* @typeAlias: view = {floor: Int, items: $items};
+\* @typeAlias: shown = {item: Int, avail: Bool};
+\* @typeAlias: node = {rx: Int -> Str -> $heard, rt: Str -> $route, view: Str -> $view,
+\*     dead: Set($hop), doubt: Set(Int), wait: Set(Int), tx: Int -> Str -> $sent,
+\*     told: Int -> Set($hop), shown: Str -> $shown};
+\* @typeAlias: msg = {t: Str, k: Str, path: $path, rev: Int, items: $items, hop: $hop,
+\*     moved: Set(<<Str, $path>>), gone: Bool};
+\* @typeAlias: events = {ended: Str -> Int, revivals: Int, falseEnds: Int, regressions: Int,
+\*     unstable: Int};
+\* @typeAlias: update = {s: $node, out: Int -> Seq($msg), ev: $events, dead: Set($hop)};
+\* @typeAlias: ov = {rev: Int, items: $items};
+\* @typeAlias: rep = {on: Bool, hop: $hop};
+TypeAliases == TRUE
 
 CONSTANTS
+    \* @type: Set(Int);
     Nodes,        \* relays and the publisher; ordered as `select` breaks ties
+    \* @type: Int;
     Origin,       \* the publisher
+    \* @type: Set(Set(Int));
     Links,        \* sessions, as 2-element sets of nodes
+    \* @type: Set(Set(Int));
     Dear,         \* the links that cost 2; the rest cost 1
+    \* @type: Set(Int);
     Scoped,       \* relays that ask every neighbour for prefix "a" alone
+    \* @type: Set(Str);
     Claims,       \* claim paths
+    \* @type: Set(Str);
     Narrow,       \* the claims inside prefix "a"
+    \* @type: Int;
     MaxRev,       \* the publisher's claim changes
+    \* @type: Int;
     MaxFlaps,     \* session opens and closes
+    \* @type: Bool;
     Patient       \* TRUE: a doubt lifts only once no DEAD about its node is in flight
 
 Relays == Nodes \ {Origin}
@@ -52,6 +83,7 @@ Absent == -2
 
 Keys == {"root", "a"}
 \* The keys in the order a node sends them in.
+\* @type: Seq(Str);
 KeySeq == <<"root", "a">>
 
 \* Whether a route keyed `k` covers claim `c`.
@@ -63,90 +95,130 @@ Ask(n) == IF n \in Scoped THEN "a" ELSE "root"
 \* The keys a stream to `p` carries.
 Streams(p) == IF p \in Scoped THEN {"a"} ELSE Keys
 
+\* @type: $items;
 NoItems == [c \in Claims |-> None]
+\* @type: ($items, Str) => $items;
 Restrict(items, k) == [c \in Claims |-> IF Covers(k, c) THEN items[c] ELSE None]
+\* @type: $view;
 EmptyView == [floor |-> None, items |-> NoItems]
+\* @type: $view;
 NoView == [floor |-> Absent, items |-> NoItems]
 
 \* A hop is <<node, peer, generation>>: the node, and the session to `peer` of
 \* that generation it learned the route on. The publisher names itself.
+\* @type: $hop;
 OHop == <<Origin, Origin, 0>>
 
 \* A route a neighbour offered (`Heard`). `state` is "live", "dead" (its path
 \* holds a hop this node knows is dead, and the neighbour has not said what
 \* became of it), or "held".
+\* @type: $heard;
 NoHeard == [on |-> FALSE, path |-> <<>>, state |-> "live", rev |-> None, items |-> NoItems]
 \* The route a node uses for a key (`Route`). Held: no path, and `next` is the
 \* neighbour it holds under, or None on its own account.
+\* @type: $route;
 NoRoute == [on |-> FALSE, held |-> FALSE, next |-> None, path |-> <<>>]
 \* What a node last sent a neighbour for a key (`Sent`). `src` is the key of
 \* the node's own route the offer reflects, kept after an end.
+\* @type: (Str) => $sent;
 NoSent(k) == [on |-> FALSE, held |-> FALSE, path |-> <<>>, rev |-> None, items |-> NoItems, src |-> k]
+\* @type: $shown;
 NotShown == [item |-> None, avail |-> FALSE]
 
 \* Messages: one record shape so TLC can compare them.
+\* @type: $msg;
 Blank == [t |-> "", k |-> "root", path |-> <<>>, rev |-> None, items |-> NoItems,
           hop |-> OHop, moved |-> {}, gone |-> FALSE]
+\* @type: (Str, $path) => $msg;
 OfferMsg(k, path) == [Blank EXCEPT !.t = "offer", !.k = k, !.path = path]
+\* @type: (Str) => $msg;
 HoldMsg(k) == [Blank EXCEPT !.t = "hold", !.k = k]
+\* @type: (Str) => $msg;
 EndMsg(k) == [Blank EXCEPT !.t = "end", !.k = k]
+\* @type: (Str, $view) => $msg;
 ClaimsMsg(k, v) == [Blank EXCEPT !.t = "claims", !.k = k, !.rev = v.floor, !.items = v.items]
+\* @type: ($hop, Set(<<Str, $path>>), Bool) => $msg;
 DeadMsg(hop, moved, gone) ==
     [Blank EXCEPT !.t = "dead", !.hop = hop, !.moved = moved, !.gone = gone]
 
 VARIABLES
+    \* @type: Set(Set(Int));
     up,          \* open sessions
+    \* @type: Set(Int) -> Int;
     gen,         \* gen[l]: the generation of the session on link l
+    \* @type: <<Int, Int>> -> Seq($msg);
     q,           \* q[<<m, n>>]: messages from m to n, in order
+    \* @type: Int;
     rev,         \* the publisher's claim revision
+    \* @type: $items;
     own,         \* the publisher's claims
+    \* @type: Seq($items);
     hist,        \* hist[r + 1]: the publisher's claims at revision r
+    \* @type: Int -> $node;
     st,          \* st[n]: node n's state for the publisher
+    \* @type: Int -> Str -> Int;
     ended,       \* ended[n][c]: the item n's reader last saw END for, until n forgets c
+    \* @type: Int;
     revivals,    \* reader STARTs of an item the reader saw END for
+    \* @type: Int;
     falseEnds,   \* reader ENDs while the publisher still has that item
+    \* @type: Int;
     regressions, \* reader UPDATEs to an older item
+    \* @type: Int;
     unstable,    \* claim changes a path change or a lifted doubt alone made
+    \* @type: Int -> Set($hop);
     learnt,      \* learnt[n]: every hop n was ever told is dead
+    \* @type: Int;
     flaps,
+    \* @type: Int;
     burst,       \* messages sent since the last quiet point
+    \* @type: Int;
     churn        \* external changes since the last quiet point
 
 vars == <<up, gen, q, rev, own, hist, st, ended, revivals, falseEnds, regressions,
           unstable, learnt, flaps, burst, churn>>
 
 Dirs == {<<m, n>> \in Nodes \X Nodes : {m, n} \in Links}
+\* @type: (Int, Set(Set(Int))) => Set(Int);
 Peers(n, ups) == {m \in Nodes : {n, m} \in ups}
 
 -----------------------------------------------------------------------------
 (* Paths.                                                                  *)
 
+\* @type: ($path, Int) => Bool;
 Names(path, n) == \E i \in DOMAIN path : path[i][1] = n
+\* @type: ($path, $hop) => Bool;
 HasHop(path, h) == \E i \in DOMAIN path : path[i] = h
+\* @type: ($path, Set($hop)) => Bool;
 DeadIn(path, D) == \E i \in DOMAIN path : path[i] \in D
 \* The relay that offered `path` learned it from `n`.
+\* @type: ($path, Int) => Bool;
 Child(path, n) == Len(path) >= 2 /\ path[Len(path) - 1][1] = n
 \* What the route costs the last node on its path.
+\* @type: ($path) => Int;
 PathCost(path) ==
-    LET F[i \in 0..Len(path)] ==
-          IF i <= 1 THEN 0 ELSE F[i - 1] + Cost[{path[i - 1][1], path[i][1]}]
-    IN F[Len(path)]
+    ApaFoldSet(LAMBDA c, i : IF i = 1 THEN c ELSE c + Cost[{path[i - 1][1], path[i][1]}],
+               0, DOMAIN path)
 
+\* @type: ($route) => Bool;
 Live(r) == r.on /\ ~r.held
 
 -----------------------------------------------------------------------------
 (* Selection on node n's state s (paths.rs: `select`, `pending`, `hopes`). *)
 
+\* @type: ($node, $path) => Bool;
 Doubted(s, path) == \E i \in DOMAIN path : path[i][1] \in s.doubt
 
 \* A route a neighbour offered that this node may use: live, and its path does
 \* not name this node.
+\* @type: (Int, $node, Int, Str) => Bool;
 Usable(n, s, m, k) ==
     s.rx[m][k].on /\ s.rx[m][k].state = "live" /\ ~Names(s.rx[m][k].path, n)
 
 \* The key of this node's own route an offer of key k to p reflects. A stream
 \* to a scoped relay carries one route, "a": the node's route for "a" where it
 \* has a live one, else its root route, which covers "a".
+\* @type: ($node, Int, Str) => Str;
 SrcKey(s, p, k) ==
     IF p \notin Scoped THEN k
     ELSE IF Live(s.rt["a"]) THEN "a"
@@ -154,6 +226,7 @@ SrcKey(s, p, k) ==
     ELSE IF s.rt["a"].on THEN "a" ELSE "root"
 
 \* A neighbour that learned this node's route for k has yet to answer its loss.
+\* @type: (Int, $node, Str) => Bool;
 Pending(n, s, k) ==
     \E p \in Nodes : \E j \in Keys :
         /\ s.rx[p][j].on
@@ -162,11 +235,13 @@ Pending(n, s, k) ==
         /\ s.tx[p][j].src = k
 
 \* A neighbour offers a route that only doubt keeps this node off.
+\* @type: (Int, $node, Str) => Bool;
 Hopes(n, s, k) == \E m \in Nodes : Usable(n, s, m, k) /\ Doubted(s, s.rx[m][k].path)
 
 \* `select` for one key: the cheapest usable route, staying on the next hop
 \* among equals, then the lowest key. Doubt keeps a node from moving to a route,
 \* not on the one it uses. With none left, hold or let go.
+\* @type: (Int, $node, Str, Set(Int) -> Int) => $route;
 SelectKey(n, s, k, gens) ==
     LET was == s.rt[k]
         current == IF was.on THEN was.next ELSE None
@@ -188,10 +263,12 @@ SelectKey(n, s, k, gens) ==
        ELSE [on |-> TRUE, held |-> TRUE, next |-> IF under THEN current ELSE None, path |-> <<>>]
 
 \* The publisher's own route covers everything.
+\* @type: Str -> $route;
 OwnRoutes == [k \in Keys |-> IF k = "root"
                              THEN [on |-> TRUE, held |-> FALSE, next |-> None, path |-> <<OHop>>]
                              ELSE NoRoute]
 
+\* @type: (Int, $node, Set(Int) -> Int) => $node;
 Select(n, s, gens) ==
     IF n = Origin THEN s
     ELSE [s EXCEPT !.rt = [k \in Keys |-> SelectKey(n, s, k, gens)]]
@@ -200,12 +277,15 @@ Select(n, s, gens) ==
 (* What a node knows of the claims: one view per key, the newest floor any   *)
 (* route covering that key gave it, kept while it holds a covering route.   *)
 
+\* @type: ($node, Str) => Bool;
 Presence(s, k) == s.rt[k].on \/ (k = "a" /\ s.rt["root"].on)
 
 \* A route this node believes: live, and it did not cross this node.
+\* @type: (Int, $node, Int, Str) => Bool;
 Believed(n, s, m, j) ==
     s.rx[m][j].on /\ s.rx[m][j].state = "live" /\ ~Names(s.rx[m][j].path, n)
 
+\* @type: (Int, $node, Str) => $view;
 NewView(n, s, k) ==
     IF ~Presence(s, k) THEN NoView
     ELSE LET base == IF s.view[k].floor = Absent THEN EmptyView ELSE s.view[k]
@@ -219,12 +299,14 @@ NewView(n, s, k) ==
             ELSE [floor |-> s.rx[best[1]][best[2]].rev,
                   items |-> Restrict(s.rx[best[1]][best[2]].items, k)]
 
+\* @type: (Int, $node, $ov) => $node;
 Know(n, s, ov) ==
     IF n = Origin THEN [s EXCEPT !.view = [k \in Keys |-> [floor |-> ov.rev, items |-> Restrict(ov.items, k)]]]
     ELSE [s EXCEPT !.view = [k \in Keys |-> NewView(n, s, k)]]
 
 \* How the reader sees each claim: from the narrowest key's view, available
 \* while a live route covers it.
+\* @type: ($node) => Str -> $shown;
 ShownNow(s) ==
     [c \in Claims |->
         LET v == s.view[KeyOf(c)] IN
@@ -238,6 +320,7 @@ ShownNow(s) ==
 \* What this node wants a neighbour p to hold for key k: a path, a hold, an
 \* end, or to keep what it was sent while the next hop this node holds under
 \* waits for those behind it.
+\* @type: (Int, $node, Str, Int) => {kind: Str, path: $path, src: Str};
 Want(n, s, k, p) ==
     LET src == SrcKey(s, p, k)
         r == s.rt[src]
@@ -249,6 +332,7 @@ Want(n, s, k, p) ==
        ELSE [kind |-> "hold", path |-> <<>>, src |-> src]
 
 \* `advertise` for one key on the stream to p.
+\* @type: (Int, $node, Int, Str) => {tx: $sent, out: Seq($msg)};
 Advertise1(n, s, p, k) ==
     LET t == s.tx[p][k]
         w == Want(n, s, k, p)
@@ -268,6 +352,7 @@ Advertise1(n, s, p, k) ==
                   out |-> (IF offer THEN <<OfferMsg(k, w.path)>> ELSE <<>>)
                           \o (IF claims THEN <<ClaimsMsg(k, v)>> ELSE <<>>)]
 
+\* @type: (Int, $node, Set(Set(Int))) => {s: $node, out: Int -> Seq($msg)};
 Advertise(n, s, ups) ==
     LET a == [p \in Peers(n, ups) |-> [k \in Keys |-> Advertise1(n, s, p, k)]]
     IN [s |-> [s EXCEPT !.tx = [p \in Nodes |->
@@ -275,15 +360,14 @@ Advertise(n, s, ups) ==
         out |-> [p \in Nodes |->
                   IF p \in Peers(n, ups) THEN a[p]["root"].out \o a[p]["a"].out ELSE <<>>]]
 
-\* Messages for the keys in `ks`, in key order.
+\* The message f(k) for each key k in `ks`, in key order.
+\* @type: (Set(Str), Str => $msg) => Seq($msg);
 Each(ks, f(_)) ==
-    LET F[i \in 0..Len(KeySeq)] ==
-          IF i = 0 THEN <<>>
-          ELSE F[i - 1] \o (IF KeySeq[i] \in ks THEN f(KeySeq[i]) ELSE <<>>)
-    IN F[Len(KeySeq)]
+    ApaFoldSeqLeft(LAMBDA out, k : IF k \in ks THEN Append(out, f(k)) ELSE out, <<>>, KeySeq)
 
 \* `report` to one neighbour p: what became of the routes this node sent it
 \* through `hop`, in one DEAD where it is the first word on that hop.
+\* @type: (Int, $node, Int, $hop) => {tx: Str -> $sent, told: Set($hop), out: Seq($msg)};
 Report1(n, s, p, hop) ==
     LET t == s.tx[p]
         through == {k \in Keys : t[k].on /\ HasHop(t[k].path, hop)}
@@ -305,13 +389,14 @@ Report1(n, s, p, hop) ==
         out == IF first \/ (gone /\ ends # {})
                THEN <<DeadMsg(hop, moved, gone)>>
                     \o (IF gone THEN <<>>
-                        ELSE Each(parents, LAMBDA k : <<HoldMsg(k)>>) \o Each(ends, LAMBDA k : <<EndMsg(k)>>))
-               ELSE Each({k \in through : w[k].kind = "path"}, LAMBDA k : <<OfferMsg(k, w[k].path)>>)
-                    \o Each(holds, LAMBDA k : <<HoldMsg(k)>>)
-                    \o Each(ends, LAMBDA k : <<EndMsg(k)>>)
+                        ELSE Each(parents, HoldMsg) \o Each(ends, EndMsg))
+               ELSE Each({k \in through : w[k].kind = "path"}, LAMBDA k : OfferMsg(k, w[k].path))
+                    \o Each(holds, HoldMsg)
+                    \o Each(ends, EndMsg)
     IN IF through = {} THEN [tx |-> t, told |-> s.told[p], out |-> <<>>]
        ELSE [tx |-> tx1, told |-> s.told[p] \cup {hop}, out |-> out]
 
+\* @type: (Int, $node, Set(Set(Int)), $hop) => {s: $node, out: Int -> Seq($msg)};
 Report(n, s, ups, hop) ==
     LET r == [p \in Peers(n, ups) |-> Report1(n, s, p, hop)]
     IN [s |-> [s EXCEPT !.tx = [p \in Nodes |-> IF p \in Peers(n, ups) THEN r[p].tx ELSE s.tx[p]],
@@ -321,6 +406,7 @@ Report(n, s, ups, hop) ==
 \* `collect`: forget each doubt no route names any more, each dead hop no route
 \* names once the timer it started has fired, and each told hop no route sent
 \* names.
+\* @type: ($node) => $node;
 Collect(s) ==
     LET heard == {s.rx[x[1]][x[2]].path : x \in {y \in Nodes \X Keys : s.rx[y[1]][y[2]].on}}
     IN [s EXCEPT
@@ -334,6 +420,7 @@ Collect(s) ==
 (* show. Returns the node's new state, its messages per neighbour, and its  *)
 (* reader's events.                                                         *)
 
+\* @type: $rep;
 NoReport == [on |-> FALSE, hop |-> OHop]
 
 \* The reader's events: changes to `ended` and the counters. A claim leaving
@@ -341,6 +428,7 @@ NoReport == [on |-> FALSE, hop |-> OHop]
 \* `quiet` marks a step that only changed a path or lifted a doubt: in one, a
 \* claim the reader sees changes only to what a newer floor says, or goes
 \* offline after it was held unavailable.
+\* @type: ($node, $node, Str -> $shown, Str -> $shown, $ov, Str -> Int, Bool) => $events;
 Events(s0, s, old, now, ov, eb, quiet) ==
     LET present(c) == Presence(s, KeyOf(c))
         isEnd(c) == old[c].item # None /\ now[c].item = None /\ present(c)
@@ -359,6 +447,7 @@ Events(s0, s, old, now, ov, eb, quiet) ==
         unstable |-> IF ~quiet THEN 0
                      ELSE Cardinality({c \in Claims : old[c].item # now[c].item /\ before(c) /\ ~newer(c) /\ ~release(c)})]
 
+\* @type: (Int, $node, $ov, Set(Set(Int)), Set(Int) -> Int, Str -> Int, $rep, Bool) => $update;
 Update(n, s0, ov, ups, gens, eb, rep, quiet) ==
     LET s1 == Select(n, s0, gens)
         s2 == Know(n, s1, ov)
@@ -375,15 +464,15 @@ Update(n, s0, ov, ups, gens, eb, rep, quiet) ==
 
 \* The publisher ignores every message it hears for its own route, so none is
 \* queued toward it. Dropping them changes no behaviour; `Budget` still counts them.
+\* @type: (<<Int, Int>>, $msg) => Bool;
 Heeded(d, m) == d[2] # Origin
 
 \* The sum of f(x) over the finite set S.
-SumOver(S, f(_)) ==
-    LET F[T \in SUBSET S] == IF T = {} THEN 0 ELSE LET x == CHOOSE x \in T : TRUE IN f(x) + F[T \ {x}]
-    IN F[S]
+SumOver(S, f(_)) == ApaFoldSet(LAMBDA a, x : a + f(x), 0, S)
 
 \* Commit the updates `rs` (a function from nodes to `Update` results), appending
 \* each node's messages to `q0`. Nodes in one step send on disjoint queues.
+\* @type: (Int -> $update, <<Int, Int>> -> Seq($msg)) => Bool;
 Commit(rs, q0) ==
     LET ns == DOMAIN rs
         Sum(f(_)) == SumOver(ns, f)
@@ -401,15 +490,18 @@ Quiet == \A d \in Dirs : q[d] = <<>>
 NoDoubt == \A n \in Nodes : st[n].wait = {}
 
 \* The messages the updates `rs` send, counted before `Heeded` drops any.
-Sent(rs) == SumOver(DOMAIN rs, LAMBDA n : SumOver(Nodes, LAMBDA m : Len(rs[n].out[m])))
+\* @type: (Int -> $update) => Int;
+Sent(rs) == LET Out(n) == SumOver(Nodes, LAMBDA m : Len(rs[n].out[m])) IN SumOver(DOMAIN rs, Out)
 
 \* A burst runs from one quiet point to the next. An external change (a claim
 \* change, a session opening or closing) made while quiet starts a fresh one;
 \* every message sent in it counts against the changes made in it.
+\* @type: (Int) => Bool;
 External(sent) ==
     /\ burst' = (IF Quiet THEN 0 ELSE burst) + sent
     /\ churn' = (IF Quiet THEN 0 ELSE churn) + 1
 
+\* @type: (Int) => Bool;
 Internal(sent) ==
     /\ burst' = burst + sent
     /\ UNCHANGED churn
@@ -418,6 +510,7 @@ Internal(sent) ==
 (* Initial state: every session open, the publisher's route sent and no     *)
 (* claims yet.                                                              *)
 
+\* @type: $node;
 InitNode == [
     rx |-> [m \in Nodes |-> [k \in Keys |-> NoHeard]],
     rt |-> [k \in Keys |-> NoRoute],
@@ -430,8 +523,10 @@ InitNode == [
     shown |-> [c \in Claims |-> NotShown]
 ]
 
+\* @type: $ov;
 OV0 == [rev |-> 0, items |-> NoItems]
 Gen0 == [l \in Links |-> 0]
+\* @type: $update;
 Start == Update(Origin, [InitNode EXCEPT !.rt = OwnRoutes], OV0, Links, Gen0,
                 [c \in Claims |-> None], NoReport, FALSE)
 
@@ -453,11 +548,13 @@ Init ==
     /\ burst = 0
     /\ churn = 1
 
+\* @type: $ov;
 OV == [rev |-> rev, items |-> own]
 
 -----------------------------------------------------------------------------
 (* The publisher changes a claim.                                           *)
 
+\* @type: (Str, Int) => Bool;
 ChangeClaim(c, item) ==
     LET own1 == [own EXCEPT ![c] = item]
         ov1 == [rev |-> rev + 1, items |-> own1]
@@ -478,6 +575,7 @@ Unannounce(c) == rev < MaxRev /\ own[c] # None /\ ChangeClaim(c, None)
 \* `fail`: the session `hop` names closed. `from` reported it with what became
 \* of its own routes through it, or this node saw it close (`from` is None).
 \* It casts doubt on the node at the session's far end, `hop[2]`.
+\* @type: (Int, $node, $hop, Int, Set(<<Str, $path>>), Bool) => $node;
 Fail(n, s, hop, from, moved, gone) ==
     LET Moved(k) == {mv \in moved : mv[1] = k}
         rx1 == [p \in Nodes |-> [k \in Keys |->
@@ -495,6 +593,7 @@ Fail(n, s, hop, from, moved, gone) ==
     IN [s EXCEPT !.rx = rx1, !.dead = @ \cup {hop},
                  !.doubt = @ \cup ({hop[2]} \ {n}), !.wait = @ \cup ({hop[2]} \ {n})]
 
+\* @type: (Int, $node, Int, $msg) => $node;
 Recv(n, s, from, msg) ==
     LET k == msg.k
         h == s.rx[from][k]
@@ -510,6 +609,7 @@ Recv(n, s, from, msg) ==
               IF h.on THEN [s EXCEPT !.rx[from][k].rev = msg.rev, !.rx[from][k].items = msg.items] ELSE s
          [] OTHER -> Fail(n, s, msg.hop, from, msg.moved, msg.gone)
 
+\* @type: (<<Int, Int>>) => Bool;
 Deliver(d) ==
     LET m == d[1]
         n == d[2]
@@ -528,6 +628,7 @@ Deliver(d) ==
 \* whose session ended at x may be forgotten. With `Patient`, only once no DEAD
 \* about such a hop is in flight: a timer long enough for the news to cross
 \* the mesh.
+\* @type: (Int, Int) => Bool;
 Lift(n, x) ==
     LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.doubt = @ \ {x}, !.wait = @ \ {x}],
                                      OV, up, gen, ended[n], NoReport, TRUE)]
@@ -541,16 +642,18 @@ Lift(n, x) ==
 (* Sessions open and close.                                                 *)
 
 \* A closed session: everything learned or sent on it goes.
+\* @type: ($node, Int) => $node;
 Closed(s, y) ==
     [s EXCEPT !.rx[y] = [k \in Keys |-> NoHeard],
               !.tx[y] = [k \in Keys |-> NoSent(k)],
               !.told[y] = {}]
 
+\* @type: (Set(Int)) => Bool;
 Connect(l) ==
     LET up1 == up \cup {l}
         gen1 == [gen EXCEPT ![l] = @ + 1]
         rs == [x \in l |->
-                 LET y == CHOOSE y \in l : y # x
+                 LET y == CHOOSE z \in l : z # x
                  IN Update(x, Closed(st[x], y), OV, up1, gen1, ended[x], NoReport, FALSE)]
     IN /\ l \notin up
        /\ flaps < MaxFlaps
@@ -562,11 +665,13 @@ Connect(l) ==
        /\ UNCHANGED <<rev, own, hist>>
 
 \* `disconnect`: each end names the hop it learned routes on there.
+\* @type: (Set(Int)) => Bool;
 Disconnect(l) ==
     LET up1 == up \ {l}
         q0 == [d \in Dirs |-> IF {d[1], d[2]} = l THEN <<>> ELSE q[d]]
         rs == [x \in l |->
-                 LET y == CHOOSE y \in l : y # x
+                 LET y == CHOOSE z \in l : z # x
+                     \* @type: $hop;
                      hop == <<x, y, gen[l]>>
                      s == Closed(st[x], y)
                  IN IF x = Origin
@@ -635,23 +740,18 @@ Seen ==
                   (j = KeyOf(c) \/ j = "root") /\ Believed(n, st[n], m, j) =>
                       st[n].rx[m][j].rev <= v.floor
 
-\* The loop-free paths from the publisher over the configured links, as the
-\* nodes each crosses in order, and what each costs its last node.
-RECURSIVE Extend(_, _)
-Last(p) == p[Len(p)]
-Extend(P, k) ==
-    IF k = 0 THEN P
-    ELSE Extend(P \cup UNION {{Append(p, n) : n \in {m \in Relays : {Last(p), m} \in Links}} : p \in P}, k - 1)
-Paths ==
-    {p \in Extend({<<Origin>>}, Cardinality(Relays)) : \A i, j \in DOMAIN p : i # j => p[i] # p[j]}
-
-NodesOf(path) == [i \in DOMAIN path |-> path[i][1]]
+\* A loop-free path from the publisher to `from` over the configured links,
+\* each hop naming the session it was learned on from the one before.
+\* @type: (Int, $path) => Bool;
 IsPath(from, path) ==
     /\ Len(path) >= 1
     /\ path[1] = OHop
-    /\ NodesOf(path) \in Paths
-    /\ Last(NodesOf(path)) = from
-    /\ \A i \in DOMAIN path : i > 1 => path[i][2] = path[i - 1][1]
+    /\ path[Len(path)][1] = from
+    /\ \A i \in DOMAIN path : i > 1 =>
+          /\ path[i][1] \in Relays
+          /\ path[i][2] = path[i - 1][1]
+          /\ {path[i - 1][1], path[i][1]} \in Links
+    /\ \A i, j \in DOMAIN path : i # j => path[i][1] # path[j][1]
 
 \* Every route held or in flight names a loop-free path from the publisher to
 \* its sender.
@@ -662,43 +762,41 @@ SimplePaths ==
           /\ q[d][i].t = "dead" => \A mv \in q[d][i].moved : IsPath(d[1], mv[2])
 
 \* A hop whose session has closed: the link is down or opened again since.
+\* @type: ($hop) => Bool;
 Gone(h) == h # OHop /\ ({h[1], h[2]} \notin up \/ gen[{h[1], h[2]}] # h[3])
+\* @type: ($path) => Bool;
 Stale(path) == \E i \in DOMAIN path : Gone(path[i])
 
 \* Where a request for a claim goes. A node starts it on the narrowest live
 \* route covering the claim; each node forwards it on the route it offered the
 \* node it came from under that key, and never along a route whose path names
-\* that node. The result is "origin", "stuck", "refused", or "loop".
-RECURSIVE Fwd(_, _, _, _)
-Fwd(cur, k, prev, i) ==
-    IF cur = Origin THEN "origin"
-    ELSE IF i = 0 THEN "loop"
-    ELSE LET src == IF prev = None THEN k ELSE SrcKey(st[cur], prev, k)
-             r == st[cur].rt[src]
-         IN IF ~Live(r) THEN "stuck"
-            ELSE IF prev # None /\ Names(r.path, prev) THEN "refused"
-            ELSE Fwd(r.next, src, cur, i - 1)
+\* that node. The result is "origin", "stuck", "refused", or "loop", once it
+\* has crossed every node; `stale` says whether a node it crossed forwarded it
+\* on a stale route.
+\* @type: {cur: Int, k: Str, prev: Int, res: Str, stale: Bool} => {cur: Int, k: Str, prev: Int, res: Str, stale: Bool};
+Fwd(w) ==
+    IF w.res # "" THEN w
+    ELSE IF w.cur = Origin THEN [w EXCEPT !.res = "origin"]
+    ELSE LET src == IF w.prev = None THEN w.k ELSE SrcKey(st[w.cur], w.prev, w.k)
+             r == st[w.cur].rt[src]
+         IN IF ~Live(r) THEN [w EXCEPT !.res = "stuck"]
+            ELSE IF w.prev # None /\ Names(r.path, w.prev) THEN [w EXCEPT !.res = "refused"]
+            ELSE [cur |-> r.next, k |-> src, prev |-> w.cur, res |-> "", stale |-> w.stale \/ Stale(r.path)]
 
-Request(n, c) ==
-    Fwd(n, IF c \in Narrow /\ Live(st[n].rt["a"]) THEN "a" ELSE "root", None, Cardinality(Nodes))
+Walk(n, c) ==
+    LET k == IF c \in Narrow /\ Live(st[n].rt["a"]) THEN "a" ELSE "root"
+        w == ApaFoldSet(LAMBDA x, i : Fwd(x),
+                        [cur |-> n, k |-> k, prev |-> None, res |-> "", stale |-> FALSE], Nodes)
+    IN IF w.res # "" THEN w
+       ELSE [w EXCEPT !.res = IF w.cur = Origin THEN "origin" ELSE "loop"]
 
-\* The nodes a request from n for c crosses before it reaches the publisher,
-\* stops, or has crossed every node.
-RECURSIVE Walk(_, _, _, _)
-Walk(cur, k, prev, i) ==
-    IF cur = Origin \/ i = 0 THEN <<>>
-    ELSE LET src == IF prev = None THEN k ELSE SrcKey(st[cur], prev, k)
-             r == st[cur].rt[src]
-         IN IF ~Live(r) \/ (prev # None /\ Names(r.path, prev)) THEN <<>>
-            ELSE <<[node |-> cur, path |-> r.path]>> \o Walk(r.next, src, cur, i - 1)
+Request(n, c) == Walk(n, c).res
 
 \* A request that loops crosses a node whose route is stale: it names a
 \* session that has closed, whose news has yet to reach that node.
 LoopsAreStale ==
     \A n \in Relays, c \in Claims :
-        (Live(st[n].rt["root"]) \/ Live(st[n].rt["a"])) /\ Request(n, c) = "loop" =>
-                LET w == Walk(n, IF c \in Narrow /\ Live(st[n].rt["a"]) THEN "a" ELSE "root", None, Cardinality(Nodes))
-                IN \E i \in DOMAIN w : Stale(w[i].path)
+        (Live(st[n].rt["root"]) \/ Live(st[n].rt["a"])) /\ Request(n, c) = "loop" => Walk(n, c).stale
 
 \* A request never loops. It does while news is in flight: `Loop.cfg` pins it.
 RequestsLoopFree == \A n \in Relays, c \in Claims : Request(n, c) # "loop"
@@ -712,30 +810,32 @@ NoStaleReturn ==
 
 \* Whether the news that ends a stale route node n heard from m under key k is
 \* on its way: queued from m to n, or m's own route is stale and its news is
-\* on its way to m.
-RECURSIVE Chased(_, _, _, _)
-Chased(n, m, k, i) ==
-    \/ q[<<m, n>>] # <<>>
-    \/ /\ i > 0
-       /\ m # Origin
-       /\ LET src == SrcKey(st[m], n, k)
-              r == st[m].rt[src]
-          IN /\ Live(r)
-             /\ Stale(r.path)
-             /\ Chased(m, r.next, src, i - 1)
+\* on its way to m, and so on back, over at most every node.
+\* @type: {n: Int, m: Int, k: Str, res: Str} => {n: Int, m: Int, k: Str, res: Str};
+Chase(w) ==
+    IF w.res # "" THEN w
+    ELSE IF q[<<w.m, w.n>>] # <<>> THEN [w EXCEPT !.res = "yes"]
+    ELSE IF w.m = Origin THEN [w EXCEPT !.res = "no"]
+    ELSE LET src == SrcKey(st[w.m], w.n, w.k)
+             r == st[w.m].rt[src]
+         IN IF Live(r) /\ Stale(r.path) THEN [n |-> w.m, m |-> r.next, k |-> src, res |-> ""]
+            ELSE [w EXCEPT !.res = "no"]
+
+Chased(n, m, k) ==
+    LET w == ApaFoldSet(LAMBDA x, i : Chase(x), [n |-> n, m |-> m, k |-> k, res |-> ""], Nodes)
+    IN w.res = "yes" \/ (w.res = "" /\ q[<<w.m, w.n>>] # <<>>)
 
 \* A stale route a node may use always has the news that ends it on its way,
 \* so it lasts no longer than that news takes to arrive.
 StaleIsChased ==
     \A n \in Relays, m \in Nodes, k \in Keys :
-        Usable(n, st[n], m, k) /\ Stale(st[n].rx[m][k].path) => Chased(n, m, k, Cardinality(Nodes))
+        Usable(n, st[n], m, k) /\ Stale(st[n].rx[m][k].path) => Chased(n, m, k)
 
 \* The nodes a path over open sessions from the publisher reaches, through
 \* nodes whose interest covers claim c.
-RECURSIVE Grow(_, _, _)
-Grow(R, c, i) == IF i = 0 THEN R
-                 ELSE Grow(R \cup {n \in Relays : Covers(Ask(n), c) /\ \E m \in R : {m, n} \in up}, c, i - 1)
-Carried(c) == Grow({Origin}, c, Cardinality(Nodes))
+Carried(c) ==
+    ApaFoldSet(LAMBDA R, i : R \cup {n \in Relays : Covers(Ask(n), c) /\ \E m \in R : {m, n} \in up},
+               {Origin}, Nodes)
 
 \* Once nothing is in flight and no doubt is left: each relay shows exactly the
 \* publisher's claims that a path carries to it, available; a request for each

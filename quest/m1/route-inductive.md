@@ -62,7 +62,54 @@ stay constants the config states. Say both bounds in the `verify-route` skill.
 - Run it through the `tla` recipes with Apalache from the flake. If five
   relays does not fit Nightly, record the largest mesh that does and its time.
 
+Found 2026-11-12, trying it on the route model itself
+([moq-dev/moq#8564](https://github.com/moq-dev/moq/pull/8564)):
+
+- The spec there carries Apalache's type annotations and its folds in place
+  of `RECURSIVE` operators, and `just rs apalache typecheck
+  moq-net/verify/route/RouteHandoff.tla` passes. TLC reads the same file
+  through Apalache's library (`nix/apalache.nix`, the `tla` recipe) and finds
+  the same distinct states as before on every exhaustive config.
+- No mesh fits. Apalache 0.63 could not finish one step with `SimplePaths`
+  as the only invariant, on a host with 16 GB of heap to give it:
+
+  | Check | Mesh | Result |
+  | --- | --- | --- |
+  | One step from `Init`, all 7 transitions | publisher and 3 relays | out of heap after 26 minutes |
+  | One `Deliver` on one session, from any typed state | publisher and 3 relays | out of heap after 6 minutes |
+  | The same, `--smt-encoding=arrays` | publisher and 3 relays | still in its optimizer pass after 85 minutes |
+  | The same | publisher and 2 relays, the smallest mesh with a loop | past 19 GB in 8 minutes, killed |
+
+- Why: every step runs `Update`, which rebuilds a node's whole state, so the
+  solver encodes every neighbour's and key's route with its path, the views,
+  what the node sent, and its reader's events, for every step. That state,
+  not the invariant, is what does not fit.
+- The rules split along the model. The claim rules (`Truthful`,
+  `NoRevival`, `NoFalseEnd`, `NoRegression`) need no paths: a view's floor
+  only grows while a route covers it, each floor is the publisher's claims at
+  its revision, and an item is the revision that set it. They should hold
+  however routes come and go, which is argued, not yet checked. The loop
+  rules (`SimplePaths`, `LoopsAreStale`, `StaleIsChased`) need routes, DEAD,
+  holds, and doubts, but no claims, views, or events.
+
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: how to prove the rules for runs of any length, now that
+  Apalache cannot check the route model itself. Options: (A, recommended)
+  split it: this quest proves the claim rules on a small model whose routes
+  come and go freely, and a new quest proves the loop rules on a model
+  without claims after measuring that Apalache fits it, each tied to
+  `RouteHandoff.tla` by a refinement TLC checks on its configs; (B) a TLAPS
+  proof on the route model, rejected 2026-11-10 because its steps break on
+  each model change, which the router quest is still making; (C) delete the
+  quest and rest on TLC's bounded runs and the sweeps; (D) retry on a host
+  with far more memory, which the two-relay result above makes unlikely to
+  fit any useful mesh. A recommends itself because the claim rules are the
+  ones bounded runs cover least, and a model without paths should fit five
+  relays. An agent cannot pick: it changes the method the 2026-11-10
+  decision chose.
 
 ## Related
 
