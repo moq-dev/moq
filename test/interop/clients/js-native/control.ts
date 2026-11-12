@@ -6,7 +6,7 @@ import { exchangeSetup } from "../../../../js/net/src/connection/handshake.ts";
 import type * as Ietf from "../../../../js/net/src/ietf/index.ts";
 import { NativeSession } from "../../../../js/net/src/ietf/session.ts";
 import { TrackStatusOk, TrackStatusRequest } from "../../../../js/net/src/ietf/track.ts";
-import Qmux from "../../../../js/qmux/src/index.ts";
+import { Session as Qmux } from "../../../../js/qmux/src/index.ts";
 
 console.debug = console.error;
 console.info = console.error;
@@ -20,7 +20,7 @@ const quic = new Qmux(new URL(address), {
 	requireProtocol: true,
 });
 await quic.ready;
-const extensions = offered({ auth: false, solicit: false });
+const extensions = offered({ solicit: false });
 await exchangeSetup(quic, version, "interop-control", { client: true, extensions });
 
 const session = new NativeSession(quic, version, true);

@@ -32,10 +32,9 @@ select_packages() {
     # A seed is the first path segment under `rs/`, so only a crate whose
     # manifest sits directly at `rs/<dir>/Cargo.toml` can be one. That drops
     # the `*-fuzz` crates (at `rs/<crate>/fuzz`), which a diff to their crate would
-    # otherwise select as a dependent and compile libFuzzer for. A demo's crate
-    # sits at `demo/<demo>/<dir>/Cargo.toml` and is a seed for its directory.
+    # otherwise select as a dependent and compile libFuzzer for.
     # The separator is normalized first so Windows paths split too.
-    metadata=$(jq '.packages |= map((.manifest_path |= gsub("\\\\"; "/")) | select((.manifest_path | split("/")) as $p | $p[-3] == "rs" or $p[-4] == "demo"))' <<<"$metadata")
+    metadata=$(jq '.packages |= map((.manifest_path |= gsub("\\\\"; "/")) | select((.manifest_path | split("/")) as $p | $p[-3] == "rs"))' <<<"$metadata")
 
     # A changed path under `rs/` is a seed only because every crate directory
     # there is named after its crate. Under-selecting checks nothing, so fall
@@ -71,8 +70,7 @@ select_packages() {
             | .packages[]
             | (.manifest_path | split("/")) as $p
             | ($p[:-1] | join("/") + "/") as $crate
-            | select(($p[-4] == "demo" and any($paths[]; startswith("demo/\($p[-3])/\($p[-2])/")))
-                or any(.targets[].src_path | resolve | select(startswith($crate) | not)
+            | select(any(.targets[].src_path | resolve | select(startswith($crate) | not)
                     | ltrimstr($root) | sub("[^/]*$"; ""); . as $dir | any($paths[]; startswith($dir))))
             | .name' <<<"$metadata"
     } | sort -u)
@@ -172,6 +170,8 @@ case "$action" in
         if [[ "$action" != lint ]] && wants '(moq-video|moq-audio)'; then
             if [[ "$action" == check-test ]]; then just rs capture-test; else just rs capture; fi
         fi
+        # moq-net without `async`, which every other build unifies back in.
+        if wants moq-net; then just rs no-async; fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
         if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
         ;;
@@ -201,16 +201,17 @@ case "$action" in
             features+=(moq-video/capture moq-audio/capture moq-audio/playback)
         fi
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
-        # The WebRTC module's hostile-input tests, such as mDNS backpressure.
-        if wants moq-tokio; then features+=(moq-tokio/webrtc); fi
+        # The WebRTC data channel's hostile-input tests, such as mDNS backpressure.
+        if wants moq-webrtc; then features+=(moq-webrtc/p2p); fi
         # The relay's io_uring listener, Linux-only. A moq-uring change selects
         # the relay too, as its dependent.
         if [[ "$(uname -s)" == Linux ]] && wants moq-relay; then features+=(moq-relay/io-uring); fi
-        # Cargo skips a bench or example whose `required-features` are off without
-        # a word, and a bench-only change selects its crate alone, so no dependent
-        # turns them on. Turn on every one the built crates' targets name. All of
-        # them are additive and build wherever the gate runs; moq-uring's targets
-        # compile to nothing off Linux.
+        # Cargo skips a target whose `required-features` are off without a word,
+        # and a crate alone in the selection (a bench-only change, or moq-boy,
+        # whose one target is its binary) has no dependent to turn them on. Turn
+        # on every one named by a target this build holds: benches, examples, and
+        # every target with tests. All of them are additive and build wherever the
+        # gate runs; moq-uring's targets compile to nothing off Linux.
         required=$(
             set -e
             cargo metadata --locked --format-version 1 --no-deps | jq -r --arg names "$building" --arg all "$packages" '
@@ -219,7 +220,7 @@ case "$action" in
                 | select(if $all == "ALL" then (.name | endswith("-fuzz") | not) else (.name as $n | $want | index($n) != null) end)
                 | .name as $name
                 | .targets[]
-                | select(.kind // [] | any(. == "bench" or . == "example"))
+                | select((.kind // [] | any(. == "bench" or . == "example")) or .test)
                 | (.["required-features"] // [])[]
                 | "\($name)/\(.)"' | sort -u | tr '\n' ' '
         )
@@ -250,10 +251,6 @@ case "$action" in
         # outside the selection; a change to anything they reach selects
         # moq-cli anyway.
         if wants moq-cli; then flags+=(--features "moq-cli/play moq-cli/capture moq-cli/pipewire moq-cli/pulseaudio"); fi
-        # Apple UDP batching is opt-in; compile its implementation and tests on macOS.
-        if [[ "$(uname -s)" == Darwin ]] && wants moq-sock; then
-            flags+=(--features moq-sock/fast-apple-datapath)
-        fi
         cargo check --locked "${flags[@]}" --all-targets
         ;;
     *)

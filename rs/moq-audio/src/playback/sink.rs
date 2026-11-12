@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use kio::clock::Instant;
+
 use super::driver::Shared;
 use super::mixer::{self, Gain};
 use crate::resample::Remix;
@@ -166,10 +168,11 @@ impl Sink {
 	/// how far ahead of the speaker you are, which is the anchor an A/V sync
 	/// clock steers video by.
 	///
-	/// Received audio is time-stretched toward the current latency. A writer
-	/// that outruns that correction eventually overflows and drops the excess;
-	/// one that leaves no received audio underruns and plays silence. Both are
-	/// logged and neither is an error, since the next write can recover.
+	/// Received audio is time-stretched toward the current latency, or toward
+	/// the clock [`due`](Self::due) anchors it to. A writer that outruns that
+	/// correction eventually overflows and drops the excess; one that leaves no
+	/// received audio underruns and plays silence. Both are logged and neither
+	/// is an error, since the next write can recover.
 	/// The returned [`Write`] counts input sample frames accepted and dropped;
 	/// dropped live audio should be observed for telemetry, not retried.
 	pub fn write(&mut self, samples: &[u8]) -> Result<Write, Error> {
@@ -254,6 +257,10 @@ impl Sink {
 
 	/// Set the playout target, converging by stretching received PCM.
 	///
+	/// This is the buffer the sink keeps against jitter: it slows down while
+	/// what it holds runs short of it, and speeds up past it only to catch up
+	/// with the clock [`due`](Self::due) anchors it to.
+	///
 	/// Must be non-zero, at most [`Input::LATENCY_MAX`], and fit in the current
 	/// ring. Each device open or rebuild allocates the then-current target plus
 	/// three seconds, less a 30 ms processing window reserved as headroom.
@@ -272,31 +279,39 @@ impl Sink {
 		Ok(())
 	}
 
+	/// Anchor the audio written so far to the caller's clock: its end is due to
+	/// sound at `at`.
+	///
+	/// The sink then plays onto that clock rather than at its latency alone.
+	/// Behind it, it speeds up once it holds more than its latency; ahead of
+	/// it, it slows down. Its buffer running low slows it down too, falling
+	/// behind the clock by at most `late`, and audio trailing the clock by more
+	/// than `late` plus one 30 ms window is skipped. `jumped` is how far the
+	/// clock's reference moved earlier since the last call, which skips as much
+	/// audio as trails the clock, where a lower latency moves the clock ahead
+	/// by speeding up. Call it after each write and whenever the clock moves;
+	/// until the first call, or after the device changes, the latency alone is
+	/// the clock.
+	pub fn due(&mut self, at: Instant, late: Duration, jumped: Duration) {
+		// The device thread reads std's clock, so carry the distance from now
+		// over to it rather than the instant.
+		let (now, host) = (Instant::now(), crate::ring::host());
+		let at = match at.checked_duration_since(now) {
+			Some(ahead) => host + ahead,
+			None => host.checked_sub(now.duration_since(at)).unwrap_or(host),
+		};
+		self.channel.lock().unwrap().prod.due(at, late, jumped);
+	}
+
 	/// The PCM layout this sink was built with.
 	pub fn input(&self) -> &Input {
 		&self.input
 	}
 
-	/// A handle for adjusting this sink from another thread, e.g. a volume
-	/// slider on a UI thread while a decode task does the writing.
+	/// This sink's volume and level, as a handle a UI thread can hold while a
+	/// decode task does the writing.
 	pub fn control(&self) -> Control {
 		self.control.clone()
-	}
-
-	/// Set the playback volume, `0.0` to `1.0`. See [`Control::set_volume`].
-	pub fn set_volume(&self, volume: f32) {
-		self.control.set_volume(volume);
-	}
-
-	/// The volume last set. Defaults to `1.0`.
-	pub fn volume(&self) -> f32 {
-		self.control.volume()
-	}
-
-	/// The loudest sample this sink contributed since the last call. See
-	/// [`Control::peak`].
-	pub fn peak(&self) -> f32 {
-		self.control.peak()
 	}
 }
 
@@ -416,8 +431,9 @@ pub(super) struct Registration {
 	channel: Arc<Mutex<Channel>>,
 	gain: Arc<Gain>,
 	/// The consumer waiting to be handed to a mixer. Taken once it is attached,
-	/// and refilled by [`rebuild`](Self::rebuild).
-	pending: Option<ring::Consumer>,
+	/// and refilled by [`rebuild`](Self::rebuild). Boxed, since it moves
+	/// through the mixer's command channel by value.
+	pending: Option<Box<ring::Consumer>>,
 }
 
 impl Registration {
@@ -464,7 +480,7 @@ impl Registration {
 		let (mut channel, cons) = channel(&input, rate, bus);
 		channel.prod.carry(&current.prod);
 		*current = channel;
-		self.pending = Some(cons);
+		self.pending = Some(Box::new(cons));
 	}
 }
 
@@ -506,7 +522,7 @@ pub(super) fn new(
 		input: sink.input.clone(),
 		channel,
 		gain,
-		pending: Some(cons),
+		pending: Some(Box::new(cons)),
 	};
 
 	Ok((sink, registration))
@@ -529,6 +545,7 @@ fn channel(input: &Input, rate: u32, bus: Layout) -> (Channel, ring::Consumer) {
 			// pays for emergency silence or trimming.
 			pad: true,
 			trim: true,
+			comfort: true,
 		},
 	);
 	cons.stretch(rate);
@@ -568,7 +585,7 @@ mod tests {
 			commands: super::super::driver::Commands::default(),
 		});
 		let (sink, mut registration) = new(0, output_rate, bus, input, shared, engine).unwrap();
-		(sink, registration.pending.take().unwrap())
+		(sink, *registration.pending.take().unwrap())
 	}
 
 	#[test]
@@ -582,8 +599,8 @@ mod tests {
 		let (retired, _rx) = std::sync::mpsc::sync_channel(8);
 		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, Default::default()).unwrap();
 		registration.attach(&commands);
-		let mut out = [0.0; 960];
-		mixer.fill(&mut out, Duration::from_millis(100));
+		let mut out = [0.0f32; 960];
+		mixer.fill(&mut out, Duration::from_millis(100), crate::ring::host());
 		let samples = [0.25f32; 123 * 2];
 		let bytes: Vec<_> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
 		assert_eq!(sink.write(&bytes).unwrap().accepted_sample_frames, 123);
@@ -592,14 +609,14 @@ mod tests {
 		assert!(Pin::new(&mut drain).poll(&mut cx).is_pending());
 		let mut heard = 0;
 		while heard < 123 * 2 {
-			mixer.fill(&mut out, Duration::from_millis(100));
+			mixer.fill(&mut out, Duration::from_millis(100), crate::ring::host());
 			heard += out.iter().filter(|s| **s == 0.25).count();
 			registration.complete();
 			assert!(Pin::new(&mut drain).poll(&mut cx).is_pending());
 		}
 		assert_eq!(heard, 123 * 2);
 		// Another staging chunk in the same callback does not finish the drain.
-		mixer.fill(&mut out, Duration::from_millis(100));
+		mixer.fill(&mut out, Duration::from_millis(100), crate::ring::host());
 		registration.complete();
 		assert!(Pin::new(&mut drain).poll(&mut cx).is_pending());
 		// Later callbacks can still run before the device plays its queued tail.
@@ -628,35 +645,40 @@ mod tests {
 		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, shared.observe.clone()).unwrap();
 		registration.attach(&commands);
 		let mut out = [0.0; 1024];
-		mixer.fill(&mut out, Duration::ZERO);
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		assert!(observer.read().unwrap().stalled, "nothing written yet");
 
 		let tone: Vec<_> = [0.25f32; 2048].iter().flat_map(|s| s.to_le_bytes()).collect();
 		let _ = sink.write(&tone).unwrap();
 		for _ in 0..4 {
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		}
-		let _ = sink.write(&tone).unwrap();
-		mixer.fill(&mut out, Duration::ZERO);
+		// Running dry waits for a 30 ms window and the device period to resume.
+		let refill: Vec<_> = [0.25f32; 2 * (1440 + 512)]
+			.iter()
+			.flat_map(|s| s.to_le_bytes())
+			.collect();
+		let _ = sink.write(&refill).unwrap();
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		let observation = observer.read().unwrap();
 		assert!(!observation.stalled);
 		assert_eq!(observation.gaps.len(), 1, "the sink ran dry once: {observation:?}");
 
 		// A finished sink still plays its tail: no stall while it lasts.
 		let _drain = sink.finish();
-		mixer.fill(&mut out, Duration::ZERO);
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		let observation = observer.read().unwrap();
 		assert!(!observation.stalled && observation.stalls.is_empty(), "{observation:?}");
 		let tail = observation.clock;
 
 		for _ in 0..4 {
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		}
 		{
 			let mut cx = Context::from_waker(std::task::Waker::noop());
 			let mut finish = std::pin::pin!(observer.finish());
 			assert!(finish.as_mut().poll(&mut cx).is_pending());
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 			assert!(finish.as_mut().poll(&mut cx).is_ready());
 		}
 		// Once the tail runs out nothing plays. The gap where it ran out lands in
@@ -698,8 +720,8 @@ mod tests {
 		};
 		let rms =
 			|samples: &[f32]| (samples.iter().map(|&s| s as f64 * s as f64).sum::<f64>() / samples.len() as f64).sqrt();
-		let mut out = [0.0; 960];
-		mixer.fill(&mut out, Duration::ZERO);
+		let mut out = [0.0f32; 960];
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 
 		// 100 ms of a quiet background, then a declared end.
 		let quiet = 0.0002;
@@ -707,7 +729,7 @@ mod tests {
 		sink.end();
 		let mut heard = Vec::new();
 		for _ in 0..150 {
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 			heard.extend_from_slice(&out);
 		}
 		// The primed silence, the background, then a second of noise at its level.
@@ -720,7 +742,7 @@ mod tests {
 		let _ = sink.write(&pcm(0.5, 960)).unwrap();
 		let mut until = 0;
 		loop {
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 			if let Some(at) = out.iter().position(|s| *s == 0.5) {
 				until += at / 2;
 				break;
@@ -731,7 +753,7 @@ mod tests {
 		assert_eq!(until, 48_000 * 40 / 1000);
 		for _ in 0..10 {
 			let _ = sink.write(&pcm(0.5, 480)).unwrap();
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		}
 
 		let observation = observer.read().unwrap();
@@ -740,10 +762,10 @@ mod tests {
 
 		// Once the next utterance plays, running dry is a gap again.
 		for _ in 0..20 {
-			mixer.fill(&mut out, Duration::ZERO);
+			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		}
 		let _ = sink.write(&pcm(0.5, 2_400)).unwrap();
-		mixer.fill(&mut out, Duration::ZERO);
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		assert_eq!(observer.read().unwrap().gaps.len(), 1);
 	}
 
@@ -776,8 +798,8 @@ mod tests {
 		let (retired, _rx) = std::sync::mpsc::sync_channel(8);
 		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, Default::default()).unwrap();
 		registration.attach(&commands);
-		let mut out = [0.0; 960];
-		mixer.fill(&mut out, Duration::ZERO);
+		let mut out = [0.0f32; 960];
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 
 		let bytes: Vec<_> = [0.25f32]
 			.repeat(frames * 2)
@@ -793,7 +815,7 @@ mod tests {
 		let mut heard = 0;
 		for period in 1..100 {
 			let now = Duration::from_millis(10 * period);
-			mixer.fill(&mut out, now);
+			mixer.fill(&mut out, now, crate::ring::host());
 			mixer.complete(now);
 			registration.complete();
 			heard += out.iter().step_by(2).filter(|left| **left > 0.125).count();

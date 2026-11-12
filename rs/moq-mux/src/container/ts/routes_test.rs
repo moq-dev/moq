@@ -96,7 +96,7 @@ impl Imported {
 	fn all(data: &[u8]) -> Self {
 		let mut imported = Self::new();
 		imported.import.decode(data).unwrap();
-		imported.import.finish().unwrap();
+		imported.import.finish_in_place().unwrap();
 		imported
 	}
 
@@ -187,6 +187,7 @@ async fn mpeg2_video_rides_whole_and_survives_a_round_trip() {
 		super::export_test::open_ts(
 			crate::source::announced(&imported.consumer).await,
 			crate::catalog::CatalogFormat::Hang,
+			Duration::from_secs(30),
 		)
 		.await
 		.unwrap(),

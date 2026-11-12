@@ -79,8 +79,3 @@ Public API: none. Wire: none.
   next merge. Look for Nightly jobs that fell back to source builds once paths
   expired (`building '/nix/store/...uniffi-bindgen` in a job log), and refresh
   on a schedule or switch to a closure-aware collector (niks3) if they recur.
-
-## Related
-
-- [Verify the Nix runtime cache](/quest/m0/ci/nix-cache-verify.md) - the same cache's `main` evidence
-- [Drop main from the publish Environment](/quest/m0/ci/publish-release-only.md) - the other workflow backport to `release` decided in the 2026-11-05 audit

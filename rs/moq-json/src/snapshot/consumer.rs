@@ -17,7 +17,7 @@ pub struct Config {
 	/// Maximum bytes in a frame or the compact JSON of the reconstructed value.
 	///
 	/// Unset, the group budget is the only bound: a group holds at most
-	/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), compressed or not, so the
+	/// 32 MiB, compressed or not, so the
 	/// reconstructed value costs no more than that. Set it to hold a smaller document, at the cost
 	/// of re-measuring the value after every delta.
 	pub max_size: Option<usize>,
@@ -52,7 +52,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// Subscribes right away at [`Config::priority`] and a zero
 	/// [`max`](moq_net::track::Delay::max) delay, with default preferences otherwise; no handle to that subscription leaves the
 	/// consumer, so nothing can change its budget. A read waits until the subscription resolves,
-	/// and fails if it cannot. A [`compress`](moq_net::track::Info::compress)ed track reads the
+	/// and fails if it cannot. A [compressed](moq_net::track::Info::compression) track reads the
 	/// same: moq-net inflates it.
 	pub fn new(track: moq_net::track::Consumer, config: Config) -> Self {
 		let subscription = moq_net::track::Subscription::default()
@@ -224,12 +224,12 @@ mod timestamps {
 
 	#[test]
 	fn exact_timestamps_survive_reads() {
-		for compress in [false, true] {
+		for compression in [moq_net::track::Compression::None, moq_net::track::Compression::Deflate] {
 			let scale = moq_net::Timescale::new(90_000).unwrap();
 			// Every state is read, superseded groups included, so they must stay fresh.
 			let info = moq_net::track::Info::default()
 				.with_timescale(scale)
-				.with_compress(compress)
+				.with_compression(compression)
 				.with_max_age(None);
 			let track = moq_net::broadcast::Info::new()
 				.produce()
@@ -258,7 +258,7 @@ mod timestamps {
 				assert_eq!(at.value(), ticks);
 				assert_eq!(at.scale(), scale);
 			}
-			producer.finish().unwrap();
+			let _finished = producer.finish().unwrap();
 			assert!(matches!(
 				consumer.poll_next(&kio::Waiter::noop()),
 				Poll::Ready(Ok(None))
@@ -276,7 +276,10 @@ mod timestamps {
 	fn latest_advances_the_same_cursor_as_next() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("data", moq_net::track::Info::default().with_compress(true))
+			.create_track(
+				"data",
+				moq_net::track::Info::default().with_compression(moq_net::track::Compression::Deflate),
+			)
 			.unwrap();
 		let mut consumer = Consumer::<serde_json::Value>::new(track.consume(), Default::default());
 		let mut producer = crate::snapshot::Producer::new(track, crate::snapshot::Config::default());
@@ -307,7 +310,7 @@ mod timestamps {
 			panic!("missing new state")
 		};
 		assert_eq!(value.value["n"].as_u64().unwrap(), 3);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(None))));
 	}
 }

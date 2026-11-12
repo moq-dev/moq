@@ -5,7 +5,9 @@
  * @module
  */
 
-/** Re-export of {@link https://jsr.io/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
+/** Re-export of {@link https://www.npmjs.com/package/@moq/clock | @moq/clock}, the durations, instants, and timers this package takes. */
+export * as Clock from "@moq/clock";
+/** Re-export of {@link https://www.npmjs.com/package/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
 export * as Signals from "@moq/signals";
 /** Broadcast announcement streams. */
 export * as Announce from "./announce.ts";
@@ -23,9 +25,10 @@ export * as Datagram from "./datagram.ts";
 export { SessionCode, StreamCode } from "./error.ts";
 /** Session, stream, and local request errors. */
 export * as Error from "./errors.ts";
-/** Group role handles and frame helpers. */
+/** Frame role handles: one frame's payload written or read in pieces. */
+export * as Frame from "./frame.ts";
+/** Group role handles. */
 export * as Group from "./group.ts";
-export { IMPLEMENTATION } from "./implementation.ts";
 /** Stream instances: one continuous stream at a path, carried on every route. */
 export * as Instance from "./instance.ts";
 /** Broadcast routing tables, independent of any connection. */
@@ -33,8 +36,8 @@ export * as Origin from "./origin.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. Path patterns are re-exported from `@moq/pattern`. */
 export * as Path from "./path.ts";
 /** Point-to-point TCP and track sessions through an origin. */
-export * as socket from "./socket.ts";
-/** Presentation timestamps and their timescales; duration units live in `@moq/clock`. */
+export * as Socket from "./socket.ts";
+/** Presentation timestamps and their timescales; durations live in {@link Clock}. */
 export * as Time from "./time.ts";
 /** A value paired with the timestamp it was captured at, absent when untimed. */
 export type { Timed } from "./timed.ts";

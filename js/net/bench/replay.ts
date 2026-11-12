@@ -1,5 +1,5 @@
 /** Sweep cached-group replay to joining subscribers, and arrivals into unread backlogs. */
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { Track } from "@moq/net";
 
 type Order = "monotonic" | "reverse" | "mixed";
@@ -109,7 +109,7 @@ async function shape(
 		track.finish();
 		track.close();
 		try {
-			await clock.advance(Nano.fromMilli(Milli(60_000)));
+			await clock.advance(Duration.millis(60_000));
 		} finally {
 			installed.close();
 		}

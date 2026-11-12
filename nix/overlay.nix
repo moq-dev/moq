@@ -13,10 +13,16 @@ let
   # Helper function to get crate info from Cargo.toml
   crateInfo = cargoTomlPath: craneLib.crateNameFromCargoToml { cargoToml = cargoTomlPath; };
 
-  # moq-video embeds a vendored PTX kernel at compile time, so every package
-  # source that may pull it in must preserve PTX alongside Cargo's sources.
+  # moq-video embeds PTX and moq-webrtc embeds crypto validation data at compile
+  # time, so packages must preserve these alongside Cargo's sources.
   filterCargoSources =
-    path: type: (final.lib.hasSuffix ".ptx" path) || (craneLib.filterCargoSources path type);
+    path: type:
+    (final.lib.hasSuffix ".ptx" path)
+    || (
+      (final.lib.hasInfix "/rs/moq-webrtc/src/vendor/dimpl/crypto/validation/" path)
+      && ((final.lib.hasSuffix ".der" path) || (final.lib.hasSuffix ".bin" path))
+    )
+    || (craneLib.filterCargoSources path type);
   cleanCargoSource = final.lib.cleanSourceWith {
     src = ../.;
     name = "source";
@@ -142,11 +148,6 @@ let
     cargoExtraArgs = "-p moq-c --features openh264";
     nativeBuildInputs = with final; [
       pkg-config
-      # moq-c is the only nix-built package that pulls moq-video, and its `vaapi`
-      # feature brings moq-vaapi, whose build.rs runs bindgen over its vendored
-      # libva headers. Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so it finds
-      # libclang and the libc headers, same as the devShell in flake.nix.
-      rustPlatform.bindgenHook
     ];
 
     # moq-c is a staticlib; crane's default install phase only handles

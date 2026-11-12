@@ -9,7 +9,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 
-use hang::moq_net;
 use moq_mux::import;
 
 use super::listed::Listed;
@@ -96,9 +95,12 @@ impl Names {
 
 /// Keep finished rendition owners until a whole run's catalog has closed.
 #[must_use]
+#[derive(Default)]
 pub(super) struct Closed {
-	track: Option<Sink>,
-	/// The catalog `track` published in, kept open until the owner drops.
+	_track: Option<Sink>,
+	/// A finished text track, which no longer has a [`Sink`].
+	_text: Option<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::TextConfig>>,
+	/// The catalog `_track` published in, kept open until the owner drops.
 	_catalog: Option<moq_mux::catalog::Producer>,
 }
 
@@ -292,23 +294,40 @@ pub enum PushOutcome {
 	Failed(String),
 }
 
+/// Where a pad's producer is in its life.
+enum Producer {
+	/// No producer and no catalog slot. `caps` are the ones a finished producer was built from: CAPS
+	/// stay sticky across a flush, so a resumed stream rebuilds from them.
+	Idle { caps: Option<gst::Caps> },
+	/// The requested pad gates the first catalog even before CAPS can name its rendition.
+	Reserved {
+		slot: Box<moq_mux::catalog::Reserved>,
+		caps: Option<gst::Caps>,
+	},
+	/// CAPS built a producer, which publishes the pad's buffers.
+	Publishing(Box<Publishing>),
+	/// A producer build or write rejected this pad's caps or bitstream; further buffers are dropped
+	/// and the track stays finalized. Isolated to the pad, so the session and other pads keep going.
+	/// The reason is not kept here: whichever call failed returns it.
+	Failed,
+}
+
+/// A live producer and what it was built from.
+struct Publishing {
+	track: Sink,
+	/// The catalog `track` publishes in.
+	catalog: moq_mux::catalog::Producer,
+	caps: gst::Caps,
+	/// Whether `track` has a configured name, which may be requested again. A generated one never is.
+	named: bool,
+}
+
 /// One sink pad's producer plus its timeline policy.
 pub struct Pad {
-	/// The requested pad gates the first catalog even before CAPS can name its rendition.
-	reserved: Option<moq_mux::catalog::Reserved>,
+	producer: Producer,
 	wall: Option<std::sync::Arc<super::wall::Wall>>,
 	/// The run's, once reserved; until then this pad's own, which still covers renegotiation.
 	names: Names,
-	track: Option<Sink>,
-	/// The catalog `track` publishes in, set with it.
-	catalog: Option<moq_mux::catalog::Producer>,
-	/// Whether `track` has a configured name, which may be requested again. A generated one never is.
-	named: bool,
-	caps: Option<gst::Caps>,
-	/// Set once a producer build rejects this pad's caps or bitstream; further buffers are dropped and
-	/// the track stays finalized. Isolated to the pad, so the session and other pads keep going. The
-	/// reason is not kept here: whichever call failed returns it.
-	failed: bool,
 	state: PadState,
 	segment_info: Option<SegmentInfo>,
 	/// Kept only to map a buffer PTS to a running time.
@@ -322,14 +341,9 @@ impl Pad {
 	/// A fresh pad with no caps, no segment, and no producer yet.
 	pub fn new() -> Self {
 		Self {
-			reserved: None,
+			producer: Producer::Idle { caps: None },
 			wall: None,
 			names: Names::default(),
-			track: None,
-			catalog: None,
-			named: false,
-			caps: None,
-			failed: false,
 			state: PadState::NoSegment,
 			segment_info: None,
 			segment: None,
@@ -346,15 +360,39 @@ impl Pad {
 	) {
 		self.wall = Some(wall);
 		self.names = names.clone();
-		if self.reserved.is_none() && self.track.is_none() && !self.failed {
-			self.reserved = Some(catalog.reserve());
+		if let Producer::Idle { caps } = &mut self.producer {
+			self.producer = Producer::Reserved {
+				slot: Box::new(catalog.reserve()),
+				caps: caps.take(),
+			};
+		}
+	}
+
+	/// The live producer's track, if any.
+	fn track(&self) -> Option<&Sink> {
+		match &self.producer {
+			Producer::Publishing(publishing) => Some(&publishing.track),
+			_ => None,
+		}
+	}
+
+	/// The live producer's media track, if it is one.
+	fn media_mut(&mut self) -> Option<&mut Media> {
+		match &mut self.producer {
+			Producer::Publishing(publishing) => match &mut publishing.track {
+				Sink::Media(media) => Some(media),
+				_ => None,
+			},
+			_ => None,
 		}
 	}
 
 	/// An ended pad can no longer resolve its config, but resolved tracks keep their usual lifetime.
 	pub(super) fn end_unresolved(&mut self, catalog: &moq_mux::catalog::Producer) -> Result<()> {
-		self.reserved.take();
-		if let Some(Sink::Media(media)) = &self.track {
+		if let Producer::Reserved { caps, .. } = &mut self.producer {
+			self.producer = Producer::Idle { caps: caps.take() };
+		}
+		if let Some(Sink::Media(media)) = self.track() {
 			// Read current state, not the gated wire snapshot. An untouched guard emits nothing and
 			// avoids cloning every rendition. Drop it before finalize takes the catalog lock again.
 			let mut catalog = catalog.clone();
@@ -377,15 +415,15 @@ impl Pad {
 	/// The caps to rebuild from when [`end_unresolved`](Self::end_unresolved) finished this pad and its
 	/// stream resumes: CAPS stay sticky across a flush, so none arrives to rebuild it.
 	pub(super) fn resumable_caps(&self) -> Option<gst::Caps> {
-		match (&self.track, self.failed) {
-			(None, false) => self.caps.clone(),
-			_ => None,
+		match &self.producer {
+			Producer::Idle { caps } | Producer::Reserved { caps, .. } => caps.clone(),
+			Producer::Publishing(_) | Producer::Failed => None,
 		}
 	}
 
 	/// True once this pad has been invalidated by a bad caps/bitstream; the caller drops its buffers.
 	pub fn is_failed(&self) -> bool {
-		self.failed
+		matches!(self.producer, Producer::Failed)
 	}
 
 	/// A watch-only handle to the active track's subscriber demand, once viewers can find the track.
@@ -395,7 +433,7 @@ impl Pad {
 	/// would keep it out of the catalog for good. Opaque data has no catalog entry by design; its
 	/// subscribers name the track directly, so its demand is live from negotiation.
 	pub(super) fn demand(&self, listed: &Listed) -> Option<moq_net::track::Demand> {
-		let track = self.track.as_ref()?;
+		let track = self.track()?;
 		match track {
 			Sink::Opaque(_) => {}
 			Sink::Media(_) | Sink::Text(_) if listed.contains(&track.name()) => {}
@@ -413,20 +451,32 @@ impl Pad {
 		catalog: &moq_mux::catalog::Producer,
 		options: ProducerOptions<'_>,
 	) -> CapsOutcome {
-		if self.failed {
-			return CapsOutcome::Unchanged;
+		match &mut self.producer {
+			Producer::Failed => return CapsOutcome::Unchanged,
+			Producer::Publishing(publishing) if same_importer(&publishing.caps, options.caps) => {
+				publishing.caps = options.caps.clone();
+				return CapsOutcome::Unchanged;
+			}
+			_ => {}
 		}
-		if self.track.is_some()
-			&& let Some(caps) = &self.caps
-			&& same_importer(caps, options.caps)
-		{
-			self.caps = Some(options.caps.clone());
-			return CapsOutcome::Unchanged;
-		}
-		let reserved = self.reserved.take().unwrap_or_else(|| catalog.reserve());
-		match self.build(broadcast, reserved, options) {
-			Ok(name) => {
-				self.catalog = Some(catalog.clone());
+		let slot = match std::mem::replace(&mut self.producer, Producer::Idle { caps: None }) {
+			Producer::Reserved { slot, .. } => *slot,
+			// A live producer stays until the build finalizes it.
+			previous => {
+				self.producer = previous;
+				catalog.reserve()
+			}
+		};
+		let caps = options.caps.clone();
+		let named = options.requested.is_some();
+		match self.build(broadcast, slot, options) {
+			Ok((name, track)) => {
+				self.producer = Producer::Publishing(Box::new(Publishing {
+					track,
+					catalog: catalog.clone(),
+					caps,
+					named,
+				}));
 				CapsOutcome::Active(name)
 			}
 			Err(err) => {
@@ -442,7 +492,7 @@ impl Pad {
 		broadcast: &moq_net::broadcast::Producer,
 		reserved: moq_mux::catalog::Reserved,
 		options: ProducerOptions<'_>,
-	) -> Result<String> {
+	) -> Result<(String, Sink)> {
 		let ProducerOptions {
 			container,
 			caps,
@@ -452,7 +502,6 @@ impl Pad {
 		// Renegotiation to new content: finalize the previous producer before replacing it (closed once,
 		// not abandoned), so its name has ended and the replacement takes a fresh one.
 		self.finalize()?;
-		self.named = requested.is_some();
 		let requested = requested.map(|name| {
 			let claimed = self.names.claim(name);
 			if claimed != name {
@@ -475,9 +524,7 @@ impl Pad {
 			let info = moq_net::track::Info::default()
 				.with_timescale(moq_net::Timescale::MICRO)
 				.with_max_age(std::time::Duration::from_secs(5));
-			self.track = Some(Sink::Opaque(Box::new(request.accept(info))));
-			self.caps = Some(caps.clone());
-			return Ok(name);
+			return Ok((name, Sink::Opaque(Box::new(request.accept(info)))));
 		}
 		let mut broadcast = broadcast.clone();
 		// Every codec converges on one import::Track; only the caps -> importer construction differs. The
@@ -489,14 +536,8 @@ impl Pad {
 		// text with a presentation time, so there is nothing to parse, only a text rendition to declare.
 		if structure.name().as_str() == "text/x-raw" {
 			let name = Self::track_name(&broadcast, requested, ".vtt");
-			self.track = Some(Sink::Text(Box::new(Self::reserve_text(
-				&mut broadcast,
-				reserved,
-				name.clone(),
-				structure,
-			)?)));
-			self.caps = Some(caps.clone());
-			return Ok(name);
+			let text = Self::reserve_text(&mut broadcast, reserved, name.clone(), structure)?;
+			return Ok((name, Sink::Text(Box::new(text))));
 		}
 
 		let mut pre_skip = None;
@@ -618,16 +659,15 @@ impl Pad {
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};
-		self.track = Some(Sink::Media(Box::new(Media {
+		let media = Media {
 			track,
 			audio,
 			group_start: None,
 			discontinuity: false,
 			keyframe: !audio,
 			pre_skip,
-		})));
-		self.caps = Some(caps.clone());
-		Ok(name)
+		};
+		Ok((name, Sink::Media(Box::new(media))))
 	}
 
 	/// The name this pad publishes under: the one it was given, else a generated `0{suffix}`.
@@ -724,7 +764,7 @@ impl Pad {
 		if let Err(err) = self.finalize() {
 			gst::warning!(CAT, "finalize on failed pad: {err:?}");
 		}
-		self.failed = true;
+		self.producer = Producer::Failed;
 	}
 
 	/// Invalidate this producer after a failure detected outside the codec importer.
@@ -754,7 +794,7 @@ impl Pad {
 				let segment = segment.downcast::<gst::ClockTime>().ok();
 				if self.segment.is_some()
 					&& self.segment != segment
-					&& let Some(Sink::Media(media)) = self.track.as_mut()
+					&& let Some(media) = self.media_mut()
 				{
 					media.discontinuity = true;
 				}
@@ -785,7 +825,7 @@ impl Pad {
 	/// Restart measurement on the next frame while retaining the current segment.
 	pub fn discontinuity(&mut self) {
 		if self.segment.is_some()
-			&& let Some(Sink::Media(media)) = self.track.as_mut()
+			&& let Some(media) = self.media_mut()
 		{
 			media.discontinuity = true;
 		}
@@ -795,32 +835,16 @@ impl Pad {
 	/// decode order and B-frames carry non-monotonic presentation timestamps, so a PTS regression is
 	/// normal reordering. Timeline breaks are caught at the SEGMENT level (the `Invalid` state).
 	fn frame_timestamp(&self, pts: Option<gst::ClockTime>) -> Result<u64, &'static str> {
-		match self.state {
-			PadState::Active => {
-				// to_running_time_full is signed: a buffer before the segment returns Negative, which
-				// frame_micros drops; to_running_time would instead clip it to None and lose the reason.
-				let running_time = self
-					.segment
-					.as_ref()
-					.zip(pts)
-					.and_then(|(segment, pts)| segment.to_running_time_full(pts))
-					.and_then(signed_nanos);
-				frame_micros(running_time)
-			}
-			PadState::NoSegment => Err("buffer before a valid SEGMENT"),
-			PadState::Invalid => Err("buffer on an invalidated timeline"),
-		}
+		frame_timestamp(self.state, self.segment.as_ref(), pts)
 	}
 
 	/// Place the run on the wall clock before its first valid timestamp can reach an importer.
 	pub(super) fn place_wall(&self, buffer: &gst::BufferRef, sample: super::wall::Sample) -> Result<()> {
 		let Some(wall) = &self.wall else { return Ok(()) };
-		if self.failed || self.track.is_none() {
+		let Some(track) = self.track() else {
 			return Ok(());
-		}
-		let timestamp = if matches!(self.track, Some(Sink::Opaque(_)))
-			&& buffer.pts().is_none()
-			&& self.state == PadState::Active
+		};
+		let timestamp = if matches!(track, Sink::Opaque(_)) && buffer.pts().is_none() && self.state == PadState::Active
 		{
 			sample
 				.running
@@ -843,12 +867,9 @@ impl Pad {
 	/// The PTS `buffer` publishes at: its own, except an Opus packet's, which moves onto hang's
 	/// timeline (see [`PreSkip`]).
 	pub(super) fn timeline_pts(&mut self, buffer: &gst::BufferRef) -> Result<Option<gst::ClockTime>> {
-		match &mut self.track {
-			Some(Sink::Media(media)) if !self.failed => match &mut media.pre_skip {
-				Some(pre_skip) => pre_skip.pts(buffer),
-				None => Ok(buffer.pts()),
-			},
-			_ => Ok(buffer.pts()),
+		match self.media_mut().and_then(|media| media.pre_skip.as_mut()) {
+			Some(pre_skip) => pre_skip.pts(buffer),
+			None => Ok(buffer.pts()),
 		}
 	}
 
@@ -859,24 +880,25 @@ impl Pad {
 		duration: Option<gst::ClockTime>,
 		current_running_time: Option<gst::ClockTime>,
 	) -> std::result::Result<PushOutcome, &'static str> {
-		if self.failed {
-			return Ok(PushOutcome::Dropped);
-		}
-		if self.track.is_none() {
-			gst::warning!(CAT, "dropping buffer received before caps");
-			return Ok(PushOutcome::Dropped);
-		}
-		let opaque = matches!(self.track.as_ref(), Some(Sink::Opaque(_)));
+		let publishing = match &mut self.producer {
+			Producer::Failed => return Ok(PushOutcome::Dropped),
+			Producer::Publishing(publishing) => publishing,
+			Producer::Idle { .. } | Producer::Reserved { .. } => {
+				gst::warning!(CAT, "dropping buffer received before caps");
+				return Ok(PushOutcome::Dropped);
+			}
+		};
+		let opaque = matches!(publishing.track, Sink::Opaque(_));
 		let timestamp = if opaque && pts.is_none() && self.state == PadState::Active {
 			let running_time = current_running_time.ok_or("no current running time for unstamped opaque data")?;
 			let nanos = i64::try_from(running_time.nseconds()).map_err(|_| "current running time is out of range")?;
 			frame_micros(Some(nanos))
 		} else {
-			self.frame_timestamp(pts)
+			frame_timestamp(self.state, self.segment.as_ref(), pts)
 		};
 		match timestamp {
 			Ok(micros) => {
-				let result: Result<()> = match self.track.as_mut().expect("track present") {
+				let result: Result<()> = match &mut publishing.track {
 					Sink::Media(media) => match media.write(&data, micros) {
 						Ok(false) => {
 							gst::debug!(
@@ -943,24 +965,73 @@ impl Pad {
 
 	/// Finish once, retaining rendition owners so closing a run cannot publish their removal.
 	pub(super) fn finish(&mut self) -> (Closed, Result<bool>) {
-		self.reserved.take();
-		let mut closed = Closed {
-			track: self.track.take(),
-			_catalog: self.catalog.take(),
+		let publishing = match std::mem::replace(&mut self.producer, Producer::Idle { caps: None }) {
+			Producer::Publishing(publishing) => publishing,
+			Producer::Reserved { caps, .. } => {
+				self.producer = Producer::Idle { caps };
+				return (Closed::default(), Ok(false));
+			}
+			unchanged => {
+				self.producer = unchanged;
+				return (Closed::default(), Ok(false));
+			}
 		};
-		let Some(track) = closed.track.as_mut() else {
-			return (closed, Ok(false));
-		};
-		let result = match track {
-			Sink::Media(media) => media.track.finish().map_err(anyhow::Error::from),
-			Sink::Text(text) => text.producer.finish().map_err(anyhow::Error::from),
-			Sink::Opaque(producer) => producer.clone().finish().map_err(anyhow::Error::from),
-		};
-		if self.named {
+		let Publishing {
+			track,
+			catalog,
+			caps,
+			named,
+		} = *publishing;
+		if named {
 			self.names.end(track.name());
 		}
-		self.failed |= result.is_err();
+		let mut text = None;
+		let (result, track) = match track {
+			Sink::Media(mut media) => (
+				media.track.finish().map_err(anyhow::Error::from),
+				Some(Sink::Media(media)),
+			),
+			Sink::Text(sink) => {
+				let result = sink.producer.finish().map(|finished| text = Some(finished));
+				(result.map_err(anyhow::Error::from), None)
+			}
+			// `closed` retains its own clone, whose appends the end refuses.
+			Sink::Opaque(producer) => (
+				producer.clone().finish().map(drop).map_err(anyhow::Error::from),
+				Some(Sink::Opaque(producer)),
+			),
+		};
+		self.producer = match result {
+			Ok(()) => Producer::Idle { caps: Some(caps) },
+			Err(_) => Producer::Failed,
+		};
+		let closed = Closed {
+			_track: track,
+			_text: text,
+			_catalog: Some(catalog),
+		};
 		(closed, result.map(|()| true))
+	}
+}
+
+/// Map `pts` onto the timeline `state` and `segment` anchor, in microseconds.
+fn frame_timestamp(
+	state: PadState,
+	segment: Option<&gst::FormattedSegment<gst::ClockTime>>,
+	pts: Option<gst::ClockTime>,
+) -> Result<u64, &'static str> {
+	match state {
+		PadState::Active => {
+			// to_running_time_full is signed: a buffer before the segment returns Negative, which
+			// frame_micros drops; to_running_time would instead clip it to None and lose the reason.
+			let running_time = segment
+				.zip(pts)
+				.and_then(|(segment, pts)| segment.to_running_time_full(pts))
+				.and_then(signed_nanos);
+			frame_micros(running_time)
+		}
+		PadState::NoSegment => Err("buffer before a valid SEGMENT"),
+		PadState::Invalid => Err("buffer on an invalidated timeline"),
 	}
 }
 
@@ -1874,9 +1945,11 @@ mod tests {
 		assert_eq!(decoder.layout().channels(), 6);
 		let mut decoded_samples = false;
 		for packet in &packets {
-			let decoded = decoder.decode(packet).expect("decode the published opus packet");
-			assert_eq!(decoded.samples.len() % 6, 0);
-			decoded_samples |= !decoded.samples.is_empty();
+			decoder.decode(packet).expect("decode the published opus packet");
+			while let Some(decoded) = decoder.receive().expect("receive the decoded opus packet") {
+				assert_eq!(decoded.samples.len() % 6, 0);
+				decoded_samples |= !decoded.samples.is_empty();
+			}
 		}
 		assert!(decoded_samples, "the 5.1 packets decoded to silence");
 	}

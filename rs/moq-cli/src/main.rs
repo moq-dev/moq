@@ -28,7 +28,6 @@ mod transcode;
 mod web;
 
 use args::{Command, Export, ExportSink, Import, ImportSource, Invocation, MoqSide, TsImport, TsProgram};
-use hang::moq_net;
 use publish::Publish;
 use subscribe::{Subscribe, SubscribeArgs};
 
@@ -39,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
-static ALLOC: moq_tokio::jemalloc::tikv_jemallocator::Jemalloc = moq_tokio::jemalloc::tikv_jemallocator::Jemalloc;
+static ALLOC: moq_tokio::jemalloc::Allocator = moq_tokio::jemalloc::Allocator;
 
 /// Everything needed to build MoQ clients/servers.
 #[derive(Clone)]
@@ -56,11 +55,11 @@ impl Net {
 	fn server(
 		&self,
 		config: moq_tokio::listen::Config,
-		activity: moq_net::server::Activity,
+		admission: moq_net::server::Admission,
 	) -> anyhow::Result<moq_tokio::Server> {
 		let mut server = moq_tokio::server::Config::default();
 		server.listen = config;
-		server.activity = activity;
+		server.admission = admission;
 		server.quic = self.quic.clone();
 		Ok(server.init()?)
 	}
@@ -86,7 +85,7 @@ async fn spawn_server(
 		.map(Into::into)
 		.unwrap_or(moq_relay::DEFAULT_DRAIN_TIMEOUT);
 	let (trigger, shutdown) = moq_relay::shutdown::Observer::new(window);
-	let server = net.server(moq.server_config(), shutdown.activity().clone())?;
+	let server = net.server(moq.server_config(), shutdown.admission().clone())?;
 	let certificates = server.certificates();
 	let cluster = attach_lan(cluster.clone(), moq, &server)?;
 	// The auth server or public grant a `--listen` endpoint admits through. A
@@ -615,7 +614,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					let echo = import
 						.echo_path
 						.as_deref()
-						.map(hang::moq_net::path::Relative::new)
+						.map(moq_net::path::Relative::new)
 						.transpose()?
 						.map(hang::catalog::Echo::new);
 					if let Some(mut publish) =
@@ -752,25 +751,27 @@ fn spawn_import(
 		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
-	let max_age = Some(import.max_age.map_or(hang::container::MAX_AGE, Into::into));
-	let linger = import.linger.map_or(moq_mux::Linger::DEFAULT, Into::into);
+	let mut ingest = moq_mux::Ingest::default();
+	if let Some(max_age) = import.max_age {
+		ingest.max_age = Some(max_age.into());
+	}
+	if let Some(linger) = import.linger {
+		ingest.linger = linger.into();
+	}
+	ingest.bandwidth = bandwidth;
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.
 	let target = |name: String| crate::moq::ImportTarget {
 		origin: origin.clone(),
 		name,
-		max_age,
-		linger,
-		bandwidth: bandwidth.clone(),
+		ingest: ingest.clone(),
 	};
 
 	let mut local = None;
 
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
-		let config = moq_mux::catalog::Config::default()
-			.with_max_age(max_age)
-			.with_bandwidth(bandwidth.clone());
+		let config = ingest.catalog();
 		let mut publish = if let ImportSource::Ts(TsImport {
 			program: Some(TsProgram::All),
 			..
@@ -781,7 +782,7 @@ fn spawn_import(
 		} else {
 			Publish::stdin(origin, &name, instance, &format, config)?
 		}
-		.with_linger(linger);
+		.with_linger(ingest.linger);
 		publish.announce()?;
 		local = Some(publish);
 	} else {
@@ -844,7 +845,7 @@ fn spawn_import(
 						moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
 					)
 					.context("failed to create broadcast")?;
-				let mut publish = Publish::capture(route, &capture, bandwidth.clone(), max_age)?;
+				let mut publish = Publish::capture(route, &capture, ingest.bandwidth.clone(), ingest.max_age)?;
 				publish.announce()?;
 				local = Some(publish);
 			}
@@ -903,12 +904,12 @@ fn spawn_export(
 				tasks.spawn(hls::export(origin.consume(), args, name));
 			}
 			ExportSink::Rtmp(rtmp) => {
-				let max_delay = rtmp.delay.into();
+				let delay = rtmp.delay.into();
 				if let Some(addr) = rtmp.endpoint.listen {
 					let name = require_broadcast(name, "export rtmp --listen")?;
-					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, max_delay));
+					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, delay));
 				} else if let Some(url) = rtmp.endpoint.connect {
-					tasks.spawn(rtmp::connect_export(origin.consume(), url, name, max_delay));
+					tasks.spawn(rtmp::connect_export(origin.consume(), url, name, delay));
 				}
 			}
 			ExportSink::Srt(srt) => {
@@ -1077,7 +1078,7 @@ mod tests {
 	async fn drain_ends_when_the_last_admission_leaves() {
 		let _signals = SIGNALS.lock().await;
 		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(std::time::Duration::from_secs(10));
-		let active = observer.activity().enter().unwrap();
+		let active = observer.admission().enter().unwrap();
 		let mut signals = Signals::new().unwrap();
 		let shutdown = Shutdown {
 			trigger,
@@ -1098,7 +1099,7 @@ mod tests {
 	async fn a_signal_before_the_driver_polls_drains() {
 		let _signals = SIGNALS.lock().await;
 		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(std::time::Duration::from_secs(10));
-		let session = observer.activity().enter().unwrap();
+		let session = observer.admission().enter().unwrap();
 		let signals = Signals::new().unwrap();
 		// SAFETY: raise has no memory-safety preconditions.
 		assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
@@ -1179,7 +1180,7 @@ mod tests {
 		let _signals = SIGNALS.lock().await;
 		let window = std::time::Duration::from_secs(10);
 		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(window);
-		let _active = observer.activity().enter().unwrap();
+		let _active = observer.admission().enter().unwrap();
 		let mut signals = Signals::new().unwrap();
 		let shutdown = Shutdown {
 			trigger,
@@ -1611,7 +1612,7 @@ mod tests {
 	}
 
 	/// A raw TCP bind is a complete server side even when no QUIC bind is set.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn tcp_only_moq_side_starts_a_server() {
 		let invocation = Invocation::try_parse_from([
 			"moq",
@@ -1645,6 +1646,8 @@ mod tests {
 			panic!("start TCP-only server: {err:#}");
 		}
 
+		// The paused clock moves only once every task parks, so the server has settled into
+		// accepting rather than exiting.
 		assert!(
 			kio::clock::timeout(std::time::Duration::from_millis(50), tasks.join_next())
 				.await

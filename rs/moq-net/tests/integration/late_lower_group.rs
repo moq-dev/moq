@@ -38,9 +38,9 @@ fn floored(start: Option<u64>) -> Range {
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap()));
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Four frames starting at `sequence` seconds, so a group created late still starts
@@ -147,7 +147,7 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 	write_group(&track, 1);
 	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 
 	let got = kio::clock::timeout(TIMEOUT * 3, reader)
 		.await
@@ -180,7 +180,7 @@ async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 	write_group(&track, 1);
 	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 	let got = kio::clock::timeout(TIMEOUT * 3, reader)
 		.await
 		.expect("reader hung")
@@ -280,7 +280,7 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	// Idle time lets the merged demand reach the publisher before the lower group exists.
 	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 
 	let mut live_read = vec![(1, 4)];
 	live_read.extend(read_all(&mut live).await);

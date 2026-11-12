@@ -6,7 +6,7 @@
 //! - WebSocket (fallback via [web-transport-ws](https://crates.io/crates/web-transport-ws))
 //! - TCP via the `tcp://` (plaintext) and `tls://` schemes (qmux; requires `tcp` feature)
 //! - Unix domain socket via the `unix://` scheme (qmux, peer-credential aware; requires `uds` feature, unix-only)
-//! - A WebRTC data channel with a browser peer, signaled by the caller (qmux; requires `webrtc` feature)
+//! - A qmux session established elsewhere, such as over a WebRTC data channel (requires `qmux` feature)
 //!
 //! With `net`, `client::Client` connects to relays; transport features enable
 //! `server::Server` for accepting connections. The `mdns` feature finds peers on the local network.
@@ -26,9 +26,6 @@ mod abort;
 pub mod accept;
 pub use moq_sock::bind;
 pub mod cli;
-/// The congestion-controller traits, for a [`quic::Controller`] of the application's own.
-#[cfg(feature = "driver")]
-pub use moq_congestion as congestion;
 #[cfg(feature = "net")]
 pub mod client;
 #[cfg(feature = "net")]
@@ -61,8 +58,9 @@ mod runtime;
 pub mod secret;
 #[cfg(feature = "_transport")]
 pub mod server;
-#[doc(hidden)]
 pub mod settings;
+#[cfg(all(feature = "sim", feature = "net"))]
+pub mod sim;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 pub mod tls;
@@ -77,19 +75,16 @@ pub mod worker;
 mod util;
 #[cfg(feature = "watch")]
 pub mod watch;
-#[cfg(feature = "webrtc")]
-#[doc(hidden)]
-pub mod webrtc;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
-/// Session settings for every qmux transport (WebSocket, `tcp://`, `tls://`, `unix://`, WebRTC),
+/// Session settings for every qmux transport moq-tokio establishes (WebSocket, `tcp://`, `tls://`, `unix://`),
 /// with `quic`'s windows and stream count.
 ///
 /// A qmux session leases receive credit as QUIC does, so it takes the same per-session
 /// numbers rather than qmux's own defaults. moq-lite holds a stream open per subscription,
 /// past qmux's default of 100, where a peer's opens would wait on credit forever.
-#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+#[cfg(any(feature = "websocket", feature = "tcp"))]
 fn qmux_config(quic: &quic::Resolved) -> qmux::Config {
 	let mut config = qmux::Config::default();
 	config.limits = quic.limits();
@@ -98,13 +93,13 @@ fn qmux_config(quic: &quic::Resolved) -> qmux::Config {
 
 /// [`qmux_config`] at the `[quic]` defaults, for a server's qmux sessions, which widen once
 /// admitted (see [`server::Request::with_quic_limits`]).
-#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+#[cfg(any(feature = "websocket", feature = "tcp"))]
 fn qmux_default() -> qmux::Config {
 	qmux_config(&quic::Resolved::default())
 }
 
 /// Run a qmux session's driver on the runtime, handing back the session.
-#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+#[cfg(any(feature = "websocket", feature = "tcp"))]
 fn spawn_qmux<T: qmux::transport::Transport + Send + 'static>(
 	(session, driver): (qmux::Session, qmux::Driver<T>),
 ) -> qmux::Session {
@@ -126,21 +121,6 @@ pub use log::{Log, RedactedUrl};
 pub use server::{Listener, Server};
 #[cfg(feature = "net")]
 pub use transport::Transport;
-
-// Re-export these crates.
-#[cfg(feature = "net")]
-pub use moq_net;
-pub use rustls;
-
-/// Re-exported because [`watch::Files`] surfaces `notify::Result`/`notify::Error`
-/// in its API; a major `notify` bump is therefore a breaking change for this crate.
-#[cfg(feature = "watch")]
-pub use notify;
-
-/// Re-exported because [`tls::init_android`] takes a `jni::Env` handle; a major
-/// `jni` bump is therefore a breaking change for this crate.
-#[cfg(target_os = "android")]
-pub use jni;
 
 #[cfg(feature = "mdns")]
 pub mod mdns;

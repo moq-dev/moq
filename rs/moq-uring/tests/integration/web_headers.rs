@@ -19,12 +19,7 @@ pub fn run(pending: usize, ready: usize, iterations: u64) -> Duration {
 	let mut worker = Worker::new(Config::default()).expect("worker");
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
-	let mut server = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&["h3"], quic::server::ClientAuth::None)
-			.expect("TLS"),
-	);
+	let mut server = quic::server::Config::new(certs.server(&["h3"]));
 	server.transport.limits.max_streams = std::num::NonZeroU64::new((pending + ready + 3) as u64);
 	let socket = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -41,7 +36,7 @@ pub fn run(pending: usize, ready: usize, iterations: u64) -> Duration {
 			.build()
 			.expect("runtime");
 		runtime.block_on(async {
-			let request = moq_tokio::quic::web::proto::ConnectRequest::new(
+			let request = web_transport_proto::ConnectRequest::new(
 				url::Url::parse(&format!("https://{address}/headers")).unwrap(),
 			);
 			let session = support::web_connect(request, Default::default())

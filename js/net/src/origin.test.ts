@@ -4,7 +4,7 @@ import { getter, Once, race, Signal } from "@moq/signals";
 import { announcedView } from "./announced.test-util";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { type Cost, HopSchema, RouteInfo } from "./hop.ts";
+import { type Cost, HopSchema, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import { chainHash, presented, spreadHash } from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
@@ -31,7 +31,7 @@ function serve(
 	origin: Producer,
 	prefix: Path.Valid,
 	consume: () => BroadcastConsumer,
-	route: RouteInfo = RouteInfo.default,
+	route: WireRoute = WireRoute.default,
 ) {
 	const handle = wireOf(origin).receive(prefix, route);
 	void (async () => {
@@ -124,14 +124,14 @@ test("a borrowed table exposes dynamic serving and a live scoped broadcast map",
 	const table: Table = origin;
 	const scope = Path.Pattern.parse("room/**");
 	const live = await announcedView(origin, scope);
-	const changes: ReadonlyMap<Path.Valid, RouteInfo>[] = [];
+	const changes: ReadonlyMap<Path.Valid, WireRoute>[] = [];
 	const stop = live.subscribe((value) => changes.push(value));
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().size).toBe(0);
 
 	const other = publish(origin, Path.from("other"));
 	const localPath = Path.from("room/alice");
-	const localRoute = table.route(localPath, { hidden: true, instance: INSTANCE, cost: 4n });
+	const localRoute = table.route(localPath, { hidden: true, instance: { id: INSTANCE, epoch: 0n }, cost: 4n });
 	const local = localRoute.broadcast;
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().has(localPath)).toBe(false);
@@ -141,18 +141,18 @@ test("a borrowed table exposes dynamic serving and a live scoped broadcast map",
 	localRoute.announce();
 	await settle();
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(localPath)).toEqual(RouteInfo.normalize({ instance: INSTANCE, cost: 4n }));
+	expect(live.peek().get(localPath)).toEqual(WireRoute.normalize({ instance: INSTANCE, cost: 4n }));
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(changes.some((value) => value.get(localPath)?.cost === 4n)).toBe(true);
 
 	const prefix = Path.from("room");
-	const dynamic = table.routePrefix(prefix, { cost: 2n });
+	const dynamic = table.claim(prefix, { cost: 2n });
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(prefix)).toEqual(RouteInfo.normalize({ ...wireOf(dynamic).info, cost: 2n }));
+	expect(live.peek().get(prefix)).toEqual(WireRoute.normalize({ ...wireOf(dynamic).info, cost: 2n }));
 	dynamic.setCost(3n);
 	await settle();
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(prefix)).toEqual(RouteInfo.normalize({ ...wireOf(dynamic).info, cost: 3n }));
+	expect(live.peek().get(prefix)).toEqual(WireRoute.normalize({ ...wireOf(dynamic).info, cost: 3n }));
 
 	dynamic.close();
 	local.close();
@@ -171,26 +171,26 @@ test("an announced local path competes with a received route on cost", async () 
 	const remote = wireOf(origin).receive(path, { instance: INSTANCE, hops: [PEER], cost: 5n });
 	const live = await announcedView(consumer);
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
 
 	// Unannounced, it competes for nothing.
-	const localRoute = origin.route(path, { hidden: true, instance: INSTANCE, cost: 9n });
+	const localRoute = origin.route(path, { hidden: true, instance: { id: INSTANCE, epoch: 0n }, cost: 9n });
 	const local = localRoute.broadcast;
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
 
 	// Cheaper wins; a tie falls to the local broadcast.
 	localRoute.announce();
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
 	localRoute.setCost(5n);
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(RouteInfo.normalize({ instance: INSTANCE, cost: 5n }));
+	expect(live.peek().get(path)).toEqual(WireRoute.normalize({ instance: INSTANCE, cost: 5n }));
 
 	local.close();
 	await settle();
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
 
 	remote.close();
 	await settle();
@@ -211,7 +211,7 @@ test("a scoped route remains visible when an exact local path is outside the sco
 
 	await new Promise<void>((resolve) => setImmediate(resolve));
 
-	expect((await announcedView(origin)).peek().get(path)).toMatchObject(RouteInfo.default);
+	expect((await announcedView(origin)).peek().get(path)).toMatchObject(WireRoute.default);
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(path)).toMatchObject({ cost: 5n });
 
@@ -441,14 +441,48 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 
 	// Announced streams include remote entries.
 	const announced = consumer.routes();
-	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: RouteInfo.default });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: WireRoute.default });
 
 	dispose();
-	expect(await announced.next()).toMatchObject({ prefix: path, kind: "end" });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "offline" });
 	expect(wireOf(consumer).routes(path)).toBe(false);
 
 	announced.close();
 	upstream.close();
+	origin.close();
+});
+
+test("a received route its announcer ends ends, and one its session loses goes offline", async () => {
+	const origin = new Producer();
+	const announced = origin.consume().routes();
+
+	const ended = wireOf(origin).receive(Path.from("ended"), WireRoute.default);
+	const lost = wireOf(origin).receive(Path.from("lost"), WireRoute.default);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("ended"), kind: "start" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("lost"), kind: "start" });
+
+	wireOf(ended).end();
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("ended"), kind: "end" });
+	lost.close();
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("lost"), kind: "offline" });
+
+	announced.close();
+	origin.close();
+});
+
+test("a route received through a scoped handle goes offline when the handle closes", async () => {
+	const origin = new Producer();
+	const announced = origin.consume().routes();
+
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const route = wireOf(scoped).receive(Path.from("room"), WireRoute.default);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
+
+	scoped.close();
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "offline" });
+	route.close();
+
+	announced.close();
 	origin.close();
 });
 
@@ -465,7 +499,7 @@ test("announced keeps a broader covering route at its prefix", async () => {
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
 
 	dispose();
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "end" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "offline" });
 
 	announced.close();
 	upstream.close();
@@ -493,7 +527,7 @@ test("a local publish shadows a remote entry", async () => {
 
 	// One path, one announcement, even though both tables route it.
 	const announced = consumer.routes();
-	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: RouteInfo.default });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: WireRoute.default });
 
 	// Dropping the local publish falls back to the remote entry without a retraction.
 	local.close();
@@ -722,7 +756,7 @@ test("an identical reconnect restarts without an instance and is quiet with one"
 		const consumer = origin.consume();
 		const path = Path.from("room");
 		const announced = consumer.routes();
-		const route = RouteInfo.normalize({ instance, hops: [PEER] });
+		const route = WireRoute.normalize({ instance, hops: [PEER] });
 
 		const old = wireOf(origin).receive(path, route);
 		expect(await announced.next()).toMatchObject({ prefix: path, kind: "start" });
@@ -1086,8 +1120,8 @@ test("a hidden route is invisible to everyone until announce", async () => {
 
 test("closing the origin ends a hidden or withdrawn prefix route's requests", async () => {
 	const origin = new Producer();
-	const hidden = origin.routePrefix(Path.from("hidden"), { hidden: true });
-	const withdrawn = origin.routePrefix(Path.from("withdrawn"));
+	const hidden = origin.claim(Path.from("hidden"), { hidden: true });
+	const withdrawn = origin.claim(Path.from("withdrawn"));
 	withdrawn.withdraw();
 	const pending = [hidden.requested().next(), withdrawn.requested().next()];
 
@@ -1097,7 +1131,7 @@ test("closing the origin ends a hidden or withdrawn prefix route's requests", as
 
 test("a prefix route refuses to announce or re-price once its origin closed, like an exact one", () => {
 	const origin = new Producer();
-	const prefix = origin.routePrefix(Path.from("live"));
+	const prefix = origin.claim(Path.from("live"));
 	const exact = origin.route(Path.from("room"));
 	origin.close();
 	expect(prefix.announced).toBe(false);
@@ -1107,13 +1141,12 @@ test("a prefix route refuses to announce or re-price once its origin closed, lik
 	expect(() => exact.setCost(1n)).toThrow();
 });
 
-test("a prefix route can start hidden, withdraw and come back while it keeps yielding requests", async () => {
+test("a claim can start hidden, withdraw and come back while it keeps yielding requests", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const prefix = Path.from("jobs");
 	const path = Path.from("jobs/a");
-	const route = origin.routePrefix(prefix, { hidden: true, cost: 3n });
-	expect(() => route.broadcast).toThrow("a prefix route owns no broadcast");
+	const route = origin.claim(prefix, { hidden: true, cost: 3n });
 	expect(route.announced).toBe(false);
 	expect(wireOf(consumer).routes(path)).toBe(false);
 	const requests = route.requested();
@@ -1121,7 +1154,7 @@ test("a prefix route can start hidden, withdraw and come back while it keeps yie
 	route.announce();
 	expect(route.announced).toBe(true);
 	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
-		RouteInfo.normalize({ instance: route.instance, cost: 3n }),
+		WireRoute.normalize({ instance: route.instance, cost: 3n }),
 	);
 	const first = consumer.request(path);
 	const asked = (await requests.next()).value;
@@ -1154,15 +1187,14 @@ test("a prefix route can start hidden, withdraw and come back while it keeps yie
 	dropped.close();
 	route.close();
 	expect((await requests.next()).done).toBe(true);
-	expect(() => route.announce()).toThrow("route is closed");
+	expect(() => route.announce()).toThrow("claim is closed");
 	source.close();
 	origin.close();
 });
 
-test("an exact route yields no requests", async () => {
+test("closing an exact route closes its broadcast", () => {
 	const origin = new Producer();
 	const route = origin.route(Path.from("room"));
-	expect((await route.requested().next()).done).toBe(true);
 	route.close();
 	expect(route.broadcast.closed.peek()).toBeNull();
 	origin.close();
@@ -1177,9 +1209,9 @@ test("a request prefers a cheaper received route over an announced local broadca
 		origin,
 		path,
 		provider(upstream),
-		RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
+		WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
 	);
-	const localRoute = origin.route(path, { instance: INSTANCE, cost: 3n });
+	const localRoute = origin.route(path, { instance: { id: INSTANCE, epoch: 0n }, cost: 3n });
 	const local = localRoute.broadcast;
 
 	// The cheaper route is served on demand, so it resolves only once its handler answers.
@@ -1224,21 +1256,21 @@ test("the cheapest received route competes with the local broadcast, not the new
 		origin,
 		path,
 		via("cheap"),
-		RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
+		WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
 	);
 	const pricey = serve(
 		origin,
 		path,
 		via("pricey"),
-		RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 10n }),
+		WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 10n }),
 	);
-	const localRoute = origin.route(path, { instance: INSTANCE, cost: 5n });
+	const localRoute = origin.route(path, { instance: { id: INSTANCE, epoch: 0n }, cost: 5n });
 	const local = localRoute.broadcast;
 
 	await new Promise<void>((resolve) => setImmediate(resolve));
 
 	expect((await announcedView(consumer)).peek().get(path)).toEqual(
-		RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
+		WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
 	);
 	const request = consumer.request(path);
 	await settle();
@@ -1258,7 +1290,7 @@ test("the cheapest received route competes with the local broadcast, not the new
 test("a handle serves a request under live", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
-	const handle = origin.routePrefix(Path.from("live"));
+	const handle = origin.claim(Path.from("live"));
 
 	expect(await consumer.routes().next()).toMatchObject({ prefix: Path.from("live"), kind: "start" });
 
@@ -1285,7 +1317,7 @@ test("a handle serves a request under live", async () => {
 
 test("an originated route serves held content a session delivered", async () => {
 	const origin = new Producer();
-	const handle = origin.routePrefix(Path.from("live"));
+	const handle = origin.claim(Path.from("live"));
 	const it = handle.requested();
 	const pending = wireOf(origin.consume()).demand(Path.from("live/cam"));
 	const { value: req } = await it.next();
@@ -1323,7 +1355,7 @@ test("a received route still serves a broadcast a session delivered", async () =
 
 test("a re-priced route is delivered as an update", async () => {
 	const origin = new Producer();
-	const handle = origin.routePrefix(Path.from("live"));
+	const handle = origin.claim(Path.from("live"));
 	const announced = origin.consume().routes();
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("live"), kind: "start" });
 	handle.setCost(5n);
@@ -1336,7 +1368,7 @@ test("a re-priced route is delivered as an update", async () => {
 
 test("an accepted dynamic broadcast is retired when it closes, and its handle resumes", async () => {
 	const origin = new Producer();
-	const handle = origin.routePrefix(Path.from("live"));
+	const handle = origin.claim(Path.from("live"));
 	const path = Path.from("live/cam");
 	const request = origin.request(path);
 	const it = handle.requested();
@@ -1370,7 +1402,7 @@ test("an accepted dynamic broadcast is retired when it closes, and its handle re
 
 test("reject surfaces the error from demand", async () => {
 	const origin = new Producer();
-	const handle = origin.routePrefix(Path.from("live"));
+	const handle = origin.claim(Path.from("live"));
 	const consumer = origin.consume();
 	const it = handle.requested();
 	const pending = wireOf(consumer).demand(Path.from("live/cam"));
@@ -1387,11 +1419,11 @@ test("a peer is offered and served the cheapest originated route", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const prefix = Path.from("live");
-	const cheap = origin.routePrefix(prefix, { instance: INSTANCE, cost: 1n });
-	const pricey = origin.routePrefix(prefix, { instance: INSTANCE, cost: 10n });
+	const cheap = origin.claim(prefix, { instance: { id: INSTANCE, epoch: 0n }, cost: 1n });
+	const pricey = origin.claim(prefix, { instance: { id: INSTANCE, epoch: 0n }, cost: 10n });
 
 	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
-		RouteInfo.normalize({ instance: INSTANCE, cost: 1n }),
+		WireRoute.normalize({ instance: INSTANCE, cost: 1n }),
 	);
 	const pending = wireOf(consumer).demand(Path.from("live/cam"));
 	const { value: req } = await cheap.requested().next();
@@ -1400,14 +1432,14 @@ test("a peer is offered and served the cheapest originated route", async () => {
 	expect(await pending).toBeDefined();
 
 	// An exact-path local broadcast competes with them on cost too.
-	const localRoute = origin.route(prefix, { instance: INSTANCE, cost: 5n });
+	const localRoute = origin.route(prefix, { instance: { id: INSTANCE, epoch: 0n }, cost: 5n });
 	const local = localRoute.broadcast;
 	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
-		RouteInfo.normalize({ instance: INSTANCE, cost: 1n }),
+		WireRoute.normalize({ instance: INSTANCE, cost: 1n }),
 	);
 	localRoute.setCost(0n);
 	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
-		RouteInfo.normalize({ instance: INSTANCE, cost: 0n }),
+		WireRoute.normalize({ instance: INSTANCE, cost: 0n }),
 	);
 
 	local.close();
@@ -1419,7 +1451,7 @@ test("a peer is offered and served the cheapest originated route", async () => {
 
 test("a shared reject still surfaces from demand", async () => {
 	const origin = new Producer();
-	const handle = origin.routePrefix(Path.from("live"));
+	const handle = origin.claim(Path.from("live"));
 	const consumer = origin.consume();
 	const it = handle.requested();
 
@@ -1441,7 +1473,7 @@ test("a shared reject still surfaces from demand", async () => {
 
 test("a request refusal does not keep demand from asking again", async () => {
 	const origin = new Producer();
-	const handle = origin.routePrefix(Path.from("live"));
+	const handle = origin.claim(Path.from("live"));
 	const consumer = origin.consume();
 	const it = handle.requested();
 
@@ -1465,7 +1497,7 @@ test("a request refusal does not keep demand from asking again", async () => {
 
 test("advancing requested without settling rejects the previous request", async () => {
 	const origin = new Producer();
-	const handle = origin.routePrefix(Path.from("live"));
+	const handle = origin.claim(Path.from("live"));
 	const consumer = origin.consume();
 	const it = handle.requested();
 
@@ -1489,7 +1521,7 @@ test("advancing requested without settling rejects the previous request", async 
 
 test("a rejected request is not asked of the same route again", async () => {
 	const origin = new Producer();
-	const handle = origin.routePrefix(Path.from("live"));
+	const handle = origin.claim(Path.from("live"));
 	const it = handle.requested();
 
 	const request = origin.request(Path.from("live/cam"));
@@ -1524,7 +1556,7 @@ test("an outranked route keeps serving until its replacement answers", async () 
 
 	const older = new BroadcastProducer();
 	const keepOlder = older.consume();
-	const disposeOlder = serve(origin, path, () => keepOlder.clone(), RouteInfo.normalize({ instance: INSTANCE }));
+	const disposeOlder = serve(origin, path, () => keepOlder.clone(), WireRoute.normalize({ instance: INSTANCE }));
 
 	const request = consumer.request(path);
 	await settle();
@@ -1644,13 +1676,13 @@ test("a request on a replaced instance fails over to another route of it", async
 
 	const primary = new BroadcastProducer();
 	const keepPrimary = primary.consume();
-	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), RouteInfo.normalize({ instance: INSTANCE }));
+	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), WireRoute.normalize({ instance: INSTANCE }));
 	const replica = new BroadcastProducer();
 	const disposeReplica = serve(
 		origin,
 		path,
 		provider(replica),
-		RouteInfo.normalize({ instance: INSTANCE, cost: 5n }),
+		WireRoute.normalize({ instance: INSTANCE, cost: 5n }),
 	);
 	const request = consumer.request(path);
 	await settle();
@@ -1658,7 +1690,7 @@ test("a request on a replaced instance fails over to another route of it", async
 	expect(first).toBeDefined();
 
 	const restarted = new BroadcastProducer();
-	const disposeRestarted = serve(origin, path, provider(restarted), RouteInfo.normalize({ instance: newer }));
+	const disposeRestarted = serve(origin, path, provider(restarted), WireRoute.normalize({ instance: newer }));
 	await settle();
 	expect(request.active.peek()).toBe(first);
 
@@ -1697,8 +1729,8 @@ test("a request on a replaced instance fails over to a local replica of it", asy
 
 	const primary = new BroadcastProducer();
 	const keepPrimary = primary.consume();
-	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), RouteInfo.normalize({ instance: INSTANCE }));
-	const localRoute = origin.route(path, { instance: INSTANCE, cost: 5n });
+	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), WireRoute.normalize({ instance: INSTANCE }));
+	const localRoute = origin.route(path, { instance: { id: INSTANCE, epoch: 0n }, cost: 5n });
 	const local = localRoute.broadcast;
 	const request = consumer.request(path);
 	await settle();
@@ -1706,7 +1738,7 @@ test("a request on a replaced instance fails over to a local replica of it", asy
 	expect(first).toBeDefined();
 
 	const restarted = new BroadcastProducer();
-	const disposeRestarted = serve(origin, path, provider(restarted), RouteInfo.normalize({ instance: newer }));
+	const disposeRestarted = serve(origin, path, provider(restarted), WireRoute.normalize({ instance: newer }));
 	await settle();
 	expect(request.active.peek()).toBe(first);
 
@@ -1739,9 +1771,9 @@ test("a stale takeover's refusal leaves a request whose source came back", async
 	const path = Path.from("resumed");
 	const newer = Instance.parse("01900000-0000-7000-8000-000000000002");
 
-	const localRoute = origin.route(path, { instance: INSTANCE, cost: 2n });
+	const localRoute = origin.route(path, { instance: { id: INSTANCE, epoch: 0n }, cost: 2n });
 	const local = localRoute.broadcast;
-	const standby = wireOf(origin).receive(path, RouteInfo.normalize({ instance: INSTANCE, cost: 5n }));
+	const standby = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 5n }));
 	const asked = standby.requested();
 	const request = consumer.request(path);
 	await settle();
@@ -1754,7 +1786,7 @@ test("a stale takeover's refusal leaves a request whose source came back", async
 		origin,
 		path,
 		provider(restarted),
-		RouteInfo.normalize({ instance: newer, cost: 1n }),
+		WireRoute.normalize({ instance: newer, cost: 1n }),
 	);
 	await settle();
 	expect(request.active.peek()).toBe(first);
@@ -1777,13 +1809,52 @@ test("a stale takeover's refusal leaves a request whose source came back", async
 	origin.close();
 });
 
+// A GOAWAY ranks a session's routes last, whatever their cost: a preference state this node
+// keeps, which readers (and the peers a relay forwards to) never see.
+test("a draining route ranks below every other and still serves alone", async () => {
+	const origin = new Producer();
+	const path = Path.from("drained");
+
+	const draining = new BroadcastProducer();
+	const disposeDraining = serve(
+		origin,
+		path,
+		provider(draining),
+		WireRoute.normalize({ instance: INSTANCE, cost: 1n, draining: true }),
+	);
+	const routes = origin.consume().routes();
+	const alone = await routes.next();
+	expect(alone?.kind).toBe("start");
+	expect(alone?.route.cost).toBe(1n);
+	expect(alone?.route.draining).toBeUndefined();
+
+	// A costlier route wins, since the draining one ranks last.
+	const standby = new BroadcastProducer();
+	const disposeStandby = serve(origin, path, provider(standby), WireRoute.normalize({ cost: 5n }));
+	const replaced = await routes.next();
+	expect(replaced?.kind).toBe("restart");
+	expect(replaced?.route.cost).toBe(5n);
+
+	// Without it, the draining route serves again as the last resort.
+	disposeStandby();
+	const restored = await routes.next();
+	expect(restored?.kind).toBe("restart");
+	expect(restored?.route.instance).toBe(INSTANCE);
+
+	routes.close();
+	disposeDraining();
+	draining.close();
+	standby.close();
+	origin.close();
+});
+
 test("a request ends when its winning source goes, even with a standby", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("standby");
 
 	const standby = new BroadcastProducer();
-	const disposeStandby = serve(origin, path, provider(standby), RouteInfo.normalize({ cost: 5n }));
+	const disposeStandby = serve(origin, path, provider(standby), WireRoute.normalize({ cost: 5n }));
 	const winner = new BroadcastProducer();
 	const keepWinner = winner.consume();
 	const disposeWinner = serve(origin, path, () => keepWinner.clone());
@@ -1813,8 +1884,8 @@ test("a request ends when its winning source goes, even with a standby", async (
 test("a refusal is terminal, never falling through to a broader route", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
-	const narrow = origin.routePrefix(Path.from("live"));
-	const wide = origin.routePrefix(Path.from(""));
+	const narrow = origin.claim(Path.from("live"));
+	const wide = origin.claim(Path.from(""));
 	const wideRequests = wide.requested();
 	const wideAsked = wideRequests.next();
 
@@ -1841,7 +1912,7 @@ test("a better route's refusal ends a served request", async () => {
 	const consumer = origin.consume();
 	const served = new BroadcastProducer();
 	// One instance, so the narrower route serves the same instance and the request follows it.
-	const disposeWide = serve(origin, Path.from(""), provider(served), RouteInfo.normalize({ instance: INSTANCE }));
+	const disposeWide = serve(origin, Path.from(""), provider(served), WireRoute.normalize({ instance: INSTANCE }));
 
 	const request = consumer.request(Path.from("live/cam"));
 	await settle();
@@ -1850,8 +1921,8 @@ test("a better route's refusal ends a served request", async () => {
 
 	// The narrower route is asked while the broad one keeps serving, then says no. A
 	// costlier sibling at the same prefix could serve, but is never asked.
-	const narrow = origin.routePrefix(Path.from("live"), { instance: INSTANCE, cost: 1n });
-	const sibling = origin.routePrefix(Path.from("live"), { instance: INSTANCE, cost: 2n });
+	const narrow = origin.claim(Path.from("live"), { instance: { id: INSTANCE, epoch: 0n }, cost: 1n });
+	const sibling = origin.claim(Path.from("live"), { instance: { id: INSTANCE, epoch: 0n }, cost: 2n });
 	const siblingRequests = sibling.requested();
 	const siblingAsked = siblingRequests.next();
 	const { value: req } = await narrow.requested().next();
@@ -1876,14 +1947,14 @@ test("a better route's refusal ends a served request", async () => {
 test("a refusal from a superseded route does not end the request", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
-	const wide = origin.routePrefix(Path.from(""));
+	const wide = origin.claim(Path.from(""));
 	const wideRequests = wide.requested();
 
 	const request = consumer.request(Path.from("live/cam"));
 	const { value: stale } = await wideRequests.next();
 
 	// A narrower route takes over the pending request before the broad one answers.
-	const narrow = origin.routePrefix(Path.from("live"));
+	const narrow = origin.claim(Path.from("live"));
 	const { value: req } = await narrow.requested().next();
 	stale?.reject(new Error("unserved"));
 	await settle();
@@ -1905,7 +1976,7 @@ test("a refusal from a superseded route does not end the request", async () => {
 test("a refusal from a route a local broadcast superseded does not end the request", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
-	const wide = origin.routePrefix(Path.from("live"));
+	const wide = origin.claim(Path.from("live"));
 	const wideRequests = wide.requested();
 
 	const request = consumer.request(Path.from("live/cam"));
@@ -1931,7 +2002,7 @@ test("a refusal from a route a local broadcast superseded does not end the reque
 
 test("close rejects queued requests as unroutable", async () => {
 	const origin = new Producer();
-	const handle = origin.routePrefix(Path.from("live"));
+	const handle = origin.claim(Path.from("live"));
 	const waiting = handle.requested().next();
 	const request = origin.request(Path.from("live/cam"));
 	const { value: req } = await waiting;
@@ -1969,9 +2040,9 @@ test("announced lists full names while covering views and session advertisements
 	const origin = new Producer();
 	const patterns = new Path.Patterns([Path.Pattern.parse("*.hang"), Path.Pattern.parse("**/*.chat")]);
 	const reader = origin.scope(Path.from("project"), patterns).consume();
-	const cam = origin.routePrefix(Path.from("project/cam.hang"));
-	const overlap = origin.routePrefix(Path.from("project/room/mic.hang"));
-	const chat = origin.routePrefix(Path.from("project/lobby.chat"));
+	const cam = origin.claim(Path.from("project/cam.hang"));
+	const overlap = origin.claim(Path.from("project/room/mic.hang"));
+	const chat = origin.claim(Path.from("project/lobby.chat"));
 	const selected = await announcedView(reader);
 	const covering = await announcedView(reader, undefined, { covering: true });
 	const all = [Path.from("cam.hang"), Path.from("lobby.chat"), Path.from("room/mic.hang")];
@@ -1979,7 +2050,7 @@ test("announced lists full names while covering views and session advertisements
 	expect([...covering.peek().keys()].sort()).toEqual(all);
 	expect(Array.from(wireOf(reader).advertised.peek()?.keys() ?? []).sort()).toEqual(all);
 
-	const nested = origin.routePrefix(Path.from("project/room/lobby.chat"));
+	const nested = origin.claim(Path.from("project/room/lobby.chat"));
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(selected.peek().has(Path.from("room/lobby.chat"))).toBe(true);
 	overlap.setCost(2n);
@@ -2002,7 +2073,7 @@ test("announced filters before rooting and retains lifecycle, routing and watch 
 	const interests: string[] = [];
 	const unlisten = wireOf(origin).interests((prefix, wanted) => interests.push(`${wanted ? "+" : "-"}${prefix}`));
 	const source = new BroadcastProducer();
-	const broad = origin.routePrefix(Path.from("room"));
+	const broad = origin.claim(Path.from("room"));
 	const stream = reader.routes();
 	const events = stream[Symbol.asyncIterator]();
 	const covering = await announcedView(reader, undefined, { covering: true });
@@ -2017,7 +2088,7 @@ test("announced filters before rooting and retains lifecycle, routing and watch 
 	expect(request.active.peek()).toBeDefined();
 	request.close();
 
-	const exact = origin.routePrefix(root, { instance: INSTANCE });
+	const exact = origin.claim(root, { instance: { id: INSTANCE, epoch: 0n } });
 	expect(await events.next()).toMatchObject({
 		value: { kind: "start", prefix: Path.empty(), captures: expect.any(Array) },
 	});
@@ -2169,7 +2240,7 @@ test("a rooted producer shares the table and enforces its pattern union", async 
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(() => scoped.request(Path.from("room/alice/deep"))).toThrow("outside the origin scope");
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(() => scoped.routePrefix(Path.from("other"))).toThrow("outside the origin scope");
+	expect(() => scoped.claim(Path.from("other"))).toThrow("outside the origin scope");
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(() => scoped.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("other/**")]))).toThrow(
 		"do not overlap",
@@ -2197,8 +2268,8 @@ test("closing a derived handle releases only what it registered", async () => {
 	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room"))]));
 	const wide = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
 	const inside = publish(scoped, Path.from("room/alice"));
-	const claim = scoped.routePrefix(Path.from("room/claim"));
-	const ranked = wide.routePrefix(Path.from("ranked"));
+	const claim = scoped.claim(Path.from("room/claim"));
+	const ranked = wide.claim(Path.from("ranked"));
 	const peer = serve(scoped, Path.from("room/peer"), provider(new BroadcastProducer()));
 
 	scoped.close();
@@ -2212,7 +2283,7 @@ test("closing a derived handle releases only what it registered", async () => {
 
 	// A released handle refuses new work, so a borrower notices instead of publishing into nothing.
 	expect(() => scoped.route(Path.from("room/late"), { hidden: true }).broadcast).toThrow("origin handle is closed");
-	scoped.routePrefix(Path.from("room/late")).close();
+	scoped.claim(Path.from("room/late")).close();
 	expect((await announcedView(origin)).peek().has(Path.from("room/late"))).toBe(false);
 
 	// The owner and fresh handles keep working.
@@ -2310,7 +2381,7 @@ test("closing a derived handle withdraws the sessions and answers attached throu
 test("a scoped dynamic only serves allowed paths and presents relative requests", async () => {
 	const origin = new Producer();
 	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
-	const dynamic = scoped.routePrefix(Path.from("room"));
+	const dynamic = scoped.claim(Path.from("room"));
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	const denied = origin.request(Path.from("tenant/room/alice/video"));
 	await new Promise<void>((resolve) => setImmediate(resolve));
@@ -2355,9 +2426,7 @@ test("scoped wire views filter and rebase advertisements and blind requests", ()
 
 test("a scoped dynamic is announced only to readers its scope can serve", async () => {
 	const origin = new Producer();
-	const dynamic = origin
-		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/chat")]))
-		.routePrefix(Path.empty());
+	const dynamic = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/chat")])).claim(Path.empty());
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/chat")]));
 	const video = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/video")]));
 	await new Promise<void>((resolve) => setImmediate(resolve));
@@ -2374,8 +2443,8 @@ test("a scoped dynamic is announced only to readers its scope can serve", async 
 
 test("a rooted reader presents the most specific covering route", async () => {
 	const origin = new Producer();
-	const narrow = origin.routePrefix(Path.from("room/alice"), { cost: 9n });
-	const broad = origin.routePrefix(Path.from("room"), { cost: 1n });
+	const narrow = origin.claim(Path.from("room/alice"), { cost: 9n });
+	const broad = origin.claim(Path.from("room"), { cost: 1n });
 	const rooted = origin.scope(Path.from("room/alice"), new Path.Patterns([Path.Pattern.all()]));
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect((await announcedView(rooted)).peek().get(Path.empty())?.cost).toBe(9n);
@@ -2389,8 +2458,8 @@ test("a rooted reader presents the most specific covering route", async () => {
 test("a scoped reader picks the best route its scope can see at a prefix", async () => {
 	const origin = new Producer();
 	const scoped = (pattern: string) => origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse(pattern)]));
-	const chat = scoped("*/chat").routePrefix(Path.empty(), { cost: 1n });
-	const video = scoped("*/video").routePrefix(Path.empty(), { cost: 5n });
+	const chat = scoped("*/chat").claim(Path.empty(), { cost: 1n });
+	const video = scoped("*/video").claim(Path.empty(), { cost: 5n });
 	const reader = scoped("room/video");
 
 	await new Promise<void>((resolve) => setImmediate(resolve));
@@ -2420,8 +2489,8 @@ test("a scoped reader sees a local broadcast that only loses to a route outside 
 	const origin = new Producer();
 	const chat = origin
 		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]))
-		.routePrefix(Path.from("room/alice"), { instance: INSTANCE, cost: 0n });
-	const localRoute = origin.route(Path.from("room/alice"), { instance: INSTANCE, cost: 5n });
+		.claim(Path.from("room/alice"), { instance: { id: INSTANCE, epoch: 0n }, cost: 0n });
+	const localRoute = origin.route(Path.from("room/alice"), { instance: { id: INSTANCE, epoch: 0n }, cost: 5n });
 	const local = localRoute.broadcast;
 	const reader = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*")]));
 
@@ -2454,7 +2523,7 @@ test("broadcast handles carry the path they were created or requested at", async
 	expect(clone?.path).toBe(Path.from("room/alice"));
 
 	// A dynamic handler's standalone broadcast is named by the request, too.
-	const dynamic = origin.routePrefix(Path.from("live"));
+	const dynamic = origin.claim(Path.from("live"));
 	const request = origin.request(Path.from("live/bob"));
 	const pending = await dynamic.requested().next();
 	const served = new BroadcastProducer();
@@ -2475,8 +2544,8 @@ test("a higher epoch of a dynamic route supersedes a cheaper local broadcast of 
 	const origin = new Producer();
 	const path = Path.from("camera");
 	const instance = Instance.random();
-	const localRoute = origin.route(path, { instance, epoch: 1n, cost: 0n });
-	const dynamic = origin.routePrefix(path, { instance, epoch: 2n, cost: 10n });
+	const localRoute = origin.route(path, { instance: { id: instance, epoch: 1n }, cost: 0n });
+	const dynamic = origin.claim(path, { instance: { id: instance, epoch: 2n }, cost: 10n });
 	const served = new BroadcastProducer();
 	const requests = dynamic.requested();
 	const request = origin.consume().request(path);
@@ -2497,9 +2566,9 @@ test("a higher epoch that is not the best route still supersedes a local broadca
 	const origin = new Producer();
 	const path = Path.from("camera");
 	const stale = Instance.random();
-	const localRoute = origin.route(path, { instance: stale, epoch: 1n, cost: 0n });
-	const newer = origin.routePrefix(path, { instance: stale, epoch: 2n, cost: 10n });
-	const other = origin.routePrefix(path, { instance: Instance.random(), cost: 5n });
+	const localRoute = origin.route(path, { instance: { id: stale, epoch: 1n }, cost: 0n });
+	const newer = origin.claim(path, { instance: { id: stale, epoch: 2n }, cost: 10n });
+	const other = origin.claim(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 5n });
 	const served = new BroadcastProducer();
 	const requests = other.requested();
 	const request = origin.consume().request(path);
@@ -2521,8 +2590,8 @@ test("a publisher weighs a local broadcast against the routes it may forward onl
 	const origin = new Producer();
 	const path = Path.from("camera");
 	const instance = Instance.random();
-	const localRoute = origin.route(path, { instance, epoch: 1n, cost: 0n });
-	const originated = origin.routePrefix(path, { cost: 5n });
+	const localRoute = origin.route(path, { instance: { id: instance, epoch: 1n }, cost: 0n });
+	const originated = origin.claim(path, { cost: 5n });
 	// A session delivered the higher epoch, which a publisher never forwards back out.
 	const received = wireOf(origin).receive(path, { instance, epoch: 2n, cost: 10n, hops: [PEER] });
 	expect(wireOf(origin.consume()).local(path, instance)).toBeDefined();
@@ -2535,8 +2604,8 @@ test("a publisher weighs a local broadcast against the routes it may forward onl
 test("a scope's merged covering prefixes never supersede across prefixes", async () => {
 	const origin = new Producer();
 	const instance = Instance.random();
-	const room = origin.routePrefix(Path.from("room"), { instance, epoch: 2n });
-	const video = origin.routePrefix(Path.from("room/video"), { instance, epoch: 1n });
+	const room = origin.claim(Path.from("room"), { instance: { id: instance, epoch: 2n } });
+	const video = origin.claim(Path.from("room/video"), { instance: { id: instance, epoch: 1n } });
 	const reader = origin.scope(Path.from("room/video"), new Path.Patterns([Path.Pattern.all()])).consume();
 	await settle();
 	const table = wireOf(reader).advertised.peek();
@@ -2553,14 +2622,14 @@ test("supersession only counts routes the reader can see", async () => {
 	const instance = Instance.random();
 	const video = origin
 		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/video")]))
-		.routePrefix(Path.empty(), { instance, epoch: 1n });
+		.claim(Path.empty(), { instance: { id: instance, epoch: 1n } });
 	const live = await announcedView(origin, Path.Pattern.parse("room/video"), { covering: true });
 	await settle();
 	expect(live.peek().size).toBe(1);
 	// A higher epoch the reader cannot see never hides the route it can.
 	const chat = origin
 		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/chat")]))
-		.routePrefix(Path.empty(), { instance, epoch: 2n });
+		.claim(Path.empty(), { instance: { id: instance, epoch: 2n } });
 	await settle();
 	expect([...live.peek().values()].map((route) => route.epoch)).toEqual([1n]);
 	chat.close();
@@ -2575,7 +2644,7 @@ test("the newest epoch of an instance is announced in place over a cheaper one",
 	const announced = consumer.routes();
 	const instance = Instance.random();
 
-	const oldRoute = origin.route(path, { instance, epoch: 1n, cost: 1n });
+	const oldRoute = origin.route(path, { instance: { id: instance, epoch: 1n }, cost: 1n });
 	const old = oldRoute.broadcast;
 	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start" });
 
@@ -2602,7 +2671,7 @@ test("demand held across an instance change asks again, unless it named the old 
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("live/cam");
-	const handle = origin.routePrefix(Path.from("live"), { instance: INSTANCE });
+	const handle = origin.claim(Path.from("live"), { instance: { id: INSTANCE, epoch: 0n } });
 	const it = handle.requested();
 	const pinned = wireOf(consumer).demand(path, INSTANCE);
 	const unpinned = wireOf(consumer).demand(path);
@@ -2631,7 +2700,7 @@ test("a demand refused across an instance change does not lose the carried deman
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("live/cam");
-	const handle = origin.routePrefix(Path.from("live"), { instance: INSTANCE });
+	const handle = origin.claim(Path.from("live"), { instance: { id: INSTANCE, epoch: 0n } });
 	const it = handle.requested();
 	const unpinned = wireOf(consumer).demand(path);
 	const pinned = wireOf(consumer).demand(path, INSTANCE);
@@ -2651,7 +2720,7 @@ test("a demand refused across an instance change does not lose the carried deman
 test("demand held across an instance round trip still asks again", async () => {
 	const origin = new Producer();
 	const path = Path.from("live/cam");
-	const handle = origin.routePrefix(Path.from("live"), { instance: INSTANCE });
+	const handle = origin.claim(Path.from("live"), { instance: { id: INSTANCE, epoch: 0n } });
 	const it = handle.requested();
 	const demanded = wireOf(origin.consume()).demand(path);
 	const { value: req } = await it.next();
@@ -2677,16 +2746,20 @@ test("demand held across an instance round trip still asks again", async () => {
 
 test("re-pricing from the current route keeps the instance", () => {
 	const origin = new Producer();
-	const handle = origin.routePrefix(Path.from("live"), { instance: INSTANCE, cost: 5n });
+	const handle = origin.claim(Path.from("live"), { instance: { id: INSTANCE, epoch: 0n }, cost: 5n });
 	handle.setCost(1n);
-	expect(wireOf(handle).info).toEqual(RouteInfo.normalize({ instance: INSTANCE, cost: 1n }));
+	expect(wireOf(handle).info).toEqual(WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
 
-	const broadcastRoute = origin.route(Path.from("room"), { hidden: true, instance: INSTANCE, cost: 5n });
+	const broadcastRoute = origin.route(Path.from("room"), {
+		hidden: true,
+		instance: { id: INSTANCE, epoch: 0n },
+		cost: 5n,
+	});
 	const broadcast = broadcastRoute.broadcast;
 	expect(wireOf(broadcastRoute).info).toBeUndefined();
 	broadcastRoute.announce();
 	broadcastRoute.setCost(1n);
-	expect(wireOf(broadcastRoute).info).toEqual(RouteInfo.normalize({ instance: INSTANCE, cost: 1n }));
+	expect(wireOf(broadcastRoute).info).toEqual(WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
 	broadcastRoute.withdraw();
 	expect(wireOf(broadcastRoute).info).toBeUndefined();
 
@@ -2699,7 +2772,7 @@ test("a peer naming another instance is refused rather than served a different i
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("room");
-	const localRoute = origin.route(path, { instance: INSTANCE });
+	const localRoute = origin.route(path, { instance: { id: INSTANCE, epoch: 0n } });
 	const local = localRoute.broadcast;
 
 	expect(wireOf(consumer).local(path, INSTANCE)).toBeDefined();
@@ -2714,14 +2787,14 @@ test("a peer naming another instance is refused rather than served a different i
 test("a newer instance ends pinned and unpinned requests on the replaced publisher alike", () => {
 	const origin = new Producer();
 	const path = Path.from("room");
-	const first = origin.route(path, { instance: INSTANCE });
+	const first = origin.route(path, { instance: { id: INSTANCE, epoch: 0n } });
 	const reader = origin.consume();
 	const pinned = reader.request(path, { instance: INSTANCE });
 	const unpinned = reader.request(path);
 	expect(pinned.active.peek()?.instance).toBe(INSTANCE);
 	expect(unpinned.active.peek()?.instance).toBe(INSTANCE);
 	const replacement = Instance.parse("01900000-0000-7000-8000-000000000002");
-	origin.route(path, { instance: replacement });
+	origin.route(path, { instance: { id: replacement, epoch: 0n } });
 	expect(() => first.announce()).toThrow("broadcast is closed");
 	first.withdraw();
 	expect(pinned.active.peek()).toBeUndefined();
@@ -2743,7 +2816,7 @@ test("a request held across an instance change asks again and never takes the ol
 	const origin = new Producer();
 	const prefix = Path.from("room");
 	const path = Path.from("room/cam");
-	const dynamic = origin.routePrefix(prefix, { instance: INSTANCE });
+	const dynamic = origin.claim(prefix, { instance: { id: INSTANCE, epoch: 0n } });
 	const unpinned = origin.consume().request(path);
 	const pinned = origin.consume().request(path, { instance: INSTANCE });
 	const requests = dynamic.requested();
@@ -2776,7 +2849,7 @@ test.each([
 	const origin = new Producer();
 	const prefix = Path.from("live");
 	const path = Path.from("live/cam");
-	const dynamic = origin.routePrefix(prefix, { instance: named });
+	const dynamic = origin.claim(prefix, { instance: named && { id: named, epoch: 0n } });
 	// A claim naming no instance serves one of its own.
 	const from = dynamic.instance;
 	expect(from).toBeDefined();
@@ -2863,7 +2936,7 @@ test.each([
 test("an instance update does not retain an answer that already closed", async () => {
 	const origin = new Producer();
 	const path = Path.from("live/cam");
-	const dynamic = origin.routePrefix(Path.from("live"), { instance: INSTANCE });
+	const dynamic = origin.claim(Path.from("live"), { instance: { id: INSTANCE, epoch: 0n } });
 	const requests = dynamic.requested();
 	const held = origin.consume().request(path);
 	const old = new BroadcastProducer();
@@ -2891,7 +2964,7 @@ test("an instance update does not retain an answer that already closed", async (
 test("an unread resolved request retains its broadcast until its last handle closes", async () => {
 	const origin = new Producer();
 	const path = Path.from("live/cam");
-	const dynamic = origin.routePrefix(Path.from("live"), { instance: INSTANCE });
+	const dynamic = origin.claim(Path.from("live"), { instance: { id: INSTANCE, epoch: 0n } });
 	const requests = dynamic.requested();
 	const held = origin.consume().request(path);
 	const old = new SessionBroadcast();
@@ -2911,7 +2984,7 @@ test("an unread resolved request retains its broadcast until its last handle clo
 test("a session's re-request after an instance update asks the handler again", async () => {
 	const origin = new Producer();
 	const path = Path.from("live/cam");
-	const dynamic = origin.routePrefix(Path.from("live"), { instance: INSTANCE });
+	const dynamic = origin.claim(Path.from("live"), { instance: { id: INSTANCE, epoch: 0n } });
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 
@@ -2941,8 +3014,8 @@ test("an update does not override route selection: another claim at the instance
 	const origin = new Producer();
 	const prefix = Path.from("live");
 	const path = Path.from("live/cam");
-	const first = origin.routePrefix(prefix, { instance: INSTANCE, cost: 1n });
-	const second = origin.routePrefix(prefix, { instance: INSTANCE, cost: 5n });
+	const first = origin.claim(prefix, { instance: { id: INSTANCE, epoch: 0n }, cost: 1n });
+	const second = origin.claim(prefix, { instance: { id: INSTANCE, epoch: 0n }, cost: 5n });
 	const firstRequests = first.requested();
 	const secondRequests = second.requested();
 
@@ -3015,8 +3088,8 @@ test("published names refuse navigation segments", () => {
 		for (const name of ["room/./cam", "room/../cam", ".", ".."]) {
 			const path = Path.from(name);
 			expect(() => origin.route(path, { hidden: true }).broadcast).toThrow();
-			expect(() => origin.routePrefix(path)).toThrow();
-			expect(() => wireOf(origin).receive(path, RouteInfo.default)).toThrow();
+			expect(() => origin.claim(path)).toThrow();
+			expect(() => wireOf(origin).receive(path, WireRoute.default)).toThrow();
 		}
 		const scoped = origin.scope(Path.from("room/.."), new Path.Patterns([Path.Pattern.all()]));
 		expect(() => scoped.route(Path.from("cam"), { hidden: true }).broadcast).toThrow();

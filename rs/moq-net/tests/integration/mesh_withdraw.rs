@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use futures::channel::mpsc;
 
-use moq_net::{Hop, Version, cache, origin};
+use moq_net::{Version, cache, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_with_latency};
-use support::{Kind, drain, watch};
+use support::{Kind, Rng, drain, watch};
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	produce(hop, origin::Config::default().update_hold)
@@ -25,12 +25,12 @@ fn produce_origin(hop: u64) -> origin::Producer {
 /// groups: nothing here carries media, and the expiry sweep would keep a timer
 /// armed forever, so [`kio::clock::sim::idle`] could never see the mesh settle.
 fn produce(hop: u64, hold: Duration) -> origin::Producer {
-	let mut config = origin::Config::new(Hop::new(hop).unwrap());
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = cache::Pool::unbounded();
 	config.update_hold = hold;
 	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// `n` relays meshed over `edges`, watched from the last one.
@@ -288,10 +288,10 @@ impl Cluster {
 		let relays: Vec<_> = (1..=n as u64)
 			.map(|id| {
 				let mut config = config.clone();
-				config.hop = Hop::new(id).unwrap();
+				config.hop = std::num::NonZeroU64::new(id).unwrap();
 				let (origin, driver) = origin::Producer::new(config);
 				support::harness::spawn(driver);
-				origin
+				origin.with_proxy(true)
 			})
 			.collect();
 		let mut pairs = Vec::new();
@@ -357,8 +357,7 @@ impl Cluster {
 /// #4349: a publisher on one relay cleanly closes a broadcast, and a client
 /// watching from another relay sees one retraction and no re-announce. On the
 /// release before the retraction quarantine (#5376), this client saw it
-/// retracted, announced, and retracted again. Relay 0 still restarts onto a
-/// stale path after the hold; see [`residual_slow_ring_reannounces`].
+/// retracted, announced, and retracted again. See [`slow_ring_retracts_once`].
 #[kio::test]
 async fn cross_node_close_retracts_once_lite07() {
 	cross_node_close_retracts_once("moq-lite-07-wip").await;
@@ -453,11 +452,10 @@ async fn late_better_path(mesh: &str, client: &str) -> (Vec<Kind>, Vec<Kind>) {
 }
 
 /// A relay that first hears a broadcast over a longer path moves to the shorter
-/// one when it arrives, and a client watching it sees a live broadcast only
-/// update. Lite-07 relays carry the instance the publisher's relay minted for
-/// its lite-06 or lite-07 publisher, so the move keeps the instance, and a
-/// lite-06 watcher gets the update in place rather than a retraction and a new
-/// announcement.
+/// one when it arrives, under the same claim and instance: lite-07 relays route by
+/// the publisher's origin node, so the move is a next hop the relay picks. The route
+/// travels with the claim, so the shorter one arrives late too, and a client of
+/// either version sees the cheaper path as an update in place.
 #[kio::test]
 async fn late_better_path_updates_in_place() {
 	for client in ["moq-lite-06", "moq-lite-07-wip"] {
@@ -467,17 +465,16 @@ async fn late_better_path_updates_in_place() {
 	}
 }
 
-// Residual counterexamples on `main`, with the hold and the retraction
-// quarantine. Each pins what the cluster does today, so a change either way
-// fails here. Routes and announces (quest/m2/cluster-routing/routes/README.md) must
-// bring each to a single retraction everywhere.
+// Counterexamples to the hop-chain cluster (with the hold and the retraction
+// quarantine), each of which moved onto a stale path or revived a broadcast
+// before retracting it. Routed by origin node, each retracts once everywhere.
 
 /// A ring of six relays with links under 150 ms. Relay 3 hears the withdrawal
-/// from relay 2 at 84 ms, but relay 5's equal-cost copy, the long way round,
-/// stays live until 446 ms. That outlasts the hold, so relay 3 moves onto the
-/// stale copy and its client sees the route update before it ends.
+/// from relay 2 at 84 ms, while relay 5's equal-cost copy, the long way round,
+/// stays live until 446 ms. Hop chains moved relay 3 onto the stale copy; the
+/// origin's own retraction is final for every relay.
 #[kio::test]
-async fn residual_slow_ring_reannounces() {
+async fn slow_ring_retracts_once() {
 	#[rustfmt::skip]
 	const EDGES: &[Link] = &[
 		((0, 1), ms(141)), ((0, 2), ms(55)), ((2, 3), ms(29)), ((1, 4), ms(135)), ((4, 5), ms(148)), ((3, 5), ms(22)),
@@ -486,16 +483,16 @@ async fn residual_slow_ring_reannounces() {
 	let mut cluster = Cluster::new("moq-lite-07-wip", EDGES, origin::Config::default(), 0, 3).await;
 	let (broadcast, _) = cluster.publish("room/a").await;
 	let (client, relays) = cluster.close("room/a", broadcast).await;
-	assert_eq!(client, [Update, End]);
-	let relays: Vec<&[Kind]> = relays.iter().map(Vec::as_slice).collect();
-	assert_eq!(relays, [&[End][..], &[End], &[End], &[Update, End], &[End], &[End]]);
+	assert_eq!(client, [End]);
+	assert!(relays.iter().all(|kinds| kinds == &[End]), "{relays:?}");
 	assert_capped_withdrawal(EDGES, 0, 3).await;
 }
 
 /// Nine relays, reduced from a seeded random mesh with [`random_mesh`]'s
-/// links. Relays 0, 5, 6, 7 and 8 move onto stale paths before they retract.
+/// links, on which hop chains moved relays 0, 5, 6, 7 and 8 onto stale paths
+/// before they retracted.
 #[kio::test]
-async fn residual_mesh_revives() {
+async fn mesh_retracts_once() {
 	#[rustfmt::skip]
 	const EDGES: &[Link] = &[
 		((3, 4), ms(10)), ((3, 5), ms(12)), ((1, 6), ms(149)), ((0, 7), ms(73)), ((6, 8), ms(20)), ((1, 4), ms(26)),
@@ -505,22 +502,8 @@ async fn residual_mesh_revives() {
 	let mut cluster = Cluster::new("moq-lite-07-wip", EDGES, origin::Config::default(), 4, 8).await;
 	let (broadcast, _) = cluster.publish("room/a").await;
 	let (client, relays) = cluster.close("room/a", broadcast).await;
-	assert_eq!(client, [Update, End]);
-	let relays: Vec<&[Kind]> = relays.iter().map(Vec::as_slice).collect();
-	assert_eq!(
-		relays,
-		[
-			&[Update, End][..],
-			&[End],
-			&[End],
-			&[End],
-			&[End],
-			&[Update, End],
-			&[Update, End],
-			&[Update, End],
-			&[Update, End],
-		]
-	);
+	assert_eq!(client, [End]);
+	assert!(relays.iter().all(|kinds| kinds == &[End]), "{relays:?}");
 	assert_capped_withdrawal(EDGES, 4, 8).await;
 }
 
@@ -536,31 +519,13 @@ async fn residual_late_better_path_restarts_on_lite06() {
 
 async fn assert_capped_withdrawal(edges: &[Link], publisher: usize, watcher: usize) {
 	let mut config = origin::Config::default();
-	config.max_hops = origin::HopLimit::new(diameter(edges) + 2).unwrap();
+	config.max_hops = std::num::NonZeroUsize::new(diameter(edges) + 2).unwrap();
 	let mut cluster = Cluster::new("moq-lite-07-wip", edges, config, publisher, watcher).await;
 	let (broadcast, _) = cluster.publish("room/a").await;
 	let (client, relays) = cluster.close("room/a", broadcast).await;
 	assert_eq!(client.last(), Some(&Kind::End));
 	for kinds in relays {
 		assert_eq!(kinds.last(), Some(&Kind::End));
-	}
-}
-
-/// splitmix64, so every platform builds the same meshes.
-struct Rng(u64);
-
-impl Rng {
-	fn next(&mut self) -> u64 {
-		self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-		let mut z = self.0;
-		z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-		z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-		z ^ (z >> 31)
-	}
-
-	/// A value in `lo..=hi`.
-	fn range(&mut self, lo: u64, hi: u64) -> u64 {
-		lo + self.next() % (hi - lo + 1)
 	}
 }
 
@@ -587,22 +552,48 @@ fn random_mesh(seed: u64) -> (Vec<Link>, usize) {
 	(edges, rng.range(0, n as u64 - 1) as usize)
 }
 
-/// One clean close on each of 200 seeded random meshes: how many relays
-/// announce the broadcast again before their last retraction (by restarting
-/// onto a stale path, or by reviving it after retracting), how many of those
-/// revive, and how many updates they send beyond the one retraction. Pinned at
-/// today's counts; Routes and announces brings all three to zero.
-#[kio::test]
-async fn residual_random_meshes() {
-	assert_eq!(withdrawal_counts(false).await, (231, 3, 290));
+/// One clean close on each of 200 seeded random meshes, sharded so each test
+/// fits the gate: every seed costs about 100 ms of debug-build CPU, nearly all of
+/// it the mesh converging on its node claims before anything is published.
+///
+/// `random` counts how many relays announce the broadcast again before their
+/// last retraction (by restarting onto a stale path, or by reviving it after
+/// retracting), how many of those revive, and how many updates they send beyond
+/// the one retraction. Hop chains counted (231, 3, 290); routed by origin node,
+/// none.
+///
+/// `capped` uses the same topologies and terminal states with room for the
+/// diameter and two extra hops, including the publishing client outside the
+/// relay graph. Hop chains counted (177, 0, 192).
+macro_rules! random_meshes {
+	($($shard:ident: $seeds:expr),* $(,)?) => {
+		mod random_meshes_retract_once {
+			$(
+				mod $shard {
+					#[kio::test]
+					async fn random() {
+						assert_eq!(super::super::withdrawal_counts(false, $seeds).await, (0, 0, 0));
+					}
+
+					#[kio::test]
+					async fn capped() {
+						assert_eq!(super::super::withdrawal_counts(true, $seeds).await, (0, 0, 0));
+					}
+				}
+			)*
+		}
+	};
 }
 
-/// The same topologies and terminal states with room for the diameter and two
-/// extra hops, including the publishing client outside the relay graph.
-#[kio::test]
-async fn capped_random_meshes_hunt_less() {
-	let capped = withdrawal_counts(true).await;
-	assert_eq!(capped, (177, 0, 192));
+random_meshes! {
+	seeds_000: 0..25,
+	seeds_025: 25..50,
+	seeds_050: 50..75,
+	seeds_075: 75..100,
+	seeds_100: 100..125,
+	seeds_125: 125..150,
+	seeds_150: 150..175,
+	seeds_175: 175..200,
 }
 
 fn diameter(edges: &[Link]) -> usize {
@@ -633,13 +624,13 @@ fn diameter(edges: &[Link]) -> usize {
 		.unwrap()
 }
 
-async fn withdrawal_counts(capped: bool) -> (usize, usize, usize) {
+async fn withdrawal_counts(capped: bool, seeds: std::ops::Range<u64>) -> (usize, usize, usize) {
 	let (mut hunted, mut revived, mut extra) = (0, 0, 0);
-	for seed in 0..200 {
+	for seed in seeds {
 		let (edges, publisher) = random_mesh(seed);
 		let mut config = origin::Config::default();
 		if capped {
-			config.max_hops = origin::HopLimit::new(diameter(&edges) + 2).unwrap();
+			config.max_hops = std::num::NonZeroUsize::new(diameter(&edges) + 2).unwrap();
 		}
 		let mut cluster = Cluster::new("moq-lite-07-wip", &edges, config, publisher, 0).await;
 		let (broadcast, _) = cluster.publish("room/a").await;
@@ -652,4 +643,205 @@ async fn withdrawal_counts(capped: bool) -> (usize, usize, usize) {
 		}
 	}
 	(hunted, revived, extra)
+}
+
+/// A relay translating a moq-lite-07 claim for a lite-06 peer starts its chain with
+/// the claiming node's route identity, not that node's hop, so the claim coming
+/// back to that node over lite-06 is a reflection all the same. Filed as one of its
+/// own claims again, the broadcast would outlive its publisher, carried around the
+/// ring by itself.
+#[kio::test]
+async fn mixed_version_ring_withdraw_retracts() {
+	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
+	let lite06: Version = "moq-lite-06".parse().unwrap();
+	let a = produce_origin(1);
+	let b = produce_origin(2);
+	let c = produce_origin(3);
+	let _ab = peer(lite07, &a, &b).await;
+	let _bc = peer(lite06, &b, &c).await;
+	// C publishes to A but hears nothing from it directly, so its only route to A's
+	// broadcast is B's translation.
+	let mut options = MockConnectOptions::new(lite06);
+	options.client_publish = Some(c.clone().with_link(origin::Link::Peer).consume().with_hidden(true));
+	options.server_subscribe = Some(a.clone().with_link(origin::Link::Peer));
+	let _ca = connect_mock(options).await;
+
+	let mut at_a = watch(a.consume().routes());
+	let mut at_c = watch(c.consume().routes());
+	let broadcast = a.route("room/x", origin::RouteOptions::hidden()).unwrap();
+	broadcast.announce().unwrap();
+	kio::clock::sim::idle().await;
+	assert_eq!(drain(&mut at_a).get("room/x"), Some(&vec![Kind::Start]));
+	assert_eq!(drain(&mut at_c).get("room/x"), Some(&vec![Kind::Start]));
+
+	drop(broadcast);
+	// A reflected claim circles the ring at one instant forever, so a regression never
+	// settles here and fails on the runner's timeout instead.
+	kio::clock::sim::idle().await;
+	for (relay, watched) in [("a", &mut at_a), ("c", &mut at_c)] {
+		let updates = drain(watched);
+		let kinds = updates.get("room/x");
+		assert_eq!(
+			kinds.and_then(|kinds| kinds.last()),
+			Some(&Kind::End),
+			"{relay}: {kinds:?}"
+		);
+	}
+}
+
+/// Relays peered over `links`, each moq-lite-06 or moq-lite-07: broadcasts announced at
+/// relay `publisher` start at every relay, and once withdrawn end at every one.
+///
+/// A claim crossing from lite-06 into lite-07 at one relay and back out at another
+/// must still name the first, or the two keep re-originating each other's copy after
+/// its source left. Such a claim circles at one instant forever, so a regression never
+/// settles here and fails on the runner's timeout instead.
+///
+/// Whether a topology loops can hang on the route identities, which are random, and
+/// selection hashes them with the path, so eight paths each draw their own tie-breaks.
+async fn assert_mixed_withdrawal(links: &[(usize, usize, &str)], publisher: usize) {
+	let n = links.iter().map(|&(a, b, _)| a.max(b) + 1).max().unwrap();
+	let relays: Vec<_> = (1..=n as u64).map(produce_origin).collect();
+	let mut pairs = Vec::new();
+	for &(a, b, version) in links {
+		pairs.push(peer(version.parse().unwrap(), &relays[a], &relays[b]).await);
+	}
+	let mut watched: Vec<_> = relays.iter().map(|relay| watch(relay.consume().routes())).collect();
+
+	let paths: Vec<String> = (0..8).map(|i| format!("room/{i}")).collect();
+	let broadcasts: Vec<_> = (paths.iter())
+		.map(|path| {
+			let broadcast = relays[publisher].route(path, origin::RouteOptions::hidden()).unwrap();
+			broadcast.announce().unwrap();
+			broadcast
+		})
+		.collect();
+	kio::clock::sim::idle().await;
+	for (relay, watched) in watched.iter_mut().enumerate() {
+		let mut updates = drain(watched);
+		for path in &paths {
+			let kinds = updates.remove(path.as_str());
+			let (first, last) = (
+				kinds.as_ref().and_then(|k| k.first()),
+				kinds.as_ref().and_then(|k| k.last()),
+			);
+			assert_eq!(first, Some(&Kind::Start), "relay {relay} {path}: {kinds:?}");
+			assert_ne!(last, Some(&Kind::End), "relay {relay} {path}: {kinds:?}");
+		}
+	}
+
+	drop(broadcasts);
+	kio::clock::sim::idle().await;
+	for (relay, watched) in watched.iter_mut().enumerate() {
+		let mut updates = drain(watched);
+		for path in &paths {
+			let kinds = updates.remove(path.as_str());
+			let last = kinds.as_ref().and_then(|kinds| kinds.last());
+			assert_eq!(last, Some(&Kind::End), "relay {relay} {path}: {kinds:?}");
+		}
+	}
+}
+
+const LITE06: &str = "moq-lite-06";
+const LITE07: &str = "moq-lite-07-wip";
+
+/// A ring alternating lite-07 and lite-06 links: A-07-B-06-C-07-D-06-A.
+#[kio::test]
+async fn alternating_version_ring_withdraw_retracts() {
+	let ring = [(0, 1, LITE07), (1, 2, LITE06), (2, 3, LITE07), (3, 0, LITE06)];
+	assert_mixed_withdrawal(&ring, 0).await;
+}
+
+/// A rolling upgrade: one relay still on lite-06, linked to each relay of a lite-07
+/// full mesh.
+const ROLLING_UPGRADE: &[(usize, usize, &str)] = &[
+	(0, 1, LITE06),
+	(0, 2, LITE06),
+	(0, 3, LITE06),
+	(1, 2, LITE07),
+	(1, 3, LITE07),
+	(2, 3, LITE07),
+];
+
+/// [`ROLLING_UPGRADE`] with the publisher on the lite-06 relay.
+#[kio::test]
+async fn rolling_upgrade_withdraw_retracts() {
+	assert_mixed_withdrawal(ROLLING_UPGRADE, 0).await;
+}
+
+/// [`ROLLING_UPGRADE`] with the publisher on a lite-07 relay.
+#[kio::test]
+async fn rolling_upgrade_from_lite07_withdraw_retracts() {
+	assert_mixed_withdrawal(ROLLING_UPGRADE, 1).await;
+}
+
+/// A relay never carries traffic between two upstreams, across versions too: a
+/// broadcast it learned from a moq-lite-06 upstream enters the route layer as one of
+/// its own claims, yet never reaches a moq-lite-07 upstream, while one published at
+/// the relay does.
+#[kio::test]
+async fn an_upstream_learned_claim_never_reaches_another_upstream() {
+	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
+	let lite06: Version = "moq-lite-06".parse().unwrap();
+	let first = produce_origin(1);
+	let relay = produce_origin(2);
+	let second = produce_origin(3);
+	let upstream = relay.clone().with_link(origin::Link::Upstream);
+	let mut pairs = Vec::new();
+	for (version, core) in [(lite06, &first), (lite07, &second)] {
+		let core = core.clone().with_link(origin::Link::Peer);
+		let mut options = MockConnectOptions::new(version);
+		options.client_publish = Some(upstream.consume().with_hidden(true));
+		options.client_subscribe = Some(upstream.clone());
+		options.server_publish = Some(core.consume().with_hidden(true));
+		options.server_subscribe = Some(core);
+		pairs.push(connect_mock(options).await);
+	}
+
+	let mut at_relay = watch(relay.consume().routes());
+	let mut at_second = watch(second.consume().routes());
+	let learned = first.route("room/learned", origin::RouteOptions::hidden()).unwrap();
+	learned.announce().unwrap();
+	let local = relay.route("room/local", origin::RouteOptions::hidden()).unwrap();
+	local.announce().unwrap();
+	kio::clock::sim::idle().await;
+	let relayed = drain(&mut at_relay);
+	assert!(relayed.contains_key("room/learned"), "{relayed:?}");
+	let seen = drain(&mut at_second);
+	assert_eq!(seen.get("room/local"), Some(&vec![Kind::Start]), "{seen:?}");
+	assert!(!seen.contains_key("room/learned"), "{seen:?}");
+}
+
+/// A node that does not proxy is never transit, across versions too: a broadcast it
+/// learned over moq-lite-06 enters the route layer as one of its own claims, yet never
+/// reaches a moq-lite-07 peer, while one published there does.
+#[kio::test]
+async fn a_node_that_does_not_proxy_keeps_what_it_learned_over_lite06() {
+	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
+	let lite06: Version = "moq-lite-06".parse().unwrap();
+	let first = produce_origin(1);
+	let app = produce_origin(2).with_proxy(false);
+	let second = produce_origin(3);
+	let mut pairs = Vec::new();
+	for (version, relay) in [(lite06, &first), (lite07, &second)] {
+		let mut options = MockConnectOptions::new(version);
+		options.client_publish = Some(app.consume());
+		options.client_subscribe = Some(app.clone());
+		options.server_publish = Some(relay.consume().with_hidden(true));
+		options.server_subscribe = Some(relay.clone().with_link(origin::Link::Peer));
+		pairs.push(connect_mock(options).await);
+	}
+
+	let mut at_app = watch(app.consume().routes());
+	let mut at_second = watch(second.consume().routes());
+	let learned = first.route("room/learned", origin::RouteOptions::hidden()).unwrap();
+	learned.announce().unwrap();
+	let local = app.route("room/local", origin::RouteOptions::hidden()).unwrap();
+	local.announce().unwrap();
+	kio::clock::sim::idle().await;
+	let seen_by_app = drain(&mut at_app);
+	assert!(seen_by_app.contains_key("room/learned"), "{seen_by_app:?}");
+	let seen = drain(&mut at_second);
+	assert_eq!(seen.get("room/local"), Some(&vec![Kind::Start]), "{seen:?}");
+	assert!(!seen.contains_key("room/learned"), "{seen:?}");
 }

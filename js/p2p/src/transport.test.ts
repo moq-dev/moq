@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Channel } from "./channel.ts";
 import { peers } from "./mock.ts";
 import { Transport } from "./transport.ts";
@@ -94,7 +94,7 @@ test("the accepting side stays silent until the dialer's first record proves its
 	await Promise.all([client.closed, server.closed]);
 });
 
-test("an accepted channel whose dialer stays silent still idles out without sending", async () => {
+test("an accepted channel whose dialer stays silent closes at the handshake deadline without sending", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
@@ -102,11 +102,10 @@ test("an accepted channel whose dialer stays silent still idles out without send
 		left.createDataChannel("moq", { ordered: true, protocol });
 		const server = Transport.accept({ peer: right.asPeer(), channel: right.incoming.asChannel(), protocol });
 		right.incoming.open();
-		// The session starts on open, so its 30 s idle deadline runs while its first write waits.
-		await server.ready;
-		// The idle check polls every 5 s and skips ticks a single long jump would miss.
-		for (let i = 0; i < 7; i++) await clock.advance(Nano.fromMilli(Milli(5_000)));
-		await expect(server.closed).rejects.toThrow("idle timeout");
+		// The session starts on open, so its 10 s handshake deadline runs while its first write
+		// waits on the silent dialer's parameters.
+		await clock.advance(Duration.millis(11_000));
+		await expect(server.closed).rejects.toThrow("handshake timeout");
 		expect(right.incoming.records).toEqual([]);
 		expect(right.incoming.listeners.size).toBe(0);
 	} finally {
@@ -129,7 +128,12 @@ test("an accepted side that closes before hearing its dialer still closes gracef
 		mock.left.channel.stream = false;
 		mock.left.channel.open();
 		mock.right.incoming.open();
-		await server.ready;
+		// Its `ready` waits for the dialer's lost parameters. The datagram writable starts once
+		// the session exists, which then starts on the open channel in pure microtask work.
+		const datagrams = server.datagrams.writable.getWriter();
+		await datagrams.ready;
+		datagrams.releaseLock();
+		for (let i = 0; i < 10; i++) await Promise.resolve();
 		server.close({ closeCode: 7, reason: "bye" });
 		// No clock advance: the close must not wait out qmux's flush timeout.
 		expect(await client.closed).toEqual({ closeCode: 7, reason: "bye" });

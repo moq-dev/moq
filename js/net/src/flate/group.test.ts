@@ -10,7 +10,7 @@ import { encodable } from "./group.ts";
 const payload = new TextEncoder().encode("one shared compression window ".repeat(100));
 
 test("synchronous writers store slices; plain readers share one charged inflated copy", async () => {
-	const track = new Track("compressed").accept({ compress: true });
+	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.appendGroup();
 	const first = group.mirror();
 	const second = group.mirror();
@@ -77,14 +77,17 @@ for (const readPlain of [false, true]) {
 		const encoder = new Encoder();
 		const decoder = new Decoder();
 		const bytes = new Uint8Array(1024 * 1024).fill(42);
-		for (let index = 0; index < 100; index++) {
+		// The group's tail budget, charged each frame's plain size. Codec work dominates the run, so
+		// write just enough frames to shed a few past it.
+		const budget = 32 * 1024 * 1024;
+		for (let index = 0; index < budget / bytes.length + 4; index++) {
 			const slice = encoder.frame(bytes);
 			hooks.writeGroupFrame(group, { payload: slice }, bytes.length);
 			const frame = await hooks.readGroupFrame(raw, true);
 			expect(frame?.frame.payload).toBe(slice);
 			expect(decoder.frame(slice, bytes.length)).toEqual(bytes);
 			if (plain) expect((await plain.readFrame())?.payload).toEqual(bytes);
-			expect(hooks.groupCacheBytes(group)).toBeLessThanOrEqual(32 * 1024 * 1024);
+			expect(hooks.groupCacheBytes(group)).toBeLessThanOrEqual(budget);
 		}
 		await expect(slow.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
 		group.finish();
@@ -92,7 +95,7 @@ for (const readPlain of [false, true]) {
 }
 
 test("empty frames preserve the window", async () => {
-	const track = new Track("compressed").accept({ compress: true });
+	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.createGroup(0n);
 	group.writeFrame({ payload });
 	group.writeFrame({ payload: new Uint8Array() });
@@ -106,7 +109,7 @@ test("empty frames preserve the window", async () => {
 });
 
 test("a cut compressed group preserves its committed frames before returning its error", async () => {
-	const track = new Track("compressed").accept({ compress: true });
+	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.appendGroup();
 	const reader = group.mirror();
 	group.writeFrame({ payload });
@@ -119,7 +122,7 @@ test("a cut compressed group preserves its committed frames before returning its
 });
 
 test("a shared plain read cannot change a later synchronous write's admission", async () => {
-	const track = new Track("compressed").accept({ compress: true });
+	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.appendGroup();
 	const reader = group.mirror();
 	// The largest local frame whose worst-case slice fits the frame cap.
@@ -136,7 +139,7 @@ test("a shared plain read cannot change a later synchronous write's admission", 
 });
 
 test("refresh measures stored slices without inflating a compressed group", () => {
-	const track = new Track("compressed").accept({ compress: true });
+	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.appendGroup();
 	const payload = Uint8Array.from({ length: 1024 }, (_, index) => index % 251);
 	for (let index = 0; index < 3; index++) group.writeFrame({ payload });

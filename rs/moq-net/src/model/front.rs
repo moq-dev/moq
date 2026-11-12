@@ -82,6 +82,8 @@ pub(super) enum Event {
 		source: u64,
 		closing: bool,
 		result: Result<track::Info, Error>,
+		/// The Retry Interval an upstream refusal asked for, kept with the refusal.
+		retry: Option<Duration>,
 	},
 	/// The spliced copy of a track ended: completed, or died. `delivered` is
 	/// whether it produced anything since it was spliced in; a copy that died
@@ -141,8 +143,13 @@ pub(super) enum Action {
 	Forget { track: Arc<str> },
 	/// The logical track completed.
 	Finish { track: Arc<str> },
-	/// The logical track failed for good.
-	Abort { track: Arc<str>, err: Error },
+	/// The logical track failed for good, with the Retry Interval of the upstream refusal it
+	/// carries, if any.
+	Abort {
+		track: Arc<str>,
+		err: Error,
+		retry: Option<Duration>,
+	},
 	/// Arm (or clear) the deadline the front wants to be woken at.
 	Arm { at: Option<Instant> },
 	/// Nothing needs the front: close its broadcast unless a consumer took hold of it
@@ -175,8 +182,12 @@ struct Track {
 	/// Sources that refused this track, by id. A refusal is authoritative for
 	/// that source; a source that reattaches has a new id and is asked afresh.
 	refused: HashSet<u64>,
-	/// The most recent refusal, reported when every source has refused.
-	refusal: Option<Error>,
+	/// The most recent refusal, reported when every source has refused, with the Retry
+	/// Interval an upstream refusal asked for.
+	refusal: Option<(Error, Option<Duration>)>,
+	/// Why the serving copy died mid-serve, while its re-splice is asked for. A refusal of
+	/// that re-splice reports this instead: the source closing is what ended the track.
+	lost: Option<Error>,
 	/// Whether anyone reads the track: a copy is only spliced in for a reader.
 	wanted: bool,
 	/// A detached source whose copy still feeds the track until the serving source's
@@ -260,6 +271,12 @@ impl Front {
 		self.serving.map(|(source, _)| source)
 	}
 
+	/// Why `track`'s serving copy died mid-serve, while its re-splice is still asked for.
+	/// A track the front ends meanwhile ends with this rather than the front's end.
+	pub(super) fn lost(&self, track: &str) -> Option<Error> {
+		self.tracks.get(track)?.lost.clone()
+	}
+
 	/// Whether the front is over.
 	#[cfg(test)]
 	fn ended(&self) -> bool {
@@ -299,6 +316,7 @@ impl Front {
 						state: TrackState::Parked { since: now },
 						refused: HashSet::new(),
 						refusal: None,
+						lost: None,
 						wanted: false,
 						ended: false,
 						draining: None,
@@ -310,7 +328,8 @@ impl Front {
 				source,
 				closing,
 				result,
-			} => self.track_info(track, source, closing, result, &mut actions),
+				retry,
+			} => self.track_info(track, source, closing, result.map_err(|err| (err, retry)), &mut actions),
 			Event::TrackEnded {
 				track,
 				source,
@@ -489,7 +508,7 @@ impl Front {
 		name: Arc<str>,
 		source: u64,
 		closing: bool,
-		result: Result<track::Info, Error>,
+		result: Result<track::Info, (Error, Option<Duration>)>,
 		actions: &mut Vec<Action>,
 	) {
 		let Some(track) = self.tracks.get_mut(&name) else {
@@ -502,25 +521,26 @@ impl Front {
 			// A copy of the same instance claims identical content, so any difference
 			// in its metadata is refused rather than reinterpreted.
 			Ok(info) => match self.info.get(&name) {
-				Some(expected) if *expected != info => Err(Error::Unsupported),
+				Some(expected) if *expected != info => Err((Error::Unsupported, None)),
 				Some(_) => Ok(()),
 				None => {
 					self.info.insert(name.clone(), info);
 					Ok(())
 				}
 			},
-			Err(err) => Err(err),
+			Err(refusal) => Err(refusal),
 		};
 		match verdict {
 			Ok(()) => {
 				track.draining = None;
+				track.lost = None;
 				track.state = TrackState::Spliced { source };
 				actions.push(Action::Splice {
 					track: name.clone(),
 					source,
 				});
 			}
-			Err(err) => self.refuse(name, source, closing, err, actions),
+			Err(refusal) => self.refuse(name, source, closing, refusal, actions),
 		}
 	}
 
@@ -569,6 +589,7 @@ impl Front {
 				if delivered && err.transient() && self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
+				track.lost = Some(err);
 				self.redispatch(name, actions);
 			}
 			// A content verdict survives every copy. Under a minted instance, even a route
@@ -576,16 +597,27 @@ impl Front {
 			Err(err) if delivered => {
 				track.state = TrackState::Idle;
 				track.ended = true;
-				actions.push(Action::Abort { track: name, err });
+				actions.push(Action::Abort {
+					track: name,
+					err,
+					retry: None,
+				});
 			}
 			// Died before producing anything: a refusal.
-			Err(err) => self.refuse(name, source, closing, err, actions),
+			Err(err) => self.refuse(name, source, closing, (err, None), actions),
 		}
 	}
 
 	/// Record that `source` will not serve `name`, then either ask another
 	/// source or, when the serving source itself refused, abort the track.
-	fn refuse(&mut self, name: Arc<str>, source: u64, closing: bool, err: Error, actions: &mut Vec<Action>) {
+	fn refuse(
+		&mut self,
+		name: Arc<str>,
+		source: u64,
+		closing: bool,
+		refusal: (Error, Option<Duration>),
+		actions: &mut Vec<Action>,
+	) {
 		let track = self.tracks.get_mut(&name).expect("refusing a known track");
 		track.state = TrackState::Idle;
 		// A closing source's answer is not a verdict: it is on its way out and
@@ -594,7 +626,10 @@ impl Front {
 			return;
 		}
 		track.refused.insert(source);
-		track.refusal = Some(err);
+		track.refusal = Some(match track.lost.take() {
+			Some(lost) => (lost, None),
+			None => refusal,
+		});
 		// A source being replaced still serves it: keep reading that copy, and the
 		// refusal stands once it runs out.
 		if let Some(draining) = track.draining {
@@ -616,9 +651,13 @@ impl Front {
 			return;
 		}
 		if track.refused.contains(&source) {
-			let err = track.refusal.clone().unwrap_or(Error::NotFound);
+			let (err, retry) = track.refusal.clone().unwrap_or((Error::NotFound, None));
 			track.ended = true;
-			actions.push(Action::Abort { track: name, err });
+			actions.push(Action::Abort {
+				track: name,
+				err,
+				retry,
+			});
 			return;
 		}
 		if self.serving_closing {
@@ -663,9 +702,11 @@ impl Front {
 				actions.push(Action::Park { track: name });
 			}
 			TrackState::Parked { .. } => {}
-			// A copy still being asked for is dropped with the park.
+			// A copy still being asked for is dropped with the park, and with it the loss
+			// it would have recovered: a returning reader's query is a fresh request.
 			TrackState::Idle | TrackState::Querying { .. } => {
 				track.state = TrackState::Parked { since: now };
+				track.lost = None;
 				// An ended track has nothing to drop.
 				if !track.ended {
 					actions.push(Action::Park { track: name });
@@ -689,7 +730,7 @@ impl Front {
 
 	fn parked_at(&self, name: &str) -> Option<Instant> {
 		match self.tracks.get(name)?.state {
-			TrackState::Parked { since } => Some(since + self.linger),
+			TrackState::Parked { since } => Some(since.saturating_add(self.linger)),
 			_ => None,
 		}
 	}
@@ -753,7 +794,7 @@ mod tests {
 			.tracks
 			.iter()
 			.filter_map(|(name, track)| match track.state {
-				TrackState::Parked { since } => Some((since + front.linger, name.clone())),
+				TrackState::Parked { since } => Some((since.saturating_add(front.linger), name.clone())),
 				_ => None,
 			})
 			.collect();
@@ -784,7 +825,9 @@ mod tests {
 				track: name("video"),
 				now: t0,
 			}),
-			&[Action::Arm { at: Some(t0 + LINGER) }],
+			&[Action::Arm {
+				at: Some(t0.saturating_add(LINGER)),
+			}],
 		);
 		assert_actions(
 			front.step(Event::Wanted { track: name("video") }),
@@ -808,6 +851,7 @@ mod tests {
 				source,
 				closing: false,
 				result: Ok(info()),
+				retry: None,
 			}),
 			&[Action::Splice {
 				track: name("video"),
@@ -892,6 +936,7 @@ mod tests {
 				source: 100,
 				closing: true,
 				result: Ok(info()),
+				retry: None,
 			}),
 			&[Action::Splice {
 				track: name("video"),
@@ -1070,10 +1115,12 @@ mod tests {
 				source: 100,
 				closing: false,
 				result: Err(Error::NotFound),
+				retry: None,
 			}),
 			&[Action::Abort {
 				track: name("audio"),
 				err: Error::NotFound,
+				retry: None,
 			}],
 		);
 		assert_eq!(front.tracks[&name("video")].state, TrackState::Spliced { source: 100 });
@@ -1093,6 +1140,7 @@ mod tests {
 				source: 100,
 				closing: true,
 				result: Err(Error::NotFound),
+				retry: None,
 			}),
 			&[],
 		);
@@ -1132,6 +1180,42 @@ mod tests {
 		);
 	}
 
+	/// A source that loses a copy mid-serve and then refuses its re-splice, such as a
+	/// closing socket endpoint, ends the track with the loss, not the refusal.
+	#[test]
+	fn a_refused_resplice_reports_the_loss() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::TrackEnded {
+			track: name("video"),
+			source: 100,
+			closing: false,
+			result: Err(Error::Dropped),
+			delivered: true,
+		});
+		assert!(matches!(front.lost("video"), Some(Error::Dropped)));
+		// A reader leaving abandons the recovery, so its loss is not reported later.
+		let mut parked = front.clone();
+		parked.step(Event::Unwanted {
+			track: name("video"),
+			now: Instant::now(),
+		});
+		assert!(parked.lost("video").is_none());
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::NotFound),
+				retry: None,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::Dropped,
+				retry: None,
+			}],
+		);
+	}
+
 	#[test]
 	fn a_copy_verdict_aborts_without_querying_again() {
 		for candidate in [remote(1), local(1)] {
@@ -1156,6 +1240,7 @@ mod tests {
 					&[Action::Abort {
 						track: name("video"),
 						err,
+						retry: None,
 					}],
 				);
 				assert_actions(front.step(Event::Wanted { track: name("video") }), &[]);
@@ -1187,6 +1272,7 @@ mod tests {
 				&[Action::Abort {
 					track: name("video"),
 					err: Error::App(7),
+					retry: None,
 				}],
 			);
 			// A returning reader is not re-spliced either.
@@ -1208,6 +1294,7 @@ mod tests {
 			&[Action::Abort {
 				track: name("video"),
 				err: Error::Dropped,
+				retry: None,
 			}],
 		);
 	}
@@ -1236,7 +1323,7 @@ mod tests {
 				..info()
 			},
 			track::Info {
-				compress: true,
+				compression: crate::track::Compression::Deflate,
 				..info()
 			},
 			track::Info {
@@ -1261,6 +1348,7 @@ mod tests {
 					source: 200,
 					closing: false,
 					result: Ok(other),
+					retry: None,
 				}),
 				&[],
 			);
@@ -1276,6 +1364,7 @@ mod tests {
 				&[Action::Abort {
 					track: name("video"),
 					err: Error::Unsupported,
+					retry: None,
 				}],
 			);
 		}
@@ -1292,19 +1381,27 @@ mod tests {
 			}),
 			&[
 				Action::Park { track: name("video") },
-				Action::Arm { at: Some(t0 + LINGER) },
+				Action::Arm {
+					at: Some(t0.saturating_add(LINGER)),
+				},
 			],
 		);
 		// Too early: nothing released, but the deadline is armed again since the
 		// driver clears it on firing.
 		assert_actions(
-			front.step(Event::Deadline { now: t0 + LINGER / 2 }),
-			&[Action::Arm { at: Some(t0 + LINGER) }],
+			front.step(Event::Deadline {
+				now: t0.saturating_add(LINGER / 2),
+			}),
+			&[Action::Arm {
+				at: Some(t0.saturating_add(LINGER)),
+			}],
 		);
 		// The driver cleared the fired deadline itself; nothing is parked, so
 		// nothing re-arms.
 		assert_actions(
-			front.step(Event::Deadline { now: t0 + LINGER }),
+			front.step(Event::Deadline {
+				now: t0.saturating_add(LINGER),
+			}),
 			&[Action::Forget { track: name("video") }],
 		);
 		assert_actions(front.step(Event::Forgotten { track: name("video") }), &[]);
@@ -1322,7 +1419,9 @@ mod tests {
 			now: t0,
 		});
 		assert_actions(
-			front.step(Event::Deadline { now: t0 + LINGER }),
+			front.step(Event::Deadline {
+				now: t0.saturating_add(LINGER),
+			}),
 			&[Action::Forget { track: name("video") }],
 		);
 		assert_actions(
@@ -1346,7 +1445,9 @@ mod tests {
 		});
 		assert_actions(front.step(Event::Unheld), &[]);
 		assert_actions(
-			front.step(Event::Deadline { now: t0 + LINGER }),
+			front.step(Event::Deadline {
+				now: t0.saturating_add(LINGER),
+			}),
 			&[Action::Forget { track: name("video") }],
 		);
 		assert_actions(front.step(Event::Forgotten { track: name("video") }), &[Action::Retire]);
@@ -1458,7 +1559,9 @@ mod tests {
 				track: name("video"),
 				now: t0,
 			}),
-			&[Action::Arm { at: Some(t0 + LINGER) }],
+			&[Action::Arm {
+				at: Some(t0.saturating_add(LINGER)),
+			}],
 		);
 		// A returning reader reads what it holds: no query, and the linger waits.
 		assert_actions(
@@ -1480,13 +1583,15 @@ mod tests {
 				drain: false,
 			}],
 		);
-		let t1 = t0 + LINGER;
+		let t1 = t0.saturating_add(LINGER);
 		front.step(Event::Unwanted {
 			track: name("video"),
 			now: t1,
 		});
 		assert_actions(
-			front.step(Event::Deadline { now: t1 + LINGER }),
+			front.step(Event::Deadline {
+				now: t1.saturating_add(LINGER),
+			}),
 			&[Action::Forget { track: name("video") }],
 		);
 		front.step(Event::Forgotten { track: name("video") });
@@ -1511,10 +1616,14 @@ mod tests {
 				track: name("video"),
 				now: t0,
 			}),
-			&[Action::Arm { at: Some(t0 + LINGER) }],
+			&[Action::Arm {
+				at: Some(t0.saturating_add(LINGER)),
+			}],
 		);
 		assert_actions(
-			front.step(Event::Deadline { now: t0 + LINGER }),
+			front.step(Event::Deadline {
+				now: t0.saturating_add(LINGER),
+			}),
 			&[Action::Forget { track: name("video") }],
 		);
 		front.step(Event::Forgotten { track: name("video") });
@@ -1564,7 +1673,7 @@ mod tests {
 		});
 		front.step(Event::TrackAssigned {
 			track: name("audio"),
-			now: now + LINGER / 2,
+			now: now.saturating_add(LINGER / 2),
 		});
 		assert_actions(
 			front.step(Event::Wanted { track: name("video") }),
@@ -1574,13 +1683,13 @@ mod tests {
 					source: 100,
 				},
 				Action::Arm {
-					at: Some(now + LINGER + LINGER / 2),
+					at: Some(now.saturating_add(LINGER).saturating_add(LINGER / 2)),
 				},
 			],
 		);
 		assert_actions(
 			front.step(Event::Deadline {
-				now: now + LINGER + LINGER / 2,
+				now: now.saturating_add(LINGER).saturating_add(LINGER / 2),
 			}),
 			&[Action::Forget { track: name("audio") }],
 		);
@@ -1600,7 +1709,9 @@ mod tests {
 		});
 		assert_eq!(front.tracks[&name("audio")].state, TrackState::Parked { since: t0 });
 		assert_actions(
-			front.step(Event::Deadline { now: t0 + LINGER }),
+			front.step(Event::Deadline {
+				now: t0.saturating_add(LINGER),
+			}),
 			&[Action::Forget { track: name("audio") }],
 		);
 	}
@@ -1666,7 +1777,7 @@ mod tests {
 					0 => Event::Wanted { track },
 					1 => Event::Unwanted { track, now },
 					2 => {
-						now += LINGER / 4;
+						now = now.saturating_add(LINGER / 4);
 						Event::Deadline { now }
 					}
 					_ => Event::TrackInfo {
@@ -1674,6 +1785,7 @@ mod tests {
 						source: 100,
 						closing: false,
 						result: Ok(info()),
+						retry: None,
 					},
 				}
 			};
@@ -1734,12 +1846,14 @@ mod tests {
 				source: 100,
 				closing: false,
 				result: Ok(info()),
+				retry: None,
 			},
 			Event::TrackInfo {
 				track: name("v"),
 				source: 100,
 				closing: false,
 				result: Err(Error::NotFound),
+				retry: None,
 			},
 			Event::TrackEnded {
 				track: name("v"),
@@ -1748,7 +1862,9 @@ mod tests {
 				result: Err(Error::Dropped),
 				delivered: false,
 			},
-			Event::Deadline { now: t0 + LINGER },
+			Event::Deadline {
+				now: t0.saturating_add(LINGER),
+			},
 			Event::Forgotten { track: name("v") },
 			Event::Unheld,
 			Event::Held,
@@ -1856,6 +1972,7 @@ mod tests {
 			source: 200,
 			closing: false,
 			result: Err(Error::NotFound),
+			retry: None,
 		});
 		front.step(Event::Selected {
 			best: Some(remote(3)),
@@ -1898,6 +2015,7 @@ mod tests {
 			source: 200,
 			closing: false,
 			result: Err(Error::NotFound),
+			retry: None,
 		});
 		let t0 = Instant::now();
 		assert_actions(
@@ -1907,7 +2025,9 @@ mod tests {
 			}),
 			&[
 				Action::Park { track: name("video") },
-				Action::Arm { at: Some(t0 + LINGER) },
+				Action::Arm {
+					at: Some(t0.saturating_add(LINGER)),
+				},
 			],
 		);
 		front.step(Event::Selected {
@@ -1924,6 +2044,7 @@ mod tests {
 			source: 300,
 			closing: false,
 			result: Err(Error::NotFound),
+			retry: None,
 		});
 		assert_ne!(
 			front.tracks[&name("video")].state,
@@ -1953,7 +2074,9 @@ mod tests {
 			}),
 			&[
 				Action::Park { track: name("video") },
-				Action::Arm { at: Some(t0 + LINGER) },
+				Action::Arm {
+					at: Some(t0.saturating_add(LINGER)),
+				},
 			],
 		);
 	}

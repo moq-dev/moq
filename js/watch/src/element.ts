@@ -6,7 +6,7 @@
  * @module
  */
 
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
@@ -62,8 +62,10 @@ const OBSERVED = [
 	"follow",
 	// Renamed to `follow`, observed only to refuse it.
 	"announced",
-	"delay",
+	// Renamed to `lookahead`, observed only to refuse it.
 	"buffer",
+	"delay",
+	"lookahead",
 	"catalog-format",
 	"captions",
 	"echo",
@@ -97,12 +99,12 @@ function parseDelay(value: string | null): Delay {
 	throw invalidAttribute("delay", value, '"auto", "instant", or a duration like "300ms"');
 }
 
-// Parse the `buffer` attribute: a duration, or zero when absent.
-function parseBuffer(value: string | null): Milli {
-	if (value === null) return Milli.zero;
+// Parse the `lookahead` attribute: a duration, or zero when absent.
+function parseLookahead(value: string | null): Duration {
+	if (value === null) return Duration.ZERO;
 	const parsed = parseDuration(value);
 	if (parsed !== undefined) return parsed;
-	throw invalidAttribute("buffer", value, 'a duration like "30s"');
+	throw invalidAttribute("lookahead", value, 'a duration like "30s"');
 }
 
 // Parse the `echo` attribute: the viewer's feedback name, one visible path segment, or undefined when absent.
@@ -134,6 +136,31 @@ function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 	return normalized !== "false" && normalized !== "0";
 }
 
+/**
+ * The element's `connection.enabled`, which the page may also write. The page's writes set what it
+ * wants and the element sets whether it can run (connected to a document, every attribute valid); it
+ * reads as on only while both hold. Kept apart, a page's disable survives the element suspending and
+ * resuming, whenever the page writes it: an explicit page choice wins.
+ */
+class Enabled extends Signal<boolean> {
+	#wanted = true;
+	#running = false;
+
+	constructor() {
+		super(false);
+	}
+
+	override set(value: boolean, notify?: boolean): void {
+		this.#wanted = value;
+		super.set(value && this.#running, notify);
+	}
+
+	run(running: boolean): void {
+		this.#running = running;
+		super.set(this.#wanted && running);
+	}
+}
+
 /** The `<moq-watch>` element: plays a broadcast into a nested <canvas>. */
 export default class MoqWatch extends HTMLElement {
 	/** The attributes the browser reports changes to. */
@@ -143,10 +170,10 @@ export default class MoqWatch extends HTMLElement {
 	 * The relay connection, shared with every other element on the page pointing at the
 	 * same URL. Its `origin` is where the broadcasts live.
 	 */
-	connection: Moq.Connection;
+	readonly connection: Moq.Connection;
 
-	/** Headless playback pipeline behind this element. */
-	readonly player: Player;
+	readonly #player: Player;
+
 	/** The broadcast being watched. */
 	readonly broadcast: Broadcast;
 
@@ -160,13 +187,13 @@ export default class MoqWatch extends HTMLElement {
 	readonly renderer: Video.Renderer;
 
 	/** Plays decoded samples through the speakers. */
-	emitter: Audio.Emitter;
+	readonly emitter: Audio.Emitter;
 
 	/** Selects the caption track. `text.out.available` lists the renditions for a picker. */
-	text: Text.Source;
+	readonly text: Text.Source;
 
 	/** Renders the selected text cues into an overlay above the canvas. */
-	textRenderer: Text.Renderer;
+	readonly textRenderer: Text.Renderer;
 
 	/** Keeps audio and video playing at the configured delay. */
 	readonly sync: Sync;
@@ -181,7 +208,7 @@ export default class MoqWatch extends HTMLElement {
 		// How far playback trails the live edge.
 		delay: new Signal<Delay>("auto"),
 		// Future-dated media held beyond the live edge before playback skips ahead.
-		buffer: new Signal<Milli>(Milli.zero),
+		lookahead: new Signal<Duration>(Duration.ZERO),
 		video: {
 			// The desired video rendition (resolution/bitrate cap).
 			target: new Signal<Video.Target | undefined>(undefined),
@@ -221,13 +248,12 @@ export default class MoqWatch extends HTMLElement {
 	#captionsOverlay = new Signal<HTMLElement | undefined>(undefined);
 	#captionsOverlayEl?: HTMLDivElement;
 
-	// Set when the element is connected to the DOM.
-	#enabled = new Signal(false);
+	// Whether the element is connected to a document.
 	#connected = false;
+	// The attributes holding a refused value, which suspend the element until corrected.
 	#invalid = new Signal<ReadonlySet<string>>(new Set());
-	// Whether clearing the last invalid attribute re-enables media: false when the page had
-	// already disabled the connection, so recovery does not override that.
-	#resume = false;
+	// Whether to connect and play: `#update` gates it on the element's state, and the page may turn it off.
+	#enabled = new Enabled();
 	#reflecting = false;
 
 	/**
@@ -246,9 +272,8 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.connection.close());
 
-		this.player = new Player({
+		this.#player = new Player({
 			origin: this.connection.origin,
-			probe: this.connection.probe,
 			enabled: this.#enabled,
 			name: this.#name,
 			follow: this.#follow,
@@ -272,26 +297,26 @@ export default class MoqWatch extends HTMLElement {
 			viewer: { ...this.controls.viewer, viewers: this.connection.viewers },
 			text: { ...this.controls.text, container: this.#captionsOverlay },
 		});
-		this.signals.cleanup(() => this.player.close());
+		this.signals.cleanup(() => this.#player.close());
 
 		// Owned here rather than by the player, which only reads its origin: feedback publishes into it.
 		const echo = new Echo({
-			broadcast: this.player.broadcast,
+			broadcast: this.#player.broadcast,
 			origin: this.connection.origin,
 			enabled: this.#enabled,
 			name: this.#echo,
 			probe: this.connection.probe,
-			sources: [this.player.video, this.player.audio],
+			sources: [this.#player.video, this.#player.audio],
 		});
 		this.signals.cleanup(() => echo.close());
-		this.broadcast = this.player.broadcast;
-		this.video = this.player.video;
-		this.audio = this.player.audio;
-		this.renderer = this.player.renderer;
-		this.emitter = this.player.emitter;
-		this.text = this.player.text;
-		this.textRenderer = this.player.textRenderer;
-		this.sync = this.player.sync;
+		this.broadcast = this.#player.broadcast;
+		this.video = this.#player.video;
+		this.audio = this.#player.audio;
+		this.renderer = this.#player.renderer;
+		this.emitter = this.#player.emitter;
+		this.text = this.#player.text;
+		this.textRenderer = this.#player.textRenderer;
+		this.sync = this.#player.sync;
 
 		// Watch to see if the canvas element is added or removed.
 		const setCanvas = () => {
@@ -343,9 +368,11 @@ export default class MoqWatch extends HTMLElement {
 		this.signals.run((effect) => this.#reflect(effect, "echo", effect.get(this.#echo)));
 		this.signals.run((effect) => {
 			const delay = effect.get(this.controls.delay);
-			this.#reflect(effect, "delay", typeof delay === "number" ? formatDuration(delay) : delay);
+			this.#reflect(effect, "delay", delay instanceof Duration ? formatDuration(delay) : delay);
 		});
-		this.signals.run((effect) => this.#reflect(effect, "buffer", formatDuration(effect.get(this.controls.buffer))));
+		this.signals.run((effect) =>
+			this.#reflect(effect, "lookahead", formatDuration(effect.get(this.controls.lookahead))),
+		);
 
 		// Track the element's rendered size and feed it into the rendition picker,
 		// scaled by devicePixelRatio so high-DPI screens still get sharp renditions.
@@ -378,8 +405,7 @@ export default class MoqWatch extends HTMLElement {
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#connected = true;
-		if (this.#invalid.peek().size) this.#resume = true;
-		else this.#enabled.set(true);
+		this.#update();
 		this.style.display = "block";
 		this.style.position = "relative";
 
@@ -401,7 +427,7 @@ export default class MoqWatch extends HTMLElement {
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
 		this.#connected = false;
-		this.#enabled.set(false);
+		this.#update();
 	}
 
 	/** Called by the browser when an observed attribute changes. */
@@ -420,8 +446,11 @@ export default class MoqWatch extends HTMLElement {
 			else if (name === "announced" && newValue !== null)
 				throw new Error("moq-watch: `announced` was renamed to `follow`");
 			else if (name === "announced") this.#accept("announced");
+			else if (name === "buffer" && newValue !== null)
+				throw new Error("moq-watch: `buffer` was renamed to `lookahead`");
+			else if (name === "buffer") this.#accept("buffer");
 			else if (name === "delay") this.delay = parseDelay(newValue);
-			else if (name === "buffer") this.buffer = parseBuffer(newValue);
+			else if (name === "lookahead") this.lookahead = parseLookahead(newValue);
 			else if (name === "catalog-format") this.catalogFormat = parseCatalogFormat(newValue);
 			else if (name === "captions") this.captions = newValue || undefined;
 			else if (name === "echo") this.echo = parseEcho(newValue);
@@ -430,24 +459,24 @@ export default class MoqWatch extends HTMLElement {
 				throw new Error(`Invalid attribute: ${exhaustive}`);
 			}
 		} catch (error) {
-			if (this.#invalid.peek().size === 0) this.#resume = this.#enabled.peek();
 			this.#invalid.update((previous) => new Set(previous).add(name));
-			this.#enabled.set(false);
+			this.#update();
 			throw error;
 		}
 	}
 
 	#accept(name: string) {
-		// Ordinary edits must preserve an explicitly disabled connection.
 		if (!this.#invalid.peek().has(name)) return;
 		this.#invalid.update((previous) => {
 			const next = new Set(previous);
 			next.delete(name);
 			return next;
 		});
-		if (this.#invalid.peek().size || !this.#resume) return;
-		this.#resume = false;
-		this.#enabled.set(this.#connected);
+		this.#update();
+	}
+
+	#update() {
+		this.#enabled.run(this.#connected && this.#invalid.peek().size === 0);
 	}
 
 	#reflect(effect: Effect, name: (typeof OBSERVED)[number], value: string | undefined) {
@@ -556,7 +585,7 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	/**
-	 * How far playback trails the live edge, in milliseconds. See {@link Delay}.
+	 * How far playback trails the live edge. See {@link Delay}.
 	 *
 	 * `"auto"` (the default) sizes the jitter buffer from how late frames arrive. `"instant"` drops the
 	 * clock instead: video paints the moment it decodes and audio is disabled.
@@ -566,28 +595,30 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	set delay(value: Delay) {
-		if (typeof value !== "number" && value !== "auto" && value !== "instant")
-			throw invalidAttribute("delay", value, '"auto", "instant", or non-negative milliseconds');
-		this.controls.delay.set(parseDelay(typeof value === "number" ? formatDuration(value) : value));
+		if (!(value instanceof Duration) && value !== "auto" && value !== "instant")
+			throw invalidAttribute("delay", value, '"auto", "instant", or a Duration');
+		this.controls.delay.set(parseDelay(value instanceof Duration ? formatDuration(value) : value));
 		this.#accept("delay");
 	}
 
 	/**
-	 * Future-dated media held beyond the live edge before playback skips ahead, in milliseconds.
+	 * Future-dated media held beyond the live edge before playback skips ahead.
 	 *
-	 * Zero (the default) minimizes latency. A larger value enables buffered playback: build up a
-	 * buffer from future-dated frames (e.g. TTS written faster than real-time) and only skip ahead
-	 * once they would sit further than `delay + buffer` past the playhead. Call `reset()` at each
-	 * utterance boundary.
+	 * Zero (the default) minimizes latency. A larger value enables buffered playback: build up
+	 * future-dated frames (e.g. TTS written faster than real-time) and only skip ahead
+	 * once they would sit further than `delay + lookahead` past the playhead. Audio that falls
+	 * behind, as after a stall, catches up by playing faster, and skips only what trails by more
+	 * than the lookahead. Call `reset()` at each utterance boundary. Not a jitter buffer: live
+	 * streams leave it at zero and tune `delay`.
 	 */
-	get buffer(): Milli {
-		return this.controls.buffer.peek();
+	get lookahead(): Duration {
+		return this.controls.lookahead.peek();
 	}
 
-	set buffer(value: Milli) {
-		if (typeof value !== "number") throw invalidAttribute("buffer", value, "non-negative milliseconds");
-		this.controls.buffer.set(parseBuffer(formatDuration(value)));
-		this.#accept("buffer");
+	set lookahead(value: Duration) {
+		if (!(value instanceof Duration)) throw invalidAttribute("lookahead", value, "a Duration");
+		this.controls.lookahead.set(parseLookahead(formatDuration(value)));
+		this.#accept("lookahead");
 	}
 
 	/**
@@ -595,7 +626,7 @@ export default class MoqWatch extends HTMLElement {
 	 * and flush the audio buffer so the next utterance plays from its own first frame.
 	 */
 	reset(): void {
-		this.player.reset();
+		this.#player.reset();
 	}
 
 	/** The catalog format to read, mirrored by the `catalog-format` attribute; undefined detects it. */

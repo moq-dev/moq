@@ -9,7 +9,9 @@ A relay publishes its traffic counters as ordinary MoQ broadcasts, so any
 subscriber can read them: a dashboard, a billing meter, an aggregator in
 another region. This page is the wire contract for those broadcasts, enough to
 read them in any language. [`moq-stats`](https://docs.rs/moq-stats) is the Rust
-producer and consumer, and the relay's [`[stats]`](/bin/relay/config#stats)
+producer and consumer, [`@moq/stats`](https://github.com/moq-dev/moq/tree/main/js/stats)
+the JavaScript consumer (node discovery, typed frames, and bucket runs followed
+through the track listing), and the relay's [`[stats]`](/bin/relay/config#stats)
 section turns it on.
 
 ## Media reports
@@ -190,50 +192,53 @@ announcements; over anything else the receiving session mints one per
 announcement, so a reader sees the same change as an end and a start at the path.
 An aggregating reader pins each node's subscription to its instance.
 
-Every group shares the node's broadcast, so a token scoped to the stats prefix
-reads every group's tracks; scope by group with an aggregating reader instead.
+Every bucket shares the node's broadcast, so a token scoped to the stats prefix
+reads every bucket's tracks; scope by bucket with an aggregating reader instead.
 
 ## Tracks
 
 Traffic is split by **tier**, an arbitrary label (a billing class, a region)
 the relay takes from the auth grant, or from `--cluster-tier` for links it
 dials and LAN peers it admits. The default tier's label is empty. Every track
-but a group's comes in two encodings:
+but a bucket's comes in two encodings:
 
 | Track | Frame keyed by | Entry |
 | --- | --- | --- |
 | `totals.json` | tier | [Totals](#totals) for the whole node |
-| `[<group>/]group.json` | | [Group](#group): one group's totals, paths, and labels, every tier |
+| `[<bucket>/]bucket.<epoch>.json` | | [Bucket](#bucket): one bucket's totals, paths, and labels, every tier |
 | `[<label>/]presence.json` | tier | [Presence](#presence): sessions under one stats label |
 | `[<path>/]prefix.json` | tier | [Prefix](#prefix) traffic under one broadcast prefix |
 
 Every track uses the one [encoding](#encoding). `totals.json` always exists.
 
-### Group tracks
+### Bucket tracks
 
-The relay buckets traffic into groups by the first `depth` segments of each
+The relay sorts traffic into buckets by the first `depth` segments of each
 broadcast path, and sessions by the first `depth` segments of each stats label;
-a path shorter than `depth` groups under all of its segments. Each group is a
-`<group>/group.json` track (`group.json` for the empty group, the only one at
-depth 0) carrying all of the group's tiers, both directions, and its sessions,
-so a reader holds one subscription per group.
+a path shorter than `depth` buckets under all of its segments. Each counter run
+of a bucket is a `<bucket>/bucket.<epoch>.json` track (`bucket.<epoch>.json` for the
+empty bucket, the only one at depth 0), named by the run's `epoch` and carrying
+all of the bucket's tiers, both directions, and its sessions, so a reader holds
+one subscription per bucket.
 
-A reader discovers the live groups from the broadcast's track listing (TRACKS
-in moq-lite 07). At depth 0 the one group's track is listed for the producer's
-life. At depth 1 or more, a group's track is listed from its first entry until
+A reader discovers the live buckets from the broadcast's track listing (TRACKS
+in moq-lite 07). At depth 0 the one bucket's track is listed for the producer's
+life. At depth 1 or more, a bucket's track is listed from its first entry until
 it has lingered empty (five minutes by default), then unlisted and ended. A
-group that returns within the linger keeps its track and epoch, and its totals
-continue. The node's announcement never changes, so group churn costs no
+bucket that returns within the linger keeps its track and epoch, and its totals
+continue. The node's announcement never changes, so bucket churn costs no
 announce traffic across a cluster. Over a hop that cannot carry a listing
 (moq-lite 06 and older, or moq-transport, whose `SUBSCRIBE_TRACKS` our relay
-refuses) the listing is empty or refused; a reader that knows a group's name
-can still subscribe to it while it is listed, and is refused otherwise.
+refuses) the listing is empty or refused. A bucket's track name carries its
+run's epoch, so a reader finds it only through the listing; one that already
+knows the name can subscribe while it is listed, and is refused otherwise.
 
-A group that returns after its linger is a new instance of its track: its
-frames carry a new `epoch` and count from zero, and its group numbers, which
-count publish intervals, continue past the old instance's. Holding a group's
-track doesn't count as an entry, so a reader follows the listing to the next
-instance. A frame too large to cache ends only that group's track.
+A bucket that returns after its linger is a new counter run under a new track:
+its frames carry a new `epoch`, which also names the track, and count from
+zero. No track name is ever reused, so each run numbers its groups from 0, and
+group 0 is where its counters start, for every reader and relay cache. Holding
+a bucket's track doesn't count as an entry, so a reader follows the listing to
+the next run. A frame too large to cache ends only that bucket's track.
 
 ### Requested tracks
 
@@ -248,17 +253,18 @@ refused.
 ## Frames
 
 Every frame is a JSON object mapping a key to an entry, except a
-[group](#group) track's. A track with no entries holds `{}`.
+[bucket](#bucket) track's. A track with no entries holds `{}`.
 
 The producer drains its counters every interval (one second by default) and
 writes only when a track's frame changed, so silence means nothing moved, not
 that the producer is gone. The track ends when the producer does, or when its
-group track is unlisted; the group may return later as a new track instance. A
+bucket track is unlisted; the bucket may return later as a new track instance. A
 frame too large to cache (32 MB) ends its track with a `FRAME_TOO_LARGE` error,
 measured by its uncompressed size, since a reader inflates the whole group.
 
-A group's number is its publish's scheduled time divided by the interval, so
-the interval is its timescale. Publishes are scheduled at least an interval
+Outside bucket tracks, which number their groups from 0, a group's number is
+its publish's scheduled time divided by the interval, so the interval is its
+timescale. Publishes are scheduled at least an interval
 apart, even after a late one, so each opens its groups in an interval of its
 own, and a track recreated later numbers its groups past every group its
 earlier instance wrote.
@@ -274,12 +280,12 @@ earlier instance wrote.
 
 Each tier that recorded anything in the node's run, with its egress (`publisher`)
 and ingress (`subscriber`) [Traffic](#traffic) and its [Presence](#presence),
-summed over every broadcast and stats label. Unlike a group's paths and labels,
+summed over every broadcast and stats label. Unlike a bucket's paths and labels,
 an entry that ends stays counted, so the next frame always carries everything
 since the run began: a reader that misses frames loses nothing while the
 node stays announced. Billing reads this track.
 
-### Group
+### Bucket
 
 ```json
 {
@@ -294,13 +300,13 @@ node stays announced. Billing reads this track.
 }
 ```
 
-`epoch` is a UUIDv7 minted for each instance of the group's track, and a
+`epoch` is a UUIDv7 minted for each instance of the bucket's track, and a
 reader keeps each epoch's counters apart, as it does for a broadcast's instances.
-`tiers` maps each tier the group recorded on since then. Its top-level
-`publisher`, `subscriber`, and `sessions` are the group's [totals](#totals), so
+`tiers` maps each tier the bucket recorded on since then. Its top-level
+`publisher`, `subscriber`, and `sessions` are the bucket's [totals](#totals), so
 a totals reader parses them unchanged, and like the node's totals they keep
-every entry that ended. A lingering group's frames repeat its final totals: a
-reader that misses every frame from the group's last change until it is
+every entry that ended. A lingering bucket's frames repeat its final totals: a
+reader that misses every frame from the bucket's last change until it is
 unlisted loses that instance's tail, so a meter reads the node's totals.
 
 `paths` holds each broadcast path's egress (`publisher`) and ingress
@@ -312,7 +318,7 @@ one that returns starts from zero; the totals keep what it counted. A side that
 has never moved is left out and reads as zero.
 
 `labels` holds each stats label's [Presence](#presence), while a session or
-HTTP request holds its context and on the tick its last one ends. While a group
+HTTP request holds its context and on the tick its last one ends. While a bucket
 lingers empty, its `paths` and `labels` are empty.
 
 ### Per-label tracks
@@ -402,7 +408,7 @@ should prefer the canonical name and fall back to the legacy one.
     "requests": 3, "sessions_started": 12, "sessions_ended": 10,
     "sessions": 12, "sessions_closed": 10,
     "sent_bytes": 1048576, "received_bytes": 524288,
-    "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "lan": 0, "expired": 0 },
+    "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "membership": 0, "expired": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
     "wire_tx": 2048, "wire_rx": 1024
@@ -411,13 +417,13 @@ should prefer the canonical name and fall back to the legacy one.
 ```
 
 `sessions_started` and `sessions_ended` count connects and disconnects, whether
-or not any data flows: under a stats label on the tier for a group's `labels`,
+or not any data flows: under a stats label on the tier for a bucket's `labels`,
 under the label on each tier for `presence.json`, and under every label in the
-group or node on the tier for its totals. `sessions` and `sessions_closed` are their
+bucket or node on the tier for its totals. `sessions` and `sessions_closed` are their
 legacy spellings. A session moved to a new tier ends on the old one and starts
 on the new. `sent_bytes` and `received_bytes` count the payload this node sent
 to and received from those sessions and HTTP requests, the same bytes a
-group's `paths` count. A changed label moves later presence and bytes; bytes
+bucket's `paths` count. A changed label moves later presence and bytes; bytes
 before the change remain under the old label. Older readers ignore these fields
 and newer readers default missing fields to zero.
 
@@ -470,7 +476,7 @@ it was admitted; later traffic follows the new tier.
 the relay, and subscriptions held on it, by any one session. Compare announces
 with the relay's [client or peer session limits](/bin/relay/config#session-and-peer),
 past which a session is closed with `TOO_MANY_REQUESTS`, and subscriptions with
-its QUIC `max_streams`, which bounds them. In a group's `labels` a peak never
+its QUIC `max_streams`, which bounds them. In a bucket's `labels` a peak never
 goes down while the label has a session; in the totals and presence tracks it
 never goes down while the track lives. Summing
 nodes or labels takes the largest.
@@ -483,7 +489,7 @@ count is started minus ended. A frame never shows ended above started.
 
 A new instance starts every counter from zero, so a reader summing a node over
 time adds each instance's counters rather than diffing across them. Within one
-instance the totals never go down. A group's path or label counter going **down**
+instance the totals never go down. A bucket's path or label counter going **down**
 means the entry was dropped and re-created, and a presence or prefix counter going down
 means the track was held again. Treat it as the start of a fresh segment
 rather than a negative rate. On a route whose instance a session minted (an older relay, or

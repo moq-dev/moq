@@ -14,9 +14,9 @@
 //! cuts the final group's stream mid-flight.
 //!
 //! The subscriber drains a head group first (so the subscription is established and
-//! only the tail is at stake), then stops reading for [`STALL`] while the publisher
-//! writes a 4 MB final group, finishes the track and disconnects, so the group is still
-//! queued behind the connection's flow-control window when the session goes away. The
+//! only the tail is at stake), then stops reading while the publisher writes a 4 MB
+//! final group, finishes the track and disconnects, so the group is still queued
+//! behind the connection's flow-control window when the session goes away. The
 //! subscriber must then either see every frame or end with an error; it must not end
 //! `Ok(None)` short of the final group.
 //!
@@ -25,8 +25,6 @@
 //! signal the subscriber gets when it could not.
 
 use std::time::Duration;
-
-use moq_tokio::moq_net;
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -40,9 +38,6 @@ const FRAMES: usize = 10;
 /// close, the publisher would only ever lose its FIN, and the test would not cover
 /// a group cut mid-flight.
 const PADDING: usize = 400_000;
-/// How long the subscriber stops reading after the head group, so the final group is
-/// still queued in the publisher when the session goes away.
-const STALL: Duration = Duration::from_millis(300);
 
 /// One round: a head group the subscriber drains, then a final group, `finish()`, and
 /// the publisher's session dropped with no await in between. Returns how many frames
@@ -70,8 +65,11 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 
 	// The publisher only learns of a subscription once the subscriber polls it, so the
 	// reader runs concurrently. It tells the publisher when it has drained the head
-	// group, so the final group is written against an established subscription.
+	// group, so the final group is written against an established subscription, and
+	// stops reading until the publisher is done, so that group is still queued behind
+	// the flow-control window when the session goes away.
 	let (drained_tx, drained_rx) = tokio::sync::oneshot::channel();
+	let (resume_tx, resume_rx) = tokio::sync::oneshot::channel::<()>();
 
 	let reader = tokio::spawn(async move {
 		let mut client_config = moq_tokio::connect::Config::default();
@@ -98,7 +96,7 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 		let mut got = 0;
-		let mut drained = Some(drained_tx);
+		let mut drained = Some((drained_tx, resume_rx));
 		loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
@@ -112,12 +110,10 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 					Err(err) => return (got, Some(err)),
 				}
 			}
-			// The head group is in: from here on, only the tail can be lost. Stop reading
-			// for a moment, so the publisher's final group is still queued behind the
-			// connection's flow-control window when it disconnects.
-			if let Some(tx) = drained.take() {
-				let _ = tx.send(());
-				kio::clock::sleep(STALL).await;
+			// The head group is in: from here on, only the tail can be lost.
+			if let Some((drained, resume)) = drained.take() {
+				let _ = drained.send(());
+				let _ = resume.await;
 			}
 		}
 	});
@@ -146,7 +142,7 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 	// The final group, a clean group end and a clean track end, innermost first and with
 	// no await in between: the session has sent none of it yet.
 	write_group(&track);
-	track.finish().expect("finish track");
+	let track = track.finish().expect("finish track");
 	drop(track);
 
 	// The publisher is done, so it disconnects. Nothing it could have awaited first.
@@ -156,6 +152,7 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 	} else {
 		Some(session)
 	};
+	let _ = resume_tx.send(());
 
 	let result = kio::clock::timeout(TIMEOUT, reader)
 		.await

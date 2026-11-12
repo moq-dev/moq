@@ -8,9 +8,9 @@ import { announcedView } from "../src/announced.test-util";
 import * as Announce from "../src/announced.ts";
 import { AuthSession } from "../src/auth_session.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
-import type { Established } from "../src/connection/established.ts";
 import { forwardAnnounced } from "../src/connection/forward.ts";
-import { RouteInfo } from "../src/hop.ts";
+import type { Session } from "../src/connection/session.ts";
+import { WireRoute } from "../src/hop.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { registerWire } from "../src/wire.ts";
@@ -35,6 +35,7 @@ class FakeSession {
 		registerWire(this, {
 			consume: () => new BroadcastProducer().consume(),
 			exclusive: false,
+			leave: () => {},
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
 		});
 		this.closed = new Promise((resolve) => {
@@ -52,7 +53,7 @@ class FakeSession {
 }
 
 const announce = (stream: Announce.Producer, prefix: Path.Valid, cost: bigint, kind: "start" | "update") =>
-	stream.append({ prefix, captures: undefined, kind, route: RouteInfo.normalize({ cost }) });
+	stream.append({ prefix, captures: undefined, kind, route: WireRoute.normalize({ cost }) });
 
 console.log("touched,heads,routes,update_us");
 for (const touched of ["covering", "single"] as const) {
@@ -65,7 +66,7 @@ for (const touched of ["covering", "single"] as const) {
 				new Path.Patterns(heads.map((head) => Path.Pattern.subtree(head))),
 			);
 			const session = new FakeSession();
-			forwardAnnounced(session as unknown as Established, scoped);
+			forwardAnnounced(session as unknown as Session, scoped);
 
 			// Watching everything narrows to one request per head.
 			const table = await announcedView(origin);
@@ -117,7 +118,7 @@ for (const watchers of [8, 128, 2048]) {
 		const origin = new Producer();
 		const attached = Array.from({ length: sessions }, () => {
 			const session = new FakeSession();
-			forwardAnnounced(session as unknown as Established, origin);
+			forwardAnnounced(session as unknown as Session, origin);
 			return session;
 		});
 		const held = Array.from({ length: watchers }, (_, index) =>

@@ -59,10 +59,6 @@ const COMMAND_QUEUE: usize = 2 * mixer::MAX_SINKS;
 const SYNC_ATTEMPTS: u32 = 8;
 const SYNC_DELAY: Duration = Duration::from_millis(4);
 
-/// Frames the sample-format conversion buffer holds. Comfortably more than any
-/// host's period, so the loop over it almost always runs once.
-const SCRATCH_FRAMES: usize = 2048;
-
 /// State shared between the caller's [`Engine`](super::Engine) handles, their
 /// sinks, and the driver thread.
 ///
@@ -538,6 +534,11 @@ impl Requests {
 
 	/// Block until there is something to do, or until `deadline` passes.
 	fn wait(&self, deadline: Option<Instant>) -> Work {
+		self.wait_with(deadline, park)
+	}
+
+	/// [`Self::wait`], sleeping through `park`, which may return early.
+	fn wait_with(&self, deadline: Option<Instant>, mut park: impl FnMut(Option<Duration>)) -> Work {
 		loop {
 			if let Some(work) = self.poll(deadline) {
 				return work;
@@ -548,11 +549,16 @@ impl Requests {
 			// below at once, or has yet to signal and will unpark us after it
 			// does. Either way the loop polls again before sleeping, so an
 			// early wake costs a lap rather than a spurious retry.
-			match deadline {
-				Some(at) => std::thread::park_timeout(at.saturating_duration_since(Instant::now())),
-				None => std::thread::park(),
-			}
+			park(deadline.map(|at| at.saturating_duration_since(Instant::now())));
 		}
+	}
+}
+
+/// Park the current thread for up to `timeout`, or until unparked.
+fn park(timeout: Option<Duration>) {
+	match timeout {
+		Some(timeout) => std::thread::park_timeout(timeout),
+		None => std::thread::park(),
 	}
 }
 
@@ -853,14 +859,8 @@ impl Driver {
 	where
 		T: cpal::SizedSample + cpal::FromSample<f32>,
 	{
-		// The mixer works in `f32`, so anything else needs a staging buffer.
-		// Allocated once and a whole number of frames long, so however big a
-		// buffer the device asks for, the callback loops over this rather than
-		// resizing (allocating on the audio thread is the one thing it must
-		// never do).
 		let channels = config.channels as usize;
 		let sample_rate = config.sample_rate as f64;
-		let mut scratch = vec![0.0f32; SCRATCH_FRAMES * channels];
 		let mut epoch = None;
 
 		device
@@ -874,13 +874,7 @@ impl Driver {
 						+ Duration::from_secs_f64((data.len() / channels) as f64 / sample_rate);
 					mixer.complete(now);
 					mixer.latency(timestamp.playback.checked_duration_since(timestamp.callback));
-					for chunk in data.chunks_mut(scratch.len()) {
-						let scratch = &mut scratch[..chunk.len()];
-						mixer.fill(scratch, played_at);
-						for (out, sample) in chunk.iter_mut().zip(scratch.iter()) {
-							*out = T::from_sample(*sample);
-						}
-					}
+					mixer.fill(data, played_at, crate::ring::host());
 				},
 				move |error| {
 					failures.report(&error);
@@ -957,7 +951,7 @@ impl Driver {
 	fn schedule(&mut self) -> Instant {
 		let wait = self.retry.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
 		self.retry = (self.retry * 2).min(RETRY_MAX);
-		Instant::now() + wait
+		Instant::now().saturating_add(wait)
 	}
 
 	/// Whether the failures the live stream has reported require a rebuild.
@@ -1056,11 +1050,11 @@ mod tests {
 		let (retired, _rx) = sync_channel(8);
 		let mut mixer = Mixer::new(wired.mixer, retired, 48_000, Layout::Stereo, Default::default()).unwrap();
 		let mut out = vec![0.0; 4096 * 2];
-		mixer.fill(&mut out, Duration::ZERO);
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		let samples: Vec<_> = [0.25f32; 123 * 2].iter().flat_map(|s| s.to_le_bytes()).collect();
 		assert_eq!(sink.write(&samples).unwrap().accepted_sample_frames, 123);
 		let mut drain = std::pin::pin!(sink.finish());
-		mixer.fill(&mut out, Duration::from_millis(100));
+		mixer.fill(&mut out, Duration::from_millis(100), crate::ring::host());
 		mixer.complete(Duration::from_millis(100));
 		wired.shared.unbind();
 		assert!(wired.shared.sync());
@@ -1297,17 +1291,23 @@ mod tests {
 		let (commands, requests) = channel();
 		let (sent, arrived) = std::sync::mpsc::channel();
 
+		let (parking, parked) = std::sync::mpsc::channel();
+
 		let waker = commands.clone();
 		let driver = std::thread::spawn(move || {
 			requests.attach();
 
 			// Deadlines rather than a plain park, so a lost wake fails the test
 			// instead of hanging it.
-			let woken = matches!(requests.wait(Some(Instant::now() + PATIENCE)), Work::Sync);
+			let first = requests.wait_with(Some(Instant::now().saturating_add(PATIENCE)), |timeout| {
+				let _ = parking.send(());
+				park(timeout);
+			});
+			let woken = matches!(first, Work::Sync);
 			sent.send(()).unwrap();
 
 			// Syncs racing in behind the first are fine; only silence is not.
-			let deadline = Instant::now() + PATIENCE;
+			let deadline = Instant::now().saturating_add(PATIENCE);
 			let stopped = loop {
 				match requests.wait(Some(deadline)) {
 					Work::Shutdown => break true,
@@ -1318,13 +1318,9 @@ mod tests {
 			(woken, stopped)
 		});
 
-		// Let the driver reach `park` with an empty mailbox, then race a flood
-		// of notifications against it.
-		#[expect(
-			clippy::disallowed_methods,
-			reason = "the driver is a real OS thread that parks outside any runtime"
-		)]
-		std::thread::sleep(Duration::from_millis(10));
+		// Once the driver has found its mailbox empty and is on its way into
+		// `park`, race a flood of notifications against it.
+		parked.recv_timeout(PATIENCE).expect("the driver never parked");
 		std::thread::scope(|s| {
 			for _ in 0..8 {
 				s.spawn(|| waker.sync());
@@ -1348,7 +1344,7 @@ mod tests {
 
 		let driver = std::thread::spawn(move || {
 			requests.attach();
-			requests.wait(Some(Instant::now() + PATIENCE))
+			requests.wait(Some(Instant::now().saturating_add(PATIENCE)))
 		});
 
 		assert!(
@@ -1380,25 +1376,19 @@ mod tests {
 	fn an_early_wake_does_not_fake_a_retry() {
 		let (commands, requests) = channel();
 
-		let waker = commands.clone();
-		let driver = std::thread::spawn(move || {
-			requests.attach();
-			// A deadline far enough out that only the unpark below can end the
-			// park, so a Retry here would mean the deadline was misread.
-			requests.wait(Some(Instant::now() + PATIENCE))
+		// The deadline is never reached: the first park returns with nothing
+		// pending, as a spurious wake does, and the second brings the sync.
+		let mut parks = 0;
+		let work = requests.wait_with(Some(Instant::now().saturating_add(PATIENCE)), |_| {
+			parks += 1;
+			match parks {
+				1 => {}
+				2 => commands.sync(),
+				_ => panic!("the sync did not end the wait"),
+			}
 		});
 
-		#[expect(
-			clippy::disallowed_methods,
-			reason = "the driver is a real OS thread that parks outside any runtime"
-		)]
-		std::thread::sleep(Duration::from_millis(10));
-		waker.sync();
-
-		assert!(
-			matches!(driver.join().unwrap(), Work::Sync),
-			"an early wake was reported as a retry"
-		);
+		assert!(matches!(work, Work::Sync), "an early wake was reported as a retry");
 	}
 
 	/// A driver that unwinds takes the mailbox down with it. Without that, a

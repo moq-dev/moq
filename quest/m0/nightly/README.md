@@ -27,8 +27,8 @@ This README's own work, after the children:
   [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
   macOS `receive_credit` timeout has no owner since its quest was deleted in
   [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
-  [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, the paired bench
-  threshold to [bench CI](/quest/m1/bench-ci.md). The moq-net benchmark
+  [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, and the paired bench
+  threshold is calibrated in [Paired comparison](/bench/README.md#paired-comparison). The moq-net benchmark
   fixtures were repaired in [moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940).
   The receive-windows benchmark's overcommitted cells, skipped since
   [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838), moved to
@@ -40,7 +40,10 @@ to the PR gate; the full run costs about 17 minutes per PR.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [Nightly's Miri job stays inside its time budget](/quest/m0/nightly/miri.md) - both Miri passes go green, with ARM timings inside the 60-minute job and 15-minute-per-test budgets
-- [Nightly's macOS platform job passes](/quest/m0/nightly/macos.md) - `moq-audio`'s tests compile on macOS again and the websocket version test's timeout is fixed if it recurs
+Decided 2026-11-09 (maintainer, /quest-complete), from the triage of runs
+[42377867523](https://github.com/moq-dev/moq/actions/runs/42377867523) and
+[42487375545](https://github.com/moq-dev/moq/actions/runs/42487375545): four
+more children for the causes nothing owned. Dropped: one-night bench moves
+near the paired threshold (re-check if one repeats), a one-off
+`remote error: 52` in the browser bench smoke, and failures main or
+[moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) already fixes.

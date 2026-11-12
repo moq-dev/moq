@@ -5,7 +5,7 @@ use std::task::{Poll, ready};
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
-use crate::ffi::{Background, Polled};
+use crate::ffi::{Background, OneShot, Polled};
 use crate::media::{MoqDatagram, MoqTimestamp};
 use crate::producer::{Child, Children, MoqBroadcastProducer};
 
@@ -132,7 +132,7 @@ impl MoqDatagramProducer {
 	/// Insert a datagram at its explicit sequence; later appends continue past the highest one.
 	pub fn insert(&self, datagram: MoqDatagram) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let datagram = moq_net::Datagram {
+		let datagram = moq_net::datagram::Datagram {
 			sequence: datagram.sequence,
 			timestamp: datagram.timestamp.map(TryInto::try_into).transpose()?,
 			payload: datagram.payload.into(),
@@ -158,7 +158,24 @@ impl MoqDatagramProducer {
 	/// Wait until the aggregate subscriber priority differs from `last`.
 	pub async fn priority_changed(&self, last: Option<i8>) -> Result<Option<i8>, MoqError> {
 		self.inner
-			.wait(|producer, waiter| Poll::Ready(Ok(ready!(producer.poll_priority(waiter, last)))))
+			.wait(|producer, waiter| {
+				// The producer compares against what it last returned, which another call on this
+				// shared handle may have moved past `last`. Register first, then compare to `last`,
+				// so a change after the check still wakes this wait.
+				loop {
+					match producer.poll_priority_changed(waiter) {
+						Poll::Ready(priority) if priority != last => return Poll::Ready(Ok(priority)),
+						Poll::Ready(_) => continue,
+						Poll::Pending => {
+							let now = producer.priority();
+							return match now != last {
+								true => Poll::Ready(Ok(now)),
+								false => Poll::Pending,
+							};
+						}
+					}
+				}
+			})
 			.await
 	}
 
@@ -264,7 +281,7 @@ impl MoqDatagramRequests {
 			.wait(|requests, waiter| Poll::Ready(Ok(ready!(requests.poll_requested(waiter))?)))
 			.await?;
 		Ok(Arc::new(MoqDatagramRequest {
-			inner: std::sync::Mutex::new(Some(request)),
+			inner: OneShot::new(request),
 			children: self.children.clone(),
 		}))
 	}
@@ -278,7 +295,7 @@ impl MoqDatagramRequests {
 /// A requested datagram track awaiting acceptance or rejection.
 #[derive(uniffi::Object)]
 pub struct MoqDatagramRequest {
-	inner: std::sync::Mutex<Option<moq_net::datagram::Request>>,
+	inner: OneShot<moq_net::datagram::Request>,
 	children: Children,
 }
 
@@ -286,34 +303,28 @@ pub struct MoqDatagramRequest {
 impl MoqDatagramRequest {
 	/// The requested datagram track's name.
 	pub fn name(&self) -> Result<String, MoqError> {
-		Ok(self
-			.inner
-			.lock()
-			.unwrap()
-			.as_ref()
-			.ok_or(MoqError::Closed)?
-			.name()
-			.to_owned())
+		self.inner.peek(|request| request.name().to_owned())
 	}
 
 	/// The highest priority among the consumers waiting for this track.
 	pub fn priority(&self) -> Result<Option<i8>, MoqError> {
-		Ok(self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.priority())
+		self.inner.peek(|request| request.priority())
 	}
 
 	/// Accept the request with its fixed publisher properties.
 	pub fn accept(&self, info: Option<MoqDatagramInfo>) -> Result<Arc<MoqDatagramProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let info = info.unwrap_or_default().try_into()?;
-		let request = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
-		MoqDatagramProducer::child(request.accept(info), &self.children)
+		self.inner
+			.answer(|request| MoqDatagramProducer::child(request.accept(info), &self.children))
 	}
 
 	/// Reject this request with an application error code.
-	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
+	pub fn reject(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let request = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
-		request.reject(moq_net::Error::App(error_code));
-		Ok(())
+		self.inner.answer(|request| {
+			request.reject(moq_net::Error::App(error_code));
+			Ok(())
+		})
 	}
 }

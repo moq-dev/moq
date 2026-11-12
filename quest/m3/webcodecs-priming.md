@@ -18,7 +18,7 @@ gap ([w3c/webcodecs#626](https://github.com/w3c/webcodecs/issues/626)).
 Out of scope: Rust, where `moq-audio` already declares Opus lookahead as
 pre-skip and folds the AAC delay into timestamps (`folded_delay` in
 `rs/moq-audio/src/encode/encoder.rs`); and playback-side sync, which
-[Watch](/quest/m1/audio-jitter-target/watch.md) converges by time-stretching.
+the audio ring converges by time-stretching.
 
 ## Plan
 
@@ -68,5 +68,5 @@ Decided 2026-11-04 (maintainer, /quest-plan):
 ## Related
 
 - [moq-audio in the browser](/quest/m5/audio-web.md) - its WebCodecs backend's `delay()` reuses this measurement
-- [AudioToolbox encode](/quest/m5/audio-encode-audiotoolbox.md) - the native AAC encoder's delay, folded the same way
+- [AudioToolbox encode](/quest/m3/audio-encode-audiotoolbox.md) - the native AAC encoder's delay, folded the same way
 - [Chromium's Opus encoder stamps chunks from their input](/quest/m4/chromium-opus-timestamps.md) - another WebCodecs `AudioEncoder` timestamp bug

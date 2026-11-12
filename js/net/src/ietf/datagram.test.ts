@@ -1,8 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
-import { yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
 import { ProtocolViolation, SessionCode } from "../error.ts";
-import { createMockTransportPair, type MockTransport } from "../mock.ts";
+import { createMockTransportPair, type MockTransport, manual, settlesWithin } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
 import { encodeVarint, Stream } from "../stream.ts";
@@ -105,6 +105,7 @@ test("an undefined object status closes the session", async () => {
 });
 
 test("a defined object status does not close the session", async () => {
+	using clock = manual();
 	const { pair, connection, version, writable } = await session();
 	try {
 		const bytes = new ObjectDatagram({
@@ -115,15 +116,14 @@ test("a defined object status does not close the session", async () => {
 		}).encode(version);
 		const writer = writable.getWriter();
 		await writer.write(bytes);
-		const open = Symbol("open");
-		const result = await Promise.race([pair.server.closed, Bun.sleep(50).then(() => open)]);
-		expect(result).toBe(open);
+		expect(await settlesWithin(pair.server.closed, clock, Duration.millis(50))).toBe(false);
 	} finally {
 		connection.abort();
 	}
 });
 
 test("a datagram track round-trips over moq-transport", async () => {
+	using clock = manual();
 	const source = new Origin();
 	const path = Path.from("live");
 	const publication = source.route(path, { hidden: true });
@@ -163,7 +163,8 @@ test("a datagram track round-trips over moq-transport", async () => {
 		expect(received?.timestamp?.asMillis()).toBe(9);
 		expect(received?.payload).toEqual(new Uint8Array([7]));
 		datagrams.finish();
-		expect(await reader.recv()).toBeUndefined();
+		// The end waits out the grace a late datagram gets.
+		expect(await clock.drive(reader.recv())).toBeUndefined();
 	} finally {
 		reader.close();
 		await peers[0].close();
@@ -190,7 +191,7 @@ test("a relay shares one IETF subscription across stream and datagram readers", 
 			accept({ url, transport: upstream.server, publish: source.consume() }),
 		]);
 		const original = wireOf(peers[0]).consume(path);
-		const requests = relay.routePrefix(path);
+		const requests = relay.claim(path);
 		const cursor = requests.requested();
 		const routing = (async () => {
 			for await (const request of cursor) request.serve(original);
@@ -288,6 +289,7 @@ for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 		[100, true],
 	] as const) {
 		test(`${alpn}: a datagram sent right behind its answer arrives (answer ${lag} microtasks late${finish ? ", then the end" : ""})`, async () => {
+			using clock = manual();
 			const source = new Origin();
 			const publication = source.route(Path.from("live"), { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio");
@@ -313,7 +315,8 @@ for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 				await reader.info();
 				if (!finish) datagrams.append(undefined, Uint8Array.of(2));
 				expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
-				if (finish) expect(await reader.recv()).toBeUndefined();
+				// The end waits out the grace a late datagram gets.
+				if (finish) expect(await clock.drive(reader.recv())).toBeUndefined();
 				else expect((await reader.recv())?.payload).toEqual(Uint8Array.of(2));
 			} finally {
 				reader.close();
@@ -328,6 +331,7 @@ for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 
 for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 	test(`${alpn}: a datagram burst reaches its reader before the end across a receive yield`, async () => {
+		using clock = manual();
 		const source = new Origin();
 		const publication = source.route(Path.from("live"), { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");
@@ -351,7 +355,8 @@ for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 			for (let i = 0; i < 64; i++) datagrams.append(undefined, Uint8Array.of(i));
 			datagrams.finish();
 			for (let i = 0; i < 64; i++) expect((await reader.recv())?.payload).toEqual(Uint8Array.of(i));
-			expect(await reader.recv()).toBeUndefined();
+			// The end waits out the grace a late datagram gets.
+			expect(await clock.drive(reader.recv())).toBeUndefined();
 		} finally {
 			budget.mockRestore();
 			reader.close();

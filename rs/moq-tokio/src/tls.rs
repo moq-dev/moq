@@ -585,7 +585,8 @@ pub struct Connect {
 	/// Only certificates are extracted; any private keys in the file are ignored.
 	/// Must be paired with `--connect-tls-key`. With the `watch` feature, both files
 	/// are hot reloaded for new connections, retaining the last valid pair while a
-	/// rotation is missing, malformed, or mismatched.
+	/// rotation is missing, malformed, or mismatched. Dialing `http://`, `ws://`,
+	/// `tcp://`, or `unix://` with a client certificate fails, since none can present it.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "connect-tls-cert",
@@ -1074,6 +1075,12 @@ impl Connect {
 	#[cfg(feature = "quic")]
 	pub(crate) fn allows_http_bootstrap(&self) -> bool {
 		self.fingerprint.is_empty() && !self.insecure.unwrap_or_default()
+	}
+
+	/// Whether a dial presents an mTLS client certificate.
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
+	pub(crate) fn has_client_cert(&self) -> bool {
+		self.identity.is_some() || self.cert.is_some()
 	}
 
 	/// Parse the configured fingerprints into fixed-size SHA-256 digests.
@@ -1827,12 +1834,13 @@ impl Serve {
 pub struct PeerIdentity {
 	chain: Vec<CertificateDer<'static>>,
 	/// Every root the accepting listener had trusted when it built this.
+	#[cfg(feature = "_certs")]
 	roots: Arc<[CertificateDer<'static>]>,
 }
 
 impl PeerIdentity {
 	/// A chain with no listener roots behind it.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "_transport"))]
 	pub(crate) fn from_chain(chain: Vec<CertificateDer<'static>>) -> Self {
 		Self {
 			chain,
@@ -3059,6 +3067,7 @@ mod tests {
 	) -> (CertificateDer<'static>, rcgen::Issuer<'static, rind_rcgen::KeyPair>) {
 		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		params.serial_number = Some(1u64.into());
 		params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 		let cert = match parent {
 			Some(parent) => params.signed_by(&key, parent).unwrap(),
@@ -3069,7 +3078,8 @@ mod tests {
 
 	fn lineage_leaf(issuer: &rcgen::Issuer<'_, rind_rcgen::KeyPair>) -> CertificateDer<'static> {
 		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-		let params = rcgen::CertificateParams::new(vec!["client.invalid".to_string()]).unwrap();
+		let mut params = rcgen::CertificateParams::new(vec!["client.invalid".to_string()]).unwrap();
+		params.serial_number = Some(1u64.into());
 		params.signed_by(&key, issuer).unwrap().into()
 	}
 
@@ -3666,6 +3676,27 @@ mod tests {
 		assert!(client_verifier.verify_client_cert(&client_b, &[], now).is_ok());
 	}
 
+	/// A root file holding several CAs trusts every one of them, not only the first.
+	#[cfg(all(feature = "watch", feature = "quic"))]
+	#[test]
+	fn a_root_bundle_is_loaded_whole() {
+		let (unrelated, _, _, _, _) = signed_certificates();
+		let (signer, server, _, _, _) = signed_certificates();
+		let dir = tempfile::TempDir::new().unwrap();
+		let bundle = dir.path().join("bundle.pem");
+		std::fs::write(&bundle, format!("{unrelated}{signer}")).unwrap();
+
+		let roots = read_roots(&[bundle]).unwrap();
+		assert_eq!(roots.len(), 2);
+		let verifier = Connect::build_root_server_verifier(&roots, false, &crypto::provider().unwrap()).unwrap();
+		let name = ServerName::try_from("localhost").unwrap();
+		assert!(
+			verifier
+				.verify_server_cert(&server, &[], &name, &[], UnixTime::now())
+				.is_ok()
+		);
+	}
+
 	#[test]
 	fn build_uses_platform_verifier_by_default() {
 		// No custom roots, system trust on: resolves to the OS platform verifier
@@ -3866,7 +3897,7 @@ impl Reload {
 		if paths.is_empty() {
 			return Ok(Self { _task: None });
 		}
-		let watcher = crate::watch::Files::new(&paths).map_err(|err| Error::Watch(err.to_string()))?;
+		let watcher = crate::watch::Files::watch(&paths).map_err(|err| Error::Watch(err.to_string()))?;
 
 		// The certificates were loaded before the watch existed, so anything that
 		// landed in between produced no event and would sit unseen until the next

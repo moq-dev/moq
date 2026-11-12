@@ -49,7 +49,7 @@ The `rust-swapped -> js` and `rust -> js` browser audio timeouts were a lite-06
 catalog group dropped mid-read ending the player's catalog, fixed by
 [moq-dev/moq#6820](https://github.com/moq-dev/moq/pull/6820).
 
-moq-rtc's session-end test was never load-bound: on the paused clock, dimpl's
+moq-webrtc's session-end test was never load-bound: on the paused clock, dimpl's
 randomly jittered DTLS handshake give-up raced ICE's establishment deadline,
 fixed by [moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379).
 
@@ -86,6 +86,13 @@ explains. That batch predates #7658's merge at 15:56Z, and no queue run since
 has failed it, so it needs no child of its own (noted 2026-11-03,
 `/quest-plan`).
 
+The JS reload close-drain test lost a race in the lite-07 publisher: the
+subscriber's FIN after reading the tail could land while a reply write, such as
+SUBSCRIBE_FINISH, still yielded on the write budget. That exit stopped owing the
+opened group streams, so a draining close aborted a final group whose FIN was
+still in flight. Every exit now owes them, fixed by
+[moq-dev/moq#8047](https://github.com/moq-dev/moq/pull/8047).
+
 Added 2026-11-03 (maintainer, `/quest-plan`): five more merge-queue failures
 from 2026-11-03 and early 2026-11-04 UTC, one child each.
 
@@ -95,22 +102,174 @@ test, which failed two merge-queue batches and two loaded local runs.
 Added 2026-11-05 (maintainer, `/quest-audit`): Interop's P2P data-channel
 timeout, one child.
 
-Added 2026-11-05 (maintainer, `/quest-complete` follow-ups): moq-net's
-pool-debt flight test, the Python audio playout-delay test, and the io_uring
-tests' shared locked-memory budget, one child each. On 2026-11-06, moq-ffi's
-concurrent-ready test, quarantined here instead of in the unrelated
+Added 2026-11-06: `js/net`'s lite-06 datagram end/close case, from `Check` on
 [moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
 
+Added 2026-11-05 (maintainer, `/quest-complete` follow-ups): moq-net's
+pool-debt flight test, the Python audio playout-delay test, and the io_uring
+tests' shared locked-memory budget, one child each. The pool-debt test
+overshot because shed frames whose payload canonical content owned stayed
+billed until crossbeam-epoch reclamation, which other tests' reads in the same
+process held back; eviction now lets go of that content itself, fixed by
+[moq-dev/moq#8052](https://github.com/moq-dev/moq/pull/8052).
+
+moq-ffi's concurrent-ready test drained its reader until the group ended, which
+an unfinished group never does. Its `ffi_caught_up` returned without yielding
+whenever the FFI runtime answered first, so under load the woken `ready` calls
+missed their turn until every frame was read. Fixed by reading at most what was
+written and yielding after each read, in
+[moq-dev/moq#8053](https://github.com/moq-dev/moq/pull/8053).
+
+The Python audio playout-delay test was never a decoder stall: under its default
+zero max delay, a read more than the 80 ms warmup late found the first frame's
+group stale, and the warmup then trimmed all the audio left. The test now asks
+for no max delay, fixed by [moq-dev/moq#8050](https://github.com/moq-dev/moq/pull/8050).
+
+Added 2026-11-06: `js/net`'s flate tail-shed test, which timed out in a
+merge-queue batch. It was CPU-bound, not racy: 100 one-MiB frames of pako
+deflate and inflate against a 32 MiB tail budget that sheds from the 33rd. It
+now writes four frames past the budget, fixed by
+[moq-dev/moq#8137](https://github.com/moq-dev/moq/pull/8137).
+
+Added 2026-11-06 (maintainer's standing rule that flakes join this epic):
+`js/net`'s datagram-end close case, which failed
+[moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986)'s Check while
+reproducing on unchanged `main`. Its end waited a host task when the
+publisher's write budget yielded under load while writing SUBSCRIBE_FINISH, past
+the case's microtask drain. [moq-dev/moq#8000](https://github.com/moq-dev/moq/pull/8000)
+stubbed that budget, merging after the quarantine was written. The case was
+re-enabled in [moq-dev/moq#8110](https://github.com/moq-dev/moq/pull/8110).
+Its follow-up: a peer's protocol violation, such as a duplicate SETUP, fails the
+session without the drain a close gets, so a lite-05/06 datagram track whose
+SUBSCRIBE_FINISH arrived before its FIN aborted with the session's error. Its
+datagrams now finish whenever the stream track's settled end survives the abort,
+fixed by [moq-dev/moq#8157](https://github.com/moq-dev/moq/pull/8157).
+
+moq-relay's `embed::worker_tokio_custom_route_and_quic` was never load-bound
+either. Its socket-ownership check matched the HTTP and QUIC ports without
+their protocol, so the test's own QUIC client, still draining, counted as the
+relay's whenever its UDP port shared the HTTP listener's TCP port number.
+Fixed by [moq-dev/moq#8236](https://github.com/moq-dev/moq/pull/8236).
+
+`sh/dispatch-query.test.py`'s terminate test was never load-bound. A TERM
+landing just after the dispatcher's `wait -n` returned left Bash marking the
+exit trap's next `wait` as interrupted, so it returned 143 at once and errexit
+skipped the timing report. A TERM landing after a lane forked but before
+`running` recorded it left that lane uncancelled and the exit trap's `wait`
+hung. The exit trap now waits again, and cancellation reads the job table,
+fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
+
+moq-gst's sink-restart pad test caught a real source bug: a track that failed on
+an instance still up, such as a relay's copy cut off as its publisher's session
+closed, left no finished record, so the final catalog snapshot started the
+rendition again and replayed a group on its held pad. A failure now counts as
+the track's end, fixed by [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160).
+
+moq-gst's stale-completion sink test, which failed once in 30 stress iterations
+in [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160)'s validation,
+because the sink reported a stopped session as a terminal failure; the session
+now tells a stop from a give-up through `Connection::closed`, fixed by
+[moq-dev/moq#8246](https://github.com/moq-dev/moq/pull/8246).
+
+`js/net`'s lite-07 relative-start integration test, which failed once on main in
+[moq-dev/moq#8165](https://github.com/moq-dev/moq/pull/8165)'s baseline run,
+read a start of 0 when the newest group landed before the reader asked: its
+window had yet to settle the relative anchor, so it asked a fill from group 0.
+`start()` now settles the window first, as the Rust `poll_start` does, fixed by
+[moq-dev/moq#8197](https://github.com/moq-dev/moq/pull/8197).
+
+Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s
+http:// fingerprint tests, whose slow real fetch lets the WebTransport hedge
+timer fire on the host clock, seen in
+[moq-dev/moq#8163](https://github.com/moq-dev/moq/pull/8163)'s CI.
+
+Added 2026-11-07 (maintainer's standing rule that flakes join this epic):
+`js/net`'s lite-07 empty-window reply test, which fails on main 12/200 under
+`--rerun-each 200`, found in [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670).
+A subscriber FIN during the reply write's budget yield resets the stream. It is
+quarantined with `test.skip` until its child fixes it.
+
+Added 2026-11-07 (maintainer, /quest-complete): moq-relay's
+`socket_auth::a_forged_dial_never_connects`, which failed
+[moq-dev/moq#8204](https://github.com/moq-dev/moq/pull/8204)'s Check when
+mallory's request for bob's endpoint synced before his announce arrived. It is
+quarantined with `#[ignore]` until its child fixes it.
+
+Added 2026-11-07 (maintainer, /quest-complete): moq-uring's qlog accounting
+test, which spins a fixed count waiting on a background thread, from
+[moq-dev/moq#8208](https://github.com/moq-dev/moq/pull/8208)'s follow-ups.
+
+Added 2026-11-08 (maintainer): `js/net`'s bandwidth sampling test and lite-07
+createWritable datagram queue test, which failed under load. So is the lite-06 case of the
+datagram session-close-after-end test, which dropped
+[moq-dev/moq#8280](https://github.com/moq-dev/moq/pull/8280) from the merge queue. All are
+quarantined with `test.skip` until their children fix them.
+
+Added 2026-11-08 (maintainer, /quest-complete): `js/net`'s widened max-age
+re-drop test, which failed on [moq-dev/moq#8230](https://github.com/moq-dev/moq/pull/8230)
+with the `Cancel` reset [moq-dev/moq#8195](https://github.com/moq-dev/moq/pull/8195) intends for a reply still pending at the stream's end; the test races its finish against that reply.
+
+Added 2026-11-08 (maintainer's standing rule that flakes join this epic):
+`bench/relay.test.py`'s stream-transport test, which binds UDP on the number the
+OS picked for TCP and failed a local run while other checks held that UDP port.
+
+Added 2026-11-08 (maintainer's standing rule that flakes join this epic): moq-ffi's
+raw media warmup test, which failed in the merge queue for
+[moq-dev/moq#8272](https://github.com/moq-dev/moq/pull/8272) when its reader skipped one of three
+buffered groups on the FFI runtime's real clock.
+[moq-dev/moq#8329](https://github.com/moq-dev/moq/pull/8329) moved it to the paused test
+clock, re-enabled it, and deleted its child.
+
+Added 2026-11-09 (maintainer, /quest-complete): `js/net`'s compressed-frame
+cap test and lite-07 re-dropped re-offer test, which failed under load during
+the datagram-queues runs and were quarantined with `test.skip` by
+[moq-dev/moq#8333](https://github.com/moq-dev/moq/pull/8333); and moq-net's
+two random-mesh withdrawal tests, which hit nextest's 60 s kill in
+[moq-dev/moq#8247](https://github.com/moq-dev/moq/pull/8247)'s local
+`just check` and are quarantined with `#[ignore]` by
+[moq-dev/moq#8336](https://github.com/moq-dev/moq/pull/8336).
+
+Added 2026-11-09 (maintainer's standing rule that flakes join this epic):
+`js/net`'s datagram session-close-after-end test again, whose lite-05 case
+failed the merge queue for [moq-dev/moq#8276](https://github.com/moq-dev/moq/pull/8276)
+after [moq-dev/moq#8321](https://github.com/moq-dev/moq/pull/8321) re-enabled it.
+The test now aborts once the client has recorded the end, signalled by the
+subscriber's `yieldNow()`, and is re-enabled by
+[moq-dev/moq#8357](https://github.com/moq-dev/moq/pull/8357).
+
+Added 2026-11-09 (maintainer's standing rule that flakes join this epic):
+moq-rs's Python socket test `test_tcp_rst_and_endpoint_close_are_errors`, whose
+reader got `Unroutable` after the endpoint closed during
+[moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)'s loaded `just check`.
+It is quarantined with `pytest.mark.skip` until its child fixes it.
+
+Added 2026-11-09 (maintainer's standing rule that flakes join this epic): the
+Go wrapper's `TestRecvGroupCancelKeepsConsumer`, whose `RecvGroup` after a
+cancelled one missed an appended group during
+[moq-dev/moq#8363](https://github.com/moq-dev/moq/pull/8363)'s loaded
+`just check`. It is quarantined with `t.Skip` until its child fixes it.
+
+Added 2026-11-09 (maintainer, `/quest-complete`, under the flaky-test rule):
+`js/common/worklet.test.ts`'s dev-server test, a candidate for bun's 5 s timeout
+in a loaded full `just check` on [moq-dev/moq#8325](https://github.com/moq-dev/moq/pull/8325).
+The failed log was not retained, so the failing test is unconfirmed.
+It is quarantined with `test.skip` until its child fixes it.
+
+Added 2026-11-09 (maintainer, /quest-complete): interop's `finish` cases with
+a cpp or rust publisher, which failed under a loaded host and passed on rerun.
+They are quarantined until their child fixes them.
+
+Resolved 2026-11-09 (maintainer, `/quest-complete`): `js/net`'s lite-07
+createWritable datagram queue test failed only on code predating [moq-dev/moq#8195](https://github.com/moq-dev/moq/pull/8195): a write
+that yielded after handing DATAGRAMS_INFO over left the first track's queue
+unopened while the reader went on. The test now reads a datagram through that
+queue before counting queues, fixed by
+[moq-dev/moq#8396](https://github.com/moq-dev/moq/pull/8396).
+
+Added 2026-11-10 (maintainer's standing rule that flakes join this epic):
+interop's `python -> go` media cell, whose Go subscriber closed its lite-07
+session as publishing outside its grant once in
+[moq-dev/moq#8444](https://github.com/moq-dev/moq/pull/8444)'s local run and
+passed on rerun. It is quarantined until its child fixes it.
+
 Public API: none. Wire: none.
-
-## Required
-
-- [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs
-- [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
-- [Diagnose and re-enable the FFI datagram connection test](/quest/m0/test-flakes-2/ffi-datagram-roundtrip.md) - diagnose the default-connection timeout and re-enable the quarantined test
-- [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
-- [moq-net's pool-debt flight test holds its bound in parallel runs](/quest/m0/test-flakes-2/pool-debt-flight.md) - `pool_debt_sheds_a_flight_without_its_cached_group` stays under `2 * POOL` when it shares a process with moq-net's other tests
-- [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
-- [io_uring tests fit the shared locked-memory budget](/quest/m0/test-flakes-2/uring-memlock.md) - concurrent moq-relay and moq-uring test runs stop exhausting the user's `RLIMIT_MEMLOCK`, fixed at the cause rather than by raising the limit
-- [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled

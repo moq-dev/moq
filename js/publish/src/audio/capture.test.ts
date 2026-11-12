@@ -1,5 +1,5 @@
 import { expect, mock, spyOn, test } from "bun:test";
-import { Nano, now } from "@moq/clock";
+import { Instant, now } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Order } from "../order";
@@ -380,7 +380,7 @@ test("captures once a gesture resumes a context built before one", async () => {
 	// Blocked, so `<moq-publish>` doesn't hold its announce for audio that may never come.
 	expect(capture.blocked.peek()).toBe(true);
 
-	const before = Nano.toMicro(Nano(now()));
+	const before = now().since(Instant.ZERO).asMicros();
 	webaudio.gesture();
 	await settle();
 
@@ -579,14 +579,14 @@ test("a failed encoder stays failed until the capture source changes", async () 
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {},
 	};
 	const encoder = new Encoder("audio", {
 		broadcast: {
 			audio: () => rendition,
 			order: new Order(),
-			in: { maxAge: new Signal(undefined), onDemand: new Signal(false) },
+			in: { maxAge: new Signal(undefined), onDemand: new Signal("off") },
 		} as never,
 		capture,
 		enabled,

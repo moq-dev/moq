@@ -115,7 +115,7 @@ func dial(ctx context.Context, url string, opts dialOptions, timeout time.Durati
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	grants := client.Session().Grants()
-	defer grants.Close()
+	defer grants.Cancel()
 	grant := grants.Grant()
 	for grant == nil {
 		if grant, err = grants.Changed(ctx); err != nil {
@@ -150,10 +150,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 		return err
 	}
 	defer route.Cancel()
-	producer, err := route.Broadcast()
-	if err != nil {
-		return err
-	}
+	producer := route.Broadcast()
 	defer producer.Close()
 
 	catalog, err := moqmedia.NewCatalogProducer(producer)
@@ -246,10 +243,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 		return err
 	}
 	defer healthRoute.Cancel()
-	health, err := healthRoute.Broadcast()
-	if err != nil {
-		return err
-	}
+	health := healthRoute.Broadcast()
 	defer health.Close()
 	live, err := health.PublishTrack("live", nil)
 	if err != nil {

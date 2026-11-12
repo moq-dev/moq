@@ -9,9 +9,8 @@
 //! emits.
 
 use bytes::{Bytes, BytesMut};
-use scuffle_h265::NALUnitType;
 
-use super::Error;
+use super::{Error, NalType};
 use crate::Result;
 use crate::codec::annexb::{InBandCodec, NalIterator, ParameterSets, START_CODE};
 
@@ -151,8 +150,11 @@ impl Split {
 		Ok(std::mem::take(&mut self.pending))
 	}
 
-	/// Decode a single NAL unit. Only reads the first header byte to extract
-	/// nal_unit_type, ignoring nuh_layer_id and nuh_temporal_id_plus1.
+	/// Decode a single NAL unit from its header's nal_unit_type and nuh_layer_id.
+	///
+	/// Only base-layer NAL units (`nuh_layer_id` 0) open an access unit (H.265 F.7.4.2.4.4):
+	/// a layered stream (MV-HEVC, SHVC) carries each enhancement picture, and the parameter
+	/// sets and SEI before it, inside its base picture's access unit, so they never close it.
 	fn decode_nal(&mut self, nal: Bytes, pts: moq_net::Timestamp) -> Result<()> {
 		if nal.len() < 2 {
 			return Err(Error::NalTooShort.into());
@@ -163,33 +165,35 @@ impl Split {
 			return Err(Error::ForbiddenZeroBit.into());
 		}
 
-		let nal_type = nal_unit_type(*header);
+		let nal_type = NalType::of(*header);
+		let base = super::is_base_layer(&nal);
 
 		match nal_type {
-			NALUnitType::VpsNut => {
-				self.maybe_start_frame(pts)?;
+			NalType::VPS => {
+				self.maybe_open(base, pts)?;
 				InBandCodec::H265.insert_parameter_set(&mut self.current.vps_seen, &nal)?;
 			}
-			NALUnitType::SpsNut => {
-				self.maybe_start_frame(pts)?;
+			NalType::SPS => {
+				self.maybe_open(base, pts)?;
 				InBandCodec::H265.insert_parameter_set(&mut self.current.sps_seen, &nal)?;
 			}
-			NALUnitType::PpsNut => {
-				self.maybe_start_frame(pts)?;
+			NalType::PPS => {
+				self.maybe_open(base, pts)?;
 				InBandCodec::H265.insert_parameter_set(&mut self.current.pps_seen, &nal)?;
 			}
 			// Access-unit openers: each precedes the next picture's VCL data, so any
 			// unit still open belongs to the previous picture and is emitted here.
-			NALUnitType::AudNut | NALUnitType::PrefixSeiNut => {
-				self.maybe_start_frame(pts)?;
+			NalType::AUD | NalType::PREFIX_SEI => {
+				self.maybe_open(base, pts)?;
 			}
 			// Suffix SEI trails the picture it describes, so it stays on the open
 			// access unit. Closing here would hand it to the next picture, and at end
 			// of stream would drop it: `flush` closes the unit it was moved out of,
 			// then finds no slice in the one holding it.
-			NALUnitType::SuffixSeiNut => {}
-			// Keyframe containing slices.
-			nal_type if super::is_irap(nal_type) => {
+			NalType::SUFFIX_SEI => {}
+			// Keyframe containing slices. Only the base picture makes the access unit a
+			// keyframe; an enhancement-layer IRAP picture rides along with it.
+			nal_type if nal_type.is_irap() && base => {
 				// first_slice_segment_in_pic_flag (bit 7 of the third byte, after the
 				// 2-byte header) marks the first slice of a new picture: close any access
 				// unit still open. A bare IDR arriving right after a delta picture in the
@@ -197,41 +201,15 @@ impl Split {
 				if nal.get(2).ok_or(Error::NalTooShort)? & 0x80 != 0 {
 					self.maybe_start_frame(pts)?;
 				}
-				// Adopt this keyframe's inline set (dropping any the new GOP no longer
-				// uses), or re-inject the retained set if the keyframe carried none.
-				crate::codec::annexb::reconcile_keyframe_params(
-					&mut self.current.chunks,
-					&mut self.vps,
-					&mut self.current.vps_seen,
-				);
-				crate::codec::annexb::reconcile_keyframe_params(
-					&mut self.current.chunks,
-					&mut self.sps,
-					&mut self.current.sps_seen,
-				);
-				crate::codec::annexb::reconcile_keyframe_params(
-					&mut self.current.chunks,
-					&mut self.pps,
-					&mut self.current.pps_seen,
-				);
-
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
 			}
-			// All other slice types (both N and R variants).
-			NALUnitType::TrailN
-			| NALUnitType::TrailR
-			| NALUnitType::TsaN
-			| NALUnitType::TsaR
-			| NALUnitType::StsaN
-			| NALUnitType::StsaR
-			| NALUnitType::RadlN
-			| NALUnitType::RadlR
-			| NALUnitType::RaslN
-			| NALUnitType::RaslR => {
+			// All other slice types, TRAIL_N through RASL_R (both N and R variants), and an
+			// enhancement layer's IRAP slices.
+			nal_type if nal_type.is_irap() || matches!(nal_type, NalType(0..=9)) => {
 				// Check first_slice_segment_in_pic_flag (bit 7 of third byte, after 2-byte header).
 				if nal.get(2).ok_or(Error::NalTooShort)? & 0x80 != 0 {
-					self.maybe_start_frame(pts)?;
+					self.maybe_open(base, pts)?;
 				}
 				self.current.contains_slice = true;
 			}
@@ -246,13 +224,34 @@ impl Split {
 		Ok(())
 	}
 
+	/// Close the open access unit before a NAL unit that opens the next one, which only a
+	/// base-layer NAL unit does.
+	fn maybe_open(&mut self, base: bool, pts: moq_net::Timestamp) -> Result<()> {
+		if base { self.maybe_start_frame(pts) } else { Ok(()) }
+	}
+
 	fn maybe_start_frame(&mut self, pts: moq_net::Timestamp) -> Result<()> {
 		if !self.current.contains_slice {
 			return Ok(());
 		}
 
-		let payload = std::mem::take(&mut self.current.chunks).freeze();
 		let keyframe = self.current.contains_idr;
+		if keyframe {
+			// Adopt this keyframe's inline sets (dropping any the new GOP no longer uses), or
+			// re-inject the retained ones it lacks. Run on the whole access unit, since a
+			// layered one may carry an enhancement layer's sets after the base slice.
+			crate::codec::annexb::reconcile_keyframe_params(
+				InBandCodec::H265,
+				&mut self.current.chunks,
+				&mut [&mut self.vps, &mut self.sps, &mut self.pps],
+				&mut [
+					&mut self.current.vps_seen,
+					&mut self.current.sps_seen,
+					&mut self.current.pps_seen,
+				],
+			)?;
+		}
+		let payload = std::mem::take(&mut self.current.chunks).freeze();
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
 		self.current.vps_seen.clear();
@@ -301,11 +300,6 @@ impl Split {
 		let zero = self.zero.get_or_insert_with(kio::clock::Instant::now);
 		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
-}
-
-/// Extract the HEVC `nal_unit_type` from the first header byte (bits 1..=6).
-pub(super) fn nal_unit_type(header: u8) -> NALUnitType {
-	NALUnitType::from((header >> 1) & 0b111111)
 }
 
 #[cfg(test)]
@@ -452,10 +446,7 @@ mod tests {
 	/// True for the NAL types [`Hvc1`](crate::codec::h265::Hvc1) lifts out of the
 	/// sample and into the hvcC.
 	fn is_param_set(nal: &[u8]) -> bool {
-		matches!(
-			nal_unit_type(nal[0]),
-			NALUnitType::VpsNut | NALUnitType::SpsNut | NALUnitType::PpsNut
-		)
+		matches!(NalType::of(nal[0]), NalType::VPS | NalType::SPS | NalType::PPS)
 	}
 
 	/// One suffix-SEI case: name, the NALs fed to the splitter, and the access
@@ -640,5 +631,87 @@ mod tests {
 			third[0].payload.as_ref(),
 			annexb(&[VPS, SPS, PPS, IDR]).freeze().as_ref()
 		);
+	}
+
+	/// An enhancement layer's parameter sets are retained beside the base layer's and re-injected
+	/// on a bare keyframe, even one reusing the base SPS's id or using the multi-layer layout. A
+	/// keyframe redefining only the enhancement layer's keeps the base layer's, re-injected ahead
+	/// in dependency order.
+	#[tokio::test(start_paused = true)]
+	async fn retains_enhancement_layer_parameter_sets() {
+		use crate::codec::h265::fixtures::{MV_PPS_LAYER1, MV_SPS_LAYER1};
+
+		// The base SPS moved to layer 1: the base layout, and the base SPS's id 0.
+		let mut same_id = SPS.to_vec();
+		same_id[1] = 0x09;
+		for layer1 in [MV_SPS_LAYER1, &same_id] {
+			let mut split = Split::new();
+			let au = [VPS, SPS, layer1, PPS, MV_PPS_LAYER1, IDR];
+			let first = decode_one(&mut split, &mut annexb(&au), ts());
+			assert_eq!(first[0].payload.as_ref(), annexb(&au).freeze().as_ref());
+
+			let bare = decode_one(&mut split, &mut annexb(&[IDR]), ts());
+			assert!(bare[0].keyframe);
+			assert_eq!(bare[0].payload.as_ref(), annexb(&au).freeze().as_ref());
+
+			let partial = decode_one(
+				&mut split,
+				&mut annexb(&[AUD, layer1, MV_PPS_LAYER1, PREFIX_SEI, IDR]),
+				ts(),
+			);
+			let full = [AUD, VPS, SPS, layer1, PPS, MV_PPS_LAYER1, PREFIX_SEI, IDR];
+			assert_eq!(partial[0].payload.as_ref(), annexb(&full).freeze().as_ref());
+			let bare = decode_one(&mut split, &mut annexb(&[IDR]), ts());
+			assert_eq!(bare[0].payload.as_ref(), annexb(&au).freeze().as_ref());
+		}
+	}
+
+	/// A layered access unit (MV-HEVC) carries the enhancement picture after the base picture, its
+	/// first slice flagged first_slice_segment_in_pic_flag too, in the order x265 4.2 writes it
+	/// (`--num-views 2`). Only the base picture opens an access unit, so each stays one frame:
+	/// a keyframe for the IRAP pair, then a delta frame for the trailing pair.
+	#[tokio::test(start_paused = true)]
+	async fn enhancement_picture_stays_in_its_access_unit() {
+		use crate::codec::h265::fixtures::{MV_PPS_LAYER1, MV_SPS_LAYER1};
+
+		const IDR_LAYER1: &[u8] = &[0x26, 0x09, 0x80, 0xbb];
+		const TRAIL_LAYER1: &[u8] = &[0x02, 0x09, 0x80, 0x44];
+		// The enhancement layer's prefix SEI and parameter sets may precede its picture too.
+		const PREFIX_SEI_LAYER1: &[u8] = &[0x4e, 0x09, 0x01, 0x04, 0x80];
+
+		let key = [VPS, SPS, MV_SPS_LAYER1, PPS, MV_PPS_LAYER1, PREFIX_SEI, IDR, IDR_LAYER1];
+		let delta = [TRAIL, PREFIX_SEI_LAYER1, MV_PPS_LAYER1, TRAIL_LAYER1];
+		let mut buf = annexb(&key);
+		buf.extend_from_slice(&annexb(&delta));
+
+		let mut split = Split::new();
+		let mut frames = split.decode(&buf, ts()).unwrap();
+		frames.extend(split.flush(ts()).unwrap());
+
+		assert_eq!(frames.len(), 2);
+		assert!(frames[0].keyframe);
+		assert_eq!(frames[0].payload.as_ref(), annexb(&key).freeze().as_ref());
+		assert!(!frames[1].keyframe);
+		assert_eq!(frames[1].payload.as_ref(), annexb(&delta).freeze().as_ref());
+	}
+
+	/// A layered keyframe may carry the enhancement layer's parameter sets between the base and
+	/// enhancement slices; they are retained like those before the base slice, so a later bare
+	/// keyframe re-injects them.
+	#[tokio::test(start_paused = true)]
+	async fn retains_enhancement_sets_after_the_base_slice() {
+		use crate::codec::h265::fixtures::{MV_PPS_LAYER1, MV_SPS_LAYER1};
+
+		const IDR_LAYER1: &[u8] = &[0x26, 0x09, 0x80, 0xbb];
+
+		let mut split = Split::new();
+		let key = [VPS, SPS, PPS, IDR, MV_SPS_LAYER1, MV_PPS_LAYER1, IDR_LAYER1];
+		let first = decode_one(&mut split, &mut annexb(&key), ts());
+		assert_eq!(first[0].payload.as_ref(), annexb(&key).freeze().as_ref());
+
+		let bare = decode_one(&mut split, &mut annexb(&[IDR, IDR_LAYER1]), ts());
+		assert!(bare[0].keyframe);
+		let full = [VPS, SPS, MV_SPS_LAYER1, PPS, MV_PPS_LAYER1, IDR, IDR_LAYER1];
+		assert_eq!(bare[0].payload.as_ref(), annexb(&full).freeze().as_ref());
 	}
 }

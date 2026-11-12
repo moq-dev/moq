@@ -60,18 +60,20 @@ async fn prepare(tracks: usize, frames: usize, live: bool) -> (moq_mux::Source, 
 				})
 				.unwrap();
 		}
-		if !live {
-			track.finish().unwrap();
+	}
+	let tracks: Box<dyn std::any::Any> = match live {
+		true => Box::new(publishers),
+		false => {
+			let finished: Vec<_> = publishers.into_iter().map(|track| track.finish().unwrap()).collect();
+			catalog.finish().unwrap();
+			Box::new(finished)
 		}
-	}
-	if !live {
-		catalog.finish().unwrap();
-	}
+	};
 	broadcast.announce().unwrap();
 	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let fixture = Fixture {
-		_published: Box::new((broadcast, catalog, publishers)),
+		_published: Box::new((broadcast, catalog, tracks)),
 		_origin: origin,
 		driver,
 	};
@@ -101,7 +103,11 @@ fn open(format: &str, source: moq_mux::Source, stream: moq_mux::catalog::Consume
 		"flv" => Export::Flv(Box::new(
 			moq_mux::container::flv::Export::new(source, stream).with_multitrack(true),
 		)),
-		"ts" => Export::Ts(Box::new(moq_mux::container::ts::Export::new(source, stream))),
+		"ts" => Export::Ts(Box::new(moq_mux::container::ts::Export::new(
+			source,
+			stream,
+			std::time::Duration::ZERO,
+		))),
 		_ => Export::Mkv(Box::new(
 			moq_mux::container::mkv::Export::new(source, stream).with_fragment_duration(Duration::ZERO),
 		)),
@@ -285,7 +291,7 @@ async fn prepare_video(
 			})
 			.unwrap();
 	}
-	video.finish().unwrap();
+	let video = video.finish().unwrap();
 	catalog.finish().unwrap();
 	broadcast.announce().unwrap();
 	let resolved = origin.consume().request("bench", None).await.unwrap();
@@ -330,7 +336,8 @@ fn video_reorder(c: &mut Criterion) {
 						|(source, stream, fixture)| {
 							let refused = runtime.block_on(async {
 								if format == "ts" {
-									let mut opened = moq_mux::container::ts::Export::new(source, stream);
+									let mut opened =
+										moq_mux::container::ts::Export::new(source, stream, std::time::Duration::ZERO);
 									let mut chunks = 0;
 									while let Some(frame) = opened.next().await.unwrap() {
 										std::hint::black_box(frame);

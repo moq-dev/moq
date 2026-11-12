@@ -16,14 +16,12 @@
 //!   they don't exist in a default build.
 //! - [`encode`] encodes PCM and publishes it through `moq_mux::container`,
 //!   registering the rendition in the `hang` catalog. Two entry points:
-//!   - `encode::Control::new` takes a capture consumer and returns a `Control`
-//!     and `Driver`. The handle starts, stops, and replaces this track's reader,
-//!     preserving track identity without controlling the shared device.
-//!   - `encode::publish_capture` is the turnkey shorthand for an already-open
-//!     capture consumer. Its rendition is registered before processing samples.
-//!     Capture keeps running while raw audio
-//!     waits for a subscriber, then encodes that history and continues live.
-//!     Set `encode::Capture::on_demand` to false to encode continuously instead.
+//!   - `encode::publish_capture` publishes an already-open capture consumer,
+//!     returning a `Publication` that reports its state and level, and the
+//!     `Driver` that encodes. Its rendition is registered before processing
+//!     samples. Capture keeps running while raw audio waits for a subscriber,
+//!     then encodes that history and continues live. Set
+//!     `encode::Capture::retain` to false to encode continuously instead.
 //!   - [`encode::Producer`] publishes PCM you hand it.
 //! - [`decode`] subscribes to an encoded track and decodes it back to PCM.
 //!   [`decode::Consumer`] is the mirror of [`encode::Producer`]. It reads AAC-LC
@@ -33,9 +31,10 @@
 //!   output device and mixes the `playback::Sink`s registered with it, so one
 //!   device serves every track in a call. Requires the `playback` feature, so
 //!   these names are unlinked here too.
-//! - `bus` mixes any number of PCM sources, each with its own gain, mute, and
-//!   meter, into one program feed that the caller reads on its own clock: a
-//!   studio's program audio. Behind the default-on `bus` feature.
+//! - `bus` mixes any number of PCM sources, each with its own gain, mute, pan,
+//!   sync delay, and meter, into several mixes advanced on the caller's own
+//!   clock: a studio's program audio and its return feeds. Behind the
+//!   default-on `bus` feature.
 //! - `aec` keeps the speaker out of the microphone, which is what a conference
 //!   on a laptop needs to not send itself back. [`aec::Processor`] processes PCM
 //!   supplied by any audio stack without enabling device features. The `aec`
@@ -52,6 +51,13 @@
 
 #[cfg(test)]
 mod allocation;
+
+/// The one output a codec that holds nothing returns for each call.
+#[cfg(test)]
+pub(crate) fn single<T: std::fmt::Debug>(outputs: Vec<T>) -> T {
+	let [output] = <[T; 1]>::try_from(outputs).expect("exactly one output");
+	output
+}
 
 #[cfg(feature = "aac")]
 mod aac;

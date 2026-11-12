@@ -1,7 +1,7 @@
 use std::task::{Poll, ready};
 
 use super::WeakEntry;
-use super::origin_impl::{Announce, Consumer, Moved, Requesting, RouteEvent, Routes};
+use super::origin_impl::{Announce, Consumer, Moved, Requesting, RouteEvent, RouteKind, Routes};
 use crate::{Error, Instance, Path, broadcast};
 
 /// The announcements covering one path, as one broadcast coming online, being replaced, and
@@ -9,11 +9,10 @@ use crate::{Error, Instance, Path, broadcast};
 ///
 /// Several routes can cover the path at once, such as the path itself and a prefix above it,
 /// and a request resolves through the most specific one, so only that route's events come
-/// through. Another route taking over is a [`Restart`](RouteEvent::Restart), unless both
+/// through. Another route taking over is a [`Restart`](RouteKind::Restart), unless both
 /// carry the same instance: those serve one continuous stream, so it is an
-/// [`Update`](RouteEvent::Update). One announced as a
-/// [`Takeover`](RouteEvent::Takeover) of the serving route continues it, and comes through
-/// as one. Routes beneath the path serve other broadcasts and are ignored.
+/// [`Update`](RouteKind::Update), as for a job's route continuing the prefix route it
+/// answered. Routes beneath the path serve other broadcasts and are ignored.
 pub(crate) struct Follow {
 	announced: Routes,
 	path: Path,
@@ -82,7 +81,10 @@ impl Follow {
 			return match (self.serving().map(|standing| standing.announce.clone()), ended) {
 				(Some(serving), _) => {
 					self.idle = false;
-					Poll::Ready(Some(RouteEvent::Start(serving)))
+					Poll::Ready(Some(RouteEvent {
+						kind: RouteKind::Start,
+						announce: serving,
+					}))
 				}
 				(None, true) => Poll::Ready(None),
 				(None, false) => Poll::Pending,
@@ -94,7 +96,13 @@ impl Follow {
 				return Poll::Ready(None);
 			};
 			if let Some(event) = self.fold(event) {
-				self.idle = matches!(event, RouteEvent::End(_));
+				self.idle = matches!(
+					event,
+					RouteEvent {
+						kind: RouteKind::End | RouteKind::Offline,
+						..
+					}
+				);
 				return Poll::Ready(Some(event));
 			}
 		}
@@ -127,15 +135,15 @@ impl Follow {
 
 	/// Apply one route's event, returning what it means for the path, if anything.
 	fn fold(&mut self, event: RouteEvent) -> Option<RouteEvent> {
-		let (RouteEvent::Start(announce)
-		| RouteEvent::Update(announce)
-		| RouteEvent::Restart(announce)
-		| RouteEvent::Takeover { announce, .. }
-		| RouteEvent::End(announce)) = &event;
-		if !self.path.has_prefix(&announce.prefix) {
+		let prefix = event.announce.prefix.clone();
+		if !self.path.has_prefix(&prefix) {
 			return None;
 		}
-		let prefix = announce.prefix.clone();
+		// A route that went reports its own way of going: ended by its origin, or let go.
+		let gone = match event.kind {
+			RouteKind::Offline => RouteKind::Offline,
+			_ => RouteKind::End,
+		};
 		let before = self
 			.serving()
 			.map(|standing| (standing.announce.clone(), standing.seen));
@@ -145,12 +153,23 @@ impl Follow {
 			.iter()
 			.position(|standing| standing.announce.prefix == prefix)
 			.map(|index| self.covering.swap_remove(index).since);
-		let (announce, since, restart, predecessor) = match event {
-			RouteEvent::End(_) => (None, None, false, None),
-			RouteEvent::Start(announce) => (Some(announce), None, false, None),
-			RouteEvent::Update(announce) => (Some(announce), standing, false, None),
-			RouteEvent::Restart(announce) => (Some(announce), standing, true, None),
-			RouteEvent::Takeover { announce, predecessor } => (Some(announce), None, true, Some(predecessor)),
+		let (announce, since, restart) = match event {
+			RouteEvent {
+				kind: RouteKind::End | RouteKind::Offline,
+				..
+			} => (None, None, false),
+			RouteEvent {
+				kind: RouteKind::Start,
+				announce,
+			} => (Some(announce), None, false),
+			RouteEvent {
+				kind: RouteKind::Update,
+				announce,
+			} => (Some(announce), standing, false),
+			RouteEvent {
+				kind: RouteKind::Restart,
+				announce,
+			} => (Some(announce), standing, true),
 		};
 		if let Some(announce) = announce {
 			self.covering.push(Standing {
@@ -165,34 +184,46 @@ impl Follow {
 			.map(|standing| (standing.announce.clone(), standing.since));
 		match (before, after) {
 			(None, None) => None,
-			(None, Some((after, _))) => Some(RouteEvent::Start(after)),
-			(Some((before, _)), None) => Some(RouteEvent::End(before)),
+			(None, Some((after, _))) => Some(RouteEvent {
+				kind: RouteKind::Start,
+				announce: after,
+			}),
+			(Some((before, _)), None) => Some(RouteEvent {
+				kind: gone,
+				announce: before,
+			}),
 			// The serving route ended, and the one left may have started after it did.
 			(Some((before, seen)), Some((after, since)))
 				if before.prefix == prefix && before.prefix != after.prefix && since > self.dry.max(seen) =>
 			{
-				Some(RouteEvent::End(before))
-			}
-			// The serving route continues as this one.
-			(Some((before, _)), Some((after, _)))
-				if after.prefix == prefix && predecessor.as_ref() == Some(&before.prefix) =>
-			{
-				Some(RouteEvent::Takeover {
-					announce: after,
-					predecessor: before.prefix,
+				Some(RouteEvent {
+					kind: gone,
+					announce: before,
 				})
 			}
 			(Some((before, _)), Some((after, _))) if before.prefix != after.prefix => {
 				let same = before.route.instance == after.route.instance;
 				Some(match same {
-					true => RouteEvent::Update(after),
-					false => RouteEvent::Restart(after),
+					true => RouteEvent {
+						kind: RouteKind::Update,
+						announce: after,
+					},
+					false => RouteEvent {
+						kind: RouteKind::Restart,
+						announce: after,
+					},
 				})
 			}
 			// A route less specific than the serving one changed, which no request sees.
 			(Some(_), Some((after, _))) if after.prefix != prefix => None,
-			(Some(_), Some((after, _))) if restart => Some(RouteEvent::Restart(after)),
-			(Some(_), Some((after, _))) => Some(RouteEvent::Update(after)),
+			(Some(_), Some((after, _))) if restart => Some(RouteEvent {
+				kind: RouteKind::Restart,
+				announce: after,
+			}),
+			(Some(_), Some((after, _))) => Some(RouteEvent {
+				kind: RouteKind::Update,
+				announce: after,
+			}),
 		}
 	}
 }
@@ -209,22 +240,37 @@ pub struct Following {
 	unseen: bool,
 	/// The resolution in flight, kept across a dropped wait so a retry picks it up.
 	resolving: Option<Requesting>,
-	/// The broadcast handed out last, until the path goes offline or the broadcast ends. Weak,
-	/// so it never keeps one the caller let go of from retiring.
-	last: Option<broadcast::WeakConsumer>,
-	/// Once the broadcast handed out last closed, waits for its instance to stop serving the
-	/// path.
-	moved: Option<Moved>,
-	/// A change resolved to the broadcast handed out last while it was still open, so it counts
-	/// as delivered only until that broadcast closes.
-	absorbed: bool,
-	/// A broadcast was handed out and its end not reported yet.
-	live: bool,
-	/// The broadcast handed out last stopped serving the path, and its end is owed.
-	ended: bool,
+	/// The broadcast handed out last, until the path goes offline, the broadcast ends, or a
+	/// resolution is refused.
+	last: Option<Last>,
+	/// Whether the end of what was handed out is still to be reported.
+	handed: Handed,
 	/// The last resolution was refused: any change to the serving route, even the same
 	/// instance over another route, is worth asking again.
 	refused: bool,
+}
+
+/// The broadcast a [`Following`] handed out last, and what it waits on once that closes.
+struct Last {
+	/// Weak, so it never keeps one the caller let go of from retiring.
+	broadcast: broadcast::WeakConsumer,
+	/// Once the broadcast closed, waits for its instance to stop serving the path.
+	moved: Option<Moved>,
+	/// A change resolved to this broadcast while it was still open, so it counts as delivered
+	/// only until the broadcast closes.
+	absorbed: bool,
+}
+
+/// Whether a [`Following`] owes the end of the broadcast it handed out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Handed {
+	/// Nothing handed out, or its end already reported.
+	Nothing,
+	/// A broadcast was handed out and its end is not yet due, even if a refused takeover means
+	/// it no longer serves the path.
+	Live,
+	/// The broadcast handed out stopped serving the path, and its end is owed.
+	Ended,
 }
 
 impl Following {
@@ -237,10 +283,7 @@ impl Following {
 			unseen: false,
 			resolving: None,
 			last: None,
-			moved: None,
-			absorbed: false,
-			live: false,
-			ended: false,
+			handed: Handed::Nothing,
 			refused: false,
 		}
 	}
@@ -265,9 +308,8 @@ impl Following {
 				self.resolving = None;
 			}
 			// Report an end before whatever serves next, so a reader drops the old broadcast first.
-			if self.ended {
-				self.ended = false;
-				self.live = false;
+			if self.handed == Handed::Ended {
+				self.handed = Handed::Nothing;
 				return Poll::Ready(Ok(None));
 			}
 			// The broadcast handed out ended while the path is still served: its instance's
@@ -277,12 +319,13 @@ impl Following {
 			// change it absorbed is owed. A refusal forgets it, so only a route change asks again.
 			if !self.unseen
 				&& self.follow.serving().is_some()
-				&& let Some(last) = self.last.as_ref().map(broadcast::WeakConsumer::consume)
-				&& last.poll_closed(waiter).is_ready()
+				&& let Some(last) = &mut self.last
+				&& let broadcast = last.broadcast.consume()
+				&& broadcast.poll_closed(waiter).is_ready()
 			{
-				let moved = match &last.info().instance {
-					_ if self.absorbed => true,
-					Some(instance) => self
+				let moved = match &broadcast.info().instance {
+					_ if last.absorbed => true,
+					Some(instance) => last
 						.moved
 						.get_or_insert_with(|| {
 							self.consumer
@@ -293,7 +336,7 @@ impl Following {
 					None => true,
 				};
 				if moved {
-					self.moved = None;
+					last.moved = None;
 					self.unseen = true;
 				}
 			}
@@ -313,28 +356,30 @@ impl Following {
 			self.refused = resolved.is_err();
 			let broadcast = match resolved {
 				Ok(broadcast) => broadcast,
-				// `live` stays: the end of what was handed out is still owed once the path goes
+				// `handed` stays: the end of what was handed out is still owed once the path goes
 				// offline.
 				Err(err) => {
 					self.last = None;
-					self.moved = None;
-					self.absorbed = false;
 					return Poll::Ready(Err(err));
 				}
 			};
 
-			// Resolving can run ahead of the follower: a takeover resolves at once while the
-			// origin holds its restart, and that restart then names the instance handed out.
-			// The caller freeing it before reading the restart is owed it again.
+			// Resolving can run ahead of the follower: another instance resolves at once while
+			// the origin holds its restart, and that restart then names the instance handed
+			// out. The caller freeing it before reading the restart is owed it again.
 			let weak = broadcast.weak();
-			if self.last.as_ref().is_some_and(|last| last.same_channel(&weak)) {
-				self.absorbed = true;
+			if let Some(last) = &mut self.last
+				&& last.broadcast.same_channel(&weak)
+			{
+				last.absorbed = true;
 				continue;
 			}
-			self.last = Some(weak);
-			self.moved = None;
-			self.absorbed = false;
-			self.live = true;
+			self.last = Some(Last {
+				broadcast: weak,
+				moved: None,
+				absorbed: false,
+			});
+			self.handed = Handed::Live;
 			return Poll::Ready(Ok(Some(broadcast)));
 		}
 	}
@@ -351,10 +396,10 @@ impl Following {
 	/// The broadcast handed out last stopped serving the path: owe its end, and hand out
 	/// whatever serves next, even the same instance coming back.
 	fn end(&mut self) {
-		self.ended |= self.live;
+		if self.handed == Handed::Live {
+			self.handed = Handed::Ended;
+		}
 		self.last = None;
-		self.moved = None;
-		self.absorbed = false;
 	}
 
 	/// Apply one change to the path, returning whether it is one.
@@ -362,28 +407,41 @@ impl Following {
 		match event {
 			// Another instance taking over ends a pinned follower's own stream, which is handed
 			// out again once it serves the path again.
-			RouteEvent::Restart(announce)
-				if self
-					.instance
-					.as_ref()
-					.is_some_and(|pin| announce.route.instance.as_ref() != Some(pin)) =>
+			RouteEvent {
+				kind: RouteKind::Restart,
+				announce,
+			} if self
+				.instance
+				.as_ref()
+				.is_some_and(|pin| announce.route.instance.as_ref() != Some(pin)) =>
 			{
 				self.end();
 				return false;
 			}
 			// A pinned resolution refuses any other instance, waiting until its own serves again.
-			RouteEvent::Start(_) | RouteEvent::Restart(_) => self.unseen = true,
+			RouteEvent {
+				kind: RouteKind::Start | RouteKind::Restart,
+				..
+			} => self.unseen = true,
 			// An end is a gap that ended every request on the old route, so whatever serves the
 			// path next is handed out, even the same instance coming back.
-			RouteEvent::End(_) => {
+			RouteEvent {
+				kind: RouteKind::End | RouteKind::Offline,
+				..
+			} => {
 				self.unseen = false;
 				self.end();
 			}
 			// After a refusal, another route may answer what the last one refused.
-			RouteEvent::Update(_) | RouteEvent::Takeover { .. } if self.refused => self.unseen = true,
-			// The same instance over another route, which its subscriptions ride out, or one
-			// continuing what was handed out.
-			RouteEvent::Update(_) | RouteEvent::Takeover { .. } => return false,
+			RouteEvent {
+				kind: RouteKind::Update,
+				..
+			} if self.refused => self.unseen = true,
+			// The same instance over another route, which its subscriptions ride out.
+			RouteEvent {
+				kind: RouteKind::Update,
+				..
+			} => return false,
 		}
 		true
 	}
@@ -407,11 +465,26 @@ mod tests {
 			.expect("no event")
 			.expect("the origin closed");
 		match event {
-			RouteEvent::Start(announce) => ("start", announce.prefix.to_string()),
-			RouteEvent::Update(announce) => ("update", announce.prefix.to_string()),
-			RouteEvent::Restart(announce) => ("restart", announce.prefix.to_string()),
-			RouteEvent::Takeover { announce, .. } => ("takeover", announce.prefix.to_string()),
-			RouteEvent::End(announce) => ("end", announce.prefix.to_string()),
+			RouteEvent {
+				kind: RouteKind::Start,
+				announce,
+			} => ("start", announce.prefix.to_string()),
+			RouteEvent {
+				kind: RouteKind::Update,
+				announce,
+			} => ("update", announce.prefix.to_string()),
+			RouteEvent {
+				kind: RouteKind::Restart,
+				announce,
+			} => ("restart", announce.prefix.to_string()),
+			RouteEvent {
+				kind: RouteKind::End,
+				announce,
+			} => ("end", announce.prefix.to_string()),
+			RouteEvent {
+				kind: RouteKind::Offline,
+				announce,
+			} => ("offline", announce.prefix.to_string()),
 		}
 	}
 
@@ -423,7 +496,7 @@ mod tests {
 	}
 
 	fn route(instance: &Instance) -> RouteInfo {
-		RouteInfo::default().with_instance(instance.clone(), 0)
+		RouteInfo::new().with_instance(instance.clone(), 0)
 	}
 
 	fn options(instance: &Instance) -> RouteOptions {
@@ -437,7 +510,7 @@ mod tests {
 		let instance = Instance::random();
 
 		// A prefix above the path covers it.
-		let pool = origin.forward("pool", route(&instance), None).unwrap();
+		let pool = origin.forward("pool", route(&instance)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A route beneath the path serves another broadcast.
@@ -464,7 +537,7 @@ mod tests {
 		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
 
 		drop(pool);
-		assert_eq!(followed(&mut follow).await, ("end", "pool".into()));
+		assert_eq!(followed(&mut follow).await, ("offline", "pool".into()));
 	}
 
 	/// A follower that joins late starts on the route serving the path, not on whichever
@@ -472,7 +545,7 @@ mod tests {
 	#[kio::test]
 	async fn follow_starts_on_the_serving_route_when_joining_late() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _pool = origin.forward("pool", RouteInfo::default(), None).unwrap();
+		let _pool = origin.forward("pool", RouteInfo::new()).unwrap();
 		let _exact = origin.route("pool/job", RouteOptions::default()).unwrap();
 
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
@@ -493,7 +566,7 @@ mod tests {
 		// Both land before the follower reads again, and the cursor delivers the prefix's start
 		// ahead of the path's end, but the path went unserved in between.
 		drop(exact);
-		let _pool = origin.forward("pool", route(&instance), None).unwrap();
+		let _pool = origin.forward("pool", route(&instance)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
@@ -514,7 +587,7 @@ mod tests {
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
 		let instance = Instance::random();
-		let _pool = origin.forward("pool", route(&instance), None).unwrap();
+		let _pool = origin.forward("pool", route(&instance)).unwrap();
 		exact.announce_info(route(&instance)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 
@@ -528,7 +601,7 @@ mod tests {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
 
-		let _pool = origin.forward("pool", RouteInfo::default(), None).unwrap();
+		let _pool = origin.forward("pool", RouteInfo::new()).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		let _exact = origin.route("pool/job", RouteOptions::default()).unwrap();
@@ -544,7 +617,7 @@ mod tests {
 		let _chat = origin
 			.scope("", &chat)
 			.unwrap()
-			.forward("room/alice", RouteInfo::default(), None)
+			.forward("room/alice", RouteInfo::new())
 			.unwrap();
 		let mut follow = origin.consume().path_routes("room/alice").unwrap();
 
@@ -556,7 +629,7 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		assert!(
-			matches!(&event, RouteEvent::Start(announce) if announce.route.cost == Cost::new(5)),
+			matches!(&event, RouteEvent { kind: RouteKind::Start, announce } if announce.route.cost == Cost::new(5)),
 			"{event:?}"
 		);
 
@@ -570,7 +643,7 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		assert!(
-			matches!(&event, RouteEvent::Restart(announce) if announce.route.cost == Cost::new(5)),
+			matches!(&event, RouteEvent { kind: RouteKind::Restart, announce } if announce.route.cost == Cost::new(5)),
 			"{event:?}"
 		);
 	}
@@ -607,7 +680,7 @@ mod tests {
 	}
 
 	/// The next request a dynamic route receives for its path.
-	async fn requested(dynamic: &crate::origin::Route) -> crate::origin::Request {
+	async fn requested(dynamic: &crate::origin::Claim) -> crate::origin::Request {
 		kio::clock::timeout(Duration::from_secs(1), dynamic.requested())
 			.await
 			.expect("never asked")
@@ -615,11 +688,12 @@ mod tests {
 	}
 
 	/// Another instance taking over while a wait resolves is the one it hands out, so the
-	/// restart the origin holds for it must not hand it out again while the caller holds it.
-	#[kio::test]
-	async fn announced_hands_out_a_held_takeover_once() {
+	/// restart that announced it must not hand it out again while the caller holds it.
+	/// `dynamic_at` is where the route the wait first resolves through covers the path: above
+	/// it, the takeover's restart lands while resolving; at it, the origin holds that restart.
+	async fn hands_out_a_takeover_once(dynamic_at: &str) {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.route_prefix("live", RouteOptions::default()).unwrap();
+		let dynamic = origin.claim(dynamic_at, RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 
 		// The wait is on the dynamic route's answer when the exact path takes over under another instance.
@@ -630,13 +704,43 @@ mod tests {
 		none(&mut announced).await;
 	}
 
+	#[kio::test]
+	async fn announced_hands_out_a_takeover_once_while_resolving() {
+		hands_out_a_takeover_once("").await;
+	}
+
+	#[kio::test]
+	async fn announced_hands_out_a_held_takeover_once() {
+		hands_out_a_takeover_once("live").await;
+	}
+
+	/// Dropping a handed-out takeover changes nothing about the path, so the follower hands
+	/// out nothing until another instance takes over. The takeover's restart reached the
+	/// follower before its resolution handed it out, so no restart is owed.
+	#[kio::test]
+	async fn announced_waits_for_another_instance_after_a_dropped_takeover() {
+		let origin = Hop::new(1).unwrap().produce();
+		let dynamic = origin.claim("live", RouteOptions::default()).unwrap();
+		let mut announced = origin.consume().follow("live", None).unwrap();
+
+		let (takeover, _publish) = futures::join!(available(&mut announced), async {
+			let _unanswered = requested(&dynamic).await;
+			origin.route("live", RouteOptions::default()).unwrap()
+		});
+		drop(takeover);
+		none(&mut announced).await;
+
+		let next = origin.route("live", RouteOptions::default()).unwrap();
+		assert_eq!(available(&mut announced).await.info().instance, Some(next.instance()));
+	}
+
 	/// The route a wait resolves through leaving, and another instance arriving before it
 	/// resolves, reach the follower as an end and a start alongside the answer. That start must
 	/// not hand the newcomer out again.
 	#[kio::test]
 	async fn announced_hands_out_a_gap_while_resolving_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.route_prefix("", RouteOptions::default()).unwrap();
+		let dynamic = origin.claim("", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 
 		let (_arrival, _publish) = futures::join!(available(&mut announced), async {
@@ -659,7 +763,7 @@ mod tests {
 		let exact = origin.route("live", options(&instance)).unwrap();
 		let first = available(&mut announced).await;
 
-		let dynamic = origin.forward("", route(&instance), None).unwrap();
+		let dynamic = origin.forward("", route(&instance)).unwrap();
 		exact.withdraw();
 		ended(&mut announced).await;
 		let served = broadcast::Info::new().produce();
@@ -739,7 +843,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_reports_a_dropped_prepared_answer() {
 		let origin = Hop::new(1).unwrap().produce();
-		let claim = origin.route_prefix("live", RouteOptions::default()).unwrap();
+		let claim = origin.claim("live", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
@@ -772,7 +876,7 @@ mod tests {
 	async fn announced_retries_a_refusal_on_another_route_of_the_instance() {
 		let origin = Hop::new(1).unwrap().produce();
 		let instance = Instance::random();
-		let claim = origin.route_prefix("", options(&instance)).unwrap();
+		let claim = origin.claim("", options(&instance)).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
@@ -796,7 +900,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_waits_for_a_route_change_after_a_refusal() {
 		let origin = Hop::new(1).unwrap().produce();
-		let claim = origin.route_prefix("live", RouteOptions::default()).unwrap();
+		let claim = origin.claim("live", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
@@ -818,7 +922,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_does_not_retry_a_refusal_after_a_takeover() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.route_prefix("", options(&Instance::random())).unwrap();
+		let dynamic = origin.claim("", options(&Instance::random())).unwrap();
 		let exact = origin.route("live", options(&Instance::random())).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let _first = available(&mut announced).await;

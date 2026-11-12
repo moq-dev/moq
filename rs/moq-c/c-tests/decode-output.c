@@ -41,7 +41,8 @@ _Static_assert(offsetof(moq_video_decoder_output, format) == 24, "format moved")
 _Static_assert(offsetof(moq_video_decoder_output, width) == 28, "width moved");
 _Static_assert(offsetof(moq_video_decoder_output, height) == 32, "height moved");
 _Static_assert(offsetof(moq_video_decoder_output, start) == 36, "start moved");
-_Static_assert(sizeof(moq_video_decoder_output) == 40, "decoder output size changed");
+_Static_assert(offsetof(moq_video_decoder_output, surface) == 40, "surface moved");
+_Static_assert(sizeof(moq_video_decoder_output) == 48, "decoder output size changed");
 _Static_assert(MOQ_DECODE_READ_FRAME == 0, "frame read discriminant moved");
 _Static_assert(MOQ_DECODE_READ_GAP == 1, "gap read discriminant moved");
 _Static_assert(MOQ_DECODE_READ_END == 2, "end read discriminant moved");
@@ -258,7 +259,7 @@ int main(void) {
         fail("error: moq_encode_video_cut failed (%s)\n", moq_error());
     publish_frames(producer, 5);
 
-    int32_t request = moq_origin_request((uint32_t)origin, path, strlen(path), NULL, 0, on_broadcast, &c);
+    int32_t request = moq_origin_request((uint32_t)origin, path, strlen(path), 0, on_broadcast, &c);
     if (request <= 0) fail("error: moq_origin_request failed: %d\n", request);
 
     pthread_mutex_lock(&c.mu);

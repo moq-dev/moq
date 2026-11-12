@@ -4,13 +4,13 @@
  * Connects to the relay, discovers camera broadcasts by announcement (like
  * moq-boy), renders each on a map with a video preview, and lets you take
  * control of one vehicle with the keyboard or a steering wheel. The
- * {@link Truck} backend publishes a `control` track and subscribes to the
- * vehicle's `status` track for round-trip confirmation.
+ * {@link Truck} backend dials the vehicle's socket endpoint to drive it and
+ * subscribes to its `status` track.
  *
  * @module
  */
 
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { COLLISION_ALERT_MS, collisionAge, collisionLabel, diverged, divergence } from "./feedback.ts";
 import { drawDivergence, drawDriveHud, drawGuide } from "./guides.ts";
@@ -53,12 +53,13 @@ import {
 export const PREVIEW = import.meta.env.DEV && new URLSearchParams(location.search).has("preview");
 
 /**
- * Render the player into `root` and run it on `connection`.
+ * Render the player into `root` and run it on `connection`, which serves and
+ * fills `origin`.
  *
  * Everything it starts, window listeners and the input loop included, stops
  * when the returned function is called.
  */
-export function mount(root: ShadowRoot, connection: Moq.Connection): () => void {
+export function mount(root: ShadowRoot, connection: Moq.Connection, origin: Moq.Origin.Producer): () => void {
 	root.innerHTML = `<style>${style}</style>${template}`;
 	preloadAerials();
 
@@ -126,7 +127,14 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				// A restarted simulator keeps its path present, and the watch broadcast
 				// follows it, so only an absence removes the tile.
 				if (entry.kind !== "absent" && !tiles.has(entry.prefix)) {
-					const truck = new Truck({ broadcastId: entry.prefix, connection, driving, focused, hovered });
+					const truck = new Truck({
+						broadcastId: entry.prefix,
+						connection,
+						origin,
+						driving,
+						focused,
+						hovered,
+					});
 					tiles.set(entry.prefix, new TruckTile(truck));
 					vehicles.set(tiles.size);
 					refreshFocusLayout();
@@ -712,7 +720,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		frame = requestAnimationFrame(tick);
 	}
 	signals.cleanup(() => cancelAnimationFrame(frame));
-	signals.interval(step, Nano.fromMilli(Milli(250)));
+	signals.interval(step, Duration.millis(250));
 
 	// --- Wheel status chip + calibration dialog. ---
 	let calibration: Calibration | undefined;
@@ -1003,15 +1011,11 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				// Status carries the measured takeover state. Never guess while it is unavailable.
 				controlButton.disabled = !active && !status;
 				const respawnButton = q(".respawn-btn") as HTMLButtonElement;
-				const driverId = effect.get(this.truck.driverId);
+				const handle = effect.get(this.truck.handle);
 				const estopped = effect.get(this.truck.estopped) || Boolean(status?.estopped);
 				respawnButton.hidden = !isFocused;
 				respawnButton.disabled =
-					effect.get(this.truck.respawning) ||
-					!active ||
-					!driverId ||
-					status?.driver !== driverId ||
-					estopped;
+					effect.get(this.truck.respawning) || !active || !handle || status?.driver !== handle || estopped;
 				// Latched if either side thinks so: the local signal reacts
 				// instantly, the status echo is authoritative (see resetEstop).
 				const stopButton = q(".estop-btn") as HTMLButtonElement;
@@ -1041,7 +1045,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 								estopped,
 								estopBy: status?.estop_by,
 								status: statusState,
-								driverId,
+								handle,
 								statusDriver: status?.driver,
 								wheel: effect.get(source) === "wheel",
 							});
@@ -1052,11 +1056,11 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				const visible =
 					effect.get(focused) === this.truck.id ||
 					(!effect.get(focused) && effect.get(hovered) === this.truck.id);
-				const frame = effect.get(this.truck.videoDecoder.out.frame);
+				const decoded = effect.get(this.truck.videoDecoder.out.timestamp) !== undefined;
 				const stalled = effect.get(this.truck.videoDecoder.out.stalled);
-				const live = visible && Boolean(frame) && !stalled;
-				q(".badge").textContent = live ? "Live" : frame ? "Interrupted" : "Connecting";
-				q(".video-state").textContent = frame ? "Camera interrupted" : "Waiting for camera";
+				const live = visible && decoded && !stalled;
+				q(".badge").textContent = live ? "Live" : decoded ? "Interrupted" : "Connecting";
+				q(".video-state").textContent = decoded ? "Camera interrupted" : "Waiting for camera";
 				q(".badge").dataset.live = String(live);
 				q(".video-state").hidden = live;
 			});
@@ -1092,8 +1096,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 								? "Manual"
 								: "Unknown";
 				q(".mode").className = `mode${s?.estopped ? " estopped" : ""}`;
-				const me = effect.get(this.truck.driverId);
-				const mine = me ? s?.media_pipeline[me] : undefined;
+				const mine = effect.get(this.truck.pipeline);
 				const roundTrip = effect.get(this.truck.roundTripMs);
 				q(".rtt").textContent = roundTrip == null ? "Not measured" : `${Math.round(roundTrip)} ms`;
 				q(".lat").textContent = mine?.length
@@ -1115,7 +1118,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 			// A collision's age is wall clock, not a status field, so it needs its own
 			// tick: without one the callout would freeze on a truck that stops moving
 			// and therefore stops changing its snapshot.
-			this.#signals.interval(() => this.#renderCollision(this.truck.status.peek()), Nano.fromMilli(Milli(1000)));
+			this.#signals.interval(() => this.#renderCollision(this.truck.status.peek()), Duration.millis(1000));
 
 			// Repaint on layout/resize (the initial effect run happens before layout,
 			// so the overlay has zero size until the first observation fires).
@@ -1232,7 +1235,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 			const { populatePreview } = await import("./preview.ts");
 			if (abort.signal.aborted) return;
 			const cleanup = populatePreview((path) => {
-				const truck = new Truck({ broadcastId: path, connection, driving, focused, hovered });
+				const truck = new Truck({ broadcastId: path, connection, origin, driving, focused, hovered });
 				const tile = new TruckTile(truck);
 				tiles.set(path, tile);
 				vehicles.set(tiles.size);

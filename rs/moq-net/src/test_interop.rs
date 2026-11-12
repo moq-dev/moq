@@ -367,7 +367,10 @@ fn lite_varint_interop() {
 			priority: 1,
 			max_age: None,
 			timescale: None,
-			compress: version.has_compression(),
+			compression: match version.has_compression() {
+				true => crate::track::Compression::Deflate,
+				false => crate::track::Compression::None,
+			},
 		}
 		.encode_bytes(version)
 		.unwrap();
@@ -554,7 +557,7 @@ fn lite_auth_unsupported_interop() {
 /// with a listing Rust decodes, and JS decodes Rust's listing events and re-encodes them byte for
 /// byte.
 #[test]
-#[ignore = "requires Bun; run by just test interop"]
+#[ignore = "JS encodes TRACKS without a Node ID until quest/m2/cluster-routing/routes/js.md, which restores it to just test interop"]
 fn lite_tracks_interop() {
 	use crate::coding::Decode;
 
@@ -562,6 +565,7 @@ fn lite_tracks_interop() {
 	let request = lite::Tracks {
 		broadcast: crate::Path::from_static("room"),
 		instance: None,
+		node: 0,
 	}
 	.encode_bytes(version)
 	.unwrap();
@@ -593,7 +597,7 @@ fn lite_tracks_interop() {
 		priority: 3,
 		max_age: Some(std::time::Duration::from_secs(2)),
 		timescale: Some(crate::Timescale::MICRO),
-		compress: true,
+		compression: crate::track::Compression::Deflate,
 	};
 	let mut bytes = Vec::new();
 	let mut w = Encoder::new(&mut bytes, version.into());
@@ -666,7 +670,8 @@ fn ietf_track_status_interop() {
 					unknown: Default::default(),
 					dynamic_groups: false,
 					compress: false,
-					max_cache_duration: Some(std::time::Duration::from_millis(5000)),
+					// The max age is never sent as MAX_CACHE_DURATION.
+					max_cache_duration: None,
 					timescale: Some(crate::Timescale::MILLI),
 					// The JS track's priority 2, lower-first on the wire as `127 - 2`.
 					priority: Some(125),

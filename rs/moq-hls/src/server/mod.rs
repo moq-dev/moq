@@ -185,7 +185,7 @@ impl Server {
 	/// cryptography cannot run on.
 	pub fn new(origin: moq_net::origin::Consumer, config: Config) -> crate::Result<Self> {
 		// Checked once here, so each broadcaster it serves starts without failing.
-		rind::cpu::check().map_err(crate::Error::unsupported_cpu)?;
+		moq_crypto::cpu::check()?;
 		Ok(Self {
 			inner: Arc::new(Inner {
 				_watch: origin.clone().with_hidden(true).announced(),
@@ -209,6 +209,10 @@ impl Server {
 	/// [`renditions`](Broadcaster::renditions) and [`segments`](crate::export::Rendition::segments)
 	/// cursors finish cleanly after the segments it listed before the takeover, even if its
 	/// publisher keeps sending. Ask again for the replacement, which starts at once.
+	///
+	/// Spawns the path's follower and each instance's driver on the tokio runtime, since the
+	/// server is an axum edge. The follower ends once the path is forgotten or the server
+	/// drops; a driver lasts while its [`Broadcaster`] or renditions are held.
 	pub async fn broadcaster(&self, name: &str) -> Option<Broadcaster> {
 		Some(self.followed(name).await?.current())
 	}

@@ -1,4 +1,4 @@
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Report, Echo as Schema } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
@@ -123,7 +123,7 @@ export class Echo {
 			}
 
 			let broadcast: Moq.Broadcast.Producer | undefined;
-			let writer: Report.Writer<Schema.Snapshot>;
+			let writer: Report.Writer<Schema.Snapshot, Schema.SnapshotInput>;
 			try {
 				// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
 				const route = origin.route(path, { hidden: true });
@@ -139,7 +139,7 @@ export class Echo {
 
 			const claim = claims;
 			claim.paths.add(path);
-			const write = () => writer.update(this.#report(base) as Schema.Snapshot);
+			const write = () => writer.update(this.#report(base));
 			// Teardown runs last in, first out: write the final counts, then retract and release the path.
 			effect.cleanup(() => {
 				claim.paths.delete(path);
@@ -148,7 +148,7 @@ export class Echo {
 			effect.cleanup(() => published.close());
 			effect.cleanup(() => writer.finish());
 			effect.cleanup(write);
-			effect.interval(write, Nano.fromMilli(Milli(Report.INTERVAL)));
+			effect.interval(write, Duration.millis(Report.INTERVAL));
 
 			// Observing the probe asks the peer for PROBE updates, so only do it while someone reads them.
 			const demand = writer.track.demand();
@@ -165,7 +165,7 @@ export class Echo {
 			this.#sources.flatMap((source) => Object.entries(source.feedback(base))),
 		);
 		const rtt = this.in.probe.peek()?.rtt;
-		return rtt === undefined ? { renditions } : { transport: { rtt: Math.floor(rtt) }, renditions };
+		return rtt === undefined ? { renditions } : { transport: { rtt: Math.floor(rtt.asMillis()) }, renditions };
 	}
 
 	/** Stop publishing and release everything this holds. */

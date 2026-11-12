@@ -75,8 +75,10 @@
 	},
 	"overrides": [
 		{
-			// Code and tests read time through @moq/clock, so a Manual clock drives them.
-			"includes": ["js/*/src/**", "demo/web/src/**", "!js/clock/src/host.ts"],
+			// Code and tests read time through @moq/clock, so a Manual clock drives them and the
+			// test preload sees every host timer.
+			"includes": ["js/*/src/**", "demo/web/src/**", "**/*.test.ts", "!js/clock/src/host.ts"],
+			"plugins": ["./js/common/no-bun-sleep.grit", "./js/common/no-drive-expect.grit"],
 			"linter": {
 				"rules": {
 					"style": {
@@ -98,6 +100,8 @@
 		{
 			// The audio jitter reference is the corpus generator, not a library: an
 			// implementation that calls it proves nothing about the normative document.
+			// Host timer imports would also bypass the @moq/clock test preload; they live here
+			// because a later override replaces this rule's options rather than merging them.
 			"includes": ["**", "!doc/concept/audio-jitter/**"],
 			"linter": {
 				"rules": {
@@ -105,6 +109,16 @@
 						"noRestrictedImports": {
 							"level": "error",
 							"options": {
+								"paths": {
+									"bun": {
+										"importNames": ["sleep", "sleepSync", "default", "*"],
+										"message": "Import other Bun APIs by name; use sleep() from @moq/clock"
+									},
+									"node:timers": "Use @moq/clock",
+									"node:timers/promises": "Use @moq/clock",
+									"timers": "Use @moq/clock",
+									"timers/promises": "Use @moq/clock"
+								},
 								"patterns": [
 									{
 										"group": [

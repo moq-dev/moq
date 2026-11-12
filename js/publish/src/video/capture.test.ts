@@ -1,5 +1,5 @@
 import { expect, mock, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Instant, Manual } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Order } from "../order";
@@ -17,7 +17,7 @@ const { Renderer } = await import("../preview");
 function manualAt(ms: number) {
 	const clock = new Manual();
 	const installed = clock.install();
-	const set = (to: number) => clock.jump(Nano(Nano.fromMilli(Milli(to)) - clock.now()));
+	const set = (to: number) => clock.jump(Duration.millis(to).sub(clock.now().since(Instant.ZERO)));
 	set(ms);
 	return { set, close: () => installed.close(), [Symbol.dispose]: () => installed.close() };
 }
@@ -199,6 +199,7 @@ function frameSource() {
 	return {
 		source: { frames, frameRate: 30 },
 		push: (timestamp: number) => controller.enqueue(new Frame(undefined, { timestamp }) as unknown as VideoFrame),
+		end: () => controller.close(),
 		[Symbol.dispose]() {
 			if (original) Object.defineProperty(globalThis, "VideoFrame", original);
 			else Reflect.deleteProperty(globalThis, "VideoFrame");
@@ -318,7 +319,7 @@ test("a replay never starts below an earlier replay", async () => {
 	using input = frameSource();
 	const clock = new Manual();
 	const installed = clock.install();
-	const advance = (ms: number) => clock.jump(Nano.fromMilli(Milli(ms)));
+	const advance = (ms: number) => clock.jump(Duration.millis(ms));
 	const capture = new Capture({ source: input.source });
 	const watch = new Effect();
 	const first = new Effect();
@@ -388,6 +389,39 @@ test("the held frame is closed when replaced, when an unread copy is dropped, an
 
 	capture.close();
 	expect(open()).toEqual([]);
+});
+
+test("a source that ends releases the held frame and still drains queued frames", async () => {
+	using input = frameSource();
+	const capture = new Capture({ source: input.source });
+	const effect = new Effect();
+	const late = new Effect();
+
+	try {
+		await settle();
+		const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
+		if (!reader) throw new Error("no fanout");
+		input.push(1_000);
+		input.end();
+		await flush();
+
+		// Only the reader's queued copy is left open: the held original is released.
+		expect(open()).toHaveLength(1);
+
+		// A reader attaching after the end gets no stale replay.
+		const after = capture.out.frames.peek()?.subscribe(late).getReader();
+		expect((await after?.read())?.done).toBe(true);
+
+		const last = await reader.read();
+		expect(last.value?.timestamp).toBe(1_000);
+		last.value?.close();
+		expect((await reader.read()).done).toBe(true);
+		expect(open()).toEqual([]);
+	} finally {
+		effect.close();
+		late.close();
+		capture.close();
+	}
 });
 
 test("closing the capture releases a copy its reader never read", async () => {
@@ -465,7 +499,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: live,
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {},
 	};
 	const encoder = new Encoder("video", {
@@ -579,7 +613,7 @@ test("an encoder torn down while a frame is in flight closes that frame", async 
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: live,
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {},
 	};
 	const encoder = new Encoder("video", {

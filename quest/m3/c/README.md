@@ -12,7 +12,10 @@ scope; they already sit on moq-ffi through the generated C++.
 
 Decided 2026-10-25 (maintainer): this line ships after the cut, once moq builds
 its bindings from rust2's UniFFI fork. The hand-written crate ships at the cut
-with [parity](/quest/m2/cut-gate/c/README.md) instead. The generator fix for the C name
+instead, with the binding features moq-ffi gained in m1 and m2
+([moq-dev/moq#8060](https://github.com/moq-dev/moq/pull/8060)). Features moq-c
+never had, such as single-group fetch and group-level consumption, wait for this
+line. The generator fix for the C name
 clash landed in rust2's fork
 ([moq-dev/rust2#66](https://github.com/moq-dev/rust2/pull/66)), not in a
 `kixelated/uniffi-bindgen-cpp` release, and reaches moq with the switch.
@@ -53,5 +56,3 @@ publication; [old-crate retirement](/quest/m3/release/c-retire.md) follows.
 ## Required
 
 - [Switch to rust2's exporter](/quest/m3/ffi-exporter.md) - the C ABI comes from rust2's exporter instead of a UniFFI generator
-- [C consumers](/quest/m3/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
-- [Async failure contract](/quest/m3/c/async-failure-contract.md) - every generated async call returns a task and calls back exactly once, cancelled when its task was freed first

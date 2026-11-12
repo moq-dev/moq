@@ -9,6 +9,7 @@
 //! back a different picture than the stream coded, so a picture in any other
 //! format is refused rather than converted.
 
+use std::collections::VecDeque;
 use std::ffi::CStr;
 use std::ptr;
 
@@ -31,12 +32,21 @@ pub(crate) const NAME: &str = "vpx";
 pub(crate) struct Vpx {
 	ctx: vpx_codec_ctx_t,
 	codec: Codec,
-	/// A frame was refused, so the reference chain is broken until the next
-	/// keyframe. Delta frames in between are dropped rather than decoded against
-	/// references that are missing or wrong.
-	broken: bool,
-	/// Frames dropped since the chain broke, so a run of them logs once.
-	lost: u64,
+	chain: Chain,
+	ready: VecDeque<Frame>,
+}
+
+/// Whether the decoder holds the references the next delta frame needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Chain {
+	Intact,
+	/// A frame was refused, so the chain is broken until a keyframe decodes.
+	/// Delta frames in between are dropped rather than decoded against
+	/// references that are missing or wrong. `lost` counts the frames dropped
+	/// since it broke, so a run of them logs once.
+	Broken {
+		lost: u64,
+	},
 }
 
 impl Vpx {
@@ -53,7 +63,7 @@ impl Vpx {
 				Codec::Vp8 => vpx_codec_vp8_dx(),
 				Codec::Vp9 => vpx_codec_vp9_dx(),
 				other => {
-					return Err(Error::Codec(anyhow::anyhow!("{NAME} cannot decode {}", other.label())));
+					return Err(Error::codec(anyhow::anyhow!("{NAME} cannot decode {}", other.label())));
 				}
 			}
 		};
@@ -70,7 +80,7 @@ impl Vpx {
 		// SAFETY: `ctx` is zeroed and outlives the call; libvpx copies `cfg`.
 		let err = unsafe { vpx_codec_dec_init_ver(&mut ctx, iface, &cfg, 0, VPX_DECODER_ABI_VERSION as i32) };
 		if err != vpx_codec_err_t::VPX_CODEC_OK {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"{NAME} {} decoder init: {}",
 				codec.label(),
 				describe(err, None)
@@ -81,8 +91,8 @@ impl Vpx {
 		Ok(Self {
 			ctx,
 			codec,
-			broken: false,
-			lost: 0,
+			chain: Chain::Intact,
+			ready: VecDeque::new(),
 		})
 	}
 
@@ -112,7 +122,7 @@ impl Vpx {
 			)
 		};
 		if err != vpx_codec_err_t::VPX_CODEC_OK {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"{NAME} corruption check: {}",
 				self.error(err)
 			)));
@@ -123,9 +133,12 @@ impl Vpx {
 	/// Records a frame the decoder refused, or one dropped while waiting for a
 	/// keyframe, and logs the first of a run.
 	fn picture_lost(&mut self, reason: &str) {
-		self.broken = true;
-		self.lost += 1;
-		if self.lost == 1 {
+		let lost = match self.chain {
+			Chain::Intact => 1,
+			Chain::Broken { lost } => lost + 1,
+		};
+		self.chain = Chain::Broken { lost };
+		if lost == 1 {
 			tracing::warn!(
 				decoder = NAME,
 				codec = self.codec.label(),
@@ -193,7 +206,7 @@ fn picture(codec: Codec, img: &vpx_image_t, timestamp: Timestamp) -> Result<Fram
 
 	let size = Size::new(img.d_w, img.d_h);
 	if !size.width.is_multiple_of(2) || !size.height.is_multiple_of(2) {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"decoded frame has odd dimensions {size}, expected 4:2:0"
 		)));
 	}
@@ -218,19 +231,14 @@ fn picture(codec: Codec, img: &vpx_image_t, timestamp: Timestamp) -> Result<Fram
 }
 
 impl Backend for Vpx {
-	fn decode(&mut self, frame: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error> {
-		if self.broken {
-			if !keyframe {
-				self.picture_lost("reference chain broken");
-				return Ok(Vec::new());
-			}
-			tracing::info!(decoder = NAME, lost = self.lost, "picture recovered");
-			self.broken = false;
-			self.lost = 0;
+	fn decode(&mut self, frame: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<(), Error> {
+		if matches!(self.chain, Chain::Broken { .. }) && !keyframe {
+			self.picture_lost("reference chain broken");
+			return Ok(());
 		}
 
 		let len = u32::try_from(frame.len()).map_err(|_| {
-			Error::Codec(anyhow::anyhow!(
+			Error::codec(anyhow::anyhow!(
 				"{} frame of {} bytes is too large",
 				self.codec.label(),
 				frame.len()
@@ -241,31 +249,40 @@ impl Backend for Vpx {
 		if err != vpx_codec_err_t::VPX_CODEC_OK {
 			let reason = self.error(err);
 			if !describes_frame(err) {
-				return Err(Error::Codec(anyhow::anyhow!("{NAME} decode: {reason}")));
+				return Err(Error::codec(anyhow::anyhow!("{NAME} decode: {reason}")));
 			}
 			self.picture_lost(&reason);
-			return Ok(Vec::new());
+			return Ok(());
 		}
 		if self.corrupted()? {
 			self.picture_lost("corrupt frame");
-			return Ok(Vec::new());
+			return Ok(());
+		}
+		// Only now the keyframe has decoded whole: one refused on the way back
+		// keeps counting into the same run.
+		if let Chain::Broken { lost } = self.chain {
+			tracing::info!(decoder = NAME, lost, "picture recovered");
+			self.chain = Chain::Intact;
 		}
 
 		// Without frame threading a call hands back at most the one picture it
 		// shows, so the input timestamp is that picture's. A frame that is not
 		// shown (a VP8 alt-ref coded on its own) hands back none.
-		let mut frames = Vec::new();
 		let mut iter: vpx_codec_iter_t = ptr::null();
 		// SAFETY: each image stays valid until the next decode call.
 		while let Some(img) = unsafe { vpx_codec_get_frame(&mut self.ctx, &mut iter).as_ref() } {
-			frames.push(picture(self.codec, img, timestamp)?);
+			self.ready.push_back(picture(self.codec, img, timestamp)?);
 		}
-		Ok(frames)
+		Ok(())
+	}
+
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.ready.pop_front())
 	}
 
 	/// libvpx decodes without delay here, so nothing is ever held back.
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
-		Ok(Vec::new())
+	fn flush(&mut self) -> Result<(), Error> {
+		Ok(())
 	}
 
 	fn name(&self) -> &str {
@@ -416,13 +433,13 @@ mod tests {
 		for (index, frame) in frames(vector.ivf).into_iter().enumerate() {
 			let key = keyframe(vector.codec, &frame);
 			let pictures = decoder
-				.decode(damage(index, frame), at(index), key)
+				.decode_all(damage(index, frame), at(index), key)
 				.unwrap_or_else(|e| panic!("{} frame {index} ended the stream: {e}", vector.name));
 			out.extend(pictures.into_iter().map(|picture| (index, picture)));
 		}
 		out.extend(
 			decoder
-				.flush()
+				.flush_all()
 				.unwrap()
 				.into_iter()
 				.map(|picture| (usize::MAX, picture)),
@@ -550,7 +567,7 @@ mod tests {
 				// The two-bit frame marker (VP9 section 6.2).
 				_ => frame[0] = 0,
 			}
-			match open(vector.codec).decode(Bytes::from(frame), at(0), true) {
+			match open(vector.codec).decode_all(Bytes::from(frame), at(0), true) {
 				Err(Error::Codec(_)) => {}
 				Err(other) => panic!("{}: expected Codec, got {other:?}", vector.name),
 				Ok(frames) => panic!("{}: decoded {} pictures", vector.name, frames.len()),
@@ -573,7 +590,7 @@ mod tests {
 	#[test]
 	fn a_picture_that_is_not_i420_is_refused() {
 		let frame = frames(VP9_PROFILE1).remove(0);
-		match open(Codec::Vp9).decode(frame, at(0), true) {
+		match open(Codec::Vp9).decode_all(frame, at(0), true) {
 			Err(Error::UnsupportedCodec(reason)) => assert!(reason.contains("I444"), "{reason}"),
 			Err(other) => panic!("expected UnsupportedCodec, got {other:?}"),
 			Ok(frames) => panic!("expected UnsupportedCodec, decoded {} pictures", frames.len()),
@@ -635,7 +652,7 @@ mod tests {
 			let key = keyframe(Codec::Vp9, &frame);
 			decoded.extend(
 				decoder
-					.decode(&frame, at(index), key)
+					.decode_all(&frame, at(index), key)
 					.unwrap()
 					.into_iter()
 					.map(|f| (index, f)),

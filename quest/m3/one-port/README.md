@@ -26,7 +26,7 @@ STUN's only consumer is P2P, deferred to m2. SRT is not blocked upstream:
 sans-io `srt-protocol` directly instead of waiting on a socket abstraction in
 srt-tokio.
 
-Decided 2026-10-05, from moq.pro's audit: `moq-rtc` taking a fed socket
+Decided 2026-10-05, from moq.pro's audit: `moq-webrtc` taking a fed socket
 ([rtc-feed](/quest/m3/one-port/rtc-feed.md)) joins this line, and
 [the io_uring demux](/quest/m3/uring-demux.md) is planned beside it, all in
 m2 rather than m3, since moq.pro's edge cutover and its uring rollout wait on
@@ -76,7 +76,7 @@ One OS socket, or one shard of a reuseport group, is read by the QUIC
 endpoint's own socket, which keeps QUIC in place and copies every other
 class into that stack's bounded feed, shared by every shard. Sends go
 straight to the shared socket, so every stack answers from the same address
-and port. `moq-rtc`'s `Mux` already demuxes STUN by ufrag
+and port. `moq-webrtc`'s `Mux` already demuxes STUN by ufrag
 internally and takes a fed socket in
 [WebRTC on the shared socket](/quest/m3/one-port/rtc-feed.md). SRT skips `srt-tokio`,
 which accepts a `tokio::net::UdpSocket` but no abstraction, and feeds
@@ -93,12 +93,7 @@ dropped and counted. Decided 2026-10-13:
 the responder binds its own port ([relay STUN](/doc/bin/relay/config.md#stun)),
 so the shared port never answers public Binding requests.
 
-## Required
-
-- [WebRTC on the shared socket](/quest/m3/one-port/rtc-feed.md) - `moq-rtc` serves WHIP and WHEP media from the WebRTC hook and pins ICE tuples
-- [SRT on the shared socket](/quest/m3/one-port/srt-demux.md) - moq-srt drives `srt-protocol` on demuxed packets and the flow table pins its 4-tuples
-
 ## Related
 
 - [One port on the io_uring workers](/quest/m3/uring-demux.md) - the io_uring workers host the UDP demux
-- [Stream transports](/quest/m4/perf/stream/README.md) - the io_uring workers that would host the TCP acceptor later
+- [Stream transports](/quest/m4/stream-transports/README.md) - the io_uring workers that would host the TCP acceptor later

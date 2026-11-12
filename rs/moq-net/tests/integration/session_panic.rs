@@ -13,14 +13,14 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Client, Hop, Server, Session, Version, origin};
+use moq_net::{Client, Server, Session, Version, origin};
 use support::harness::{now, spawn};
 use support::mock::{MockSession, create_mock_session_pair};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	producer
 }
@@ -81,11 +81,14 @@ async fn until(announced: &mut origin::Routes, path: &str, active: bool) {
 	let wait = async {
 		loop {
 			let (announce, now_active) = match announced.next().await.expect("origin closed") {
-				origin::RouteEvent::Start(announce)
-				| origin::RouteEvent::Update(announce)
-				| origin::RouteEvent::Restart(announce)
-				| origin::RouteEvent::Takeover { announce, .. } => (announce, true),
-				origin::RouteEvent::End(announce) => (announce, false),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
+					announce,
+				} => (announce, true),
+				origin::RouteEvent {
+					kind: origin::RouteKind::End | origin::RouteKind::Offline,
+					announce,
+				} => (announce, false),
 			};
 			if announce.prefix.as_str() == path && now_active == active {
 				return;

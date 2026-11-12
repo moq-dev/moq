@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { StreamCode } from "./error.ts";
 import { randomHop } from "./hop.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
@@ -110,10 +110,10 @@ for (const protocol of protocols) {
 				expect(ended).toBe(false);
 				write(1n);
 				if (mode === "expires") {
-					await clock.advance(Nano.fromMilli(Milli(budget - 1)));
+					await clock.advance(Duration.millis(budget - 1));
 					expect(ended).toBe(false);
-					await clock.advance(Nano.fromMilli(Milli(1)));
-				} else await clock.advance(Nano.fromMilli(Milli(33_750)));
+					await clock.advance(Duration.millis(1));
+				} else await clock.advance(Duration.millis(45_000));
 				expect(ended).toBe(true);
 				if (protocol.kind === "lite") {
 					for (;;) {
@@ -127,7 +127,7 @@ for (const protocol of protocols) {
 				// The transport cannot cancel createUnidirectionalStream. A late slot is kept for
 				// the next open, never used to transmit the obsolete group's header or frames.
 				slot.resolve();
-				await clock.advance(Nano.zero);
+				await clock.advance(Duration.ZERO);
 				expect(writes).toBe(0);
 				expect(resets).toBe(0);
 			} finally {
@@ -221,10 +221,10 @@ for (const protocol of protocols) {
 		try {
 			await blocked.promise;
 			write(1n, 1);
-			await clock.advance(Nano.fromMilli(Milli(33_750)));
+			await clock.advance(Duration.millis(45_000));
 			// The write already handed to the stream finishes, and the stream is reset after it.
 			credit.resolve();
-			await clock.advance(Nano.zero);
+			await clock.advance(Duration.ZERO);
 			expect(writes).toBe(1);
 			expect(resets).toBe(1);
 		} finally {

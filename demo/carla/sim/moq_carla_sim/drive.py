@@ -8,6 +8,7 @@ exactly where a real vehicle-bus backend would.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Literal
@@ -21,6 +22,16 @@ class Gear(str, Enum):
     NEUTRAL = "neutral"
     FORWARD = "forward"
     REVERSE = "reverse"
+
+
+def handle(session: str) -> str:
+    """The name `status` gives the lease or e-stop a session carried.
+
+    A hash of the session id, which only that session's two ends know, so the
+    driver recognizes its own lease while no viewer learns its endpoint id,
+    which anyone could announce to take the route to that driver's next dial.
+    """
+    return "driver-" + hashlib.sha256(session.encode()).hexdigest()[:8]
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -94,15 +105,17 @@ class Command:
     `drive`, `estop`, `reset_estop`, and `respawn` arrive on the wire;
     `driver_left` and `watchdog_expired` are synthesized locally.
 
-    `driver_id` is the driver's path segment, which `status` echoes. `instance`
-    names the run that sent it, one per publisher instance serving the path: the
-    same id under another instance is another run of the driver, so it is a
-    different driver for the lease.
+    `driver_id` is the driver's socket endpoint id, which stays private.
+    `session` is the socket session that carried it, one per lease the player
+    takes: the same id on another session is a different driver for the lease.
+    The session id is the secret that keeps a session to its two ends, so only
+    its `handle` leaves this process. Only a locally synthesized command has
+    none.
     """
 
     kind: CommandKind
     driver_id: str = ""
-    instance: str | None = None
+    session: str | None = None
     sequence: int = 0
     state: DriveState | None = None
     timestamps: tuple[TimestampEntry, ...] = ()
@@ -114,19 +127,16 @@ class Drive:
     The first driver to send a command owns the truck until it disconnects or
     its command lease expires. Other drivers cannot silently steal control.
 
-    The lease binds to the driver's broadcast path and the run serving it, so a
-    driver whose broadcast ends or restarts loses it.
-    It is still cooperative, not enforced: the holder's id is echoed on the
-    public `status` track, so anyone allowed to publish there can announce at
-    that path under another instance, which ends the holder's broadcast and frees
-    the lease for the newcomer. This stops two honest drivers colliding; it
-    does not stop a deliberate takeover.
+    The lease binds to the driver's socket session, so a driver whose session
+    ends loses it, and another session claiming the same driver id is another
+    driver. `driver` and `estop_by` are session handles, never endpoint ids, so
+    the public `status` track gives nobody an id to announce in the holder's
+    place.
     """
 
     def __init__(self) -> None:
         self._driver: str | None = None
-        self._instance: str | None = None
-        self._sequence: int | None = None
+        self._session: str | None = None
         self._state = DriveState.stopped()
         self._takeover_pedals: tuple[float, float] | None = None
         self._estopped = False
@@ -134,11 +144,13 @@ class Drive:
 
     @property
     def driver(self) -> str | None:
-        return self._driver
+        """The lease holder's handle, or None while nobody holds it."""
+        return None if self._session is None else handle(self._session)
 
     @property
-    def sequence(self) -> int | None:
-        return self._sequence
+    def holder(self) -> tuple[str, str] | None:
+        """The lease holder's driver id and session, or None while nobody holds it."""
+        return None if self._driver is None or self._session is None else (self._driver, self._session)
 
     @property
     def state(self) -> DriveState:
@@ -150,11 +162,12 @@ class Drive:
 
     @property
     def estop_by(self) -> str | None:
+        """The handle of the session that latched the e-stop."""
         return self._estop_by
 
     def holds(self, command: Command) -> bool:
-        """Whether `command` comes from the run of the driver holding the lease."""
-        return self._driver is not None and (self._driver, self._instance) == (command.driver_id, command.instance)
+        """Whether `command` comes from the session holding the lease."""
+        return self._driver is not None and (self._driver, self._session) == (command.driver_id, command.session)
 
     def accepted(self) -> Accepted:
         return Accepted(state=self._state, estopped=self._estopped)
@@ -162,12 +175,12 @@ class Drive:
     def apply(self, command: Command) -> bool:
         """Apply a command, returning whether it changed or refreshed state."""
         if command.kind == "drive":
-            if self._estopped or not (self._driver is None or self.holds(command)):
+            # A lease binds to a session, so a command without one cannot hold it.
+            if command.session is None or self._estopped or not (self._driver is None or self.holds(command)):
                 return False
             claiming = self._driver is None
             self._driver = command.driver_id
-            self._instance = command.instance
-            self._sequence = command.sequence
+            self._session = command.session
             state = (command.state or DriveState.stopped()).sanitized()
             pedals = (state.throttle, state.brake)
             if claiming:
@@ -188,23 +201,17 @@ class Drive:
             # latches and brings the truck to a stop, but it must never transfer
             # the driving lease to its sender. Otherwise a bystander could
             # e-stop, then reset_estop, and drive off with a lease they never
-            # legitimately claimed. Only refresh the acknowledgement sequence
-            # when the sender already holds the lease, so a bystander's e-stop
-            # cannot masquerade as the authoritative command either.
-            if self.holds(command):
-                self._sequence = command.sequence
+            # legitimately claimed.
             self._state = DriveState.stopped()
             self._estopped = True
-            if not was_estopped:
-                self._estop_by = command.driver_id
+            if not was_estopped and command.session is not None:
+                self._estop_by = handle(command.session)
 
         elif command.kind == "reset_estop":
             if not self._estopped:
                 return False
             # Reset clears the global latch without claiming or transferring the
-            # lease. Only the holder's sequence is authoritative for that lease.
-            if self.holds(command):
-                self._sequence = command.sequence
+            # lease.
             self._state = DriveState.stopped()
             self._estopped = False
             self._estop_by = None
@@ -228,7 +235,6 @@ class Drive:
 
     def _clear_driver(self) -> None:
         self._driver = None
-        self._instance = None
-        self._sequence = None
+        self._session = None
         self._state = DriveState.stopped()
         self._takeover_pedals = None

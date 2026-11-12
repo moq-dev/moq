@@ -102,7 +102,7 @@ pub(super) enum Command {
 	/// Start mixing a sink.
 	Add {
 		id: u64,
-		cons: ring::Consumer,
+		cons: Box<ring::Consumer>,
 		gain: Arc<Gain>,
 		completion: Arc<super::sink::Completion>,
 	},
@@ -117,13 +117,21 @@ pub(super) enum Command {
 /// One sink being mixed, owned by the audio thread until it is retired.
 pub(super) struct Entry {
 	id: u64,
-	cons: ring::Consumer,
+	cons: Box<ring::Consumer>,
 	gain: Arc<Gain>,
 	completion: Arc<super::sink::Completion>,
 	/// Device deadline of the last period containing this sink's samples.
 	played_at: Duration,
 	/// Gain actually applied, chasing [`Gain::target`] a step at a time.
 	applied: f32,
+	/// [`ring::Consumer::comfort`] as of the last read.
+	comfort: u64,
+	/// [`ring::Consumer::skips`] as of the last read.
+	skips: u64,
+	/// [`ring::Consumer::trimmed`] as of the last read.
+	trimmed: u64,
+	/// [`ring::Consumer::accelerated`] as of the last read.
+	accelerated: u64,
 }
 
 /// Something the audio thread is done with and must not free itself.
@@ -152,6 +160,8 @@ pub(super) struct Mixer {
 	/// Channels the device takes, which is also the bus layout's: every sink
 	/// remixes into it on its way here.
 	channels: usize,
+	/// The device's rate, which every sink is resampled to.
+	rate: u32,
 	/// Per-frame gain step, so any change spans [`RAMP`] regardless of rate.
 	step: f32,
 	/// Accumulator for one chunk, in the device's layout.
@@ -197,6 +207,7 @@ impl Mixer {
 			commands,
 			retired,
 			channels,
+			rate,
 			step: 1.0 / (rate as f32 * RAMP),
 			bus: vec![0.0; CHUNK * channels],
 			scratch: vec![0.0; CHUNK * channels],
@@ -239,8 +250,19 @@ impl Mixer {
 		self.ledger.latency(latency);
 	}
 
-	/// Fill one device buffer, interleaved at the device's channel count.
-	pub(super) fn fill(&mut self, out: &mut [f32], played_at: Duration) {
+	/// Fill one device buffer, interleaved at the device's channel count and in
+	/// its sample format, whose first frame the device reads at `start` on the
+	/// host clock.
+	///
+	/// The whole buffer in one call, converting as each chunk goes out, so a
+	/// buffer of any size is read against one clock reading rather than one per
+	/// staging pass.
+	pub(super) fn fill<T: cpal::Sample + cpal::FromSample<f32>>(
+		&mut self,
+		out: &mut [T],
+		played_at: Duration,
+		start: ring::Instant,
+	) {
 		loop {
 			match self.commands.try_recv() {
 				Ok(Command::Add {
@@ -253,6 +275,10 @@ impl Mixer {
 					// doesn't click.
 					let entry = Entry {
 						id,
+						comfort: cons.comfort(),
+						skips: cons.skips(),
+						trimmed: cons.trimmed(),
+						accelerated: cons.accelerated(),
 						cons,
 						gain,
 						completion,
@@ -292,6 +318,7 @@ impl Mixer {
 		let Self {
 			entries,
 			channels,
+			rate,
 			step,
 			bus,
 			scratch,
@@ -307,10 +334,14 @@ impl Mixer {
 		let channels = *channels;
 
 		let total = out.len() / channels;
+		// Each chunk starts as many frames past the callback's start as precede
+		// it, so a later chunk is not read as ahead of the clock by the chunks
+		// before it.
 		let mut done = 0;
 		while done < total {
 			let frames = (total - done).min(CHUNK);
 			let samples = frames * channels;
+			let now = start + Duration::from_secs_f64(done as f64 / *rate as f64);
 
 			bus[..samples].fill(0.0);
 
@@ -322,13 +353,17 @@ impl Mixer {
 			let mut supplied = frames;
 			let mut playing = false;
 			let mut tail = 0;
+			// The most comfort noise any sink still being written played.
+			let mut comfort = 0;
+			// What those sinks discarded, summed.
+			let (mut skips, mut trimmed, mut accelerated) = (0, 0, 0);
 
 			for entry in entries.iter_mut() {
 				// Read even at zero volume: this is live audio, so a muted sink
 				// stays on the timeline instead of queueing up and jumping when
 				// it unmutes. The status only reports under/overflow, which the
 				// channel has already corrected for.
-				let status = entry.cons.read(&mut scratch[..samples]);
+				let status = entry.cons.read_at(&mut scratch[..samples], now, total - done);
 				if !matches!(status, Read::NotReady | Read::Underflow { frames: 0 }) {
 					entry.played_at = played_at;
 				}
@@ -338,10 +373,24 @@ impl Mixer {
 					// A declared silence is played on purpose, so it is no gap.
 					Read::Ok | Read::Trimmed { .. } | Read::Comfort { .. } => Some(frames),
 				};
+				let comforted = entry.cons.comfort();
+				let filled = comforted - std::mem::replace(&mut entry.comfort, comforted);
+				let jumps = entry.cons.skips();
+				let jumps = jumps - std::mem::replace(&mut entry.skips, jumps);
+				let cut = entry.cons.trimmed();
+				let cut = cut - std::mem::replace(&mut entry.trimmed, cut);
+				let sped = entry.cons.accelerated();
+				let sped = sped - std::mem::replace(&mut entry.accelerated, sped);
+				if entry.completion.writing() {
+					skips += jumps;
+					trimmed += cut as usize;
+					accelerated += sped as usize;
+				}
 				match read {
 					Some(read) if entry.completion.writing() => {
 						playing = true;
 						supplied = supplied.min(read);
+						comfort = comfort.max(filled as usize);
 					}
 					Some(read) => tail = tail.max(read),
 					None => {}
@@ -374,7 +423,8 @@ impl Mixer {
 			if !playing && tail > 0 {
 				(playing, supplied) = (true, tail);
 			}
-			ledger.add(&bus[..samples], channels, supplied, playing);
+			ledger.add(&bus[..samples], channels, supplied, playing, comfort);
+			ledger.shed(skips, trimmed, accelerated);
 
 			// Tap the mix on its way out. Overflow means the microphone stopped
 			// draining, which the canceller notices on its own; there is nothing
@@ -386,7 +436,12 @@ impl Mixer {
 				reference.push(stereo);
 			}
 
-			out[done * channels..(done + frames) * channels].copy_from_slice(&bus[..samples]);
+			for (out, sample) in out[done * channels..(done + frames) * channels]
+				.iter_mut()
+				.zip(&bus[..samples])
+			{
+				*out = T::from_sample(*sample);
+			}
 
 			done += frames;
 		}
@@ -419,6 +474,7 @@ mod tests {
 		retired: Receiver<Retired>,
 		next: u64,
 		channels: usize,
+		observe: Arc<observe::Shared>,
 	}
 
 	impl Harness {
@@ -429,12 +485,14 @@ mod tests {
 		fn with_depth(layout: Layout, depth: usize) -> Self {
 			let (commands, rx) = sync_channel(depth);
 			let (retired_tx, retired) = sync_channel(MAX_SINKS);
+			let observe = Arc::new(observe::Shared::default());
 			Self {
-				mixer: Mixer::new(rx, retired_tx, RATE, layout, Default::default()).unwrap(),
+				mixer: Mixer::new(rx, retired_tx, RATE, layout, observe.clone()).unwrap(),
 				commands,
 				retired,
 				next: 0,
 				channels: layout.channels() as usize,
+				observe,
 			}
 		}
 
@@ -452,6 +510,7 @@ mod tests {
 					capacity: Duration::from_secs(1),
 					pad: true,
 					trim: true,
+					comfort: true,
 				},
 			);
 
@@ -460,7 +519,7 @@ mod tests {
 			self.commands
 				.send(Command::Add {
 					id,
-					cons,
+					cons: Box::new(cons),
 					gain,
 					completion: Arc::new(super::super::sink::Completion::new(
 						super::super::driver::Commands::default(),
@@ -478,7 +537,7 @@ mod tests {
 		/// its first callback.
 		fn fill(&mut self, out: &mut [f32]) {
 			self.mixer.complete(Duration::ZERO);
-			self.mixer.fill(out, Duration::ZERO);
+			self.mixer.fill(out, Duration::ZERO, ring::host());
 		}
 
 		/// Fill twice and hand back the buffer, so assertions look at gain that has
@@ -491,7 +550,7 @@ mod tests {
 
 	/// Measurement-only harness: no device and no timing acceptance threshold.
 	#[test]
-	#[ignore = "run with just rs bench-playback"]
+	#[ignore = "release benchmark, run by nightly"]
 	#[expect(
 		clippy::disallowed_methods,
 		clippy::disallowed_types,
@@ -537,6 +596,62 @@ mod tests {
 	/// Push `frames` stereo frames of a constant sample.
 	fn push(prod: &mut ring::Producer, value: f32, frames: usize) {
 		prod.push(&vec![value; frames * STEREO]);
+	}
+
+	/// A callback longer than a chunk reads each chunk where it starts, so a
+	/// stretched sink anchored exactly on its clock stays there with nothing
+	/// to correct, rather than reading every later chunk as ahead of it.
+	#[test]
+	fn each_chunk_of_a_callback_reads_the_clock_where_it_starts() {
+		let mut harness = Harness::new(Layout::Stereo);
+		let (mut prod, mut cons) = ring::channel(
+			STEREO,
+			RATE,
+			RATE,
+			ring::Config {
+				latency: Duration::from_millis(10),
+				capacity: Duration::from_secs(2),
+				pad: false,
+				trim: false,
+				comfort: true,
+			},
+		);
+		cons.stretch(RATE);
+		harness
+			.commands
+			.send(Command::Add {
+				id: 0,
+				cons: Box::new(cons),
+				gain: Arc::new(Gain::new()),
+				completion: Arc::new(super::super::sink::Completion::new(
+					super::super::driver::Commands::default(),
+				)),
+			})
+			.unwrap();
+
+		// One read marks the sink ready, then a second of tone is due exactly
+		// as it would play from the next callback on.
+		let start = ring::host();
+		harness.mixer.fill(&mut [0.0; 128 * STEREO], Duration::ZERO, start);
+		let tone: Vec<f32> = (0..RATE as usize)
+			.flat_map(|i| [(i as f32 * std::f32::consts::TAU * 200.0 / RATE as f32).sin() * 0.25; STEREO])
+			.collect();
+		assert_eq!(prod.push(&tone), Push::Ok);
+		// Four chunks to a callback, in a format the mixer converts to as it
+		// goes, so none of them restarts the clock.
+		let callback = 4 * CHUNK;
+		let mut now = start + Duration::from_millis(10);
+		prod.due(now + prod.buffered(), Duration::from_secs(2), Duration::ZERO);
+
+		let period = Duration::from_secs_f64(callback as f64 / RATE as f64);
+		let mut out = vec![0i16; callback * STEREO];
+		for _ in 0..10 {
+			harness.mixer.fill(&mut out, Duration::ZERO, now);
+			now += period;
+		}
+		let entry = &harness.mixer.entries[0];
+		assert_eq!(entry.cons.accelerated(), 0);
+		assert_eq!(entry.cons.skips(), 0);
 	}
 
 	#[test]
@@ -784,6 +899,7 @@ mod tests {
 				capacity: Duration::from_millis(200),
 				pad: true,
 				trim: true,
+				comfort: true,
 			},
 		)
 	}
@@ -879,5 +995,57 @@ mod tests {
 			"expected silence after underflow, got {}",
 			out[out.len() - 1]
 		);
+	}
+
+	/// A declared silence plays as comfort noise, which the observer times
+	/// apart from received audio and never counts as a gap.
+	#[test]
+	fn a_declared_silence_is_timed_as_comfort_noise() {
+		let mut harness = Harness::new(Layout::Stereo);
+		let mut observer = observe::Observer::new(harness.observe.clone()).unwrap();
+		let mut out = vec![0.0f32; 4096 * STEREO];
+
+		let (_, mut prod) = harness.add(Arc::new(Gain::new()));
+		harness.fill(&mut out[..STEREO]);
+		push(&mut prod, 0.5, 960);
+		prod.end();
+		// The opening silence, the 960 pushed, then comfort noise.
+		harness.fill(&mut out);
+
+		let observation = observer.read().unwrap();
+		assert!(observation.gaps.is_empty(), "{observation:?}");
+		let loud = out.iter().rposition(|sample| sample.abs() > 0.01).unwrap() / STEREO;
+		let played = 4096 - 1 - loud;
+		let expected = played as f64 / RATE as f64;
+		assert!(
+			(observation.comfort.as_secs_f64() - expected).abs() < 1e-6,
+			"{:?}, want {played} frames",
+			observation.comfort
+		);
+	}
+
+	/// A queue trimmed back to its latency is reported as discarded audio,
+	/// distinct from what the stretch sheds.
+	#[test]
+	fn a_trim_is_timed_as_discarded_audio() {
+		let mut harness = Harness::new(Layout::Stereo);
+		let mut observer = observe::Observer::new(harness.observe.clone()).unwrap();
+		let mut out = vec![0.0f32; 512 * STEREO];
+
+		let (_, mut prod) = harness.add(Arc::new(Gain::new()));
+		harness.fill(&mut out[..STEREO]);
+		// Past three quarters of the second of headroom above the 10 ms latency.
+		push(&mut prod, 0.5, 40_000);
+		harness.fill(&mut out);
+
+		let observation = observer.read().unwrap();
+		// The 10 ms prime and the push, less the buffer read and the latency kept.
+		let trimmed = 480 + 40_000 - 512 - 480;
+		assert_eq!(
+			observation.trimmed,
+			Duration::from_secs_f64(trimmed as f64 / RATE as f64)
+		);
+		assert_eq!(observation.skips, 1);
+		assert_eq!(observation.accelerated, Duration::ZERO);
 	}
 }

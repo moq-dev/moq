@@ -266,7 +266,7 @@ pub struct Server {
 impl Server {
 	/// Bind an RTMP listener on `addr` (RTMP's well-known port is 1935).
 	pub async fn bind(addr: SocketAddr) -> Result<Self> {
-		rind::cpu::check().map_err(std::io::Error::other)?;
+		moq_crypto::cpu::check()?;
 		let listener = TcpListener::bind(addr).await?;
 
 		Ok(Self {
@@ -421,7 +421,7 @@ impl Server {
 						tracing::warn!(%err, "failed to accept RTMP connection; continuing");
 						let wait = self.accept_delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
 						self.accept_delay = (self.accept_delay * 2).min(ACCEPT_RETRY_MAX);
-						self.accept_retry = Some(kio::clock::Instant::now() + wait);
+						self.accept_retry = Some(kio::clock::Instant::now().saturating_add(wait));
 					}
 				},
 			}
@@ -496,6 +496,7 @@ pub fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
 /// `play`. The handshake must finish in five seconds; wrap the call in
 /// [`kio::clock::timeout`] to also bound the wait for a publish or play request.
 pub async fn accept_stream<S: Stream>(stream: S, peer: SocketAddr) -> Result<Option<Request<S>>> {
+	moq_crypto::cpu::check()?;
 	Ok(accept_until_request(stream, peer).await?)
 }
 
@@ -573,14 +574,6 @@ pub struct Publish<S = Conn> {
 	stream_key: String,
 	tc_url: Option<String>,
 	peer: SocketAddr,
-	/// Max age declared on the media tracks this publish mints, or `None` for no publisher
-	/// limit. Override with [`with_max_age`](Self::with_max_age).
-	max_age: Option<Duration>,
-	/// Connection allocator each passthrough track claims its peak-hold bitrate on.
-	/// Override with [`with_bandwidth`](Self::with_bandwidth).
-	bandwidth: moq_net::bandwidth::Allocator,
-	/// How long an unpublished broadcast stays up. Override with [`with_linger`](Self::with_linger).
-	linger: Duration,
 }
 
 impl<S: Stream> Publish<S> {
@@ -609,39 +602,8 @@ impl<S: Stream> Publish<S> {
 		self.peer
 	}
 
-	/// Set how long a superseded group of this publish's media tracks stays fresh, or
-	/// `None` for no publisher limit. Defaults to
-	/// [`MAX_AGE`](hang::container::MAX_AGE).
-	///
-	/// A freshness bound, not a delivery one: it never makes a subscriber play further
-	/// behind live, it caps how far back a FETCH can still reach. The default suits a
-	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history.
-	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
-		self.max_age = max_age.into();
-		self
-	}
-
-	/// Claim each ingested track's peak-hold catalog bitrate on `bandwidth`.
-	///
-	/// A passthrough import has no configured ceiling, so it reserves the measured
-	/// maximum instead. A co-resident encoder then targets what is left of the
-	/// uplink. Unlimited (the default) claims nothing a sender can follow.
-	pub fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
-		self.bandwidth = bandwidth;
-		self
-	}
-
-	/// Keep the broadcast up for `linger` after the client unpublishes, so a subscriber that
-	/// arrives after the end still gets the tail. Defaults to [`moq_mux::Linger::DEFAULT`];
-	/// zero closes it at once.
-	pub fn with_linger(mut self, linger: Duration) -> Self {
-		self.linger = linger;
-		self
-	}
-
 	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
-	/// RTMP media into it until the client disconnects.
+	/// RTMP media into it, published as `ingest` says, until the client disconnects.
 	///
 	/// `origin` is whatever the caller wants the media published into (e.g. a
 	/// relay's shared origin, optionally re-rooted/scoped per the authenticated
@@ -649,18 +611,20 @@ impl<S: Stream> Publish<S> {
 	/// run it on its own task.
 	///
 	/// A client that unpublishes (`deleteStream`) ends cleanly: the finished broadcast
-	/// stays up for the [linger](Self::with_linger), and the future resolves after that.
-	/// Dropping the future ends the linger early. A connection that drops without
+	/// stays up for the ingest's [linger](moq_mux::Ingest::linger), and the future resolves
+	/// after that. Dropping the future ends the linger early. A connection that drops without
 	/// unpublishing closes the broadcast at once.
-	pub async fn accept(mut self, origin: &origin::Producer, path: impl Into<moq_net::Path>) -> Result<()> {
+	pub async fn accept(
+		mut self,
+		origin: &origin::Producer,
+		path: impl Into<moq_net::Path>,
+		ingest: &moq_mux::Ingest,
+	) -> Result<()> {
 		let path: moq_net::Path = path.into();
 		// Reserve the broadcast path before telling the client the publish succeeded:
 		// if the origin refuses `path`, reject cleanly instead of accepting and then
 		// dropping the connection a moment later.
-		let config = moq_mux::catalog::Config::default()
-			.with_max_age(self.max_age)
-			.with_bandwidth(self.bandwidth);
-		let mut publisher = match Publisher::new(origin, path.as_str(), config) {
+		let mut publisher = match Publisher::new(origin, path.as_str(), ingest.catalog()) {
 			Ok(publisher) => publisher,
 			Err(err) => {
 				tracing::warn!(peer = %self.peer, %path, %err, "rejecting RTMP publish: broadcast unavailable");
@@ -700,9 +664,9 @@ impl<S: Stream> Publish<S> {
 			// arrives after the end still gets the tail. The encoder is done, so hang up first.
 			Ok(End::Unpublished) => {
 				drop(self.stream);
-				match publisher.finish(self.linger) {
+				match publisher.finish(ingest.linger) {
 					Ok(linger) => {
-						tracing::info!(%peer, %path, linger = ?self.linger, "rtmp publish ended, serving the finished broadcast");
+						tracing::info!(%peer, %path, linger = ?ingest.linger, "rtmp publish ended, serving the finished broadcast");
 						linger.wait().await;
 					}
 					Err(err) => tracing::debug!(%peer, %err, "error finishing RTMP publish"),
@@ -766,8 +730,8 @@ pub struct Play<S = Conn> {
 	tc_url: Option<String>,
 	peer: SocketAddr,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one; see [`with_max_delay`](Self::with_max_delay).
-	max_delay: Duration,
+	/// one; see [`with_delay`](Self::with_delay).
+	delay: Duration,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
 }
@@ -799,8 +763,8 @@ impl<S: Stream> Play<S> {
 
 	/// Set the FLV release delay and stalled-group budget.
 	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
-	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
-		self.max_delay = max_delay;
+	pub fn with_delay(mut self, delay: Duration) -> Self {
+		self.delay = delay;
 		self
 	}
 
@@ -889,7 +853,11 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_delay(self.max_delay)
+			.with_delay(
+				moq_net::track::Delay::default()
+					.with_min(self.delay)
+					.with_max(self.delay),
+			)
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -1198,9 +1166,6 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							max_age: Some(hang::container::MAX_AGE),
-							bandwidth: moq_net::bandwidth::Allocator::unlimited(),
-							linger: moq_mux::Linger::DEFAULT,
 						})));
 					}
 					// The client wants to play: hand control back to the caller.
@@ -1221,7 +1186,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							max_delay: crate::DEFAULT_MAX_DELAY,
+							delay: crate::DEFAULT_DELAY,
 							capabilities: client_capabilities.clone(),
 						})));
 					}
@@ -1262,7 +1227,7 @@ async fn pump<S: Stream>(
 	peer: SocketAddr,
 ) -> anyhow::Result<End> {
 	let mut buffer = [0u8; READ_BUFFER];
-	let mut media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+	let mut media_deadline = kio::clock::Instant::now().saturating_add(PUBLISH_IDLE_TIMEOUT);
 	loop {
 		let mut finished = false;
 		while let Some(result) = work.pop_front() {
@@ -1275,11 +1240,11 @@ async fn pump<S: Stream>(
 				ServerSessionResult::RaisedEvent(event) => match event {
 					// A timestamp restart ends this publisher; isolated malformed tags are skipped.
 					ServerSessionEvent::AudioDataReceived { data, timestamp, .. } => {
-						media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+						media_deadline = kio::clock::Instant::now().saturating_add(PUBLISH_IDLE_TIMEOUT);
 						publisher.push(flv::TAG_AUDIO, timestamp.value, &data)?;
 					}
 					ServerSessionEvent::VideoDataReceived { data, timestamp, .. } => {
-						media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+						media_deadline = kio::clock::Instant::now().saturating_add(PUBLISH_IDLE_TIMEOUT);
 						publisher.push(flv::TAG_VIDEO, timestamp.value, &data)?;
 					}
 					ServerSessionEvent::PublishStreamFinished { .. } => finished = true,
@@ -1470,7 +1435,7 @@ async fn feed_input<S: Stream>(
 /// Perform the RTMP server handshake, returning any leftover bytes that followed
 /// the client's final handshake packet (the start of the chunk stream).
 async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::Result<Vec<u8>> {
-	let mut handshake = Handshake::new(PeerType::Server)?;
+	let mut handshake = Handshake::new(PeerType::Server);
 	let mut buffer = [0u8; 4096];
 	loop {
 		let n = stream.read(&mut buffer).await?;
@@ -1542,16 +1507,28 @@ impl Publisher {
 
 	/// Flush any buffered media and finish every track, the catalog included, keeping the
 	/// finished broadcast up for `linger`.
-	fn finish(mut self, linger: Duration) -> anyhow::Result<moq_mux::Linger<Self>> {
-		self.importer.finish()?;
-		self.catalog.finish()?;
-		Ok(moq_mux::Linger::new([self.route.broadcast().clone()], self, linger))
+	fn finish(self, linger: Duration) -> anyhow::Result<moq_mux::Linger<impl Sized>> {
+		let Self {
+			importer,
+			mut catalog,
+			metadata,
+			route,
+		} = self;
+		let importer = importer.finish()?;
+		catalog.finish()?;
+		let broadcast = route.broadcast().clone();
+		Ok(moq_mux::Linger::new(
+			[broadcast],
+			(importer, catalog, metadata, route),
+			linger,
+		))
 	}
 
 	/// Flush any buffered media, finish the catalog, close out the broadcast's open groups, and end
 	/// the broadcast so the origin unannounces it immediately.
 	fn close(mut self) -> anyhow::Result<()> {
-		self.importer.finish()?;
+		// Held until the broadcast closes, so the route retracts before the tracks drop.
+		let _importer = self.importer.finish()?;
 		self.catalog.finish()?;
 		self.route.broadcast().close();
 		Ok(())
@@ -1850,9 +1827,10 @@ mod tests {
 		let Some(Request::Publish(publish)) = accept_stream(stream, peer).await.unwrap() else {
 			panic!("expected a publish request");
 		};
+		let mut ingest = moq_mux::Ingest::default();
+		ingest.linger = linger;
 		publish
-			.with_linger(linger)
-			.accept(&origin, moq_net::Path::from_static("live/cam0"))
+			.accept(&origin, moq_net::Path::from_static("live/cam0"), &ingest)
 			.await
 			.unwrap();
 	}
@@ -1952,7 +1930,7 @@ mod tests {
 
 	/// The client half of the RTMP handshake, returning the bytes read past it.
 	async fn client_handshake<S: Stream>(stream: &mut S) -> Vec<u8> {
-		let mut handshake = Handshake::new(PeerType::Client).unwrap();
+		let mut handshake = Handshake::new(PeerType::Client);
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2033,7 +2011,7 @@ mod tests {
 		media: tokio::sync::mpsc::UnboundedSender<Media>,
 	) {
 		// Handshake.
-		let mut handshake = Handshake::new(PeerType::Client).unwrap();
+		let mut handshake = Handshake::new(PeerType::Client);
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2121,7 +2099,7 @@ mod tests {
 			None
 		}
 
-		let mut handshake = Handshake::new(PeerType::Client).unwrap();
+		let mut handshake = Handshake::new(PeerType::Client);
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2253,7 +2231,7 @@ mod tests {
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2398,7 +2376,7 @@ mod tests {
 		vp9.extend_from_slice(b"vp09");
 		vp9.extend_from_slice(VP9_KEYFRAME_320X240);
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vp9)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2676,7 +2654,7 @@ mod tests {
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &seq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &frames)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2799,6 +2777,7 @@ mod tests {
 	/// until it leaves.
 	#[tokio::test]
 	async fn a_reconnect_replaces_the_stale_publish() {
+		kio::clock::host_time(); // real RTMP over TCP
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
 		let origin = moq_tokio::origin::spawn();
@@ -2809,7 +2788,11 @@ mod tests {
 					panic!("expected a publish request");
 				};
 				let origin = origin.clone();
-				tokio::spawn(async move { publish.accept(&origin, moq_net::Path::from_static("live/cam0")).await });
+				tokio::spawn(async move {
+					publish
+						.accept(&origin, moq_net::Path::from_static("live/cam0"), &Default::default())
+						.await
+				});
 			}
 		});
 
@@ -2835,7 +2818,13 @@ mod tests {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
 		kio::clock::timeout(Duration::from_secs(5), async {
-			while !matches!(announced.next().await, Some(moq_net::origin::RouteEvent::Restart(_))) {}
+			while !matches!(
+				announced.next().await,
+				Some(moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Restart,
+					..
+				})
+			) {}
 		})
 		.await
 		.expect("the reconnect restarts the broadcast");
@@ -2882,7 +2871,7 @@ mod tests {
 		let mut stream = TcpStream::connect(addr).await.unwrap();
 
 		// Client handshake.
-		let mut handshake = Handshake::new(PeerType::Client).unwrap();
+		let mut handshake = Handshake::new(PeerType::Client);
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await

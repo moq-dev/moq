@@ -207,13 +207,14 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 		const state: Sample = {
 			seq: seq++,
 			broadcastActive: el.broadcast.out.active.peek() !== undefined,
-			broadcastInstance: el.broadcast.out.active.peek()?.instance,
+			// Its text: a minted instance is an object, which JSON would print as {}.
+			broadcastInstance: instanceText(el.broadcast.out.active.peek()?.instance),
 			broadcastStatus: el.broadcast.out.status.peek(),
 			userActivated: navigator.userActivation.hasBeenActive,
 			at: performance.now(),
 			...readCanvas(el.querySelector("canvas")),
 			videoFrames: el.video.out.stats.peek()?.frameCount ?? 0,
-			videoTimestamp: el.video.out.timestamp.peek() ?? undefined,
+			videoTimestamp: el.video.out.timestamp.peek()?.asMillis(),
 			videoCodedWidth: el.video.out.frame.peek()?.codedWidth,
 			videoCodedHeight: el.video.out.frame.peek()?.codedHeight,
 			videoTrack: el.catalog?.video?.renditions.video?.track ?? "video",
@@ -221,9 +222,9 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 			hasAudio: el.catalog?.audio !== undefined,
 			audioBytes: el.audio.out.stats.peek()?.bytesReceived ?? 0,
 			audioContext: el.audio.out.context.peek()?.state,
-			audioTimestamp: el.audio.out.timestamp.peek() ?? undefined,
+			audioTimestamp: el.audio.out.timestamp.peek()?.asMillis(),
 			audioStalled: el.audio.out.stalled.peek(),
-			delay: el.sync.out.delay.peek(),
+			delay: el.sync.out.delay.peek().asMillis(),
 			...(analyser ? analyze(analyser, spectrum, wave) : {}),
 			audioCodec: audioRendition?.codec,
 			audioChannels: audioRendition?.numberOfChannels,
@@ -246,4 +247,9 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 
 	const timer = self.setInterval(sample, SAMPLE_MS);
 	return () => self.clearInterval(timer);
+}
+
+// The instance's text: both kinds stringify to it.
+function instanceText(instance: { toString(): string } | undefined): string | undefined {
+	return instance === undefined ? undefined : String(instance);
 }

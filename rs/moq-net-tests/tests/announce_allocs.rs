@@ -14,9 +14,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use moq_net::{
-	Client, Hop, Hops, Path, Pattern, Patterns, Server, Version,
+	Client, Path, Pattern, Patterns, Server, Version,
 	fuzz::{decode_path, decode_subscribe, encode_path, encode_subscribe},
-	kio, origin,
+	origin,
 	time::{Driver, Instant},
 	track,
 	transport::memory,
@@ -77,13 +77,11 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 
 /// Land `peer`'s route at `path`, as a session does: one hop, at `cost`.
-fn peer_route(producer: &origin::Producer, path: &'static str, peer: u64, cost: u64) -> origin::Route {
-	let mut hops = Hops::new();
-	hops.push(Hop::new(peer).unwrap()).unwrap();
+fn peer_route(producer: &origin::Producer, path: &'static str, peer: u64, cost: u64) -> origin::Claim {
 	moq_net::fuzz::requests_route(
 		producer,
 		Path::from_static(path),
-		moq_net::fuzz::route_info(hops, cost, None),
+		moq_net::fuzz::route_info([peer], cost, None),
 	)
 	.unwrap()
 }
@@ -250,14 +248,14 @@ async fn a_lite_request_keeps_one_copy_of_its_track_name() {
 	// before the SUBSCRIBE, so the publisher serves two requests to 03's one.
 	for (version, requests) in [("moq-lite-03", 1), ("moq-lite-07-wip", 2)] {
 		let version: Version = version.parse().unwrap();
-		let (publisher, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+		let (publisher, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 		spawn(driver);
 		let broadcast = publisher.route("room", origin::RouteOptions::default()).unwrap();
 		let track = broadcast
 			.broadcast()
 			.create_track(TRACK, track::Info::default())
 			.unwrap();
-		let (viewer, driver) = origin::Producer::new(origin::Config::new(Hop::new(2).unwrap()));
+		let (viewer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(2).unwrap()));
 		spawn(driver);
 
 		let mut transport = memory::Config::default();

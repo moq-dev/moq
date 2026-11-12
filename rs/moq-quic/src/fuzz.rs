@@ -1,4 +1,5 @@
-//! Fuzz target bodies, plus the seeds they start from.
+//! Test support, enabled by the `fuzz` feature: fuzz target bodies and their seeds, plus the
+//! plaintext crypto and sent-packet storage the benches run on.
 //!
 //! Each `pub fn` here is one target: it takes raw fuzzer bytes and drives a parser or
 //! a state machine with them. The bodies live in the crate rather than in
@@ -7,8 +8,8 @@
 //! fuzzer found into a regression `just check` runs.
 //!
 //! `packet`, `params`, `streamid`, and `streams` are ported from upstream quinn's
-//! `fuzz/fuzz_targets/`. Compiled only under `cfg(test)` or the `fuzz` feature, so none
-//! of this is part of the published API. See `fuzz/README.md` for the workflow.
+//! `fuzz/fuzz_targets/`. It tracks the crate's internals, so it can change in any release. See `fuzz/README.md`
+//! for the workflow.
 //!
 //! [`Plaintext`] is the crypto the `connection` target and the benchmarks run on, and
 //! [`SentPackets`] is the sent-packet storage its benchmark drives.
@@ -23,9 +24,9 @@ use bytes::{Bytes, BytesMut};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::{
-	ConnectionId, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, Side, StreamId, Streams, VarInt,
+	ConnectionId, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, Side, StreamId, VarInt,
 	coding::BufMutExt,
-	connection::{Retransmits, State, StreamsState},
+	connection::{Retransmits, Streams, StreamsState},
 	frame::{self, Frame},
 	packet::{FixedLengthConnectionIdParser, PartialDecode},
 	transport_parameters::{PreferredAddress, TransportParameters},
@@ -35,6 +36,17 @@ use crate::{
 pub use crate::connection::BenchSentPackets as SentPackets;
 pub use connection::connection;
 pub use plaintext::Plaintext;
+
+/// Whether `conn` is still handshaking, for the benches to wait out.
+pub fn is_handshaking(conn: &crate::connection::Connection) -> bool {
+	conn.is_handshaking()
+}
+
+/// Pins every packet to `mtu`, so black hole detection cannot shrink them.
+pub fn pin_mtu(transport: &mut crate::transport::Config, mtu: u16) {
+	transport.initial_mtu = mtu;
+	transport.min_mtu = mtu;
+}
 
 /// One fuzz target body: it returns whether the input got past the first parse, which
 /// is what [`seeds`] is checked against.
@@ -168,7 +180,6 @@ pub fn streams(data: &[u8]) -> bool {
 
 	let side = if limits.server { Side::Server } else { Side::Client };
 	let dir = if limits.uni { Dir::Uni } else { Dir::Bi };
-	let conn_state = State::Established;
 	let mut pending = Retransmits::default();
 	let mut state = StreamsState::new(
 		side,
@@ -185,14 +196,14 @@ pub fn streams(data: &[u8]) -> bool {
 		};
 		match op {
 			StreamOp::Open => {
-				Streams::new(&mut state, &conn_state).open(dir, Default::default());
+				Streams::new(&mut state, false).open(dir, Default::default());
 			}
 			StreamOp::Accept { uni } => {
 				let dir = if uni { Dir::Uni } else { Dir::Bi };
-				Streams::new(&mut state, &conn_state).accept(dir);
+				Streams::new(&mut state, false).accept(dir);
 			}
 			StreamOp::Finish { id } => {
-				let _ = crate::send::Stream::new(StreamId(id), &mut state, &mut pending, &conn_state).finish();
+				let _ = crate::send::Stream::new(StreamId(id), &mut state, &mut pending, false).finish();
 			}
 			StreamOp::ReceivedStopSending { id, error_code } => {
 				let _ = state.received_stop_sending(StreamId(id), varint(error_code));
@@ -211,8 +222,7 @@ pub fn streams(data: &[u8]) -> bool {
 				});
 			}
 			StreamOp::Reset { id } => {
-				let _ =
-					crate::send::Stream::new(StreamId(id), &mut state, &mut pending, &conn_state).reset(0u32.into());
+				let _ = crate::send::Stream::new(StreamId(id), &mut state, &mut pending, false).reset(0u32.into());
 			}
 		}
 	}

@@ -31,9 +31,9 @@ const BUDGET: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap()));
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn write_group(track: &moq_net::track::Producer, sequence: u64) {
@@ -118,7 +118,7 @@ async fn relay(
 	// Sent later, so group 0's send time lands after group 1's.
 	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 
 	let got = kio::clock::timeout(TIMEOUT * 3, reader)
 		.await
@@ -190,7 +190,7 @@ async fn fetch_only(version: &str) -> Vec<Result<Option<moq_net::Timestamp>, moq
 	broadcast.announce().unwrap();
 	write_group(&track, 0);
 	write_group(&track, 1);
-	track.finish().unwrap();
+	let _track = track.finish().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());

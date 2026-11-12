@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { Elapsed, Manual, Milli, Nano, sleep, timeout } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks } from "../internal.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Timescale } from "../time.ts";
@@ -26,7 +26,7 @@ import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_05, hasRanges, resolvesStart, Version } from "./version.ts";
 
 // The subscription's max delay, which is also how long it waits for a group that never arrives.
-const GRACE = Milli(100);
+const GRACE = Duration.millis(100);
 
 /** One lite-05+ frame: a zero timestamp delta, then the length-prefixed payload. */
 function frame(payload: string): Uint8Array {
@@ -101,20 +101,12 @@ async function readAll(group: GroupConsumer | undefined): Promise<string[]> {
 /** Let every pending microtask run, so a parked read gets a turn without a timer. */
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-/** Whether `promise` settles within `ms`. */
-async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
-	return await timeout(Nano.fromMilli(Milli(ms)), promise).then(
-		() => true,
-		(error: unknown) => {
-			if (error instanceof Elapsed) return false;
-			throw error;
-		},
-	);
-}
-
 describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (version) => {
 	test("the source start waits for SUBSCRIBE_START where it resolves the start", async () => {
 		const { reader, respond } = await subscribed(version, GRACE, { start: { absolute: 2n } });
+		// The accepted copy registers once the SUBSCRIBE write resolves, which can trail the publisher
+		// reading it, so let that run before asking where the source starts.
+		await settle();
 		expect(hooks.sourceStart(reader)).toBe(resolvesStart(version) ? "pending" : undefined);
 		await respond({ start: new SubscribeStart([3n]) });
 		await settle();
@@ -233,7 +225,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	// QUIC does not order streams, so a lower group's stream can land after a higher one and
 	// after SUBSCRIBE_FINISH. The reader receives it before its end, which then comes at once.
 	test("a lower group that lands after SUBSCRIBE_FINISH reaches the reader", async () => {
-		const { subscriber, reader, respond, fin } = await subscribed(version, Milli(60_000));
+		const { subscriber, reader, respond, fin } = await subscribed(version, Duration.millis(60_000));
 		await respond({ start: new SubscribeStart([0n]) });
 		const high = groupStream(subscriber, 1n);
 		high.finish();
@@ -260,10 +252,11 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test("a subscription ends without waiting once every group is accounted for", async () => {
+		using clock = manual();
 		// A max delay far past the test's patience: only the accounting may end it.
-		const { subscriber, reader, respond, fin } = await subscribed(version, Milli(60_000));
+		const { subscriber, reader, respond, fin } = await subscribed(version, Duration.millis(60_000));
 		await respond({ start: new SubscribeStart([0n]) });
-		await respond({ drop: new SubscribeDrop({ start: 0n, end: 0n, error: 0 }) });
+		await respond({ drop: new SubscribeDrop({ start: 0n, end: 1n, error: 0 }) });
 		const group = groupStream(subscriber, 1n);
 		group.write("1.0");
 		group.finish();
@@ -271,21 +264,21 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await fin();
 
 		expect((await reader.recvGroup())?.sequence).toBe(1n);
-		expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
+		expect(await settlesWithin(reader.recvGroup(), clock, Duration.millis(1000))).toBe(true);
 		expect(await reader.closed).toBeNull();
 	});
 
 	// Lite-07 carries a stream error code; earlier versions an application one, so the same
 	// bytes read as OLD there.
 	test("a SUBSCRIBE_DROP ends a group still arriving, before the FIN", async () => {
-		const { subscriber, reader, respond } = await subscribed(version, Milli(60_000));
+		const { subscriber, reader, respond } = await subscribed(version, Duration.millis(60_000));
 		await respond({ start: new SubscribeStart([0n]) });
 		const arriving = groupStream(subscriber, 0n);
 		arriving.write("0.0");
 		const group = await reader.recvGroup();
 		expect(await group?.readString()).toBe("0.0");
 
-		await respond({ drop: new SubscribeDrop({ start: 0n, end: 0n, error: 70 }) });
+		await respond({ drop: new SubscribeDrop({ start: 0n, end: 1n, error: 70 }) });
 		const err = await group?.readString().then(
 			() => undefined,
 			(err: unknown) => err,
@@ -304,17 +297,19 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test("a subscription that served nothing ends at SUBSCRIBE_FINISH", async () => {
-		const { reader, respond, fin } = await subscribed(version, Milli(60_000));
+		using clock = manual();
+		const { reader, respond, fin } = await subscribed(version, Duration.millis(60_000));
 		await respond({ finish: new SubscribeFinish(0n) });
 		await fin();
 
-		expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
+		expect(await settlesWithin(reader.recvGroup(), clock, Duration.millis(1000))).toBe(true);
 		expect(await reader.closed).toBeNull();
 		expect(hooks.subscriberEnd(reader)).toEqual({ group: 0n, frame: 0 });
 	});
 
 	// lite-05 specified an inclusive end, so there the group costs only its own stream.
 	test(`a group at or past SUBSCRIBE_FINISH ${version === Version.DRAFT_05 ? "is dropped" : "aborts the track"}`, async () => {
+		using clock = manual();
 		const { subscriber, reader, respond } = await subscribed(version);
 		await respond({ start: new SubscribeStart([0n]) });
 		await respond({ finish: new SubscribeFinish(2n) });
@@ -323,7 +318,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const handled = groupStream(subscriber, 2n).handled;
 		if (version === Version.DRAFT_05) {
 			await handled;
-			expect(await settlesWithin(Promise.resolve(reader.closed), 50)).toBe(false);
+			expect(await settlesWithin(Promise.resolve(reader.closed), clock, Duration.millis(50))).toBe(false);
 		} else {
 			// The violation escapes to the connection, which closes the session on it.
 			expect(
@@ -337,7 +332,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test("a floor below SUBSCRIBE_START owes nothing below it", async () => {
-		const { subscriber, reader, respond, fin } = await subscribed(version, Milli(60_000), {
+		using clock = manual();
+		const { subscriber, reader, respond, fin } = await subscribed(version, Duration.millis(60_000), {
 			start: { absolute: 1n },
 		});
 		await respond({ start: new SubscribeStart([3n]) });
@@ -348,12 +344,13 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await fin();
 
 		expect((await reader.recvGroup())?.sequence).toBe(3n);
-		expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
+		expect(await settlesWithin(reader.recvGroup(), clock, Duration.millis(1000))).toBe(true);
 		expect(await reader.closed).toBeNull();
 	});
 
 	test("a lowered floor owes the groups it newly asked for", async () => {
-		const maxDelay = Milli(60_000);
+		using clock = manual();
+		const maxDelay = Duration.millis(60_000);
 		const { subscriber, respond, update, fin } = await subscribed(version, maxDelay, {
 			start: { absolute: 3n },
 		});
@@ -377,7 +374,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await respond({ finish: new SubscribeFinish(4n) });
 		await fin();
 		// Long enough for a subscription that owed nothing more to have ended.
-		await sleep(Nano.fromMilli(Milli(50)));
+		await clock.advance(Duration.millis(50));
 
 		// QUIC does not order streams, so the lowered groups land after the FIN.
 		for (const sequence of [1n, 2n]) {
@@ -401,6 +398,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so there an end
 	// below a received group only costs the early boundary.
 	test(`a SUBSCRIBE_FINISH below a group already received ${version === Version.DRAFT_05 ? "finishes clean" : "aborts the track"}`, async () => {
+		using clock = manual();
 		const { subscriber, reader, respond, fin } = await subscribed(version);
 		await respond({ start: new SubscribeStart([0n]) });
 		const group = groupStream(subscriber, 3n);
@@ -410,7 +408,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 		if (version === Version.DRAFT_05) {
 			await fin();
-			expect(await reader.closed).toBeNull();
+			// Groups 0 and 1 never arrive, so the subscription ends once their grace runs out.
+			expect(await clock.drive(Promise.resolve(reader.closed))).toBeNull();
 		} else {
 			expect(await reader.closed).toBeInstanceOf(ProtocolViolation);
 		}
@@ -418,7 +417,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 });
 
 test("lite-07 settles a skipped group with SUBSCRIBE_DROP", async () => {
-	const { subscriber, reader, respond, fin } = await subscribed(Version.DRAFT_07, Milli(60_000));
+	using clock = manual();
+	const { subscriber, reader, respond, fin } = await subscribed(Version.DRAFT_07, Duration.millis(60_000));
 	await respond({ start: new SubscribeStart([0n]) });
 	for (const sequence of [0n, 2n]) {
 		const group = groupStream(subscriber, sequence);
@@ -427,23 +427,24 @@ test("lite-07 settles a skipped group with SUBSCRIBE_DROP", async () => {
 		await group.handled;
 	}
 	await respond({ finish: new SubscribeFinish(3n) });
-	await respond({ drop: new SubscribeDrop({ start: 1n, end: 1n, error: 0 }) });
+	await respond({ drop: new SubscribeDrop({ start: 1n, end: 2n, error: 0 }) });
 	await fin();
 
 	expect((await reader.recvGroup())?.sequence).toBe(0n);
 	expect((await reader.recvGroup())?.sequence).toBe(2n);
-	expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
+	expect(await settlesWithin(reader.recvGroup(), clock, Duration.millis(1000))).toBe(true);
 	expect(await reader.closed).toBeNull();
 });
 
 test("lite-07 settles a dropped range without grace", async () => {
-	const { reader, respond, fin } = await subscribed(Version.DRAFT_07, Milli(60_000));
+	using clock = manual();
+	const { reader, respond, fin } = await subscribed(Version.DRAFT_07, Duration.millis(60_000));
 	await respond({ start: new SubscribeStart([0n]) });
 	await respond({ finish: new SubscribeFinish(3n) });
-	await respond({ drop: new SubscribeDrop({ start: 0n, end: 2n, error: 0 }) });
+	await respond({ drop: new SubscribeDrop({ start: 0n, end: 3n, error: 0 }) });
 	await fin();
 
-	expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
+	expect(await settlesWithin(reader.recvGroup(), clock, Duration.millis(1000))).toBe(true);
 	expect(await reader.closed).toBeNull();
 	expect(hooks.subscriberEnd(reader)).toEqual({ group: 3n, frame: 0 });
 });
@@ -468,7 +469,10 @@ test("a subscribe stream reset preserves the publisher's failure", async () => {
 });
 
 test("lite-07 FIN waits for the skipped and reset final range to settle", async () => {
-	const { subscriber, reader, respond, fin, subscriberFin } = await subscribed(Version.DRAFT_07, Milli(60_000));
+	const { subscriber, reader, respond, fin, subscriberFin } = await subscribed(
+		Version.DRAFT_07,
+		Duration.millis(60_000),
+	);
 	await respond({ start: new SubscribeStart([0n]) });
 	const first = groupStream(subscriber, 0n);
 	first.finish();
@@ -476,7 +480,7 @@ test("lite-07 FIN waits for the skipped and reset final range to settle", async 
 	const last = groupStream(subscriber, 2n);
 	last.write("tail");
 	await respond({ finish: new SubscribeFinish(3n) });
-	await respond({ drop: new SubscribeDrop({ start: 1n, end: 1n, error: 0 }) });
+	await respond({ drop: new SubscribeDrop({ start: 1n, end: 2n, error: 0 }) });
 	await fin();
 	let finished = false;
 	const ack = subscriberFin().then(() => {

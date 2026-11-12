@@ -57,7 +57,8 @@ func TestTracks(t *testing.T) {
 	broadcast, consumer := newBroadcast(t)
 
 	scale := uint64(1_000_000)
-	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compress: true})
+	deflate := moq.CompressionDeflate
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compression: &deflate})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,8 @@ func TestWindow(t *testing.T) {
 	broadcast, consumer := newBroadcast(t)
 
 	scale := uint64(1_000_000)
-	track, err := broadcast.PublishTrack("log", &moq.TrackInfo{Timescale: &scale, Compress: true})
+	deflate := moq.CompressionDeflate
+	track, err := broadcast.PublishTrack("log", &moq.TrackInfo{Timescale: &scale, Compression: &deflate})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,11 +165,11 @@ func TestWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []moqjson.TimedWindowEvent{
-		{Event: moqjson.WindowPush{Index: 0, Value: json.RawMessage(`{"n":0}`)}, Timestamp: ms(0)},
-		{Event: moqjson.WindowPush{Index: 1, Value: json.RawMessage(`{"n":1}`)}, Timestamp: ms(1)},
-		{Event: moqjson.WindowPush{Index: 2, Value: json.RawMessage(`{"n":2}`)}, Timestamp: ms(2)},
-		{Event: moqjson.WindowPop{Start: 0, End: 2}, Timestamp: ms(3)},
+	want := []moqjson.WindowTimed{
+		{Event: moqjson.WindowEventPush{Index: 0, Value: json.RawMessage(`{"n":0}`)}, Timestamp: ms(0)},
+		{Event: moqjson.WindowEventPush{Index: 1, Value: json.RawMessage(`{"n":1}`)}, Timestamp: ms(1)},
+		{Event: moqjson.WindowEventPush{Index: 2, Value: json.RawMessage(`{"n":2}`)}, Timestamp: ms(2)},
+		{Event: moqjson.WindowEventPop{Start: 0, End: 2}, Timestamp: ms(3)},
 	}
 	for _, expected := range want {
 		event, err := windowConsumer.Next(ctx)
@@ -189,15 +191,15 @@ func TestWindow(t *testing.T) {
 	if err := window.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	var got []moqjson.TimedWindowEvent
+	var got []moqjson.WindowTimed
 	for event, err := range windowConsumer.All(ctx) {
 		if err != nil {
 			t.Fatal(err)
 		}
 		got = append(got, *event)
 	}
-	tail := []moqjson.TimedWindowEvent{
-		{Event: moqjson.WindowPush{Index: 3, Value: json.RawMessage(`{"n":3}`)}, Timestamp: ms(4)},
+	tail := []moqjson.WindowTimed{
+		{Event: moqjson.WindowEventPush{Index: 3, Value: json.RawMessage(`{"n":3}`)}, Timestamp: ms(4)},
 	}
 	if !reflect.DeepEqual(got, tail) {
 		t.Fatalf("events after the cut = %+v, want %+v", got, tail)

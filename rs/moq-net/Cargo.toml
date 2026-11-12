@@ -25,8 +25,8 @@ async = ["dep:futures", "kio/async", "kio/runtime"]
 # Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, and canonical storage benches,
 # session views of an origin to the viewers bench, the lite publisher's run loop to the
 # publisher bench, and a lite-07 publisher's frame bounds to the ranges bench, through the
-# hidden `fuzz` module. Off by default and hidden from the docs.
-fuzz = ["async"]
+# `fuzz` module. Its session targets run on kio's simulated clock. Off by default.
+fuzz = ["async", "kio/sim"]
 
 [dependencies]
 arrayvec = "0.7"
@@ -77,37 +77,43 @@ name = "fuzz-seeds"
 path = "examples/fuzz-seeds.rs"
 required-features = ["fuzz"]
 
-# Lands peer claims through the hidden `fuzz` module, as a session does.
+# Lands peer claims through the `fuzz` module, as a session does.
 [[bench]]
 name = "origin"
 harness = false
 required-features = ["fuzz"]
 
-# Reaches the crate-private session view of an origin through the hidden `fuzz` module.
+# Reaches the crate-private session view of an origin through the `fuzz` module.
 [[bench]]
 name = "viewers"
 harness = false
 required-features = ["fuzz"]
 
-# Reaches the private announce codec through the hidden `fuzz` module.
+# Reaches the private announce codec through the `fuzz` module.
 [[bench]]
 name = "announce"
 harness = false
 required-features = ["fuzz"]
 
-# Reaches the crate-private session snapshot through the hidden `fuzz` module.
+# Reaches the crate-private session snapshot through the `fuzz` module.
 [[bench]]
 name = "synced"
 harness = false
 required-features = ["fuzz"]
 
-# Reaches the crate-private session interests through the hidden `fuzz` module.
+# Reaches the crate-private session interests through the `fuzz` module.
 [[bench]]
 name = "interests"
 harness = false
 required-features = ["fuzz"]
 
-# Reaches the private message codecs through the hidden `fuzz` module.
+# Reaches the crate-private route layer through the `fuzz` module.
+[[bench]]
+name = "routes"
+harness = false
+required-features = ["fuzz"]
+
+# Reaches the private message codecs through the `fuzz` module.
 [[bench]]
 name = "codec"
 harness = false
@@ -119,25 +125,25 @@ name = "parameters"
 harness = false
 required-features = ["fuzz"]
 
-# Reaches the private lite codec through the hidden `fuzz` module.
+# Reaches the private lite codec through the `fuzz` module.
 [[bench]]
 name = "varint"
 harness = false
 required-features = ["fuzz"]
 
-# Reaches the private frame ingest through the hidden `fuzz` module.
+# Reaches the private frame ingest through the `fuzz` module.
 [[bench]]
 name = "frame"
 harness = false
 required-features = ["fuzz"]
 
-# Reaches a lite-07 publisher's frame bounds through the hidden `fuzz` module.
+# Reaches a lite-07 publisher's frame bounds through the `fuzz` module.
 [[bench]]
 name = "ranges"
 harness = false
 required-features = ["fuzz"]
 
-# Receives frames through the private session reader via the hidden `fuzz` module.
+# Receives frames through the private session reader via the `fuzz` module.
 [[bench]]
 name = "backing"
 harness = false
@@ -166,7 +172,7 @@ name = "tail"
 harness = false
 required-features = ["fuzz"]
 
-# Drives the lite publisher's run loop through the hidden `fuzz` module.
+# Drives the lite publisher's run loop through the `fuzz` module.
 [[bench]]
 name = "publisher"
 harness = false
@@ -202,13 +208,13 @@ required-features = ["async"]
 name = "refresh"
 harness = false
 
-# Follows the session's probe target through the hidden `fuzz` module.
+# Follows the session's probe target through the `fuzz` module.
 [[bench]]
 name = "bandwidth"
 harness = false
 required-features = ["fuzz"]
 
-# Uses the hidden fuzz module to observe source selection without public API.
+# Uses the `fuzz` module to observe source selection without public API.
 [[bench]]
 name = "retirement"
 harness = false

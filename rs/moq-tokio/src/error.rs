@@ -105,8 +105,8 @@ pub enum Error {
 	#[error("quic.keylog needs a nonempty path; boolean keylog settings require SSLKEYLOGFILE")]
 	KeylogUnset,
 
-	/// A zero `connect.backoff.healthy`, which would count every session as healthy.
-	#[error("connect.backoff.healthy must be non-zero")]
+	/// A zero `Backoff::healthy`, which would count every session as healthy.
+	#[error("the healthy backoff bar must be non-zero")]
 	BackoffHealthy,
 
 	/// The config was parsed from released spellings that no longer work. The
@@ -145,6 +145,11 @@ pub enum Error {
 	/// retry instead of a wait that never ends.
 	#[error("connect timed out after {0:?}")]
 	ConnectTimeout(std::time::Duration),
+
+	/// A client certificate is configured, but the URL's scheme can't present it to a
+	/// server authenticated by a trusted root. The payload is the scheme.
+	#[error("{0}:// can't present the client certificate; dial https://, wss://, moqt://, moql://, or tls:// instead")]
+	ClientCertScheme(String),
 
 	/// The server rejected the connection with an auth status. See [`crate::ConnectError`].
 	#[cfg(feature = "net")]
@@ -255,14 +260,14 @@ pub enum Error {
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
 
-	/// The WebRTC data channel transport failed.
-	#[cfg(feature = "webrtc")]
-	#[error(transparent)]
-	WebRtc(Arc<crate::webrtc::Error>),
+	/// [`crate::watch::Files`] could not watch a file's directory. The string has the details.
+	#[cfg(feature = "watch")]
+	#[error("failed to watch files: {0}")]
+	Watch(String),
 
 	/// A qmux session refused the limits [`crate::server::Request::with_quic_limits`] set,
 	/// such as a rate cap, which qmux cannot pace.
-	#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+	#[cfg(feature = "qmux")]
 	#[error("qmux refused the session limits: {0}")]
 	QmuxLimits(String),
 }
@@ -288,6 +293,7 @@ impl Error {
 			| Self::KeylogUnset
 			| Self::BackoffHealthy
 			| Self::QlogUnsupported
+			| Self::ClientCertScheme(_)
 			| Self::Connect(_) => true,
 			#[cfg(feature = "quic")]
 			Self::Quic(err) => err.is_terminal(),
@@ -430,13 +436,6 @@ impl From<crate::tcp::Error> for Error {
 impl From<crate::unix::Error> for Error {
 	fn from(err: crate::unix::Error) -> Self {
 		Self::Unix(Arc::new(err))
-	}
-}
-
-#[cfg(feature = "webrtc")]
-impl From<crate::webrtc::Error> for Error {
-	fn from(err: crate::webrtc::Error) -> Self {
-		Self::WebRtc(Arc::new(err))
 	}
 }
 

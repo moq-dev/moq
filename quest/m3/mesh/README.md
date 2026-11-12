@@ -48,14 +48,26 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
 - An endpoint ID is a persistent Ed25519 device key, iroh-style. It is not
   the [routing identity](/quest/m2/cluster-routing/routes/README.md), which each
   process declares fresh.
-- Addressing is announcement: each node publishes under `mesh/<id>/...`, and
-  reaching an ID is subscribing there. There is no separate directory.
+- Addressing is announcement: each node publishes its address and status
+  tracks under `mesh/node/<id>/...`, and reaching an ID is subscribing
+  there. There is no separate directory. Services are not under a member
+  subtree: each is one socket endpoint at `mesh/service/<service>` (decided
+  2026-11-07, see [Endpoint API](/quest/m3/mesh/endpoint.md)).
+- Certificates can stand in for the token (decided 2026-11-07, maintainer,
+  Kixel's planning): a downstream mesh that must admit and evict devices
+  with no internet issues long-lived certificates from its own signers, and
+  [certificate credentials](/quest/m3/mesh/cert-credentials.md) checks them
+  against a trust store it supplies. The coordinator's token stays the
+  default for `moq auth`.
 - The token is the binding: enrollment proves the device key, then the
-  coordinator issues a grant to publish `mesh/<id>/**` and subscribe
-  `mesh/**`, plus publish on its own [socket](/quest/m1/socket/README.md)
-  endpoint, `.socket/<id>`, so it can dial and accept under its own id
-  (amended 2026-11-01, 2026-11-03 when sockets became endpoints, and
-  2026-11-04 when the segment became `.socket`). Relays need no new check. Membership is the coordinator's
+  coordinator issues a grant to publish `mesh/node/<id>/**` and subscribe
+  `mesh/**`, plus publish on its own [socket](/doc/concept/socket.md)
+  endpoints, `mesh/service/*/.server/<id>` and `mesh/service/*/.client/<id>`,
+  so it can accept and dial under its own id (amended 2026-11-01,
+  2026-11-03 when sockets became endpoints, 2026-11-06 when endpoints split
+  into server and client roles, and 2026-11-07 when member and service
+  paths were scoped apart; the [Endpoint API](/quest/m3/mesh/endpoint.md)
+  changes the shipped `mesh/<id>/**` grant). Relays need no new check. Membership is the coordinator's
   token only; a Tailnet-Lock analog was declined.
 - Protection is per broadcast, with levels that nest: identity (the token
   only), authentication (per-frame Ed25519 signatures, the default), and
@@ -93,17 +105,10 @@ the third, and survives a relay restart.
 
 - [Outbound federation](/quest/m2/cluster-routing/federation.md) - a local relay dials its relays and prefers LAN peers
 - [Byte streams](/quest/m3/stream/README.md) - lossless TCP-level streams over MoQ
-- [Endpoint API](/quest/m3/mesh/endpoint.md) - an iroh-shaped `Endpoint` that connects to an endpoint ID and service and accepts byte streams
-- [Mesh relay node](/quest/m3/mesh/node.md) - a relay node enrolls into a mesh, dials its relays, and admits only enrolled LAN peers
-- [Address hints](/quest/m3/mesh/addr.md) - nodes publish their addresses on mesh tracks and dial each other directly where mDNS cannot find them
-- [Sparse overlay](/quest/m3/mesh/overlay.md) - each node keeps about log N deterministic direct links, forwards for the rest, and falls back to relays across a partition
-- [JS mesh enrollment client](/quest/m3/mesh/js-enroll.md) - `@moq/auth` enrolls and refreshes from JS like `moq_auth::mesh::Client`
-- [Status track](/quest/m3/mesh/status.md) - a signed `.status` track per node with its links and per-link RTTs
-- [Mesh library guide](/quest/m3/mesh/guide.md) - the doc.moq.dev page for the libraries, the contract, and porting from iroh
 
 ## Related
 
 - [P2P](/quest/m4/p2p/README.md) - internet peer sessions, which the m3 mesh does not use
 - [Mesh over ICE](/quest/m5/mesh-ice.md) - deferred direct paths between mesh nodes on different networks
 - [End-to-end encryption](/quest/m5/e2ee/README.md) - the AEAD the encryption level will reuse
-- [Teleoperation](/quest/m5/teleop-robot.md) - robot track shapes that could ride the mesh
+- [Teleoperation](/quest/m5/teleop-robot.md) - robot track conventions that could ride the mesh

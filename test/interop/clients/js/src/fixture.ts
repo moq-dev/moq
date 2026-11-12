@@ -17,7 +17,7 @@
  * @module
  */
 
-import { Milli, Nano, now } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
 import * as Moq from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
@@ -36,7 +36,7 @@ import * as Pattern from "./pattern";
 const MAX_BITRATE = 1_000_000;
 
 /** Short GOP so a late subscriber tunes in quickly and a rejoin is not dominated by keyframe wait. */
-const KEYFRAME_INTERVAL = Milli(KEYFRAME_INTERVAL_MS);
+const KEYFRAME_INTERVAL = Duration.millis(KEYFRAME_INTERVAL_MS);
 
 /** How far ahead the tone table is scheduled on the audio clock. */
 const SCHEDULE_AHEAD = 2; // seconds
@@ -123,7 +123,7 @@ export class Fixture {
 			const resolve = waiting;
 			if (!resolve || !deliver) return;
 			waiting = undefined;
-			deliver(new VideoFrame(canvas, { timestamp: Math.round(Nano.toMicro(Nano(now()))) }));
+			deliver(new VideoFrame(canvas, { timestamp: Math.round(now().since(Instant.ZERO).asMicros()) }));
 			resolve();
 		};
 
@@ -161,7 +161,7 @@ export class Fixture {
 			config: {
 				codec: "avc1",
 				frameRate: Pattern.FPS,
-				keyframeInterval: KEYFRAME_INTERVAL,
+				join: KEYFRAME_INTERVAL,
 				maxBitrate: MAX_BITRATE,
 			},
 		});
@@ -278,7 +278,7 @@ export class Fixture {
 		};
 
 		schedule();
-		this.#signals.interval(schedule, Nano.fromMilli(Milli((SCHEDULE_AHEAD * 1000) / 4)));
+		this.#signals.interval(schedule, Duration.millis((SCHEDULE_AHEAD * 1000) / 4));
 	}
 
 	// Paint and hand the capture a frame per pattern tick. Encoding can finish later. The counter

@@ -1,10 +1,11 @@
 /** Sweep observers against routes for one route update, and against tracks for one listing change. */
 
+import { Wall } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../src/auth.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
-import { HopSchema, RouteInfo } from "../src/hop.ts";
+import { HopSchema, WireRoute } from "../src/hop.ts";
 import * as Instance from "../src/instance.ts";
 import { AnnounceRequest } from "../src/lite/announce.ts";
 import { Publisher } from "../src/lite/publisher.ts";
@@ -38,7 +39,7 @@ for (const scope of [
 		for (const observerCount of observerCounts) {
 			const origin = new Producer();
 			const handles = Array.from({ length: routeCount }, (_, index) =>
-				origin.routePrefix(Path.from(`room/${index}${scope === "full-name" ? ".chat" : ""}`)),
+				origin.claim(Path.from(`room/${index}${scope === "full-name" ? ".chat" : ""}`)),
 			);
 			const touched = Path.from(
 				scope === "rooted-producers" ? "0" : scope === "full-name" ? "room/0.chat" : "room/0",
@@ -134,7 +135,7 @@ for (const pinned of [false, true]) {
 			const reader = origin.consume();
 			const options = pinned ? { instance } : {};
 			const publishers = Array.from({ length: routeCount }, (_, index) =>
-				origin.route(Path.from(`room/${index}`), { instance }),
+				origin.route(Path.from(`room/${index}`), { instance: { id: instance, epoch: 0n } }),
 			);
 			const background = publishers.map((_, index) => reader.request(Path.from(`room/${index}`), options));
 			const requests = Array.from({ length: readerCount }, () => reader.request(Path.from("room/0"), options));
@@ -215,7 +216,7 @@ for (const patternCount of [8, 32, 128]) {
 		);
 		const start = performance.now();
 		for (let i = 0; i < 1024; i++) {
-			grant.set({ publish: new Path.Patterns(), subscribe, expires: i });
+			grant.set({ publish: new Path.Patterns(), subscribe, expires: Wall.unixMillis(i) });
 			await Promise.resolve();
 		}
 		console.log(`fetch,${patternCount},${fetchCount},${(((performance.now() - start) * 1000) / 1024).toFixed(2)}`);
@@ -233,7 +234,7 @@ const nextInstance = Instance.parse("01900000-0000-7000-8000-000000000002");
 for (const pathCount of routeCounts) {
 	for (const readerCount of observerCounts) {
 		const origin = new Producer();
-		const dynamic = origin.routePrefix(Path.from("room"), { instance });
+		const dynamic = origin.claim(Path.from("room"), { instance: { id: instance, epoch: 0n } });
 		const pending = dynamic.requested();
 		const requests = Array.from({ length: pathCount }, (_, index) =>
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),
@@ -268,7 +269,7 @@ for (const routeCount of routeCounts) {
 	for (const consumerCount of [8, 32, 128]) {
 		const cache = new BroadcastCache();
 		const owners = Array.from({ length: routeCount }, () => ({}));
-		for (let i = 0; i < routeCount; i++) cache.announce(Path.from(`pool/${i}`), owners[i], RouteInfo.default);
+		for (let i = 0; i < routeCount; i++) cache.announce(Path.from(`pool/${i}`), owners[i], WireRoute.default);
 		const sources = Array.from({ length: consumerCount }, () => new BroadcastProducer());
 		const held = sources.map((source, i) => {
 			const path = Path.from(`pool/${i % routeCount}/job/${i}`);
@@ -277,7 +278,7 @@ for (const routeCount of routeCounts) {
 		const touched = Path.from("pool/0/job/0");
 		const start = performance.now();
 		for (let i = 0; i < 4096; i++) {
-			cache.announce(Path.from("pool/0"), owners[0], { ...RouteInfo.default, cost: BigInt(i) });
+			cache.announce(Path.from("pool/0"), owners[0], { ...WireRoute.default, cost: BigInt(i) });
 			const shared = cache.get(touched, cache.instance(touched));
 			if (!shared || shared.closed !== held[0].closed) throw new Error("update replaced the source");
 			shared.close();
@@ -294,7 +295,7 @@ for (const routeCount of routeCounts) {
 	for (const consumerCount of [1, 8, 32]) {
 		const cache = new BroadcastCache();
 		const owners = Array.from({ length: routeCount }, () => ({}));
-		for (let i = 0; i < routeCount; i++) cache.announce(Path.from(`pool/${i}`), owners[i], RouteInfo.default);
+		for (let i = 0; i < routeCount; i++) cache.announce(Path.from(`pool/${i}`), owners[i], WireRoute.default);
 		const sources = Array.from({ length: consumerCount }, () => new BroadcastProducer());
 		const paths = sources.map((_, i) => Path.from(`pool/0/job/${i}`));
 		const held = sources.map((source, i) => cache.insert(paths[i], cache.instance(paths[i]), source.consume()));
@@ -304,7 +305,7 @@ for (const routeCount of routeCounts) {
 		let duplicates = 0;
 		const start = performance.now();
 		for (let round = 0; round < 256; round++) {
-			if (round % 2 === 0) cache.announce(prefix, specific, { ...RouteInfo.default, instance });
+			if (round % 2 === 0) cache.announce(prefix, specific, { ...WireRoute.default, instance });
 			else cache.withdraw(prefix, specific);
 			for (let i = 0; i < consumerCount; i++) {
 				const instance = cache.instance(paths[i]);
@@ -329,7 +330,7 @@ console.log("blind,announcements,consumers,invalidate_us,stale");
 for (const routeCount of routeCounts) {
 	for (const consumerCount of [1, 8, 32]) {
 		const cache = new BroadcastCache();
-		for (let i = 0; i < routeCount; i++) cache.announce(Path.from(`other/${i}`), {}, RouteInfo.default);
+		for (let i = 0; i < routeCount; i++) cache.announce(Path.from(`other/${i}`), {}, WireRoute.default);
 		const source = new BroadcastProducer();
 		const keeper = source.consume();
 		const paths = Array.from({ length: consumerCount }, (_, i) => Path.from(`pool/job/${i}`));
@@ -340,7 +341,7 @@ for (const routeCount of routeCounts) {
 		for (let round = 0; round < 256; round++) {
 			const held = paths.map((path) => cache.insert(path, cache.instance(path), source.consume()));
 			const start = performance.now();
-			cache.announce(prefix, owner, RouteInfo.default);
+			cache.announce(prefix, owner, WireRoute.default);
 			cache.withdraw(prefix, owner);
 			elapsed += performance.now() - start;
 			for (const path of paths) {
@@ -371,7 +372,7 @@ for (const routeCount of routeCounts) {
 			const held = [];
 			for (let route = 0; route < routeCount; route++) {
 				const prefix = Path.from(`route/${route}`);
-				cache.announce(prefix, owners[route], RouteInfo.default);
+				cache.announce(prefix, owners[route], WireRoute.default);
 				for (let consumer = 0; consumer < (route === 0 ? consumerCount : 1); consumer++) {
 					const path = Path.from(`${prefix}/job/${consumer}`);
 					const instance = cache.instance(path);

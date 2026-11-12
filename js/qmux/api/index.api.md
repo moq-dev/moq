@@ -1,12 +1,19 @@
 # `@moq/qmux`
 
 ```ts
+import { Duration } from "@moq/clock";
+
 export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBufferSize"> {
 	protocol?: string;
 }
 
+export interface BidirectionalStream extends WebTransportBidirectionalStream {
+	readonly writable: SendStream;
+}
+
 export interface Config {
-	idleTimeout?: number | null;
+	handshakeTimeout?: Duration | null;
+	idleTimeout?: Duration | null;
 	maxDatagramFrameSize?: bigint | null;
 	maxRecordSize?: bigint;
 	maxStreamsBidi?: bigint;
@@ -15,14 +22,43 @@ export interface Config {
 	streamReceiveWindow?: bigint;
 }
 
-export interface InstallOptions {
-	requireProtocol?: boolean;
-	versions?: Record<string, Version | Version[] | null>;
+export interface SendStream extends WritableStream<Uint8Array> {
+	getStats(): Promise<SendStreamStats>;
+	sendOrder: number;
 }
 
 export type SendStreamOptions = WebTransportSendStreamOptions & {
 	waitUntilAvailable?: boolean;
 };
+
+export interface SendStreamStats {
+	bytesAcknowledged: number;
+	bytesSent: number;
+	bytesWritten: number;
+}
+
+export class Session implements WebTransport {
+	constructor(source: string | URL | WebSocketLike | WebSocketStreamLike, options?: SessionOptions);
+	static accept(socket: WebSocketLike | WebSocketStreamLike, options?: AcceptOptions): Session;
+	close(info?: {
+		closeCode?: number;
+		reason?: string;
+	}): void;
+	readonly closed: Promise<WebTransportCloseInfo>;
+	get congestionControl(): WebTransportCongestionControl;
+	createBidirectionalStream(options?: SendStreamOptions): Promise<BidirectionalStream>;
+	createUnidirectionalStream(options?: SendStreamOptions): Promise<SendStream>;
+	get datagrams(): WebTransportDatagramDuplexStream;
+	getStats(): Promise<{
+		datagrams: {};
+	}>;
+	readonly incomingBidirectionalStreams: ReadableStream<BidirectionalStream>;
+	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
+	get protocol(): string;
+	readonly ready: Promise<void>;
+	get reliability(): "reliable-only";
+	setSendBufferSize(bytes: number): void;
+}
 
 export class SessionError extends Error implements Pick<WebTransportError, "source" | "streamErrorCode"> {
 	constructor(message: string, options?: {
@@ -38,11 +74,6 @@ export interface SessionOptions extends WebTransportOptions {
 	requireProtocol?: boolean;
 	sendBufferSize?: number;
 	versions?: Record<string, Version | Version[] | null>;
-}
-
-export interface StreamCredit {
-	available: bigint;
-	blocked: boolean;
 }
 
 export class StreamError extends Error implements Pick<WebTransportError, "source" | "streamErrorCode"> {
@@ -99,32 +130,6 @@ export interface WebSocketStreamOpenEvent {
 	readable: ReadableStream<WebSocketStreamData>;
 	writable: WritableStream<WebSocketStreamData>;
 }
-
-export default class implements WebTransport {
-	constructor(source: string | URL | WebSocketLike | WebSocketStreamLike, options?: SessionOptions);
-	static accept(socket: WebSocketLike | WebSocketStreamLike, options?: AcceptOptions): import("@moq/qmux").default;
-	close(info?: {
-		closeCode?: number;
-		reason?: string;
-	}): void;
-	readonly closed: Promise<WebTransportCloseInfo>;
-	get congestionControl(): WebTransportCongestionControl;
-	createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream>;
-	createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>>;
-	get datagrams(): WebTransportDatagramDuplexStream;
-	getStats(): Promise<{
-		datagrams: {};
-	}>;
-	readonly incomingBidirectionalStreams: ReadableStream<WebTransportBidirectionalStream>;
-	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
-	get protocol(): string;
-	readonly ready: Promise<void>;
-	get reliability(): "reliable-only";
-	setSendBufferSize(bytes: number): void;
-	streamCredit(dir: "uni" | "bi"): StreamCredit;
-}
-
-export function install(options?: InstallOptions): boolean;
 
 export function selectSubprotocol(offered: string | readonly string[] | null | undefined, options?: Pick<SessionOptions, "protocols" | "versions" | "requireProtocol">): string | undefined;
 ```

@@ -84,7 +84,7 @@ pub(crate) struct Forward {
 
 /// A congestion controller of the application's own, built fresh for each connection.
 ///
-/// Implement [`crate::congestion::Factory`] and install it with [`Config::controller`].
+/// Implement [`moq_congestion::Factory`] and install it with [`Config::controller`].
 #[cfg(feature = "driver")]
 #[derive(Clone)]
 pub struct Controller(pub std::sync::Arc<dyn moq_congestion::Factory + Send + Sync>);
@@ -253,7 +253,7 @@ pub struct Config {
 	/// [`congestion_control`](Self::congestion_control)'s families.
 	///
 	/// Code-only, since a controller has no text form: no flag or setting reaches it.
-	/// The QUIC backend runs it, and the io_uring runtime refuses it.
+	/// Both the QUIC backend and the relay's io_uring runtime run it.
 	#[cfg(feature = "driver")]
 	#[serde(skip)]
 	#[usage(skip)]
@@ -598,7 +598,7 @@ impl Config {
 		let resolved = self.resolve();
 		let mut transport = moq_quic::transport::Config::default();
 		transport.limits = resolved.limits();
-		transport.idle_timeout = Some(resolved.idle_timeout);
+		transport.idle_timeout = resolved.idle_timeout;
 		match transport.validate() {
 			Ok(()) => {}
 			Err(ConfigError::Limits(LimitsError::MaxStreams)) => return Err(crate::Error::StreamsRange),
@@ -627,9 +627,14 @@ impl Config {
 	/// first when the config came from a parser: a released spelling would show up
 	/// here as the default rather than the value that was written.
 	pub fn resolve(&self) -> Resolved {
-		let idle_timeout = self.idle_timeout.map(Into::into).unwrap_or(DEFAULT_IDLE_TIMEOUT);
-		// Unset stays unset: the backend derives it from the negotiated idle timeout.
-		let keep_alive = self.keep_alive.map(Into::into);
+		// A configured zero turns the idle timeout off.
+		let idle_timeout = Some(self.idle_timeout.map(Into::into).unwrap_or(DEFAULT_IDLE_TIMEOUT))
+			.filter(|timeout: &Duration| !timeout.is_zero());
+		// Unset or zero stays unset: the backend derives it from the negotiated idle timeout.
+		let keep_alive = self
+			.keep_alive
+			.map(Into::into)
+			.filter(|interval: &Duration| !interval.is_zero());
 
 		Resolved {
 			max_streams: self.max_streams.unwrap_or(DEFAULT_MAX_STREAMS),
@@ -672,9 +677,9 @@ pub struct Resolved {
 	pub max_streams: u64,
 	/// GSO override, or `None` to leave the backend default (on).
 	pub gso: Option<bool>,
-	/// Idle timeout.
-	pub idle_timeout: Duration,
-	/// Keep-alive interval, `None` or zero to derive it from the negotiated idle timeout.
+	/// Idle timeout, or `None` to keep a silent peer forever.
+	pub idle_timeout: Option<Duration>,
+	/// Keep-alive interval, or `None` to derive it from the negotiated idle timeout.
 	///
 	/// Unset by default, since the interval depends on the peer's idle timeout.
 	pub keep_alive: Option<Duration>,
@@ -721,34 +726,16 @@ impl Resolved {
 		self.qlog.as_deref()
 	}
 
-	/// Whether an application's own congestion controller is installed.
-	///
-	/// Compiled in every feature set, unlike the `controller` field, so a runtime
-	/// that cannot run one, such as the relay's io_uring workers, can refuse it
-	/// whichever features unify onto this crate.
-	#[cfg(feature = "driver")]
-	pub fn has_controller(&self) -> bool {
-		self.controller.is_some()
-	}
-
-	/// Whether an application's own congestion controller is installed: never,
-	/// since a build without the `driver` feature has no way to install one.
-	#[cfg(not(feature = "driver"))]
-	pub fn has_controller(&self) -> bool {
-		false
-	}
-
 	/// The keep-alive interval against a peer whose idle timeout is no shorter than
 	/// ours, using moq-quic's 30s default (a 9s interval) when neither peer sets one.
 	#[cfg(feature = "_transport")]
 	pub fn keep_alive_interval(&self) -> Duration {
-		let idle_timeout = (!self.idle_timeout.is_zero()).then_some(self.idle_timeout);
-		moq_quic::transport::keep_alive_interval(self.keep_alive, idle_timeout)
+		moq_quic::transport::keep_alive_interval(self.keep_alive, self.idle_timeout)
 	}
 
-	/// The flow-control limits as moq-quic spells them.
+	/// The flow-control limits as moq-quic and qmux spell them.
 	#[cfg(feature = "_transport")]
-	pub(crate) fn limits(&self) -> moq_quic::Limits {
+	pub fn limits(&self) -> moq_quic::Limits {
 		use std::num::NonZeroU64;
 
 		let mut limits = moq_quic::Limits::default();
@@ -799,7 +786,7 @@ mod tests {
 		assert!(Config::default().keep_alive.is_none());
 		let quic = Config::default().resolve();
 		assert_eq!(quic.max_streams, DEFAULT_MAX_STREAMS);
-		assert_eq!(quic.idle_timeout, DEFAULT_IDLE_TIMEOUT);
+		assert_eq!(quic.idle_timeout, Some(DEFAULT_IDLE_TIMEOUT));
 		assert_eq!(quic.keep_alive, None);
 		assert!(!quic.mtu_discovery);
 		assert_eq!(quic.gso, None);
@@ -1116,7 +1103,7 @@ mod duration_tests {
 		idle_timeout,
 		"--quic-idle-timeout",
 		|c: &Config| c.resolve().idle_timeout,
-		|d| d
+		|d: Duration| Some(d).filter(|d| !d.is_zero())
 	);
 	crate::cli::duration::test_config_duration!(
 		keep_alive_set_in_code_beats_parser_default,
@@ -1124,6 +1111,6 @@ mod duration_tests {
 		keep_alive,
 		"--quic-keep-alive",
 		|c: &Config| c.resolve().keep_alive,
-		Some
+		|d: Duration| Some(d).filter(|d| !d.is_zero())
 	);
 }

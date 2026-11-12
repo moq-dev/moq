@@ -1,4 +1,4 @@
-//! Cost of one merged group frame from [`moq_stats::aggregate`], swept over live nodes and
+//! Cost of one merged bucket frame from [`moq_stats::aggregate`], swept over live nodes and
 //! nodes that have come and gone, with and without the grace that folds departed nodes away.
 //! Compare steady nodes with live nodes that resumed after their open pairs were closed.
 //!
@@ -18,7 +18,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use moq_net::origin;
-use moq_stats::{Group, Traffic, aggregate, group_track};
+use moq_net::stats::Traffic;
+use moq_stats::{Bucket, aggregate, bucket_track};
 
 /// Broadcast paths each node reports.
 const KEYS: usize = 16;
@@ -29,18 +30,18 @@ const FRAMES: u32 = 64;
 /// The grace configured when folding; the churn ages past it before measuring.
 const GRACE: Duration = Duration::from_secs(1);
 
-/// A group frame as the producer writes it.
+/// A bucket frame as the producer writes it.
 #[derive(serde::Serialize)]
 struct Body {
 	epoch: String,
-	tiers: BTreeMap<String, Group>,
+	tiers: BTreeMap<String, Bucket>,
 }
 
-/// A hand-published node stats broadcast with one group track carrying
+/// A hand-published node stats broadcast with one bucket track carrying
 /// default-tier egress.
 struct Node {
 	source: moq_net::origin::Route,
-	group: moq_json::snapshot::Producer<Body>,
+	bucket: moq_json::snapshot::Producer<Body>,
 	frame: Body,
 }
 
@@ -52,49 +53,57 @@ impl Node {
 		let track = source
 			.broadcast()
 			.create_track(
-				group_track(moq_net::Path::from_static("acme")),
+				bucket_track(
+					moq_net::Path::from_static("acme"),
+					&"01900000-0000-7000-8000-000000000001".parse().unwrap(),
+				),
 				moq_net::track::Info::default()
 					.with_max_age(None)
 					.with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
 		let config = moq_json::snapshot::Config::default().with_deltas(false);
-		let mut group = Group::default();
+		let mut bucket = Bucket::default();
 		for key in 0..KEYS {
 			let mut traffic = Traffic::default();
 			traffic.subscriptions_started = 1;
-			group.paths.entry(format!("acme/room-{key:02}")).or_default().publisher = traffic;
+			bucket.paths.entry(format!("acme/room-{key:02}")).or_default().publisher = traffic;
 		}
 		let frame = Body {
 			epoch: "01900000-0000-7000-8000-000000000001".to_string(),
-			tiers: BTreeMap::from([(String::new(), group)]),
+			tiers: BTreeMap::from([(String::new(), bucket)]),
 		};
 		Self {
 			source,
-			group: moq_json::snapshot::Producer::new(track, config),
+			bucket: moq_json::snapshot::Producer::new(track, config),
 			frame,
 		}
 	}
 
 	/// Bump every path's byte counter and publish the whole snapshot.
 	fn publish(&mut self, bytes: u64) {
-		for usage in self.frame.tiers.values_mut().flat_map(|group| group.paths.values_mut()) {
+		for usage in self
+			.frame
+			.tiers
+			.values_mut()
+			.flat_map(|bucket| bucket.paths.values_mut())
+		{
 			usage.publisher.bytes += bytes;
 		}
-		self.group
+		self.bucket
 			.update(moq_net::Timed::from(&self.frame).at(moq_net::Timestamp::now()))
 			.unwrap();
 	}
 }
 
 /// The first path's merged egress.
-fn first(frame: &BTreeMap<String, Group>) -> Option<Traffic> {
+fn first(frame: &BTreeMap<String, Bucket>) -> Option<Traffic> {
 	let usage = frame.get("")?.paths.values().next()?;
 	Some(usage.publisher)
 }
 
 /// Read merged frames until the first path reaches `want` bytes.
-async fn read_until(traffic: &mut aggregate::GroupConsumer, want: u64) {
+async fn read_until(traffic: &mut aggregate::BucketConsumer, want: u64) {
 	loop {
 		let frame = traffic.next().await.unwrap().unwrap();
 		if first(&frame).is_some_and(|t| t.bytes >= want) {
@@ -114,7 +123,7 @@ async fn measure(live: usize, departed: usize, grace: Duration, state: State) ->
 	let (origin, driver) = origin::Producer::new(origin::Config::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
 	let agg = aggregate::Consumer::new(origin.consume(), aggregate::Config::new().with_grace(grace));
-	let mut traffic = agg.group(moq_net::Path::from_static("acme"));
+	let mut traffic = agg.bucket(moq_net::Path::from_static("acme"));
 
 	// Every node contributes 1 byte per path, so the total counts nodes seen.
 	let mut total = 0;

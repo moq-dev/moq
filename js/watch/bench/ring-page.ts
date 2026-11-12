@@ -1,5 +1,5 @@
 /** The page `ring.ts` loads: N players feeding the real render worklet through `AudioBuffer`. */
-import { Micro, Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { AudioBuffer } from "../src/audio/buffer";
 
 const RATE = 48_000;
@@ -12,7 +12,7 @@ const players = Array.from({ length: count }, () => {
 	const worklet = new AudioWorkletNode(context, "render", { outputChannelCount: [2] });
 	worklet.connect(context.destination);
 	// The 200 ms floor, unbuffered: what a live viewer plays at.
-	const buffer = new AudioBuffer(worklet, { channels: 2, rate: RATE, delay: Milli(200), buffered: false });
+	const buffer = new AudioBuffer(worklet, { channels: 2, rate: RATE, delay: Duration.millis(200), buffered: false });
 	return { worklet, buffer };
 });
 await context.resume();
@@ -29,7 +29,7 @@ const tick = () => {
 	while ((callbacks * FRAME) / RATE <= context.currentTime - start) {
 		// A decoder hands over fresh planes every frame, which the ring then transfers.
 		for (const { buffer } of players)
-			buffer.insert(Micro((callbacks * FRAME * 1_000_000) / RATE), [tone.slice(), tone.slice()]);
+			buffer.insert((callbacks * FRAME * 1_000_000) / RATE, [tone.slice(), tone.slice()]);
 		callbacks++;
 	}
 	setTimeout(tick, FRAME / (RATE / 1000));

@@ -798,12 +798,12 @@ pub(super) fn poll_requested(
 	}
 
 	// No fill queued: surface a track abort so the handler loop can exit.
-	match state.poll_ref(waiter, |state| match &state.abort {
+	match state.poll_ref(waiter, |state| match state.outcome.aborted() {
 		Some(err) => Poll::Ready(err.clone()),
 		None => Poll::Pending,
 	}) {
 		Poll::Ready(Ok(err)) => Poll::Ready(Err(err)),
-		Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
+		Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.outcome.aborted().cloned().unwrap_or(Error::Dropped))),
 		Poll::Pending => Poll::Pending,
 	}
 }
@@ -815,7 +815,7 @@ pub(super) fn poll_requested(
 /// [`max_delay`](Self::max_delay), and [`order`](Self::order) follow its readers as they
 /// change, so read them as each group is served. The handler calls [`accept`](Self::accept) for each group
 /// it has and [`drop_groups`](Self::drop_groups) for the rest, one group at a time as
-/// [`wanted_changed`](Self::wanted_changed) yields them, so it writes no faster than its
+/// [`poll_wanted_changed`](Self::poll_wanted_changed) yields them, so it writes no faster than its
 /// readers read. Serve the fills you take concurrently: each waits on its own readers, so
 /// serving them in turn holds every fill behind the readers of the one before. Dropping the fill names
 /// whatever is left as dropped while a reader still wants it; once nobody does, the fill is
@@ -914,8 +914,8 @@ impl Fill {
 	/// frames written keep the indices they have in the group. `info` sets the track's
 	/// [`Info`] if it hasn't been accepted yet (a fetch with no live subscription), and is
 	/// ignored otherwise. Errors with [`Error::InvalidRange`] outside the fill,
-	/// [`Error::Duplicate`] if the group was already answered or cached, or the track's abort
-	/// error.
+	/// [`Error::Duplicate`] if the group was already answered or cached, [`Error::Skipped`] if
+	/// the track skipped it, or the track's abort error.
 	pub fn accept(&self, sequence: u64, info: impl Into<Option<Info>>) -> Result<group::Producer> {
 		self.inner.accept(sequence, info.into())
 	}
@@ -972,7 +972,7 @@ impl Fill {
 	/// The next group still owed in the fill's order: a reader still reads it, and it was
 	/// neither answered nor delivered live since it was asked. `None` once none is owed or
 	/// no reader waits on the fill, so stop serving it. It does not wait for the readers to
-	/// pick up what was served before it; [`wanted_changed`](Self::wanted_changed) does.
+	/// pick up what was served before it; [`poll_wanted_changed`](Self::poll_wanted_changed) does.
 	pub fn wanted(&self) -> Option<u64> {
 		self.wanted_except(None)
 	}
@@ -1417,7 +1417,7 @@ impl Inner {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn finish_track_at(&self, final_sequence: u64) {
 		if let Ok(mut state) = TrackState::modify(&self.state)
-			&& state.end.is_none()
+			&& state.declared().is_none()
 		{
 			let _ = state.set_end(Position::group(final_sequence), None);
 		}
@@ -1457,7 +1457,7 @@ impl TrackState {
 	/// or the live feed may still deliver: a fill refused is no verdict on the feed.
 	fn drop_unfed(&mut self, groups: ops::Range<u64>, err: StreamError) {
 		// Until the serving session resolves where the feed starts, it may deliver anything.
-		if self.start_pending {
+		if matches!(self.start, super::Start::Pending(_)) {
 			return;
 		}
 		let now = self.cache.pool().now_wall();
@@ -1468,7 +1468,11 @@ impl TrackState {
 			}
 		}
 		for groups in dropped.iter() {
-			self.drop_groups(groups.clone(), err.clone());
+			self.drop_groups(groups.clone(), super::Hole::drop(err.clone()));
+		}
+		// The runs are billed, so a source refusing fills in fragments pays for them.
+		if !dropped.is_empty() {
+			self.charge_debt();
 		}
 	}
 }

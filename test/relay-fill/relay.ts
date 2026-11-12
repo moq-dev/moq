@@ -7,10 +7,10 @@
 // `fetches` reports how many downstream FETCHes the relay forwarded upstream.
 import assert from "node:assert/strict";
 import { createInterface } from "node:readline";
-import { Manual, Milli, Nano } from "@moq/clock";
-import Session from "@moq/qmux";
+import { Manual } from "@moq/clock";
+import { Session } from "@moq/qmux";
+import { DEFAULT_EXPIRY } from "../../js/net/src/cache.ts";
 import { connect } from "../../js/net/src/connection/connect.ts";
-import { CACHE_EXPIRY } from "../../js/net/src/ledger.ts";
 import { Producer } from "../../js/net/src/origin.ts";
 import * as Path from "../../js/net/src/path.ts";
 import { wireOf } from "../../js/net/src/wire.ts";
@@ -38,7 +38,7 @@ const clock = new Manual();
 const installed = clock.install();
 // A session never announces a received broadcast to another, so the relay advertises it itself.
 const origin = new Producer();
-const route = origin.routePrefix(path);
+const claim = origin.claim(path);
 
 async function dial(address: string, publish?: ReturnType<Producer["consume"]>) {
 	const url = new URL(address);
@@ -55,7 +55,7 @@ async function dial(address: string, publish?: ReturnType<Producer["consume"]>) 
 const source = await dial(upstream);
 const sinks: Awaited<ReturnType<typeof dial>>[] = [];
 const serving = (async () => {
-	for await (const request of route.requested()) request.serve(wireOf(source).consume(path));
+	for await (const request of claim.requested()) request.serve(wireOf(source).consume(path));
 })();
 console.log("ready");
 const lines = createInterface({ input: process.stdin });
@@ -71,13 +71,14 @@ try {
 			continue;
 		}
 		assert.equal(line, "evict", `unknown command: ${line}`);
-		// A prune slice past the cache window, so the next scan evicts what nobody touched.
-		await clock.advance(Nano.fromMilli(Milli(CACHE_EXPIRY + 10_000)));
+		// Past the cache window and the sweep that trails it by up to half a window, so the
+		// copy has evicted what nobody touched.
+		await clock.advance(DEFAULT_EXPIRY.mul(2));
 		console.log("evicted");
 	}
 } finally {
 	lines.close();
-	route.close();
+	claim.close();
 	await serving;
 	for (const sink of sinks) await sink.close();
 	await source.close();

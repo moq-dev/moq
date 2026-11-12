@@ -1,22 +1,24 @@
 #![cfg(feature = "async")]
 
-//! A moq-lite-07 TRACKS listing over a session and through a relay: each hop syncs with
-//! what it holds at once, and the upstream's tracks follow as live adds.
+//! A moq-lite-07 TRACKS listing over a session and through a relay: each hop lists the
+//! upstream's tracks as they arrive and syncs when the upstream does, so a track listed
+//! after the sync is new at the source.
 
 use crate::support;
 
 use std::time::Duration;
 
 use moq_net::broadcast::TracksEvent;
-use moq_net::{Hop, Version, session::Limits};
+use moq_net::{Version, session::Limits};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn lite07() -> Version {
@@ -60,8 +62,8 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 		.unwrap()
 }
 
-/// A session syncs at once, then lists the peer's tracks and their changes until the
-/// broadcast ends.
+/// A session lists the peer's tracks, syncs when the peer does, then lists their
+/// changes until the broadcast ends.
 #[kio::test]
 async fn a_session_lists_its_peers_tracks() {
 	let publisher = produce_origin(1);
@@ -74,18 +76,14 @@ async fn a_session_lists_its_peers_tracks() {
 	let (subscriber, _pair) = connect(&publisher, 2, lite07()).await;
 	let remote = resolve(&subscriber).await;
 	let mut tracks = remote.tracks().unwrap();
-	assert_eq!(
-		next(&mut tracks).await,
-		"synced",
-		"synced with this hop, which holds nothing yet"
-	);
 	assert_eq!(next(&mut tracks).await, "+a");
+	assert_eq!(next(&mut tracks).await, "synced", "synced with the peer");
 
 	let b = broadcast.broadcast().create_track("b", None).unwrap();
 	assert_eq!(next(&mut tracks).await, "+b");
 	drop(a);
 	assert_eq!(next(&mut tracks).await, "-a");
-	b.finish().unwrap();
+	let b = b.finish().unwrap();
 	drop(b);
 	assert_eq!(next(&mut tracks).await, "~b", "TRACKS_FINISH, not TRACKS_REMOVE");
 
@@ -105,13 +103,12 @@ async fn a_listing_carries_track_info() {
 		.with_max_age(Duration::from_secs(3))
 		.with_priority(9)
 		.with_refresh(4)
-		.with_compress(true);
+		.with_compression(moq_net::track::Compression::Deflate);
 	let _a = broadcast.broadcast().create_track("a", info).unwrap();
 	broadcast.announce().unwrap();
 
 	let (subscriber, _pair) = connect(&publisher, 2, lite07()).await;
 	let mut tracks = resolve(&subscriber).await.tracks().unwrap();
-	assert_eq!(next(&mut tracks).await, "synced");
 	let event = kio::clock::timeout(TIMEOUT, tracks.next())
 		.await
 		.expect("listing stalled")
@@ -124,7 +121,7 @@ async fn a_listing_carries_track_info() {
 	assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	assert_eq!(info.priority, 9);
 	assert_eq!(info.refresh, Some(4));
-	assert!(info.compress);
+	assert_eq!(info.compression, moq_net::track::Compression::Deflate);
 }
 
 /// A listed track is a track like any other: a SUBSCRIBE from the listing reads the
@@ -161,9 +158,9 @@ async fn a_listed_track_serves_its_cached_group() {
 	assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"first");
 }
 
-/// Through a relay: the relay answers each downstream listing at once from the one
-/// upstream listing it keeps, a cold relay's upstream tracks follow as live adds, and a
-/// removal reaches each downstream as its upstream reported it.
+/// Through a relay: the relay answers each downstream listing from the one upstream
+/// listing it keeps, a cold relay syncs only once its upstream has, and a removal
+/// reaches each downstream as its upstream reported it.
 #[kio::test]
 async fn a_relay_shares_its_upstream_listing() {
 	let publisher = produce_origin(1);
@@ -177,20 +174,21 @@ async fn a_relay_shares_its_upstream_listing() {
 	let (first, _first) = connect(&relay, 3, lite07()).await;
 	let (second, _second) = connect(&relay, 4, lite07()).await;
 
+	// Cold: the source's track comes before the sync, as it would in-process.
 	let mut one = resolve(&first).await.tracks().unwrap();
-	assert_eq!(next(&mut one).await, "synced");
 	assert_eq!(next(&mut one).await, "+a");
+	assert_eq!(next(&mut one).await, "synced");
 
-	// Warm now: the relay lists what it holds before syncing.
+	// Warm now: the relay lists what it holds, then syncs.
 	let mut two = resolve(&second).await.tracks().unwrap();
-	assert_eq!(next(&mut two).await, "synced");
 	assert_eq!(next(&mut two).await, "+a");
+	assert_eq!(next(&mut two).await, "synced");
 
 	let b = broadcast.broadcast().create_track("b", None).unwrap();
 	assert_eq!(next(&mut one).await, "+b");
 	assert_eq!(next(&mut two).await, "+b");
 
-	a.finish().unwrap();
+	let a = a.finish().unwrap();
 	drop(a);
 	assert_eq!(next(&mut one).await, "~a");
 	assert_eq!(next(&mut two).await, "~a");
@@ -242,8 +240,7 @@ async fn a_listing_past_the_announces_cap_is_reset() {
 
 	let remote = resolve(&subscriber).await;
 	let mut listing = remote.tracks().unwrap();
-	assert_eq!(next(&mut listing).await, "synced");
-	// The announcement holds a slot too, so not every track fits.
+	// The announcement holds a slot too, so not every track fits, and the peer never syncs.
 	let mut added = 0;
 	let end = loop {
 		match next(&mut listing).await {

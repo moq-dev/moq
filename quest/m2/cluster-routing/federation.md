@@ -20,8 +20,8 @@ local publishers', are qualified, so a forger or a misconfigured uplink only
 affects its own scope (decided 2026-10-14; see [Routes and
 announces](/quest/m2/cluster-routing/routes/README.md)). Decided 2026-11-04
 (maintainer): those identities are keyed by the route key the peer proves,
-read from a key file the local relay's uplinks share ([Route session
-integration](/quest/m2/cluster-routing/routes/session.md)). Without a key, a
+read from a key file the local relay's uplinks share
+([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)). Without a key, a
 scoped forger declaring a victim's id captures claims outside its scope
 (`forged_identity_hijacks_claims_outside_the_forgers_scope`). The scope itself
 (`hash(scope, id)`) was rejected 2026-10-15, and the grant's issuer-qualified
@@ -57,15 +57,26 @@ Update `doc/bin/relay/cluster.md` (`proxy`, `upstream`, and the
 one-copy-per-broadcast priority recipe) and affected auth/config examples in
 the same PR; the combined concept/setup guide follows separately.
 
+Decided 2026-11-06 (maintainer; the agent picked the children): require
+only the route children federation builds on,
+session integration (landed in [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023) and [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)) and
+[acceptance](/quest/m2/cluster-routing/routes/acceptance.md), not the whole
+[route epic](/quest/m2/cluster-routing/routes/README.md). Federation is
+relay-to-relay, so browser route-key proofs, the Playwright pin they wait on,
+and the mixed-version follow-up (mount takeover) gates the
+lite-07 cut, not this. Its consumer, the [mesh node](/quest/m3/mesh/node.md),
+is a Rust relay too. Acceptance still brings the js/net route layer for its
+Rust/JS interop checks. Rejected: session integration alone, which drops the
+proven contract the wire rule below relies on.
+
 Public API: report any peer configuration or admission change. Wire: use the
 proven lite-07 routing contract; any additional change requires draft and
 Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts check`.
 
 ## Required
 
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - identity, scoped claims, reachability, and export policy
+- [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - the forwarding and partition fixtures this reuses, proven on the implementation
 
 ## Related
 
-- [Route health](/quest/m5/route-health/README.md) - epoch-only detection of stalled delivery on still-open links
 - [Routing guide](/quest/m1/routing-guide.md) - runnable operator setup after integration

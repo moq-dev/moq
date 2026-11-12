@@ -13,7 +13,7 @@ use crate::support;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Hop, Timestamp, Version, goaway::Goaway, origin, track};
+use moq_net::{Timestamp, Version, goaway::Goaway, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -24,9 +24,9 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Have `to` pull everything `from` publishes, over a link priced at `cost`.
@@ -46,7 +46,7 @@ async fn settle() {
 /// A worker claiming `pool`, answering each request with an output whose `video`
 /// track carries the worker's name.
 struct Worker {
-	_claim: Rc<origin::Route>,
+	_claim: Rc<origin::Claim>,
 	/// Each output with its track, which would end once its route drops.
 	outputs: Rc<RefCell<Vec<(origin::Route, track::Producer)>>>,
 	origin: origin::Producer,
@@ -55,11 +55,7 @@ struct Worker {
 impl Worker {
 	fn new(hop: u64, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(
-			origin
-				.route_prefix("pool", moq_net::origin::RouteOptions::default())
-				.unwrap(),
-		);
+		let claim = Rc::new(origin.claim("pool", moq_net::origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(kio::clock::sim::spawn(async move {
@@ -86,10 +82,10 @@ impl Worker {
 	}
 }
 
-/// Read the first frame of `video` at `pool/p` through `relay`. moq-lite-07 announces the
-/// answer as a takeover of the claim, so the first subscription reads. Older wires carry it
-/// as an ordinary announcement, which resets the first subscription through the claim, so
-/// they wake the worker first.
+/// Read the first frame of `video` at `pool/p` through `relay`. On moq-lite-07 the answer's
+/// exact route carries the claim's instance, so the first subscription reads. Older wires
+/// mint an instance per announcement, so the answer resets the first subscription through
+/// the claim: they wake the worker first.
 async fn watch(version: Version, relay: &origin::Producer) -> String {
 	if version != "moq-lite-07-wip".parse().unwrap() {
 		let cold = relay.consume().request("pool/p", None).await.unwrap();

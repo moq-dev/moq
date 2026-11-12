@@ -1,4 +1,4 @@
-"""Point-to-point TCP and track sessions over hidden endpoint broadcasts."""
+"""Point-to-point TCP and track sessions between server and client endpoints."""
 
 from __future__ import annotations
 
@@ -20,8 +20,9 @@ __all__ = ["Endpoint", "IncomingTcp", "IncomingTrack", "TcpStream", "TrackStream
 
 
 class Endpoint:
-    """Announces one hidden endpoint and dials or accepts independent sessions.
+    """A server, a client, or both: dials or accepts independent sessions.
 
+    Its first dial announces it as a client, and its first accept as a server.
     Hold it while sessions run. Closing it resets pending dials and sessions.
     Cancelling a dial cancels only that dial; cancelling an accept wait leaves
     the endpoint listening. Usable as an async context manager.
@@ -47,11 +48,11 @@ class Endpoint:
         self.close()
 
     def close(self) -> None:
-        """Retract the endpoint and reset its pending dials and sessions."""
+        """Retract the endpoint's broadcasts and reset its pending dials and sessions."""
         self._inner.close()
 
     async def dial_tcp(self, peer: str) -> TcpStream:
-        """Dial a new TCP session, waiting until the peer accepts it."""
+        """Dial the server peer in a new TCP session, waiting until it accepts."""
         return TcpStream(await self._inner.dial_tcp(peer))
 
     async def accept_tcp(self) -> IncomingTcp:

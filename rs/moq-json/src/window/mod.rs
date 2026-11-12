@@ -21,7 +21,7 @@
 //!
 //! Trimming is therefore an op, not a group boundary. Dropping a record costs one small frame
 //! instead of a roll that restates the whole window (and, on a
-//! [`compress`](moq_net::track::Info::compress)ed track, throws away the group's DEFLATE window).
+//! [compressed](moq_net::track::Info::compression) track, throws away the group's DEFLATE window).
 //!
 //! # Group boundaries are invisible
 //!
@@ -61,7 +61,7 @@ mod properties;
 pub use consumer::Consumer;
 pub use decoder::{ConsumerConfig, Decoder, Event, Group};
 pub use encoder::{Encoded, Encoder, Pending, ProducerConfig};
-pub use producer::Producer;
+pub use producer::{Finished, Producer};
 
 #[cfg(test)]
 use futures::FutureExt;
@@ -111,7 +111,7 @@ mod test {
 		let at = moq_net::Timestamp::from_millis(100).unwrap();
 		producer.push(moq_net::Timed::from(&rec(1)).at(at)).unwrap();
 		producer.push(moq_net::Timed::from(&rec(2)).at(at)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let pushed: Vec<_> = drain(&mut consumer(track))
 			.into_iter()
 			.filter_map(|event| match event {
@@ -148,7 +148,7 @@ mod test {
 		producer.push(moq_net::Timed::from(&rec(2)).at(at)).unwrap();
 		assert_eq!(largest(&mut track), Some(0), "a refused op rolled the group");
 
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let pushed: Vec<_> = drain(&mut consumer(track))
 			.into_iter()
 			.filter_map(|event| match event {
@@ -372,11 +372,11 @@ mod test {
 
 		fn finish(self) -> Vec<Event<Value>> {
 			let Live {
-				mut producer,
+				producer,
 				mut consumer,
 				mut events,
 			} = self;
-			producer.finish().unwrap();
+			let _finished = producer.finish().unwrap();
 			events.extend(drain(&mut consumer));
 			events
 		}
@@ -551,7 +551,7 @@ mod test {
 			.unwrap();
 		subscriber = subscriber.with_range(largest..);
 		let mut fresh = consumer(subscriber);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		// Joining at offset 3 must not report 3 skips for records that were never this reader's to
 		// miss: it simply starts where the window starts.
@@ -677,7 +677,7 @@ mod test {
 			let mut checkpoint = track.append_group().unwrap();
 			checkpoint.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
 			checkpoint.finish().unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 
 			assert_eq!(
 				drain(&mut consumer),
@@ -798,7 +798,8 @@ mod test {
 		let _late = producer.consume();
 		assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
 
-		producer.finish().unwrap();
+		// A clone finishes, so the shared state refuses this handle's refresh.
+		let _finished = producer.clone().finish().unwrap();
 		assert!(matches!(producer.refresh().now_or_never(), Some(Err(_))));
 	}
 
@@ -806,7 +807,7 @@ mod test {
 	fn compressed_round_trip_across_rolls() {
 		let mut live = Live::on(
 			ProducerConfig::default(),
-			moq_net::track::Info::default().with_compress(true),
+			moq_net::track::Info::default().with_compression(moq_net::track::Compression::Deflate),
 		);
 		for n in 0..40 {
 			live.push(n);
@@ -826,7 +827,7 @@ mod test {
 	fn an_empty_pop_writes_nothing() {
 		let (mut producer, mut track) = producer(ProducerConfig::default());
 		producer.pop(5).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		// Nothing was ever pushed, so there is nothing to drop and no group to publish.
 		assert_eq!(
@@ -854,22 +855,88 @@ mod test {
 	}
 
 	#[test]
-	fn the_handle_remains_usable_after_finish() {
-		let (mut producer, mut track) = producer(ProducerConfig::default());
-		producer.push(&rec(1)).unwrap();
-		producer.finish().unwrap();
+	fn the_window_stays_readable_after_finish() {
+		let (producer, mut track) = producer(ProducerConfig::default());
+		let mut clone = producer.clone();
+		clone.push(&rec(1)).unwrap();
+		let finished = producer.finish().unwrap();
 
-		assert_eq!(producer.window(), vec![rec(1)]);
-		assert_eq!(producer.range(), 0..1);
-		let mut mirror = producer.consume();
+		assert_eq!(finished.window(), vec![rec(1)]);
+		assert_eq!(finished.range(), 0..1);
+		let mut mirror = finished.consume();
 		assert_eq!(
 			mirror.largest().now_or_never().flatten().map(|position| position.group),
 			track.largest().now_or_never().flatten().map(|position| position.group)
 		);
-		producer.finish().unwrap();
+		// A clone sharing the finished state refuses edits, and finishing it again does nothing.
+		assert!(matches!(
+			clone.push(&rec(2)),
+			Err(crate::Error::Net(moq_net::Error::Closed))
+		));
+		let _finished = clone.finish().unwrap();
+	}
+
+	/// A finish that fails is final: the track aborts, and a retry reports the failure rather than
+	/// claiming the track finished.
+	#[test]
+	fn a_failed_finish_is_final() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", moq_net::track::Info::default())
+			.unwrap();
+		let mut producer = Producer::<Value>::new(track.clone(), ProducerConfig::default());
+		producer.push(&rec(1)).unwrap();
+		// Another handle ends the track, so finishing it fails.
+		track.abort(moq_net::Error::Cancel).unwrap();
+
+		let err = producer.clone().finish().err().unwrap().to_string();
+		assert_eq!(producer.clone().finish().err().unwrap().to_string(), err);
+		assert_eq!(producer.push(&rec(2)).unwrap_err().to_string(), err);
+	}
+
+	/// A track another handle already ended still has its open group closed by this producer's
+	/// finish, which then refuses edits even though the end leaves room below it.
+	#[test]
+	fn finish_closes_the_group_on_a_track_already_ended() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", moq_net::track::Info::default())
+			.unwrap();
+		let mut subscriber = track.subscribe(None).ordered();
+		let mut producer = Producer::<Value>::new(track.clone(), ProducerConfig::default());
+		producer.push(&rec(1)).unwrap();
+		let _track = track.finish().unwrap();
+		let _finished = producer.clone().finish().unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("expected the window group");
+		};
+		while let Poll::Ready(Ok(Some(_))) = group.poll_read_frame(&waiter) {}
+		assert!(
+			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))),
+			"the group ends rather than waiting for a producer that finished"
+		);
 		assert!(matches!(
 			producer.push(&rec(2)),
 			Err(crate::Error::Net(moq_net::Error::Closed))
+		));
+	}
+
+	/// Clones of an aborted producer report the abort's cause, not just a closed track.
+	#[test]
+	fn edits_after_an_abort_report_its_cause() {
+		let (mut producer, _track) = producer(ProducerConfig::default());
+		producer.push(&rec(1)).unwrap();
+		producer.clone().abort(moq_net::Error::Cancel).unwrap();
+
+		assert!(matches!(
+			producer.push(&rec(2)),
+			Err(crate::Error::Net(moq_net::Error::Cancel))
+		));
+		assert!(matches!(
+			producer.finish(),
+			Err(crate::Error::Net(moq_net::Error::Cancel))
 		));
 	}
 
@@ -877,7 +944,7 @@ mod test {
 	fn writes_after_another_clone_finishes_are_rejected() {
 		let (mut producer, _track) = producer(ProducerConfig::default());
 		producer.push(&rec(1)).unwrap();
-		producer.clone().finish().unwrap();
+		let _finished = producer.clone().finish().unwrap();
 
 		assert!(matches!(
 			producer.push(&rec(2)),

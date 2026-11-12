@@ -17,7 +17,7 @@ Decided 2026-11-05 (maintainer, /quest-plan):
 - The maintainer added "moq-cli only when we're happy with the feature set"
   and left the bar to the planner. Decided: the bar is
   [Ship capture and playback](/quest/m3/cli-packaging.md) merged, since that
-  is when every distribution builds with `--features release`.
+  is when every distribution builds with `--features full`.
 
 Follow [moq-relay in nixpkgs](/quest/m3/nixpkgs-relay.md)'s process: prepare
 a branch on kixelated/nixpkgs with `Assisted-by:` trailers, then wait for the
@@ -26,7 +26,7 @@ by then.
 
 The attribute is `moq-cli`, because nixpkgs' `moq` is an unrelated Go mocking
 tool ([matryer/moq](https://github.com/matryer/moq)) that also installs
-`bin/moq`. Set `meta.mainProgram = "moq"`. Build with `--features release`
+`bin/moq`. Set `meta.mainProgram = "moq"`. Build with `--features full`
 and the `jemalloc` feature our overlay uses. `vaapi` and `nvidia` dlopen
 their driver libraries, so make them findable at runtime (for example
 `addDriverRunpath` for libcuda, and libva on the runpath). Prove it with

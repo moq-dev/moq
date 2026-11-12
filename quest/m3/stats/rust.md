@@ -31,7 +31,7 @@
   - Audio capture: `capture::Samples::gap` only flags that buffers were
     dropped. Counting `skipped` needs the drop size, converted to codec frames.
 - The gateways build their catalogs in their own crates (`moq-rtmp`,
-  `moq-srt`, `moq-rtc`, `moq-archive`; `hls` and `rtsp` build theirs in
+  `moq-srt`, `moq-webrtc`, `moq-archive`; `hls` and `rtsp` build theirs in
   `rs/moq-cli`), so each needs a way to name the stats track and the echo path
   before its first catalog, and a reporter to run beside each session's
   catalog. The report writer lives in `rs/moq-cli/src/report.rs` and reads the
@@ -56,14 +56,15 @@
   `--echo` when it adds one: they would publish rendition IDs and per-track
   counters in plaintext beside it.
 - Decided 2026-10-22 (maintainer): the publisher's solicit option moved here
-  from [encoder feedback](/quest/m5/stats-encoder-feedback.md), which keeps
-  only the adaptation loop and reuses `--echo-path`.
+  from the encoder feedback quest, since deleted, which kept only the
+  adaptation loop.
 - `export --echo` counts no drops in `late`: `Received::report`
   (`rs/moq-mux/src/stats.rs`) fills only frames, bytes, and arrival while the
   TS release section holds the drops (from
   [moq-dev/moq#6654](https://github.com/moq-dev/moq/pull/6654)).
 
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): a gateway takes its report and echo as fields on its request struct or on `moq_mux::Ingest`, not as `with_report` and `with_echo` builders.
+
 ## Related
 
 - [Encrypted native CLI](/quest/m5/e2ee/cli.md) - refuses stats and feedback on an encrypted broadcast
-- [Encoder feedback](/quest/m5/stats-encoder-feedback.md) - the adaptation loop that reads what `--echo-path` solicits

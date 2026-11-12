@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use moq_net::track::Delay;
 use moq_net::track::{Info, Subscription};
-use moq_net::{Hop, Timescale, Timestamp, Version, origin, track};
+use moq_net::{Timescale, Timestamp, Version, origin, track};
 
 use crate::support::harness::{peer, spawn};
 
@@ -29,9 +29,9 @@ const BUDGET: Duration = Duration::from_secs(100);
 const VERSIONS: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 async fn subscribe(relay: &origin::Producer) -> track::Subscriber {

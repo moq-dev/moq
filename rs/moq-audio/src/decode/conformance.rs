@@ -149,14 +149,12 @@ fn import(
 		Container::Ts(bytes) => {
 			let mut importer = moq_mux::container::ts::Import::new(broadcast, catalog.reserve());
 			importer.decode(bytes).unwrap();
-			importer.finish().unwrap();
-			Box::new(importer)
+			Box::new(importer.finish().unwrap())
 		}
 		Container::Cmaf(bytes) => {
 			let mut importer = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve());
 			importer.decode(bytes).unwrap();
-			importer.finish().unwrap();
-			Box::new(importer)
+			Box::new(importer.finish().unwrap())
 		}
 	};
 	let snapshot = catalog.snapshot();
@@ -201,7 +199,9 @@ async fn every_backend_matches_independent_reference() {
 
 			let mut pcm = Vec::new();
 			for packet in &packets {
-				pcm.extend(decoder.decode(packet).unwrap().samples);
+				decoder.decode(packet).unwrap();
+				pcm.extend(decoder.receive().unwrap().expect("one output per packet").samples);
+				assert!(decoder.receive().unwrap().is_none(), "one output per packet");
 			}
 			compare(vector, decoder.name(), &pcm[delay..]);
 		}

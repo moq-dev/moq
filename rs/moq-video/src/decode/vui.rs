@@ -93,10 +93,8 @@ fn h264(nal: &[u8]) -> Option<Option<Color>> {
 }
 
 fn h265(nal: &[u8]) -> Option<Option<Color>> {
-	use scuffle_h265::NALUnitType;
-
-	// The type is the six bits after the forbidden zero bit (H.265 7.3.1.2).
-	if NALUnitType::from((nal.first()? >> 1) & 0x3f) != NALUnitType::SpsNut {
+	// The type is the six bits after the forbidden zero bit (H.265 7.3.1.2); 33 is SPS_NUT.
+	if (nal.first()? >> 1) & 0x3f != 33 {
 		return None;
 	}
 	let Ok(sps) = moq_mux::codec::h265::Sps::parse(nal) else {
@@ -105,7 +103,7 @@ fn h265(nal: &[u8]) -> Option<Option<Color>> {
 	let (width, height) = sps.size();
 	let size = Size::new(width, height);
 	// Absent, the range flag is 0 (limited) and the description unspecified
-	// (E.3.1); scuffle_h265 fills an absent description with 2 itself.
+	// (E.3.1); moq-mux fills an absent description with 2 itself.
 	let Some(signal) = sps.video_signal() else {
 		return Some(Color::from_code_points(None, Range::Limited, size));
 	};
@@ -160,7 +158,7 @@ mod tests {
 				Surface::I420(i420.with_color(color)),
 				moq_net::Timestamp::from_micros(0).unwrap(),
 			);
-			encoder.encode(&frame).unwrap().remove(0).payload
+			encoder.encode_all(&frame).unwrap().remove(0).payload
 		};
 		let both = |first: Color, second: Color| {
 			let mut unit = keyframe(first).to_vec();
@@ -185,7 +183,7 @@ mod tests {
 		assert_eq!(signalled(Codec::H265, &Bytes::from(unit)), Some(None));
 	}
 
-	/// Hostile SPS fields must clear the label without reaching scuffle_h265's overflows.
+	/// Hostile SPS fields clear the label.
 	#[test]
 	fn overflowing_h265_sps_clear_the_label() {
 		for input in [

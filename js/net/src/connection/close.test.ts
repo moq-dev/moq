@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { type Installed, Manual, Nano, Second } from "@moq/clock";
+import { Duration, type Installed, Manual } from "@moq/clock";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -79,11 +79,13 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 				const closing = server.close();
 				await fin.reached;
 				expect(closed).toBe(false);
-				expect((await announced.next())?.kind).toBe("end");
+				// lite-07 withdraws its claims; moq-transport only ends the stream, which
+				// withdraws nothing without a NAMESPACE_DONE.
+				expect((await announced.next())?.kind).toBe(protocol === Lite.ALPN_07_WIP ? "end" : "offline");
 				if (outcome === "timeout") {
 					// bun's `rejects` blocks on a pending promise, so catch first and advance.
 					const timedOut = closing.catch((err: unknown) => err);
-					await clock.advance(Nano.fromSecond(Second(1)));
+					await clock.advance(Duration.secs(1));
 					expect(await timedOut).toHaveProperty("message", "session close timed out");
 				} else {
 					fin.release();

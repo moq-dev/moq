@@ -35,7 +35,7 @@ pub(crate) fn properties() -> Vec<glib::ParamSpec> {
 		glib::ParamSpecUInt64::builder("quic-idle-timeout")
 			.nick("QUIC idle timeout")
 			.blurb("QUIC idle timeout in milliseconds, 0 to disable locally")
-			.default_value(duration_millis(quic.idle_timeout))
+			.default_value(duration_millis(quic.idle_timeout.unwrap_or_default()))
 			.mutable_ready()
 			.build(),
 		glib::ParamSpecUInt64::builder("quic-keep-alive")
@@ -70,7 +70,7 @@ impl Settings {
 			"tls-disable-verify" => self.tls_disable_verify.to_value(),
 			"quic-idle-timeout" => duration_millis(
 				self.quic_idle_timeout
-					.unwrap_or_else(|| moq_tokio::quic::Resolved::default().idle_timeout),
+					.unwrap_or_else(|| moq_tokio::quic::Resolved::default().idle_timeout.unwrap_or_default()),
 			)
 			.to_value(),
 			"quic-keep-alive" => duration_millis(self.quic_keep_alive.unwrap_or_default()).to_value(),
@@ -165,8 +165,8 @@ mod tests {
 		assert_eq!(connect.tls.insecure, Some(true));
 		assert_eq!(connect.backoff.timeout, Some(Duration::ZERO.into()));
 		let quic = quic.resolve();
-		assert_eq!(quic.idle_timeout, Duration::from_secs(15));
-		assert_eq!(quic.keep_alive, Some(Duration::ZERO));
+		assert_eq!(quic.idle_timeout, Some(Duration::from_secs(15)));
+		assert_eq!(quic.keep_alive, None);
 		assert!(quic.keylog.is_some());
 		settings.set("connect-version", &"moq-lite-99".to_value());
 		assert!(settings.resolve().unwrap_err().to_string().contains("moq-lite-99"));

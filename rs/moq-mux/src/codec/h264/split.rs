@@ -195,7 +195,7 @@ impl Split {
 				}
 				// Adopt this keyframe's inline set (dropping any the new GOP no longer
 				// uses), or re-inject the retained set if the keyframe carried none.
-				self.reconcile_params();
+				self.reconcile_params()?;
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
 			}
@@ -211,7 +211,7 @@ impl Split {
 				// same way an IDR does. `contains_slice` is still false here on the
 				// AU's first slice, so this runs once per access unit.
 				if self.current.contains_recovery_point && !self.current.contains_slice {
-					self.reconcile_params();
+					self.reconcile_params()?;
 				}
 				self.current.contains_slice = true;
 			}
@@ -228,17 +228,14 @@ impl Split {
 	/// Adopt the access unit's inline parameter sets as the retained set, or
 	/// re-inject the retained set when the keyframe carried none, so every
 	/// keyframe (IDR or open-GOP recovery point) is self-contained.
-	fn reconcile_params(&mut self) {
+	fn reconcile_params(&mut self) -> Result<()> {
 		crate::codec::annexb::reconcile_keyframe_params(
+			InBandCodec::H264,
 			&mut self.current.chunks,
-			&mut self.sps,
-			&mut self.current.sps_seen,
-		);
-		crate::codec::annexb::reconcile_keyframe_params(
-			&mut self.current.chunks,
-			&mut self.pps,
-			&mut self.current.pps_seen,
-		);
+			&mut [&mut self.sps, &mut self.pps],
+			&mut [&mut self.current.sps_seen, &mut self.current.pps_seen],
+		)?;
+		Ok(())
 	}
 
 	fn maybe_start_frame(&mut self, pts: moq_net::Timestamp) -> Result<()> {

@@ -10,21 +10,6 @@ class MoqError(Exception):
     pass
 
 
-class AnnounceEvent:
-    """One announcement event; the subclass names which kind, as in moq's."""
-
-    def __init__(self, announce: SimpleNamespace) -> None:
-        self.announce = announce
-
-
-class AnnounceEventPresent(AnnounceEvent):
-    pass
-
-
-class AnnounceEventAbsent(AnnounceEvent):
-    pass
-
-
 class SnapshotProducer:
     """Records every published value; demand comes from the wrapped track."""
 
@@ -39,30 +24,19 @@ class SnapshotProducer:
         self.values.append(value)
 
 
-class SnapshotConsumer:
-    """Reads the named fake track of a broadcast, wrapping its parsed values in timed records,
-    like the runtime consumer."""
-
-    def __init__(self, broadcast: object, name: str, *, priority: int = 0) -> None:
-        self._track = broadcast.tracks[name]
-
-    async def __aiter__(self):
-        async for value in self._track:
-            yield SimpleNamespace(value=value, at=None)
-
-
 moq = ModuleType("moq")
 moq.Error = MoqError
-# The stub has no shutdown errors: every `MoqError` it raises is a failure.
-moq.is_shutdown = lambda err: False
-moq.AnnounceEventPresent = AnnounceEventPresent
-moq.AnnounceEventAbsent = AnnounceEventAbsent
+moq.Subscription = lambda **kwargs: SimpleNamespace(**kwargs)
+moq.Delay = lambda **kwargs: SimpleNamespace(**kwargs)
+moq.Order = SimpleNamespace(ASCENDING="ascending")
+moq.Compression = SimpleNamespace(DEFLATE="deflate")
+# Tests that run a truck's endpoint script it in place of this.
+moq.socket = ModuleType("moq.socket")
 moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)
 moq.TrackInfo = lambda **kwargs: SimpleNamespace(**kwargs)
 
 moq_json = ModuleType("moq.json")
 moq_json.SnapshotProducer = SnapshotProducer
-moq_json.SnapshotConsumer = SnapshotConsumer
 moq.json = moq_json
 
 moq_media = ModuleType("moq.media")

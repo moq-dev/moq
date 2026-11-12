@@ -50,4 +50,12 @@ impl Config {
 	pub fn new(count: u16) -> Self {
 		Self { count, pin: false }
 	}
+
+	/// One unpinned worker per core this process may use, honoring cgroup quotas, up to
+	/// the most a group can steer packets to.
+	pub fn auto() -> Self {
+		let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+		let max = moq_sock::shard::MAX_SHARDS;
+		Self::new(u16::try_from(cores).map_or(max, |cores| cores.min(max)))
+	}
 }

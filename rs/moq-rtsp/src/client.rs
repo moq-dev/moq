@@ -224,14 +224,14 @@ impl Client {
 			tracing::info!(%url, streams = tracks.len(), "RTSP session playing");
 			let playing = kio::clock::now();
 			// Measured from the last frame, so RTCP reports alone cannot keep a dead camera alive.
-			let mut deadline = playing + self.timeout;
+			let mut deadline = playing.saturating_add(self.timeout);
 			while let Some(item) = kio::clock::timeout(deadline - kio::clock::now(), session.next())
 				.await
 				.map_err(|_| Error::Stalled(self.timeout))?
 			{
 				let item = item?;
 				if matches!(item, CodecItem::VideoFrame(_) | CodecItem::AudioFrame(_)) {
-					deadline = kio::clock::now() + self.timeout;
+					deadline = kio::clock::now().saturating_add(self.timeout);
 				}
 				if ingest.push(item, session.streams())?.is_some() {
 					tracing::warn!(%url, "RTSP timeline jumped, ending the session");
@@ -1046,6 +1046,7 @@ mod tests {
 	/// far ahead as it paused, which continues the timeline rather than jumping it.
 	#[tokio::test]
 	async fn a_paused_stream_is_not_a_jump() {
+		kio::clock::host_time(); // real RTSP sockets, and the pause is real time
 		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
 		let (broadcast, catalog) = broadcast();
 		let mut client = Client::new(server.url()).unwrap();

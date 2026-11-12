@@ -41,7 +41,7 @@ m1 quest on 2026-10-22.
   and possibly moq-audio and moq-video), because their breaks predate the
   backfill's merge base. The [compression migration](https://github.com/moq-dev/moq/pull/7046)
   deleted moq-flate before this cut: audit the migration from its published
-  API to ordinary tracks with `compress`, rather than promising a new
+  API to ordinary tracks with `compression`, rather than promising a new
   moq-flate transition release.
 - Each version-transition section, starting from the `## Unreleased`
   entries already on `main`, says how to migrate from the published
@@ -68,6 +68,26 @@ m1 quest on 2026-10-22.
   `rootUrl = [ "https://root:4443" ];`; an empty list fails evaluation.
   Write it into `rs/moq-relay/MIGRATE.md`'s transition section (its
   `## Unreleased` section until the cut names the version).
+
+- Known drift (added 2026-11-07, from the API shape audit), to fix in the
+  guide each names:
+  - moq-webrtc: `rs/moq-webrtc/MIGRATE.md` is still titled "Migrating
+    moq-rtc" and documents `wire::Source`, which
+    [moq-dev/moq#6454](https://github.com/moq-dev/moq/pull/6454) removed.
+  - moq-boy: `rs/moq-boy/MIGRATE.md` documents `.socket/{name}` and
+    `.socket/viewer-*` paths and grants; the code serves `.server/{name}`
+    and `.client/{id}`.
+  - moq-cli: `rtmp` is listed under `--max-delay` but its flag is `--delay`;
+    the `--connect-once` removal and the `MOQ_LISTEN_TLS_*` to
+    `MOQ_HLS_TLS_*` rename are missing; the `export archive` entry reads as a
+    break of something release never had.
+  - moq-relay: the line saying no transport enforces bitrate caps is stale
+    (QUIC enforces them through the pacer); the two `receive_window` floor
+    entries (64 MiB, then 1 MiB) collapse into the net change; and the
+    removed `moq_relay_stale_datagrams_total` metric has no note.
+  - moq-gst: the request pad's `encoder` property, shipped in
+    `moq-gst-v0.4.24`, was removed with no entry, so a `gst-launch` line
+    setting it now fails at runtime.
 
 ## Required
 

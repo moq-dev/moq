@@ -8,8 +8,6 @@ use std::time::Duration;
 use kio::clock::Instant;
 
 use anyhow::Context;
-use hang::moq_net;
-use moq_video::render::wgpu;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -21,7 +19,7 @@ use super::args::Args;
 use super::layout::fit;
 use super::media::Media;
 use super::output::Output;
-use moq_mux::timeline::{Consumer, Producer as Presentation};
+use moq_mux::sync::{Consumer, Producer as Presentation};
 
 /// How early a frame may be shown rather than waiting another wakeup for it.
 /// Under a display's frame interval, so it can't be seen, but enough that timer
@@ -43,6 +41,15 @@ pub(super) enum Event {
 	/// still queued, then stop.
 	Ended,
 	Failed(String),
+	/// Audio resumed after a declared silence, starting at this media timestamp.
+	Utterance(Duration),
+	/// Received audio the player discarded rather than played to bound its
+	/// delay: skipped at the fast threshold, or refused by a full sink. `skip`
+	/// marks the first frame of a spell, one jump however many frames it spans.
+	Trimmed {
+		audio: Duration,
+		skip: bool,
+	},
 }
 
 /// Run native playback on the calling thread until the window closes.
@@ -77,6 +84,7 @@ pub fn run(
 			args,
 			video: video.clone(),
 			presentation: presentation.clone(),
+			playhead: Default::default(),
 			drained: drained.clone(),
 			output: Remote {
 				proxy: proxy.clone(),
@@ -193,8 +201,8 @@ impl App {
 			return Ok(());
 		};
 		let mut video = self.video.lock().unwrap();
-		// Re-read the shared anchor on every redraw: audio may have moved it.
-		let cutoff = Instant::now() + VIDEO_EARLY_TOLERANCE;
+		// Re-read the shared schedule on every redraw: any track may have moved it.
+		let cutoff = Instant::now().saturating_add(VIDEO_EARLY_TOLERANCE);
 		let mut due = None;
 		if let Some(index) = self
 			.presentation
@@ -284,6 +292,7 @@ impl ApplicationHandler<Event> for App {
 				}
 			}
 			Event::Failed(err) => self.fail(event_loop, err),
+			Event::Utterance(_) | Event::Trimmed { .. } => {}
 		}
 	}
 

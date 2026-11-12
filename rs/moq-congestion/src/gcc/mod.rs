@@ -114,7 +114,7 @@ const CLUSTER_HISTORY: TimeDelta = TimeDelta::from_seconds(2);
 /// back at 8% a second. Only the 5 Mbit/s ceiling `ProbeController` keeps without a maximum rate
 /// hid this: the probe it capped happened to restore the estimate after the cut.
 const INITIAL_RATE: DataRate = DataRate::from_kilobits_per_sec(1000);
-/// The most GoogCC estimates or probes when the transport sets no pacing limit, the 1 Gbit/s
+/// The most GoogCC estimates or probes, the 1 Gbit/s
 /// `SendSideBandwidthEstimation` already defaults to. Without one, `ProbeController` caps every
 /// probe at 5 Mbit/s, so a probe target above that could never be reached.
 const MAX_RATE: DataRate = DataRate::from_kilobits_per_sec(1_000_000);
@@ -183,9 +183,7 @@ impl Gcc {
             constraints: TargetRateConstraints {
                 at_time: now,
                 min_data_rate: None,
-                max_data_rate: Some(init.max_pacing_rate.map_or(MAX_RATE, |rate| {
-                    DataRate::from_bytes_per_sec(rate.min(i64::MAX as u64) as i64)
-                })),
+                max_data_rate: Some(MAX_RATE),
                 starting_rate: Some(starting_rate),
             },
             stream_based_config: StreamsConfig {
@@ -204,13 +202,7 @@ impl Gcc {
         let mut gcc = Self {
             cc,
             prober: BitrateProber::default(),
-            pacer: Pacer::new(
-                init.rtt,
-                initial_window,
-                init.mtu,
-                init.max_pacing_rate,
-                init.now,
-            ),
+            pacer: Pacer::new(init.rtt, initial_window, init.mtu, init.now),
             mtu: init.mtu,
             pacing_rate: starting_rate.bytes_per_sec() as u64,
             target_rate: starting_rate.bytes_per_sec() as u64,
@@ -244,7 +236,7 @@ impl Gcc {
         if now < self.next_process {
             return;
         }
-        self.next_process = now + PROCESS_INTERVAL;
+        self.next_process = now.saturating_add(PROCESS_INTERVAL);
         let update = self.cc.on_process_interval(ProcessInterval {
             at_time: timestamp(now),
             pacer_queue: None,
@@ -465,7 +457,7 @@ impl Controller for Gcc {
             if next <= at {
                 return None;
             }
-            return Some(now + Duration::from_micros((next - at).us().max(0) as u64));
+            return Some(now.saturating_add(Duration::from_micros((next - at).us().max(0) as u64)));
         }
         let rate = Rate {
             window: self.congestion_window(),

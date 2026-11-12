@@ -14,7 +14,6 @@ use anyhow::{Context, ensure};
 use moq_mux::catalog::Stream;
 use moq_mux::catalog::hang::Container;
 use moq_mux::container::{Frame, Kind};
-use moq_tokio::moq_net;
 use tokio::io::AsyncBufReadExt;
 
 /// One frame: its pts in milliseconds and whether it opens a group.
@@ -39,9 +38,9 @@ fn audio() -> Schedule {
 }
 
 fn write<R: Clone + Send + 'static>(
-	producer: &mut moq_mux::container::Producer<Container, R>,
+	mut producer: moq_mux::container::Producer<Container, R>,
 	schedule: Schedule,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<moq_mux::container::Finished<Container, R>> {
 	for (index, part) in schedule.into_iter().enumerate() {
 		if index > 0 {
 			producer.discontinuity()?;
@@ -55,8 +54,7 @@ fn write<R: Clone + Send + 'static>(
 			})?;
 		}
 	}
-	producer.finish()?;
-	Ok(())
+	Ok(producer.finish()?)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -80,12 +78,10 @@ async fn main() -> anyhow::Result<()> {
 		let track = broadcast.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))?;
 		let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		// Each producer owns its catalog entry, so both stay alive until the reader is done.
-		let mut video_track = catalog.video(track, Container::Legacy(Kind::Video), config)?;
-		write(&mut video_track, video())?;
+		let video_track = write(catalog.video(track, Container::Legacy(Kind::Video), config)?, video())?;
 		let track = broadcast.create_track("audio", catalog.track_info(hang::catalog::PRIORITY.audio))?;
 		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-		let mut audio_track = catalog.audio(track, Container::Legacy(Kind::Audio), config)?;
-		write(&mut audio_track, audio())?;
+		let audio_track = write(catalog.audio(track, Container::Legacy(Kind::Audio), config)?, audio())?;
 		catalog.finish()?;
 
 		let session = client

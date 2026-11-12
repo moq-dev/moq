@@ -4,7 +4,7 @@
  * @module
  */
 import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import type { RouteInfo } from "./hop.js";
+import { type RouteInfo, routeInfo, type WireRoute } from "./hop.ts";
 import type * as Path from "./path.js";
 
 /**
@@ -30,26 +30,42 @@ export interface Announce {
 }
 
 /**
- * What an announcement listing yields: a path becoming present or absent.
+ * An {@link Announce} as the origin and sessions carry it, with the route's internal metadata.
  *
- * `present`: a route now covers the path, which was absent. `absent`: no route covers it any
- * more, carrying its last advertised route. Another instance taking a path over keeps it
- * present: follow it with the origin's `follow(path)` to see the broadcast change.
+ * @internal
+ */
+export type Routed = Omit<Announce, "route"> & { route: WireRoute };
+
+/**
+ * What an announcement listing yields: a path becoming present, absent, or offline, or its
+ * availability changing.
+ *
+ * `present`: a route now covers the path, which was absent; it may arrive unavailable (see
+ * {@link RouteInfo.available}). `unavailable`: the present path lost every usable path to its
+ * origin but may recover one, so it stays present while requests for it may fail.
+ * `available`: it recovered one: request it again. `absent`: the origin withdrew the path, and
+ * no route covers it any more. `offline`: this side let go of the path, and no route covers it
+ * any more: the session it arrived on closed, or the network lost every path to it, so its
+ * origin may still serve it. Both carry its last advertised route.
+ *
+ * Another instance taking a path over keeps it present: follow it with the origin's
+ * `follow(path)` to see the broadcast change.
  *
  * @public
  */
-export type Event = { kind: "present" | "absent" } & Announce;
+export type Event = { kind: "present" | "unavailable" | "available" | "absent" | "offline" } & Announce;
 
 /**
  * Every change to a route, for code that forwards or routes them.
  *
- * `start`: a route now covers the prefix. `update`: the route covering it changed hops or cost,
- * in place. `restart`: another instance now serves the prefix. `end`: no route covers it any
- * more.
+ * `start`: a route now covers the prefix. `update`: the route covering it changed hops, cost,
+ * or availability, in place. `restart`: another instance now serves the prefix. `end`: the
+ * origin withdrew it, and no route covers it any more. `offline`: this side let go of it,
+ * and no route covers it any more.
  *
  * @internal
  */
-export type RouteEvent = { kind: "start" | "update" | "restart" | "end" } & Announce;
+export type RouteEvent = { kind: "start" | "update" | "restart" | "end" | "offline" } & Routed;
 
 /**
  * Options for an announcement stream.
@@ -267,7 +283,8 @@ export class Routes {
 let makeConsumer: (routes: Routes) => Consumer;
 
 /**
- * The paths announced under a scope, each reported as it becomes present or absent.
+ * The paths announced under a scope, each reported as it becomes present, absent, or offline,
+ * and as its availability changes.
  *
  * Created internally: obtain one from an origin or the connection's `announced(scope)`.
  *
@@ -275,6 +292,8 @@ let makeConsumer: (routes: Routes) => Consumer;
  */
 export class Consumer {
 	#routes: Routes;
+	// The present paths last reported unavailable, bounded by the present set.
+	#unavailable = new Set<Path.Valid>();
 
 	private constructor(routes: Routes) {
 		this.#routes = routes;
@@ -311,14 +330,30 @@ export class Consumer {
 		}
 	}
 
-	/** Returns the next path that became present or absent, or undefined once the listing or this handle closes. */
+	/** Returns the next change to a path, or undefined once the listing or this handle closes. */
 	async next(): Promise<Event | undefined> {
 		for (;;) {
 			const event = await this.#routes.next();
 			if (!event) return undefined;
-			const { kind, ...announce } = event;
-			if (kind === "start") return { kind: "present", ...announce };
-			if (kind === "end") return { kind: "absent", ...announce };
+			const { kind, prefix, captures } = event;
+			const route = routeInfo(event.route);
+			switch (kind) {
+				case "start":
+					if (!route.available) this.#unavailable.add(prefix);
+					return { kind: "present", prefix, captures, route };
+				case "update":
+				case "restart": {
+					const was = !this.#unavailable.has(prefix);
+					if (was === route.available) continue;
+					if (route.available) this.#unavailable.delete(prefix);
+					else this.#unavailable.add(prefix);
+					return { kind: route.available ? "available" : "unavailable", prefix, captures, route };
+				}
+				case "end":
+				case "offline":
+					this.#unavailable.delete(prefix);
+					return { kind: kind === "end" ? "absent" : "offline", prefix, captures, route };
+			}
 		}
 	}
 
@@ -332,7 +367,8 @@ export class Consumer {
 }
 
 /**
- * The listing over a route stream: only paths becoming present or absent.
+ * The listing over a route stream: only paths becoming present, absent, or offline, and their
+ * availability changing.
  *
  * @internal
  */

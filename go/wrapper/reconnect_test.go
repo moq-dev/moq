@@ -3,7 +3,6 @@ package moq_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -189,10 +188,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer route.Cancel()
-	broadcast, err := route.Broadcast()
-	if err != nil {
-		t.Fatal(err)
-	}
+	broadcast := route.Broadcast()
 	defer broadcast.Close()
 
 	track, err := broadcast.PublishTrack("data", timedInfo())
@@ -203,20 +199,6 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	if err := route.Announce(); err != nil {
 		t.Fatal(err)
 	}
-
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		for i := 0; ; i++ {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			_ = track.WriteFrame(moq.Frame{Payload: fmt.Appendf(nil, "frame-%d", i), Timestamp: ts(0)})
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
 
 	// Subscriber: finds the broadcast and reads a frame before the restart, so
 	// the post-restart read proves delivery resumed rather than never started.
@@ -241,11 +223,15 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	}
 	defer trackConsumer.Cancel()
 
+	// Each write starts a new group, which a live subscription receives as the latest.
+	if err := track.WriteFrame(moq.Frame{Payload: []byte("before"), Timestamp: ts(0)}); err != nil {
+		t.Fatal(err)
+	}
 	if frame, err := trackConsumer.ReadFrame(ctx); err != nil || frame == nil {
 		t.Fatalf("frame before restart: frame=%+v err=%v", frame, err)
 	}
-	if err := subscriber.Session().State().Failure; err != nil {
-		t.Fatalf("failure before any drop: %v", err)
+	if state := subscriber.Session().State(); !isConnected(state) {
+		t.Fatalf("not serving before any drop: %+v", state)
 	}
 	if version := subscriber.Session().Stats().Version; version == nil || *version == "" {
 		t.Fatal("a live session must report its negotiated version")
@@ -259,9 +245,9 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	// Both workers observe the reconnect and advance their connect count past the first.
 	waitConnects(t, ctx, publisher.Session(), 2)
 	waitConnects(t, ctx, subscriber.Session(), 2)
-	// The connect that advanced the count also cleared the drop's reason.
-	if err := subscriber.Session().State().Failure; err != nil {
-		t.Fatalf("failure after reconnect: %v", err)
+	// The connect that advanced the count also left the drop's reason behind.
+	if state := subscriber.Session().State(); !isConnected(state) {
+		t.Fatalf("not serving after reconnect: %+v", state)
 	}
 
 	// The publisher re-announces the broadcast the fresh relay never saw.
@@ -280,6 +266,9 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	}
 	defer resumed.Cancel()
 
+	if err := track.WriteFrame(moq.Frame{Payload: []byte("after"), Timestamp: ts(1)}); err != nil {
+		t.Fatal(err)
+	}
 	frame, err := resumed.ReadFrame(ctx)
 	if err != nil {
 		t.Fatalf("frame after restart: %v", err)
@@ -353,7 +342,8 @@ func TestDialConnectionOptions(t *testing.T) {
 	}
 }
 
-// A public wrapper owns its first dial through Session and observes repeated failures.
+// A public wrapper owns its first dial through Session and observes it fail: a first dial
+// that reaches no session ends the session with its error rather than retrying.
 func TestFirstDialState(t *testing.T) {
 	silent, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -374,26 +364,34 @@ func TestFirstDialState(t *testing.T) {
 	}
 	session := client.Session()
 	defer session.Cancel(0)
-	state := session.State()
-	if state.Phase != moq.ConnectionPhaseConnecting || state.Connects != 0 {
-		t.Fatalf("initial state: %+v", state)
-	}
-	for i := 0; i < 2; i++ {
-		state, err = session.StateChanged(ctx, state.Revision)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if state.Failure == nil || state.Connects != 0 || state.Version != nil {
-			t.Fatalf("failed dial state: %+v", state)
-		}
+	initial := session.State()
+	if _, ok := initial.Phase.(moq.ConnectionPhaseConnecting); !ok || initial.Connects != 0 {
+		t.Fatalf("initial state: %+v", initial)
 	}
 	// A canceled waiter must leave both the session and another observer live.
 	canceled, stop := context.WithCancel(ctx)
 	stop()
-	if _, err := session.StateChanged(canceled, state.Revision); !errors.Is(err, context.Canceled) {
+	if _, err := session.StateChanged(canceled, initial.Revision); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled waiter: %v", err)
 	}
-	if _, err := session.StateChanged(ctx, state.Revision); err != nil {
+	state, err := session.StateChanged(ctx, initial.Revision)
+	if err != nil {
 		t.Fatalf("independent waiter: %v", err)
 	}
+	if phase, ok := state.Phase.(moq.ConnectionPhaseClosed); !ok || !errors.Is(phase.Failure, moq.ErrConnect) || state.Connects != 0 {
+		t.Fatalf("failed dial state: %+v", state)
+	}
+	// The terminal revision never changes again, so a wait there reports the failure.
+	if _, err := session.StateChanged(ctx, state.Revision); !errors.Is(err, moq.ErrConnect) {
+		t.Fatalf("terminal waiter: %v", err)
+	}
+	if err := session.Closed(ctx); !errors.Is(err, moq.ErrConnect) {
+		t.Fatalf("closed: %v", err)
+	}
+}
+
+// isConnected reports whether a session serves with a negotiated version.
+func isConnected(state moq.ConnectionState) bool {
+	phase, ok := state.Phase.(moq.ConnectionPhaseConnected)
+	return ok && phase.Version != ""
 }

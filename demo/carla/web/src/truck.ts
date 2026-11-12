@@ -1,21 +1,22 @@
 /**
  * The non-UI truck steering session backend.
  *
- * Shaped like moq-boy's `Game`: a video pipeline pulled from `@moq/watch`, a
- * `control` track we publish, and a `status` track we subscribe to for
- * round-trip confirmation. The UI layer reads signals from this class to render
- * video, the control panel, and telemetry.
+ * A video pipeline pulled from `@moq/watch`, the truck's `status` track that
+ * every viewer reads, and, while driving, a socket session to the truck that
+ * carries this driver's commands one way and the truck's acknowledgements the
+ * other. The UI layer reads signals from this class to render video, the
+ * control panel, and telemetry.
  *
  * @module
  */
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
 import { changed, REST, takeoverState } from "./input.ts";
-import { driverPath, parseCamera } from "./paths.ts";
-import type { DriveState, Gear, TruckStatus } from "./schemas.ts";
-import { TruckStatusSchema } from "./schemas.ts";
+import { driverId, handle, parseCamera, SOCKET } from "./paths.ts";
+import type { DriveState, Gear, LatencyEntry, Reply, TruckStatus } from "./schemas.ts";
+import { ReplySchema, TruckStatusSchema } from "./schemas.ts";
 
 /** Configuration for creating a Truck session. */
 export interface TruckConfig {
@@ -23,6 +24,8 @@ export interface TruckConfig {
 	broadcastId: Moq.Path.Valid;
 	/** MoQ connection to the relay. */
 	connection: Moq.Connection;
+	/** The origin the connection serves and fills, which driver endpoints publish into. */
+	origin: Moq.Origin.Producer;
 	/** Shared signal tracking which truck is currently being driven. */
 	driving: Moq.Signals.Signal<string | undefined>;
 	/** Shared signal tracking which truck is currently focused. */
@@ -38,28 +41,21 @@ interface Command {
 	timestamps: { label: string; ts: number }[];
 }
 
-/** A retained safety snapshot that fans out to every truck consumer. */
-export class SafetyCommandBroadcast {
-	readonly broadcast: Moq.Broadcast.Producer;
-	readonly #producer: Json.Snapshot.Producer<Record<string, unknown>>;
+/** A driver session: pending until the truck accepts, `null` once the dial or the session failed. */
+type Session = Moq.Signals.Signal<Moq.Socket.TrackStream | null | undefined>;
 
-	constructor(command: Command, broadcast = new Moq.Broadcast.Producer()) {
-		this.broadcast = broadcast;
-		const track = this.broadcast.createTrack("control", { compress: true });
-		this.#producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
-		this.#producer.update({
-			value: { ...command.cmd, sequence: command.sequence, timestamps: command.timestamps },
-		});
-	}
-
-	close() {
-		this.#producer.finish();
-		this.broadcast.close();
-	}
-}
-
-const CONTROL_HEARTBEAT = Nano.fromMilli(Milli(250));
+const CONTROL_HEARTBEAT = Duration.millis(250);
 const MAX_PENDING_ACKS = 64;
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+/** Send one command as its own message, so a late one never holds up the next. */
+function write(stream: Moq.Socket.TrackStream, command: Command) {
+	// A session that already ended has nothing to send to; its reply reader reports the end.
+	if (stream.producer.closed.peek() !== undefined) return;
+	const message = { ...command.cmd, sequence: command.sequence, timestamps: command.timestamps };
+	stream.producer.writeFrame({ payload: encoder.encode(JSON.stringify(message)) });
+}
 
 /**
  * A single truck streaming + steering session (the non-UI backend).
@@ -77,10 +73,13 @@ export class Truck {
 	readonly active = new Moq.Signals.Signal(false);
 	readonly status = new Moq.Signals.Signal<TruckStatus | undefined>(undefined);
 	readonly statusState = new Moq.Signals.Signal<"pending" | "available" | "unavailable">("pending");
-	readonly driverId = new Moq.Signals.Signal<string | undefined>(undefined);
+	/** How `status` names this player's lease, once the truck accepted the driving session. */
+	readonly handle = new Moq.Signals.Signal<string | undefined>(undefined);
 	readonly estopped = new Moq.Signals.Signal(false);
 	readonly respawning = new Moq.Signals.Signal(false);
 	readonly roundTripMs = new Moq.Signals.Signal<number | undefined>(undefined);
+	/** This driver's media pipeline stages, as the truck last measured them. */
+	readonly pipeline = new Moq.Signals.Signal<LatencyEntry[] | undefined>(undefined);
 
 	// The driver's locally-requested drive state (what we are sending).
 	readonly drive = new Moq.Signals.Signal<DriveState>({ ...REST });
@@ -105,14 +104,17 @@ export class Truck {
 	// takes it as a signal input rather than a property set afterwards.
 	readonly #canvas = new Moq.Signals.Signal<HTMLCanvasElement | undefined>(undefined);
 
+	readonly #origin: Moq.Origin.Producer;
+
 	constructor(config: TruckConfig) {
-		const { broadcastId, connection, driving, focused, hovered } = config;
+		const { broadcastId, connection, origin, driving, focused, hovered } = config;
 		const camera = parseCamera(broadcastId);
 		if (!camera) throw new Error(`not a camera broadcast: ${broadcastId}`);
 		this.broadcastId = broadcastId;
 		this.id = camera.id;
 		this.name = camera.truck;
 		this.#driving = driving;
+		this.#origin = origin;
 
 		// Active when this truck is the one being driven.
 		this.#signals.run(this.#runActive.bind(this));
@@ -167,9 +169,9 @@ export class Truck {
 		// Subscribe to the truck's status (telemetry) track.
 		this.#signals.run(this.#runStatus.bind(this));
 
-		// Publish control while this truck is being driven.
-		this.#signals.run(this.#runControl.bind(this, connection));
-		this.#signals.run(this.#runSafetyControl.bind(this, connection));
+		// Dial the truck while driving it, or to deliver a bystander's e-stop.
+		this.#signals.run(this.#runControl.bind(this));
+		this.#signals.run(this.#runSafetyControl.bind(this));
 	}
 
 	/** Attach the canvas the UI created so the renderer can draw into it. */
@@ -206,10 +208,10 @@ export class Truck {
 		this.#send({ type: "drive", ...state });
 	}
 
-	/** Request an emergency stop. */
 	/**
-	 * Latch e-stop on this truck even without holding the driving lease. A viewer
-	 * sends it on a one-shot safety broadcast, leaving the driving session alone.
+	 * Latch e-stop on this truck even without holding the driving lease. The
+	 * holder sends it on its driving session; a viewer dials a short safety
+	 * session of its own, so it neither takes the lease nor waits for one.
 	 */
 	emergencyStop() {
 		this.respawning.set(false);
@@ -258,7 +260,8 @@ export class Truck {
 			this.estopped.peek() ||
 			!status ||
 			status.estopped ||
-			status.driver !== this.driverId.peek()
+			!this.handle.peek() ||
+			status.driver !== this.handle.peek()
 		) {
 			return false;
 		}
@@ -310,11 +313,11 @@ export class Truck {
 	#timestamps(): { label: string; ts: number }[] {
 		const entries: { label: string; ts: number }[] = [];
 		const received = this.sync.out.timestamp.peek();
-		if (received != null) entries.push({ label: "received", ts: received });
+		if (received != null) entries.push({ label: "received", ts: received.asMillis() });
 		const decoded = this.videoDecoder.out.timestamp.peek();
-		if (decoded != null) entries.push({ label: "decoded", ts: decoded });
+		if (decoded != null) entries.push({ label: "decoded", ts: decoded.asMillis() });
 		const rendered = this.videoRenderer.out.timestamp.peek();
-		if (rendered != null) entries.push({ label: "rendered", ts: rendered });
+		if (rendered != null) entries.push({ label: "rendered", ts: rendered.asMillis() });
 		return entries;
 	}
 
@@ -330,8 +333,8 @@ export class Truck {
 
 	#runControlLease(effect: Moq.Signals.Effect) {
 		if (!effect.get(this.active)) {
-			// Releasing control closes the driving broadcast, which may not have
-			// delivered this player's e-stop yet: carry it on the safety broadcast,
+			// Releasing control closes the driving session, which may not have
+			// delivered this player's e-stop yet: carry it on a safety session,
 			// which stays up until a status echoes the latch.
 			if (this.#estopUnconfirmed) this.#sendSafety({ type: "estop" });
 			this.respawning.set(false);
@@ -349,8 +352,9 @@ export class Truck {
 	#runRespawn(effect: Moq.Signals.Effect) {
 		if (!effect.get(this.respawning)) return;
 		const status = effect.get(this.status);
-		const driverId = effect.get(this.driverId);
-		if (!status || status.driver === driverId) return;
+		// No handle means the driving session already ended, and the lease with it.
+		const handle = effect.get(this.handle);
+		if (!status || (handle !== undefined && status.driver === handle)) return;
 		this.respawning.set(false);
 		if (this.#driving.peek() === this.id) this.#driving.set(undefined);
 	}
@@ -398,73 +402,134 @@ export class Truck {
 				if (status.estopped) this.#estopUnconfirmed = false;
 				if (!this.#estopUnconfirmed) this.estopped.set(status.estopped);
 				this.#acknowledgeSafety(status);
-				this.#acknowledge(status);
 				this.status.set(status);
 				this.statusState.set("available");
 			}
 		});
 	}
 
-	#runControl(connection: Moq.Connection, effect: Moq.Signals.Effect) {
-		const conn = effect.get(connection.origin);
-		if (!conn) return;
-
+	#runControl(effect: Moq.Signals.Effect) {
 		if (!effect.get(this.active)) return;
 
-		const driverId = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
-		this.driverId.set(driverId);
-
-		const driverBroadcastRoute = conn.route(driverPath(this.name, driverId), { hidden: true });
-		const driverBroadcast = driverBroadcastRoute.broadcast;
+		// A fresh endpoint and session per lease: the truck binds its single
+		// driver to the session, so a new lease is a new claimant.
 		effect.cleanup(() => {
-			driverBroadcast.close();
-			this.driverId.set(undefined);
+			this.handle.set(undefined);
 			this.roundTripMs.set(undefined);
+			this.pipeline.set(undefined);
 			this.#sentAt.clear();
 		});
 
-		const track = driverBroadcast.createTrack("control", { compress: true });
-		const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
-		effect.cleanup(() => producer.finish());
-		effect.run(this.#runControlTrack.bind(this, track, producer));
-		// A fresh instance per lease, which each publication mints: the truck binds its single
-		// driver to this path and instance.
-		driverBroadcastRoute.announce();
+		const session = this.#dial(effect, driverId());
+		effect.run((nested) => {
+			const stream = nested.get(session);
+			// The truck refused the dial or ended the session, which ended the lease.
+			if (stream === null) return this.#release();
+			if (!stream) return;
+			nested.spawn(async () => {
+				const name = await handle(stream.session);
+				if (!nested.abort.aborted) this.handle.set(name);
+			});
+			nested.spawn(async () => {
+				if (await this.#readReplies(nested, stream)) this.#release();
+			});
+			nested.run((inner) => {
+				const command = inner.get(this.#command);
+				if (command) write(stream, command);
+			});
+		});
 	}
 
-	#runSafetyControl(connection: Moq.Connection, effect: Moq.Signals.Effect) {
-		const conn = effect.get(connection.origin);
+	#runSafetyControl(effect: Moq.Signals.Effect) {
 		const command = effect.get(this.#safetyCommand);
-		if (!conn || !command) return;
-
-		const driverId = `safety-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
-		const broadcastRoute = conn.route(driverPath(this.name, driverId), { hidden: true });
-		const broadcast = broadcastRoute.broadcast;
-		const safety = new SafetyCommandBroadcast(command, broadcast);
-		broadcastRoute.announce();
-		effect.cleanup(() => safety.close());
-	}
-
-	#runControlTrack(
-		track: Moq.Track.Producer,
-		producer: Json.Snapshot.Producer<Record<string, unknown>>,
-		effect: Moq.Signals.Effect,
-	) {
-		if (effect.get(track.closed) !== undefined) return;
-
-		const command = effect.get(this.#command);
 		if (!command) return;
 
-		producer.update({ value: { ...command.cmd, sequence: command.sequence, timestamps: command.timestamps } });
+		const session = this.#dial(effect, driverId());
+		effect.run((nested) => {
+			const stream = nested.get(session);
+			if (stream === null) return this.#undelivered(command);
+			if (!stream) return;
+			write(stream, command);
+			// The truck answers a bystander with nothing but the session's end.
+			nested.spawn(async () => {
+				if (await this.#readReplies(nested, stream)) this.#undelivered(command);
+			});
+		});
 	}
 
-	#acknowledge(status: TruckStatus) {
-		if (status.driver !== this.driverId.peek() || status.sequence == null) return;
-		const sentAt = this.#sentAt.get(status.sequence);
+	/**
+	 * Drop a safety command whose session failed before the status confirmed it.
+	 *
+	 * The local latch then follows the truck's status again, rather than showing a
+	 * stop that never arrived: the viewer sees it and can press again.
+	 */
+	#undelivered(command: Command) {
+		if (this.#safetyCommand.peek() !== command) return;
+		console.warn(`${String(command.cmd.type)} for ${this.name} was not delivered`);
+		this.#safetyCommand.set(undefined);
+		this.#estopUnconfirmed = false;
+		this.estopped.set(this.status.peek()?.estopped ?? false);
+	}
+
+	/** Dial the truck from a new endpoint `id`, both closed with `effect`. */
+	#dial(effect: Moq.Signals.Effect, id: string): Session {
+		const session: Session = new Moq.Signals.Signal<Moq.Socket.TrackStream | null | undefined>(undefined);
+		const endpoint = new Moq.Socket.Endpoint(this.#origin, SOCKET, id);
+		effect.cleanup(() => {
+			// Finishing first ends the session cleanly rather than resetting it.
+			session.peek()?.producer.finish();
+			endpoint.close();
+		});
+		effect.spawn(async () => {
+			try {
+				session.set(await endpoint.dialTrack(this.name, undefined, { signal: effect.abort }));
+			} catch (err) {
+				if (effect.abort.aborted) return;
+				console.warn(`dialing ${this.name} failed:`, err);
+				session.set(null);
+			}
+		});
+		return session;
+	}
+
+	/** Read the truck's acknowledgements, returning true once the session ends unless `effect` closed it. */
+	async #readReplies(effect: Moq.Signals.Effect, stream: Moq.Socket.TrackStream): Promise<boolean> {
+		// An acknowledgement a heartbeat late is superseded by the next one.
+		stream.consumer.update({ order: "ascending", delay: { max: CONTROL_HEARTBEAT } });
+		const replies = stream.consumer.ordered();
+		try {
+			for (;;) {
+				const frame = await effect.race(replies.readFrame());
+				if (effect.abort.aborted) return false;
+				if (!frame) break;
+				let reply: Reply;
+				try {
+					reply = ReplySchema.parse(JSON.parse(decoder.decode(frame.payload)));
+				} catch (err) {
+					console.warn("Invalid reply JSON:", err);
+					continue;
+				}
+				this.#acknowledge(reply);
+			}
+		} catch (err) {
+			if (effect.abort.aborted) return false;
+			console.warn(`session with ${this.name} failed:`, err);
+		}
+		return true;
+	}
+
+	/** Give up driving this truck, if this player still is. */
+	#release() {
+		if (this.#driving.peek() === this.id) this.#driving.set(undefined);
+	}
+
+	#acknowledge(reply: Reply) {
+		this.pipeline.set(reply.media_pipeline);
+		const sentAt = this.#sentAt.get(reply.sequence);
 		if (sentAt == null) return;
 		this.roundTripMs.set(performance.now() - sentAt);
 		for (const sequence of this.#sentAt.keys()) {
-			if (sequence <= status.sequence) this.#sentAt.delete(sequence);
+			if (sequence <= reply.sequence) this.#sentAt.delete(sequence);
 		}
 	}
 

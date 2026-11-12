@@ -16,6 +16,13 @@
 //! `track_subscriber_churn_after_peak` runs the same churn after a departed audience,
 //! so entries walked in proportion to the old peak show up as a slope over it.
 //!
+//! `track_subscriber_churn_drops` drops one more run into a fragmented drop set read by wire
+//! cursors, each reporting it, swept over the readers, the runs the track shares, the runs
+//! each reader's range holds and already reported, and the span of each run (built with the
+//! `fuzz` feature, which reaches the crate-private drop cursor). A drop must cost each reader
+//! the runs it touches, so a slope over the runs, what each reader reported, or the span
+//! means a cursor walks the set.
+//!
 //! `track_subscriber_join` measures a burst of viewers joining one track: each join
 //! registers in the subscription list, so any per-join walk of it shows up as a slope.
 //!
@@ -511,7 +518,10 @@ fn bench_wall(c: &mut Criterion) {
 					|| Aged::new(tracks, groups),
 					|aged| {
 						// Past every deadline, which setup armed after `now`.
-						black_box(aged.pool.poll(aged.now + 2 * AGED_BUDGET, &kio::Waiter::noop()));
+						black_box(
+							aged.pool
+								.poll(aged.now.saturating_add(2 * AGED_BUDGET), &kio::Waiter::noop()),
+						);
 						aged
 					},
 					BatchSize::PerIteration,
@@ -538,7 +548,7 @@ fn bench_gc(c: &mut Criterion) {
 			let mut now = swept.now;
 			let waiter = kio::Waiter::noop();
 			b.iter(|| {
-				now += Duration::from_nanos(1);
+				now = now.saturating_add(Duration::from_nanos(1));
 				black_box(swept.pool.poll(now, &waiter))
 			});
 		});
@@ -550,7 +560,7 @@ fn bench_gc(c: &mut Criterion) {
 			let mut now = swept.now;
 			let waiter = kio::Waiter::noop();
 			b.iter(|| {
-				now += interval;
+				now = now.saturating_add(interval);
 				black_box(swept.pool.poll(now, &waiter))
 			});
 		});
@@ -582,12 +592,17 @@ fn bench_evict_fanout(c: &mut Criterion) {
 	for subscribers in FANOUT {
 		for evicted in EVICTED {
 			group.throughput(Throughput::Elements(evicted as u64));
+			// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+			let mut fixture = None;
 			group.bench_function(BenchmarkId::new(format!("{subscribers}r"), evicted), |b| {
-				let mut fanout = Fanout::new(subscribers);
-				// Twice what the pool holds, so every write evicts.
-				for _ in 0..2 * CACHE_CAPACITY / PAYLOAD as u64 {
-					fanout.cycle();
-				}
+				let fanout = fixture.get_or_insert_with(|| {
+					let mut fanout = Fanout::new(subscribers);
+					// Twice what the pool holds, so every write evicts.
+					for _ in 0..2 * CACHE_CAPACITY / PAYLOAD as u64 {
+						fanout.cycle();
+					}
+					fanout
+				});
 				// Only the writes and the evictions they cause are timed, not the reads that
 				// judge each written group cached again.
 				b.iter_custom(|iterations| {
@@ -655,7 +670,7 @@ fn bench_fanout_frame(c: &mut Criterion) {
 					let mut elapsed = Duration::ZERO;
 					for _ in 0..iterations {
 						if written == FRAMES_PER_GROUP {
-							if let Some(mut open) = open.take() {
+							if let Some(open) = open.take() {
 								open.finish().unwrap();
 							}
 							open = Some(fanout.track.append_group().unwrap());
@@ -899,6 +914,47 @@ fn bench_subscriber_churn_after_peak(c: &mut Criterion) {
 	}
 	group.finish();
 }
+
+/// Readers of a fragmented drop set, its runs, the runs each reader reported, and each run's span.
+#[cfg(feature = "fuzz")]
+const DROP_READERS: [usize; 3] = [1, 16, 256];
+#[cfg(feature = "fuzz")]
+const DROP_RUNS: [u64; 3] = [16, 1024, 65_536];
+#[cfg(feature = "fuzz")]
+const DROP_SPAN: [u64; 2] = [1, 1 << 32];
+
+#[cfg(feature = "fuzz")]
+fn bench_subscriber_churn_drops(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_subscriber_churn_drops");
+	group.throughput(Throughput::Elements(1));
+	for readers in DROP_READERS {
+		for runs in DROP_RUNS {
+			for reported in [1, runs] {
+				for span in DROP_SPAN {
+					let id = format!("{readers}r/{runs}n/{reported}k/span_{span}");
+					group.bench_function(BenchmarkId::from_parameter(id), |b| {
+						let mut set = moq_net::fuzz::DropSet::new(readers, runs, reported, span);
+						b.iter_custom(|iterations| {
+							let mut elapsed = Duration::ZERO;
+							for _ in 0..iterations {
+								// Untimed: restore the runs and records each drop adds.
+								set.hold();
+								let start = Instant::now();
+								set.drop_one();
+								elapsed += start.elapsed();
+							}
+							elapsed
+						});
+					});
+				}
+			}
+		}
+	}
+	group.finish();
+}
+
+#[cfg(not(feature = "fuzz"))]
+fn bench_subscriber_churn_drops(_: &mut Criterion) {}
 
 /// One join and its aggregate poll, excluding the departure between iterations.
 fn bench_subscriber_join(c: &mut Criterion) {
@@ -1387,12 +1443,12 @@ impl Expiring {
 		let mut fixture = Self {
 			sparse,
 			pool,
-			now: Instant::now() + Duration::from_secs(3600),
+			now: Instant::now().saturating_add(Duration::from_secs(3600)),
 		};
 		for gap in 0..gaps {
 			fixture.pool.poll(fixture.now, &kio::Waiter::noop());
 			fixture.sparse.hand_out(gap * 2);
-			fixture.now += Duration::from_millis(1);
+			fixture.now = fixture.now.saturating_add(Duration::from_millis(1));
 		}
 		fixture.sparse.next = gaps * 2;
 		// The eviction queue trails arrivals by one entry: warm both capacities.
@@ -1408,7 +1464,7 @@ impl Expiring {
 	}
 
 	fn step(&mut self) {
-		self.now += Duration::from_millis(1);
+		self.now = self.now.saturating_add(Duration::from_millis(1));
 		self.pool.poll(self.now, &kio::Waiter::noop());
 		self.sparse.hand_out(self.sparse.next);
 		self.sparse.next += 2;
@@ -1616,42 +1672,46 @@ fn bench_range_widening(c: &mut Criterion) {
 	bench.throughput(Throughput::Elements(1));
 	for readers in WIDENING_READERS {
 		for cached in WIDENING_CACHED {
+			// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+			let mut fixture = None;
 			bench.bench_function(BenchmarkId::new(format!("{readers}r"), cached), |b| {
-				let broadcast = broadcast::Info::default().produce();
-				let track = broadcast
-					.create_track("bench", moq_net::track::Info::default().with_max_age(None))
-					.unwrap();
-				for _ in 0..cached {
-					let mut group = track.append_group().unwrap();
-					group.write_frame(None, Bytes::from_static(b"x")).unwrap();
-					group.finish().unwrap();
-				}
-				let narrow = track::Subscription::default()
-					.with_delay(track::Delay::default().with_max(AGED_BUDGET))
-					.with_range(0..1);
-				let mid = cached / 2;
-				let wide = narrow
-					.clone()
-					.with_ranges([track::Range::groups(0..1), track::Range::groups(mid..mid + WIDENED)]);
-				let waiter = kio::Waiter::noop();
-				let mut readers: Vec<_> = (0..readers)
-					.map(|_| {
-						let mut reader = track.subscribe(narrow.clone());
-						while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-						reader
-					})
-					.collect();
+				let (readers, _track, _broadcast, narrow, wide, waiter) = fixture.get_or_insert_with(|| {
+					let broadcast = broadcast::Info::default().produce();
+					let track = broadcast
+						.create_track("bench", moq_net::track::Info::default().with_max_age(None))
+						.unwrap();
+					for _ in 0..cached {
+						let mut group = track.append_group().unwrap();
+						group.write_frame(None, Bytes::from_static(b"x")).unwrap();
+						group.finish().unwrap();
+					}
+					let narrow = track::Subscription::default()
+						.with_delay(track::Delay::default().with_max(AGED_BUDGET))
+						.with_range(0..1);
+					let mid = cached / 2;
+					let wide = narrow
+						.clone()
+						.with_ranges([track::Range::groups(0..1), track::Range::groups(mid..mid + WIDENED)]);
+					let waiter = kio::Waiter::noop();
+					let readers: Vec<_> = (0..readers)
+						.map(|_| {
+							let mut reader = track.subscribe(narrow.clone());
+							while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+							reader
+						})
+						.collect();
+					(readers, track, broadcast, narrow, wide, waiter)
+				});
 				let reader = &mut readers[0];
 				b.iter(|| {
 					reader.update(wide.clone()).unwrap();
-					while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
+					while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(waiter) {
 						black_box(group);
 					}
 					reader.update(narrow.clone()).unwrap();
 					// The narrow range is already delivered, so it ends until widened again.
-					assert!(matches!(reader.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+					assert!(matches!(reader.poll_recv_group(waiter), Poll::Ready(Ok(None))));
 				});
-				drop((readers, track, broadcast));
 			});
 		}
 	}
@@ -2125,6 +2185,7 @@ criterion_group!(
 	bench_gc,
 	bench_subscriber_churn,
 	bench_subscriber_churn_after_peak,
+	bench_subscriber_churn_drops,
 	bench_subscriber_join,
 	bench_range_demand,
 	bench_subscription_ranges,

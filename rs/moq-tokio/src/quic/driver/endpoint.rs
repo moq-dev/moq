@@ -169,7 +169,8 @@ impl Endpoint {
 	/// Get the next incoming connection attempt, or `None` once the endpoint closes.
 	pub fn poll_accept(&self, waiter: &kio::Waiter) -> Poll<Option<Incoming>> {
 		let mut endpoint = self.inner.state.lock().unwrap();
-		if endpoint.driver_lost {
+		// Leaving `Running` refuses or ignores every queued attempt, and queues no new one.
+		if !endpoint.recv_state.connections.lifecycle.is_running() {
 			return Poll::Ready(None);
 		}
 		if let Some(incoming) = endpoint.recv_state.incoming.pop_front() {
@@ -182,9 +183,6 @@ impl Endpoint {
 			drop(endpoint);
 			let incoming = Incoming::new(incoming, self.inner.clone());
 			return Poll::Ready(Some(incoming));
-		}
-		if endpoint.recv_state.connections.close.is_some() {
-			return Poll::Ready(None);
 		}
 		waiter.register(&mut endpoint.incoming_waiters);
 		Poll::Pending
@@ -205,7 +203,7 @@ impl Endpoint {
 		server_name: &str,
 	) -> Result<Connecting, ConnectError> {
 		let mut endpoint = self.inner.state.lock().unwrap();
-		if endpoint.driver_lost || endpoint.recv_state.connections.close.is_some() {
+		if !endpoint.recv_state.connections.lifecycle.is_running() {
 			return Err(ConnectError::EndpointStopping);
 		}
 		if addr.is_ipv6() && !endpoint.ipv6 {
@@ -227,7 +225,7 @@ impl Endpoint {
 		Ok(endpoint
 			.recv_state
 			.connections
-			.insert(ch, conn, slot, false, &self.inner.runtime))
+			.insert(ch, conn, slot, &self.inner.runtime))
 	}
 
 	/// Switch to a new UDP socket
@@ -235,8 +233,10 @@ impl Endpoint {
 	/// Allows the endpoint's address to be updated live, affecting all active connections. Incoming
 	/// connections and connections to servers unreachable from the new address will be lost.
 	///
-	/// On error, the old UDP socket is retained.
-	pub fn rebind(&self, socket: impl Into<Socket>) -> Result<(), Error> {
+	/// On error, the old UDP socket is retained. Only tests switch sockets: on a closed endpoint
+	/// this would bind a port that nothing reads.
+	#[cfg(test)]
+	pub(crate) fn rebind(&self, socket: impl Into<Socket>) -> Result<(), Error> {
 		let socket = socket.into().into_async()?;
 		let addr = socket.local_addr()?;
 		let mut inner = self.inner.state.lock().unwrap();
@@ -292,9 +292,18 @@ impl Endpoint {
 	}
 
 	/// Close every connection and refuse new ones, without waiting for the closes to go out
+	///
+	/// The first close's code and reason stand, and a lost driver leaves nothing to close.
 	fn close_now(&self, error_code: VarInt, reason: &str) {
 		let endpoint = &mut *self.inner.state.lock().unwrap();
-		endpoint.recv_state.connections.close = Some((error_code, reason.to_string()));
+		let connections = &mut endpoint.recv_state.connections;
+		if !connections.lifecycle.is_running() {
+			return;
+		}
+		connections.lifecycle = Lifecycle::Closed {
+			error_code,
+			reason: reason.to_string(),
+		};
 		for sender in endpoint.recv_state.connections.senders.values() {
 			// Ignoring errors from dropped connections
 			let _ = sender.send(ConnectionEvent::Close {
@@ -432,7 +441,7 @@ impl Drop for EndpointDriver {
 		let endpoint = &mut *self.0.state.lock().unwrap();
 		endpoint.prev_socket = None;
 		endpoint.forward = None;
-		endpoint.driver_lost = true;
+		endpoint.recv_state.connections.lifecycle = Lifecycle::DriverLost;
 		endpoint.incoming_waiters.wake();
 		// Drop all outgoing channels, signaling the termination of the endpoint to the associated
 		// connections.
@@ -498,11 +507,10 @@ impl EndpointInner {
 		state.pending_accepts -= 1;
 		let result = match state.inner.finish_accept(accepted, &mut response_buffer) {
 			Ok((handle, conn)) => {
-				let driver_lost = state.driver_lost;
 				Ok(state
 					.recv_state
 					.connections
-					.insert(handle, conn, self.slot.clone(), driver_lost, &self.runtime))
+					.insert(handle, conn, self.slot.clone(), &self.runtime))
 			}
 			Err(error) => {
 				if let Some(transmit) = error.response {
@@ -555,7 +563,6 @@ pub(crate) struct State {
 	driver: Option<Waker>,
 	ipv6: bool,
 	events: mpsc::UnboundedReceiver<(ConnectionHandle, EndpointEvent)>,
-	driver_lost: bool,
 	/// Connections in the process of being accepted
 	pending_accepts: usize,
 	/// QUIC-LB forwarding to and from the other servers behind this one's address
@@ -725,8 +732,26 @@ struct ConnectionSet {
 	draining: FxHashSet<ConnectionHandle>,
 	/// Stored to give out clones to new ConnectionInners
 	sender: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
-	/// Set if the endpoint has been manually closed
-	close: Option<(VarInt, String)>,
+	/// Whether the endpoint still takes connections, which every entry point checks
+	lifecycle: Lifecycle,
+}
+
+/// Where an endpoint is in its life. Nothing returns it to [`Running`](Self::Running).
+#[derive(Debug)]
+enum Lifecycle {
+	/// Accepting and dialing.
+	Running,
+	/// [`Endpoint::close`] ran: every connection closes with this code and reason, including one
+	/// accepted afterwards, and no attempt is dialed or queued again.
+	Closed { error_code: VarInt, reason: String },
+	/// The driver is gone, so nothing can drive a connection again.
+	DriverLost,
+}
+
+impl Lifecycle {
+	fn is_running(&self) -> bool {
+		matches!(self, Self::Running)
+	}
 }
 
 impl ConnectionSet {
@@ -735,24 +760,24 @@ impl ConnectionSet {
 		handle: ConnectionHandle,
 		conn: moq_quic::connection::Connection,
 		slot: Arc<Slot>,
-		driver_lost: bool,
 		runtime: &crate::runtime::Spawner,
 	) -> Connecting {
 		let (send, recv) = mpsc::unbounded_channel();
-		if let Some((error_code, reason)) = &self.close {
-			send.send(ConnectionEvent::Close {
-				error_code: *error_code,
-				reason: reason.clone(),
-			})
-			.unwrap();
-		}
-		match driver_lost {
-			// Close the event channel before spawning the connection driver, so it cannot
-			// transmit a handshake after the endpoint driver has stopped.
-			true => drop(send),
-			false => {
+		match &self.lifecycle {
+			Lifecycle::Running => {
 				self.senders.insert(handle, send);
 			}
+			Lifecycle::Closed { error_code, reason } => {
+				send.send(ConnectionEvent::Close {
+					error_code: *error_code,
+					reason: reason.clone(),
+				})
+				.unwrap();
+				self.senders.insert(handle, send);
+			}
+			// Close the event channel before spawning the connection driver, so it cannot
+			// transmit a handshake after the endpoint driver has stopped.
+			Lifecycle::DriverLost => drop(send),
 		}
 		Connecting::new(handle, conn, self.sender.clone(), recv, slot, runtime)
 	}
@@ -805,7 +830,6 @@ impl EndpointRef {
 				ipv6: local_addr.is_ipv6(),
 				events,
 				driver: None,
-				driver_lost: false,
 				recv_state,
 				pending_accepts: 0,
 				forward,
@@ -871,7 +895,7 @@ impl RecvState {
 				senders: FxHashMap::default(),
 				draining: FxHashSet::default(),
 				sender,
-				close: None,
+				lifecycle: Lifecycle::Running,
 			},
 			incoming: VecDeque::new(),
 			recv_buf: recv_buf.into(),
@@ -998,7 +1022,7 @@ impl RecvState {
 		let mut response_buffer = Vec::new();
 		match endpoint.handle(now, received, &mut response_buffer) {
 			Some(DatagramEvent::NewConnection(incoming)) => {
-				if connections.close.is_none() {
+				if connections.lifecycle.is_running() {
 					incoming_queue.push_back(incoming);
 				} else {
 					let transmit = endpoint.refuse(incoming, &mut response_buffer);
@@ -1115,7 +1139,7 @@ mod tests {
 			// Calibrate the next receive cycles to allow two work items each.
 			state.recv_limiter.start_cycle(|| now);
 			state.recv_limiter.record_work(2);
-			state.recv_limiter.finish_cycle(|| now + RECV_TIME_BOUND);
+			state.recv_limiter.finish_cycle(|| now.saturating_add(RECV_TIME_BOUND));
 
 			let socket = ErrorSocket {
 				error,

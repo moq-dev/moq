@@ -50,7 +50,8 @@ element. `<moq-publish-support>` shows what the browser can encode.
 Capture failures, such as `NotAllowedError` when permission is refused, land in
 `out.error` on the camera or microphone in `el.sources.video` and
 `el.sources.audio`, and `<moq-publish-ui>` shows them. A refused capture waits
-for a permission, device, or settings change instead of prompting again.
+for a permission, device, or settings change. Apps can toggle the source’s `enabled`
+state off and on to retry after a refusal.
 
 ## Stats and feedback
 
@@ -89,8 +90,8 @@ encoder's `muted` instead: it sends nothing, keeps the rendition enabled, and
 marks where each utterance ends, so listeners stay subscribed and treat the gap
 as intentional silence.
 
-Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
-`onDemand: true` also gates video, which then loses its unsubscribed past.
+Pass `onDemand: "off"` to `Publish.Broadcast` to encode audio continuously too.
+`onDemand: "all"` also gates video, which then loses its unsubscribed past.
 Bandwidth reservations still follow subscriptions; unwatched video uses its
 configured bitrate.
 
@@ -99,12 +100,12 @@ several publishers on one connection do not each target the whole uplink.
 Codec, resolution, framerate, and bitrate are tunable through
 `el.video.config`, and `el.video.cut()` asks for an extra keyframe. A viewer
 who joins once a group's deltas outweigh twice its keyframe gets a fresh one,
-so `keyframeInterval` is only the longest a group runs. Through a moq-lite
+so `join` is only the longest a group runs. Through a moq-lite
 relay, only the join that opens the relay's upstream subscription counts.
 The broadcast declares the longest group among its renditions as the catalog's
 `media.join.interval` when it first lists one, which an HLS or DASH export cuts
 its segments on. It stays fixed for the network broadcast, so raising
-`keyframeInterval` later overruns that grid. Size,
+`join` later overruns that grid. Size,
 bitrate, and framerate change in place, while a codec or audio format change
 keeps the rendition's catalog ID under a fresh `track` name that viewers
 follow through the catalog. For
@@ -112,13 +113,13 @@ simulcast, drop the element and register several encoders on a
 `Publish.Broadcast`, as below.
 
 Audio groups carry at least 20 ms by default, packing shorter codec frames
-together. `el.audio.groupDuration` changes that minimum; `Milli(0)` puts
-every frame in its own group. A longer minimum lets a relay keep fewer
-streams, at the cost of coarser loss: a viewer that falls behind skips a whole
-group. Frames still forward as they are encoded.
+together. `el.audio.join` changes that minimum; a join shorter than a frame
+puts every frame in its own group, and zero is refused. A longer join lets a
+relay keep fewer streams, at the cost of coarser loss: a viewer that falls
+behind skips a whole group. Frames still forward as they are encoded.
 
-Timestamps are `@moq/clock`'s `now()` in microseconds, so every source shares one
-timeline. The catalog's `media.clock` maps it to wall time. Stamp your own tracks
+Timestamps are `@moq/clock`'s `now()` since its origin, a `Duration`, so every
+source shares one timeline. The catalog's `media.clock` maps it to wall time. Stamp your own tracks
 (e.g. text cues) on the same timeline to stay in sync.
 
 ## Custom tracks
@@ -187,7 +188,7 @@ const broadcast = new Publish.Broadcast({
 });
 
 // Video encodes while enabled. Audio buffers raw PCM until someone subscribes.
-// Pass `onDemand: false` to the broadcast to encode both continuously.
+// Pass `onDemand: "off"` to the broadcast to encode both continuously.
 new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
 const audioSource = new Publish.Signals.Computed((effect) => effect.get(microphone.out.source)?.audio);
@@ -198,7 +199,9 @@ new Publish.Audio.Encoder("audio", { broadcast, capture: audioCapture, enabled: 
 Standalone components start enabled unless you pass `enabled: false` (or a
 signal). An enabled camera or microphone prompts for permission on
 construction, and a screen source must be built inside the user gesture that
-authorizes it. Audio waits for the page's first click or keypress, since
+authorizes it. A screen source's `out.state` is `off`, `prompting`, `live`, or
+`ended` with a reason (`stopped`, `dismissed`, or `error`); an ended share stays
+ended until the next enable, which prompts again. Audio waits for the page's first click or keypress, since
 browsers suspend Web Audio until then. Every input and output is a signal from
 [`@moq/signals`](/lib/js/signals). A failed encoder exposes the cause through
 `out.error` and disables only its rendition; siblings and the broadcast keep
@@ -223,6 +226,10 @@ import * as Publish from "@moq/publish";
 Publish.assets("/moq/");
 ```
 
-The URL must end with `/`. Copy the files again on every upgrade: they change
-with the package. `@moq/room` publishes through `@moq/publish`, so this one
+The URL must end with `/` and have no query or fragment. Copy the files again
+on every upgrade: they change with the package. `@moq/room` publishes through `@moq/publish`, so this one
 call covers it.
+
+A browser without `AudioEncoder` encodes Opus through the libav polyfill, which
+loads its worker and WebAssembly from the same directory (they are among
+`assets/*`), so also allow `'wasm-unsafe-eval'` in `script-src`.

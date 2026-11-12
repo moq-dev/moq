@@ -16,7 +16,7 @@ LINUX = os.uname().sysname == "Linux"
 
 
 def target_features():
-    """Every bench and example `required-features`, as `crate/feature`, for the workspace."""
+    """Every `required-features` of a bench, example, or tested target, as `crate/feature`, for the workspace."""
     metadata = json.loads(
         subprocess.run(
             ["cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"],
@@ -32,7 +32,7 @@ def target_features():
             for package in metadata["packages"]
             if not package["name"].endswith("-fuzz")
             for target in package["targets"]
-            if {"bench", "example"} & set(target["kind"])
+            if {"bench", "example"} & set(target["kind"]) or target["test"]
             for feature in target.get("required-features", [])
         }
     )
@@ -73,7 +73,7 @@ class SelectTest(unittest.TestCase):
             return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
-        features = [*DEVICE_FEATURES.split(), "moq-tokio/webrtc", *(["moq-relay/io-uring"] if LINUX else [])]
+        features = [*DEVICE_FEATURES.split(), "moq-webrtc/p2p", *(["moq-relay/io-uring"] if LINUX else [])]
         features += [feature for feature in target_features() if feature not in features]
         for github_actions in (False, True):
             for action in ("check", "check-test", "lint", "test"):
@@ -128,9 +128,10 @@ class SelectTest(unittest.TestCase):
         for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
             with self.subTest(path=path):
                 calls = self.selected(path)
-                self.assertEqual(len(calls), 2, calls)
+                self.assertEqual(len(calls), 3, calls)
                 self.assertTrue(calls[0].startswith("rs lint "), calls)
                 self.assertEqual(calls[1], "rs media-defaults", calls)
+                self.assertEqual(calls[2], "rs no-async", calls)
         self.assertEqual(self.selected("sh/rs/send-depth.sh"), [])
 
     def test_media_defaults_are_isolated_from_device_features(self):
@@ -138,13 +139,27 @@ class SelectTest(unittest.TestCase):
             for github_actions in (False, True):
                 with self.subTest(path=path, github_actions=github_actions):
                     calls = self.selected(path, github_actions=github_actions)
-                    self.assertEqual(calls[-1], "rs media-defaults", calls)
+                    self.assertIn("rs media-defaults", calls)
                     self.assertEqual(calls.count("rs media-defaults"), 1, calls)
         # A crate with no media dependents needs no extra compile.
         for action in ("lint", "test"):
             self.assertNotIn("rs media-defaults", self.selected("rs/moq-auth/src/lib.rs", action=action))
         # The device-feature test build stays a single build.
         self.assertNotIn("rs media-defaults", self.selected("rs/moq-audio/src/lib.rs", action="test"))
+
+    def test_gate_builds_net_without_async(self):
+        # Every other build unifies `async` back in, so the gate compiles it alone.
+        for path in ("rs/moq-net/src/lib.rs", "Cargo.lock"):
+            for action in ("check", "check-test", "lint"):
+                with self.subTest(path=path, action=action):
+                    calls = self.selected(path, action=action)
+                    self.assertEqual(calls.count("rs no-async"), 1, calls)
+        # A crate with no moq-net dependents needs no extra compile.
+        for action in ("check", "check-test", "lint"):
+            self.assertNotIn("rs no-async", self.selected("rs/moq-auth/src/lib.rs", action=action))
+        # The test and fix lanes build the default features only.
+        for action in ("test", "fix"):
+            self.assertNotIn("rs no-async", self.selected("rs/moq-net/src/lib.rs", action=action))
 
     def test_device_features_join_the_one_test_build(self):
         for path, features in (
@@ -156,10 +171,13 @@ class SelectTest(unittest.TestCase):
                 self.assertEqual(len(calls), 1, calls)
                 # The targets' required features follow the device ones.
                 self.assertIn(f" --features {features}", calls[0])
-        # moq-tokio's WebRTC module is off by default too.
-        calls = self.selected("rs/moq-tokio/src/webrtc.rs", action="test")
+        # moq-webrtc's data channel transport is off by default too.
+        calls = self.selected("rs/moq-webrtc/src/p2p/mod.rs", action="test")
         self.assertEqual(len(calls), 1, calls)
-        self.assertIn(" moq-tokio/webrtc", calls[0])
+        self.assertIn(" moq-webrtc/p2p", calls[0])
+        # So is a change to qmux, which only that optional feature pulls in.
+        calls = self.selected("rs/qmux/src/lib.rs", action="test")
+        self.assertTrue(any(" moq-webrtc/p2p" in call for call in calls), calls)
         # A dependency of the media crates still runs both their device tests.
         calls = self.selected("rs/moq-audio/src/lib.rs", action="test")
         self.assertIn("--package moq-video --package moq-audio", calls[0])
@@ -179,13 +197,6 @@ class SelectTest(unittest.TestCase):
             with self.subTest(path=path):
                 calls = self.selected(path, action="test")
                 self.assertTrue(any("/rs/moq-net-tests#" in call for call in calls), calls)
-
-    def test_demo_crate_follows_its_dependencies(self):
-        for path in ("demo/carla/bridge/src/lib.rs", "rs/moq-video/src/lib.rs"):
-            with self.subTest(path=path):
-                calls = self.selected(path, action="test")
-                self.assertTrue(any("/demo/carla/bridge#moq-carla-bridge" in call for call in calls), calls)
-        self.assertEqual(self.selected("demo/carla/web/src/player.ts"), [])
 
     def test_out_of_crate_target_selects_its_crate(self):
         # moq-cli builds the Rust interop clients as examples from outside its crate.
@@ -246,6 +257,13 @@ class SelectTest(unittest.TestCase):
                 (call,) = [call for call in self.selected(bench, action="test") if call.startswith("rs test ")]
                 self.assertIn(" --benches --examples ", call)
                 self.assertIn(feature, call.split(" --features ", 1)[1].split())
+
+    def test_a_binary_alone_enables_its_required_features(self):
+        # moq-boy's only target is its binary, so without openh264 the build
+        # holds nothing and its tests never run.
+        calls = self.selected("rs/moq-boy/src/main.rs", action="test")
+        (call,) = [call for call in calls if call.startswith("rs test ")]
+        self.assertIn("moq-boy/openh264", call.split(" --features ", 1)[1].split())
 
 
 class MetadataTest(unittest.TestCase):

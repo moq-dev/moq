@@ -16,8 +16,8 @@ use std::{
 	task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
+use crate::quic::driver::Duration;
 use crate::quic::driver::runtime::{AsyncUdpSocket, wrap_udp_socket};
-use crate::quic::driver::{Duration, Instant};
 use bytes::{Buf, Bytes};
 use kio::clock::{sleep, timeout};
 use moq_quic::RandomConnectionIdGenerator;
@@ -42,14 +42,11 @@ use super::{
 	recv, send, server, transport,
 };
 
-#[test]
-fn handshake_timeout() {
+/// Paused: nobody answers the dial, so only the handshake timer can end it.
+#[tokio::test(start_paused = true)]
+async fn handshake_timeout() {
 	let _guard = subscribe();
-	let runtime = rt_threaded();
-	let client = {
-		let _guard = runtime.enter();
-		client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap()
-	};
+	let client = client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
 
 	// Avoid NoRootAnchors error
 	let cert = (|| -> std::result::Result<_, rcgen::Error> {
@@ -71,24 +68,22 @@ fn handshake_timeout() {
 	transport_config.initial_rtt = Duration::from_millis(10);
 	client_config.transport = transport_config;
 
-	let start = Instant::now();
-	runtime.block_on(async move {
-		match client
-			.connect(
-				&client_config,
-				SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
-				"localhost",
-			)
-			.unwrap()
-			.await
-		{
-			Err(crate::quic::driver::connection::Error::HandshakeTimeout) => {}
-			Err(e) => panic!("unexpected error: {e:?}"),
-			Ok(_) => panic!("unexpected success"),
-		}
-	});
+	let start = kio::clock::now();
+	match client
+		.connect(
+			&client_config,
+			SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+			"localhost",
+		)
+		.unwrap()
+		.await
+	{
+		Err(crate::quic::driver::connection::Error::HandshakeTimeout) => {}
+		Err(e) => panic!("unexpected error: {e:?}"),
+		Ok(_) => panic!("unexpected success"),
+	}
 	let dt = start.elapsed();
-	assert!(dt > IDLE_TIMEOUT && dt < 2 * IDLE_TIMEOUT);
+	assert!(dt >= IDLE_TIMEOUT && dt < 2 * IDLE_TIMEOUT, "timed out after {dt:?}");
 }
 
 #[tokio::test]
@@ -208,7 +203,8 @@ fn read_after_close() {
 			.unwrap()
 			.await
 			.expect("connect");
-		sleep(Duration::from_millis(100)).await;
+		// The peer closes once its stream is acknowledged; read only after that close.
+		let _ = wait_closed(&new_conn).await;
 		let mut stream = new_conn.accept_uni().await.expect("incoming streams");
 		let msg = stream.read_to_end(usize::MAX).await.expect("read_to_end");
 		assert_eq!(msg, MSG);
@@ -574,8 +570,14 @@ async fn await_connection(
 	timeout(Duration::from_secs(5), task).await.unwrap().unwrap()
 }
 
-async fn assert_wait_idle_pending(endpoint: &Endpoint) {
-	assert!(timeout(Duration::from_millis(50), endpoint.wait_idle()).await.is_err());
+/// Idleness is the endpoint's own state, so one poll reads it.
+fn assert_wait_idle_pending(endpoint: &Endpoint) {
+	let (waker, _) = new_count_waker();
+	assert!(
+		pin!(endpoint.wait_idle())
+			.poll(&mut Context::from_waker(&waker))
+			.is_pending()
+	);
 }
 
 async fn wait_idle(endpoint: &Endpoint) {
@@ -632,32 +634,34 @@ fn wait_idle_returns_when_the_driver_is_dropped() {
 	});
 	let _server_connection = accepted.join().expect("accept thread");
 
-	// Park `wait_idle`; it blocks while that connection is live.
-	let (done_tx, done_rx) = std::sync::mpsc::channel();
-	let waiter = {
-		let handle = endpoint_handle.clone();
-		let endpoint = endpoint.clone();
-		std::thread::spawn(move || {
-			handle.block_on(endpoint.wait_idle());
-			let _ = done_tx.send(());
-		})
-	};
-
-	// Otherwise a pass below would be vacuous.
+	// Park `wait_idle`; it blocks while that connection is live. Otherwise a pass
+	// below would be vacuous.
+	struct Signal(Mutex<std::sync::mpsc::Sender<()>>);
+	impl std::task::Wake for Signal {
+		fn wake(self: Arc<Self>) {
+			let _ = self.0.lock().unwrap().send(());
+		}
+	}
+	let (woken_tx, woken) = std::sync::mpsc::channel();
+	let waker = Waker::from(Arc::new(Signal(Mutex::new(woken_tx))));
+	let mut idle = pin!(endpoint.wait_idle());
 	assert!(
-		done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+		idle.as_mut().poll(&mut Context::from_waker(&waker)).is_pending(),
 		"wait_idle returned before the driver was dropped"
 	);
 
 	// Dropping the runtime drops the endpoint driver.
 	endpoint_runtime.shutdown_background();
 
-	let woke = done_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+	let woke = woken.recv_timeout(Duration::from_secs(10)).is_ok();
 	drop(connection);
 	drop(peer);
 	drop(peer_runtime);
-	assert!(woke, "wait_idle never returned after the endpoint driver was dropped");
-	let _ = waiter.join();
+	assert!(woke, "wait_idle was never woken after the endpoint driver was dropped");
+	assert!(
+		idle.as_mut().poll(&mut Context::from_waker(&waker)).is_ready(),
+		"wait_idle still pending after the endpoint driver was dropped"
+	);
 }
 
 async fn wait_closed(conn: &crate::quic::driver::connection::Connection) -> crate::quic::driver::connection::Error {
@@ -1065,7 +1069,7 @@ async fn split_accept_wait_idle_and_open_connections() {
 
 	wait_for_blocked_handshake(blocker.clone()).await;
 	assert_eq!(server.open_connections(), 0);
-	assert_wait_idle_pending(&server).await;
+	assert_wait_idle_pending(&server);
 
 	blocker.release();
 
@@ -1135,7 +1139,7 @@ async fn split_accept_close_during_pending_accept() {
 
 	wait_for_blocked_handshake(blocker.clone()).await;
 	drop(server.close(0u32.into(), "closing"));
-	assert_wait_idle_pending(&server).await;
+	assert_wait_idle_pending(&server);
 
 	blocker.release();
 
@@ -1253,6 +1257,47 @@ async fn refused_incoming_wakes_all_draining_waiter() {
 	timeout(Duration::from_secs(5), draining).await.unwrap();
 
 	assert!(timeout(Duration::from_secs(5), connect).await.unwrap().is_err());
+}
+
+/// Nothing revives a closed endpoint or one whose driver is gone: neither dials nor accepts again.
+#[tokio::test]
+async fn a_closed_or_driverless_endpoint_stays_closed() {
+	let _guard = subscribe();
+	let factory = EndpointFactory::new();
+	let mut roots = RootCertStore::empty();
+	roots.add(factory.cert.cert.der().clone()).unwrap();
+	let config = client::Config::with_root_certificates(Arc::new(roots)).unwrap();
+
+	let closed = factory.endpoint();
+	let addr = closed.local_addr();
+	closed.close(0u32.into(), "done").await;
+	assert!(matches!(
+		closed.connect(&config, addr, "localhost"),
+		Err(endpoint::ConnectError::EndpointStopping)
+	));
+	assert!(closed.accept().await.is_none());
+
+	let failure = Arc::new(SocketFailure::default());
+	let socket: Box<dyn AsyncUdpSocket> = Box::new(FailingSocket {
+		inner: localhost_socket(),
+		failure: failure.clone(),
+	});
+	let driverless = Endpoint::new(
+		endpoint::Config::default().with_server(factory.server_config(transport::Config::default())),
+		socket,
+	)
+	.unwrap();
+	failure.trigger();
+	assert!(
+		timeout(Duration::from_secs(5), driverless.accept())
+			.await
+			.unwrap()
+			.is_none()
+	);
+	assert!(matches!(
+		driverless.connect(&config, addr, "localhost"),
+		Err(endpoint::ConnectError::EndpointStopping)
+	));
 }
 
 /// The endpoint driver may exit while an accept runs without the lock. The connection registered
@@ -1675,7 +1720,7 @@ async fn stream_stopped() {
 		let stopped3 = stopped3.await;
 		assert_eq!(stopped3, Ok(Some(42u32.into())));
 	};
-	let client = timeout(Duration::from_millis(100), client).instrument(error_span!("client"));
+	let client = client.instrument(error_span!("client"));
 	let server = async move {
 		let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
 		let mut stream = conn.accept_uni().await.unwrap();
@@ -1685,8 +1730,7 @@ async fn stream_stopped() {
 		conn
 	}
 	.instrument(error_span!("server"));
-	let (client, conn) = tokio::join!(client, server);
-	client.expect("timeout");
+	let ((), conn) = tokio::join!(client, server);
 	drop(conn);
 }
 
@@ -1700,7 +1744,7 @@ async fn stream_stopped_2() {
 	})
 	.unwrap();
 	let send_stream = conn.open_uni(Default::default()).await.unwrap();
-	let stopped = timeout(Duration::from_millis(100), send_stream.closed()).instrument(error_span!("stopped"));
+	let stopped = send_stream.closed().instrument(error_span!("stopped"));
 	tokio::pin!(stopped);
 	// poll the future once so that the waker is registered.
 	tokio::select! {
@@ -1713,7 +1757,7 @@ async fn stream_stopped_2() {
 	drop(send_stream);
 	// make sure the stopped future still resolves
 	let res = stopped.await;
-	assert_eq!(res, Ok(Ok(None)));
+	assert_eq!(res, Ok(None));
 }
 
 /// A send stream dropped before `finish` is reset, so the peer can't mistake the truncated data
@@ -2269,6 +2313,20 @@ async fn reads_after_a_received_reset_fail_with_it() {
 	let mut recv = server.accept_uni().await.unwrap();
 	send.reset(VarInt::from_u32(7));
 
+	// A read that hit the reset reads it again, never a clean end.
+	let mut buf = Vec::with_capacity(8);
+	loop {
+		match timeout(Duration::from_secs(10), recv.read(&mut buf)).await.unwrap() {
+			Ok(Some(_)) => {}
+			res => {
+				assert!(matches!(res, Err(recv::Error::Reset(_))), "{res:?}");
+				break;
+			}
+		}
+	}
+	let read = recv.read(&mut Vec::with_capacity(8)).await;
+	assert!(matches!(read, Err(recv::Error::Reset(_))), "{read:?}");
+
 	let reset = timeout(Duration::from_secs(10), recv.received_reset()).await.unwrap();
 	assert_eq!(reset.unwrap(), Some(VarInt::from_u32(7)));
 	let lease = recv.lease(1).await.err();
@@ -2577,9 +2635,98 @@ struct ControlledSocket {
 #[derive(Debug, Default)]
 struct ControlledOutput {
 	blocked: bool,
+	/// Sends that still pass while blocked
+	allowed: usize,
 	attempts: usize,
 	writable: Option<Waker>,
 	parked: kio::WaiterList,
+}
+
+#[cfg(feature = "sim")]
+impl ControlledOutput {
+	/// Wait until a send parks on the blocked socket, past `attempts` earlier ones
+	async fn parked(output: &Mutex<Self>, attempts: usize) {
+		kio::wait(|waiter| {
+			let mut output = output.lock().unwrap();
+			if output.writable.is_some() && output.attempts > attempts {
+				return Poll::Ready(());
+			}
+			waiter.register(&mut output.parked);
+			Poll::Pending
+		})
+		.await;
+	}
+
+	/// Let `sends` more through, keeping the socket blocked once they are spent, or every one
+	/// with `None`
+	fn release(output: &Mutex<Self>, sends: Option<usize>) {
+		let waker = {
+			let mut output = output.lock().unwrap();
+			match sends {
+				Some(sends) => output.allowed = sends,
+				None => output.blocked = false,
+			}
+			output.writable.take().unwrap()
+		};
+		waker.wake();
+	}
+}
+
+/// A client connected to a server whose output the test holds, with the handshake settled
+#[cfg(feature = "sim")]
+struct Controlled {
+	output: Arc<Mutex<ControlledOutput>>,
+	_client: Endpoint,
+	server: Endpoint,
+	/// The client's end
+	conn: Connection,
+	/// The server's end, which sends through the held socket
+	peer: Connection,
+}
+
+#[cfg(feature = "sim")]
+impl Controlled {
+	async fn connect() -> Self {
+		let network = super::sim::Network::new(1);
+		let client_addr = SocketAddr::from(([10, 0, 0, 1], 4433));
+		let server_addr = SocketAddr::from(([10, 0, 0, 2], 443));
+		let factory = EndpointFactory::new();
+		let mut transport = transport::Config::default();
+		transport.idle_timeout = None;
+		let mut roots = RootCertStore::empty();
+		roots.add(factory.cert.cert.der().clone()).unwrap();
+		let mut config = client::Config::with_root_certificates(Arc::new(roots)).unwrap();
+		config.transport = transport.clone();
+		let output = Arc::new(Mutex::new(ControlledOutput::default()));
+		let socket: Box<dyn AsyncUdpSocket> = Box::new(ControlledSocket {
+			inner: network.bind(server_addr),
+			output: output.clone(),
+		});
+		let client = Endpoint::new(endpoint::Config::default(), network.bind(client_addr)).unwrap();
+		let server = Endpoint::new(
+			endpoint::Config::default().with_server(factory.server_config(transport)),
+			socket,
+		)
+		.unwrap();
+		let (conn, peer) = tokio::try_join!(client.connect(&config, server_addr, "localhost").unwrap(), async {
+			server.accept().await.unwrap().accept().unwrap().await
+		})
+		.unwrap();
+
+		// Settle the server's handshake flight and FIN before holding an ACK-only packet.
+		let warmup = peer.open_uni(Default::default()).await.unwrap().finish();
+		assert_eq!(warmup.await, Ok(None));
+		// Retire handshake keys on the simulated clock before blocking its next send.
+		sleep(Duration::from_secs(1)).await;
+
+		Self {
+			output,
+			_client: client,
+			server,
+			conn,
+			peer,
+		}
+	}
 }
 
 #[cfg(feature = "sim")]
@@ -2599,15 +2746,21 @@ impl AsyncUdpSocket for ControlledSocket {
 	}
 
 	fn try_send(&self, transmit: &moq_sock::udp::Transmit<'_>) -> io::Result<()> {
-		if self.output.lock().unwrap().blocked {
-			return Err(io::ErrorKind::WouldBlock.into());
+		{
+			let mut output = self.output.lock().unwrap();
+			if output.blocked {
+				if output.allowed == 0 {
+					return Err(io::ErrorKind::WouldBlock.into());
+				}
+				output.allowed -= 1;
+			}
 		}
 		self.inner.try_send(transmit)
 	}
 
 	fn poll_writable(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
 		let mut output = self.output.lock().unwrap();
-		if !output.blocked {
+		if !output.blocked || output.allowed > 0 {
 			return Poll::Ready(Ok(()));
 		}
 		output.attempts += 1;
@@ -2627,74 +2780,29 @@ impl AsyncUdpSocket for ControlledSocket {
 fn a_close_behind_a_blocked_socket_is_bounded() {
 	for release in [false, true] {
 		kio::clock::sim::run(async {
-			let network = super::sim::Network::new(1);
-			let client_addr = SocketAddr::from(([10, 0, 0, 1], 4433));
-			let server_addr = SocketAddr::from(([10, 0, 0, 2], 443));
-			let factory = EndpointFactory::new();
-			let mut transport = transport::Config::default();
-			transport.idle_timeout = None;
-			let mut roots = RootCertStore::empty();
-			roots.add(factory.cert.cert.der().clone()).unwrap();
-			let mut config = client::Config::with_root_certificates(Arc::new(roots)).unwrap();
-			config.transport = transport.clone();
-			let output = Arc::new(Mutex::new(ControlledOutput::default()));
-			let socket: Box<dyn AsyncUdpSocket> = Box::new(ControlledSocket {
-				inner: network.bind(server_addr),
-				output: output.clone(),
-			});
-			let client = Endpoint::new(endpoint::Config::default(), network.bind(client_addr)).unwrap();
-			let server = Endpoint::new(
-				endpoint::Config::default().with_server(factory.server_config(transport)),
-				socket,
-			)
-			.unwrap();
-			let (conn, peer) = tokio::try_join!(client.connect(&config, server_addr, "localhost").unwrap(), async {
-				server.accept().await.unwrap().accept().unwrap().await
-			})
-			.unwrap();
-
-			// Settle the server's handshake flight and FIN before holding an ACK-only packet.
-			let warmup = peer.open_uni(Default::default()).await.unwrap().finish();
-			assert_eq!(warmup.await, Ok(None));
-			// Retire handshake keys on the simulated clock before blocking its next send.
-			sleep(Duration::from_secs(1)).await;
+			let Controlled {
+				output,
+				server,
+				conn,
+				peer,
+				..
+			} = Controlled::connect().await;
 
 			output.lock().unwrap().blocked = true;
 			let mut stream = conn.open_uni(Default::default()).await.unwrap();
 			stream.write_all(&b"held"[..]).await.unwrap();
 			let finished = stream.finish();
-			kio::wait(|waiter| {
-				let mut output = output.lock().unwrap();
-				if output.writable.is_some() {
-					return Poll::Ready(());
-				}
-				waiter.register(&mut output.parked);
-				Poll::Pending
-			})
-			.await;
+			ControlledOutput::parked(&output, 0).await;
 
 			// Consume any transmit registration left from before the socket blocked. The driver
 			// must park again without polling transmission, which would consume a packet.
 			let attempts = output.lock().unwrap().attempts;
 			peer.send_datagram(Bytes::from_static(b"queued"), Default::default())
 				.unwrap();
-			kio::wait(|waiter| {
-				let mut output = output.lock().unwrap();
-				if output.attempts > attempts {
-					return Poll::Ready(());
-				}
-				waiter.register(&mut output.parked);
-				Poll::Pending
-			})
-			.await;
+			ControlledOutput::parked(&output, attempts).await;
 
 			if release {
-				let waker = {
-					let mut output = output.lock().unwrap();
-					output.blocked = false;
-					output.writable.take().unwrap()
-				};
-				waker.wake();
+				ControlledOutput::release(&output, None);
 				let mut received = peer.accept_uni().await.unwrap();
 				assert_eq!(received.read_to_end(4).await.unwrap(), b"held");
 				assert_eq!(finished.await, Ok(None));
@@ -2714,6 +2822,44 @@ fn a_close_behind_a_blocked_socket_is_bounded() {
 			}
 		});
 	}
+}
+
+/// A datagram the socket held from before a local close is not the CONNECTION_CLOSE, so
+/// sending it leaves `closed` waiting for the close itself.
+#[cfg(feature = "sim")]
+#[test]
+fn closed_waits_past_a_datagram_held_from_before_the_close() {
+	use futures::FutureExt;
+
+	kio::clock::sim::run(async {
+		let Controlled { output, conn, peer, .. } = Controlled::connect().await;
+
+		output.lock().unwrap().blocked = true;
+		peer.send_datagram(Bytes::from_static(b"held"), Default::default())
+			.unwrap();
+		ControlledOutput::parked(&output, 0).await;
+		peer.close(7u32.into(), "bye");
+
+		// Send only the held datagram, so the close behind it parks.
+		let attempts = output.lock().unwrap().attempts;
+		ControlledOutput::release(&output, Some(1));
+		ControlledOutput::parked(&output, attempts).await;
+		assert_eq!(output.lock().unwrap().allowed, 0, "the held datagram was not sent");
+		assert!(
+			peer.closed().now_or_never().is_none(),
+			"resolved before the close was sent"
+		);
+
+		ControlledOutput::release(&output, None);
+		assert!(matches!(
+			wait_closed(&peer).await,
+			crate::quic::driver::connection::Error::LocallyClosed { .. }
+		));
+		assert!(matches!(
+			wait_closed(&conn).await,
+			crate::quic::driver::connection::Error::ApplicationClosed(_)
+		));
+	});
 }
 
 /// A finished handle keeps the terminal outcome when driven as a future or a caller-owned poll.
@@ -2740,4 +2886,30 @@ async fn finished_waits_keep_the_terminal_outcome() {
 			assert!(matches!(awaited, Err(send::Error::Connection(_))));
 		}
 	}
+}
+
+/// A local close resolves `closed` once the driver has sent the CONNECTION_CLOSE, as on the
+/// other backends, so a caller that exits the moment it resolves still tells the peer.
+#[tokio::test]
+async fn closed_waits_for_the_close_to_be_sent() {
+	use futures::FutureExt;
+
+	let _guard = subscribe();
+	let endpoint = endpoint();
+	let (conn, server) = connect_self(&endpoint).await;
+	let sent = conn.stats().udp_tx.datagrams;
+	conn.close(7u32.into(), "bye");
+	assert!(conn.closed().now_or_never().is_none(), "nothing has sent the close yet");
+	assert!(matches!(
+		wait_closed(&conn).await,
+		crate::quic::driver::connection::Error::LocallyClosed { .. }
+	));
+	assert!(
+		conn.stats().udp_tx.datagrams > sent,
+		"resolved before the close was sent"
+	);
+	assert!(matches!(
+		wait_closed(&server).await,
+		crate::quic::driver::connection::Error::ApplicationClosed(_)
+	));
 }

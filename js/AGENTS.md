@@ -4,7 +4,7 @@ The `/js` Bun workspace, published as `@moq/<package>`. Run recipes via `just js
 
 `@moq/signals` is the reactive core; read `signals/src/index.ts` before touching reactive code.
 
-- `Signal` equality is deep for plain data but identity for class instances; `set(v, true)` forces a notify.
+- `Signal` equality is deep for plain data but identity for class instances, except clock values (by value); `set(v, true)` forces a notify.
 - `Computed` is `undefined` until its first run and after `close()`. Close standalone ones; `effect.computed()` closes with its parent.
 - An `Effect` rerun waits for every `effect.spawn` task from the previous run to settle, so register `effect.cleanup` unconditionally.
 - Use the scoped helpers (`effect.interval`, `timer`, `event`, `subscribe`, ...) over raw timers and listeners, and nested `effect.run` over one giant effect.
@@ -24,6 +24,6 @@ The `/js` Bun workspace, published as `@moq/<package>`. Run recipes via `just js
 # Conventions
 
 - Only browser performance counts; accept a small regression that shows only on node or bun.
-- Document every export and give each entrypoint a `@module` block (JSR builds docs from them). Hide deprecated exports with `@internal` or drop them; never annotate "use X".
+- Document every export and give each entrypoint a `@module` block. Hide deprecated exports with `@internal` or drop them; never annotate "use X".
 - `just js check` includes the build, since declaration emit catches errors `--noEmit` misses, and rejects importing a `@moq/*` package the manifest doesn't declare.
 - Test UI or playback changes with `just dev` in a real browser. `<moq-watch>` renders black in a background tab unless `visible="always"`.

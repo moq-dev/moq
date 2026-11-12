@@ -11,7 +11,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Pattern, Patterns, Version, origin};
+use moq_net::{Pattern, Patterns, Version, origin};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// Long enough, in virtual time, for anything in flight to reach the far side.
@@ -21,24 +21,16 @@ const SERVED: &str = ".dash";
 const REQUESTED: &str = ".dash/nobody";
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Drain every event the cursor has pending, as `kind prefix` lines.
 fn drain(announced: &mut moq_net::origin::Routes) -> Vec<String> {
-	use moq_net::origin::RouteEvent as Event;
 	let mut seen = Vec::new();
 	while let Some(event) = announced.try_next() {
-		let (kind, announce) = match event {
-			Event::Start(announce) => ("Start", announce),
-			Event::Update(announce) => ("Update", announce),
-			Event::Restart(announce) => ("Restart", announce),
-			Event::Takeover { announce, .. } => ("Takeover", announce),
-			Event::End(announce) => ("End", announce),
-		};
-		seen.push(format!("{kind} {}", announce.prefix));
+		seen.push(format!("{:?} {}", event.kind, event.announce.prefix));
 	}
 	seen
 }
@@ -134,7 +126,7 @@ async fn relays_route_a_covering_claim_that_listings_omit() {
 		let version: Version = version.parse().unwrap();
 		let publisher = produce_origin(1);
 		let claim = publisher
-			.route_prefix("room", moq_net::origin::RouteOptions::default())
+			.claim("room", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let listed = publisher
 			.route("lobby.chat", moq_net::origin::RouteOptions::hidden())

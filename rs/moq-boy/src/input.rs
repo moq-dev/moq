@@ -1,7 +1,7 @@
 //! Viewer sessions and their commands.
 //!
-//! The emulator runs a socket endpoint named for its game, and each viewer dials it in a
-//! `track` session. Each group the viewer writes is one JSON command: button states or a
+//! The emulator runs a server socket endpoint named for its game, and each viewer dials it
+//! from a client endpoint in a `track` session. Each group the viewer writes is one JSON command: button states or a
 //! reset. The emulator answers each button command with that viewer's latency breakdown,
 //! one group per reply, on its own half of the session. A viewer is gone once its session
 //! ends, and a reload is a new session.
@@ -227,7 +227,7 @@ mod tests {
 		let (tx, rx) = tokio::sync::mpsc::channel(16);
 		tokio::spawn(async move { handle_viewers(&game, &tx).await });
 
-		let viewer = Endpoint::new(&origin, "boy", "viewer-alice").unwrap();
+		let viewer = Endpoint::new(&origin, "boy", "alice").unwrap();
 		let session = kio::clock::timeout(Duration::from_secs(5), viewer.dial_track("tetris", None).unwrap())
 			.await
 			.expect("dial timeout")
@@ -327,7 +327,7 @@ mod tests {
 		let frame = group.read_frame().await.unwrap().expect("a frame");
 		assert_eq!(&frame.payload[..], br#"{"latency":[{"label":"input","ms":42}]}"#);
 
-		session.producer.finish().unwrap();
+		let _producer = session.producer.finish().unwrap();
 		let Command::Left { viewer: left } = recv(&mut rx).await else {
 			panic!("the finished session did not leave");
 		};

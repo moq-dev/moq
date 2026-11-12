@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
-import { type Installed, Manual, Milli, Nano } from "@moq/clock";
+import { Duration, type Installed, Manual } from "@moq/clock";
 import * as Announce from "../announced.ts";
 import { AuthSession } from "../auth_session.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
-import { RouteInfo } from "../hop.ts";
+import { WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { registerWire, wireOf } from "../wire.ts";
-import type { Established } from "./established.ts";
 import { forwardAnnounced } from "./forward.ts";
+import type { Session } from "./session.ts";
 
 const LINGER = 2000;
 
@@ -30,12 +30,12 @@ afterEach(() => {
 
 /** Drain the reactive work without moving time. */
 function settle(): Promise<void> {
-	return clock.advance(Nano.zero);
+	return clock.advance(Duration.ZERO);
 }
 
 /** Move time forward, draining the reactive work at each deadline on the way. */
 function advance(ms: number): Promise<void> {
-	return clock.advance(Nano.fromMilli(Milli(ms)));
+	return clock.advance(Duration.millis(ms));
 }
 
 /**
@@ -72,6 +72,7 @@ class FakeSession {
 		registerWire(this, {
 			consume: (path) => this.consume(path),
 			exclusive,
+			leave: () => {},
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
 		});
 		this.closed = new Promise((resolve) => {
@@ -127,12 +128,12 @@ class FakeSession {
 	}
 
 	/** What `forwardAnnounced` takes; only the members it touches are implemented. */
-	get session(): Established {
-		return this as unknown as Established;
+	get session(): Session {
+		return this as unknown as Session;
 	}
 }
 
-function start(stream: Announce.Producer, prefix: string, route: RouteInfo = RouteInfo.default) {
+function start(stream: Announce.Producer, prefix: string, route: WireRoute = WireRoute.default) {
 	stream.append({ prefix: Path.from(prefix), captures: undefined, kind: "start", route });
 }
 
@@ -382,7 +383,7 @@ test("an exclusive session closes every request beneath a broader one before it 
 	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(false);
 	start(session.stream("a/**"), "a/b/x");
 	await settle();
-	expect(events).toEqual(["start a/b/x", "end a/b/x", "start a/b/x"]);
+	expect(events).toEqual(["start a/b/x", "offline a/b/x", "start a/b/x"]);
 	expect(origin.discovery.peek()).toBe(true);
 
 	// The narrower watch rides the broader request from here on.
@@ -411,12 +412,12 @@ for (const [name, instances] of [
 
 		const narrow = origin.routes(Path.Pattern.subtree(Path.from("a/b")));
 		await settle();
-		start(session.stream("a/b/**"), "a/b/x", { ...RouteInfo.default, instance: instances[0] });
+		start(session.stream("a/b/**"), "a/b/x", { ...WireRoute.default, instance: instances[0] });
 		await settle();
 		const broad = origin.routes(Path.Pattern.subtree(Path.from("a")));
 		const events = record(broad);
 		await settle();
-		start(session.stream("a/**"), "a/b/x", { ...RouteInfo.default, instance: instances[1] });
+		start(session.stream("a/**"), "a/b/x", { ...WireRoute.default, instance: instances[1] });
 		await settle();
 		expect(events).toEqual(["start a/b/x"]);
 

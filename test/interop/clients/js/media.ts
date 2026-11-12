@@ -133,7 +133,7 @@ const selected = new Set<string>(
 	values.cases === undefined
 		? native
 			? NATIVE_CASES
-			: CASES
+			: CASES.filter((name) => requestedPlayer !== "firefox" || name !== "replacement")
 		: values.cases === "none"
 			? []
 			: values.cases.split(","),
@@ -161,6 +161,17 @@ if (
 const publisherEngine = requestedPublisher as Engine;
 const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
+if (!native && values.cases === undefined && playerEngine === "firefox") {
+	console.error(
+		"QUARANTINE\treplacement\tintermittent audio tone; investigate with https://github.com/moq-dev/moq/pull/8058",
+	);
+}
+// Every replacement publisher pins lite-07, including the lite-06 and IETF reader legs.
+// An explicit --cases replacement remains available while porting the route wire.
+if (!native && values.cases === undefined) {
+	selected.delete("replacement");
+	console.error("QUARANTINE\treplacement\tJS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md");
+}
 
 // process.exit narrows `url` above, but not inside the function declarations below.
 const relay: string = url;

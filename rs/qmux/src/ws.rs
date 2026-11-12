@@ -6,46 +6,28 @@ use crate::protocol::validate_protocol;
 use crate::transport::WsTransport;
 use moq_net::transport::Address;
 use moq_quic::Side;
+use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::{Config, Driver, Error, Session, Version, alpn};
 
-/// The `tokio-tungstenite` version this crate is built against.
-///
-/// [`Client::with_connector`] and [`Upgraded`] take `tokio-tungstenite` types
-/// directly, so use this re-export rather than a separately pinned dependency -
-/// a different minor version is a distinct crate to the compiler and fails to
-/// typecheck against these APIs.
-pub use tokio_tungstenite;
-
-/// The `tungstenite` version this crate is built against, matching
-/// [`tokio_tungstenite`].
-///
-/// [`Client::with_config`] and [`Upgraded`] name `tungstenite` types, and
-/// [`Error::WebSocket`] wraps a `tungstenite::Error`.
-pub use tokio_tungstenite::tungstenite;
-
 /// The largest WebSocket message or frame a session under `config` reads.
 ///
-/// Each message carries one record, or one frame on draft-00, so cap a socket upgraded
-/// elsewhere (see [`Upgraded`]) at this: a larger one is refused anyway, but only after
-/// the socket buffered it whole.
-pub fn max_message_size(config: &Config) -> usize {
+/// Each message carries one record, or one frame on draft-00, so the socket is capped
+/// at this: a larger one would be refused anyway, but only after buffering it whole.
+fn max_message_size(config: &Config) -> usize {
 	usize::try_from(config.max_record_size)
 		.unwrap_or(usize::MAX)
 		.max(crate::MAX_FRAME_SIZE)
 }
 
-/// `config` with its message and frame sizes held to [`max_message_size`] of `session`.
-fn capped(
-	config: Option<tungstenite::protocol::WebSocketConfig>,
-	session: &Config,
-) -> tungstenite::protocol::WebSocketConfig {
+/// The socket settings for a session under `session`: messages and frames held to
+/// [`max_message_size`].
+fn capped(session: &Config) -> tungstenite::protocol::WebSocketConfig {
 	let max = max_message_size(session);
-	let mut config = config.unwrap_or_default();
-	config.max_message_size = Some(config.max_message_size.map_or(max, |size| size.min(max)));
-	config.max_frame_size = Some(config.max_frame_size.map_or(max, |size| size.min(max)));
-	config
+	tungstenite::protocol::WebSocketConfig::default()
+		.max_message_size(Some(max))
+		.max_frame_size(Some(max))
 }
 
 /// Keep-alive configuration for WebSocket transports.
@@ -76,7 +58,7 @@ impl KeepAlive {
 
 impl Default for KeepAlive {
 	fn default() -> Self {
-		// Match the QUIC defaults used by moq-native: 5s ping, 30s deadline.
+		// Match the QUIC defaults used by moq-tokio: 5s ping, 30s deadline.
 		Self {
 			interval: Duration::from_secs(5),
 			timeout: Duration::from_secs(30),
@@ -84,31 +66,29 @@ impl Default for KeepAlive {
 	}
 }
 
-/// Wrap an already-upgraded WebSocket as a QMux session.
+/// Run a QMux session over a connection whose HTTP upgrade to WebSocket already
+/// finished.
 ///
-/// Use this when the WebSocket handshake was performed by an external
-/// framework (e.g. axum) and the caller already has the negotiated
-/// `Sec-WebSocket-Protocol` value, which names the QMux wire-format version and
-/// application protocol. Disable Nagle on the TCP socket underneath, as with
-/// [`Server::accept`].
+/// Use this when an HTTP server (e.g. hyper or axum) answered the upgrade and the
+/// caller has the raw upgraded IO and the negotiated `Sec-WebSocket-Protocol`
+/// value, which names the QMux wire-format version and application protocol.
+/// [`connect`](Self::connect) speaks the WebSocket client role and
+/// [`accept`](Self::accept) the server role. The IO must hold nothing but
+/// WebSocket frames: no handshake bytes, and none already read past it. Disable
+/// Nagle on the TCP socket underneath, as with [`Server::accept`].
 pub struct Upgraded<T> {
-	ws: T,
+	io: T,
 	alpn: String,
 	keep_alive: Option<KeepAlive>,
 	socket_stats: Option<crate::SharedSocketStats>,
 	session: Config,
 }
 
-impl<T> Upgraded<T>
-where
-	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
-		+ futures::Sink<tungstenite::Message, Error = tungstenite::Error>
-		+ Unpin,
-{
-	/// Wrap `ws`, whose handshake negotiated the `Sec-WebSocket-Protocol` value `alpn`.
-	pub fn new(ws: T, alpn: &str) -> Self {
+impl<T: AsyncRead + AsyncWrite + Unpin> Upgraded<T> {
+	/// Wrap `io`, whose upgrade negotiated the `Sec-WebSocket-Protocol` value `alpn`.
+	pub fn new(io: T, alpn: &str) -> Self {
 		Self {
-			ws,
+			io,
 			alpn: alpn.to_string(),
 			keep_alive: None,
 			socket_stats: None,
@@ -124,11 +104,6 @@ where
 
 	/// Use `config` for every session setting except the wire-format version
 	/// and application protocol, which the handshake negotiates.
-	///
-	/// The WebSocket handshake already settled the protocol, so the session starts
-	/// without awaiting the peer's transport parameters, failing later with
-	/// [`Error::HandshakeTimeout`] if they never arrive. Cap the socket's message and
-	/// frame sizes at [`max_message_size`] of `config`, since each record is one message.
 	pub fn with_session_config(mut self, config: Config) -> Self {
 		self.session = config;
 		self
@@ -146,39 +121,40 @@ where
 		self
 	}
 
-	/// Wrap as a client-side session, returned with the [`Driver`] to spawn.
+	/// Wrap as a client-side session once it is established, returned with the
+	/// [`Driver`] to spawn.
 	///
-	/// The protocol is already known from the negotiated subprotocol (ALPN), so
-	/// this returns synchronously without awaiting in-band parameters. Fails when
-	/// the subprotocol names no QMux version.
-	pub fn connect(self) -> Result<(Session, Driver<WsTransport<T>>), Error> {
-		self.start(Side::Client)
+	/// As with [`Session::connect`], established means the peer's transport parameters
+	/// arrived, so its stream and datagram limits are known. Fails when the subprotocol
+	/// names no QMux version, or with [`Error::HandshakeTimeout`] if the parameters never
+	/// arrive.
+	pub async fn connect(self) -> Result<(Session, Driver<WsTransport<WebSocketStream<T>>>), Error> {
+		self.start(Side::Client).await
 	}
 
-	/// Wrap as a server-side session, returned with the [`Driver`] to spawn.
-	///
-	/// As with [`connect`](Self::connect), the protocol is known from the
-	/// negotiated subprotocol, so this returns synchronously.
-	pub fn accept(self) -> Result<(Session, Driver<WsTransport<T>>), Error> {
-		self.start(Side::Server)
+	/// Wrap as a server-side session once it is established, as with
+	/// [`connect`](Self::connect).
+	pub async fn accept(self) -> Result<(Session, Driver<WsTransport<WebSocketStream<T>>>), Error> {
+		self.start(Side::Server).await
 	}
 
-	fn start(self, side: Side) -> Result<(Session, Driver<WsTransport<T>>), Error> {
+	async fn start(self, side: Side) -> Result<(Session, Driver<WsTransport<WebSocketStream<T>>>), Error> {
 		let (version, protocol) = alpn::parse(Some(&self.alpn))?;
 		let config = self.session.clone().with_negotiated(version, protocol);
-		let transport = self.into_transport()?;
-		Session::new(transport, side, config)
-	}
-
-	fn into_transport(self) -> Result<WsTransport<T>, Error> {
-		let mut transport = WsTransport::new(self.ws, Address::Uri);
+		let role = match side {
+			Side::Client => tungstenite::protocol::Role::Client,
+			Side::Server => tungstenite::protocol::Role::Server,
+		};
+		let ws = WebSocketStream::from_raw_socket(self.io, role, Some(capped(&config))).await;
+		let mut transport = WsTransport::new(ws, Address::Uri);
 		if let Some(stats) = self.socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}
-		Ok(match self.keep_alive {
+		let transport = match self.keep_alive {
 			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
-		})
+		};
+		Session::start(transport, side, config).await
 	}
 }
 
@@ -196,11 +172,10 @@ where
 pub struct Client {
 	protocols: Vec<(String, Vec<Version>)>,
 	require_protocol: bool,
-	config: Option<tungstenite::protocol::WebSocketConfig>,
 	keep_alive: Option<KeepAlive>,
 	session: Config,
 	#[cfg(feature = "wss")]
-	connector: Option<tokio_tungstenite::Connector>,
+	tls: Option<std::sync::Arc<rustls::ClientConfig>>,
 }
 
 impl Client {
@@ -233,12 +208,6 @@ impl Client {
 		self
 	}
 
-	/// Set the WebSocket configuration, its message and frame sizes held to [`max_message_size`].
-	pub fn with_config(mut self, config: tungstenite::protocol::WebSocketConfig) -> Self {
-		self.config = Some(config);
-		self
-	}
-
 	/// Send periodic Pings and close the session if the peer goes silent.
 	///
 	/// WebSocket has no built-in idle timeout, so without this a crashed peer
@@ -254,20 +223,21 @@ impl Client {
 	/// The WebSocket handshake already settled the protocol, so the session starts
 	/// without awaiting the peer's transport parameters, failing later with
 	/// [`Error::HandshakeTimeout`] if they never arrive. The socket's message and frame
-	/// sizes are held to [`max_message_size`] of `config`, since each record is one message.
+	/// sizes are held to one record of `config`.
 	pub fn with_session_config(mut self, config: Config) -> Self {
 		self.session = config;
 		self
 	}
 
-	/// Set the TLS connector for secure WebSocket connections.
+	/// Dial `wss://` URLs with this TLS policy instead of the platform's root store.
 	#[cfg(feature = "wss")]
-	pub fn with_connector(mut self, connector: tokio_tungstenite::Connector) -> Self {
-		self.connector = Some(connector);
+	pub fn with_tls(mut self, tls: std::sync::Arc<rustls::ClientConfig>) -> Self {
+		self.tls = Some(tls);
 		self
 	}
 
-	/// Connect to a WebSocket server, negotiating an advertised `(alpn, version)`.
+	/// Connect to a WebSocket server, negotiating an advertised `(alpn, version)`, and
+	/// return the session once it is established.
 	pub async fn connect(
 		&self,
 		url: &str,
@@ -284,7 +254,7 @@ impl Client {
 			validate_protocol(a)?;
 		}
 
-		let mut request = url.into_client_request().map_err(Error::from)?;
+		let mut request = url.into_client_request().map_err(Error::websocket)?;
 
 		let entries = self.protocols.iter().map(|(a, vs)| (a.as_str(), vs.as_slice()));
 		let protocol_value = alpn::build(entries, self.require_protocol).join(", ");
@@ -294,19 +264,19 @@ impl Client {
 			http::HeaderValue::from_str(&protocol_value).map_err(|_| Error::InvalidProtocol(protocol_value))?,
 		);
 
-		let ws_config = capped(self.config, &self.session);
+		let ws_config = capped(&self.session);
 
 		// `true` disables Nagle: records are already batched, see `Server::accept`.
 		#[cfg(feature = "wss")]
 		let (ws_stream, response) = {
 			let connector = match (
-				&self.connector,
+				&self.tls,
 				request
 					.uri()
 					.scheme_str()
 					.is_some_and(|scheme| scheme.eq_ignore_ascii_case("wss")),
 			) {
-				(Some(connector), _) => Some(connector.clone()),
+				(Some(tls), _) => Some(tokio_tungstenite::Connector::Rustls(tls.clone())),
 				(None, true) => {
 					let provider = moq_crypto::provider::provider()?;
 					let native = rustls_native_certs::load_native_certs();
@@ -330,13 +300,13 @@ impl Client {
 			};
 			tokio_tungstenite::connect_async_tls_with_config(request, Some(ws_config), true, connector)
 				.await
-				.map_err(Error::from)?
+				.map_err(Error::websocket)?
 		};
 
 		#[cfg(not(feature = "wss"))]
 		let (ws_stream, response) = tokio_tungstenite::connect_async_with_config(request, Some(ws_config), true)
 			.await
-			.map_err(Error::from)?;
+			.map_err(Error::websocket)?;
 
 		let negotiated = response
 			.headers()
@@ -357,8 +327,7 @@ impl Client {
 			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
 		};
-		// Protocol came from the negotiated subprotocol, so no in-band wait.
-		Session::new(transport, Side::Client, config)
+		Session::start(transport, Side::Client, config).await
 	}
 }
 
@@ -426,13 +395,14 @@ impl Server {
 	/// The WebSocket handshake already settled the protocol, so the session starts
 	/// without awaiting the peer's transport parameters, failing later with
 	/// [`Error::HandshakeTimeout`] if they never arrive. The socket's message and frame
-	/// sizes are held to [`max_message_size`] of `config`, since each record is one message.
+	/// sizes are held to one record of `config`.
 	pub fn with_session_config(mut self, config: Config) -> Self {
 		self.session = config;
 		self
 	}
 
-	/// Accept a WebSocket connection, negotiating an offered `(alpn, version)`.
+	/// Accept a WebSocket connection, negotiating an offered `(alpn, version)`, and
+	/// return the session once it is established.
 	///
 	/// Disable Nagle on a TCP `socket` first (`set_nodelay(true)`): records are
 	/// already batched, so Nagle would only hold a batch's tail for the peer's ACK.
@@ -511,8 +481,9 @@ impl Server {
 				.unwrap())
 		};
 
-		let ws = tokio_tungstenite::accept_hdr_async_with_config(socket, callback, Some(capped(None, &self.session)))
-			.await?;
+		let ws = tokio_tungstenite::accept_hdr_async_with_config(socket, callback, Some(capped(&self.session)))
+			.await
+			.map_err(Error::websocket)?;
 
 		let (version, protocol) = negotiated
 			.lock()
@@ -526,15 +497,13 @@ impl Server {
 			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
 		};
-		// Protocol came from the negotiated subprotocol, so no in-band wait.
-		Session::new(transport, Side::Server, config)
+		Session::start(transport, Side::Server, config).await
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::transport::poll::Session as _;
 	use tokio::io::AsyncWriteExt;
 
 	/// A frame declaring more than one record is refused at its header rather than
@@ -551,17 +520,21 @@ mod tests {
 			)
 			.await
 			.unwrap();
-		let (session, driver) = accept.await.unwrap().unwrap();
-		tokio::spawn(driver);
-
-		// A masked binary frame declaring 1 MiB, with none of its payload sent.
+		// A masked binary frame declaring 1 MiB, with none of its payload sent, before the
+		// client's transport parameters: the accept fails on it rather than awaiting them.
 		let mut frame = vec![0x82, 0x80 | 127];
 		frame.extend_from_slice(&(1u64 << 20).to_be_bytes());
 		frame.extend_from_slice(&[0; 4]);
 		client.write_all(&frame).await.unwrap();
 
-		kio::clock::timeout(Duration::from_secs(1), session.closed())
+		let accepted = kio::clock::timeout(Duration::from_secs(1), accept)
 			.await
-			.expect("the socket waited to buffer a frame larger than a record");
+			.expect("the socket waited to buffer a frame larger than a record")
+			.unwrap();
+		assert!(
+			matches!(&accepted, Err(err) if !matches!(err, Error::HandshakeTimeout)),
+			"{:?}",
+			accepted.map(|_| ())
+		);
 	}
 }

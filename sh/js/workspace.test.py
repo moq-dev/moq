@@ -54,6 +54,8 @@ class SelectionTest(unittest.TestCase):
         sh = self.root / "sh"
         shutil.copy(selector.ROOT / "sh/dispatch.sh", sh / "dispatch.sh")
         shutil.copy(selector.ROOT / "sh/quest.sh", sh / "quest.sh")
+        (sh / "js").mkdir()
+        (sh / "js/install.py").write_text("# Dependency setup is outside this selector fixture.\n")
         changed = sh / "changed.sh"
         changed.write_text("#!/bin/sh\nprintf '%s\\n' js/auth/src/token.ts demo/pub/worker.ts quest/unrelated.md\n")
         changed.chmod(0o755)
@@ -203,7 +205,7 @@ class SelectionTest(unittest.TestCase):
             set(self.plan(["js/view/src/index.ts"])["packages"]), {"@example/core", "@example/view", "docs"}
         )
 
-    def calls(self, paths, action="check", github_actions=False):
+    def calls(self, paths, action="check", github_actions=False, reports=None):
         calls = []
         self.configurations = []
 
@@ -219,6 +221,10 @@ class SelectionTest(unittest.TestCase):
             patch.object(selector.os, "chdir"),
             patch.object(selector.subprocess, "run", side_effect=invoke),
         ):
+            # The nightly gate cost scenarios set this for the whole gate, these tests included.
+            selector.os.environ.pop("JS_TEST_REPORTS", None)
+            if reports:
+                selector.os.environ["JS_TEST_REPORTS"] = str(reports)
             selector.run(action, self.plan(paths))
         return calls
 
@@ -245,6 +251,19 @@ class SelectionTest(unittest.TestCase):
         hosted = self.calls(["doc/index.md"], "test", github_actions=True)
         self.assertIn(["bun", "run", "--filter=docs", "--elide-lines=0", "test"], hosted)
         self.assertFalse(any(c[0] == "just" for c in calls))
+
+    def test_reports_keep_one_junit_per_package(self):
+        reports = self.root / "reports"
+        calls = self.calls(["js/view/src/index.ts"], "test", reports=reports)
+
+        def junit(directory):
+            return ["--reporter=junit", f"--reporter-outfile={reports / directory / 'junit.xml'}"]
+
+        self.assertEqual(
+            [c for c in calls if c[:2] == ["bun", "run"]],
+            [["bun", "run", "test", *junit(d)] for d in ("js/view", "doc")],
+        )
+        self.assertTrue(any(c[:3] == ["bun", "test", *junit(".")[:1]] and junit(".")[1] in c for c in calls))
 
     def test_owned_package_without_scripts_keeps_harness_check(self):
         self.packages["doc"].pop("scripts")

@@ -310,7 +310,7 @@ mod tests {
 	#[tokio::test]
 	async fn timestamp_is_captured_before_queued_delay() {
 		let chan = FrameChannel::new();
-		let captured = chan.epoch + std::time::Duration::from_millis(12);
+		let captured = chan.epoch.saturating_add(std::time::Duration::from_millis(12));
 		chan.push_at(frame(1), captured);
 		assert_eq!(chan.recv().await.unwrap().unwrap().timestamp.as_micros(), 12_000);
 	}
@@ -333,7 +333,7 @@ mod tests {
 	async fn native_timestamps_reanchor_when_the_device_clock_restarts() {
 		let chan = FrameChannel::new();
 		let us = |micros| Timestamp::from_micros(micros).unwrap();
-		let at = |millis| chan.epoch + std::time::Duration::from_millis(millis);
+		let at = |millis| chan.epoch.saturating_add(std::time::Duration::from_millis(millis));
 
 		chan.push_native_at(frame(1), us(0), at(0));
 		// Real time passes with the device clock, so the mapping stays at arrival.
@@ -356,7 +356,7 @@ mod tests {
 	async fn native_timestamps_reanchor_above_a_fast_drain() {
 		let chan = FrameChannel::new();
 		let us = |micros| Timestamp::from_micros(micros).unwrap();
-		let at = |millis| chan.epoch + std::time::Duration::from_millis(millis);
+		let at = |millis| chan.epoch.saturating_add(std::time::Duration::from_millis(millis));
 
 		chan.push_native_at(frame(1), us(0), at(0));
 		chan.push_native_at(frame(2), us(40_000), at(1));
@@ -383,7 +383,7 @@ mod tests {
 	async fn a_device_clock_at_the_end_of_the_timeline_fails_the_stream() {
 		let chan = FrameChannel::new();
 		let us = |micros| Timestamp::from_micros(micros).unwrap();
-		let at = |millis| chan.epoch + std::time::Duration::from_millis(millis);
+		let at = |millis| chan.epoch.saturating_add(std::time::Duration::from_millis(millis));
 
 		chan.push_native_at(frame(1), us(0), at(0));
 		chan.push_native_at(frame(2), us((1 << 61) - 1), at(1));
@@ -399,7 +399,7 @@ mod tests {
 	async fn a_stalled_device_clock_falls_back_to_arrival() {
 		let chan = FrameChannel::new();
 		let constant = Timestamp::from_micros(0).unwrap();
-		let at = |millis| chan.epoch + std::time::Duration::from_millis(millis);
+		let at = |millis| chan.epoch.saturating_add(std::time::Duration::from_millis(millis));
 
 		chan.push_native_at(frame(1), constant, at(0));
 		let first = chan.recv().await.unwrap().unwrap().timestamp;

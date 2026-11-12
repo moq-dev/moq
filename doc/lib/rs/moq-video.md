@@ -26,12 +26,15 @@ feature (vendored C++); the published bindings and binaries enable it. H.265 is
 hardware-only, AV1 decodes through NVDEC and MediaCodec, and VP8 and VP9
 decode in software through the opt-in `vpx` feature.
 
-`encode::publish_capture` advertises the track up front, then keeps the camera
-open and encoding whether or not anyone subscribes, so a late viewer can fetch
-the recent past. Set `encode::Capture::on_demand` to open the camera only while
-someone subscribes, at the cost of that past. A viewer who joins
+`encode::publish_capture` advertises the track up front and returns a
+`Publication` that reports its status, plus the `Driver` that captures. Running
+the driver keeps the camera open and encoding whether or not anyone subscribes,
+so a late viewer can fetch the recent past. Set `encode::Capture::on_demand` to
+open the camera only while someone subscribes, at the cost of that past. Either
+way the driver first opens the camera once to learn its mode, which can raise a
+permission prompt before anyone subscribes. A viewer who joins
 once the current group's deltas outweigh twice its keyframe gets a fresh
-keyframe, so the GOP is only the longest a group runs. Through a moq-lite
+keyframe, so `encode::Config::join` is only the longest a group runs. Through a moq-lite
 relay, only the join that opens the relay's upstream subscription counts. A
 build with the `v4l2` feature keeps every `Auto` or `Hardware` selection to its
 GOP, whichever encoder it lands on, since a V4L2 driver may refuse the request.
@@ -40,10 +43,10 @@ change bitrate live follow the connection's send estimate while someone
 watches, and return to the configured bitrate while nobody does. Where the platform
 allows it, frames stay on the GPU between capture, decode, encode, and render.
 
-Opt-in features: `capture`, `vaapi` (Intel and AMD on Linux; the build needs
-libclang), `v4l2` (ARM SoC codecs such as a Raspberry Pi's), `pipewire` (Linux
-portal capture and PipeWire cameras; links libpipewire), and `vpx` (links
-libvpx).
+Opt-in features: `capture`, `v4l2` (ARM SoC codecs such as a Raspberry Pi's),
+`pipewire` (Linux portal capture and PipeWire cameras; links libpipewire), and
+`vpx` (links libvpx). `vaapi` (Intel and AMD on Linux) is on by default beside
+`nvidia`, since neither needs anything on the build host.
 
 On Wayland, the `pipewire` feature lets Rust callers request a screen or
 window through the system picker with `capture::Source::Portal`. Keep the

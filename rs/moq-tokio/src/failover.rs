@@ -162,7 +162,7 @@ where
 				match addr {
 					Some(addr) => {
 						start(addr, &mut attempts);
-						ready = kio::clock::now() + delay;
+						ready = kio::clock::now().saturating_add(delay);
 					}
 					None => exhausted = true,
 				}

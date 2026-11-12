@@ -2,7 +2,7 @@
 //!
 //! [`Control`] turns each grant from a [`bandwidth::Consumer`] into the target
 //! rate a sender should produce, so audio, video, and transcode back off the
-//! same way. [`Follower`] drives it from a live grant. A rendition encoded beside
+//! same way. [`Grant`] drives it from a live grant. A rendition encoded beside
 //! lower ones of the same source sets [`Policy::lower`], and stops once its grant
 //! can no longer fund it, so the lower renditions keep their share.
 
@@ -138,7 +138,7 @@ pub enum Target {
 ///
 /// A raise climbs over several updates, and a grant that has settled sends no
 /// further estimate to climb on, so a sender following a live grant uses
-/// [`Follower`], which also wakes when the ramp allows the next step.
+/// [`Grant`], which also wakes when the ramp allows the next step.
 ///
 /// The time source is a parameter rather than an [`Instant::now`] call so the
 /// policy stays pure and testable. Pass the time the estimate was observed.
@@ -207,7 +207,7 @@ impl Control {
 	}
 
 	/// Follow `policy` from the next [`update`](Self::update), returning whether it changed;
-	/// see [`Follower::set_policy`].
+	/// see [`Grant::set_policy`].
 	fn set_policy(&mut self, policy: Policy) -> bool {
 		if policy == self.policy {
 			return false;
@@ -330,7 +330,9 @@ impl Control {
 		let disable = boundary.is_some_and(|boundary| desired < boundary);
 		let under = boundary.is_some_and(|boundary| self.target < boundary);
 		let settling = next > self.target && next == self.policy.max;
-		let suppressed = next == self.target || (!settling && next.abs_diff(self.target) < band(self.target));
+		// A sender above the ceiling, such as an assumed one, always comes down to it.
+		let over = self.target > self.policy.max;
+		let suppressed = next == self.target || (!settling && !over && next.abs_diff(self.target) < band(self.target));
 		if suppressed && !(disable && under) {
 			self.deadline = self.raise(desired);
 			return None;
@@ -424,7 +426,7 @@ impl Control {
 /// Follow a [`Reservation`](bandwidth::Reservation)'s consumer: it reports whether a
 /// session probes for it, which a rendition needs before it disables, and the slice it
 /// would get back while unwatched, which it needs to resume after its viewers left.
-pub struct Follower {
+pub struct Grant {
 	grant: bandwidth::Consumer,
 	control: Control,
 	/// Armed at the control's deadline, created on first use.
@@ -434,7 +436,7 @@ pub struct Follower {
 	refeed: bool,
 }
 
-impl Follower {
+impl Grant {
 	/// Follow `grant` under `policy`, starting at [`Policy::max`].
 	pub fn new(grant: bandwidth::Consumer, policy: Policy) -> Self {
 		Self {
@@ -445,6 +447,28 @@ impl Follower {
 		}
 	}
 
+	/// Follow on from a sender already producing at `target`, such as one moving to a new
+	/// grant, rather than at [`Policy::max`]. The current grant is fed on the next poll, so a
+	/// sender below a grant that has room climbs back without waiting for the grant to change,
+	/// and one above [`Policy::max`] is lowered to it.
+	pub fn assume(&mut self, target: Target) {
+		match target {
+			Target::Enabled(rate) => {
+				self.control.target = rate;
+				self.control.enabled = true;
+				// The sender is at this rate now, so a raise ramps from here.
+				self.control.applied = Some(kio::clock::now());
+			}
+			Target::Disabled => {
+				self.control.enabled = false;
+				self.control.applied = None;
+			}
+		}
+		self.control.deadline = None;
+		self.control.last = None;
+		self.refeed = true;
+	}
+
 	/// The policy the target follows.
 	pub fn policy(&self) -> &Policy {
 		&self.control.policy
@@ -452,7 +476,7 @@ impl Follower {
 
 	/// Follow under `policy` from now on, feeding it the current grant on the next poll.
 	///
-	/// A new ceiling or floor starts over at its [`Policy::max`], as a fresh [`Follower`]
+	/// A new ceiling or floor starts over at its [`Policy::max`], as a fresh [`Grant`]
 	/// would, since the sender applied that ceiling itself. A new
 	/// [`lower`](Policy::lower) alone keeps the target and ramp, since nothing retuned
 	/// the sender. Either way a disabled sender stays disabled until that grant resumes
@@ -559,7 +583,7 @@ mod tests {
 
 		// Losing the estimate (disconnected) is not evidence the uplink is
 		// healthy again, so the target must not jump back to max.
-		assert_eq!(control.update(None, now + Duration::from_secs(10)), None);
+		assert_eq!(control.update(None, now.saturating_add(Duration::from_secs(10))), None);
 		assert_eq!(control.target(), on(bps(2_000_000)));
 	}
 
@@ -588,7 +612,7 @@ mod tests {
 		// The pipe reopens to 4 Mbps. One second later the default 25%/s ramp
 		// allows only 1M -> 1.25M, not the full 4 Mbps the estimate wants.
 		let raised = control
-			.update(Some(bps(4_000_000)), start + Duration::from_secs(1))
+			.update(Some(bps(4_000_000)), start.saturating_add(Duration::from_secs(1)))
 			.unwrap();
 		assert_eq!(raised, on(bps(1_250_000)));
 	}
@@ -607,7 +631,10 @@ mod tests {
 		// Tick at 100ms: each tick alone is under the 5% threshold.
 		let mut raised = None;
 		for tick in 1..=10 {
-			if let Some(next) = control.update(Some(bps(4_000_000)), start + Duration::from_millis(100 * tick)) {
+			if let Some(next) = control.update(
+				Some(bps(4_000_000)),
+				start.saturating_add(Duration::from_millis(100 * tick)),
+			) {
 				raised = Some((tick, next));
 				break;
 			}
@@ -633,7 +660,10 @@ mod tests {
 		// Walk up until it settles, then confirm where it settled.
 		let mut last = None;
 		for tick in 1..=200 {
-			if let Some(next) = control.update(Some(bps(4_000_000)), start + Duration::from_millis(100 * tick)) {
+			if let Some(next) = control.update(
+				Some(bps(4_000_000)),
+				start.saturating_add(Duration::from_millis(100 * tick)),
+			) {
 				last = Some(next);
 			}
 		}
@@ -641,7 +671,7 @@ mod tests {
 		assert_eq!(last, Some(on(bps(4_000_000))));
 		// And it stops there rather than reapplying the same value forever.
 		assert_eq!(
-			control.update(Some(bps(4_000_000)), start + Duration::from_secs(60)),
+			control.update(Some(bps(4_000_000)), start.saturating_add(Duration::from_secs(60))),
 			None
 		);
 	}
@@ -658,7 +688,7 @@ mod tests {
 
 		// A 0.5% rise: inside the 5% deadband, and nowhere near the ceiling.
 		assert_eq!(
-			control.update(Some(bps(2_010_000)), start + Duration::from_millis(100)),
+			control.update(Some(bps(2_010_000)), start.saturating_add(Duration::from_millis(100))),
 			None
 		);
 
@@ -667,7 +697,10 @@ mod tests {
 		for tick in 2..=9 {
 			let estimate = 2_000_000 + tick * 10_000;
 			assert_eq!(
-				control.update(Some(bps(estimate)), start + Duration::from_millis(100 * tick)),
+				control.update(
+					Some(bps(estimate)),
+					start.saturating_add(Duration::from_millis(100 * tick))
+				),
 				None,
 				"estimate {estimate} is inside the deadband"
 			);
@@ -677,7 +710,7 @@ mod tests {
 		// And the deadband is still only a deadband: once the estimate does clear it,
 		// the raise lands normally, without needing the ceiling exemption.
 		assert_eq!(
-			control.update(Some(bps(2_200_000)), start + Duration::from_secs(2)),
+			control.update(Some(bps(2_200_000)), start.saturating_add(Duration::from_secs(2))),
 			Some(on(bps(2_200_000)))
 		);
 	}
@@ -689,12 +722,15 @@ mod tests {
 		control.update(Some(bps(2_000_000)), now).unwrap(); // target 2M
 
 		// 2% under the current target: inside the 5% deadband, so no reconfigure.
-		assert_eq!(control.update(Some(bps(1_960_000)), now + Duration::from_secs(1)), None);
+		assert_eq!(
+			control.update(Some(bps(1_960_000)), now.saturating_add(Duration::from_secs(1))),
+			None
+		);
 		assert_eq!(control.target(), on(bps(2_000_000)));
 
 		// 20% under: outside the deadband, so it applies.
 		assert_eq!(
-			control.update(Some(bps(1_600_000)), now + Duration::from_secs(2)),
+			control.update(Some(bps(1_600_000)), now.saturating_add(Duration::from_secs(2))),
 			Some(on(bps(1_600_000)))
 		);
 	}
@@ -738,7 +774,7 @@ mod tests {
 		control.update(Some(bps(1_000_000)), start).unwrap();
 		assert_eq!(control.deadline(), None, "a drop lands at once");
 
-		let recovered = start + Duration::from_secs(1);
+		let recovered = start.saturating_add(Duration::from_secs(1));
 		assert_eq!(
 			control.update(Some(bps(4_000_000)), recovered),
 			Some(on(bps(1_250_000)))
@@ -764,7 +800,7 @@ mod tests {
 			for floor in [1, max / 10, max / 3, max - max / 25] {
 				let mut control = Control::new(Policy::new(bps(max)));
 				control.update(Some(bps(floor)), start);
-				let at = start + Duration::from_millis(7);
+				let at = start.saturating_add(Duration::from_millis(7));
 				control.update(Some(bps(max)), at);
 				let (applied, _) = follow(&mut control, bps(max));
 				assert_eq!(control.target(), on(bps(max)), "{max} from {floor}: {applied:?}");
@@ -779,7 +815,7 @@ mod tests {
 		let start = kio::clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap();
 		assert_eq!(
-			control.update(Some(bps(1_100_000)), start + Duration::from_secs(1)),
+			control.update(Some(bps(1_100_000)), start.saturating_add(Duration::from_secs(1))),
 			Some(on(bps(1_100_000)))
 		);
 		assert_eq!(control.deadline(), None);
@@ -793,7 +829,7 @@ mod tests {
 		let start = kio::clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap();
 		control
-			.update(Some(bps(2_000_000)), start + Duration::from_secs(1))
+			.update(Some(bps(2_000_000)), start.saturating_add(Duration::from_secs(1)))
 			.unwrap();
 		assert!(control.deadline().is_some());
 
@@ -809,14 +845,17 @@ mod tests {
 		let start = kio::clock::now();
 		let mut whole = control();
 		whole.update(Some(bps(2_000_000)), start).unwrap();
-		assert_eq!(whole.update(Some(bps(2_050_000)), start + Duration::from_secs(1)), None);
+		assert_eq!(
+			whole.update(Some(bps(2_050_000)), start.saturating_add(Duration::from_secs(1))),
+			None
+		);
 		assert_eq!(whole.deadline(), None);
 
 		// 1M to 1.3M: one second allows 1.25M, leaving 50k under the 62.5k band.
 		let mut remainder = control();
 		remainder.update(Some(bps(1_000_000)), start).unwrap();
 		assert_eq!(
-			remainder.update(Some(bps(1_300_000)), start + Duration::from_secs(1)),
+			remainder.update(Some(bps(1_300_000)), start.saturating_add(Duration::from_secs(1))),
 			Some(on(bps(1_250_000)))
 		);
 		assert_eq!(remainder.deadline(), None);
@@ -830,19 +869,19 @@ mod tests {
 			let mut control = control();
 			control.update(Some(bps(1_000_000)), start).unwrap();
 			control
-				.update(Some(bps(4_000_000)), start + Duration::from_secs(1))
+				.update(Some(bps(4_000_000)), start.saturating_add(Duration::from_secs(1)))
 				.unwrap();
 			assert!(control.deadline().is_some());
 			control
 		};
 
 		let mut control = scheduled();
-		assert_eq!(control.update(None, start + Duration::from_secs(2)), None);
+		assert_eq!(control.update(None, start.saturating_add(Duration::from_secs(2))), None);
 		assert_eq!(control.deadline(), None);
 
 		let mut control = scheduled();
 		assert_eq!(
-			control.update(Some(bps(800_000)), start + Duration::from_secs(2)),
+			control.update(Some(bps(800_000)), start.saturating_add(Duration::from_secs(2))),
 			Some(on(bps(800_000)))
 		);
 		assert_eq!(control.deadline(), None);
@@ -856,23 +895,23 @@ mod tests {
 		let start = kio::clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap();
 		control
-			.update(Some(bps(4_000_000)), start + Duration::from_secs(1))
+			.update(Some(bps(4_000_000)), start.saturating_add(Duration::from_secs(1)))
 			.unwrap();
 		let (applied, last) = follow(&mut control, bps(4_000_000));
 		assert_eq!(applied.last(), Some(&bps(4_000_000)));
 		let before = applied[applied.len() - 2];
 
-		let failed = last.unwrap() + Duration::from_millis(1);
+		let failed = last.unwrap().saturating_add(Duration::from_millis(1));
 		control.failed(failed);
 		assert_eq!(control.target(), on(before), "the previous target is restored");
 		let retry = control.deadline().expect("the failed raise is retried");
 		assert!(
-			retry >= failed + RETRY,
+			retry >= failed.saturating_add(RETRY),
 			"{retry:?} is sooner than one step after {failed:?}"
 		);
 
 		// A second report has nothing left to take back.
-		control.failed(failed + Duration::from_secs(1));
+		control.failed(failed.saturating_add(Duration::from_secs(1)));
 		assert_eq!(control.target(), on(before));
 		assert_eq!(control.deadline(), Some(retry));
 
@@ -888,9 +927,9 @@ mod tests {
 		control.update(Some(bps(1_000_000)), start).unwrap();
 		control.failed(start);
 		assert_eq!(control.target(), on(bps(4_000_000)));
-		assert_eq!(control.deadline(), Some(start + RETRY));
+		assert_eq!(control.deadline(), Some(start.saturating_add(RETRY)));
 		assert_eq!(
-			control.update(Some(bps(1_000_000)), start + RETRY),
+			control.update(Some(bps(1_000_000)), start.saturating_add(RETRY)),
 			Some(on(bps(1_000_000)))
 		);
 		assert_eq!(control.deadline(), None);
@@ -903,10 +942,10 @@ mod tests {
 		let start = kio::clock::now();
 		control.update(Some(bps(2_000_000)), start).unwrap();
 		assert_eq!(
-			control.update(Some(bps(1_960_000)), start + Duration::from_secs(1)),
+			control.update(Some(bps(1_960_000)), start.saturating_add(Duration::from_secs(1))),
 			None
 		);
-		control.failed(start + Duration::from_secs(1));
+		control.failed(start.saturating_add(Duration::from_secs(1)));
 		assert_eq!(control.target(), on(bps(2_000_000)));
 		assert_eq!(control.deadline(), None);
 	}
@@ -916,7 +955,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_follower_recovers_a_quiet_grant() {
 		let grant = bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(4_000_000)));
 
 		grant.set(Some(bps(1_000_000))).unwrap();
 		assert_eq!(follower.next().await.unwrap(), on(bps(1_000_000)));
@@ -943,12 +982,46 @@ mod tests {
 		assert!(applied.windows(2).all(|pair| pair[0] < pair[1]), "{applied:?}");
 	}
 
+	/// A follower that assumes its sender's state corrects it against an unchanged grant: a
+	/// sender below a full grant ramps back up, and a disabled one resumes.
+	#[tokio::test(start_paused = true)]
+	async fn an_assumed_target_climbs_to_the_grant() {
+		let grant = bandwidth::Producer::new();
+		grant.set(Some(bps(4_000_000))).unwrap();
+
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(4_000_000)));
+		follower.assume(on(bps(1_000_000)));
+		let mut applied = Vec::new();
+		while let Ok(target) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
+			applied.push(target.unwrap());
+		}
+		assert_eq!(applied.last(), Some(&on(bps(4_000_000))));
+		assert!(applied.len() > 1, "the climb ramps rather than jumping: {applied:?}");
+
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(4_000_000)));
+		follower.assume(Target::Disabled);
+		assert!(matches!(follower.next().await.unwrap(), Target::Enabled(_)));
+	}
+
+	/// A follower that assumes a sender above its ceiling lowers it to the ceiling, even from
+	/// inside the deadband, with the grant unchanged.
+	#[tokio::test(start_paused = true)]
+	async fn an_assumed_target_above_the_ceiling_comes_down() {
+		let grant = bandwidth::Producer::new();
+		grant.set(Some(bps(2_000_000))).unwrap();
+		for above in [4_000_000, 2_050_000] {
+			let mut follower = Grant::new(grant.consume(), Policy::new(bps(2_000_000)));
+			follower.assume(on(bps(above)));
+			assert_eq!(follower.next().await.unwrap(), on(bps(2_000_000)), "from {above}");
+		}
+	}
+
 	/// A new policy feeds the unchanged grant through it at once, and setting the same
 	/// policy again changes nothing.
 	#[tokio::test(start_paused = true)]
 	async fn a_new_policy_feeds_the_current_grant() {
 		let grant = bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(4_000_000)));
 		grant.set(Some(bps(3_000_000))).unwrap();
 		assert_eq!(follower.next().await.unwrap(), on(bps(3_000_000)));
 
@@ -978,7 +1051,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_raised_policy_follows_the_next_grant() {
 		let grant = bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(bps(2_000_000)));
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(2_000_000)));
 		grant.set(Some(bps(2_000_000))).unwrap();
 		assert!(
 			kio::clock::timeout(Duration::from_secs(60), follower.next())
@@ -997,7 +1070,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_new_lower_keeps_the_applied_target() {
 		let grant = bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(4_000_000)));
 		grant.set(Some(bps(2_000_000))).unwrap();
 		assert_eq!(follower.next().await.unwrap(), on(bps(2_000_000)));
 
@@ -1021,7 +1094,7 @@ mod tests {
 		let grant = bandwidth::Producer::new();
 		let mut policy = Policy::new(bps(4_000_000));
 		policy.lower = Some(bps(2_000_000));
-		let mut follower = Follower::new(grant.consume(), policy);
+		let mut follower = Grant::new(grant.consume(), policy);
 		grant.set(Some(bps(1_000_000))).unwrap();
 		assert_eq!(follower.next().await.unwrap(), on(bps(1_000_000)));
 	}
@@ -1030,7 +1103,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_closed_grant_ends_the_follower() {
 		let grant = bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(4_000_000)));
 		drop(grant);
 		assert!(follower.next().await.is_err());
 	}
@@ -1052,7 +1125,7 @@ mod tests {
 		// Squeezed, but still inside its band: it adapts like any sender.
 		assert_eq!(rung.update(Some(bps(3_500_000)), start), Some(on(bps(3_500_000))));
 		// Below it, the lower rendition is the better picture, so stop.
-		let off = start + Duration::from_millis(100);
+		let off = start.saturating_add(Duration::from_millis(100));
 		assert_eq!(rung.update(Some(bps(3_000_000)), off), Some(Target::Disabled));
 		assert_eq!(rung.target(), Target::Disabled);
 		assert_eq!(rung.deadline(), None, "only a new estimate resumes it");
@@ -1089,7 +1162,7 @@ mod tests {
 
 		rung.set_probed(false);
 		assert_eq!(
-			rung.update(Some(bps(1_000_000)), start + Duration::from_secs(1)),
+			rung.update(Some(bps(1_000_000)), start.saturating_add(Duration::from_secs(1))),
 			Some(on(bps(1_000_000)))
 		);
 	}
@@ -1101,12 +1174,18 @@ mod tests {
 		assert_eq!(rung.update(Some(bps(3_000_000)), start), Some(Target::Disabled));
 
 		// Back over the boundary, but not by the 5% hysteresis: stay off.
-		assert_eq!(rung.update(Some(bps(3_400_000)), start + Duration::from_secs(1)), None);
-		assert_eq!(rung.update(Some(bps(3_499_000)), start + Duration::from_secs(2)), None);
+		assert_eq!(
+			rung.update(Some(bps(3_400_000)), start.saturating_add(Duration::from_secs(1))),
+			None
+		);
+		assert_eq!(
+			rung.update(Some(bps(3_499_000)), start.saturating_add(Duration::from_secs(2))),
+			None
+		);
 		assert_eq!(rung.target(), Target::Disabled);
 
 		// Clear of it: resume at the boundary rather than the whole estimate.
-		let resumed = start + Duration::from_secs(3);
+		let resumed = start.saturating_add(Duration::from_secs(3));
 		assert_eq!(rung.update(Some(bps(5_000_000)), resumed), Some(on(bps(3_333_333))));
 
 		// Then ramp at 25%/s like any raise, on deadlines alone.
@@ -1126,16 +1205,16 @@ mod tests {
 		// About 3% either side of the boundary, every 100ms for 10s.
 		let jitter = |tick: u64| if tick.is_multiple_of(2) { 3_250_000 } else { 3_430_000 };
 		for tick in 1..=100u64 {
-			let at = start + Duration::from_millis(100 * tick);
+			let at = start.saturating_add(Duration::from_millis(100 * tick));
 			assert_eq!(rung.update(Some(bps(jitter(tick))), at), None, "tick {tick}");
 		}
 		assert_eq!(rung.target(), on(bps(3_400_000)));
 
 		// A real drop turns it off, and the same jitter can't bring it back.
-		let off = start + Duration::from_secs(20);
+		let off = start.saturating_add(Duration::from_secs(20));
 		assert_eq!(rung.update(Some(bps(3_000_000)), off), Some(Target::Disabled));
 		for tick in 1..=100u64 {
-			let at = off + Duration::from_millis(100 * tick);
+			let at = off.saturating_add(Duration::from_millis(100 * tick));
 			assert_eq!(rung.update(Some(bps(jitter(tick))), at), None, "tick {tick}");
 		}
 		assert_eq!(rung.target(), Target::Disabled);
@@ -1146,7 +1225,7 @@ mod tests {
 		let mut rung = rung();
 		let now = kio::clock::now();
 		rung.update(Some(bps(1_000_000)), now).unwrap();
-		assert_eq!(rung.update(None, now + Duration::from_secs(10)), None);
+		assert_eq!(rung.update(None, now.saturating_add(Duration::from_secs(10))), None);
 		assert_eq!(rung.target(), Target::Disabled);
 	}
 
@@ -1161,7 +1240,7 @@ mod tests {
 		let now = kio::clock::now();
 		assert_eq!(rung.update(Some(bps(500_000)), now), Some(Target::Disabled));
 		assert_eq!(
-			rung.update(Some(bps(10_000_000)), now + Duration::from_secs(1)),
+			rung.update(Some(bps(10_000_000)), now.saturating_add(Duration::from_secs(1))),
 			Some(on(bps(966_666)))
 		);
 	}
@@ -1185,16 +1264,19 @@ mod tests {
 		assert_eq!(rung.update(Some(bps(3_000_000)), start), Some(Target::Disabled));
 		rung.failed(start);
 		assert_eq!(rung.target(), on(bps(5_000_000)));
-		assert_eq!(rung.deadline(), Some(start + RETRY));
-		assert_eq!(rung.update(Some(bps(3_000_000)), start + RETRY), Some(Target::Disabled));
+		assert_eq!(rung.deadline(), Some(start.saturating_add(RETRY)));
+		assert_eq!(
+			rung.update(Some(bps(3_000_000)), start.saturating_add(RETRY)),
+			Some(Target::Disabled)
+		);
 
-		let resumed = start + Duration::from_secs(5);
+		let resumed = start.saturating_add(Duration::from_secs(5));
 		assert_eq!(rung.update(Some(bps(5_000_000)), resumed), Some(on(bps(3_333_333))));
 		rung.failed(resumed);
 		assert_eq!(rung.target(), Target::Disabled);
-		assert_eq!(rung.deadline(), Some(resumed + RETRY));
+		assert_eq!(rung.deadline(), Some(resumed.saturating_add(RETRY)));
 		assert_eq!(
-			rung.update(Some(bps(5_000_000)), resumed + RETRY),
+			rung.update(Some(bps(5_000_000)), resumed.saturating_add(RETRY)),
 			Some(on(bps(3_333_333)))
 		);
 	}
@@ -1207,12 +1289,15 @@ mod tests {
 		let mut rung = rung();
 		let start = kio::clock::now();
 		assert_eq!(rung.update(Some(bps(3_000_000)), start), Some(Target::Disabled));
-		let resumed = start + Duration::from_secs(1);
+		let resumed = start.saturating_add(Duration::from_secs(1));
 		assert_eq!(rung.update(Some(bps(5_000_000)), resumed), Some(on(bps(3_333_333))));
 		rung.failed(resumed);
-		assert_eq!(rung.deadline(), Some(resumed + RETRY));
+		assert_eq!(rung.deadline(), Some(resumed.saturating_add(RETRY)));
 
-		assert_eq!(rung.update(Some(bps(3_000_000)), resumed + RETRY / 2), None);
+		assert_eq!(
+			rung.update(Some(bps(3_000_000)), resumed.saturating_add(RETRY / 2)),
+			None
+		);
 		assert_eq!(rung.target(), Target::Disabled);
 		assert_eq!(rung.deadline(), None);
 	}
@@ -1229,14 +1314,14 @@ mod tests {
 		let mut funded = rung.clone();
 		rung.set_probed(true);
 		assert_eq!(
-			rung.update(Some(bps(3_000_000)), start + Duration::from_millis(100)),
+			rung.update(Some(bps(3_000_000)), start.saturating_add(Duration::from_millis(100))),
 			Some(Target::Disabled)
 		);
 
 		// A grant over the boundary funds it, so it ramps up from under it instead.
 		funded.set_probed(true);
 		assert_eq!(
-			funded.update(Some(bps(5_000_000)), start + Duration::from_secs(1)),
+			funded.update(Some(bps(5_000_000)), start.saturating_add(Duration::from_secs(1))),
 			Some(on(bps(3_750_000)))
 		);
 	}
@@ -1253,7 +1338,7 @@ mod tests {
 		policy.lower = Some(bps(3_000_000));
 		assert!(rung.set_policy(policy));
 		assert_eq!(
-			rung.update(Some(bps(3_500_000)), start + Duration::from_millis(100)),
+			rung.update(Some(bps(3_500_000)), start.saturating_add(Duration::from_millis(100))),
 			Some(Target::Disabled)
 		);
 	}
@@ -1317,14 +1402,14 @@ mod tests {
 		// Shrinking further takes the middle one next, still keeping the lowest whole.
 		estimate.set(Some(bps(2_000_000))).unwrap();
 		assert_eq!(
-			update(start + Duration::from_secs(1)),
+			update(start.saturating_add(Duration::from_secs(1))),
 			[on(bps(1_000_000)), Target::Disabled, Target::Disabled]
 		);
 
 		// Below every boundary, the lowest still encodes at what it gets.
 		estimate.set(Some(bps(200_000))).unwrap();
 		assert_eq!(
-			update(start + Duration::from_secs(2)),
+			update(start.saturating_add(Duration::from_secs(2))),
 			[on(bps(200_000)), Target::Disabled, Target::Disabled]
 		);
 
@@ -1333,13 +1418,13 @@ mod tests {
 		viewers[1] = None;
 		viewers[2] = None;
 		estimate.set(Some(bps(8_000_000))).unwrap();
-		let recovered = update(start + Duration::from_secs(3));
+		let recovered = update(start.saturating_add(Duration::from_secs(3)));
 		assert_eq!(recovered[1], on(bps(1_333_333)));
 		assert_eq!(recovered[2], on(bps(2_666_666)));
 	}
 
 	/// Random walks of grants, probing, policy changes, refused changes, and time,
-	/// replayed through [`Control`] the way [`Follower`] drives it, checking the rung's
+	/// replayed through [`Control`] the way [`Grant`] drives it, checking the rung's
 	/// invariants after every wake.
 	mod model {
 		use proptest::prelude::*;
@@ -1410,7 +1495,7 @@ mod tests {
 						self.set_policy(policy, fail);
 					}
 					Op::Advance(elapsed) => {
-						let end = self.now + elapsed;
+						let end = self.now.saturating_add(elapsed);
 						while let Some(at) = self.control.deadline().filter(|at| *at <= end) {
 							self.now = at;
 							self.wake(fail);

@@ -1,4 +1,4 @@
-import { Micro, Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
 import { Origin, Path } from "@moq/net";
@@ -52,8 +52,8 @@ async function poster(audio: boolean, buffered: boolean) {
 		catalogFormat: "manual",
 		catalog,
 		video: { canvas, visible: "always", backend: "2d" },
-		delay: Milli(100),
-		buffer: Milli(buffered ? 1000 : 0),
+		delay: Duration.millis(100),
+		lookahead: Duration.millis(buffered ? 1000 : 0),
 	});
 	const chunks = new Map<number, Uint8Array>();
 	const encoder = new VideoEncoder({
@@ -82,7 +82,7 @@ async function poster(audio: boolean, buffered: boolean) {
 	const push = (timestamp: number) => {
 		const payload = chunks.get(timestamp);
 		if (!payload) throw new Error("missing encoded frame");
-		group.writeFrame({ payload: Legacy.encodeFrame(payload, Micro(timestamp)) });
+		group.writeFrame({ payload: Legacy.encodeFrame(payload, Duration.micros(timestamp)) });
 	};
 	return {
 		push,
@@ -94,7 +94,7 @@ async function poster(audio: boolean, buffered: boolean) {
 				output(chunk) {
 					const data = new Uint8Array(chunk.byteLength);
 					chunk.copyTo(data);
-					audioGroup.writeFrame({ payload: Legacy.encodeFrame(data, Micro(chunk.timestamp)) });
+					audioGroup.writeFrame({ payload: Legacy.encodeFrame(data, Duration.micros(chunk.timestamp)) });
 				},
 				error(error) {
 					throw error;
@@ -121,12 +121,12 @@ async function poster(audio: boolean, buffered: boolean) {
 			if (!context) throw new Error("no renderer canvas context");
 			const rgba = context.getImageData(32, 16, 1, 1).data;
 			return {
-				timestamp: player.renderer.out.frame.peek()?.timestamp,
+				timestamp: player.renderer.painted.peek()?.timestamp,
 				decoded: !!player.video.out.frame.peek(),
 				downloading: player.video.in.enabled.peek(),
 				playing: player.sync.playing.peek(),
 				color: rgba[0] > 160 ? "red" : rgba[2] > 160 ? "blue" : "black",
-				audioTimestamp: player.audio.out.timestamp.peek(),
+				audioTimestamp: player.audio.out.timestamp.peek()?.asMillis(),
 				audioState: player.audio.out.context.peek()?.state,
 			};
 		},

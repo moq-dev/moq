@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/4be350816f2a5c1157f799773ee1594f199fd9a7";
+      url = "github:moq-dev/quest/2572be9c459fc8831a400148c44626527ac32865";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -160,10 +160,10 @@
             cargo-bloat
             # The workspace-hack that gives every build one feature set per dependency.
             cargo-hakari
-            # Weekly mutation testing of the security-critical modules (`just rs mutants`).
-            cargo-mutants
             cargo-nextest
             cargo-codspeed
+            # Sets versions for a release cut; `sh/version.py` needs 0.4.1 or newer.
+            release-plz
             # Source-based test coverage (`just rs coverage`).
             # Its LLVM test helpers must read the compiler's profile format.
             (cargo-llvm-cov.override {
@@ -175,8 +175,6 @@
           ]
           ++ gstreamerDeps
           ++ pkgs.lib.optionals (!pkgs.stdenv.hostPlatform.isDarwin) [
-            # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
-            pkgs.release-plz
             # cpal's `alsa-sys` (moq-audio `capture` / `playback` features) links
             # libasound on Linux via pkg-config; macOS uses CoreAudio, so no dep
             # there. See `alsaPlugins` below for reaching the default device at
@@ -223,9 +221,6 @@
           bun
           # Only for NPM publishing
           nodejs_24
-          # JSR publishing. We call `deno publish` directly instead of `bunx jsr`
-          # so the release doesn't race on a runtime binary download.
-          deno
           # One browser build for local and CI Playwright checks.
           playwright-driver.browsers
         ];
@@ -427,21 +422,22 @@
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
         # and the fork adds `error_style = "expected"`, `strip_type_prefix`, and
-        # `strip_function_prefix`, which cpp/moq/uniffi.toml turns on. Its tags
+        # `strip_function_prefix`, which cpp/moq/uniffi.toml turns on, and C
+        # functions for an object's exported traits (`moq_instance_eq`). Its tags
         # add a `-kixelated.N` pre-release so they never collide with upstream's.
         # Move back upstream once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-cpp";
-          version = "0.11.0-kixelated.7+v0.32.2";
+          version = "0.11.0-kixelated.8+v0.32.2";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
             rev = "v${version}";
-            hash = "sha256-nErLn2hQus5omIaFheJWy06wKQS9HiKNtksxaJm9Z8k=";
+            hash = "sha256-ziqwP54PsSOmOzZXax6WZDtrnEtwzyMhTHD1g7aPraM=";
           };
 
-          cargoHash = "sha256-fz7fn6D12zmFFSVSdySDfNRtQe+n4KCB9bXAsuvq/QY=";
+          cargoHash = "sha256-jWMxmzxU815OhdDnoVfIdOkOC+HijX/gs6BOdDIDTyY=";
 
           # The workspace's other member is the fixture crate, which pulls the
           # uniffi examples in from git; build only the generator.

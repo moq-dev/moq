@@ -1,5 +1,5 @@
 // Finite media fixture and finish observations for the existing browser client.
-import { Micro, Milli, Nano, sleep } from "@moq/clock";
+import { Duration, sleep } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
@@ -8,7 +8,7 @@ import { Effect } from "@moq/signals";
 import { readFinish } from "../../js-native/finish";
 
 /** How long the publisher keeps its finished broadcast up for the late readers. */
-const LINGER = Milli(10_000);
+const LINGER = Duration.millis(10_000);
 
 interface State {
 	ready: boolean;
@@ -44,7 +44,7 @@ export function finish(
 		releaseAck = resolve;
 	});
 	const origin = new Moq.Origin.Producer();
-	let connection: Moq.Connection.Established | undefined;
+	let connection: Moq.Connection.Session | undefined;
 	const state: State = {
 		ready: false,
 		ended: false,
@@ -67,7 +67,7 @@ export function finish(
 		if (role === "finish-subscribe") {
 			state.ready = true;
 			await read;
-			state.result = await readFinish(origin, path, frames, Milli(timeout));
+			state.result = await readFinish(origin, path, frames, Duration.millis(timeout));
 			return;
 		}
 		const broadcastRoute = origin.route(Moq.Path.from(path), { hidden: true });
@@ -87,7 +87,7 @@ export function finish(
 		const media = new Container.Legacy.Producer(track, new Container.Legacy.Format(config));
 		let encodingError: Error | undefined;
 		const encoder = new VideoEncoder({
-			output: (chunk) => media.encode(chunk, Micro(chunk.timestamp), chunk.type === "key"),
+			output: (chunk) => media.encode(chunk, Duration.micros(chunk.timestamp), chunk.type === "key"),
 			error: (error) => {
 				encodingError = error;
 			},
@@ -119,7 +119,7 @@ export function finish(
 		} finally {
 			encoder.close();
 		}
-		media.close();
+		media.finish();
 		const catalog = new CatalogProducer();
 		catalog.mutate((root) => {
 			root.video = { renditions: { video: config } };
@@ -135,9 +135,9 @@ export function finish(
 		serving.close();
 		broadcastRoute.announce();
 		// Keep the finished broadcast up for the late readers, then take it offline.
-		state.lingerUs = LINGER * 1000;
+		state.lingerUs = LINGER.asMicros();
 		state.ready = true;
-		await sleep(Nano.fromMilli(LINGER));
+		await sleep(LINGER);
 		broadcast.close();
 		const healthRoute = origin.route(Moq.Path.from(`${path}.health`), { hidden: true });
 		const health = healthRoute.broadcast;

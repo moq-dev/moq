@@ -2,7 +2,7 @@
 //! forwards one it has no room to stamp.
 //!
 //! Only a peer's route arrives with hops, so the routes under test land through the
-//! hidden `fuzz` module as a session lands them.
+//! `fuzz` module as a session lands them.
 
 use crate::support::{
 	Kind, drain,
@@ -10,23 +10,25 @@ use crate::support::{
 	watch,
 };
 
-use moq_net::{Hop, cache, origin};
+use moq_net::{cache, origin};
+use std::num::NonZeroUsize;
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let mut config = origin::Config::new(Hop::new(hop).unwrap());
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = cache::Pool::unbounded();
 	let (producer, driver) = origin::Producer::new(config);
 	spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Land a peer's route at `path` on `origin`, as its session does.
-fn forward(origin: &origin::Producer, path: &str, route: origin::RouteInfo) -> origin::Route {
+fn forward(origin: &origin::Producer, path: &str, route: origin::RouteInfo) -> origin::Claim {
 	moq_net::fuzz::requests_route(origin, moq_net::Path::new(path).unwrap(), route).unwrap()
 }
 
 /// A permissive source sends an over-limit path to prove ingress refusal; an
-/// accepted boundary path then proves egress counts the relay's own stamp.
+/// accepted boundary path then proves egress counts the relay's own stamp. Lite-07
+/// carries no hop chain: its routes are loop-free by feasibility instead.
 #[kio::test]
 async fn hop_limit_bounds_receive_and_send() {
 	for name in [
@@ -34,31 +36,24 @@ async fn hop_limit_bounds_receive_and_send() {
 		"moq-lite-04",
 		"moq-lite-05",
 		"moq-lite-06",
-		"moq-lite-07-wip",
 		"moq-transport-18",
 		"moq-transport-22",
 	] {
 		let version = name.parse().unwrap();
 		let source = produce_origin(1);
-		let mut config = origin::Config::new(Hop::new(2).unwrap());
-		config.max_hops = origin::HopLimit::new(2).unwrap();
+		let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
+		config.max_hops = NonZeroUsize::new(2).unwrap();
 		config.pool = cache::Pool::unbounded();
 		let (relay, driver) = origin::Producer::new(config);
 		spawn(driver);
+		let relay = relay.with_proxy(true);
 		let sink = produce_origin(3);
 		let _upstream = peer(version, &source, &relay).await;
 		let _downstream = peer(version, &relay, &sink).await;
 		let mut received = watch(relay.consume().routes());
 		let mut sent = watch(sink.consume().routes());
 		kio::clock::sim::idle().await;
-		let route = |count: u64| {
-			moq_net::fuzz::route_info(
-				moq_net::Hops::try_from((100..100 + count).map(|id| Hop::new(id).unwrap()).collect::<Vec<_>>())
-					.unwrap(),
-				0,
-				None,
-			)
-		};
+		let route = |count: u64| moq_net::fuzz::route_info(100..100 + count, 0, None);
 		let _long = forward(&source, "long", route(2));
 		let _boundary = forward(&source, "boundary", route(1));
 		let short = forward(&source, "short", route(0));
@@ -101,16 +96,18 @@ async fn hop_limit_bounds_receive_and_send() {
 /// withdraws only once no in-cap route is left.
 #[kio::test]
 async fn hop_limit_falls_back_to_a_forwardable_route() {
-	// Only wires carrying a route cost can rank a longer route first.
-	for name in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	// Only wires carrying a route cost can rank a longer route first, and only those
+	// carrying a hop chain cap it: lite-07 carries none.
+	for name in ["moq-lite-06", "moq-transport-18", "moq-transport-22"] {
 		let version = name.parse().unwrap();
 		let near = produce_origin(1);
 		let far = produce_origin(4);
-		let mut config = origin::Config::new(Hop::new(2).unwrap());
-		config.max_hops = origin::HopLimit::new(3).unwrap();
+		let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
+		config.max_hops = NonZeroUsize::new(3).unwrap();
 		config.pool = cache::Pool::unbounded();
 		let (relay, driver) = origin::Producer::new(config);
 		spawn(driver);
+		let relay = relay.with_proxy(true);
 		let sink = produce_origin(3);
 		let _near = peer(version, &near, &relay).await;
 		let _far = peer(version, &far, &relay).await;
@@ -118,18 +115,7 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 		let mut sent = watch(sink.consume().routes());
 		kio::clock::sim::idle().await;
 
-		let route = |first: u64, count: u64, cost: u64| {
-			moq_net::fuzz::route_info(
-				moq_net::Hops::try_from(
-					(first..first + count)
-						.map(|id| Hop::new(id).unwrap())
-						.collect::<Vec<_>>(),
-				)
-				.unwrap(),
-				cost,
-				None,
-			)
-		};
+		let route = |first: u64, count: u64, cost: u64| moq_net::fuzz::route_info(first..first + count, cost, None);
 		// Three hops at the relay once the sender is appended: in the cap, but full.
 		let _cheap = forward(&far, "room", route(100, 2, 1));
 		// Two hops at the relay, so it has room for the relay's own.

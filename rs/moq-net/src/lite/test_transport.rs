@@ -618,8 +618,8 @@ pub struct SinkSession {
 	stats: Arc<Mutex<SinkStats>>,
 	/// Set by [`Self::with_probe`].
 	probe: Option<crate::transport::Probe>,
-	/// Set by [`Self::with_receive_window`].
-	receive_window: Option<crate::transport::ReceiveWindow>,
+	/// Set by [`Self::with_receive_window`], and widened by `set_limits`.
+	receive_window: Arc<Mutex<Option<crate::transport::ReceiveWindow>>>,
 }
 
 impl SinkSession {
@@ -651,7 +651,7 @@ impl SinkSession {
 
 	/// Report `window` as the receive windows in force.
 	pub fn with_receive_window(mut self, window: crate::transport::ReceiveWindow) -> Self {
-		self.receive_window = Some(window);
+		self.receive_window = Arc::new(Mutex::new(Some(window)));
 		self
 	}
 
@@ -831,7 +831,17 @@ impl poll::Session for SinkSession {
 	}
 
 	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
-		self.receive_window
+		*self.receive_window.lock().unwrap()
+	}
+
+	/// Set the connection window, on a transport that reports one.
+	fn set_limits(&self, limits: crate::transport::Limits) -> Result<(), crate::transport::LimitsError> {
+		let mut window = self.receive_window.lock().unwrap();
+		let (Some(window), Some(connection)) = (window.as_mut(), limits.receive_window) else {
+			return Err(crate::transport::LimitsError::Unsupported);
+		};
+		window.connection = Some(connection);
+		Ok(())
 	}
 }
 

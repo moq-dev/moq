@@ -21,7 +21,7 @@ local (`!Send`) task set, and the UDP sockets bound through it.
   clock, and `Handle::run` drives MoQ with it and a single timer.
 - **Turns**: each turn reaps and dispatches completions first, then polls the
   root future and runs passes over the woken tasks until a pass wakes nothing
-  or `Config::passes` have run, then parks or submits. So a received
+  or four have run, then parks or submits. So a received
   datagram's routing, its connection's processing, and the reply that stages
   are carried by the one enter that follows. A connection stages a bounded
   number of GSO trains per turn, then yields its backlog to the next turn.
@@ -121,7 +121,7 @@ first spike (recv batching x GRO x GSO, epoll vs io\_uring); see git history
 for their methodology. `echo_quic` is the ablation matrix over the real
 worker: the same QUIC echo with receive batching, GRO, and GSO toggled one
 at a time. `worker_turns` sweeps sockets against datagrams per burst for UDP,
-and connections against reply bytes and task passes for QUIC request/reply.
+and connections against reply bytes for QUIC request/reply.
 The QUIC client and server run as worker tasks; the root only waits for a
 measurement to finish. Counter deltas stay in the run's log beside the timing
 series in the nightly `rust-shared` group.
@@ -131,7 +131,7 @@ just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1
 just rs bench-echo
 ```
 
-`benchmark_socket_queues` (an ignored integration test, run nightly) attributes
+`benchmark_socket_queues` (ignored integration tests, run nightly) attributes
 UDP loss between a sender and a steered worker group, on this ring and on
 moq-sock's `recvmmsg` under Tokio. It sweeps the kernel queue, the receive pool
 depth, workers, flows and GSO one at a time across worker stalls, CPU
@@ -141,6 +141,10 @@ at a socket (`sk_drops` via `SO_MEMINFO`), dropped on the path, or
 unattributed, beside `rx_enobufs`, peak queued bytes, delay and receive CPU.
 `rx_enobufs` is pool starvation, which leaves datagrams queued in the socket:
 with a 16-buffer pool it fired hundreds of times and dropped nothing.
+Each sweep axis runs as a separate test within nextest's hang budget. Each
+reserves the `io-uring` group's four slots so measurements do not compete.
+All cells still run three rounds by default (`SOCKET_QUEUES_RUNS` overrides
+the count), interleaving cells and receive paths within each axis.
 
 ```bash
 just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ignored only --success-output immediate
@@ -151,12 +155,22 @@ just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ign
 Locked memory is charged per user across processes, not per nextest run.
 Unit tests use 128 SQ entries and 512 CQ entries instead of the production
 256/2048 geometry. Integration tests still exercise production rings.
-The nextest group allows four ring tests per invocation.
+The nextest group allows four ring tests per invocation. Each socket-queue
+benchmark axis occupies all four slots, excluding other ring tests while measuring.
+
+Other programs draw on the same budget. libuv gives every event loop a
+256-entry ring of 28 KiB, and it creates these without checking
+`UV_USE_IO_URING`. A desktop running nine agent sessions held 4 to 5 MiB of an
+8 MiB limit before any test started, mostly in Node.js tool servers. A
+production-geometry worker takes 52 KiB and a unit-test worker 20 KiB.
+One `moq-uring` plus `moq-relay` test invocation needs about 0.5 to 1 MiB
+of what is left. Count the rings with `ls -l /proc/*/fd 2>/dev/null | grep -c io_uring`.
 
 The Rust recipes that run nextest use `sh/rs/nextest.sh`: local Linux shells raise their
 soft locked-memory limit to the host's hard limit, while GitHub-hosted jobs
 raise both to 64 MiB before launching nextest. A NixOS self-hosted runner
 should set `serviceConfig.LimitMEMLOCK = "64M"` on its runner service.
 For many simultaneous local checks, configure the same user limit through
-PAM limits or the service that starts the development shell; a Nix shell
+PAM limits or the service that starts the development shell (for a systemd
+user session, `LimitMEMLOCK=64M` in a `user@.service` drop-in); a Nix shell
 cannot raise its inherited hard limit. Verify with `ulimit -Sl` and `ulimit -Hl`.

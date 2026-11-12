@@ -4,7 +4,7 @@
  * @module
  */
 
-import type { Milli } from "@moq/clock";
+import type { Duration } from "@moq/clock";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { TimeoutError } from "./util/timeout.ts";
@@ -314,10 +314,10 @@ export class RefusedRedirect extends Error {
  */
 export class ConnectTimeout extends Error {
 	/** The timeout that elapsed. */
-	readonly timeout: Milli;
+	readonly timeout: Duration;
 
-	constructor(timeout: Milli) {
-		super(`connect timed out after ${timeout}ms`);
+	constructor(timeout: Duration) {
+		super(`connect timed out after ${timeout}`);
 		this.name = "ConnectTimeout";
 		this.timeout = timeout;
 	}
@@ -403,6 +403,25 @@ function localStreamCode(err: unknown): StreamCode {
 	const source = typeof err === "object" && err !== null ? (err as { source?: unknown }).source : undefined;
 	if (source === "session") return StreamCode.Unroutable;
 	return StreamCode.Internal;
+}
+
+/**
+ * A group was created at a sequence its track declared skipped.
+ *
+ * A skip says the sequence will never be produced, so it is final. See the track producer's
+ * `skipGroups`. Mirrors the Rust `Error::Skipped`.
+ *
+ * @public
+ */
+export class Skipped extends Error {
+	/** The sequence that was refused. */
+	readonly sequence: bigint;
+
+	constructor(sequence: bigint) {
+		super(`sequence ${sequence} was skipped`);
+		this.name = "Skipped";
+		this.sequence = sequence;
+	}
 }
 
 /**

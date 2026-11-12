@@ -4,7 +4,7 @@
 //! Simulates a realistic device telemetry blob that ticks once per second: most of the document
 //! is static (identity, config, geo) while a handful of gauges and counters change each tick. This
 //! is exactly the shape `moq-json` targets. The bytes counted are the JSON frames a plain reader
-//! sees; a [`compress`](moq_net::track::Info::compress)ed track shrinks them further on the wire.
+//! sees; a [compressed](moq_net::track::Info::compression) track shrinks them further on the wire.
 //!
 //! Run with: `cargo run -p moq-json --example telemetry`
 
@@ -79,7 +79,10 @@ fn telemetry(tick: u64) -> Value {
 fn track(compress: bool) -> moq_net::track::Producer {
 	let info = moq_net::track::Info::default()
 		.with_timescale(moq_net::Timescale::MILLI)
-		.with_compress(compress);
+		.with_compression(match compress {
+			true => moq_net::track::Compression::Deflate,
+			false => moq_net::track::Compression::None,
+		});
 	moq_net::broadcast::Info::new()
 		.produce()
 		.create_track("telemetry", info)
@@ -97,7 +100,7 @@ fn frame_bytes(config: snapshot::Config, ticks: u64) -> usize {
 			.update(moq_net::Timed::from(&telemetry(tick)).at(moq_net::Timestamp::now()))
 			.unwrap();
 	}
-	producer.finish().unwrap();
+	let _finished = producer.finish().unwrap();
 
 	// Drain the frames and sum their sizes.
 	let waiter = kio::Waiter::noop();
@@ -131,7 +134,7 @@ fn verify(producer_config: snapshot::Config, compress: bool, ticks: u64) {
 			other => panic!("tick {tick}: expected a value, got {other:?}"),
 		}
 	}
-	producer.finish().unwrap();
+	let _finished = producer.finish().unwrap();
 
 	// Drain: nothing left and the stream ends cleanly.
 	assert!(
@@ -155,7 +158,7 @@ fn verify_late_joiner(producer_config: snapshot::Config, compress: bool, ticks: 
 			.update(moq_net::Timed::from(&telemetry(tick)).at(moq_net::Timestamp::now()))
 			.unwrap();
 	}
-	producer.finish().unwrap();
+	let _finished = producer.finish().unwrap();
 
 	let waiter = kio::Waiter::noop();
 	let mut last = None;

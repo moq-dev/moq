@@ -1,4 +1,4 @@
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Report, Stats } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
@@ -8,12 +8,15 @@ import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { Order } from "./order";
 import { type Identity, identity, type Listing, Publication, type Slot } from "./publication";
-import type { Kind, Rendition, RenditionStats } from "./rendition";
+import type { Kind, Rendition } from "./rendition";
 import { makeRendition } from "./rendition-internal";
 
 // The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
 // outweigh twice its keyframe. Matches moq-video's capture `REFRESH`; see it for the measurements.
 const VIDEO_REFRESH = 2;
+
+// The stats track, named in the catalog's `stats` section while stats are on. Matches moq-cli's.
+const STATS_TRACK = "stats.json";
 
 /**
  * Signals the broadcast reads. Whoever owns the backing Signal (the element, or another component
@@ -59,7 +62,7 @@ export type BroadcastInput = {
 	 * shortens how far back a fetch can reach. A track's max age is fixed when it is created,
 	 * so changing this publishes a new network broadcast.
 	 */
-	maxAge: Getter<Milli | null | undefined>;
+	maxAge: Getter<Duration | null | undefined>;
 
 	/**
 	 * Whether to publish a stats track and name it in the catalog's `stats` section. Defaults to
@@ -82,14 +85,22 @@ export type BroadcastInput = {
 	 */
 	echo: Getter<Moq.Path.Relative | undefined>;
 
-	/**
-	 * Override when renditions encode. Omitted: audio retains raw PCM until subscribed, while
-	 * video encodes continuously. False encodes both continuously; true gates video too, losing
-	 * its past. Unless false, audio keeps raw history up to `maxAge`, or 30 seconds when it is
-	 * `null`. Capture stays open.
-	 */
-	onDemand: Getter<boolean | undefined>;
+	/** Which renditions wait for a subscriber before encoding. Defaults to `"retain"`. */
+	onDemand: Getter<OnDemand>;
 };
+
+/**
+ * Which renditions wait for a subscriber before encoding. Capture stays open in every mode.
+ *
+ * - `"off"`: every rendition encodes continuously.
+ * - `"retain"`: audio retains raw PCM until subscribed, then encodes from it; video and text
+ *   encode continuously.
+ * - `"all"`: audio retains, and video and text also wait for a subscriber, losing their
+ *   unsubscribed past.
+ *
+ * Retained audio keeps raw history up to the broadcast's `maxAge`, or 30 seconds when it is `null`.
+ */
+export type OnDemand = "off" | "retain" | "all";
 
 // The longest group among the video and audio renditions, the catalog's `media.join.interval`: the
 // promise that every one starts a group at least that often. Undefined while none declares one, so a
@@ -98,9 +109,9 @@ function longestGroup(effect: Effect, renditions: ReadonlyMap<string, Rendition<
 	let longest: number | undefined;
 	for (const rendition of renditions.values()) {
 		if (rendition.kind === "text") continue;
-		const hint = effect.get(rendition.joinInterval);
-		if (hint === undefined || !Number.isFinite(hint) || hint <= 0) continue;
-		longest = Math.max(longest ?? 0, Math.ceil(hint));
+		const hint = effect.get(rendition.join);
+		if (hint === undefined || hint.isZero()) continue;
+		longest = Math.max(longest ?? 0, Math.ceil(hint.asMillis()));
 	}
 	return longest === undefined ? undefined : Catalog.u53(longest);
 }
@@ -117,16 +128,13 @@ export class Broadcast {
 	/** The catalog track name served to subscribers. */
 	static readonly CATALOG_TRACK = Catalog.TRACK;
 
-	/** The stats track name, named in the catalog's `stats` section while {@link BroadcastInput.stats} is set. */
-	static readonly STATS_TRACK = "stats.json";
-
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<BroadcastInput>;
 
 	/**
 	 * The catalog, editable at any time regardless of whether anyone is subscribed. The base
 	 * `video`/`audio` sections and `media.join` are folded from the registered renditions (see
-	 * {@link Rendition.joinInterval}); an application adds its own
+	 * {@link Rendition.join}); an application adds its own
 	 * root sections (e.g. `scte35`) by locking it too.
 	 */
 	readonly catalog = new CatalogProducer();
@@ -164,12 +172,14 @@ export class Broadcast {
 	// The renditions of the current network broadcast, undefined while there is none.
 	readonly #publication = new Signal<Publication | undefined>(undefined);
 
+	readonly #join = new Signal<Duration | undefined>(undefined);
+
 	/**
 	 * The catalog's `media.join.interval` the current network broadcast declared, in milliseconds:
 	 * the longest group any video or audio rendition promised when media was first listed. Fixed
 	 * for the network broadcast, so an encoder holds its groups within it. Undefined until declared.
 	 */
-	readonly join = new Signal<Milli | undefined>(undefined);
+	readonly join: Getter<Duration | undefined> = this.#join;
 
 	// Each catalog ID in the latest catalog fold, which seeds a new network broadcast's publication.
 	#listed = new Map<string, Listing>();
@@ -189,7 +199,7 @@ export class Broadcast {
 			stats: getter(props?.stats ?? false),
 			probe: getter(props?.probe),
 			echo: getter(props?.echo),
-			onDemand: getter(props?.onDemand),
+			onDemand: getter(props?.onDemand ?? "retain"),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
@@ -312,7 +322,7 @@ export class Broadcast {
 			publication.join = longestGroup(effect, renditions);
 		}
 		const join = publication?.join;
-		this.join.set(join === undefined ? undefined : Milli(join));
+		this.#join.set(join === undefined ? undefined : Duration.millis(join));
 
 		this.catalog.mutate((catalog) => {
 			if (join !== undefined) {
@@ -377,12 +387,12 @@ export class Broadcast {
 
 	// Name the stats track in the catalog and write a report every interval while someone subscribes.
 	// The track lives as long as the network broadcast, so disabling stats only stops reporting.
-	#runStats(effect: Effect, report: () => Report.Writer<Stats.Snapshot>) {
+	#runStats(effect: Effect, report: () => Report.Writer<Stats.Snapshot, Stats.SnapshotInput>) {
 		if (!effect.get(this.in.stats)) return;
 		const writer = report();
 
 		this.catalog.mutate((catalog) => {
-			catalog.stats = { track: Broadcast.STATS_TRACK };
+			catalog.stats = { track: STATS_TRACK };
 		});
 		effect.cleanup(() =>
 			this.catalog.mutate((catalog) => {
@@ -396,18 +406,18 @@ export class Broadcast {
 			if (demand.get(watched)) demand.get(this.in.probe);
 		});
 
-		effect.interval(() => writer.update(this.#stats() as Stats.Snapshot), Nano.fromMilli(Milli(Report.INTERVAL)));
+		effect.interval(() => writer.update(this.#stats()), Duration.millis(Report.INTERVAL));
 	}
 
 	// What each listed rendition has sent, keyed by its catalog ID, and the connection's round-trip time.
-	#stats(): { transport?: { rtt: number }; renditions: Record<string, RenditionStats> } {
-		const renditions: Record<string, RenditionStats> = Object.create(null);
+	#stats(): Stats.SnapshotInput {
+		const renditions: Record<string, Stats.RenditionInput> = Object.create(null);
 		for (const rendition of this.#renditions.peek().values()) {
 			const stats = rendition.stats.peek();
 			if (stats && rendition.config.peek() !== undefined) renditions[rendition.name] = stats;
 		}
 		const rtt = this.in.probe.peek()?.rtt;
-		return rtt === undefined ? { renditions } : { transport: { rtt: Math.floor(rtt) }, renditions };
+		return rtt === undefined ? { renditions } : { transport: { rtt: Math.floor(rtt.asMillis()) }, renditions };
 	}
 
 	// The names outside a publication's own that a replacement must avoid: every registered ID, and
@@ -472,9 +482,9 @@ export class Broadcast {
 		});
 
 		// Created on first use and kept with the broadcast, like a rendition's track.
-		let stats: Report.Writer<Stats.Snapshot> | undefined;
+		let stats: Report.Writer<Stats.Snapshot, Stats.SnapshotInput> | undefined;
 		const report = () => {
-			stats ??= new Report.Writer(broadcast, Broadcast.STATS_TRACK, Stats.SnapshotSchema);
+			stats ??= new Report.Writer(broadcast, STATS_TRACK, Stats.SnapshotSchema);
 			return stats;
 		};
 		effect.cleanup(() => stats?.finish());
@@ -501,7 +511,7 @@ export class Broadcast {
 					timescale: Moq.Time.Timescale.MILLI,
 					priority: Catalog.PRIORITY.catalog,
 					// Catalog JSON is small and repetitive.
-					compress: true,
+					compression: "deflate",
 				});
 				effect.cleanup(() => {
 					track.finish();
@@ -569,7 +579,7 @@ export class Broadcast {
 					}
 					const idle =
 						rendition.kind !== "audio" &&
-						gate.get(this.in.onDemand) &&
+						gate.get(this.in.onDemand) === "all" &&
 						gate.get(served.demand().wanted) === undefined;
 					handle.track.set(idle ? undefined : served);
 				});

@@ -45,8 +45,17 @@ connection (`wss://`) and keep whichever wins. A small multiplexer,
 [qmux](/draft/qmux-websocket), carries MoQ streams over the socket. It works
 everywhere but cannot escape TCP head-of-line blocking, so priority and resets
 only help once bytes leave the TCP queue. The fallback is automatic in every
-client; the relay serves it on its `[web.http]` or `[web.https]` listener. A session that lands on
-WebSocket stays there until it ends; the next connect races again.
+client; the relay serves it on its `[web.http]` or `[web.https]` listener. A
+reconnecting connection that lands on WebSocket probes QUIC in the background,
+5 to 10 seconds in and then on a doubling backoff capped at one probe every 5
+minutes. Once a probe gets through, it moves back the way it follows a GOAWAY:
+the WebSocket session tells the relay it is leaving and keeps serving until the
+QUIC session replaces it.
+
+A `moq-tokio` client with a client certificate refuses to dial `http://`,
+`ws://`, `tcp://`, or `unix://`: none can present the certificate to a server
+it has authenticated, and `http://` trusts a fingerprint fetched over
+plaintext. Dial `https://`, `wss://`, `moqt://`, `moql://`, or `tls://` instead.
 
 Each side lets the other hold 10,000 streams open in each direction, as over
 QUIC, since MoQ holds one per subscription and per live group. Set it with
@@ -56,8 +65,8 @@ QUIC gets a head start in the race: 500 ms in `@moq/net` and 200 ms in
 `moq-tokio`. Once WebSocket wins against a server, identified by the host and
 port the fallback dials, later connects to that server race both transports at
 once. The path and query, including a rotating `?jwt=` token, don't matter. A
-QUIC win against that server restores the head start, so a client returns to
-QUIC once UDP gets through again.
+QUIC win or probe against that server restores the head start, and so does the
+end of the WebSocket session that won, so a redial after an outage prefers QUIC.
 
 ## Raw QUIC (native)
 
@@ -90,7 +99,7 @@ records, with no datagrams. The application supplies signaling and ICE and
 keeps ownership of the peer connection; closing the transport closes only its
 channel. SCTP ordering means one lost packet can hold back every stream.
 
-Native peers can opt into `moq-tokio`'s internal `webrtc` feature, which runs its own ICE agent:
+Native peers can use `moq-webrtc`'s `p2p` feature, which runs its own ICE agent:
 host candidates on every interface, server-reflexive candidates from the STUN
 servers it is given, and mDNS resolution of a browser's `.local` candidates.
 The application still carries the offer, answer, and candidates; the offering

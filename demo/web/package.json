@@ -15,6 +15,7 @@
 		"@moq/clock": "workspace:*",
 		"@moq/hang": "workspace:^",
 		"@moq/json": "workspace:^",
+		"@moq/stats": "workspace:^",
 		"@moq/publish": "workspace:^",
 		"@moq/room": "workspace:^",
 		"@moq/watch": "workspace:^",
@@ -27,11 +28,9 @@
 		"@tailwindcss/vite": "^4.3.2",
 		"highlight.js": "^11.12.0",
 		"open": "^11.0.4",
-		"rolldown": "^1.2.15",
-		"solid-js": "^1.9.17",
+		"rolldown": "^1.2.16",
 		"tailwindcss": "^4.1.13",
 		"typescript": "7.0.2",
-		"vite": "^8.3.5",
-		"vite-plugin-solid": "^2.11.14"
+		"vite": "^8.3.5"
 	}
 }

@@ -11,7 +11,7 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use kio::clock::Instant;
-use moq_tokio::moq_net::{self, Timescale, Timestamp, Version, origin, track};
+use moq_net::{Timescale, Timestamp, Version, origin, track};
 use moq_tokio::quic::driver::{
 	self,
 	sim::{Bottleneck, Link, Network, Path},
@@ -221,7 +221,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 			group.finish().unwrap();
 			kio::clock::sleep(INTERVAL).await;
 		}
-		source.finish().unwrap();
+		let _source = source.finish().unwrap();
 	};
 	let read = async {
 		let mut arrivals = Vec::new();
@@ -287,7 +287,7 @@ fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
 }
 
 fn origin_producer(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(moq_net::Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	origin
 }

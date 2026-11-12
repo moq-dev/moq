@@ -1,11 +1,11 @@
-import { Micro } from "@moq/clock";
+import type { Duration } from "@moq/clock";
 import type { AudioFrame } from "./capture";
 
-type Entry = { frame: AudioFrame; end: Micro; cut: boolean };
+type Entry = { frame: AudioFrame; end: Duration; cut: boolean };
 
 /** @internal Codec-sized PCM retained until demanded, bounded by time and sample count. */
 export class Backlog {
-	readonly #retention: Micro;
+	readonly #retention: Duration;
 	readonly #limit: number;
 	#frames: (Entry | undefined)[] = [];
 	#head = 0;
@@ -13,19 +13,19 @@ export class Backlog {
 	#evicted = false;
 
 	/** Retain at most this much audio at the codec's sample rate. */
-	constructor(retention: Micro, sampleRate: number) {
+	constructor(retention: Duration, sampleRate: number) {
 		this.#retention = retention;
-		this.#limit = Math.ceil((retention * sampleRate) / 1_000_000);
+		this.#limit = Math.ceil(retention.asSecs() * sampleRate);
 	}
 
 	/**
 	 * Store one complete frame, expiring against both capture time and the clock. `cut` marks the
 	 * first frame after a break in the timeline, such as a disable.
 	 */
-	push(frame: AudioFrame, end: Micro, now: Micro, cut = false): void {
+	push(frame: AudioFrame, end: Duration, now: Duration, cut = false): void {
 		this.#frames.push({ frame, end, cut });
 		this.#samples += frame.channels[0].length;
-		this.expire(Micro(Math.max(now, end)));
+		this.expire(now.max(end));
 		while (this.#samples > this.#limit) this.#evict();
 	}
 
@@ -33,11 +33,11 @@ export class Backlog {
 	 * Drop expired frames even when capture has stopped delivering samples. A `budget` shorter than
 	 * the retention also drops what a subscriber that far behind the live edge would find stale.
 	 */
-	expire(now: Micro, budget: Micro = this.#retention): void {
-		const age = Math.min(budget, this.#retention);
+	expire(now: Duration, budget: Duration = this.#retention): void {
+		const age = budget.min(this.#retention);
 		for (;;) {
 			const first = this.#frames[this.#head];
-			if (!first || first.end + age > now) return;
+			if (!first || first.end.add(age).gt(now)) return;
 			this.#evict();
 		}
 	}
@@ -71,14 +71,14 @@ export class Backlog {
 	}
 
 	/** The oldest frame's expiry, or undefined while empty. */
-	get deadline(): Micro | undefined {
+	get deadline(): Duration | undefined {
 		const first = this.#frames[this.#head];
-		return first && Micro(first.end + this.#retention);
+		return first?.end.add(this.#retention);
 	}
 
-	/** The oldest retained frame, left in place. */
-	peek(): AudioFrame | undefined {
-		return this.#frames[this.#head]?.frame;
+	/** The oldest retained frame and where it ends, left in place. */
+	peek(): { readonly frame: AudioFrame; readonly end: Duration } | undefined {
+		return this.#frames[this.#head];
 	}
 
 	/** Remove the oldest retained frame. */

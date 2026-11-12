@@ -1,7 +1,7 @@
 //! HLS / LL-HLS <-> MoQ gateway.
 //!
 //! Bridges HLS (and Low-Latency HLS) and [`moq_net`] broadcasts in both
-//! directions, mirroring the WHIP/WHEP split in `moq-rtc`:
+//! directions, mirroring the WHIP/WHEP split in `moq-webrtc`:
 //!
 //! - [`import`] pulls a remote HLS master/media playlist and publishes its CMAF
 //!   segments into MoQ (an HTTP *client* that *publishes*).
@@ -19,7 +19,7 @@
 //! record-driven playlist window, and the HTTP surface.
 //!
 //! Its cryptography is [rind](https://docs.rs/rind), so every constructor that first needs it
-//! refuses a CPU missing a feature rind requires with [`Error::UnsupportedCpu`].
+//! refuses a CPU missing a feature rind requires with [`Error::UnsupportedCpu`], carrying [`moq_crypto::cpu::UnsupportedCpu`].
 //!
 //! The gateway drives its HTTP fetches and background watchers as async code, so [`import`] and
 //! [`export`] need the `async` feature. The default `server` feature enables it.
@@ -44,14 +44,6 @@ pub mod server;
 pub use error::*;
 #[cfg(feature = "server")]
 pub use server::Server;
-
-/// Re-export of the HTTP stack behind the export server, so consumers can name the
-/// types that surface through [`Server::router`] (and layer their own middleware on
-/// it) without adding their own axum dependency and risking a version mismatch.
-/// `axum::http` covers the `http` crate types too. A major axum bump is therefore a
-/// breaking change for this crate.
-#[cfg(feature = "server")]
-pub use axum;
 
 /// Test helper: a [`moq_mux::Source`] for the broadcast at `path`, resolved through `origin`.
 #[cfg(test)]

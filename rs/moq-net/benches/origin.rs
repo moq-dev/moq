@@ -29,11 +29,10 @@
 //! Readers draining a swapped track are swept over their count, the groups every
 //! route delivered, and the routes each reader still holds a copy of.
 //!
-//! A claim's answer taking over the claim is swept over the paths the claim already
-//! answered and the cursors watching it, and a takeover in place over the fronts
-//! resolved through what it takes over.
+//! A claim's answer, and its retraction moving the claim to a fresh instance, is swept
+//! over the paths the claim already answered and the cursors watching it.
 //!
-//! Peer claims land through the hidden `fuzz` module, as a session lands them.
+//! Peer claims land through the `fuzz` module, as a session lands them.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench origin`.
 
@@ -51,7 +50,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Hop, Hops, Instance, Pattern, Patterns, Timestamp, auth, broadcast, kio, origin, track};
+use moq_net::{Instance, Pattern, Patterns, Timestamp, auth, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -142,7 +141,7 @@ fn bench_announce_covering(c: &mut Criterion) {
 					let _routes: Vec<_> = (0..routes)
 						.map(|i| {
 							producer
-								.route_prefix(format!("room/{i}/mic.hang"), moq_net::origin::RouteOptions::default())
+								.claim(format!("room/{i}/mic.hang"), moq_net::origin::RouteOptions::default())
 								.unwrap()
 						})
 						.collect();
@@ -157,9 +156,7 @@ fn bench_announce_covering(c: &mut Criterion) {
 					}
 					b.iter(|| {
 						for (name, delivered) in [("room/live.chat", true), ("room/mic.hang", covering)] {
-							let route = producer
-								.route_prefix(name, moq_net::origin::RouteOptions::default())
-								.unwrap();
+							let route = producer.claim(name, moq_net::origin::RouteOptions::default()).unwrap();
 							for cursor in &mut cursors {
 								assert_eq!(cursor.next().now_or_never().flatten().is_some(), delivered);
 							}
@@ -267,13 +264,7 @@ fn bench_withdraw_wave(c: &mut Criterion) {
 	group.sample_size(10);
 	let instance: Instance = "01900000-0000-7000-8000-000000000001".parse().unwrap();
 	// One instance, so the winner moving between the peers is an update, which is held.
-	let route = |chain: &[u64]| {
-		let mut hops = Hops::new();
-		for &hop in chain {
-			hops.push(Hop::new(hop).unwrap()).unwrap();
-		}
-		moq_net::fuzz::route_info(hops, 0, Some((instance.clone(), 0)))
-	};
+	let route = |chain: &[u64]| moq_net::fuzz::route_info(chain.iter().copied(), 0, Some((instance.clone(), 0)));
 	for broadcasts in [1_000, 10_000] {
 		for subscribers in [1, 20, 100] {
 			let id = BenchmarkId::from_parameter(format!("{broadcasts}b_{subscribers}s"));
@@ -345,33 +336,34 @@ fn bench_route_churn(c: &mut Criterion) {
 	for broadcasts in [1_000, 10_000] {
 		for subscribers in [1, 20, 100] {
 			let id = BenchmarkId::from_parameter(format!("{broadcasts}b_{subscribers}s"));
+			// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+			let mut fixture = None;
 			group.bench_function(id, |b| {
-				let (producer, _driver) = origin::Producer::new(origin::Config::default());
-				let _routes: Vec<_> = (0..broadcasts)
-					.map(|i| {
-						moq_net::fuzz::requests_route(
-							&producer,
-							moq_net::Path::new(&format!("room/{i}")).unwrap(),
-							peer_route(1, 1),
-						)
-						.unwrap()
-					})
-					.collect();
-				let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().routes()).collect();
-				for cursor in &mut cursors {
-					while cursor.try_next().is_some() {}
-				}
+				let (cursors, _routes, producer, _driver) = fixture.get_or_insert_with(|| {
+					let (producer, driver) = origin::Producer::new(origin::Config::default());
+					let routes: Vec<_> = (0..broadcasts)
+						.map(|i| {
+							moq_net::fuzz::requests_route(
+								&producer,
+								moq_net::Path::new(&format!("room/{i}")).unwrap(),
+								peer_route(1, 1),
+							)
+							.unwrap()
+						})
+						.collect();
+					let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().routes()).collect();
+					for cursor in &mut cursors {
+						while cursor.try_next().is_some() {}
+					}
+					(cursors, routes, producer, driver)
+				});
 				b.iter(|| {
 					drop(
-						moq_net::fuzz::requests_route(
-							&producer,
-							moq_net::Path::from_static("room/0"),
-							peer_route(2, 5),
-						)
-						.unwrap(),
+						moq_net::fuzz::requests_route(producer, moq_net::Path::from_static("room/0"), peer_route(2, 5))
+							.unwrap(),
 					)
 				});
-				for cursor in &mut cursors {
+				for cursor in cursors.iter_mut() {
 					assert!(cursor.try_next().is_none(), "the winner is unchanged");
 				}
 			});
@@ -540,7 +532,7 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 /// honor each cursor's scope rather than reuse one global winner.
 fn bench_reprice_duplicate(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/reprice_duplicate");
-	for incumbent_cost in [INCUMBENT_COST, origin::Cost::MAX.value() - 1] {
+	for incumbent_cost in [INCUMBENT_COST, MAX_COST - 1] {
 		for (duplicates, subscribers) in CONTENDED {
 			let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s_cost{incumbent_cost}"));
 			group.bench_function(id, |b| {
@@ -594,7 +586,11 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 						for cursor in &mut cursors {
 							// The winner switches between unnamed routes, which is another instance.
 							let event = cursor.next().now_or_never().flatten().expect("winner changed");
-							let moq_net::origin::RouteEvent::Restart(update) = event else {
+							let moq_net::origin::RouteEvent {
+								kind: moq_net::origin::RouteKind::Restart,
+								announce: update,
+							} = event
+							else {
 								panic!("expected a restart: got {event:?}");
 							};
 							assert_eq!(
@@ -617,6 +613,10 @@ const PATH: &str = ".stats/p0/node/edge0";
 /// What every incumbent route costs, leaving room for a cheaper challenger.
 const INCUMBENT_COST: u64 = 2;
 
+/// The wire ceiling a route cost saturates at: an incumbent just below it leaves room
+/// for a costlier challenger.
+const MAX_COST: u64 = (1 << 62) - 1;
+
 /// A route as `peer` would have announced it: one hop, at `cost`.
 fn peer_route(peer: u64, cost: u64) -> origin::RouteInfo {
 	peer_instance(peer, cost, None)
@@ -624,9 +624,7 @@ fn peer_route(peer: u64, cost: u64) -> origin::RouteInfo {
 
 /// [`peer_route`], serving `instance` when it names one.
 fn peer_instance(peer: u64, cost: u64, instance: Option<Instance>) -> origin::RouteInfo {
-	let mut hops = Hops::new();
-	hops.push(Hop::new(peer).expect("peer id")).expect("hop chain");
-	moq_net::fuzz::route_info(hops, cost, instance.map(|instance| (instance, 0)))
+	moq_net::fuzz::route_info([peer], cost, instance.map(|instance| (instance, 0)))
 }
 
 /// An announcement of an unrelated prefix with `fronts` remote fronts parked on
@@ -641,7 +639,7 @@ fn bench_announce_fronts(c: &mut Criterion) {
 			let consumer = producer.consume();
 			// Served but never answered: every request under it parks a front.
 			let _served = producer
-				.route_prefix("room", moq_net::origin::RouteOptions::default())
+				.claim("room", moq_net::origin::RouteOptions::default())
 				.unwrap();
 			let _requests: Vec<_> = (0..fronts)
 				.map(|i| consumer.request(format!("room/{i}"), None))
@@ -663,7 +661,7 @@ fn bench_announce_fronts(c: &mut Criterion) {
 }
 
 /// Answer the claim's request for `path`, dropping any other it queued.
-fn answer(claim: &origin::Route, path: &str) -> origin::Route {
+fn answer(claim: &origin::Claim, path: &str) -> origin::Route {
 	loop {
 		let request = claim
 			.requested()
@@ -676,12 +674,12 @@ fn answer(claim: &origin::Route, path: &str) -> origin::Route {
 	}
 }
 
-/// A claim's answer delivered to every cursor as a takeover of the claim, then retracted.
-/// Swept over the paths the claim already answered and the cursors watching it, so a
-/// continuity check that walks the table rather than the claim's prefix shows up as a
-/// slope.
-fn bench_takeover(c: &mut Criterion) {
-	let mut group = c.benchmark_group("origin/takeover");
+/// A claim's answer delivered to every cursor as a start, then retracted, which moves the
+/// claim to a fresh instance. Swept over the paths the claim already answered and the
+/// cursors watching it, so finding the lending claim by walking the table rather than the
+/// path's covering routes shows up as a slope.
+fn bench_lend(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/lend");
 	for (publishers, subscribers) in SHAPES {
 		group.bench_function(
 			BenchmarkId::from_parameter(format!("{publishers}p_{subscribers}s")),
@@ -689,7 +687,7 @@ fn bench_takeover(c: &mut Criterion) {
 				let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 				let consumer = producer.consume();
 				let claim = producer
-					.route_prefix("room", moq_net::origin::RouteOptions::default())
+					.claim("room", moq_net::origin::RouteOptions::default())
 					.unwrap();
 				let waiter = kio::Waiter::noop();
 				let mut ask = |path: &str| {
@@ -708,12 +706,26 @@ fn bench_takeover(c: &mut Criterion) {
 					let (request, output) = ask(&format!("room/incoming{n}"));
 					for cursor in &mut cursors {
 						let event = cursor.next().now_or_never().flatten();
-						assert!(matches!(event, Some(origin::RouteEvent::Takeover { .. })), "{event:?}");
+						assert!(
+							matches!(
+								event,
+								Some(origin::RouteEvent {
+									kind: origin::RouteKind::Start,
+									..
+								})
+							),
+							"{event:?}"
+						);
 					}
 					drop(request);
 					drop(output);
 					for cursor in &mut cursors {
 						cursor.next().now_or_never().flatten().expect("retract delivered");
+						cursor
+							.next()
+							.now_or_never()
+							.flatten()
+							.expect("the claim's advance delivered");
 					}
 				});
 			},
@@ -746,7 +758,7 @@ fn bench_serve_idle(c: &mut Criterion) {
 			let dynamics: Vec<_> = (0..routes)
 				.map(|i| {
 					producer
-						.route_prefix(
+						.claim(
 							format!(".stats/p{}/node/edge{i}", i % 8),
 							moq_net::origin::RouteOptions::default(),
 						)
@@ -778,7 +790,11 @@ fn bench_subscribe(c: &mut Criterion) {
 			b.iter(|| {
 				let mut cursor = fleet.consumer.routes();
 				let mut replayed = 0;
-				while let Some(origin::RouteEvent::Start(_)) = cursor.next().now_or_never().flatten() {
+				while let Some(origin::RouteEvent {
+					kind: origin::RouteKind::Start,
+					..
+				}) = cursor.next().now_or_never().flatten()
+				{
 					replayed += 1;
 				}
 				assert_eq!(replayed, publishers);
@@ -841,24 +857,30 @@ fn bench_request(c: &mut Criterion) {
 fn bench_retire(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/retire");
 	for fronts in [100, 1_000, 10_000] {
+		// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+		let mut fixture = None;
 		group.bench_function(BenchmarkId::from_parameter(format!("{fronts}f")), |b| {
-			let mut fleet = fanout(fronts + 1, 0);
-			let waiter = kio::Waiter::noop();
-			let held: Vec<_> = (0..fronts)
-				.map(|i| fleet.consumer.request(format!("room/{i}"), None))
-				.collect();
-			fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
-			let _held: Vec<_> = held
-				.into_iter()
-				.map(|pending| pending.now_or_never().expect("resolved once driven").expect("local"))
-				.collect();
+			let (_held, fleet, waiter) = fixture.get_or_insert_with(|| {
+				let mut fleet = fanout(fronts + 1, 0);
+				let waiter = kio::Waiter::noop();
+				let held: Vec<_> = (0..fronts)
+					.map(|i| fleet.consumer.request(format!("room/{i}"), None))
+					.collect();
+				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				let held: Vec<_> = held
+					.into_iter()
+					.map(|pending| pending.now_or_never().expect("resolved once driven").expect("local"))
+					.collect();
+				(held, fleet, waiter)
+			});
+			let waiter = &*waiter;
 			let path = format!("room/{fronts}");
 			b.iter(|| {
 				let pending = fleet.consumer.request(&path, None);
-				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				fleet.driver.poll(moq_net::time::Instant::now(), waiter).unwrap();
 				drop(pending.now_or_never().expect("resolved once driven").expect("local"));
 				// Nothing holds it and a local source keeps no track, so it retires here.
-				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				fleet.driver.poll(moq_net::time::Instant::now(), waiter).unwrap();
 			});
 		});
 	}
@@ -883,7 +905,7 @@ const POOL_HOP: u64 = 1_000;
 struct Pool {
 	producer: origin::Producer,
 	driver: origin::Driver,
-	_members: Vec<origin::Route>,
+	_members: Vec<origin::Claim>,
 	_producers: Vec<broadcast::Producer>,
 	_consumers: Vec<broadcast::Consumer>,
 	cursors: Vec<origin::Routes>,
@@ -899,7 +921,7 @@ impl Pool {
 }
 
 fn pool(members: usize, paths: usize, cursors: usize) -> Pool {
-	let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+	let (producer, mut driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 	let consumer = producer.consume();
 	let cursors = (0..cursors).map(|_| consumer.routes()).collect();
 	let members: Vec<_> = (0..members)
@@ -978,43 +1000,6 @@ fn bench_restart_fronts(c: &mut Criterion) {
 					},
 					BatchSize::PerIteration,
 				);
-			});
-		}
-	}
-	group.finish();
-}
-
-/// A pool member taken over in place and retired, under `fronts` fronts resolved
-/// through it, against the same member restarting without a takeover. Each change
-/// pokes every front beneath the prefix, and the takeover carries each one's verdict
-/// forward under the table lock, so the takeover's cost over the restart is that pass.
-/// The fronts' tasks never run: this is the install alone.
-fn bench_takeover_fronts(c: &mut Criterion) {
-	let mut group = c.benchmark_group("origin/takeover_fronts");
-	for fronts in [100, 1_000, 10_000] {
-		for takeover in [false, true] {
-			let kind = if takeover { "takeover" } else { "restart" };
-			group.bench_function(format!("{fronts}f_{kind}"), |b| {
-				let mut pool = pool(1, fronts, 0);
-				let mut last = pool._members.pop().expect("one member");
-				let mut hop = POOL_HOP + 1;
-				b.iter(|| {
-					hop += 1;
-					let next = match takeover {
-						true => moq_net::fuzz::takeover_route(
-							&pool.producer,
-							moq_net::Path::from_static("pool"),
-							pool_route(hop),
-							&last,
-						),
-						false => moq_net::fuzz::requests_route(
-							&pool.producer,
-							moq_net::Path::from_static("pool"),
-							pool_route(hop),
-						),
-					};
-					drop(std::mem::replace(&mut last, next.unwrap()));
-				});
 			});
 		}
 	}
@@ -1190,7 +1175,7 @@ fn watched_path(index: usize) -> String {
 
 async fn watching(routes: usize, subscribers: usize) -> Watching {
 	let spawn = |hop| {
-		let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+		let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 		support::harness::spawn(driver);
 		producer
 	};
@@ -1260,10 +1245,9 @@ fn runtime() -> tokio::runtime::Runtime {
 
 /// Everything under `room/`, which leaves out only the `muted` subscription.
 fn room() -> auth::Grant {
-	auth::Grant {
-		subscribe: Pattern::subtree("room").unwrap().into(),
-		..auth::Grant::all()
-	}
+	let mut grant = auth::Grant::all();
+	grant.subscribe = Pattern::subtree("room").unwrap().into();
+	grant
 }
 
 /// Steady-state delivery through a session's gates: one round across every
@@ -1861,14 +1845,13 @@ criterion_group!(
 	bench_announce_duplicate,
 	bench_reprice_duplicate,
 	bench_announce_fronts,
-	bench_takeover,
+	bench_lend,
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
 	bench_retire,
 	bench_restart_fronts,
 	bench_pool_churn,
-	bench_takeover_fronts,
 	bench_pool_cursors,
 	bench_handoff,
 	bench_narrow_delivery,

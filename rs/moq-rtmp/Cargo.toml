@@ -21,8 +21,8 @@ default = ["tls"]
 # `pub use rustls`. Plaintext RTMP needs none of this, so an embedder can drop
 # TLS with `default-features = false`.
 tls = ["dep:rustls", "dep:tokio-rustls"]
-# Exposes the AMF0 fuzz target body and seeds to the `fuzz/` harness through the hidden `fuzz`
-# module. Off by default and hidden from the docs.
+# Exposes the AMF0 fuzz target body and seeds to the `fuzz/` harness through the `fuzz`
+# module. Off by default.
 fuzz = []
 
 # Pure library: the RTMP <-> MoQ gateway. The CLI lives in `moq-cli` (the `rtmp`
@@ -38,6 +38,7 @@ bytes = { workspace = true }
 futures = { workspace = true }
 hang = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
+moq-crypto = { workspace = true, features = ["cpu"] }
 moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 rand = { workspace = true }

@@ -206,7 +206,7 @@ enum AckPhase {
 /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.5>
 /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.2>
 #[derive(Debug, Clone)]
-pub struct Bbr3 {
+pub(crate) struct Bbr3 {
     /// equivalent to C.SMSS The Sender Maximum Send Size in bytes. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.2>
     /// <https://www.rfc-editor.org/rfc/rfc9000#name-datagram-size>
     smss: u64,
@@ -586,13 +586,7 @@ impl Bbr3 {
             cycle_count_stamp: None,
             cwnd: initial_cwnd,
             pacing_rate,
-            pacer: Pacer::new(
-                init.rtt,
-                initial_cwnd,
-                init.mtu,
-                init.max_pacing_rate,
-                init.now,
-            ),
+            pacer: Pacer::new(init.rtt, initial_cwnd, init.mtu, init.now),
             // Keep the first flight conservative until an ACK measures the path's RTT.
             send_quantum: smss,
             pacing_gain: startup_pacing_gain,
@@ -2115,7 +2109,7 @@ impl Controller for Bbr3 {
     }
 }
 
-/// Configuration for the `Bbr3` congestion controller
+/// Configuration for the BBRv3 congestion controller
 /// Different pacing_gains can be set to modify the multiplier used to
 /// increase the sending rates.
 /// Different cwnd_gains can be set to modify the multiplier used to increase
@@ -2219,7 +2213,6 @@ mod test {
                 now: Instant::now(),
                 mtu,
                 rtt: Duration::from_millis(333),
-                max_pacing_rate: None,
                 seed: 0,
             };
             Self {
@@ -2394,7 +2387,7 @@ mod test {
 
         /// Convert a simulator-nanosecond offset into an `Instant`.
         fn at(&self, off_ns: u64) -> Instant {
-            self.base + Duration::from_nanos(off_ns)
+            self.base.saturating_add(Duration::from_nanos(off_ns))
         }
 
         /// Send `count` packets at `now_ns` outside the link model, for scripted tests that
@@ -2519,7 +2512,7 @@ mod test {
                     let ce = self.ce_above_ns.is_some_and(|limit| queue_ns > limit);
 
                     self.bbr.send(
-                        self.base + Duration::from_nanos(send_ns),
+                        self.base.saturating_add(Duration::from_nanos(send_ns)),
                         self.mss as u16,
                         self.pn,
                     );
@@ -2543,8 +2536,8 @@ mod test {
                 } else if let Some(p) = self.flight.pop_front() {
                     self.now_ns = self.now_ns.max(p.ack_ns);
                     self.inflight -= self.mss;
-                    let now_at = self.base + Duration::from_nanos(self.now_ns);
-                    let send_at = self.base + Duration::from_nanos(p.send_ns);
+                    let now_at = self.base.saturating_add(Duration::from_nanos(self.now_ns));
+                    let send_at = self.base.saturating_add(Duration::from_nanos(p.send_ns));
                     let received = self.timestamps.then(|| Duration::from_nanos(p.recv_ns));
                     self.bbr
                         .ack_received(now_at, send_at, self.mss, p.pn, received);
@@ -2587,7 +2580,6 @@ mod test {
             now: Instant::now(),
             mtu: 2500,
             rtt: Duration::from_millis(333),
-            max_pacing_rate: None,
             seed: 17,
         };
         let mut bbr3 = Bbr3::new(Arc::new(Config::default()), init);
@@ -2710,7 +2702,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -2969,7 +2961,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -3291,7 +3283,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -3439,7 +3431,7 @@ mod test {
         const MSS: u16 = 1200;
         let mut bbr = Driver::new(Arc::new(Config::default()), MSS);
         let base = Instant::now();
-        let at = |ms: u64| base + Duration::from_millis(ms);
+        let at = |ms: u64| base.saturating_add(Duration::from_millis(ms));
         let mut inflight = 0;
         let send = |bbr: &mut Driver, ms: u64, pn: u64, inflight: &mut u64| {
             bbr.send(at(ms), MSS, pn);
@@ -3547,7 +3539,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -4194,7 +4186,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -4448,7 +4440,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -4657,7 +4649,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -4956,7 +4948,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -5231,7 +5223,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -5475,7 +5467,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -5690,7 +5682,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -5905,7 +5897,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -6163,7 +6155,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -6435,7 +6427,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -6693,7 +6685,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,
@@ -6928,7 +6920,7 @@ mod test {
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
-        let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
+        let at = |off_ns: u64| base.saturating_add(Duration::from_nanos(off_ns));
 
         struct InFlight {
             pn: u64,

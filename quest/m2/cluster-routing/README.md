@@ -9,9 +9,8 @@ Known advertisements remain distinct from current reachability, and stale
 copies cannot revive a claim after its withdrawal is known.
 
 Reliability, federation, and P2P are independently shippable milestones of
-this architecture. Active/passive delivery health is a separate
-[route-health line](/quest/m5/route-health/README.md), shared by endpoints
-and relays, and applies only to broadcasts with epochs.
+this architecture. Active/passive delivery health is out of scope; its
+plan was deleted 2026-11-09 for want of a consumer.
 
 ## Plan
 
@@ -38,6 +37,21 @@ Decided with the maintainer, 2026-10-13:
 - Keep Babel. A detour longer than the lost route may wait for a sequence
   refresh from the origin; instant failover is not required. Measure failure
   detection, additional routing recovery, and total interruption separately.
+  Reopened 2026-11-11 (maintainer, /quest-plan after
+  [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)'s reviews):
+  the distance refuses a longer way round until the publisher advances its
+  seqno, and refuses a cached copy at a neighbour no closer to the
+  publisher, which [cache-aware routing](/quest/m3/cache-routing/README.md)
+  wants to join. Decided the same day: a route is shared per publisher and
+  per scope, and a relay believes a route by that route's own path. Rejected:
+  link-state among relays, and routes to relays in place of publishers.
+  Decided 2026-11-11 (maintainer, on the measurements of
+  [moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533)): Babel goes. A route is
+  kept free of loops by its path, a withdrawal that names the hop that died,
+  holds, and a timed doubt
+  ([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27). A
+  detour no longer waits on the publisher, and today's router keeps Babel
+  until [the router quest](/quest/m2/cluster-routing/routes/scope.md) lands.
 - An origin declares its own routing identity, fresh per process or tab
   restart and shared across its live sessions. It is unverified. Decided 2026-11-02 (maintainer, /quest-unblock): no
   key proof is planned; if a use case needs a provable identity, moq-lite-07's
@@ -57,7 +71,7 @@ Decided with the maintainer, 2026-10-13:
   2026-10-14; own identities included 2026-10-26, since they are no longer
   proven.) The issuer-qualified subject key was dropped 2026-11-02
   (maintainer); since 2026-11-04 a scoped peer's identities are keyed by the
-  route key it proves ([Route session integration](/quest/m2/cluster-routing/routes/session.md)).
+  route key it proves ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)).
 - Matching explicit epochs authorize resume. Epochless changes retain
   Restart and fresh resolution; neither node identity nor a healthy
   alternate grants permission to splice content.
@@ -119,24 +133,21 @@ fixtures and controlled-time regressions, including residual stale revival,
 not only results from deployment tooling. Do not claim per-origin aggregation
 reduces origin count when every application publishes one broadcast.
 
-Non-goals: measured RTT/loss pricing by default, cache-dependent route prices,
-TURN, browser transit, full link-state topology, or cross-operator economic
-exchange rates. Basic federation does not wait for
-[routing cost domains](/quest/m5/routing-cost-domains.md).
+Non-goals: measured RTT/loss pricing by default, TURN, browser transit, full
+link-state topology, or cross-operator economic exchange rates. Basic
+federation does not wait for
+administrative routing cost domains, which nobody plans. Node routes here
+are the cold cost that [cache-aware routing](/quest/m3/cache-routing/README.md)'s
+per-broadcast warm routes rank against (decided 2026-11-08, maintainer).
 
 Each implementation updates the docs it makes stale. The separate
 [routing guide](/quest/m1/routing-guide.md) explains the combined design and
 setup after the capabilities land.
 
-## Required
-
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
-- [Outbound federation](/quest/m2/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
-
 ## Related
 
-- [Route health](/quest/m5/route-health/README.md) - epoch-only active/passive delivery monitoring and automatic recovery
 - [P2P](/quest/m4/p2p/README.md) - application-selected peer sessions feed the shared routing model
 - [Routing guide](/quest/m1/routing-guide.md) - concept page and federation setup; P2P extends it in m4
 - [Route wakes](/quest/m4/route-wakes.md) - local work follows affected fronts rather than the whole covered table
 - [Link quality](/quest/m5/link-quality.md) - optional measured link cost, distinct from delivery-health failover
+- [Cache-aware routing](/quest/m3/cache-routing/README.md) - per-broadcast warm routes ranked against these node routes

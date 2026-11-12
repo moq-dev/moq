@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Instant, Manual } from "@moq/clock";
 import { u53 } from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
@@ -117,7 +117,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal(track),
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -132,14 +132,14 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 		config: { frameRate: 25 },
 	});
 	const send = async (millis = 40) => {
-		await clock.advance(Nano.fromMilli(Milli(millis)));
-		const timestamp = Nano.toMicro(Nano(clock.now()));
+		await clock.advance(Duration.millis(millis));
+		const timestamp = clock.now().since(Instant.ZERO).asMicros();
 		audio.write(timestamp, order, true);
 		controller.enqueue(new Input(timestamp) as never);
-		await clock.advance(Nano.zero);
+		await clock.advance(Duration.ZERO);
 	};
 	try {
-		await clock.advance(Nano.zero);
+		await clock.advance(Duration.ZERO);
 		expect(encoder.out.resolved.peek()).toBeDefined();
 		const live = SlowEncoder.instances.find((instance) => instance.state === "configured");
 		if (!live) throw new Error("live encoder was not configured");
@@ -150,7 +150,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 			largestQueue = Math.max(largestQueue, live.encodeQueueSize);
 			if (frame % 3 === 2) {
 				live.finish();
-				await clock.advance(Nano.zero);
+				await clock.advance(Duration.ZERO);
 			}
 		}
 		// A kept frame waits exactly two capture intervals, independent of stream duration.
@@ -179,7 +179,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 		fanout.close();
 		track.finish();
 		track.close();
-		await clock.advance(Nano.zero);
+		await clock.advance(Duration.ZERO);
 		installed.close();
 		for (const [index, name] of ["VideoEncoder", "VideoFrame"].entries()) {
 			const original = originals[index];

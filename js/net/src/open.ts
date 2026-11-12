@@ -1,4 +1,8 @@
-import { race } from "@moq/signals";
+import { Duration, sleep } from "@moq/clock";
+import { type Getter, race } from "@moq/signals";
+import type { Probe } from "./connection/stats.ts";
+import { transportStats } from "./connection/stats.ts";
+import { transportOf } from "./connection/transport.ts";
 
 /**
  * The one entry point every stream a session opens goes through.
@@ -15,6 +19,12 @@ import { race } from "@moq/signals";
  *
  * Chrome ignores a `sendOrder` set after a create, so there a stream handed to another open
  * keeps the send order it was created at.
+ *
+ * The session also lists the group streams it has open, each with its send order and whether
+ * the peer has acknowledged everything written to it. A browser reports no stream credit, so a
+ * unidirectional open that has waited about one round trip resets the lowest one below it to
+ * make room, at most one reset in flight per waiting open, since each frees credit only once
+ * the peer's MAX_STREAMS arrives.
  */
 
 const live = Symbol("live");
@@ -26,6 +36,17 @@ interface Waiting<T> {
 	rank: () => number;
 	resolve: (stream: T) => void;
 	reject: (err: unknown) => void;
+	/** Aborted once the open leaves the line, ending its wait to make room. */
+	left: AbortController;
+	/** Whether it has waited long enough to make room. */
+	impatient: boolean;
+}
+
+/** What a line resets to make room with, once an open has waited long enough. */
+interface Room {
+	streams: OpenStreams;
+	/** About one round trip: how long an open waits for credit before making room. */
+	patience: () => Promise<Duration>;
 }
 
 /** An admitted stream, with the send order it was created at. */
@@ -44,10 +65,17 @@ class Line<T> {
 	#spare: Admitted<T>[] = [];
 	/** Creates still waiting on the transport, never more than the opens waiting. */
 	#creating = 0;
+	readonly #room?: Room;
+	/**
+	 * Streams reset to make room whose credit has yet to reach an open, never more than the
+	 * opens waiting: the first this many in line are owed one.
+	 */
+	#resets = 0;
 
-	constructor(create: (sendOrder: number) => Promise<T>, rank: (stream: T, sendOrder: number) => void) {
+	constructor(create: (sendOrder: number) => Promise<T>, rank: (stream: T, sendOrder: number) => void, room?: Room) {
 		this.#create = create;
 		this.#rank = rank;
+		this.#room = room;
 	}
 
 	/**
@@ -71,9 +99,14 @@ class Line<T> {
 
 		let waiting!: Waiting<T>;
 		const ticket = new Promise<T>((resolve, reject) => {
-			waiting = { rank: current, resolve, reject };
+			waiting = { rank: current, resolve, reject, left: new AbortController(), impatient: false };
 		});
 		this.#waiting.push(waiting);
+		if (this.#room) {
+			// An open ranked above an impatient one takes its place among those a reset is owed to.
+			this.#makeRoom(this.#room);
+			void this.#impatient(this.#room, waiting);
+		}
 
 		// An open that gave up leaves its create running for the next one, so cancellation
 		// churn never queues more creates than opens wait.
@@ -112,8 +145,53 @@ class Line<T> {
 	#leave(waiting: Waiting<T>): boolean {
 		const index = this.#waiting.indexOf(waiting);
 		if (index === -1) return false;
-		this.#waiting.splice(index, 1);
+		this.#remove(index);
 		return true;
+	}
+
+	#remove(index: number): Waiting<T> {
+		const [left] = this.#waiting.splice(index, 1);
+		left.left.abort();
+		// Never more resets owed than opens left to owe them to.
+		this.#resets = Math.min(this.#resets, this.#waiting.length);
+		return left;
+	}
+
+	/** Make room once `waiting` has waited about a round trip without a stream. */
+	async #impatient(room: Room, waiting: Waiting<T>) {
+		try {
+			const patience = await room.patience();
+			if (waiting.left.signal.aborted) return;
+			await sleep(patience, { signal: waiting.left.signal, ref: false });
+		} catch {
+			// Left the line first.
+			return;
+		}
+		waiting.impatient = true;
+		this.#makeRoom(room);
+	}
+
+	/**
+	 * Reset the lowest open group stream below each waiting open not yet owed a reset that has
+	 * waited long enough.
+	 */
+	#makeRoom(room: Room) {
+		// The highest rank first, and the earliest arrival among equals.
+		const owed = this.#waiting
+			.map((waiting) => ({ rank: waiting.rank(), impatient: waiting.impatient }))
+			.sort((a, b) => b.rank - a.rank)
+			.slice(this.#resets)
+			.filter((waiting) => waiting.impatient)
+			.map((waiting) => waiting.rank);
+		const open = room.streams.list();
+		for (const rank of owed) {
+			const lowest = open.shift();
+			// The opens behind rank lower still.
+			if (!lowest || lowest.sendOrder >= rank) break;
+			console.debug(`reset a lower stream to make room: sendOrder=${lowest.sendOrder} waiting=${rank}`);
+			lowest.preempt();
+			this.#resets++;
+		}
 	}
 
 	/** Hand an admitted stream to the highest ranked open in line, or keep it for the next. */
@@ -131,13 +209,17 @@ class Line<T> {
 			this.#spare.push(admitted);
 			return;
 		}
-		const [next] = this.#waiting.splice(best, 1);
+		// Whichever open the credit reaches, a reset's credit may be the one it took.
+		this.#resets = Math.max(this.#resets - 1, 0);
+		const next = this.#remove(best);
+		// A rank read again may have moved an impatient open out of those still owed a reset.
+		if (this.#room) this.#makeRoom(this.#room);
 		next.resolve(this.#handed(admitted, order));
 	}
 
 	/** A failed create fails the newest open in line: one more open than streams it can have. */
 	#refuse(err: unknown) {
-		this.#waiting.pop()?.reject(err);
+		if (this.#waiting.length > 0) this.#remove(this.#waiting.length - 1).reject(err);
 	}
 
 	#handed(admitted: Admitted<T>, sendOrder: number): T {
@@ -156,28 +238,78 @@ function aborted(signal: AbortSignal): { promise: Promise<void>; done: () => voi
 
 type SendStream = WritableStream<Uint8Array> & { sendOrder?: number };
 
-/** The lines of one session's opens. */
+/** One of a session's open group streams. */
+export interface OpenStream {
+	/** The send order the stream has now, where HIGHER values are sent first. */
+	readonly sendOrder: number;
+	/**
+	 * Whether the peer has acknowledged every byte written to it so far, or undefined when the
+	 * transport cannot tell.
+	 */
+	acknowledged(): Promise<boolean | undefined>;
+	/** Reset the stream to make room for a higher one, failing its writer as too far behind. */
+	preempt(): void;
+}
+
+/** The group streams a session has open, from when each opens until it is closed or reset. */
+export class OpenStreams {
+	/**
+	 * Whether the transport reports acknowledgements, known when the session starts:
+	 * `@moq/qmux` does, a browser's WebTransport cannot.
+	 */
+	readonly acknowledges: boolean;
+	readonly #open = new Set<OpenStream>();
+
+	constructor(acknowledges: boolean) {
+		this.acknowledges = acknowledges;
+	}
+
+	add(stream: OpenStream) {
+		this.#open.add(stream);
+	}
+
+	delete(stream: OpenStream) {
+		this.#open.delete(stream);
+	}
+
+	/** The open group streams, the lowest send order first, and the earliest opened among equals. */
+	list(): OpenStream[] {
+		return [...this.#open].sort((a, b) => a.sendOrder - b.sendOrder);
+	}
+}
+
+/** The lines of one session's opens, and the group streams it has open. */
 interface Lines {
 	uni: Line<SendStream>;
 	bi: Line<WebTransportBidirectionalStream>;
+	streams: OpenStreams;
+	/** The peer's PROBE estimates, whose RTT stands in for a transport that reports none. */
+	probe?: Getter<Probe>;
 }
 
 const sessions = new WeakMap<WebTransport, Lines>();
 
-/** The lines `quic`'s opens wait in, shared by everything opening on it. */
+/** The lines `quic`'s opens wait in, and its open group streams, shared by everything opening on it. */
 export function lines(quic: WebTransport): Lines {
-	let lines = sessions.get(quic);
+	const lines = sessions.get(quic);
 	if (lines) return lines;
 	// `@types/web` doesn't declare `waitUntilAvailable` yet. Waiting is what keeps an open in
 	// line rather than refused. 0 is the transport's default order, so it is left unset.
 	const options = (sendOrder: number) =>
 		sendOrder === 0 ? { waitUntilAvailable: true } : { sendOrder, waitUntilAvailable: true };
-	lines = {
+	const streams = new OpenStreams(transportOf(quic) === "websocket");
+	// Before any RTT sample, wait 100 ms. A transport may report 0 until its first sample.
+	// A zero RTT is a transport that has not sampled yet.
+	const sampled = (rtt?: Duration) => (rtt?.isZero() ? undefined : rtt);
+	const patience = async () =>
+		sampled((await transportStats(quic)).rtt) ?? sampled(session.probe?.peek().rtt) ?? Duration.millis(100);
+	const session: Lines = {
 		uni: new Line(
 			(sendOrder) => quic.createUnidirectionalStream(options(sendOrder)) as Promise<SendStream>,
 			(stream, sendOrder) => {
 				stream.sendOrder = sendOrder;
 			},
+			{ streams, patience },
 		),
 		bi: new Line(
 			(sendOrder) => quic.createBidirectionalStream(options(sendOrder)),
@@ -185,7 +317,8 @@ export function lines(quic: WebTransport): Lines {
 				(stream.writable as SendStream).sendOrder = sendOrder;
 			},
 		),
+		streams,
 	};
-	sessions.set(quic, lines);
-	return lines;
+	sessions.set(quic, session);
+	return session;
 }

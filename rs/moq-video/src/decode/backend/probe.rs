@@ -8,6 +8,7 @@
 //! Reachable only through [`Kind::Named`](super::Kind), never through `Auto` /
 //! `Hardware` / `Software`, so it can't be picked by accident.
 
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::ThreadId;
@@ -60,6 +61,10 @@ static LOG: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 #[cfg(not(apple))]
 static FLUSH_ENTERED: AtomicBool = AtomicBool::new(false);
 
+/// Wakes [`flush_entered`] once [`FLUSH_ENTERED`] is set.
+#[cfg(not(apple))]
+static FLUSH_ENTERING: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 #[cfg(not(apple))]
 static FLUSH_RELEASED: AtomicBool = AtomicBool::new(false);
 
@@ -89,10 +94,17 @@ pub(crate) fn prepare_blocking_flush() {
 	FLUSH_RELEASED.store(false, Ordering::SeqCst);
 }
 
-/// Whether the blocking flush has started on the codec thread.
+/// Resolves once the blocking flush has started on the codec thread.
 #[cfg(not(apple))]
-pub(crate) fn flush_entered() -> bool {
-	FLUSH_ENTERED.load(Ordering::SeqCst)
+pub(crate) async fn flush_entered() {
+	loop {
+		let mut entering = std::pin::pin!(FLUSH_ENTERING.notified());
+		entering.as_mut().enable();
+		if FLUSH_ENTERED.load(Ordering::SeqCst) {
+			return;
+		}
+		entering.await;
+	}
 }
 
 /// Let the blocking flush finish so the codec thread can be joined.
@@ -130,15 +142,18 @@ pub(crate) const SIZE: Size = Size {
 	height: 240,
 };
 
-pub(crate) struct Probe;
+pub(crate) struct Probe(VecDeque<Frame>);
 
-pub(crate) struct Buffered(Option<Frame>);
+pub(crate) struct Buffered {
+	held: Option<Frame>,
+	ready: VecDeque<Frame>,
+}
 
-pub(crate) struct Immediate;
+pub(crate) struct Immediate(VecDeque<Frame>);
 
-pub(crate) struct Single;
+pub(crate) struct Single(VecDeque<Frame>);
 
-pub(crate) struct Native;
+pub(crate) struct Native(VecDeque<Frame>);
 
 pub(crate) struct Refusing;
 
@@ -148,32 +163,40 @@ pub(crate) struct BlockingFlush;
 impl Probe {
 	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		record("open");
-		Ok(Box::new(Self))
+		Ok(Box::new(Self(VecDeque::new())))
 	}
 }
 
 impl Buffered {
 	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
-		Ok(Box::new(Self(None)))
+		Ok(Box::new(Self {
+			held: None,
+			ready: VecDeque::new(),
+		}))
 	}
 }
 
 impl Immediate {
 	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
-		Ok(Box::new(Self))
+		Ok(Box::new(Self(VecDeque::new())))
 	}
 }
 
 impl Backend for Immediate {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
 		if access_unit == CORRUPT {
 			return Err(anyhow::anyhow!("probe: corrupt access unit").into());
 		}
-		Ok(vec![frame(timestamp)?])
+		self.0.push_back(frame(timestamp)?);
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
-		Ok(Vec::new())
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.0.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
+		Ok(())
 	}
 
 	fn name(&self) -> &str {
@@ -186,17 +209,22 @@ impl Single {
 		if SINGLE_OPEN.swap(true, Ordering::SeqCst) {
 			return Err(anyhow::anyhow!("probe: out of decoder sessions").into());
 		}
-		Ok(Box::new(Self))
+		Ok(Box::new(Self(VecDeque::new())))
 	}
 }
 
 impl Backend for Single {
-	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
-		Ok(vec![frame(timestamp)?])
+	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
+		self.0.push_back(frame(timestamp)?);
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
-		Ok(Vec::new())
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.0.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
+		Ok(())
 	}
 
 	fn name(&self) -> &str {
@@ -213,7 +241,7 @@ impl Drop for Single {
 impl Native {
 	pub(crate) fn open(_stream: &Stream, config: &Config) -> Result<Box<dyn Backend>, Error> {
 		*NATIVE_OPENED.lock().unwrap() = Some(config.clone());
-		Ok(Box::new(Self))
+		Ok(Box::new(Self(VecDeque::new())))
 	}
 
 	/// A mid-gray picture at [`SIZE`] in the most native representation this
@@ -235,12 +263,17 @@ impl Native {
 }
 
 impl Backend for Native {
-	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
-		Ok(vec![Self::frame(timestamp)?])
+	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
+		self.0.push_back(Self::frame(timestamp)?);
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
-		Ok(Vec::new())
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.0.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
+		Ok(())
 	}
 
 	fn name(&self) -> &str {
@@ -272,13 +305,18 @@ fn frame(timestamp: Timestamp) -> Result<Frame, Error> {
 impl Backend for Probe {
 	/// One mid-gray frame per access unit, carrying the timestamp it came in
 	/// with, so a test can tell which payload a frame came from.
-	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
 		record("decode");
-		Ok(vec![frame(timestamp)?])
+		self.0.push_back(frame(timestamp)?);
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
-		Ok(Vec::new())
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.0.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
+		Ok(())
 	}
 
 	fn name(&self) -> &str {
@@ -288,16 +326,21 @@ impl Backend for Probe {
 
 #[cfg(not(apple))]
 impl Backend for BlockingFlush {
-	fn decode(&mut self, _access_unit: Bytes, _timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
-		Ok(Vec::new())
+	fn decode(&mut self, _access_unit: Bytes, _timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(None)
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
 		FLUSH_ENTERED.store(true, Ordering::SeqCst);
+		FLUSH_ENTERING.notify_waiters();
 		while !FLUSH_RELEASED.load(Ordering::SeqCst) {
 			std::thread::yield_now();
 		}
-		Ok(Vec::new())
+		Ok(())
 	}
 
 	fn name(&self) -> &str {
@@ -306,12 +349,18 @@ impl Backend for BlockingFlush {
 }
 
 impl Backend for Buffered {
-	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
-		Ok(self.0.replace(frame(timestamp)?).into_iter().collect())
+	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
+		self.ready.extend(self.held.replace(frame(timestamp)?));
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
-		Ok(self.0.take().into_iter().collect())
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
+		self.ready.extend(self.held.take());
+		Ok(())
 	}
 
 	fn name(&self) -> &str {

@@ -94,18 +94,18 @@ impl Receivers {
 		for _ in 0..sessions {
 			let (client, server) = tokio::io::duplex(64 << 10);
 			let (client, server) = if websocket {
-				use qmux::ws::{Upgraded, tokio_tungstenite::WebSocketStream, tungstenite::protocol::Role};
-				let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
-				let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
-				let (client, driver) = Upgraded::new(client, version.alpn())
-					.with_session_config(config.clone())
-					.connect()
-					.unwrap();
+				use qmux::ws::Upgraded;
+				let (client, server) = tokio::join!(
+					Upgraded::new(client, version.alpn())
+						.with_session_config(config.clone())
+						.connect(),
+					Upgraded::new(server, version.alpn())
+						.with_session_config(config.clone())
+						.accept(),
+				);
+				let (client, driver) = client.unwrap();
 				rig.drivers.spawn(driver);
-				let (server, driver) = Upgraded::new(server, version.alpn())
-					.with_session_config(config.clone())
-					.accept()
-					.unwrap();
+				let (server, driver) = server.unwrap();
 				rig.drivers.spawn(driver);
 				(client, server)
 			} else {

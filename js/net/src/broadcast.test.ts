@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, StreamCode } from "./error.ts";
 import { hooks } from "./internal.ts";
@@ -320,19 +320,19 @@ test("a request exposes the aggregate subscription options", async () => {
 
 	consumer.track("video").subscribe({
 		priority: 3,
-		delay: { max: Milli(100) },
+		delay: { max: Duration.millis(100) },
 		ranges: [{ start: { absolute: 10n }, end: { absolute: 20n } }],
 	});
 	consumer.track("video").subscribe({
 		priority: 7,
-		delay: { max: Milli(250) },
+		delay: { max: Duration.millis(250) },
 		ranges: [{ start: { absolute: 0n }, end: { absolute: 30n } }],
 	});
 
 	const request = await pendingRequest(consumer);
 	expect(request?.subscription).toEqual({
 		priority: 7,
-		delay: { min: Milli.zero, max: Milli(250) },
+		delay: { min: Duration.ZERO, max: Duration.millis(250) },
 		order: "descending",
 		ranges: [{ start: { absolute: 0n }, end: { absolute: 30n } }],
 	});
@@ -444,11 +444,11 @@ test("two subscribers to one inserted track each get a full copy", async () => {
 
 	const a = broadcast
 		.track("video")
-		.subscribe({ delay: { max: Milli(5000) } })
+		.subscribe({ delay: { max: Duration.millis(5000) } })
 		.ordered();
 	const b = broadcast
 		.track("video")
-		.subscribe({ delay: { max: Milli(5000) } })
+		.subscribe({ delay: { max: Duration.millis(5000) } })
 		.ordered();
 
 	producer.writeFrame(textFrame("hello"));
@@ -480,7 +480,7 @@ test("a read throws Evicted at a shed front, then resyncs to the next group", as
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const sub = broadcast
 		.track("video")
-		.subscribe({ delay: { max: Milli(5000) } })
+		.subscribe({ delay: { max: Duration.millis(5000) } })
 		.ordered();
 
 	// Group 0 sheds its front without aborting the writer.
@@ -502,7 +502,7 @@ test("a stalled consumer does not pin evicted groups", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
-		clock.jump(Nano.fromMilli(Milli(10_000)));
+		clock.jump(Duration.millis(10_000));
 
 		const broadcast = new BroadcastProducer();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
@@ -513,10 +513,9 @@ test("a stalled consumer does not pin evicted groups", async () => {
 
 		producer.writeFrame(textFrame("old"));
 
-		// Advance past the cache window, plus the scan slice a prune may lag by, and write
-		// again to trigger a prune. The old (closed, aged-out) group is dropped from the
-		// stalled sink, not retained.
-		clock.jump(Nano.fromMilli(Milli(30_000 + 30_000 / 8)));
+		// Advance past the cache window and write again, which scans for idle groups. The old
+		// (closed, aged-out) group is dropped from the stalled sink, not retained.
+		clock.jump(Duration.millis(30_000 + 1_000));
 		producer.writeFrame(textFrame("fresh"));
 
 		// The next group in arrival order is the fresh one (seq 1): the old (seq 0) group
@@ -536,11 +535,15 @@ test("a stalled consumer does not pin evicted groups", async () => {
 test("createTrack commits info up front", async () => {
 	const broadcast = new BroadcastProducer();
 
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Milli(2000), priority: 3 });
+	const producer = broadcast.createTrack("video", {
+		timescale: Timescale.MILLI,
+		maxAge: Duration.millis(2000),
+		priority: 3,
+	});
 	expect(producer.name).toBe("video");
 
 	const info = await broadcast.track("video").info();
-	expect(info.maxAge).toBe(Milli(2000));
+	expect(info.maxAge).toEqual(Duration.millis(2000));
 	expect(info.priority).toBe(3);
 });
 
@@ -561,7 +564,7 @@ test("a finished track is still served from its cache", async () => {
 	const late = broadcast
 		.consume()
 		.track("track1")
-		.subscribe({ delay: { max: Milli(5000) } })
+		.subscribe({ delay: { max: Duration.millis(5000) } })
 		.ordered();
 	expect(await late.readString()).toBe("last");
 	expect(await late.nextGroup()).toBeUndefined();
@@ -648,7 +651,7 @@ test("a fetch of a group still to come asks the request handler, and the write a
 
 test("fetch maxDelay tightens the publisher's maxAge without changing omission", async () => {
 	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Milli(2000) });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(2000) });
 
 	for (const millis of [0, 1000]) {
 		const group = track.appendGroup();
@@ -663,7 +666,9 @@ test("fetch maxDelay tightens the publisher's maxAge without changing omission",
 	expect(omitted.sequence).toBe(0n);
 	omitted.close();
 
-	await expect(wireOf(broadcast).fetchGroup("video", 0n, { maxDelay: Milli(0) })).rejects.toBeInstanceOf(NotFound);
+	await expect(wireOf(broadcast).fetchGroup("video", 0n, { maxDelay: Duration.millis(0) })).rejects.toBeInstanceOf(
+		NotFound,
+	);
 	broadcast.close();
 });
 

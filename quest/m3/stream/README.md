@@ -17,7 +17,7 @@ fastest-reader pacing gives.
 Decided 2026-10-25 with the maintainer (mesh planning interview):
 
 - TCP-level proxying over groups, never IP over datagrams.
-- A forwarded service is one [socket](/quest/m1/socket/README.md) endpoint,
+- A forwarded service is one [socket](/doc/concept/socket.md) endpoint,
   and each TCP connection is one session on it (amended 2026-11-03, below),
   one group each way; each TCP `read()` becomes one frame, because a frame's length must
   be known before it is written and a read has one. It coalesces whatever is
@@ -42,9 +42,10 @@ Decided 2026-10-25 with the maintainer (mesh planning interview):
 Amended 2026-11-01 with the maintainer (socket planning interview),
 2026-11-03 when sockets became endpoints, and 2026-11-04 when the socket's
 `tcp` protocol became one group each way: connection setup is the
-[socket](/quest/m1/socket/README.md) epic's `Endpoint`, `dial_tcp`, and
-`accept_tcp`, which settle the layout (`<prefix>/.socket/<id>`, a
-`tcp/<dialer>/<acceptor>/<session>` track each way). Each TCP connection is one `tcp`
+[socket](/doc/concept/socket.md) `Endpoint`, `dial_tcp`, and
+`accept_tcp`, which settle the layout (`<prefix>/.server/<id>` and
+`<prefix>/.client/<id>`, a `tcp/<dialer>/<acceptor>/<session>` track each
+way). Each TCP connection is one `tcp`
 session, whose halves are a single group each way for the connection's life:
 frames are writes, finishing is FIN, resetting is RST, and the writer awaits
 `group::Producer::ready` for backpressure. Each session gets its own priority,
@@ -55,9 +56,3 @@ This epic owns the end-to-end proof: an unmodified TCP client and server (SSH
 and an HTTP bulk transfer) talk through a two-relay chain with loss injected on
 one hop, with no corruption, FIN and reset propagated, and memory bounded by
 the window.
-
-## Required
-
-- [Rust byte streams](/quest/m3/stream/rust.md) - a duplex `AsyncRead`/`AsyncWrite` stream, a listener and a dialer, and `moq` CLI forwarding
-- [JS byte streams](/quest/m3/stream/js.md) - the same surface in `@moq/net`
-- [Stream benchmark](/quest/m3/stream/bench.md) - throughput and latency against raw TCP through a relay chain, with and without loss

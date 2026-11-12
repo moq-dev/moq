@@ -48,7 +48,7 @@ impl<T> Producer<T> {
 				},
 				encoder: Encoder::new(config),
 				at: None,
-				finished: false,
+				state: crate::state::State::Open,
 			})),
 			_marker: PhantomData,
 		}
@@ -102,21 +102,24 @@ impl<T> Producer<T> {
 		self.inner.lock().unwrap().poll_refresh(waiter)
 	}
 
-	/// Finish the track, closing any open group.
+	/// Finish the track, closing any open group, and return the [`Finished`] window.
 	///
-	/// Borrows rather than consumes, matching snapshot and stream, so the handle stays
-	/// usable afterwards (reads, a second finish). Writes after this fail with
-	/// [`moq_net::Error::Closed`].
-	pub fn finish(&mut self) -> Result<()> {
-		self.inner.lock().unwrap().finish()
+	/// Clones sharing the track see it ended: their edits fail with [`moq_net::Error::Closed`]. A
+	/// finish that fails aborts the track instead, and those clones then report its cause.
+	pub fn finish(self) -> Result<Finished<T>> {
+		self.inner.lock().unwrap().finish()?;
+		Ok(Finished {
+			inner: self.inner,
+			_marker: PhantomData,
+		})
 	}
 
 	/// Abort the track with the given error, which consumers see in place of a clean end.
 	///
 	/// Consumes the handle, since nothing can be published afterwards. Clones sharing the track see
-	/// it closed: their next edit fails with [`moq_net::Error::Closed`].
+	/// it closed: their next edit fails with `err`.
 	pub fn abort(self, err: moq_net::Error) -> Result<()> {
-		self.inner.lock().unwrap().abort(err);
+		self.inner.lock().unwrap().abort(err.into());
 		Ok(())
 	}
 }
@@ -128,6 +131,45 @@ impl<T: Serialize> Producer<T> {
 		T: 'a,
 	{
 		self.inner.lock().unwrap().push(value.into())
+	}
+}
+
+/// A window whose producer [finished](Producer::finish) it: it can still be read or aborted, but
+/// not edited.
+///
+/// Dropping the last handle sharing the track releases it, so new readers can no longer find it.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_push(window: moq_json::window::Finished<u32>) {
+/// window.push(&1).unwrap();
+/// # }
+/// ```
+#[must_use = "dropping the last handle releases the track, which new readers can then no longer find"]
+pub struct Finished<T> {
+	inner: Arc<Mutex<Inner<T>>>,
+	_marker: PhantomData<fn(T)>,
+}
+
+impl<T> Finished<T> {
+	/// Create a subscriber for the underlying track.
+	pub fn consume(&self) -> moq_net::track::Subscriber {
+		self.inner.lock().unwrap().track.inner.subscribe(None)
+	}
+
+	/// The retained checkpoint suffix, oldest first; see [`Producer::window`].
+	pub fn window(&self) -> Vec<Value> {
+		self.inner.lock().unwrap().encoder.window()
+	}
+
+	/// Absolute index of the oldest retained record, and of the next one; see [`Producer::range`].
+	pub fn range(&self) -> std::ops::Range<u64> {
+		self.inner.lock().unwrap().encoder.range()
+	}
+
+	/// Release the track's cache, reporting `err` to readers that have not drained it.
+	pub fn abort(self, err: moq_net::Error) -> Result<()> {
+		self.inner.lock().unwrap().abort(err.into());
+		Ok(())
 	}
 }
 
@@ -147,7 +189,8 @@ struct Inner<T> {
 	/// older timestamp than its group's first frame, and a new group may not start before that one.
 	at: Option<moq_net::Timestamp>,
 
-	finished: bool,
+	/// Whether this producer still publishes, or how it ended the track.
+	state: crate::state::State,
 }
 
 impl<T> Inner<T> {
@@ -182,7 +225,7 @@ impl<T> Inner<T> {
 	}
 
 	fn cut(&mut self) -> Result<()> {
-		let Some(mut group) = self.track.group.take() else {
+		let Some(group) = self.track.group.take() else {
 			return Ok(());
 		};
 		// The group closes either way, so reset first: a `finish` error must not leave the encoder
@@ -193,25 +236,53 @@ impl<T> Inner<T> {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		if self.finished {
-			return Ok(());
+		match &self.state {
+			crate::state::State::Open => {}
+			crate::state::State::Finished => return Ok(()),
+			crate::state::State::Aborted(err) => return Err(err.clone()),
 		}
-		self.finished = true;
-		self.track.finish()
+		// The open group goes with the track, so the encoder must not keep appending ops to it.
+		self.encoder.reset();
+		if let Err(err) = self.track.finish() {
+			// Half-finished, the track could still take groups, so it ends with the cause instead.
+			self.abort(err.clone());
+			return Err(err);
+		}
+		self.state = crate::state::State::Finished;
+		Ok(())
 	}
 
-	fn abort(&mut self, err: moq_net::Error) {
-		self.finished = true;
+	/// Abort the track with `err`, which every later call reports. The first cause wins.
+	fn abort(&mut self, err: crate::Error) {
+		// The track carries a moq-net error; anything else has no wire code, so consumers get a
+		// generic failure while the exact cause stays here.
+		let reason = match &err {
+			crate::Error::Net(err) => err.clone(),
+			_ => moq_net::StreamError::Internal.into(),
+		};
+		self.encoder.reset();
 		// The group first: aborting the track leaves an already-pulled group consumer independent.
 		if let Some(group) = self.track.group.take() {
-			let _ = group.abort(err.clone());
+			let _ = group.abort(reason.clone());
 		}
 		// Idempotent: a track that is already closed keeps its first reason.
-		let _ = self.track.inner.clone().abort(err);
+		let _ = self.track.inner.clone().abort(reason);
+		self.state.abort(err);
 	}
 
+	/// Refuse further edits once the track can't take another group.
 	fn ensure_open(&self) -> Result<()> {
-		if self.finished {
+		self.state.check()?;
+		// The same test `append_group` applies: a boundary declared ahead of the live edge still
+		// admits the groups below it. The largest counts every group, even an empty one, so the
+		// next group is the one after it.
+		let track = &self.track.inner;
+		let next = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
+		if track.is_closed()
+			|| track
+				.finished()
+				.is_some_and(|end| moq_net::track::Position::group(next) >= end)
+		{
 			return Err(moq_net::Error::Closed.into());
 		}
 		Ok(())
@@ -237,7 +308,8 @@ impl<T: Serialize> Inner<T> {
 struct Track {
 	inner: moq_net::track::Producer,
 
-	/// The group an op would be appended to, open after a header.
+	/// The group an op would be appended to, open after a header. Whatever clears it resets the
+	/// encoder too, or the encoder's next op would have no group to land in.
 	group: Option<moq_net::group::Producer>,
 
 	/// The sequence of the newest group written, which a refresh has to pass.
@@ -267,7 +339,7 @@ impl Track {
 	/// Close the open group and write the header as the first frame of a new one.
 	fn write_header(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
 		// The previous group is complete; no more frames will be appended to it.
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 
@@ -295,10 +367,14 @@ impl Track {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
-		self.inner.finish()?;
+		// Another handle may have declared the end already, which stands. This shared state
+		// keeps its own clone, whose appends the end refuses.
+		if self.inner.finished().is_none() {
+			drop(self.inner.clone().finish()?);
+		}
 		Ok(())
 	}
 }

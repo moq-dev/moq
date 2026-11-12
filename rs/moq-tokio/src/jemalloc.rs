@@ -1,15 +1,44 @@
 //! On-demand jemalloc heap profiling, for chasing leaks in a running process.
 //!
-//! Spawn [`run`] to dump a profile whenever the process gets SIGUSR1.
+//! Install [`Allocator`] as the `#[global_allocator]`, then spawn [`run`] to dump a profile
+//! whenever the process gets SIGUSR1.
 //!
 //! Sampling does not have to be running for that to work. `MALLOC_CONF=prof:true` alone builds
 //! the profiling backend without sampling anything, and the first SIGUSR1 starts it. That keeps
 //! the steady-state cost off a process nobody is profiling: sampling accrues per-allocation
 //! metadata for as long as it runs, which on a busy process is hundreds of megabytes.
 
-use tikv_jemalloc_ctl::raw;
+use std::alloc::{GlobalAlloc, Layout};
 
-pub use tikv_jemallocator;
+use tikv_jemalloc_ctl::raw;
+use tikv_jemallocator::Jemalloc;
+
+/// The jemalloc allocator [`run`] profiles, for a binary's `#[global_allocator]`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Allocator;
+
+// Each method forwards to jemalloc's, under the same contract.
+unsafe impl GlobalAlloc for Allocator {
+	#[inline]
+	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+		unsafe { Jemalloc.alloc(layout) }
+	}
+
+	#[inline]
+	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+		unsafe { Jemalloc.alloc_zeroed(layout) }
+	}
+
+	#[inline]
+	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+		unsafe { Jemalloc.dealloc(ptr, layout) }
+	}
+
+	#[inline]
+	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+		unsafe { Jemalloc.realloc(ptr, layout, new_size) }
+	}
+}
 
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, tokio::task::JoinError> {
 	tokio::task::spawn_blocking(work).await
@@ -23,6 +52,13 @@ fn register_signal() -> std::io::Result<tokio::signal::unix::Signal> {
 fn signal_ready() -> &'static tokio::sync::Notify {
 	static READY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
 	READY.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Notified once each SIGUSR1 has been handled, so a test needn't poll for its effect.
+#[cfg(test)]
+fn signal_handled() -> &'static tokio::sync::Notify {
+	static HANDLED: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+	HANDLED.get_or_init(tokio::sync::Notify::new)
 }
 
 /// Whether jemalloc built its profiling backend, which is what makes `prof.active` writable.
@@ -62,42 +98,49 @@ pub async fn run() -> crate::Result<()> {
 
 		loop {
 			sig.recv().await;
-			if !ready {
-				tracing::warn!(
-					"heap profile requested, but jemalloc profiling was not enabled at startup (MALLOC_CONF=prof:true)"
-				);
-				continue;
-			}
-
-			// Start sampling on the first request rather than at startup, so an unprofiled process
-			// carries none of the cost. Only allocations from here on are sampled: whatever the heap
-			// already holds is not attributed retroactively, so a dump taken to explain an
-			// already-large heap wants `prof_active:true` from the start instead.
-			if !sampling() {
-				match blocking(|| unsafe { raw::write(b"prof.active\0", true) }).await {
-					Ok(Ok(())) => {
-						tracing::info!("jemalloc heap profiling started; this dump covers only allocations from now on")
-					}
-					Ok(Err(err)) => {
-						tracing::error!(%err, "failed to start heap profiling");
-						continue;
-					}
-					Err(err) => {
-						tracing::error!(%err, "start-profiling task failed");
-						continue;
-					}
-				}
-			}
-
-			// Null pointer tells jemalloc to use prof_prefix from MALLOC_CONF.
-			match blocking(|| unsafe { raw::write(b"prof.dump\0", std::ptr::null::<u8>()) }).await {
-				Ok(Ok(())) => tracing::info!("heap profile dumped"),
-				Ok(Err(err)) => tracing::error!(%err, "failed to dump heap profile"),
-				Err(err) => tracing::error!(%err, "heap profile task failed"),
-			}
+			dump(ready).await;
+			#[cfg(test)]
+			signal_handled().notify_one();
 		}
 	})
 	.await
+}
+
+/// Answer one SIGUSR1: start sampling if it is off, then dump a profile.
+async fn dump(ready: bool) {
+	if !ready {
+		tracing::warn!(
+			"heap profile requested, but jemalloc profiling was not enabled at startup (MALLOC_CONF=prof:true)"
+		);
+		return;
+	}
+
+	// Start sampling on the first request rather than at startup, so an unprofiled process
+	// carries none of the cost. Only allocations from here on are sampled: whatever the heap
+	// already holds is not attributed retroactively, so a dump taken to explain an
+	// already-large heap wants `prof_active:true` from the start instead.
+	if !sampling() {
+		match blocking(|| unsafe { raw::write(b"prof.active\0", true) }).await {
+			Ok(Ok(())) => {
+				tracing::info!("jemalloc heap profiling started; this dump covers only allocations from now on")
+			}
+			Ok(Err(err)) => {
+				tracing::error!(%err, "failed to start heap profiling");
+				return;
+			}
+			Err(err) => {
+				tracing::error!(%err, "start-profiling task failed");
+				return;
+			}
+		}
+	}
+
+	// Null pointer tells jemalloc to use prof_prefix from MALLOC_CONF.
+	match blocking(|| unsafe { raw::write(b"prof.dump\0", std::ptr::null::<u8>()) }).await {
+		Ok(Ok(())) => tracing::info!("heap profile dumped"),
+		Ok(Err(err)) => tracing::error!(%err, "failed to dump heap profile"),
+		Err(err) => tracing::error!(%err, "heap profile task failed"),
+	}
 }
 
 #[cfg(test)]
@@ -182,15 +225,9 @@ mod tests {
 				super::signal_ready().notified().await;
 				unsafe { libc::raise(libc::SIGUSR1) };
 
-				// Flipping `prof.active` hops to a blocking thread, so poll rather than assume it
-				// has landed by the next yield.
-				for _ in 0..200 {
-					if super::sampling() {
-						break;
-					}
-					kio::clock::sleep(std::time::Duration::from_millis(10)).await;
-				}
-
+				// Flipping `prof.active` hops to a blocking thread, so wait for the signal to be
+				// handled rather than assume it has landed by the next yield.
+				super::signal_handled().notified().await;
 				assert!(super::sampling(), "SIGUSR1 did not start sampling");
 				assert!(!runner.is_finished());
 				runner.abort();
@@ -215,7 +252,7 @@ mod tests {
 				let runner = tokio::spawn(super::run());
 				super::signal_ready().notified().await;
 				unsafe { libc::raise(libc::SIGUSR1) };
-				tokio::task::yield_now().await;
+				super::signal_handled().notified().await;
 				assert!(!runner.is_finished());
 				runner.abort();
 			});

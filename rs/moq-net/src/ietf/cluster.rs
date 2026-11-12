@@ -162,7 +162,7 @@ impl Advert {
 		let advertised = crate::origin::Cost::new(self.cost);
 		// The prefix travels separately: it is stamped where the advertisement
 		// attaches (the namespace).
-		crate::origin::RouteInfo::default()
+		crate::origin::RouteInfo::new()
 			.with_hops(self.hops.hops().clone())
 			.with_cost(advertised.charged(link_cost))
 	}

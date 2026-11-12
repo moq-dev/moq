@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+
 import { ObjectDatagram } from "./ietf/datagram.ts";
 import * as Filter from "./ietf/filter.ts";
 import { GoAway } from "./ietf/goaway.ts";
@@ -127,10 +127,10 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		expect(() => params.fillTimeout).toThrow(RangeError);
 		expect(() => Filter.decodeFill(fields(version, 1, 0x0a, UNSAFE), version)).toThrow(RangeError);
 		const safe = new Parameters();
-		safe.fillTimeout = Milli(Number.MAX_SAFE_INTEGER);
+		safe.fillTimeout = Number.MAX_SAFE_INTEGER;
 		const bytes = await Writer.collect(version, (w) => safe.encode(w, version));
 		expect((await Parameters.decode(new Reader(undefined, bytes, version), version)).fillTimeout).toBe(
-			Milli(Number.MAX_SAFE_INTEGER),
+			Number.MAX_SAFE_INTEGER,
 		);
 	});
 
@@ -164,7 +164,11 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 		for (const index of [0, 1]) {
 			const body = await Writer.collect(version, async (w) => {
 				await w.string("room");
-				if (version === Lite.DRAFT_07) await w.u53(0);
+				if (version === Lite.DRAFT_07) {
+					// No pinned instance: empty and unminted.
+					await w.u53(0);
+					await w.bool(false);
+				}
 				await w.string("video");
 				await w.u8(0);
 				if (version === Lite.DRAFT_07) await w.u53(0);

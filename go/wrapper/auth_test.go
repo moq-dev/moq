@@ -16,7 +16,7 @@ func awaitGrant(t *testing.T, ctx context.Context, session *moq.Session, want mo
 	t.Helper()
 
 	grants := session.Grants()
-	defer grants.Close()
+	defer grants.Cancel()
 	got := grants.Grant()
 	for got == nil || !reflect.DeepEqual(*got, want) {
 		var err error
@@ -97,8 +97,92 @@ func TestSessionAuthReadsTheGrant(t *testing.T) {
 		t.Fatalf("answered = %v, want ErrUnsupported", err)
 	}
 	grants := client.Session().Grants()
-	defer grants.Close()
+	defer grants.Cancel()
 	if got := grants.Grant(); got == nil || !reflect.DeepEqual(*got, everything) {
 		t.Fatalf("grant after a refusal = %+v", got)
+	}
+}
+
+// A credential is answered by the peer, names a route and a claim, and cancels.
+func TestSessionCredentialLifecycle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const version = "moq-lite-07-wip"
+	server, err := moq.Listen(ctx, "127.0.0.1:0", moq.WithTLSGenerate("localhost"), moq.WithServerVersions(version))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	accepted := make(chan *moq.Session, 1)
+	go func() {
+		req, err := server.Accept(ctx)
+		if err != nil || req == nil {
+			return
+		}
+		session, err := req.Accept(ctx, nil, nil)
+		if err != nil {
+			return
+		}
+		accepted <- session
+	}()
+
+	client, err := moq.Dial(ctx, "https://"+server.LocalAddr(), moq.ClientConfig{
+		TLS:      moq.ClientTLS{Insecure: true},
+		Versions: []string{version},
+		Once:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	select {
+	case session := <-accepted:
+		defer session.Cancel(0)
+	case <-ctx.Done():
+		t.Fatal("no session accepted")
+	}
+
+	session := client.Session()
+	if _, err := session.Credential(""); !errors.Is(err, moq.ErrConfig) {
+		t.Fatalf("empty token = %v, want ErrConfig", err)
+	}
+	credential, err := session.Credential("extra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The server verifies no tokens of its own, so it refuses this one.
+	if err := credential.Answered(ctx); !errors.Is(err, moq.ErrUnsupported) {
+		t.Fatalf("answered = %v, want ErrUnsupported", err)
+	}
+
+	route, err := session.Publish().Route("room/x", moq.RouteOptions{Hidden: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer route.Cancel()
+	claim, err := session.Publish().Claim("live", moq.RouteOptions{Hidden: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer claim.Cancel()
+	for _, set := range []func(*moq.Credential) error{route.SetAuth, claim.SetAuth} {
+		if err := set(credential); err != nil {
+			t.Fatal(err)
+		}
+		if err := set(nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	credential.Cancel()
+	if err := credential.Answered(ctx); !errors.Is(err, moq.ErrCancelled) {
+		t.Fatalf("answered after cancel = %v, want ErrCancelled", err)
+	}
+	for _, set := range []func(*moq.Credential) error{route.SetAuth, claim.SetAuth} {
+		if err := set(credential); !errors.Is(err, moq.ErrCancelled) {
+			t.Fatalf("set_auth with a cancelled credential = %v, want ErrCancelled", err)
+		}
 	}
 }

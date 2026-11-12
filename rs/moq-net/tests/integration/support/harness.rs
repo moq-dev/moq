@@ -13,7 +13,7 @@ use std::sync::{
 };
 use std::task::Poll;
 
-use moq_net::{Client, Server, Session, Version, kio, origin};
+use moq_net::{Client, Server, Session, Version, origin};
 
 use super::mock::{MockSession, MockStats, create_mock_session_pair};
 
@@ -182,7 +182,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 		client = client.with_implementation(implementation);
 	}
 	if let Some(publish) = &opts.client_publish {
-		client = client.with_publisher(publish);
+		client = client.with_publisher(publish.clone());
 	}
 	let client_discovery = opts
 		.client_subscribe
@@ -198,7 +198,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 		.with_versions(opts.version.into())
 		.with_extensions(opts.server_extensions);
 	if let Some(publish) = &opts.server_publish {
-		server = server.with_publisher(publish);
+		server = server.with_publisher(publish.clone());
 	}
 	if let Some(subscribe) = opts.server_subscribe {
 		server = server.with_subscriber(subscribe);

@@ -12,7 +12,7 @@ use moq_net::track::Delay;
 use std::time::Duration;
 
 use moq_net::track::{Anchor, Info, Order, Range, Subscription};
-use moq_net::{Error, Hop, Timescale, Timestamp, Version};
+use moq_net::{Error, Timescale, Timestamp, Version};
 use support::harness::peer;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -31,9 +31,10 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn millis(ms: u64) -> Timestamp {
@@ -96,7 +97,7 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 			None => break,
 		}
 	}
-	track.finish().unwrap();
+	let _track = track.finish().unwrap();
 	Ok(read)
 }
 
@@ -165,4 +166,60 @@ async fn every_wire_carries_the_live_and_oldest_starts() {
 		};
 		assert_eq!(oldest, want, "{version}: oldest reads every group its start reaches");
 	}
+}
+
+/// A publisher counts a relative start back from its newest group, which may hold no frame yet
+/// and so counts neither in the largest it reports nor where the copy resolves the start. The
+/// copy reports the publisher's start instead, where a reader waiting on each group in sequence
+/// starts, rather than one below that never arrives.
+#[kio::test]
+async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_group() {
+	let publisher = produce_origin(1);
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track("data", Info::default().with_max_age(FOREVER))
+		.unwrap();
+	broadcast.announce().unwrap();
+	for sequence in 0..5 {
+		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+		group.write_frame(None, &b"x"[..]).unwrap();
+		group.finish().unwrap();
+	}
+	let mut newest = track.create_group(moq_net::group::Info { sequence: 5 }).unwrap();
+
+	let subscriber = produce_origin(2);
+	let _pair = peer("moq-lite-07-wip".parse::<Version>().unwrap(), &publisher, &subscriber).await;
+	let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("room", None).unwrap().available())
+		.await
+		.expect("resolve timeout")
+		.expect("broadcast resolves")
+		.unwrap();
+	let subscription = Subscription::default()
+		.with_delay(Delay::default().with_max(FOREVER))
+		.with_ranges([Range::live()]);
+	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
+		.await
+		.expect("subscribe timeout")
+		.unwrap();
+
+	let start = kio::clock::timeout(TIMEOUT, reader.start())
+		.await
+		.expect("start timeout");
+	assert_eq!(
+		start,
+		Some(5),
+		"the publisher's resolved start, counting its frameless newest group"
+	);
+
+	newest.write_frame(None, &b"x"[..]).unwrap();
+	newest.finish().unwrap();
+	let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
+		.await
+		.expect("group timeout")
+		.unwrap();
+	assert_eq!(group.map(|group| group.sequence), Some(5));
+	let _track = track.finish().unwrap();
 }

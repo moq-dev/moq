@@ -11,7 +11,7 @@ use crate::support;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Hop, Instance, Timestamp, Version, announce, broadcast, origin, track};
+use moq_net::{Instance, Timestamp, Version, announce, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -24,9 +24,9 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Have `to` pull everything `from` publishes.
@@ -67,11 +67,20 @@ async fn expect_restart(version: Version, announced: &mut origin::Routes, prefix
 /// place, so the path was never absent, or as an end then a start.
 async fn expect_replaced(version: Version, announced: &mut origin::Routes, prefix: &str, restarts: bool) {
 	match next_event(announced).await {
-		origin::RouteEvent::Restart(announce) if restarts => assert_eq!(announce.prefix.as_str(), prefix),
-		origin::RouteEvent::End(announce) if !restarts => {
+		origin::RouteEvent {
+			kind: origin::RouteKind::Restart,
+			announce,
+		} if restarts => assert_eq!(announce.prefix.as_str(), prefix),
+		origin::RouteEvent {
+			kind: origin::RouteKind::End,
+			announce,
+		} if !restarts => {
 			assert_eq!(announce.prefix.as_str(), prefix);
 			match next_event(announced).await {
-				origin::RouteEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), prefix),
+				origin::RouteEvent {
+					kind: origin::RouteKind::Start,
+					announce,
+				} => assert_eq!(announce.prefix.as_str(), prefix),
 				other => panic!("{version}: expected the start, got {other:?}"),
 			}
 		}
@@ -125,7 +134,10 @@ async fn relay_chain(version: &str) {
 	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().routes();
 	match next_event(&mut announced).await {
-		origin::RouteEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			announce,
+		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the route, got {other:?}"),
 	}
 
@@ -173,10 +185,10 @@ relay_chain_tests! {
 
 /// A worker claiming `pool` under its own instance, `worker-<hop>`, answering each request
 /// with an output whose `video` track carries the worker's name. The claim is a peer's, landed through
-/// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
+/// the `fuzz` module as a session lands it, so its answers carry no exact route.
 struct Worker {
 	origin: origin::Producer,
-	_claim: Rc<origin::Route>,
+	_claim: Rc<origin::Claim>,
 	_outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
@@ -187,11 +199,7 @@ impl Worker {
 			moq_net::fuzz::requests_route(
 				&origin,
 				moq_net::Path::from_static("pool"),
-				moq_net::fuzz::route_info(
-					moq_net::Hops::new(),
-					0,
-					Some((format!("worker-{hop}").parse().unwrap(), 0)),
-				),
+				moq_net::fuzz::route_info([], 0, Some((format!("worker-{hop}").parse().unwrap(), 0))),
 			)
 			.unwrap(),
 		);
@@ -214,25 +222,12 @@ impl Worker {
 	}
 }
 
-/// The worker that wins `path` among `workers`: the lowest spread hash of the path and its
-/// instance, which every relay computes alike (`instance_key` in `moq-net`).
-fn spread(path: &str, workers: &[u64]) -> String {
-	let key = |hop: &u64| {
-		let mut hash: u64 = 0x420C0DECB00B;
-		for byte in path.bytes().chain(format!("worker-{hop}").into_bytes()) {
-			hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
-		}
-		hash
-	};
-	workers.iter().min_by_key(|hop| key(hop)).unwrap().to_string()
-}
-
-/// Workers `10` and `11` claim `pool` behind `U -> D`, each under its own instance. `U`
-/// spreads the pool's paths over them, but advertises one route for `pool`, its own winner
-/// for the prefix, and `D` names that route's instance on every request it forwards, so
-/// every hop serves the instance the first one chose: behind `D` the pool collapses onto
-/// that one worker. Worker `12` joining takes `U`'s requests for the paths it wins, and
-/// `D`'s whenever `U` advertises it for `pool`.
+/// Workers `10` and `11` claim `pool` behind `U -> D`, each under its own instance, and
+/// lite-07 routes each claim to its own origin node. Only the first hop selects the
+/// origin, by a rendezvous hash of the path and the origin's identity that every node
+/// computes alike, so `D` spreads the pool's paths over the workers exactly as `U` does
+/// and names the chosen origin on every request it forwards. Worker `12` joining takes
+/// over only the paths it wins, at both.
 async fn prefix_pool(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let upstream = produce_origin(2);
@@ -245,53 +240,58 @@ async fn prefix_pool(version: &str) {
 	}
 	settle().await;
 
-	// The worker whose instance `D`'s route for `pool` names.
+	// `D`'s route for `pool` names one of the workers.
 	let advertised = |announce: announce::Announce| {
 		assert_eq!(announce.prefix.as_str(), "pool");
 		let instance = announce.route.instance().clone();
-		instance.as_str().strip_prefix("worker-").expect("a worker").to_string()
+		assert!(instance.as_str().starts_with("worker-"), "{instance:?}");
 	};
 	let mut announced = downstream.consume().routes();
-	let mut prefix = match next_event(&mut announced).await {
-		origin::RouteEvent::Start(announce) => advertised(announce),
+	match next_event(&mut announced).await {
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			announce,
+		} => advertised(announce),
 		other => panic!("{version}: expected the pool, got {other:?}"),
+	}
+
+	// The worker serving `path` at `U`, which `D` must agree on.
+	let served = async |path: &str| {
+		let (_broadcast, mut subscription) = subscribe(&upstream, path).await;
+		let at_upstream = read(&mut subscription).await;
+		let (_broadcast, mut subscription) = subscribe(&downstream, path).await;
+		assert_eq!(read(&mut subscription).await, at_upstream, "{version}: {path} at D");
+		at_upstream
 	};
 
 	let paths = ["pool/job-0", "pool/job-1", "pool/job-2", "pool/job-3"];
-	let mut held = Vec::new();
+	let mut before = Vec::new();
 	for path in paths {
-		let (broadcast, mut subscription) = subscribe(&downstream, path).await;
-		assert_eq!(read(&mut subscription).await, prefix, "{version}: {path}");
-		held.push((broadcast, subscription));
-		let (_broadcast, mut subscription) = subscribe(&upstream, path).await;
-		assert_eq!(
-			read(&mut subscription).await,
-			spread(path, &[10, 11]),
-			"{version}: {path} at U"
+		let worker = served(path).await;
+		assert!(
+			["10", "11"].contains(&worker.as_str()),
+			"{version}: {path} served by {worker}"
 		);
+		before.push(worker);
 	}
-	assert!(
-		paths.iter().any(|path| spread(path, &[10, 11, 12]) == "12"),
-		"the paths must exercise the joining worker"
-	);
 
 	links.push(link(version, &workers[2].origin, &upstream).await);
 	settle().await;
 	while let Ok(Some(event)) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		match event {
-			origin::RouteEvent::Restart(announce) => prefix = advertised(announce),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Restart,
+				announce,
+			} => advertised(announce),
 			other => panic!("{version}: expected a restart at most, got {other:?}"),
 		}
 	}
 
-	for path in paths {
-		let (_broadcast, mut subscription) = subscribe(&downstream, path).await;
-		assert_eq!(read(&mut subscription).await, prefix, "{version}: {path}");
-		let (_broadcast, mut subscription) = subscribe(&upstream, path).await;
-		assert_eq!(
-			read(&mut subscription).await,
-			spread(path, &[10, 11, 12]),
-			"{version}: {path} at U"
+	for (path, before) in paths.into_iter().zip(before) {
+		let worker = served(path).await;
+		assert!(
+			worker == before || worker == "12",
+			"{version}: {path} moved from {before} to {worker}, not to the joining worker"
 		);
 	}
 }
@@ -305,10 +305,10 @@ async fn prefix_pool_lite07() {
 
 /// A claim at `live` whose handler answers each request with a fresh output, kept so
 /// the test can write into it: `outputs[n]` answered the `n`th request. Only a peer's
-/// claim moves to another instance or re-prices in place, so it lands through the hidden
+/// claim moves to another instance or re-prices in place, so it lands through the
 /// `fuzz` module as a session lands it.
 struct Claim {
-	dynamic: Rc<origin::Route>,
+	dynamic: Rc<origin::Claim>,
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 	/// The price the claim advertises, kept across an instance move.
 	cost: std::cell::Cell<u64>,
@@ -316,7 +316,7 @@ struct Claim {
 
 impl Claim {
 	fn new(origin: &origin::Producer, instance: Option<Instance>) -> Self {
-		let route = moq_net::fuzz::route_info(moq_net::Hops::new(), 0, instance.map(|instance| (instance, 0)));
+		let route = moq_net::fuzz::route_info([], 0, instance.map(|instance| (instance, 0)));
 		let dynamic =
 			Rc::new(moq_net::fuzz::requests_route(origin, moq_net::Path::from_static("live"), route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
@@ -347,14 +347,14 @@ impl Claim {
 
 	/// Move the claim to `instance` in place, keeping the rest of its route.
 	fn update_instance(&self, instance: Instance) {
-		let route = moq_net::fuzz::route_info(moq_net::Hops::new(), self.cost.get(), Some((instance, 0)));
+		let route = moq_net::fuzz::route_info([], self.cost.get(), Some((instance, 0)));
 		moq_net::fuzz::update_route(&self.dynamic, route).unwrap();
 	}
 
 	/// Re-price the claim in place, keeping its instance.
 	fn update_cost(&self, cost: u64) {
 		self.cost.set(cost);
-		let route = moq_net::fuzz::route_info(moq_net::Hops::new(), cost, None);
+		let route = moq_net::fuzz::route_info([], cost, None);
 		moq_net::fuzz::update_route(&self.dynamic, route).unwrap();
 	}
 }
@@ -374,7 +374,10 @@ async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 	let claim = Claim::new(&publisher, from.clone());
 	let mut announced = viewer.consume().routes();
 	match next_event(&mut announced).await {
-		origin::RouteEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			announce,
+		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the claim, got {other:?}"),
 	}
 
@@ -386,7 +389,13 @@ async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 	claim.update_cost(5);
 	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		assert!(
-			matches!(event, Some(origin::RouteEvent::Update(_))),
+			matches!(
+				event,
+				Some(origin::RouteEvent {
+					kind: origin::RouteKind::Update,
+					..
+				})
+			),
 			"{version}: a re-price delivered {event:?}"
 		);
 	}
@@ -477,7 +486,13 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	let old = publisher.route("live", old_route).unwrap();
 	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().routes();
-	assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::Start(_)));
+	assert!(matches!(
+		next_event(&mut announced).await,
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			..
+		}
+	));
 	let (held, mut subscription) = subscribe(&viewer, "live").await;
 	let track = held.track("video").unwrap();
 	write(&old_track, "old:0");
@@ -556,7 +571,13 @@ async fn unanswered_takeover(version: &str) {
 	// Quiet, so the publisher has nothing to answer the SUBSCRIBE with yet.
 	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().routes();
-	assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::Start(_)));
+	assert!(matches!(
+		next_event(&mut announced).await,
+		origin::RouteEvent {
+			kind: origin::RouteKind::Start,
+			..
+		}
+	));
 	let (_held, mut subscription) = subscribe(&viewer, "live").await;
 	settle().await;
 	assert!(
@@ -615,13 +636,25 @@ async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 		let source = publisher.route("live", origin::RouteOptions::default()).unwrap();
 		let produced = source.broadcast().create_track("video", timed()).unwrap();
 		let mut announced = viewer.consume().routes();
-		assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::Start(_)));
+		assert!(matches!(
+			next_event(&mut announced).await,
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				..
+			}
+		));
 		let (held, mut subscription) = subscribe(&viewer, "live").await;
 		let track = held.track("video").unwrap();
 		write(&produced, "old:0");
 		assert_eq!(read(&mut subscription).await, "old:0");
 		source.withdraw();
-		assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::End(_)));
+		assert!(matches!(
+			next_event(&mut announced).await,
+			origin::RouteEvent {
+				kind: origin::RouteKind::End,
+				..
+			}
+		));
 		assert!(track.fetch_group(1, None).await.is_err(), "{version}");
 		write(&produced, "old:1");
 		assert_eq!(read(&mut subscription).await, "old:1");
@@ -637,7 +670,13 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 		let _session = link(version, &publisher, &viewer).await;
 		let old = Claim::new(&publisher, None);
 		let mut announced = viewer.consume().routes();
-		assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::Start(_)));
+		assert!(matches!(
+			next_event(&mut announced).await,
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				..
+			}
+		));
 		let (held, mut subscription) = subscribe(&viewer, "live/job").await;
 		let track = held.track("video").unwrap();
 		old.write(0, "old:0");
@@ -646,7 +685,13 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 		let replacement_track = replacement.broadcast().create_track("video", timed()).unwrap();
 		write(&replacement_track, "new:0");
 		write(&replacement_track, "new:1");
-		assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::Start(_)));
+		assert!(matches!(
+			next_event(&mut announced).await,
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				..
+			}
+		));
 		assert!(
 			track.fetch_group(1, None).await.is_err(),
 			"{version}: covering handle fetched replacement"
@@ -657,16 +702,17 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 }
 
 /// A worker claiming `pool` through the public API: each request is answered with its own
-/// exact route under a fresh instance, and `outputs[path]` holds the latest.
+/// exact route, which carries the claim's instance until it ends, and `outputs[path]`
+/// holds the latest.
 struct Pool {
-	_claim: Rc<origin::Route>,
+	_claim: Rc<origin::Claim>,
 	outputs: Rc<RefCell<std::collections::HashMap<String, (origin::Route, track::Producer)>>>,
 	answered: Rc<RefCell<usize>>,
 }
 
 impl Pool {
 	fn new(origin: &origin::Producer) -> Self {
-		let claim = Rc::new(origin.route_prefix("pool", origin::RouteOptions::default()).unwrap());
+		let claim = Rc::new(origin.claim("pool", origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(std::collections::HashMap::new()));
 		let answered = Rc::new(RefCell::new(0));
 		let (handler, served, count) = (claim.clone(), outputs.clone(), answered.clone());
@@ -697,10 +743,11 @@ impl Pool {
 	}
 }
 
-/// Wake the worker for `path` through the claim and subscribe. moq-lite-07 announces the
-/// answer as a takeover of the claim, so the first subscription keeps reading. Older wires
-/// carry it as an ordinary announcement, which resets the first subscription through the
-/// claim, so they wake the worker first and subscribe through the exact route.
+/// Subscribe to `path` through the claim. On moq-lite-07 the answer's exact route carries
+/// the claim's instance, so the first subscription continues on it. Older wires and
+/// moq-transport mint an instance per announcement, so the answer is another broadcast that
+/// resets the first subscription: wake the worker first and subscribe through the exact
+/// route.
 async fn claimed(version: Version, origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
 	if version != "moq-lite-07-wip".parse().unwrap() {
 		let cold = origin.consume().request(path, None).await.unwrap();
@@ -795,7 +842,13 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().routes();
 	assert!(
-		matches!(next_event(&mut announced).await, origin::RouteEvent::Start(_)),
+		matches!(
+			next_event(&mut announced).await,
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				..
+			}
+		),
 		"{case}"
 	);
 

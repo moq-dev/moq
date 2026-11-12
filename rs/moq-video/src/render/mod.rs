@@ -12,7 +12,7 @@
 //! dependency.
 //!
 //! ```no_run
-//! # fn example(device: &moq_video::render::wgpu::Device, queue: &moq_video::render::wgpu::Queue) -> Result<(), moq_video::Error> {
+//! # fn example(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<(), moq_video::Error> {
 //! use moq_video::render::{Config, Renderer};
 //!
 //! let mut renderer = Renderer::new(device, queue, Config::new())?;
@@ -45,13 +45,16 @@
 //!
 //! [`export`] runs the other way, handing a texture you drew to an encoder as a
 //! [`Frame`](crate::Frame): on the GPU when the encoder reads this platform's
-//! GPU surface, read back to the CPU when it does not.
+//! GPU surface, read back to the CPU when it does not. [`readback`] is that
+//! read back on its own, for a consumer that wants the picture's RGBA pixels
+//! with no encoder behind it.
 //!
 //! Enabled by the non-default `render` feature, which is what pulls in `wgpu`.
 
 mod color;
 mod device;
 pub mod export;
+pub mod readback;
 mod renderer;
 mod source;
 
@@ -66,14 +69,6 @@ mod metal;
 
 pub use device::request_device;
 pub use renderer::{Config, Renderer};
-
-/// The `wgpu` this renderer was built against, re-exported so you name the exact
-/// version rather than guessing at a compatible one.
-///
-/// [`Renderer::new`] takes this crate's `Device` and `Queue`, and
-/// [`Renderer::render`] hands back its `Texture`, so a major bump here is a
-/// breaking change for this crate.
-pub use wgpu;
 
 #[cfg(test)]
 mod tests {

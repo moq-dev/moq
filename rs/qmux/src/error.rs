@@ -100,12 +100,12 @@ pub enum Error {
 
 	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
 	#[error(transparent)]
-	UnsupportedCpu(#[from] moq_crypto::provider::UnsupportedCpu),
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 
 	/// The WebSocket failed.
 	#[cfg(feature = "ws")]
 	#[error(transparent)]
-	WebSocket(Arc<tokio_tungstenite::tungstenite::Error>),
+	WebSocket(WebSocketError),
 
 	/// Datagrams are disabled on this session, or the peer does not accept them.
 	#[error("datagrams not supported")]
@@ -168,16 +168,36 @@ impl From<std::io::Error> for Error {
 	}
 }
 
+/// A WebSocket failure, opaque so the WebSocket implementation is not part of this API.
 #[cfg(feature = "ws")]
-impl From<tokio_tungstenite::tungstenite::Error> for Error {
-	fn from(err: tokio_tungstenite::tungstenite::Error) -> Self {
+#[derive(Clone, Debug)]
+pub struct WebSocketError(Arc<tokio_tungstenite::tungstenite::Error>);
+
+#[cfg(feature = "ws")]
+impl std::fmt::Display for WebSocketError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		self.0.fmt(f)
+	}
+}
+
+#[cfg(feature = "ws")]
+impl std::error::Error for WebSocketError {
+	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+		self.0.source()
+	}
+}
+
+#[cfg(feature = "ws")]
+impl Error {
+	/// Classify a WebSocket failure.
+	pub(crate) fn websocket(err: tokio_tungstenite::tungstenite::Error) -> Self {
 		// A non-101 upgrade response carries the HTTP status; surface it as a
 		// distinct, transport-agnostic variant so callers can act on terminal
 		// rejections (e.g. auth) without downcasting tungstenite.
 		if let tokio_tungstenite::tungstenite::Error::Http(response) = &err {
 			return Self::Http(response.status().as_u16());
 		}
-		Self::WebSocket(Arc::new(err))
+		Self::WebSocket(WebSocketError(Arc::new(err)))
 	}
 }
 
@@ -217,13 +237,13 @@ mod tests {
 			.status(http::StatusCode::UNAUTHORIZED)
 			.body(None::<Vec<u8>>)
 			.unwrap();
-		let err: Error = tungstenite::Error::Http(Box::new(response)).into();
+		let err = Error::websocket(tungstenite::Error::Http(Box::new(response)));
 		assert!(matches!(err, Error::Http(401)));
 	}
 
 	#[test]
 	fn non_http_preserves_source() {
-		let err: Error = tungstenite::Error::ConnectionClosed.into();
+		let err = Error::websocket(tungstenite::Error::ConnectionClosed);
 		assert!(matches!(err, Error::WebSocket(_)));
 	}
 }

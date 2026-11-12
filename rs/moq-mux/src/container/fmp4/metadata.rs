@@ -49,7 +49,7 @@ impl Scan {
 			return Err(Error::TooManySamples(self.samples));
 		}
 		if self.groups > MAX_FRAGMENT_SAMPLES {
-			return Err(mp4_atom::Error::TooLarge(b"sgpd".into()).into());
+			return Err(Error::mp4(mp4_atom::Error::TooLarge(b"sgpd".into())));
 		}
 		if self.tracks > MAX_TRACKS {
 			return Err(Error::TooManyTracks(self.tracks));
@@ -92,7 +92,7 @@ impl Scan {
 	fn retain(&mut self, kind: FourCC, count: u64, size: usize) -> Result<()> {
 		self.any_bytes += count * size as u64;
 		if self.any_bytes > MAX_METADATA_BYTES as u64 {
-			return Err(mp4_atom::Error::TooLarge(kind).into());
+			return Err(Error::mp4(mp4_atom::Error::TooLarge(kind)));
 		}
 		Ok(())
 	}
@@ -103,8 +103,8 @@ impl Scan {
 		}
 		let namespace = match kind.as_ref() {
 			b"trun" => {
-				u32::decode(&mut data)?; // version and flags
-				self.samples += u64::from(u32::decode(&mut data)?);
+				u32::decode(&mut data).map_err(crate::container::fmp4::Error::mp4)?; // version and flags
+				self.samples += u64::from(u32::decode(&mut data).map_err(crate::container::fmp4::Error::mp4)?);
 				return Ok(());
 			}
 			b"sgpd" => {
@@ -122,8 +122,8 @@ impl Scan {
 				Namespace::Any
 			}
 			b"stsd" => {
-				u32::decode(&mut data)?; // full-box prefix
-				let count = u32::decode(&mut data)?;
+				u32::decode(&mut data).map_err(crate::container::fmp4::Error::mp4)?; // full-box prefix
+				let count = u32::decode(&mut data).map_err(crate::container::fmp4::Error::mp4)?;
 				self.retain(kind, count.into(), std::mem::size_of::<mp4_atom::Codec>())?;
 				Namespace::Any
 			}
@@ -134,7 +134,7 @@ impl Scan {
 			b"mp4a" | b".mp3" | b"Opus" | b"fLaC" | b"ac-3" | b"ec-3" | b"sowt" | b"twos" | b"lpcm" | b"ipcm"
 			| b"fpcm" | b"in24" | b"in32" | b"fl32" | b"fl64" | b"s16l" => {
 				// Includes the variable-sized QuickTime v1/v2 fields; this decoder allocates nothing.
-				mp4_atom::Audio::decode(&mut data)?;
+				mp4_atom::Audio::decode(&mut data).map_err(crate::container::fmp4::Error::mp4)?;
 				Namespace::Any
 			}
 			b"samr" => {
@@ -172,7 +172,9 @@ impl Scan {
 			_ => return Ok(()),
 		};
 		if self.parents.contains(&kind) {
-			return Err(mp4_atom::Error::InvalidCombination("recursive metadata boxes").into());
+			return Err(Error::mp4(mp4_atom::Error::InvalidCombination(
+				"recursive metadata boxes",
+			)));
 		}
 		self.parents.push(kind);
 		self.boxes(data, namespace)?;
@@ -210,30 +212,46 @@ impl Scan {
 
 /// Split a complete box without copying its body or trusting a narrowed 64-bit size.
 fn next<'a>(data: &mut &'a [u8]) -> Result<(Header, &'a [u8])> {
-	let size = u32::decode(data)?;
-	let kind = FourCC::decode(data)?;
+	let size = u32::decode(data).map_err(crate::container::fmp4::Error::mp4)?;
+	let kind = FourCC::decode(data).map_err(crate::container::fmp4::Error::mp4)?;
 	let size = match size {
 		0 => data.len(),
-		1 => usize::try_from(u64::decode(data)?.checked_sub(16).ok_or(mp4_atom::Error::InvalidSize)?)
-			.map_err(|_| mp4_atom::Error::InvalidSize)?,
-		_ => size.checked_sub(8).ok_or(mp4_atom::Error::InvalidSize)? as usize,
+		1 => usize::try_from(
+			u64::decode(data)
+				.map_err(crate::container::fmp4::Error::mp4)?
+				.checked_sub(16)
+				.ok_or(mp4_atom::Error::InvalidSize)
+				.map_err(crate::container::fmp4::Error::mp4)?,
+		)
+		.map_err(|_| mp4_atom::Error::InvalidSize)
+		.map_err(crate::container::fmp4::Error::mp4)?,
+		_ => size
+			.checked_sub(8)
+			.ok_or(mp4_atom::Error::InvalidSize)
+			.map_err(crate::container::fmp4::Error::mp4)? as usize,
 	};
 	// Media has a transport-owned payload bound and is never expanded as metadata.
 	if kind.as_ref() != b"mdat" && size > MAX_METADATA_BYTES {
-		return Err(Error::MetadataTooLarge { kind, size });
+		return Err(Error::MetadataTooLarge {
+			kind: kind.to_string(),
+			size,
+		});
 	}
 	Ok((Header { kind, size: Some(size) }, take(data, size)?))
 }
 
 fn take<'a>(data: &mut &'a [u8], size: usize) -> Result<&'a [u8]> {
-	let (body, rest) = data.split_at_checked(size).ok_or(mp4_atom::Error::OutOfBounds)?;
+	let (body, rest) = data
+		.split_at_checked(size)
+		.ok_or(mp4_atom::Error::OutOfBounds)
+		.map_err(crate::container::fmp4::Error::mp4)?;
 	*data = rest;
 	Ok(body)
 }
 
 // Count descriptions across boxes before allocating the metadata tree.
 fn sgpd(mut data: &[u8]) -> Result<u64> {
-	let version = u32::decode(&mut data)? >> 24;
+	let version = u32::decode(&mut data).map_err(crate::container::fmp4::Error::mp4)? >> 24;
 	take(&mut data, 4)?; // grouping_type
 	if version >= 1 {
 		take(&mut data, 4)?; // default_length
@@ -241,7 +259,7 @@ fn sgpd(mut data: &[u8]) -> Result<u64> {
 	if version >= 2 {
 		take(&mut data, 4)?; // default_group_description_index
 	}
-	let count = u32::decode(&mut data)?;
+	let count = u32::decode(&mut data).map_err(crate::container::fmp4::Error::mp4)?;
 	Ok(count.into())
 }
 
@@ -435,7 +453,9 @@ pub(crate) mod tests {
 		] {
 			let (decoded, checked) = entry(&nested);
 			assert!(decoded);
-			assert!(matches!(checked, Err(Error::Mp4(err)) if matches!(*err, mp4_atom::Error::TooLarge(_))));
+			assert!(
+				matches!(checked, Err(Error::Mp4(err)) if matches!(err.downcast_ref(), Some(mp4_atom::Error::TooLarge(_))))
+			);
 		}
 		// A few are accepted, as are children that do not frame: the dependency keeps those whole.
 		let mut truncated = 100u32.to_be_bytes().to_vec();

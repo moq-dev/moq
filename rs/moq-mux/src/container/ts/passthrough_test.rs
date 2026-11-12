@@ -84,7 +84,7 @@ async fn import_onto(
 	for chunk in data.chunks(chunk) {
 		passthrough.decode(chunk)?;
 	}
-	passthrough.finish()?;
+	let _finished = passthrough.finish()?;
 
 	let mut track = consumer
 		.track(&name)?
@@ -510,7 +510,7 @@ async fn the_section_goes_with_the_importer() {
 		if abort {
 			passthrough.abort(moq_net::Error::Cancel);
 		} else {
-			passthrough.finish().unwrap();
+			let passthrough = passthrough.finish().unwrap();
 			assert!(catalog.snapshot().m2ts.is_some(), "a finished track is still described");
 			drop(passthrough);
 		}

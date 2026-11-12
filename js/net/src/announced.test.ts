@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import * as Announce from "./announced.ts";
+import type { Credential } from "./auth.ts";
 import type { Producer as BroadcastProducer } from "./broadcast.ts";
-import { RouteInfo } from "./hop.ts";
+import { HopSchema, UNKNOWN_HOP, WireRoute } from "./hop.ts";
+import * as Instance from "./instance.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { wireOf } from "./wire.ts";
@@ -19,7 +21,7 @@ test("next streams every appended event in order", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();
 
-	const route = RouteInfo.default;
+	const route = WireRoute.default;
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 	producer.append({ prefix: p("a"), captures: undefined, kind: "end", route });
 
@@ -31,7 +33,7 @@ test("a listing reports only a path becoming present or absent", async () => {
 	const producer = new Announce.Producer();
 	const listing = Announce.list(producer.consume());
 
-	const route = RouteInfo.default;
+	const route = WireRoute.default;
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 	producer.append({ prefix: p("a"), captures: undefined, kind: "update", route });
 	producer.append({ prefix: p("a"), captures: undefined, kind: "restart", route });
@@ -41,11 +43,66 @@ test("a listing reports only a path becoming present or absent", async () => {
 	expect((await listing.next())?.kind).toBe("absent");
 });
 
+test("a listing shows a route's facts, never its epoch, hops, credential, or drain state", async () => {
+	const producer = new Announce.Producer();
+	const listing = Announce.list(producer.consume());
+
+	const instance = Instance.random();
+	const route = WireRoute.normalize({
+		instance,
+		epoch: 3n,
+		hops: [HopSchema.parse(7n), UNKNOWN_HOP],
+		cost: 5n,
+		auth: {} as Credential,
+		draining: true,
+	});
+	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
+
+	const event = await listing.next();
+	expect(event).toEqual({
+		kind: "present",
+		prefix: p("a"),
+		captures: undefined,
+		route: { instance, cost: 5n, available: true },
+	});
+	expect(Object.keys(event?.route ?? {}).sort()).toEqual(["available", "cost", "instance"]);
+});
+
+test("a listing reports availability flips and tells an offline path from an absent one", async () => {
+	const producer = new Announce.Producer();
+	const listing = Announce.list(producer.consume());
+	const route = WireRoute.normalize({ instance: Instance.random() });
+	const held = { ...route, available: false };
+
+	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route: held });
+	// A re-price that leaves availability as it was is not reported.
+	producer.append({ prefix: p("a"), captures: undefined, kind: "update", route: { ...held, cost: 3n } });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "update", route });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "restart", route: held });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "offline", route: held });
+	producer.append({ prefix: p("b"), captures: undefined, kind: "start", route });
+	producer.append({ prefix: p("b"), captures: undefined, kind: "end", route });
+
+	const seen = [];
+	for (let i = 0; i < 6; i++) {
+		const event = await listing.next();
+		seen.push(`${event?.kind} ${event?.prefix} ${event?.route.available}`);
+	}
+	expect(seen).toEqual([
+		"present a false",
+		"available a true",
+		"unavailable a false",
+		"offline a false",
+		"present b true",
+		"absent b true",
+	]);
+});
+
 test("the consumer is an async iterable of the same events", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();
 
-	const route = RouteInfo.default;
+	const route = WireRoute.default;
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 	producer.append({ prefix: p("a"), captures: undefined, kind: "end", route });
 
@@ -64,7 +121,7 @@ test("a same-name re-announce is a distinct update", async () => {
 	// The stream is a log, not a set: it carries a redundant announce as its own update rather
 	// than collapsing it. Deciding what a repeat means belongs to the session layer, which resolves
 	// a restart into either nothing (an identical route) or an in-place update.
-	const route = RouteInfo.default;
+	const route = WireRoute.default;
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 
@@ -97,7 +154,7 @@ test("closing a consumer releases only that handle", async () => {
 	expect(producer.closed.peek()).toBeUndefined();
 
 	// The other reader keeps the stream: an event still reaches it.
-	const route = RouteInfo.default;
+	const route = WireRoute.default;
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 	expect((await second.next())?.prefix).toBe(p("a"));
 
@@ -178,7 +235,7 @@ const start = (prefix: string): Announce.RouteEvent => ({
 	prefix: p(prefix),
 	captures: undefined,
 	kind: "start",
-	route: RouteInfo.default,
+	route: WireRoute.default,
 });
 
 test("a stream syncs once the reader is past what was queued at the boundary", async () => {

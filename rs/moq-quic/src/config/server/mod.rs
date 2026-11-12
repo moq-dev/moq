@@ -34,7 +34,7 @@ pub struct Config {
 
 	/// Duration after a retry token was issued for which it's considered valid, 15 seconds by
 	/// default
-	pub retry_token_lifetime: Duration,
+	pub(crate) retry_token_lifetime: Duration,
 
 	/// Whether to allow clients to migrate to new addresses
 	///
@@ -82,7 +82,7 @@ pub struct Config {
 	///
 	/// The default value is set to 100 MiB--a generous amount that still prevents memory
 	/// exhaustion in most contexts.
-	pub incoming_buffer_size_total: u64,
+	pub(crate) incoming_buffer_size_total: u64,
 
 	/// Used to generate one-time AEAD keys to protect handshake tokens
 	pub(crate) token_key: Arc<dyn HandshakeTokenKey>,
@@ -125,7 +125,7 @@ impl Config {
 	/// Present `cert_chain`, signed for by `key`, with the default settings
 	///
 	/// A CPU that rind cannot run on arrives in [`rustls::Error::Other`]: downcast it to
-	/// [`UnsupportedCpu`](moq_crypto::provider::UnsupportedCpu).
+	/// [`UnsupportedCpu`](moq_crypto::cpu::UnsupportedCpu).
 	pub fn with_single_cert(
 		cert_chain: Vec<CertificateDer<'static>>,
 		key: PrivateKeyDer<'static>,

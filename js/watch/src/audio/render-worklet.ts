@@ -1,5 +1,5 @@
 import { ComfortNoise } from "./comfort";
-import type { Message, State } from "./render";
+import type { Clock, Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 
 // Samples to fade over when playback stops or resumes short of a full quantum. A shortfall
@@ -16,6 +16,8 @@ class Render extends AudioWorkletProcessor {
 	#playing = true;
 	// Whether the previous quantum ended short, so the next one fades back in.
 	#short = false;
+	// The shared clock's latest reading, which the ring plays onto.
+	#clock?: Clock;
 
 	constructor() {
 		super();
@@ -28,14 +30,18 @@ class Render extends AudioWorkletProcessor {
 				this.#playing = msg.playing ?? true;
 				this.#underflow = 0;
 				this.#short = false;
+				this.#clock = undefined;
 			} else if (msg.type === "data") {
 				this.#ring?.write(msg.timestamp, msg.data);
+			} else if (msg.type === "received") {
+				this.#ring?.received(msg.end);
+			} else if (msg.type === "clock") {
+				this.#clock = msg;
+				if (msg.jumped) this.#ring?.jumped(msg.jumped);
 			} else if (msg.type === "latency") {
-				this.#ring?.setLatency(msg.latency);
-				if (msg.park !== undefined) {
-					this.#ring?.park();
-					this.#epoch = msg.park;
-				}
+				this.#ring?.setLatency(msg.latency, msg);
+				// The clock moves with the delay, so a reading from before it would misplace audio.
+				this.#clock = undefined;
 			} else if (msg.type === "end") {
 				this.#ring?.end(msg.timestamp);
 			} else if (msg.type === "truncate") {
@@ -48,6 +54,8 @@ class Render extends AudioWorkletProcessor {
 				}
 				this.#epoch = msg.epoch;
 				this.#playing = msg.playing ?? true;
+				// A reset ends the timeline the clock was read on.
+				this.#clock = undefined;
 			} else if (msg.type === "playing" && msg.epoch === this.#epoch) {
 				this.#playing = msg.playing;
 			}
@@ -57,6 +65,10 @@ class Render extends AudioWorkletProcessor {
 	process(_inputs: Float32Array[][], outputs: Float32Array[][], _parameters: Record<string, Float32Array>) {
 		const output = outputs[0];
 		const ring = this.#ring;
+		const clock = this.#clock;
+		ring?.clock(
+			clock?.timestamp !== undefined ? clock.timestamp + (currentTime - clock.time) * 1_000_000 : undefined,
+		);
 		const samplesRead = this.#playing ? (ring?.read(output) ?? 0) : 0;
 		// A declared silence between two buffered utterances plays as comfort noise, faded like any other.
 		const quiet = this.#playing ? ring?.quiet : undefined;
@@ -100,6 +112,9 @@ class Render extends AudioWorkletProcessor {
 					stalled: ring.stalled,
 					anchored: ring.anchored,
 					underruns: ring.underruns,
+					skips: ring.skips,
+					trimmed: ring.trimmed,
+					accelerated: ring.accelerated,
 					silent: ring.silent,
 					epoch: this.#epoch,
 				};

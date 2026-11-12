@@ -8,6 +8,18 @@ cache:
 cache-runtime:
     bash sh/gh/cache-runtime.sh
 
+# Print the newest main commit whose Cache push run succeeded: its closures are all on nix.moq.dev.
+cache-rev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rev=$(gh run list --repo moq-dev/moq --workflow cache.yml --branch main --event push \
+        --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
+    if [[ -z "$rev" ]]; then
+        echo "no successful Cache run found on main" >&2
+        exit 1
+    fi
+    echo "$rev"
+
 # Build the runner image with a temporary policy on a disposable hosted runner.
 runner-vm-ci:
     #!/usr/bin/env bash
@@ -47,7 +59,7 @@ check:
     python3 sh/gh/test-inventory.py
     python3 bench/relay.test.py
 
-# Tests of repository tooling; every `just check` and `just ci` runs them.
+# Repository tooling tests; run every ordinary test file whole in the merge gate.
 test:
     python3 sh/version.test.py
     python3 sh/local.test.py
@@ -57,7 +69,6 @@ test:
     python3 sh/size/release.test.py
     python3 sh/size/nightly.test.py
     python3 bench/compare.test.py
-    bash sh/local.sh python3 bench/build.test.py
     python3 bench/summary.test.py
     python3 bench/profile.test.py
     python3 bench/fanout.test.py
@@ -66,9 +77,10 @@ test:
     python3 sh/gh/gst-formula.test.py
     python3 sh/changed.test.py
     python3 sh/large-files.test.py
+    python3 sh/migrate.test.py
     python3 sh/text.test.py
+    python3 sh/coverage-tables.test.py
     python3 sh/dispatch-query.test.py
-    python3 sh/dispatch-query.test.py --bench
     python3 sh/gh/test-inventory.test.py
     bun test ./sh/gh/setup.test.ts
     bun sh/gh/queue.test.ts
@@ -82,17 +94,22 @@ test:
     python3 sh/rs/select.test.py
     python3 sh/rs/config.test.py
     python3 sh/rs/hakari.test.py
+    python3 sh/rs/test-lints.test.py
+    python3 sh/js/install.test.py
     python3 sh/js/workspace.test.py
     python3 sh/js/audit.test.py
-    python3 sh/rs/test-lints.test.py
     python3 sh/gh/nightly.test.py
     python3 sh/gh/pages-clean.test.py
     python3 sh/gh/bench-report.test.py
+    python3 sh/gh/rustc-cost.test.py
     python3 sh/gh/ts-paths.test.py
     sh/go/publish-wrapper.test.sh
-    bash .claude/hooks/direnv.test.sh
-    bash .codex/hooks/direnv.test.sh
     python3 sh/rs/uring.test.py
+
+# Tooling integration tests and selector timing, run nightly outside the merge gate.
+test-integration:
+    bash sh/local.sh python3 bench/build.slow.test.py
+    python3 sh/dispatch-query.test.py --bench
 
 # Release workflow helpers, e.g. `just gh release parse-version moq-cli`.
 [positional-arguments]
@@ -140,6 +157,10 @@ gst-formula *args:
 # Run related Nightly benchmarks in one build environment, reporting every failure.
 nightly group:
     sh/gh/nightly.sh {{ quote(group) }}
+
+# Measure the merge gate's build and test cost, cold and after a moq-net edit, for the benchmark history.
+gate-cost:
+    sh/gh/gate-cost.sh
 
 # Measure selected Criterion targets through the existing benchmark lifecycle.
 [positional-arguments]

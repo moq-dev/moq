@@ -4,6 +4,8 @@
  * Creates paired client/server transports connected by in-memory streams.
  */
 
+import { Duration, Manual } from "@moq/clock";
+import type { Getter } from "@moq/signals";
 import { Consumer as BroadcastConsumer } from "./broadcast.ts";
 import type { TransportStats } from "./connection/stats.ts";
 import type { Frame } from "./group.ts";
@@ -13,6 +15,35 @@ import { Timestamp } from "./time.ts";
 /** A UTF-8 text frame stamped `timestamp` (now by default), for a test writing to a timed track. */
 export function textFrame(text: string, timestamp = Timestamp.now()): Frame {
 	return { payload: new TextEncoder().encode(text), timestamp };
+}
+
+/** A Manual clock installed in this realm until disposed, for a test that moves time itself. */
+export function manual(): Manual & Disposable {
+	const clock = new Manual();
+	const installed = clock.install();
+	return Object.assign(clock, { [Symbol.dispose]: () => installed.close() });
+}
+
+/** Whether `work` settles once everything pending has run and `clock` has advanced `duration`. */
+export async function settlesWithin(
+	work: PromiseLike<unknown>,
+	clock: Manual,
+	duration = Duration.ZERO,
+): Promise<boolean> {
+	let settled = false;
+	const done = () => {
+		settled = true;
+	};
+	Promise.resolve(work).then(done, done);
+	await clock.advance(duration);
+	return settled;
+}
+
+/** Resolves with `getter`'s value once `ready` holds for it, for a test awaiting a state change. */
+export async function waitFor<T>(getter: Getter<T>, ready: (value: T) => boolean): Promise<T> {
+	let value = getter.peek();
+	while (!ready(value)) value = await getter.changed();
+	return value;
 }
 
 /**

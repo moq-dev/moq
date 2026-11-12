@@ -4,7 +4,7 @@
  *
  * @module
  */
-import { Instant, Nano, now, Second, sleep, sleepUntil } from "@moq/clock";
+import { Duration, Instant, now, sleep, sleepUntil, Wall } from "@moq/clock";
 
 /** Cancels a subscription, effect, or other registration when called. */
 export type Dispose = () => void;
@@ -63,6 +63,8 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 	// Microtask coalescing state
 	#pending = false;
+	// Watchers owed their first value at the next flush, unless it delivers a change anyway.
+	#initial: Set<Subscriber<T>> = new Set();
 	#oldValue: T | undefined;
 	#hasCapturedOldValue = false;
 	#forceNotify = false;
@@ -96,6 +98,13 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	 * A function is stored as the value; use {@link update} to transform instead.
 	 */
 	set(value: T, notify?: boolean): void {
+		// A silent write captures nothing: a listener that subscribes after it starts from the new
+		// value, so comparing a later write against the value it replaced would hide a change.
+		if (notify === false) {
+			this.#value = value;
+			return;
+		}
+
 		// Capture old value before the first set in this microtask.
 		if (!this.#hasCapturedOldValue) {
 			this.#oldValue = this.#value;
@@ -103,9 +112,6 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		}
 
 		this.#value = value;
-
-		// If notify is false, don't notify.
-		if (notify === false) return;
 
 		if (notify === true) this.#forceNotify = true;
 
@@ -128,37 +134,60 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 	#flush(): void {
 		this.#pending = false;
+		const value = this.#value;
+
+		// Watchers added during this flush wait for the flush their watch() queued.
+		let initial: Set<Subscriber<T>> | undefined;
+		if (this.#initial.size > 0) {
+			initial = this.#initial;
+			this.#initial = new Set();
+		}
 
 		// A write while nobody listened dropped the capture, so any listener since then saw the
 		// current value when it subscribed and there is no change to deliver.
-		if (!this.#hasCapturedOldValue) return;
-		this.#hasCapturedOldValue = false;
-		const old = this.#oldValue;
-		this.#oldValue = undefined;
+		if (this.#hasCapturedOldValue) {
+			this.#hasCapturedOldValue = false;
+			const old = this.#oldValue;
+			this.#oldValue = undefined;
 
-		const force = this.#forceNotify;
-		this.#forceNotify = false;
+			const force = this.#forceNotify;
+			this.#forceNotify = false;
 
-		// Check if the net change is zero (value returned to what it was before).
-		if (!force && isEqual(old as T, this.#value)) return;
+			// Deliver unless the net change is zero (value returned to what it was before).
+			if (force || !isEqual(old as T, value)) {
+				const changed = this.#changed;
+				this.#changed = new Set();
 
-		const value = this.#value;
-		const changed = this.#changed;
-		this.#changed = new Set();
+				for (const fn of this.#subscribers) {
+					if (this.#initial.size > 0 && this.#initial.has(fn)) continue;
+					try {
+						fn(value);
+					} catch (error) {
+						console.error("signal subscriber error", error);
+					}
+				}
 
-		for (const fn of this.#subscribers) {
-			try {
-				fn(value);
-			} catch (error) {
-				console.error("signal subscriber error", error);
+				for (const fn of changed) {
+					try {
+						fn(value);
+					} catch (error) {
+						console.error("signal changed error", error);
+					}
+				}
+
+				// Pending watchers are subscribers, so the loop above was their first value.
+				return;
 			}
 		}
 
-		for (const fn of changed) {
+		if (!initial) return;
+		for (const fn of initial) {
+			// Disposed during this flush.
+			if (!this.#subscribers.has(fn)) continue;
 			try {
 				fn(value);
 			} catch (error) {
-				console.error("signal changed error", error);
+				console.error("signal watch error", error);
 			}
 		}
 	}
@@ -199,11 +228,23 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		});
 	}
 
-	/** Calls `fn` with the current value now, and again every time it changes. */
+	/**
+	 * Calls `fn` with the current value on a microtask, and again every time it changes.
+	 * A change before that first call is delivered once, as the first call.
+	 */
 	watch(fn: Subscriber<T>): Dispose {
-		const dispose = this.subscribe(fn);
-		queueMicrotask(() => fn(this.#value));
-		return dispose;
+		// A wrapper per call, so watching with the same `fn` twice stays two watchers.
+		const watcher: Subscriber<T> = (value) => fn(value);
+		const dispose = this.subscribe(watcher);
+		this.#initial.add(watcher);
+		if (!this.#pending) {
+			this.#pending = true;
+			queueMicrotask(() => this.#flush());
+		}
+		return () => {
+			this.#initial.delete(watcher);
+			dispose();
+		};
 	}
 
 	/**
@@ -689,7 +730,7 @@ export class Effect {
 		if (this.#async.size > 0) {
 			// Diagnostic only: a task that ignores cancellation stalls the rerun, so name it.
 			const warn = new AbortController();
-			sleep(Nano.fromSecond(Second(5)), { signal: warn.signal, ref: false }).then(() => {
+			sleep(Duration.secs(5), { signal: warn.signal, ref: false }).then(() => {
 				// A close() racing the timer disarms it, but the wakeup can already be
 				// queued by then. There is nothing to warn about once the effect is gone.
 				if (this.#dispose === undefined) return;
@@ -743,12 +784,16 @@ export class Effect {
 		}
 	}
 
-	/** Reads a signal and tracks it, rerunning the effect whenever it changes. */
+	/**
+	 * Reads a signal and tracks it, rerunning the effect whenever it changes. A {@link spawn} task
+	 * that outlived its run only reads: the next run tracks what it reads itself.
+	 */
 	get<T>(signal: Getter<T>): T {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.get called when closed, returning current value");
 			return signal.peek();
 		}
+		if (this.#stale) return signal.peek();
 
 		const value = signal.peek();
 
@@ -808,7 +853,7 @@ export class Effect {
 	}
 
 	/** Runs `fn` after `duration` on the installed clock, unless the effect reruns or closes first. */
-	timer(fn: () => void, duration: Nano) {
+	timer(fn: () => void, duration: Duration) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.timer called when closed, ignoring");
 			return;
@@ -828,7 +873,7 @@ export class Effect {
 	 * Shares {@link run}'s handling of a task that outlived its run: the child is closed at the
 	 * next teardown, not immediately.
 	 */
-	timeout(fn: (effect: Effect) => void, duration: Nano) {
+	timeout(fn: (effect: Effect) => void, duration: Duration) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.timeout called when closed, ignoring");
 			return;
@@ -864,16 +909,15 @@ export class Effect {
 	 * Runs `fn` every positive period until cleanup, arming the first deadline before returning.
 	 * Each period uses the clock installed then; a late callback delays the next by a full period.
 	 */
-	interval(fn: () => void, period: Nano) {
+	interval(fn: () => void, period: Duration) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.interval called when closed, ignoring");
 			return;
 		}
 
-		Instant.add(Instant.zero, period);
-		if (period === 0) throw new RangeError("interval period must be positive");
+		if (period.isZero()) throw new RangeError("interval period must be positive");
 		const abort = new AbortController();
-		let next = Instant.add(now(), period);
+		let next = now().saturatingAdd(period);
 		void (async () => {
 			for (;;) {
 				await sleepUntil(next, { signal: abort.signal });
@@ -885,7 +929,7 @@ export class Effect {
 				}
 				// A callback may install a clock with a different origin. A full Delay period
 				// starts from that clock's now, never from the previous clock's deadline.
-				next = Instant.add(now(), period);
+				next = now().saturatingAdd(period);
 			}
 		})().catch(noop);
 		this.cleanup(() => abort.abort());
@@ -1299,17 +1343,24 @@ export class Derived<const S extends readonly Getter<unknown>[], T> implements G
 	}
 }
 
+// Nesting past this compares unequal, bounding the work and stack for cyclic or very deep
+// values. A false "changed" only costs an extra notification.
+const EQUAL_DEPTH = 64;
+
 // Deep equality for plain objects/arrays, SameValueZero for everything else.
-// Class instances have identity semantics (e.g. two different Broadcast instances are never equal).
-function isEqual(a: unknown, b: unknown): boolean {
+// Class instances have identity semantics (e.g. two different Broadcast instances are never equal),
+// except the clock's immutable values, which compare by value like the numbers they replace.
+function isEqual(a: unknown, b: unknown, depth = 0): boolean {
 	if (a === b || (Number.isNaN(a) && Number.isNaN(b))) return true;
 	if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+	if (depth >= EQUAL_DEPTH) return false;
 
 	const protoA = Object.getPrototypeOf(a);
 	const protoB = Object.getPrototypeOf(b);
 
 	// Both must be plain objects or both arrays to deep-compare.
 	if (protoA !== protoB) return false;
+	if (a instanceof Duration || a instanceof Instant || a instanceof Wall) return a.eq(b as never);
 	if (protoA !== Object.prototype && protoA !== Array.prototype) return false;
 
 	// Holes are not keys, so a sparse array's length is only visible here.
@@ -1321,7 +1372,7 @@ function isEqual(a: unknown, b: unknown): boolean {
 	for (const key of keysA) {
 		// Membership matters on its own: `{ a: undefined }` is not `{ b: undefined }`.
 		if (!Object.hasOwn(b, key)) return false;
-		if (!isEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) return false;
+		if (!isEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], depth + 1)) return false;
 	}
 
 	return true;

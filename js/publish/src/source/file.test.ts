@@ -1,5 +1,5 @@
 import { expect, mock, spyOn, test } from "bun:test";
-import { Manual, Micro, Nano, Second } from "@moq/clock";
+import { Duration, Instant, Manual } from "@moq/clock";
 import { File as FileSource } from "./file";
 
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
@@ -109,7 +109,7 @@ test("an image read again after a gap skips to the slot due now", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	// Start away from zero so an unanchored timestamp can't pass by accident.
-	clock.jump(Nano.fromSecond(Second(1)));
+	clock.jump(Duration.secs(1));
 	const zero = 1_000_000;
 
 	const source = new FileSource({
@@ -126,13 +126,13 @@ test("an image read again after a gap skips to the slot due now", async () => {
 		expect(await read()).toBe(zero);
 
 		// Unread for a minute: the next frame is the one due now, not the 1,799 missed in between.
-		clock.jump(Nano.fromSecond(Second(60)));
+		clock.jump(Duration.secs(60));
 		expect(await read()).toBe(zero + 60_000_000);
 
 		// Then the 30fps cadence resumes from the present.
-		const next = zero + Micro.fromSecond(Second(1801 / 30));
-		expect(await read()).toBe(next);
-		expect(Nano.toMicro(Nano(clock.now()))).toBe(Micro(next));
+		const next = zero + (1801 / 30) * 1_000_000;
+		expect(await read()).toBe(Math.round(next));
+		expect(clock.now().since(Instant.ZERO).asMicros()).toBeCloseTo(next, 3);
 
 		await reader.cancel();
 	} finally {

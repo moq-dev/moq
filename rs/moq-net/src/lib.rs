@@ -97,18 +97,13 @@ mod discovery;
 #[cfg(feature = "async")]
 mod driver;
 mod error;
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub mod fuzz;
 #[cfg(feature = "async")]
 pub mod goaway;
 #[cfg(not(feature = "async"))]
 #[allow(dead_code, unused_imports, reason = "async-only")]
 mod goaway;
-#[cfg(test)]
-mod test_tracing;
-// Not part of the public API: compiled only for the crate's own tests and for the
-// `fuzz/` harness.
-#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
-#[doc(hidden)]
-pub mod fuzz;
 mod ietf;
 mod instance;
 mod ledger;
@@ -129,6 +124,8 @@ mod setup;
 mod tail;
 #[cfg(all(test, feature = "async"))]
 mod test_interop;
+#[cfg(test)]
+mod test_tracing;
 mod util;
 mod version;
 
@@ -164,9 +161,3 @@ pub use version::*;
 /// A wrapper prepends its own token, space-separated, outermost first:
 /// `format!("moq-ffi/{v} {}", moq_net::IMPLEMENTATION)`.
 pub const IMPLEMENTATION: &str = concat!("moq-net-rs/", env!("CARGO_PKG_VERSION"));
-
-// Re-export the bytes crate
-pub use bytes;
-
-// Re-export the kio crate, since it appears in the public API (e.g. poll_* waiters).
-pub use kio;

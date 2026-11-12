@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use moq_crypto::e2ee::Credential;
 use moq_crypto::e2ee::credential::Config;
-use moq_net::{Hop, Timestamp, Version};
+use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -17,7 +17,8 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	tokio::spawn(support::harness::run(driver));
 	producer
 }
@@ -130,7 +131,7 @@ async fn datagram_roundtrip(version: &str, plaintext: &[u8]) {
 		consumer.set_priority(1);
 		let mut priority = producer.priority();
 		while priority != Some(1) {
-			priority = kio::wait(|waiter| producer.poll_priority(waiter, priority)).await;
+			priority = kio::wait(|waiter| producer.poll_priority_changed(waiter)).await;
 		}
 
 		let sequence = producer.append(Timestamp::from_millis(9).unwrap(), plaintext).unwrap();

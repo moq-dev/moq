@@ -17,10 +17,10 @@ libraries and entry points, rejected loader calls, and drivers older than the
 vendored SDK are reported as `LoadError` values. The safe encoder facade never
 panics while loading its driver function table.
 
-The crate compiles on any platform, macOS included: the `sys` bindings are plain
-C-ABI definitions and nothing links at build time. It only actually loads NVENC
-on Linux (that is the only place `moq-video` calls it); elsewhere it is a
-compile-only stub.
+The crate compiles on any platform: the `sys` bindings are Linux's plain C-ABI
+definitions and nothing links at build time. It only loads NVENC and NVDEC on
+Linux, the only place `moq-video` depends on it; elsewhere it is a compile-only
+stub.
 
 The public encoder facade owns configuration and registered allocations, seals
 driver handles, and returns a submission that keeps input and output resources

@@ -43,6 +43,11 @@ never filled from a `Host` header or a WebTransport authority. The client still 
 the relay serves, so a hostname-scoped server binds the tenant to the
 credential, not to `server_name` alone.
 
+`host` is the host the client dialed, without its port: the `Host` header or
+URL authority on HTTP, WebSocket, and WebTransport, and the SNI on raw QUIC and
+`tls://`. Unlike `server_name` it is present over plaintext, so a server that
+scopes tenants by hostname can read `host`; it is just as client-chosen.
+
 **Connect.** A 2xx with a grant admits. A 403 can carry JSON such as
 `{"reason":"expired","root":"rooms/123","tier":"edge"}`. The reason is
 `refused`, `forbidden`, `expired`, or `malformed` (the token does not parse);
@@ -133,7 +138,8 @@ and use its `moq auth` subcommand.
 moq auth generate --algorithm ES256 --out private.jwk --public public.jwk
 
 # Let the bearer publish under rooms/123/alice and subscribe to anything in rooms/123.
-moq auth sign --key private.jwk --root rooms/123 --publish 'alice/**' --subscribe '**' --expires "$(( $(date +%s) + 3600 ))" > alice.jwt
+# The token expires in an hour unless --ttl, --expires, or --unbounded says otherwise.
+moq auth sign --key private.jwk --root rooms/123 --publish 'alice/**' --subscribe '**' > alice.jwt
 
 moq auth verify --key public.jwk --in alice.jwt
 ```
@@ -162,9 +168,9 @@ key can itself be **scoped** at generation (`--root`, `--publish`,
 
 ### In-band renewal
 
-On moq-lite-07-wip or moq-transport draft-18 and later with MoQ Auth negotiated,
-a client can present another JWT without reconnecting. Present its replacement
-before the current grant expires and keep the returned token handle alive.
+On moq-lite-07-wip a client can present another JWT without reconnecting.
+Present its replacement before the current grant expires and keep the returned
+token handle alive.
 The auth handle a reconnecting connection owns (native `Connection::auth()`,
 JavaScript `connection.auth`) presents its tokens again on every reconnect.
 A native client can instead replace its configured tokens through its
@@ -286,24 +292,6 @@ the same way, as a token with an empty root.
 | `""` | `**` | `**` | everything | everything |
 
 Libraries: [`moq-auth`](/lib/rs/moq-auth) (Rust) and [`@moq/auth`](/lib/js/auth) (TypeScript) sign and verify the same tokens.
-
-### Peer grants
-
-A peer grant is the relay's short-lived statement of one session's publish and
-subscribe patterns, bound to a public key the client holds (`cnf`). Another
-client verifies it with the relay's public keys and serves the presenter only
-those paths on a direct connection. It is not a token: presented as `?jwt=`
-it is refused, and a token is never a peer grant.
-
-Peer grants need an asymmetric key, ES256 or EdDSA. A relay configured with
-only HMAC keys (HS256 and friends) issues none, since giving a client an HMAC
-key would let it forge grants, and its sessions serve nothing on a direct
-connection. The set of public keys that verify peer grants is not a secret: it
-holds only ES256 and EdDSA public keys, never HMAC material.
-
-[`moq-auth`](/lib/rs/moq-auth) signs and verifies peer grants
-(`KeySet::sign_peer`, `KeySet::verify_peer`, `KeySet::to_peer_set`). The relay
-does not issue them on the AUTH stream yet.
 
 ## Anonymous access
 
@@ -433,7 +421,7 @@ evaluated or refused: nothing is ignored, and no two are combined.
 | a JWT and a certificate | never requested | refused |
 
 A JWT is verified against `--key FILE`, `--key-dir DIR`, or `--key-set FILE`
-(by `kid`, read per request so rotation needs no restart) and authorized at the
+(by `kid`, re-read when the file changes so rotation needs no restart) and authorized at the
 dialed path, as in [Path matching](#path-matching). A bad token is refused; it
 never falls through to the anonymous rules. A JWT presented with a certificate
 is refused too, because neither can safely win, so a peer presents
@@ -451,8 +439,12 @@ security boundary: approximate across relay crashes and server restarts, and
 they gate admission without revoking.
 
 `--listen unix:/run/moq-auth.sock` serves a socket. Binding anything but a
-loopback address needs `--listen-public`: the server has no authentication of
-its own. See `moq auth serve --help` for the rest.
+loopback address needs `--listen-public`, which needs `--listen-secret FILE`:
+every request must then carry the file's secret as its HTTP Basic password, so
+only relays can record sessions and fill the session limits. A relay sends it
+from its URL, `--auth-url https://relay:<secret>@auth.example.com/` (percent-encode
+reserved characters), through the TLS proxy in front of the server. `--listen-secret`
+also guards a loopback listener. See `moq auth serve --help` for the rest.
 
 ### Mesh enrollment
 
@@ -487,8 +479,9 @@ proxy, since devices refuse plain `http://` beyond loopback. A challenge holds
 no state until a proof uses it, so unauthenticated requests cannot crowd out a
 device's; the proxy should still rate-limit each client. The owner's
 commands go to `--listen` (`moq auth mesh --url`, `unix:///path` for a
-socket), which has no authentication, so `--mesh-url` refuses
-`--listen-public`. A hosted coordinator implements
+socket), which every relay holding `--listen-secret` could reach, so `--mesh-url`
+refuses `--listen-public`. With `--listen-secret` set, the owner presents it
+too, as the URL's password: `moq auth mesh --url http://owner:SECRET@127.0.0.1:4440`. A hosted coordinator implements
 the same JSON contract, documented in
 [`moq_auth::mesh`](https://docs.rs/moq-auth/latest/moq_auth/mesh/); it adds
 no token claims.
@@ -509,7 +502,7 @@ patterns: `--auth-public 'PREFIX/**'`.
 | `--auth-mtls-tier LABEL` | `--tier LABEL` (one tier per server) |
 | `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` |
 | `--auth-api` (token or proxy mode), `Cache-Control` | `--auth-url` pointed at any server answering the contract; `revalidate` and `expires` in the grant |
-| `--auth-domain` | your server reads `server_name` and decides |
+| `--auth-domain` | your server reads `host` (present over plaintext too) and decides |
 
 Both on one host:
 

@@ -1,57 +1,49 @@
-//! Lite-07 announce compression: an ANNOUNCE_START may copy the head of a live
-//! announcement's path, and an ANNOUNCE_START or ANNOUNCE_UPDATE the tail of a live
-//! announcement's hop chain, naming that base by its distance back from the stream's
-//! next unassigned Announce ID.
+//! Lite-07 announce compression: an ANNOUNCE_START may copy the
+//! head of a live announcement's path, naming that base by its distance back from the
+//! stream's next unassigned Announce ID.
 //!
 //! The codec in `announce.rs` stays stateless and carries bases as they travel. The
 //! decoder here resolves them against the stream's live announcements, which the
 //! subscriber has to track anyway, and the encoder picks them.
 
-use std::{
-	borrow::Borrow,
-	collections::{BTreeSet, HashMap},
-	hash::Hash,
-};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::{
-	Error, Hop, Hops, Path,
+	Error, Path,
 	coding::{Form, varint},
 };
 
-use super::{HopsRef, PathRef, Version};
+use super::{PathRef, Version};
 
-/// A live announcement, as the peer holds it: its wire suffix and wire hop chain
-/// (the one excluding ANNOUNCE_OK's Hop ID).
-#[derive(Clone, Debug)]
-struct Entry {
-	suffix: Path,
-	hops: Hops,
-}
-
-/// The live announcements on one stream by Announce ID, which is all a base can name.
+/// The live announcements on one stream by Announce ID, each with its wire suffix,
+/// which is all a base can name.
 #[derive(Debug, Default)]
 struct Live {
 	next: u64,
-	entries: HashMap<u64, Entry>,
+	suffixes: HashMap<u64, Path>,
 }
 
 impl Live {
+	/// The suffix of the live announcement with this id.
+	fn suffix(&self, id: u64) -> Result<&Path, Error> {
+		self.suffixes.get(&id).ok_or(Error::ProtocolViolation)
+	}
+
 	/// The live announcement `distance` back from the next id, or `None` for 0.
-	fn base(&self, distance: u64) -> Result<Option<&Entry>, Error> {
+	fn base(&self, distance: u64) -> Result<Option<&Path>, Error> {
 		if distance == 0 {
 			return Ok(None);
 		}
 		let id = self.next.checked_sub(distance).ok_or(Error::ProtocolViolation)?;
-		let entry = self.entries.get(&id).ok_or(Error::ProtocolViolation)?;
-		Ok(Some(entry))
+		self.suffix(id).map(Some)
 	}
 
-	fn resolve_path(&self, path: PathRef) -> Result<Path, Error> {
+	fn resolve(&self, path: PathRef) -> Result<Path, Error> {
 		let Some(base) = self.base(path.base)? else {
 			return Ok(path.rest);
 		};
 		let keep = usize::try_from(path.keep).map_err(|_| Error::ProtocolViolation)?;
-		let head = head(&base.suffix, keep).ok_or(Error::ProtocolViolation)?;
+		let head = head(base, keep).ok_or(Error::ProtocolViolation)?;
 		let suffix = match (head.is_empty(), path.rest.is_empty()) {
 			(true, _) => Ok(path.rest),
 			(false, true) => Path::new(head),
@@ -62,20 +54,6 @@ impl Live {
 			return Err(Error::ProtocolViolation);
 		}
 		Ok(suffix)
-	}
-
-	fn resolve_hops(&self, hops: HopsRef) -> Result<Hops, Error> {
-		let Some(base) = self.base(hops.base)? else {
-			return Ok(hops.literal);
-		};
-		let keep = usize::try_from(hops.keep).map_err(|_| Error::ProtocolViolation)?;
-		let tail = base.hops.as_slice();
-		let start = tail.len().checked_sub(keep).ok_or(Error::ProtocolViolation)?;
-		let mut out = hops.literal;
-		for hop in &tail[start..] {
-			out.push(*hop).map_err(|_| Error::ProtocolViolation)?;
-		}
-		Ok(out)
 	}
 }
 
@@ -100,84 +78,49 @@ pub(crate) struct AnnounceDecoder {
 }
 
 impl AnnounceDecoder {
-	/// An ANNOUNCE_START: resolve it and assign it the next id.
-	pub fn start(&mut self, suffix: PathRef, hops: HopsRef) -> Result<(Path, Hops), Error> {
-		let suffix = self.live.resolve_path(suffix)?;
-		let hops = self.live.resolve_hops(hops)?;
+	/// An ANNOUNCE_START: resolve its suffix and assign it the next id.
+	pub fn start(&mut self, suffix: PathRef) -> Result<Path, Error> {
+		let suffix = self.live.resolve(suffix)?;
 		let id = self.live.next;
 		self.live.next += 1;
-		self.live.entries.insert(
-			id,
-			Entry {
-				suffix: suffix.clone(),
-				hops: hops.clone(),
-			},
-		);
-		Ok((suffix, hops))
+		self.live.suffixes.insert(id, suffix.clone());
+		Ok(suffix)
 	}
 
-	/// An ANNOUNCE_TAKEOVER: resolve it like a start against the live `predecessor`,
-	/// returning the predecessor's suffix too. One at the predecessor's own suffix
-	/// retires the predecessor, since a suffix holds one advertisement.
-	pub fn takeover(&mut self, predecessor: u64, suffix: PathRef, hops: HopsRef) -> Result<(Path, Path, Hops), Error> {
-		let previous = self
-			.live
-			.entries
-			.get(&predecessor)
-			.ok_or(Error::ProtocolViolation)?
-			.suffix
-			.clone();
-		let (suffix, hops) = self.start(suffix, hops)?;
-		if suffix == previous {
-			self.live.entries.remove(&predecessor);
-		}
-		Ok((previous, suffix, hops))
+	/// The id the last start assigned.
+	pub fn last(&self) -> u64 {
+		self.live.next.saturating_sub(1)
 	}
 
-	/// An ANNOUNCE_UPDATE: resolve its chain before replacing the old one, which it
-	/// may itself be based on.
-	pub fn update(&mut self, id: u64, hops: HopsRef) -> Result<(Path, Hops), Error> {
-		let hops = self.live.resolve_hops(hops)?;
-		let entry = self.live.entries.get_mut(&id).ok_or(Error::ProtocolViolation)?;
-		entry.hops = hops.clone();
-		Ok((entry.suffix.clone(), hops))
+	/// The suffix of the live id an ANNOUNCE_UPDATE or ANNOUNCE_RESTART names, which
+	/// stays live.
+	pub fn get(&self, id: u64) -> Result<Path, Error> {
+		self.live.suffix(id).cloned()
 	}
 
 	/// An ANNOUNCE_END: retire the id, returning its suffix.
 	pub fn end(&mut self, id: u64) -> Result<Path, Error> {
-		let entry = self.live.entries.remove(&id).ok_or(Error::ProtocolViolation)?;
-		Ok(entry.suffix)
+		self.live.suffixes.remove(&id).ok_or(Error::ProtocolViolation)
 	}
 }
 
-/// The live ids under a run of keys: path segments from the head, or hop ids from
-/// the tail. Every node holds the ids of the entries beneath it, so the entry sharing
-/// the longest run with a query is found by walking the query down once, at a cost
-/// that grows with its length rather than with the number of entries.
-#[derive(Debug)]
-struct Trie<K> {
-	children: HashMap<K, Node<K>>,
+/// The live ids under a run of leading path segments. Every node holds the ids of the
+/// entries beneath it, so the entry sharing the longest head with a query is found by
+/// walking the query down once, at a cost that grows with its length rather than with
+/// the number of entries.
+#[derive(Debug, Default)]
+struct Trie {
+	children: HashMap<String, Node>,
 }
 
 #[derive(Debug)]
-struct Node<K> {
+struct Node {
 	ids: BTreeSet<u64>,
-	children: HashMap<K, Node<K>>,
+	children: HashMap<String, Node>,
 }
 
-impl<K: Hash + Eq> Default for Trie<K> {
-	fn default() -> Self {
-		Self {
-			children: HashMap::new(),
-		}
-	}
-}
-
-impl<K: Hash + Eq> Trie<K> {
-	fn insert<'a, Q>(&mut self, keys: impl Iterator<Item = &'a Q>, id: u64)
-	where
-		Q: ?Sized + ToOwned<Owned = K> + 'a,
-	{
+impl Trie {
+	fn insert<'a>(&mut self, keys: impl Iterator<Item = &'a str>, id: u64) {
 		let mut children = &mut self.children;
 		for key in keys {
 			let node = children.entry(key.to_owned()).or_insert_with(|| Node {
@@ -189,19 +132,11 @@ impl<K: Hash + Eq> Trie<K> {
 		}
 	}
 
-	fn remove<'a, Q>(&mut self, keys: impl Iterator<Item = &'a Q>, id: u64)
-	where
-		Q: ?Sized + Hash + Eq + 'a,
-		K: Borrow<Q>,
-	{
+	fn remove<'a>(&mut self, keys: impl Iterator<Item = &'a str>, id: u64) {
 		Self::remove_from(&mut self.children, keys, id);
 	}
 
-	fn remove_from<'a, Q>(children: &mut HashMap<K, Node<K>>, mut keys: impl Iterator<Item = &'a Q>, id: u64)
-	where
-		Q: ?Sized + Hash + Eq + 'a,
-		K: Borrow<Q>,
-	{
+	fn remove_from<'a>(children: &mut HashMap<String, Node>, mut keys: impl Iterator<Item = &'a str>, id: u64) {
 		let Some(key) = keys.next() else {
 			return;
 		};
@@ -219,11 +154,7 @@ impl<K: Hash + Eq> Trie<K> {
 
 	/// How many leading keys the query shares with its closest entry, and that entry's
 	/// id, preferring the newest (the smallest distance to encode).
-	fn longest<'a, Q>(&self, keys: impl Iterator<Item = &'a Q>) -> Option<(usize, u64)>
-	where
-		Q: ?Sized + Hash + Eq + 'a,
-		K: Borrow<Q>,
-	{
+	fn longest<'a>(&self, keys: impl Iterator<Item = &'a str>) -> Option<(usize, u64)> {
 		let mut children = &self.children;
 		let mut best = None;
 		for (depth, key) in keys.enumerate() {
@@ -242,20 +173,13 @@ impl<K: Hash + Eq> Trie<K> {
 /// versions that have them. Only lite-07 keeps the live set, since nothing earlier
 /// can name a base.
 ///
-/// One trie over the live paths by segment, and one over the live hop chains from the
-/// last hop back, find the longest shared head and tail. A base is used only when it
-/// encodes smaller than the literal.
+/// A trie over the live paths by segment finds the longest shared head. A base is
+/// used only when it encodes smaller than the literal.
 #[derive(Debug)]
 pub(crate) struct AnnounceEncoder {
 	version: Version,
 	live: Live,
-	heads: Trie<String>,
-	tails: Trie<Hop>,
-}
-
-/// A hop chain from the last hop back.
-fn reversed(hops: &Hops) -> impl Iterator<Item = &Hop> {
-	hops.as_slice().iter().rev()
+	heads: Trie,
 }
 
 impl AnnounceEncoder {
@@ -264,60 +188,27 @@ impl AnnounceEncoder {
 			version,
 			live: Live::default(),
 			heads: Trie::default(),
-			tails: Trie::default(),
 		}
 	}
 
-	/// An ANNOUNCE_START: its id (on versions that assign one) and its wire form.
-	pub fn start(&mut self, suffix: Path, hops: Hops) -> (Option<u64>, PathRef, HopsRef) {
+	/// An ANNOUNCE_START: its id (on versions that assign one) and its wire suffix.
+	pub fn start(&mut self, suffix: Path) -> (Option<u64>, PathRef) {
 		if !self.version.has_announce_id() {
-			return (None, PathRef::literal(suffix), HopsRef::literal(hops));
+			return (None, PathRef::literal(suffix));
 		}
 
 		let id = self.live.next;
 		self.live.next += 1;
 
 		if !self.version.has_announce_compression() {
-			return (Some(id), PathRef::literal(suffix), HopsRef::literal(hops));
+			return (Some(id), PathRef::literal(suffix));
 		}
 
 		// Distances count back from the id this START takes.
 		let path = self.path_ref(&suffix, id);
-		let chain = self.hops_ref(&hops, id);
 		self.heads.insert(suffix.parts(), id);
-		self.tails.insert(reversed(&hops), id);
-		self.live.entries.insert(id, Entry { suffix, hops });
-		(Some(id), path, chain)
-	}
-
-	/// An ANNOUNCE_TAKEOVER of the live `predecessor`: like [`Self::start`], retiring
-	/// the predecessor when it holds the same suffix.
-	pub fn takeover(&mut self, predecessor: u64, suffix: Path, hops: Hops) -> (u64, PathRef, HopsRef) {
-		let replaces = self
-			.live
-			.entries
-			.get(&predecessor)
-			.is_some_and(|entry| entry.suffix == suffix);
-		let (id, path, chain) = self.start(suffix, hops);
-		let id = id.expect("a takeover is only sent on a version with announce ids");
-		if replaces {
-			self.end(predecessor);
-		}
-		(id, path, chain)
-	}
-
-	/// An ANNOUNCE_UPDATE for a live `id`: its wire hop chain.
-	pub fn update(&mut self, id: u64, hops: Hops) -> HopsRef {
-		if !self.version.has_announce_compression() {
-			return HopsRef::literal(hops);
-		}
-		// The decoder resolves against the chain this replaces, so it is a valid base.
-		let chain = self.hops_ref(&hops, self.live.next);
-		let entry = self.live.entries.get_mut(&id).expect("update for a live id");
-		self.tails.remove(reversed(&entry.hops), id);
-		self.tails.insert(reversed(&hops), id);
-		entry.hops = hops;
-		chain
+		self.live.suffixes.insert(id, suffix);
+		(Some(id), path)
 	}
 
 	/// An ANNOUNCE_END for a live `id`.
@@ -325,9 +216,8 @@ impl AnnounceEncoder {
 		if !self.version.has_announce_compression() {
 			return;
 		}
-		let entry = self.live.entries.remove(&id).expect("end for a live id");
-		self.heads.remove(entry.suffix.parts(), id);
-		self.tails.remove(reversed(&entry.hops), id);
+		let suffix = self.live.suffixes.remove(&id).expect("end for a live id");
+		self.heads.remove(suffix.parts(), id);
 	}
 
 	/// The wire form of `suffix`, sized from its parts so only the winner is built.
@@ -347,35 +237,6 @@ impl AnnounceEncoder {
 		let size = varint_size(base, form) + varint_size(keep, form) + string_size(&rest, form);
 		match size < varint_size(0, form) * 2 + string_size(suffix, form) {
 			true => PathRef { base, keep, rest },
-			false => literal(),
-		}
-	}
-
-	/// The wire form of `hops`, sized from its parts so only the winner is built.
-	fn hops_ref(&self, hops: &Hops, next: u64) -> HopsRef {
-		let form: Form = self.version.into();
-		let literal = || HopsRef::literal(hops.clone());
-		let Some((keep, id)) = self.tails.longest(reversed(hops)) else {
-			return literal();
-		};
-		let head = &hops.as_slice()[..hops.len() - keep];
-
-		let base = next - id;
-		let keep = keep as u64;
-		let chain = |hops: &[Hop]| {
-			varint_size(hops.len() as u64, form)
-				+ hops
-					.iter()
-					.map(|hop| varint_size(hop.wire_id(form), form))
-					.sum::<usize>()
-		};
-		let size = varint_size(base, form) + chain(head) + varint_size(keep, form);
-		match size < varint_size(0, form) * 2 + chain(hops.as_slice()) {
-			true => HopsRef {
-				base,
-				literal: Hops::try_from(head.to_vec()).expect("a prefix of a valid chain is valid"),
-				keep,
-			},
 			false => literal(),
 		}
 	}
@@ -399,10 +260,6 @@ mod tests {
 
 	const VERSION: Version = Version::Lite07;
 
-	fn hops(ids: &[u64]) -> Hops {
-		Hops::try_from(ids.iter().map(|id| Hop::from_wire(*id)).collect::<Vec<_>>()).unwrap()
-	}
-
 	fn path(base: u64, keep: u64, rest: &str) -> PathRef {
 		PathRef {
 			base,
@@ -411,171 +268,69 @@ mod tests {
 		}
 	}
 
-	fn chain(base: u64, literal: &[u64], keep: u64) -> HopsRef {
-		HopsRef {
-			base,
-			literal: hops(literal),
-			keep,
-		}
-	}
-
-	fn literal(suffix: &str, ids: &[u64]) -> (PathRef, HopsRef) {
-		(path(0, 0, suffix), chain(0, ids, 0))
+	fn literal(suffix: &str) -> PathRef {
+		path(0, 0, suffix)
 	}
 
 	#[test]
-	fn resolves_a_path_head_and_hop_tail() {
+	fn resolves_a_path_head() {
 		let mut decoder = AnnounceDecoder::default();
-		let (p, h) = literal("pid/private/channel_1/health-1", &[1, 2, 3]);
-		decoder.start(p, h).unwrap();
+		decoder.start(literal("pid/private/channel_1/health-1")).unwrap();
 
-		// Three leading segments of the latest START, and its last two hops.
-		let (suffix, chain) = decoder.start(path(1, 3, "health-2"), chain(1, &[7], 2)).unwrap();
+		// Three leading segments of the latest START.
+		let suffix = decoder.start(path(1, 3, "health-2")).unwrap();
 		assert_eq!(suffix.as_str(), "pid/private/channel_1/health-2");
-		assert_eq!(chain, hops(&[7, 2, 3]));
 	}
 
 	#[test]
-	fn keeps_the_whole_path_and_chain() {
+	fn keeps_the_whole_path() {
 		let mut decoder = AnnounceDecoder::default();
-		let (p, h) = literal("a/b", &[1, 2]);
-		decoder.start(p, h).unwrap();
-		// A full keep with an empty rest names a route above the base's: not a
-		// duplicate, since the rest extends it.
-		let (suffix, chain) = decoder.start(path(1, 2, "c"), chain(1, &[], 2)).unwrap();
+		decoder.start(literal("a/b")).unwrap();
+		// A full keep with a rest names a route beneath the base's: not a duplicate,
+		// since the rest extends it.
+		let suffix = decoder.start(path(1, 2, "c")).unwrap();
 		assert_eq!(suffix.as_str(), "a/b/c");
-		assert_eq!(chain, hops(&[1, 2]));
-		// An update copying its own full chain.
-		let (suffix, chain) = decoder.update(0, chain_ref(2, 2)).unwrap();
-		assert_eq!(suffix.as_str(), "a/b");
-		assert_eq!(chain, hops(&[1, 2]));
-	}
-
-	fn chain_ref(base: u64, keep: u64) -> HopsRef {
-		chain(base, &[], keep)
+		// And a full keep with an empty rest copies it whole.
+		let suffix = decoder.start(path(1, 3, "")).unwrap();
+		assert_eq!(suffix.as_str(), "a/b/c");
 	}
 
 	#[test]
 	fn a_new_stream_has_no_base() {
 		let mut decoder = AnnounceDecoder::default();
-		assert!(matches!(
-			decoder.start(path(1, 0, "a"), chain(0, &[], 0)),
-			Err(Error::ProtocolViolation)
-		));
-		let mut decoder = AnnounceDecoder::default();
-		assert!(matches!(
-			decoder.start(path(0, 0, "a"), chain(1, &[], 0)),
-			Err(Error::ProtocolViolation)
-		));
+		assert!(matches!(decoder.start(path(1, 0, "a")), Err(Error::ProtocolViolation)));
 	}
 
 	#[test]
 	fn rejects_a_retired_or_unassigned_base() {
 		let mut decoder = AnnounceDecoder::default();
-		let (p, h) = literal("a", &[1]);
-		decoder.start(p, h).unwrap();
-		let (p, h) = literal("b", &[2]);
-		decoder.start(p, h).unwrap();
+		decoder.start(literal("a")).unwrap();
+		decoder.start(literal("b")).unwrap();
 		decoder.end(0).unwrap();
 
 		// Id 0 is two back, and retired.
-		assert!(matches!(
-			decoder.start(path(2, 1, "x"), chain(0, &[], 0)),
-			Err(Error::ProtocolViolation)
-		));
+		assert!(matches!(decoder.start(path(2, 1, "x")), Err(Error::ProtocolViolation)));
 		// Three back was never assigned.
-		assert!(matches!(
-			decoder.start(path(3, 0, "x"), chain(0, &[], 0)),
-			Err(Error::ProtocolViolation)
-		));
+		assert!(matches!(decoder.start(path(3, 0, "x")), Err(Error::ProtocolViolation)));
 		// Id 1 is still live, so reusing it works after the END.
-		let (suffix, _) = decoder.start(path(1, 1, "x"), chain(1, &[], 1)).unwrap();
+		let suffix = decoder.start(path(1, 1, "x")).unwrap();
 		assert_eq!(suffix.as_str(), "b/x");
-	}
-
-	// A takeover assigns the next id like a start. Beneath its predecessor the predecessor
-	// stays live; at the predecessor's own suffix it retires, after bases resolve against it.
-	#[test]
-	fn takeover_assigns_an_id_and_retires_one_in_place() {
-		let mut decoder = AnnounceDecoder::default();
-		let (p, h) = literal("pool", &[1]);
-		decoder.start(p, h).unwrap();
-
-		let (previous, suffix, chain) = decoder.takeover(0, path(1, 1, "p"), chain_ref(1, 1)).unwrap();
-		assert_eq!((previous.as_str(), suffix.as_str()), ("pool", "pool/p"));
-		assert_eq!(chain, hops(&[1]));
-		decoder.update(0, chain_ref(0, 0)).unwrap();
-
-		// Id 2 at id 1's own suffix, copied from id 1 itself, which then retires.
-		let (previous, suffix, _) = decoder.takeover(1, path(1, 2, ""), chain_ref(1, 1)).unwrap();
-		assert_eq!((previous.as_str(), suffix.as_str()), ("pool/p", "pool/p"));
-		assert!(matches!(
-			decoder.update(1, chain_ref(0, 0)),
-			Err(Error::ProtocolViolation)
-		));
-		assert!(matches!(
-			decoder.takeover(1, path(0, 0, "pool/p/q"), chain_ref(0, 0)),
-			Err(Error::ProtocolViolation)
-		));
-		assert!(matches!(
-			decoder.takeover(9, path(0, 0, "pool/p/q"), chain_ref(0, 0)),
-			Err(Error::ProtocolViolation)
-		));
-		assert_eq!(decoder.end(2).unwrap().as_str(), "pool/p");
-		assert_eq!(decoder.end(0).unwrap().as_str(), "pool");
 	}
 
 	#[test]
 	fn rejects_a_keep_longer_than_the_base() {
 		let mut decoder = AnnounceDecoder::default();
-		let (p, h) = literal("a/b", &[1]);
-		decoder.start(p, h).unwrap();
-		assert!(matches!(
-			decoder.start(path(1, 3, "x"), chain(0, &[], 0)),
-			Err(Error::ProtocolViolation)
-		));
-		assert!(matches!(
-			decoder.update(0, chain_ref(1, 2)),
-			Err(Error::ProtocolViolation)
-		));
-	}
-
-	#[test]
-	fn rejects_a_resolved_chain_breaking_the_hop_rules() {
-		let mut decoder = AnnounceDecoder::default();
-		let (p, h) = literal("a", &[1, 2]);
-		decoder.start(p, h).unwrap();
-		// A literal hop the kept tail repeats.
-		assert!(matches!(
-			decoder.start(path(0, 0, "b"), chain(1, &[2], 1)),
-			Err(Error::ProtocolViolation)
-		));
-
-		// Anonymous hops may repeat across the two halves.
-		let (p, h) = literal("c", &[0]);
-		decoder.start(p, h).unwrap();
-		let (_, resolved) = decoder.start(path(0, 0, "d"), chain(1, &[0], 1)).unwrap();
-		assert_eq!(resolved, hops(&[0, 0]));
-
-		// And the resolved chain is still capped.
-		// MAX_HOPS entries.
-		let full: Vec<u64> = (1..=32).collect();
-		let (p, h) = literal("e", &full);
-		decoder.start(p, h).unwrap();
-		assert!(matches!(
-			decoder.start(path(0, 0, "f"), chain(1, &[100], 32)),
-			Err(Error::ProtocolViolation)
-		));
+		decoder.start(literal("a/b")).unwrap();
+		assert!(matches!(decoder.start(path(1, 3, "x")), Err(Error::ProtocolViolation)));
 	}
 
 	#[test]
 	fn rejects_a_resolved_path_too_deep() {
 		let mut decoder = AnnounceDecoder::default();
 		let deep = vec!["x"; Path::MAX_PARTS].join("/");
-		let (p, h) = literal(&deep, &[]);
-		decoder.start(p, h).unwrap();
+		decoder.start(literal(&deep)).unwrap();
 		assert!(matches!(
-			decoder.start(path(1, Path::MAX_PARTS as u64, "y"), chain(0, &[], 0)),
+			decoder.start(path(1, Path::MAX_PARTS as u64, "y")),
 			Err(Error::ProtocolViolation)
 		));
 	}
@@ -584,55 +339,21 @@ mod tests {
 	fn rejects_a_resolved_path_too_long() {
 		let mut decoder = AnnounceDecoder::default();
 		let head = "x".repeat(Path::MAX_BYTES - 2);
-		let (p, h) = literal(&head, &[]);
-		decoder.start(p, h).unwrap();
+		decoder.start(literal(&head)).unwrap();
 
 		// `head/y` is exactly the limit, and one byte more is refused.
-		let (suffix, _) = decoder.start(path(1, 1, "y"), chain(0, &[], 0)).unwrap();
+		let suffix = decoder.start(path(1, 1, "y")).unwrap();
 		assert_eq!(suffix.len(), Path::MAX_BYTES);
-		assert!(matches!(
-			decoder.start(path(1, 1, "yz"), chain(0, &[], 0)),
-			Err(Error::ProtocolViolation)
-		));
+		assert!(matches!(decoder.start(path(1, 1, "yz")), Err(Error::ProtocolViolation)));
 	}
 
-	/// Encode a message with `encoder`, decode it with `decoder`, and check that the
-	/// resolved values match the input.
-	fn start(encoder: &mut AnnounceEncoder, decoder: &mut AnnounceDecoder, suffix: &str, ids: &[u64]) -> (u64, usize) {
-		let (id, wire_path, wire_hops) = encoder.start(Path::new(suffix).unwrap(), hops(ids));
-		let size = wire_path.encode_bytes(VERSION).unwrap().len() + wire_hops.encode_bytes(VERSION).unwrap().len();
-		let (got_path, got_hops) = decoder.start(wire_path, wire_hops).unwrap();
-		assert_eq!(got_path.as_str(), suffix);
-		assert_eq!(got_hops, hops(ids));
+	/// Encode a START with `encoder`, decode it with `decoder`, and check that the
+	/// resolved suffix matches the input. Returns its id and wire size.
+	fn start(encoder: &mut AnnounceEncoder, decoder: &mut AnnounceDecoder, suffix: &str) -> (u64, usize) {
+		let (id, wire) = encoder.start(Path::new(suffix).unwrap());
+		let size = wire.encode_bytes(VERSION).unwrap().len();
+		assert_eq!(decoder.start(wire).unwrap().as_str(), suffix);
 		(id.unwrap(), size)
-	}
-
-	// The encoder's takeover ids and bases agree with the decoder's, in place and beneath.
-	#[test]
-	fn encoder_takeover_decodes_to_its_input() {
-		let mut encoder = AnnounceEncoder::new(VERSION);
-		let mut decoder = AnnounceDecoder::default();
-		let (claim, _) = start(&mut encoder, &mut decoder, "pool", &[1, 2]);
-		let mut predecessor = claim;
-		for (suffix, ids) in [
-			("pool/p", &[3, 1, 2][..]),
-			("pool/p", &[4, 1, 2]),
-			("pool/p/q", &[4, 1, 2]),
-		] {
-			let (id, wire_path, wire_hops) = encoder.takeover(predecessor, Path::new(suffix).unwrap(), hops(ids));
-			let (_, got_path, got_hops) = decoder.takeover(predecessor, wire_path, wire_hops).unwrap();
-			assert_eq!(got_path.as_str(), suffix);
-			assert_eq!(got_hops, hops(ids));
-			predecessor = id;
-		}
-		// Both sides retired the id replaced in place and kept the rest.
-		let (id, wire_path, wire_hops) = encoder.start(Path::new("other").unwrap(), hops(&[1, 2]));
-		decoder.start(wire_path, wire_hops).unwrap();
-		assert_eq!(id, Some(4));
-		assert!(matches!(decoder.end(1), Err(Error::ProtocolViolation)));
-		decoder.end(claim).unwrap();
-		decoder.end(2).unwrap();
-		decoder.end(3).unwrap();
 	}
 
 	#[test]
@@ -640,13 +361,10 @@ mod tests {
 		let mut encoder = AnnounceEncoder::new(VERSION);
 		let mut decoder = AnnounceDecoder::default();
 
-		// Several origins behind a shared pair of relays.
-		let relays = [1u64 << 40, 1u64 << 41];
 		let mut ids = Vec::new();
 		for n in 0..40u64 {
-			let origin = 1000 + n % 4;
 			let suffix = format!("pid{}/private/channel_{}/stream-health-{}", n % 4, n % 7, n);
-			let (id, _) = start(&mut encoder, &mut decoder, &suffix, &[origin, relays[0], relays[1]]);
+			let (id, _) = start(&mut encoder, &mut decoder, &suffix);
 			ids.push(id);
 			// Retire every third one so bases come and go.
 			if n % 3 == 0 {
@@ -656,103 +374,57 @@ mod tests {
 			}
 		}
 
-		// Updates resolve against the chain they replace.
-		for id in ids.iter().copied().take(5) {
-			let chain = hops(&[2000, relays[1]]);
-			let wire = encoder.update(id, chain.clone());
-			let (_, got) = decoder.update(id, wire).unwrap();
-			assert_eq!(got, chain);
-		}
-
-		// And a later START still matches what the encoder remembers.
-		start(
-			&mut encoder,
-			&mut decoder,
-			"pid0/private/channel_0/x",
-			&[1000, relays[0], relays[1]],
-		);
+		// A later START still matches what the encoder remembers.
+		start(&mut encoder, &mut decoder, "pid0/private/channel_0/x");
 	}
 
 	#[test]
-	fn encoder_picks_the_longest_shared_head_and_tail() {
+	fn encoder_picks_the_longest_shared_head() {
 		let mut encoder = AnnounceEncoder::new(VERSION);
 		let mut decoder = AnnounceDecoder::default();
-		start(&mut encoder, &mut decoder, "a/b/c", &[1u64 << 50, 1u64 << 51]);
+		start(&mut encoder, &mut decoder, "a/b/c");
 		// Shares a byte prefix with `a/b/d`, but no second segment.
-		start(&mut encoder, &mut decoder, "a/b-z", &[3]);
+		start(&mut encoder, &mut decoder, "a/b-z");
 
-		let (_, wire_path, wire_hops) = encoder.start(Path::from_static("a/b/d"), hops(&[5, 1u64 << 51]));
-		assert_eq!(wire_path, path(2, 2, "d"));
-		assert_eq!(wire_hops, chain(2, &[5], 1));
-	}
-
-	/// Hop 100 is 2 bytes as a QUIC varint and 1 byte as leading-ones. Sharing that
-	/// single hop from 128 announcements back costs 4 bytes in both forms (the base
-	/// is 2 bytes either way). The literal chain is 5 bytes in QUIC and 4 in
-	/// leading-ones, so QUIC would compress and leading-ones ties. A tie stays literal.
-	#[test]
-	fn a_tie_stays_literal_where_hop_100_sizes_differ() {
-		let quic = Form::Quic;
-		let leading = Form::LeadingOnes;
-		assert_eq!(varint_size(100, quic), 2);
-		assert_eq!(varint_size(100, leading), 1);
-
-		let base = 128;
-		let compressed = |form| varint_size(base, form) + varint_size(0, form) + varint_size(1, form);
-		let literal = |form| varint_size(0, form) * 2 + varint_size(1, form) + varint_size(100, form);
-		assert!(compressed(quic) < literal(quic));
-		assert_eq!(compressed(leading), literal(leading));
-
-		let mut encoder = AnnounceEncoder::new(VERSION);
-		let mut decoder = AnnounceDecoder::default();
-		start(&mut encoder, &mut decoder, "origin", &[100]);
-		for n in 1..128 {
-			let suffix = format!("f{n}");
-			start(&mut encoder, &mut decoder, &suffix, &[1]);
-		}
-		let (_, wire_path, wire_hops) = encoder.start(Path::from_static("again"), hops(&[100]));
-		assert_eq!(wire_hops, HopsRef::literal(hops(&[100])));
-		let (got_path, got_hops) = decoder.start(wire_path, wire_hops).unwrap();
-		assert_eq!(got_path.as_str(), "again");
-		assert_eq!(got_hops, hops(&[100]));
+		let (_, wire) = encoder.start(Path::from_static("a/b/d"));
+		assert_eq!(wire, path(2, 2, "d"));
 	}
 
 	#[test]
 	fn encoder_sends_literal_when_nothing_is_shared() {
 		let mut encoder = AnnounceEncoder::new(VERSION);
 		let mut decoder = AnnounceDecoder::default();
-		start(&mut encoder, &mut decoder, "a", &[1]);
-		let (_, wire_path, wire_hops) = encoder.start(Path::from_static("b"), hops(&[2]));
-		assert_eq!(wire_path, PathRef::literal(Path::from_static("b")));
-		assert_eq!(wire_hops, HopsRef::literal(hops(&[2])));
+		start(&mut encoder, &mut decoder, "a");
+		let (_, wire) = encoder.start(Path::from_static("b"));
+		assert_eq!(wire, PathRef::literal(Path::from_static("b")));
 	}
 
 	#[test]
 	fn lite06_assigns_ids_without_bases() {
 		let mut encoder = AnnounceEncoder::new(Version::Lite06);
-		let (id, _, _) = encoder.start(Path::from_static("a/b"), hops(&[1]));
+		let (id, _) = encoder.start(Path::from_static("a/b"));
 		assert_eq!(id, Some(0));
-		let (id, wire_path, wire_hops) = encoder.start(Path::from_static("a/c"), hops(&[1]));
+		let (id, wire) = encoder.start(Path::from_static("a/c"));
 		assert_eq!(id, Some(1));
-		assert_eq!(wire_path, PathRef::literal(Path::from_static("a/c")));
-		assert_eq!(wire_hops, HopsRef::literal(hops(&[1])));
+		assert_eq!(wire, PathRef::literal(Path::from_static("a/c")));
 		encoder.end(0);
-		assert_eq!(encoder.update(1, hops(&[1])), HopsRef::literal(hops(&[1])));
 	}
 
-	/// A compressed stream pinned byte for byte: `js/net/src/lite/announce.test.ts`
-	/// decodes the same hex, so a codec change on either side breaks both.
-	const GOLDEN: &str = "001800000a726f6f6d2f612f63616d01610000029111a2220000000f0102036d69630161000101b33301000208000101c044440100010101000e020101620161000201c055550100";
+	/// A compressed stream pinned byte for byte. `js/net/src/lite/announce.test.ts` decodes
+	/// this hex once js/net speaks the route layer (quest/m2/cluster-routing/routes/js.md).
+	const GOLDEN: &str =
+		"001300000a726f6f6d2f612f63616d000161000000000c0102036d696300016100000002020000010101000a02010162000161000000";
 
 	#[cfg(feature = "async")]
 	fn golden() -> Vec<crate::fuzz::Announced> {
 		use crate::fuzz::Announced;
+		// Lite-07 names a route instead of a hop chain, so none travels.
 		vec![
-			Announced::Start(Path::from_static("room/a/cam"), hops(&[0x1111, 0x2222])),
-			Announced::Start(Path::from_static("room/a/mic"), hops(&[0x3333, 0x2222])),
-			Announced::Update(0, hops(&[0x4444, 0x2222])),
+			Announced::Start(Path::from_static("room/a/cam"), vec![]),
+			Announced::Start(Path::from_static("room/a/mic"), vec![]),
+			Announced::Update(0, vec![]),
 			Announced::End(1),
-			Announced::Start(Path::from_static("room/b"), hops(&[0x5555, 0x2222])),
+			Announced::Start(Path::from_static("room/b"), vec![]),
 		]
 	}
 
@@ -765,9 +437,9 @@ mod tests {
 		assert_eq!(crate::fuzz::decode_announces(&encoded, true), golden());
 	}
 
-	/// The literal lite-07 stream `js/net` writes for the same announcements, which
-	/// never picks a base.
-	const JS_LITERAL: &str = "001800000a726f6f6d2f612f63616d01610000029111a2220000001800000a726f6f6d2f612f6d69630161000002b333a2220000020a000002c04444a22200000101010015000006726f6f6d2f620161000002c05555a2220000";
+	/// The literal lite-07 stream `js/net` will write for the same announcements once it
+	/// speaks the route layer, never picking a base.
+	const JS_LITERAL: &str = "001300000a726f6f6d2f612f63616d000161000000001300000a726f6f6d2f612f6d696300016100000002020000010101000f000006726f6f6d2f62000161000000";
 
 	#[test]
 	#[cfg(feature = "async")]

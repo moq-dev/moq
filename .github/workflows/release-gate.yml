@@ -31,7 +31,6 @@ jobs:
     outputs:
       android: ${{ steps.filter.outputs.android }}
       api-diff: ${{ steps.filter.outputs.api-diff }}
-      audio-quality: ${{ steps.filter.outputs.audio-quality }}
       c: ${{ steps.filter.outputs.c }}
       cpp: ${{ steps.filter.outputs.cpp }}
       interop: ${{ steps.filter.outputs.interop }}
@@ -98,17 +97,6 @@ jobs:
               - "justfile"
               - ".github/workflows/api-diff.yml"
               - ".github/workflows/release-gate.yml"
-            audio-quality:
-              - "js/watch/**"
-              # The container consumer decides what a replay delivers, waits for, and skips, on the
-              # groups, tracks, and signals underneath it.
-              - "js/hang/**"
-              - "js/net/**"
-              - "js/signals/**"
-              - "test/audio-quality/**"
-              - "test/lib/**"
-              - "test/justfile"
-              - ".github/workflows/audio-quality.yml"
             c:
               - "c/**"
               - "rs/moq-ffi/**"
@@ -140,6 +128,8 @@ jobs:
               - "test/max-age/**"
               - "test/portrait/**"
               - "rs/moq-tokio/tests/integration/max_age.rs"
+              - "test/datagram-tracks/**"
+              - "rs/moq-tokio/tests/integration/datagram_tracks.rs"
               - "test/stream-limits/**"
               - "rs/moq-tokio/tests/integration/stream_limits.rs"
               - "test/relay-fill/**"
@@ -252,7 +242,6 @@ jobs:
               - "rs/moq-congestion/**"
               - "rs/moq-crypto/**"
               - "rs/moq-hls/**"
-              - "rs/moq-ice/**"
               - "rs/moq-json/**"
               - "rs/moq-loc/**"
               - "rs/moq-msf/**"
@@ -261,7 +250,6 @@ jobs:
               - "rs/moq-pattern/**"
               - "rs/moq-quic/**"
               - "rs/moq-relay/**"
-              - "rs/moq-rtc/**"
               - "rs/moq-rtmp/**"
               - "rs/moq-rtsp/**"
               - "rs/moq-shaper/**"
@@ -269,6 +257,7 @@ jobs:
               - "rs/moq-srt/**"
               - "rs/moq-stats/**"
               - "rs/moq-tokio/**"
+              - "rs/moq-webrtc/**"
               - "rs/qmux/**"
               - "Cargo.toml"
               - "Cargo.lock"
@@ -343,12 +332,6 @@ jobs:
     if: needs.scope.outputs.api-diff == 'true'
     uses: ./.github/workflows/api-diff.yml
     secrets: inherit
-
-  audio-quality:
-    name: Audio quality
-    needs: scope
-    if: needs.scope.outputs.audio-quality == 'true'
-    uses: ./.github/workflows/audio-quality.yml
 
   c:
     name: C
@@ -493,7 +476,6 @@ jobs:
       - features
       - android
       - api-diff
-      - audio-quality
       - c
       - cpp
       - interop

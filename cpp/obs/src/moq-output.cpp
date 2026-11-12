@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -56,6 +57,19 @@ MoQError::Code FailureCode(const moq::Error &error)
 			return MoQError::Code::Unauthorized;
 	}
 	return MoQError::Code::Other;
+}
+
+// The failure a connection phase carries, or null when it carries none.
+const moq::Error *PhaseFailure(const moq::ConnectionPhase &phase)
+{
+	return std::visit(
+		[](const auto &data) -> const moq::Error * {
+			if constexpr (std::is_same_v<std::decay_t<decltype(data)>, moq::ConnectionPhase::kConnected>)
+				return nullptr;
+			else
+				return data.failure ? &*data.failure : nullptr;
+		},
+		phase.get_variant());
 }
 
 // Retune `encoder` to `bitrate_bps`, the way OBS's own RTMP dynamic bitrate does.
@@ -178,10 +192,6 @@ bool MoQOutput::Start()
 		return false;
 	}
 	auto next_broadcast = (*next_route)->broadcast();
-	if (!next_broadcast) {
-		LOG_ERROR("Failed to create broadcast: %s", next_broadcast.error().to_string().c_str());
-		return false;
-	}
 
 	// Advanced settings live on the service alongside the URL and path. With the group
 	// switched off the client keeps the library defaults.
@@ -229,13 +239,13 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
-		instance = (*next_route)->instance_id();
+		instance = (*next_route)->instance_id()->text();
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
 		origin = next_origin;
 		route = *next_route;
-		broadcast = *next_broadcast;
+		broadcast = next_broadcast;
 	}
 
 	// NOTE: You could publish the same broadcasts to multiple sessions if you want (redundant ingest).
@@ -289,22 +299,22 @@ void MoQOutput::OnState(const std::shared_ptr<Attempt> &current, moq::expected<m
 	}
 	const auto &state = *result;
 	current->revision = state.revision;
-	current->live = state.phase == moq::ConnectionPhase::kConnected ||
-			state.phase == moq::ConnectionPhase::kMigrating;
-	if (state.connects > 0 && !current->connected) {
-		auto elapsed = std::chrono::steady_clock::now() - current->started;
-		auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-		connect_time_ms = ms > 0 ? static_cast<int>(ms) : 1;
-		current->connected = true;
-	}
+	const auto &phase = state.phase.get_variant();
+	const bool live = std::holds_alternative<moq::ConnectionPhase::kConnected>(phase) ||
+			  std::holds_alternative<moq::ConnectionPhase::kMigrating>(phase);
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		connected = current->connected;
-		live = current->live;
-		if (state.failure) {
-			last_failure_code = FailureCode(*state.failure);
-			last_failure_reason = state.failure->to_string();
-		} else if (current->live) {
+		if (state.connects > 0 && link == Link::kPending) {
+			auto elapsed = std::chrono::steady_clock::now() - current->started;
+			auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+			connect_time_ms = ms > 0 ? static_cast<int>(ms) : 1;
+		}
+		// `connects` only grows, so a session that reached the server stays past kPending.
+		link = live ? Link::kLive : state.connects > 0 ? Link::kLost : Link::kPending;
+		if (const auto *failure = PhaseFailure(state.phase)) {
+			last_failure_code = FailureCode(*failure);
+			last_failure_reason = failure->to_string();
+		} else if (live) {
 			last_failure_code = MoQError::None;
 			last_failure_reason.clear();
 		}
@@ -318,17 +328,17 @@ void MoQOutput::OnState(const std::shared_ptr<Attempt> &current, moq::expected<m
 void MoQOutput::Fail(const std::shared_ptr<Attempt> &current, const moq::Error &error)
 {
 	const std::string reason = error.to_string();
-	const bool was_connected = current->connected;
+	bool was_connected = false;
 
 	// Retire the attempt, which also limits the failure signal to one per Start().
 	// The broadcast stays until Reset(), as OBS stops or restarts the output next.
 	attempt.reset();
 	{
 		std::lock_guard<std::mutex> lock(mutex);
+		was_connected = link != Link::kPending;
 		recv_bandwidth.reset();
 		session.reset();
-		connected = false;
-		live = false;
+		link = Link::kPending;
 		last_failure_code = FailureCode(error);
 		last_failure_reason = reason;
 	}
@@ -369,8 +379,7 @@ void MoQOutput::Reset()
 		std::lock_guard<std::mutex> lock(mutex);
 		recv_bandwidth.reset();
 		session.reset();
-		connected = false;
-		live = false;
+		link = Link::kPending;
 		url.clear();
 		instance.clear();
 		last_failure_code = MoQError::None;
@@ -452,7 +461,7 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 		current = session;
 		receive = recv_bandwidth;
 		dial_url = url;
-		current_live = live;
+		current_live = link == Link::kLive;
 	}
 
 	if (!current_live) {
@@ -490,7 +499,7 @@ bool MoQOutput::CommitConnectionStats(const std::shared_ptr<moq::Session> &curre
 	// A Stop(), restart, or disconnect while stats() ran retired this session, so
 	// its numbers no longer describe the output.
 	std::lock_guard<std::mutex> lock(mutex);
-	if (session != current || !live)
+	if (session != current || link != Link::kLive)
 		return false;
 	*out = std::move(snapshot);
 	return true;
@@ -511,7 +520,7 @@ int MoQOutput::GetReconnectCount()
 bool MoQOutput::IsLiveSession()
 {
 	std::lock_guard<std::mutex> lock(mutex);
-	return connected && session != nullptr;
+	return link != Link::kPending && session != nullptr;
 }
 
 void MoQOutput::CopyLastFailure(int *code, std::string *reason)

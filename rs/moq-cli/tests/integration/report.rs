@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::time::Duration;
 
-use hang::moq_net;
 use moq_mux::container::ts;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout};
@@ -49,6 +48,8 @@ async fn relay() -> Relay {
 
 fn moq(relay: &Relay, broadcast: &str, args: &[&str]) -> tokio::process::Command {
 	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	// The guard on host timers is for tests, not the binaries they run.
+	command.env_remove("KIO_DENY_HOST_TIMERS");
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
 	for (name, _) in std::env::vars_os() {
 		if name.to_string_lossy().starts_with("MOQ_") {
@@ -98,7 +99,7 @@ fn written(clip: &[u8]) -> (BTreeMap<String, hang::stats::Rendition>, ts::stats:
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 	let mut import = ts::Import::new(broadcast, catalog.reserve());
 	import.decode(clip).unwrap();
-	import.finish().unwrap();
+	let import = import.finish().unwrap();
 	(catalog.stats(), import.stats())
 }
 

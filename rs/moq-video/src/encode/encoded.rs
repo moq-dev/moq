@@ -12,7 +12,7 @@ use moq_net::Timestamp;
 ///
 /// The encoder carries the timestamp through the codec rather than leaving the
 /// caller to guess one at publish time, so a backend that buffers a frame or
-/// drains a tail from [`Encoder::finish`](super::Encoder::finish) still stamps
+/// drains a tail on [`Encoder::flush`](super::Encoder::flush) still stamps
 /// each access unit with the time of the picture it encoded.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -24,7 +24,7 @@ pub struct Encoded {
 	/// Whether this access unit is a keyframe, one a decoder can start from.
 	///
 	/// Set on every keyframe, whether [`Encoder::cut`](super::Encoder::cut) forced
-	/// it or the encoder placed it on its own [`Gop`](super::Gop) cadence.
+	/// it or the encoder placed it on its own [`Config::join`](super::Config::join) cadence.
 	pub keyframe: bool,
 }
 

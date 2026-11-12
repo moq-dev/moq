@@ -22,14 +22,17 @@
 //!
 //! Datagrams ignore their send options, and are dropped when oversized or when the
 //! peer's queue is full, as a network would.
+//!
+//! [`Config::latency`] delays each stream message and finish on the ambient clock, so
+//! a mesh of pairs orders its traffic as a network of that latency would. Opens,
+//! resets, stops, datagrams, and the session close skip it.
 
 use std::{
 	collections::VecDeque,
-	sync::{
-		Arc,
-		atomic::{AtomicBool, Ordering},
-	},
+	pin::Pin,
+	sync::Arc,
 	task::{Poll, ready},
+	time::Duration,
 };
 
 use bytes::{Buf, Bytes};
@@ -61,6 +64,9 @@ pub struct Config {
 	/// stops, or drops it, and its writer finishes, resets, or drops it. `None` grants credit
 	/// without limit.
 	pub max_concurrent_bi_streams: Option<usize>,
+	/// How long each stream message and finish takes to reach its reader, on the ambient
+	/// clock. Zero delivers at once.
+	pub latency: Duration,
 }
 
 impl Default for Config {
@@ -72,6 +78,7 @@ impl Default for Config {
 			protocol: None,
 			max_concurrent_uni_streams: None,
 			max_concurrent_bi_streams: None,
+			latency: Duration::ZERO,
 		}
 	}
 }
@@ -183,6 +190,7 @@ impl Conn {
 			channel: channel.clone(),
 			close: self.close.clone(),
 			buffer: self.config.stream_buffer,
+			latency: self.config.latency,
 			done: false,
 			credit: send,
 		};
@@ -191,6 +199,7 @@ impl Conn {
 			close: self.close.clone(),
 			stopped: false,
 			credit: recv,
+			landing: None,
 		});
 		(writer, reader)
 	}
@@ -204,9 +213,6 @@ type Credit = Arc<Opened>;
 #[derive(Default)]
 struct Open {
 	count: usize,
-	/// Whether an open pended since a stream last returned its credit. Atomic, so a pending
-	/// open's read-only check sets it without waking itself.
-	blocked: AtomicBool,
 }
 
 /// Counted in an open-stream total until dropped.
@@ -216,7 +222,6 @@ impl Drop for Opened {
 	fn drop(&mut self) {
 		let mut open = self.0.lock();
 		open.count -= 1;
-		*open.blocked.get_mut() = false;
 	}
 }
 
@@ -236,25 +241,12 @@ fn poll_credit(
 		if open.count < max {
 			return Poll::Ready(());
 		}
-		open.blocked.store(true, Ordering::Relaxed);
 		Poll::Pending
 	}) else {
 		return closed.map(Err);
 	};
 	taken.count += 1;
 	Poll::Ready(Ok(Some(Arc::new(Opened(open.clone())))))
-}
-
-/// What is left of `max` streams beyond those in `open`, unbounded without a `max`.
-fn stream_credit(open: &kio::Shared<Open>, max: Option<usize>) -> super::StreamCredit {
-	let Some(max) = max else {
-		return super::StreamCredit::new(u64::MAX, false);
-	};
-	let open = open.read();
-	super::StreamCredit::new(
-		max.saturating_sub(open.count) as u64,
-		open.blocked.load(Ordering::Relaxed),
-	)
 }
 
 /// Streams and datagrams one side has yet to accept.
@@ -351,6 +343,42 @@ impl Session {
 	}
 }
 
+/// What one side of a pair still holds, read without keeping it alive, for the session fuzz
+/// target's leak check.
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub(crate) struct Held {
+	side: std::sync::Weak<Side>,
+	conn: Arc<Conn>,
+	local: usize,
+}
+
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+impl Held {
+	/// Whether any handle to this side's session is alive.
+	pub(crate) fn session(&self) -> bool {
+		self.side.strong_count() > 0
+	}
+
+	/// Streams the peer opened toward this side that this side is not done with, counted only
+	/// under [`Config::max_concurrent_uni_streams`] and [`Config::max_concurrent_bi_streams`].
+	pub(crate) fn streams(&self) -> usize {
+		let incoming = &self.conn.incoming[self.local];
+		incoming.uni_open.read().count + incoming.bi_open.read().count
+	}
+}
+
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+impl Session {
+	/// Watch what this side holds; see [`Held`].
+	pub(crate) fn held(&self) -> Held {
+		Held {
+			side: Arc::downgrade(&self.side),
+			conn: self.side.conn.clone(),
+			local: self.side.local,
+		}
+	}
+}
+
 impl poll::Session for Session {
 	type SendStream = SendStream;
 	type RecvStream = RecvStream;
@@ -433,19 +461,7 @@ impl poll::Session for Session {
 
 	/// Streams share no connection window, and one holds at most its buffer.
 	fn receive_window(&self) -> Option<super::ReceiveWindow> {
-		Some(super::ReceiveWindow::new(
-			u64::MAX,
-			self.conn().config.stream_buffer as u64,
-		))
-	}
-
-	fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
-		let outgoing = self.side.outgoing();
-		let config = &self.conn().config;
-		Some(match dir {
-			super::Dir::Uni => stream_credit(&outgoing.uni_open, config.max_concurrent_uni_streams),
-			super::Dir::Bi => stream_credit(&outgoing.bi_open, config.max_concurrent_bi_streams),
-		})
+		Some(super::ReceiveWindow::new(None, self.conn().config.stream_buffer as u64))
 	}
 
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
@@ -464,11 +480,25 @@ impl poll::Session for Session {
 /// One direction of a stream: the messages its writer queued for its reader.
 #[derive(Default)]
 struct Channel {
-	messages: VecDeque<Bytes>,
+	messages: VecDeque<Message>,
 	/// The bytes in `messages`.
 	queued: usize,
 	/// How the channel closed, once it has.
 	end: Option<End>,
+	/// When a finish reaches the reader under [`Config::latency`], until the reader
+	/// takes it: the writer counts it acknowledged only then.
+	finished: Option<kio::clock::Instant>,
+}
+
+/// One write, and when it reaches the reader under [`Config::latency`].
+struct Message {
+	bytes: Bytes,
+	lands: Option<kio::clock::Instant>,
+}
+
+/// When something a writer sent `latency` ago reaches the reader: `None` at once.
+fn landing(latency: Duration) -> Option<kio::clock::Instant> {
+	(!latency.is_zero()).then(|| kio::clock::now().saturating_add(latency))
 }
 
 #[derive(Clone, Copy)]
@@ -490,6 +520,16 @@ impl Channel {
 		}
 	}
 
+	/// When the next thing the reader takes lands, if it is still in flight.
+	fn in_flight(&self) -> Option<kio::clock::Instant> {
+		let lands = match self.messages.front() {
+			Some(message) => message.lands,
+			None if matches!(self.end, Some(End::Fin)) => self.finished,
+			None => None,
+		}?;
+		(lands > kio::clock::now()).then_some(lands)
+	}
+
 	/// Close with a reset or stop code and drop what is queued. An earlier end stands,
 	/// unless it was a finish the reader has not fully read.
 	fn abort(&mut self, end: End) {
@@ -498,12 +538,14 @@ impl Channel {
 		}
 		self.messages.clear();
 		self.queued = 0;
+		// Nothing is left in flight for the writer to wait on.
+		self.finished = None;
 	}
 
 	/// How the writer sees the channel close: reset, stopped, or finished and drained.
 	fn sent(&self) -> Poll<Result<(), Error>> {
 		match self.end {
-			Some(End::Fin) if self.messages.is_empty() => Poll::Ready(Ok(())),
+			Some(End::Fin) if self.messages.is_empty() && self.finished.is_none() => Poll::Ready(Ok(())),
 			Some(End::Reset(_)) => Poll::Ready(Ok(())),
 			Some(End::Stop(code)) => Poll::Ready(Err(Error::Stopped(code))),
 			_ => Poll::Pending,
@@ -516,6 +558,8 @@ pub struct SendStream {
 	channel: kio::Shared<Channel>,
 	close: Close,
 	buffer: usize,
+	/// See [`Config::latency`].
+	latency: Duration,
 	/// This side finished or reset the stream.
 	done: bool,
 	/// The credit of a bidi stream the peer opened, held until this side is done.
@@ -560,7 +604,10 @@ impl poll::SendStream for SendStream {
 
 		// Take ownership rather than copy: free for a `Bytes` source.
 		let size = buf.remaining();
-		channel.messages.push_back(buf.copy_to_bytes(size));
+		channel.messages.push_back(Message {
+			bytes: buf.copy_to_bytes(size),
+			lands: landing(self.latency),
+		});
 		channel.queued += size;
 
 		Poll::Ready(Ok(size))
@@ -585,6 +632,7 @@ impl poll::SendStream for SendStream {
 			return Err(Error::Stopped(code));
 		}
 		channel.end = Some(End::Fin);
+		channel.finished = landing(self.latency);
 		drop(channel);
 		self.done = true;
 		self.credit = None;
@@ -606,7 +654,7 @@ impl poll::SendStream for SendStream {
 	}
 
 	/// Ready once this side reset the stream, the reader stopped it, or the reader took
-	/// every message of a finished stream. That stands in for a FIN acknowledgement, so a
+	/// every message of a finished stream and, under latency, the finish. That stands in for a FIN acknowledgement, so a
 	/// writer that waits for it before closing the session knows the peer has the data.
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		// Check the close first, so a drain that happened before it is still seen below.
@@ -615,6 +663,16 @@ impl poll::SendStream for SendStream {
 			return channel.sent();
 		}
 		closed.map(Err)
+	}
+
+	/// Whether the reader took every message written so far, which stands in for an
+	/// acknowledgement as it does for [`poll_closed`](poll::SendStream::poll_closed).
+	fn acknowledged(&self) -> Option<bool> {
+		let channel = self.channel.lock();
+		// A reset on a closed session leaves the channel as it was, so only `done` records it.
+		let finished = matches!(channel.end, Some(End::Fin)) && channel.finished.is_none();
+		let open = channel.end.is_none() && !self.done;
+		Some((open || finished) && channel.messages.is_empty())
 	}
 }
 
@@ -636,6 +694,8 @@ pub struct Chunks {
 	stopped: bool,
 	/// The open-stream count this stream holds a credit in, until it is done.
 	credit: Option<Credit>,
+	/// Armed while the next message or the finish is still in flight.
+	landing: Option<Pin<Box<kio::clock::Sleep>>>,
 }
 
 impl Chunks {
@@ -670,8 +730,38 @@ impl poll::Chunks for Chunks {
 			}
 		};
 
+		if let Some(lands) = channel.in_flight() {
+			drop(channel);
+			// Wait on the channel too: a reset or stop drops what is in flight, and the
+			// reader sees it at once rather than at the discarded message's landing.
+			let changed = |channel: &kio::Ref<'_, Channel>| match channel.in_flight() {
+				Some(_) => Poll::Pending,
+				None => Poll::Ready(()),
+			};
+			if self.channel.poll(waiter, changed).is_ready() {
+				return self.poll_read_chunk(waiter, max);
+			}
+			let landing = match &mut self.landing {
+				Some(landing) => {
+					// A reset wakes the task parked on the sleep, so resetting to the
+					// same instant on every poll would spin without time advancing.
+					if landing.deadline() != lands {
+						landing.as_mut().reset(lands);
+					}
+					landing
+				}
+				None => self.landing.insert(Box::pin(kio::clock::sleep_until(lands))),
+			};
+			ready!(waiter.poll_future(landing.as_mut()));
+			return self.poll_read_chunk(waiter, max);
+		}
+
 		let Some(front) = channel.messages.front_mut() else {
 			let end = channel.end.expect("checked above");
+			if matches!(end, End::Fin) && channel.finished.is_some() {
+				// The finish landed: tell the writer, which waits on it as an acknowledgement.
+				channel.finished = None;
+			}
 			drop(channel);
 			self.release();
 			return Poll::Ready(match end {
@@ -680,9 +770,9 @@ impl poll::Chunks for Chunks {
 				End::Stop(_) => Err(Error::Closed),
 			});
 		};
-		let chunk = match front.len() > max {
-			true => front.split_to(max),
-			false => channel.messages.pop_front().expect("front exists"),
+		let chunk = match front.bytes.len() > max {
+			true => front.bytes.split_to(max),
+			false => channel.messages.pop_front().expect("front exists").bytes,
 		};
 		channel.queued -= chunk.len();
 
@@ -735,7 +825,6 @@ mod tests {
 		task::{Wake, Waker},
 	};
 
-	use super::super::{Dir, StreamCredit};
 	use super::*;
 	use poll::{RecvStream as _, SendStream as _, Session as _};
 
@@ -862,19 +951,14 @@ mod tests {
 			..Default::default()
 		});
 		let open = |a: &Session, waiter: &kio::Waiter| a.poll_open_uni(waiter, Default::default());
-		let credit = |a: &Session| a.stream_credit(Dir::Uni).unwrap();
-		assert_eq!(credit(&a), StreamCredit::new(2, false));
 
 		// Streams the peer has not accepted yet hold credit too.
 		let mut finished = ready(open(&a, &noop())).unwrap();
 		let _reset = ready(open(&a, &noop())).unwrap();
-		assert_eq!(credit(&a), StreamCredit::new(0, false), "none refused yet");
 		let count = Arc::new(Count::default());
 		let waiter = kio::Waiter::new(Waker::from(count.clone()));
 		assert!(open(&a, &waiter).is_pending());
 		assert_eq!(count.0.load(Ordering::Relaxed), 0, "being blocked wakes nobody");
-		assert_eq!(credit(&a), StreamCredit::new(0, true));
-		assert!(!credit(&b).blocked, "each side blocks alone");
 
 		// Credit is per direction.
 		let _back = ready(open(&b, &noop())).unwrap();
@@ -887,7 +971,6 @@ mod tests {
 		assert!(open(&a, &waiter).is_pending(), "an unread FIN keeps the credit");
 		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap(), None);
 		assert!(count.0.load(Ordering::Relaxed) > 0);
-		assert_eq!(credit(&a), StreamCredit::new(1, false), "returned credit unblocks");
 		let _third = ready(open(&a, &noop())).unwrap();
 		assert!(open(&a, &noop()).is_pending());
 
@@ -940,6 +1023,103 @@ mod tests {
 			ready(write(&mut send, &Bytes::from_static(b"x"))),
 			Err(Error::Closed)
 		));
+	}
+
+	/// The next chunk `recv` reads, once it lands.
+	async fn landed(recv: &mut RecvStream) -> Option<Bytes> {
+		kio::wait(|waiter| poll::Chunks::poll_read_chunk(recv.get_mut(), waiter, usize::MAX))
+			.await
+			.unwrap()
+	}
+
+	#[test]
+	fn latency_delays_each_message_and_the_finish() {
+		kio::clock::sim::run(async {
+			const LATENCY: Duration = Duration::from_millis(10);
+			let (a, b) = pair(Config {
+				latency: LATENCY,
+				..Default::default()
+			});
+			let (mut send, mut recv) = uni(&a, &b);
+			let start = kio::clock::now();
+
+			ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
+			// Polling again while it is in flight must not wake the reader, or a task
+			// re-polling its stream would spin without simulated time moving.
+			let count = Arc::new(Count::default());
+			let waiter = kio::Waiter::new(Waker::from(count.clone()));
+			for _ in 0..2 {
+				let chunk = poll::Chunks::poll_read_chunk(recv.get_mut(), &waiter, usize::MAX);
+				assert!(chunk.is_pending(), "a message landed at once");
+			}
+			assert_eq!(count.0.load(Ordering::Relaxed), 0, "a re-poll woke the reader");
+			kio::clock::sleep(LATENCY / 2).await;
+			ready(write(&mut send, &Bytes::from_static(b"two"))).unwrap();
+			send.finish().unwrap();
+
+			// Each lands its latency after it was sent, in order, and the finish last.
+			assert_eq!(landed(&mut recv).await.unwrap(), "one");
+			assert_eq!(start.elapsed(), LATENCY);
+			assert_eq!(landed(&mut recv).await.unwrap(), "two");
+			assert_eq!(start.elapsed(), LATENCY + LATENCY / 2);
+			assert_eq!(landed(&mut recv).await, None);
+			assert_eq!(start.elapsed(), LATENCY + LATENCY / 2);
+		});
+	}
+
+	#[test]
+	fn a_finish_is_acknowledged_once_the_reader_takes_it() {
+		kio::clock::sim::run(async {
+			const LATENCY: Duration = Duration::from_millis(10);
+			let (a, b) = pair(Config {
+				latency: LATENCY,
+				..Default::default()
+			});
+			let (mut send, mut recv) = uni(&a, &b);
+			ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
+			assert_eq!(landed(&mut recv).await.unwrap(), "one");
+
+			// Every message is taken, but the finish is still in flight: a writer that
+			// closed the session now would beat its finish to the reader.
+			send.finish().unwrap();
+			assert!(send.poll_closed(&noop()).is_pending());
+			assert_eq!(send.acknowledged(), Some(false));
+			let start = kio::clock::now();
+			assert_eq!(landed(&mut recv).await, None);
+			assert_eq!(start.elapsed(), LATENCY);
+			assert!(ready(send.poll_closed(&noop())).is_ok());
+			assert_eq!(send.acknowledged(), Some(true));
+
+			// A reader that stops before the finish lands leaves the writer finished.
+			let (mut send, recv) = uni(&a, &b);
+			send.finish().unwrap();
+			assert!(send.poll_closed(&noop()).is_pending());
+			drop(recv);
+			assert!(ready(send.poll_closed(&noop())).is_ok());
+		});
+	}
+
+	#[test]
+	fn a_reset_skips_the_latency() {
+		kio::clock::sim::run(async {
+			let (a, b) = pair(Config {
+				latency: Duration::from_millis(10),
+				..Default::default()
+			});
+			let (mut send, mut recv) = uni(&a, &b);
+			let start = kio::clock::now();
+			ready(write(&mut send, &Bytes::from_static(b"dropped"))).unwrap();
+
+			// A reader parked on a message in flight wakes for the reset that drops it.
+			let count = Arc::new(Count::default());
+			let waiter = kio::Waiter::new(Waker::from(count.clone()));
+			assert!(poll::Chunks::poll_read_chunk(recv.get_mut(), &waiter, usize::MAX).is_pending());
+			send.reset(2);
+			assert!(count.0.load(Ordering::Relaxed) > 0, "the reset did not wake the reader");
+			let read = poll::Chunks::poll_read_chunk(recv.get_mut(), &waiter, usize::MAX);
+			assert!(matches!(ready(read), Err(Error::Reset(2))));
+			assert_eq!(start.elapsed(), Duration::ZERO);
+		});
 	}
 
 	#[test]

@@ -33,7 +33,7 @@ in sync at the latency you ask for.
 | `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `paused`, `muted`, `volume` | The usual player controls. |
 | `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint video as it decodes, with no audio. |
-| `buffer` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
+| `lookahead` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
 | `captions` | The caption track to show. |
 | `visible` | Only download video while the element is on screen (or near it). |
 | `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
@@ -50,7 +50,7 @@ The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, and a stats panel.
 
 Audio, video, and captions play from one clock on local time, anchored at the
-earliest arrival (with `buffer`, at the earliest retained frame once startup
+earliest arrival (with `lookahead`, at the earliest retained frame once startup
 fills). A congested track falls behind on its own instead of stalling the
 others; in `auto` delay, its rising playout target still raises the delay
 every track plays at. A discontinuity restarts only its own track's timeline,
@@ -78,7 +78,10 @@ one, the player inserts a second recovery point with a zero count before its
 first slice. The slices are untouched; the stripes clear as the sweep
 completes.
 
-`el.broadcast.out.status` is `offline`, `loading`, `live`, `error`, or `unsupported`.
+`el.broadcast.out.status` is `connecting`, `offline`, `loading`, `live`, `error`, or `unsupported`.
+It reads `connecting` until a session could have announced the broadcast: while the
+connection dials, redials, or was refused (`el.connection.error` says why), and until the
+relay's initial announcements arrive. Only then does a missing broadcast read `offline`.
 On `unsupported`, update the player to read the broadcast's newer catalog; the overlay shows this notice.
 On `error` the origin refused the broadcast, `el.broadcast.out.error` says why,
 and the player does not ask again until it is pointed elsewhere or re-enabled.
@@ -107,7 +110,9 @@ player publishes its own broadcast, reporting only what it counted, so a second
 player on one connection that resolves the same feedback path, for any catalog,
 publishes nothing and warns until the first one leaves; give each player its own
 name. The decoders'
-`out.stats` and the stats panel read the same counters. The token must allow
+`out.stats` and the stats panel read the same counters. Audio's `out.stats`
+also counts `skips`, each jump that dropped buffered audio rather than playing
+it faster, which the stats panel shows and the feedback track leaves out. The token must allow
 publishing under the echo path.
 
 ## Binding from a framework
@@ -186,7 +191,6 @@ import * as Watch from "@moq/watch";
 const connection = new Moq.Connection({ url: new URL("https://relay.example.com/anon") });
 const player = new Watch.Player({
     origin: connection.origin,
-    probe: connection.probe,
     name: Moq.Path.from("alice.hang"),
     video: { canvas },
     viewer: { viewers: connection.viewers },
@@ -205,52 +209,42 @@ estimate (see [`connection.viewers`](/lib/js/net)). Its ceiling follows the
 catalog: the rate at which selection would pick the best enabled video
 rendition the `video.target` allows, plus the selected audio rendition's
 bitrate, counting only media being downloaded. A relay that probes raises the
-estimate toward it, so a larger rendition can become affordable. Set
+estimate toward it, and video selects from the claim's grant less that audio, so a viewer on a small
+rendition moves up once the grant reaches the ceiling. Players sharing a connection split its estimate
+instead of each selecting against all of it. Set
 `viewer.max` (`controls.viewer.max` on `<moq-watch>`) to claim a fixed ceiling
-in bits per second instead while media downloads, or `0` to claim nothing; omit `viewer.viewers` to
-leave the connection's estimate unclaimed.
-
-To chart when each audio frame arrived against when it plays, open an
-`arrivals()` handle on the audio decoder. It yields every frame received while it is open, stamped
-when the frame came off the transport, and a gap wherever media after an earlier
-frame will never arrive (a latency skip, a hole):
-
-```ts
-const arrivals = player.audio.arrivals();
-for await (const entry of arrivals) {
-    if (entry.kind === "gap") {
-        // Break the plotted line; nothing arrived from `timestamp` for `duration`.
-        continue;
-    }
-    const { timestamp, arrival, late } = entry;
-    // `late`: arrived after its playback deadline.
-}
-```
-
-A gap's span is an upper bound: without per-frame durations it starts at the
-last frame's timestamp, and it covers any pause the publisher declared.
-
-Unread frames queue on the handle, so keep reading and keep your own window.
-Leaving the loop or calling `arrivals.close()` stops observing and releases
-them; nothing is retained without an open handle.
+in bits per second instead while media downloads, which also caps what video selects, or `0` to claim nothing; omit `viewer.viewers` to
+leave the connection's estimate unclaimed. Without a claim, video selects the best rendition its
+`video.target` allows. To stop the relay probing while still adapting, keep the claim and call
+`connection.viewers.setTarget(0)`.
 
 ## Buffered playback
 
-By default the player minimizes latency: it skips ahead whenever media piles
-up past the delay. Content produced faster than real time, such as a TTS
+By default the player minimizes latency: audio plays at the delay, slows down
+slightly when the audio received ahead of it runs low, speeds back up once it
+recovers, and skips ahead only audio trailing by more than the subscription
+still delivers. Content produced faster than real time, such as a TTS
 response emitted in one burst with future timestamps, wants the opposite. Set
-`buffer` to how far ahead it may run and it plays through at the encoded pace:
+`lookahead` to how far ahead it may run and it plays through at the encoded pace.
+If a stall leaves audio behind, it catches up by playing faster, as live
+playback does, and skips only what trails by more than the lookahead:
 
 ```html
-<moq-watch url="..." name="bot/tts.hang" delay="100ms" buffer="30s"></moq-watch>
+<moq-watch url="..." name="bot/tts.hang" delay="100ms" lookahead="30s"></moq-watch>
 ```
 
-Durations need a unit; a bare number is rejected. Audio holds the buffer as
-encoded frames, so a large one is cheap; video waits as decoded pictures, which
-hold decoder memory, so a long video buffer is not. The first video frame shows
-as a poster at once, and playback starts once every enabled track has buffered
-the delay. `el.reset()` flushes and re-anchors at the next frame, which is how a
-producer interrupts an utterance.
+`lookahead` is not a jitter buffer: a live stream leaves it at zero and tunes
+`delay`, since playback only skips ahead once media sits more than
+`delay + lookahead` past the playhead.
+
+Durations need a unit; a bare number is rejected. From script, the `delay` and
+`lookahead` properties take a `Duration` from `@moq/clock`, such as
+`el.delay = Duration.millis(300)`. Audio holds the lookahead
+as encoded frames, so a large one is cheap; video waits as decoded pictures,
+which hold decoder memory, so a long video lookahead is not. The first video
+frame shows as a poster at once, and playback starts once every enabled track
+has buffered the delay. `el.reset()` flushes and re-anchors at the next frame,
+which is how a producer interrupts an utterance.
 
 ## Strict CSP
 
@@ -265,6 +259,10 @@ import * as Watch from "@moq/watch";
 Watch.assets("/moq/");
 ```
 
-The URL must end with `/`. Copy the files again on every upgrade: the worklet
-changes with the package. `@moq/room` and `@moq/boy` play through
+The URL must end with `/` and have no query or fragment. Copy the files again
+on every upgrade: the worklet changes with the package. `@moq/room` plays through
 `@moq/watch`, so this one call covers them.
+
+A browser without `AudioDecoder` decodes through the libav polyfill, which
+loads its worker and WebAssembly from the same directory (they are among
+`assets/*`), so also allow `'wasm-unsafe-eval'` in `script-src`.

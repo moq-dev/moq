@@ -9,7 +9,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Timestamp, Version};
+use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -26,13 +26,14 @@ const VERSIONS: &[&str] = &[
 fn compressed() -> moq_net::track::Info {
 	moq_net::track::Info::default()
 		.with_timescale(moq_net::Timescale::MILLI)
-		.with_compress(true)
+		.with_compression(moq_net::track::Compression::Deflate)
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// A repetitive payload, which DEFLATE shrinks, distinct per frame.
@@ -194,7 +195,7 @@ async fn relay_serves_every_version() {
 		kio::clock::timeout(TIMEOUT, async {
 			let mut fixture = connect("moq-lite-07-wip", version).await;
 			assert_eq!(
-				fixture.subscriber.info().compress,
+				fixture.subscriber.info().compression == moq_net::track::Compression::Deflate,
 				!matches!(version, "moq-lite-06" | "moq-lite-03"),
 				"{version}: compression declared"
 			);
@@ -243,7 +244,10 @@ async fn ietf_ingress_stays_compressed_across_protocols() {
 		for downstream in ["moq-lite-07-wip", "moq-transport-22"] {
 			kio::clock::timeout(TIMEOUT, async {
 				let mut fixture = connect(upstream, downstream).await;
-				assert!(fixture.subscriber.info().compress, "{upstream} -> {downstream}");
+				assert!(
+					fixture.subscriber.info().compression == moq_net::track::Compression::Deflate,
+					"{upstream} -> {downstream}"
+				);
 				let mut group = fixture.track.append_group().unwrap();
 				for index in 0..3 {
 					group
@@ -283,7 +287,7 @@ async fn ietf_fetch_keeps_the_stored_form() {
 					.unwrap();
 			}
 			group.finish().unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			broadcast.announce().unwrap();
 			let origin = produce_origin(2);
 			let mut options = MockConnectOptions::new(version.parse().unwrap());
@@ -299,7 +303,11 @@ async fn ietf_fetch_keeps_the_stored_form() {
 				.unwrap()
 				.unwrap();
 			let consumer = remote.track("data").unwrap();
-			assert!(consumer.info().await.unwrap().compress, "{version}");
+			assert_eq!(
+				consumer.info().await.unwrap().compression,
+				moq_net::track::Compression::Deflate,
+				"{version}"
+			);
 			let mut fetched = consumer.fetch_group(0, moq_net::group::Fetch::default()).await.unwrap();
 			for index in 0..3 {
 				assert_eq!(

@@ -10,9 +10,17 @@ pub enum Error {
 	#[error("moq: {0}")]
 	Moq(#[from] moq_net::Error),
 
+	/// Muxing or demuxing FLV failed.
+	#[error("mux: {0}")]
+	Mux(#[from] moq_mux::Error),
+
 	/// I/O error from the RTMP listener or a connection.
 	#[error("io: {0}")]
 	Io(Arc<std::io::Error>),
+
+	/// This CPU lacks a feature that rind requires.
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 
 	/// The RTMP handshake or session state machine failed.
 	#[error("rtmp session: {0}")]

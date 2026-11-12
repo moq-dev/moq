@@ -21,7 +21,7 @@ use crate::producer::{Child, MoqBroadcastProducer, MoqTrackProducer};
 
 /// Options for a JSON snapshot producer (lossy latest-value mode).
 ///
-/// Compression is the track's: set `compress` on the [`MoqTrackInfo`](crate::producer::MoqTrackInfo)
+/// Compression is the track's: set `compression` on the [`MoqTrackInfo`](crate::producer::MoqTrackInfo)
 /// the track is created with. A consumer reads either kind with no option of its own.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqJsonSnapshotConfig {
@@ -530,9 +530,9 @@ impl MoqJsonWindowProducer {
 	/// Finish the track, closing any open group.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		let _ = self.alive.close();
-		producer.finish()?;
+		drop(producer.finish()?);
 		Ok(())
 	}
 }

@@ -44,7 +44,7 @@ export function settingsButton(parent: Effect, panel: Signal<boolean>): HTMLButt
 	return button;
 }
 
-/** Fullscreen toggle button for `player`, wired to {@link createFullscreen}. */
+/** Fullscreen toggle button for `player`, falling back to a pseudo-fullscreen class on iPhone. */
 export function fullscreenButton(parent: Effect, player: HTMLElement): HTMLButtonElement {
 	const button = controlButton(fullscreenEnter, "Fullscreen");
 	const fullscreen = createFullscreen(parent, player);

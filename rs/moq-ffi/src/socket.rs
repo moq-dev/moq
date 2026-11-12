@@ -1,15 +1,16 @@
 //! Point-to-point socket endpoints and their two protocol-specific streams.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Poll, ready};
 
 use crate::consumer::{MoqGroupConsumer, MoqTrackConsumer};
 use crate::error::MoqError;
-use crate::ffi::{Background, Polled};
+use crate::ffi::{Background, OneShot, Polled};
 use crate::origin::MoqOriginProducer;
 use crate::producer::{MoqGroupProducer, MoqTrackInfo, MoqTrackProducer};
 
-/// An endpoint announcing one hidden broadcast and accepting TCP and track dials separately.
+/// A socket endpoint: its first dial announces it as a client, and its first accept as a
+/// server, which takes TCP and track dials separately.
 #[derive(uniffi::Object)]
 pub struct MoqSocketEndpoint {
 	inner: moq_net::socket::Endpoint,
@@ -18,7 +19,8 @@ pub struct MoqSocketEndpoint {
 
 #[uniffi::export]
 impl MoqSocketEndpoint {
-	/// Announce `id` beneath `prefix`, using `origin` for publishing and finding peers.
+	/// The endpoint `id` beneath `prefix`, using `origin` for publishing and finding peers.
+	/// Nothing is announced until its first dial or accept.
 	#[uniffi::constructor]
 	pub fn new(origin: &MoqOriginProducer, prefix: String, id: String) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
@@ -42,13 +44,13 @@ impl MoqSocketEndpoint {
 		self.inner.prefix().to_string()
 	}
 
-	/// Retract the endpoint and reset its pending dials and sessions.
+	/// Retract the endpoint's broadcasts and reset its pending dials and sessions.
 	pub fn close(&self) {
 		let _guard = crate::ffi::enter();
 		self.inner.close();
 	}
 
-	/// Dial a new `tcp` session; cancelling this call resets only this dial.
+	/// Dial the server `peer` in a new `tcp` session; cancelling this call resets only this dial.
 	pub async fn dial_tcp(&self, peer: String) -> Result<Arc<MoqSocketTcpStream>, MoqError> {
 		self.driver
 			.watch(async {
@@ -66,14 +68,14 @@ impl MoqSocketEndpoint {
 				Ok(Arc::new(MoqSocketIncomingTcp {
 					peer: inner.peer().into(),
 					session: inner.session().into(),
-					inner: Mutex::new(Some(inner)),
+					inner: OneShot::new(inner),
 					driver: self.driver.clone(),
 				}))
 			})
 			.await
 	}
 
-	/// Dial a new `track` session; cancelling this call resets only this dial.
+	/// Dial the server `peer` in a new `track` session; cancelling this call resets only this dial.
 	pub async fn dial_track(
 		&self,
 		peer: String,
@@ -98,7 +100,7 @@ impl MoqSocketEndpoint {
 				Ok(Arc::new(MoqSocketIncomingTrack {
 					peer: inner.peer().into(),
 					session: inner.session().into(),
-					inner: Mutex::new(Some(inner)),
+					inner: OneShot::new(inner),
 					driver: self.driver.clone(),
 				}))
 			})
@@ -115,7 +117,7 @@ impl Drop for MoqSocketEndpoint {
 /// An incoming `tcp` dial, consumed by accepting or rejecting it.
 #[derive(uniffi::Object)]
 pub struct MoqSocketIncomingTcp {
-	inner: Mutex<Option<moq_net::socket::Incoming<moq_net::socket::TcpStream>>>,
+	inner: OneShot<moq_net::socket::Incoming<moq_net::socket::TcpStream>>,
 	peer: String,
 	session: String,
 	driver: Background,
@@ -134,19 +136,21 @@ impl MoqSocketIncomingTcp {
 	/// Verify return routability and accept; cancelling resets the dial.
 	pub async fn accept(&self) -> Result<Arc<MoqSocketTcpStream>, MoqError> {
 		self.driver.check()?;
-		let incoming = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let (incoming, answering) = self.inner.take()?;
 		let accepting = Polled::new(incoming.accept()).supervised(self.driver.clone());
 		let stream = accepting
 			.wait(|inner, waiter| Poll::Ready(Ok(ready!(inner.poll_ok(waiter))?)))
-			.await?;
-		Ok(Arc::new(MoqSocketTcpStream::new(stream, self.driver.clone())))
+			.await;
+		answering.settle(stream.map(|stream| Arc::new(MoqSocketTcpStream::new(stream, self.driver.clone()))))
 	}
 	/// Refuse the dial as not found.
 	pub fn reject(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
-		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?.reject();
-		Ok(())
+		self.inner.answer(|incoming| {
+			incoming.reject();
+			Ok(())
+		})
 	}
 }
 
@@ -195,7 +199,7 @@ impl MoqSocketTcpStream {
 /// An incoming `track` dial, consumed by accepting or rejecting it.
 #[derive(uniffi::Object)]
 pub struct MoqSocketIncomingTrack {
-	inner: Mutex<Option<moq_net::socket::Incoming<moq_net::socket::TrackStream>>>,
+	inner: OneShot<moq_net::socket::Incoming<moq_net::socket::TrackStream>>,
 	peer: String,
 	session: String,
 	driver: Background,
@@ -215,19 +219,21 @@ impl MoqSocketIncomingTrack {
 	pub async fn accept(&self, info: Option<MoqTrackInfo>) -> Result<Arc<MoqSocketTrackStream>, MoqError> {
 		self.driver.check()?;
 		let info = info.map(TryInto::try_into).transpose()?;
-		let incoming = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let (incoming, answering) = self.inner.take()?;
 		let accepting = Polled::new(incoming.accept(info)).supervised(self.driver.clone());
 		let stream = accepting
 			.wait(|inner, waiter| Poll::Ready(Ok(ready!(inner.poll_ok(waiter))?)))
-			.await?;
-		Ok(Arc::new(MoqSocketTrackStream::new(stream, self.driver.clone())))
+			.await;
+		answering.settle(stream.map(|stream| Arc::new(MoqSocketTrackStream::new(stream, self.driver.clone()))))
 	}
 	/// Refuse the dial as not found.
 	pub fn reject(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
-		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?.reject();
-		Ok(())
+		self.inner.answer(|incoming| {
+			incoming.reject();
+			Ok(())
+		})
 	}
 }
 
@@ -347,6 +353,15 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn endpoint_close_resets_an_open_tcp_session_as_closed() {
+		let (a, b) = endpoints();
+		let (_client, server) = tcp(&a, &b).await;
+		a.close();
+		let error = server.consumer().read_frame().await.err().unwrap();
+		assert!(matches!(error, MoqError::Closed), "{error:?}");
+	}
+
+	#[tokio::test]
 	async fn dropping_an_unfinished_tcp_writer_resets_with_a_deliberate_cause() {
 		let (a, b) = endpoints();
 		let (client, server) = tcp(&a, &b).await;
@@ -368,7 +383,7 @@ mod tests {
 			let incoming = b.accept_tcp().await.unwrap();
 			assert_eq!(incoming.peer(), "a");
 			incoming.reject().unwrap();
-			assert!(matches!(incoming.reject(), Err(MoqError::Closed)));
+			assert!(matches!(incoming.reject(), Err(MoqError::AlreadyResponded)));
 		});
 		assert!(matches!(dialed, Err(MoqError::NotFound)));
 		let _ = tcp(&a, &b).await;

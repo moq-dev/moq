@@ -8,7 +8,7 @@ by its stream id `m=` mode:
 - `m=publish` (the default): ingest. Demux the connection's transport stream
   with [`moq-mux`](../moq-mux) and publish it into a MoQ origin as an ordinary
   broadcast. The contribution-ingest analogue of `moq-cli` HLS import and
-  `moq-rtc`'s WHIP. Once a second it logs the importer's per-stream counters
+  `moq-webrtc`'s WHIP. Once a second it logs the importer's per-stream counters
   the way `moq import ts` does, so a PID that goes silent behind a running mux
   is named.
 - `m=request`: egress. Re-mux a broadcast from the origin back to MPEG-TS and
@@ -41,10 +41,14 @@ while let Some(request) = server.accept().await {
     // as a token if you like), verify it, and pick the broadcast path.
     match request {
         moq_srt::Request::Publish(publish) => {
-            tokio::spawn(publish.accept(&origin, "live/cam0"));
+            let origin = origin.clone();
+            tokio::spawn(async move {
+                publish.accept(&origin, "live/cam0", &moq_mux::Ingest::default()).await
+            });
         }
         moq_srt::Request::Subscribe(subscribe) => {
-            tokio::spawn(subscribe.accept(&consumer, "live/cam0"));
+            let consumer = consumer.clone();
+            tokio::spawn(async move { subscribe.accept(&consumer, "live/cam0").await });
         }
     }
     // ...or call `.reject(moq_srt::Reject::Forbidden)` on the `Publish` /

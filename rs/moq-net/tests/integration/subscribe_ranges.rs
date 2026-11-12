@@ -20,9 +20,9 @@ const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap()));
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// A millisecond track with no publisher max age, so ranges reach its superseded groups.
@@ -118,7 +118,7 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 	// The live subscriber reads group 3 before group 4 supersedes it.
 	let mut live_got: Vec<u64> = next(&mut live).await.into_iter().collect();
 	write_group(&track, 4);
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 
 	live_got.extend(read_all(&mut live).await);
 	let ahead_got = read_all(&mut ahead).await;
@@ -170,7 +170,7 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 		for sequence in 0..=4 {
 			write_group(&track, sequence);
 		}
-		track.finish().unwrap();
+		let track = track.finish().unwrap();
 		let mut got = read_all(&mut reader).await;
 		got.sort_unstable();
 		assert_eq!(got, [0, 3], "{version}");
@@ -273,6 +273,7 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 		for relay in [false, true] {
 			for finished in [false, true] {
 				let fixture = range_fixture_version(version, relay).await;
+				let mut _finished = None;
 				if finished {
 					let mut warm = subscribe(
 						&fixture.remote,
@@ -282,7 +283,7 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 					)
 					.await;
 					assert_eq!(next(&mut warm).await, Some(5));
-					fixture.track.finish().unwrap();
+					_finished = Some(fixture.track.clone().finish().unwrap());
 					assert_eq!(next(&mut warm).await, None);
 				}
 				let subscription = Subscription::default()

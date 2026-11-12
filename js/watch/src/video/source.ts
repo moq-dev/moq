@@ -1,8 +1,8 @@
 import * as Catalog from "@moq/hang/catalog";
-import type * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { SupportProbe } from "../support-probe";
+import { supported as decoderSupported } from "./supported";
 
 /**
  * A function that checks if a video configuration can be played.
@@ -27,7 +27,7 @@ export type Target = {
 
 	// Maximum desired bitrate in bits per second, a cap rather than a hint: selection picks the
 	// best rendition within it, and `0` picks the lowest rendition with a known bitrate.
-	// Omit it to select from the connection's PROBE estimate instead.
+	// Omit it to select from the `rate` input instead.
 	bitrate?: number;
 };
 
@@ -37,13 +37,13 @@ export type SourceInput = {
 	target: Getter<Target | undefined>;
 
 	// A function that checks if a video configuration can be played. Renditions that fail the
-	// probe are filtered out. Nothing is selected until one is provided.
+	// probe are filtered out. Defaults to `Decoder.supported`, the WebCodecs probe.
 	supported: Getter<Supported | undefined>;
 
-	// The connection's PROBE estimates, used to auto-select a rendition when the target has no
-	// explicit bitrate. Usually wired from a `Connection`'s `probe`.
-	// Optional: without it auto-selection falls back to the rank order alone.
-	probe: Getter<Moq.Connection.Probe | undefined>;
+	// The receive rate in bits per second this video may spend, used to auto-select a rendition
+	// when the target has no explicit bitrate. A `Player` wires its viewer grant less its audio.
+	// While `undefined`, selection keeps the last rate it had, or ranks alone without one.
+	rate: Getter<number | undefined>;
 };
 
 /** Signals the source derives. */
@@ -59,13 +59,17 @@ export type SourceOutput = {
 	track: Signal<string | undefined>;
 	config: Signal<Catalog.VideoConfig | undefined>;
 
-	// The receive rate, in bits per second, at which selection settles on the best rendition
-	// the target allows, or undefined when no candidate has a catalog bitrate. A player claims it
-	// as its viewer ceiling, so a probe that reaches it makes that rendition selectable.
+	/**
+	 * The receive rate, in bits per second, at which selection settles on the best rendition
+	 * the target allows, or undefined when no candidate has a catalog bitrate. A player claims it
+	 * as its viewer ceiling, so a grant that reaches it makes that rendition selectable.
+	 *
+	 * @internal Feeds the player's viewer claim.
+	 */
 	ceiling: Signal<number | undefined>;
 };
 
-// Automatic selection spends at most this share of the receive estimate, to avoid oscillation.
+// Automatic selection spends at most this share of the receive rate, to avoid oscillation.
 const MARGIN = 0.8;
 
 /**
@@ -205,7 +209,7 @@ function preferredRenditions(renditions: Record<string, Catalog.VideoConfig>): R
 	return Object.fromEntries(entries.filter(([, config]) => (config.preference ?? 0) === top));
 }
 
-/** Whether the receive estimate steers selection: not with nothing to select, or a pinned rendition or bitrate. */
+/** Whether the receive rate steers selection: not with nothing to select, or a pinned rendition or bitrate. */
 function steers(available: Record<string, Catalog.VideoConfig>, target: Target | undefined): boolean {
 	if (Object.keys(available).length === 0) return false;
 	return !(target?.name && target.name in available) && target?.bitrate === undefined;
@@ -234,6 +238,9 @@ export class Source {
 	/** Whether rendition support is still being resolved. @internal */
 	readonly pending: Getter<boolean> = this.#probe.pending;
 
+	// The last defined `rate`, held while it is unknown, such as across a reconnect.
+	#rate: number | undefined;
+
 	#signals = new Effect();
 
 	constructor(props?: Inputs<SourceInput>) {
@@ -241,7 +248,7 @@ export class Source {
 			broadcast: getter(props?.broadcast),
 			target: getter(props?.target),
 			supported: getter(props?.supported),
-			probe: getter(props?.probe),
+			rate: getter(props?.rate),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
@@ -261,7 +268,7 @@ export class Source {
 	}
 
 	#runSupported(effect: Effect): void {
-		const supported = effect.get(this.in.supported);
+		const supported = effect.get(this.in.supported) ?? decoderSupported;
 		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
 		const broadcast = effect.get(this.in.broadcast);
 		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.video?.renditions) ?? {};
@@ -271,9 +278,9 @@ export class Source {
 	#runSelected(effect: Effect): void {
 		const available = enabledRenditions(effect.get(this.#out.available));
 		const target = effect.get(this.in.target);
-		// Read the estimate only when it steers selection: observing it requests PROBE.
-		const estimate = steers(available, target) ? effect.get(this.in.probe)?.estimatedRecvRate : undefined;
-		const selected = this.#choose(available, target, estimate);
+		// Read the rate only when it steers selection, so a pinned choice doesn't rerun with it.
+		if (steers(available, target)) this.#rate = effect.get(this.in.rate) ?? this.#rate;
+		const selected = this.#choose(available, target, this.#rate);
 		if (!selected) return;
 
 		effect.set(this.#out.track, selected);
@@ -283,26 +290,26 @@ export class Source {
 	#runCeiling(effect: Effect): void {
 		const available = enabledRenditions(effect.get(this.#out.available));
 		const target = effect.get(this.in.target);
-		// An unlimited estimate picks the best rendition bandwidth could ever buy.
+		// An unlimited rate picks the best rendition bandwidth could ever buy.
 		const best = this.#choose(available, target, Number.POSITIVE_INFINITY);
 		const bitrate = best === undefined ? undefined : available[best].bitrate;
 		if (bitrate === undefined) return;
-		// Only the estimate's discounted share counts, so it must reach the bitrate over the margin.
+		// Only the rate's discounted share counts, so it must reach the bitrate over the margin.
 		const ceiling = steers(available, target) ? Math.ceil(bitrate / MARGIN) : bitrate;
 		effect.set(this.#out.ceiling, ceiling, undefined);
 	}
 
-	// Pick among the enabled renditions, given the receive estimate if known.
+	// Pick among the enabled renditions, given the receive rate if known.
 	#choose(
 		available: Record<string, Catalog.VideoConfig>,
 		target: Target | undefined,
-		estimate: number | undefined,
+		rate: number | undefined,
 	): string | undefined {
 		if (target?.name && target.name in available) return target.name;
 		if (Object.keys(available).length === 0) return undefined;
 
-		if (estimate != null && steers(available, target)) {
-			target = { ...target, bitrate: Math.round(estimate * MARGIN) };
+		if (rate != null && steers(available, target)) {
+			target = { ...target, bitrate: Math.round(rate * MARGIN) };
 		}
 
 		return this.#select(preferredRenditions(available), target);

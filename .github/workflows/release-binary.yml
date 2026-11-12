@@ -16,6 +16,16 @@ on:
         description: "Executable the package ships, e.g. moq"
         required: true
         type: string
+      linux-targets:
+        description: "JSON list of the Linux targets to build"
+        required: false
+        type: string
+        default: '["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]'
+      linux-features:
+        description: "Cargo features the Linux builds add, comma-separated"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -27,23 +37,14 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.runs-on }}
+    # Native runners for x86_64 and aarch64; armv7 cross-compiles on arm64.
+    # zig links every target against glibc 2.34, whatever the runner has.
+    runs-on: ${{ startsWith(matrix.target, 'x86_64') && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
 
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Native runners. Each binary is built on the same arch it ships
-          # for, so the .deb/.rpm linkage matches the distro's glibc on the
-          # oldest LTS we support (Ubuntu 22.04 / AlmaLinux 9).
-          - target: x86_64-unknown-linux-gnu
-            runs-on: ubuntu-22.04
-            deb-arch: amd64
-            rpm-arch: x86_64
-          - target: aarch64-unknown-linux-gnu
-            runs-on: ubuntu-22.04-arm
-            deb-arch: arm64
-            rpm-arch: aarch64
+        target: ${{ fromJSON(inputs.linux-targets) }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,11 +66,40 @@ jobs:
       - name: Set up packaging tools
         uses: ./.github/actions/setup-packaging
 
+      # Debian and RPM name each architecture their own way. AlmaLinux 9 ships
+      # no 32-bit ARM, so armv7 is a .deb and a tarball only.
+      - name: Package architectures
+        id: arch
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          case "$TARGET" in
+            x86_64-unknown-linux-gnu) echo "deb=amd64 rpm=x86_64" ;;
+            aarch64-unknown-linux-gnu) echo "deb=arm64 rpm=aarch64" ;;
+            armv7-unknown-linux-gnueabihf) echo "deb=armhf rpm=" ;;
+            *) echo "no package architecture for $TARGET" >&2; exit 1 ;;
+          esac | tr ' ' '\n' >> "$GITHUB_OUTPUT"
+
+      # cargo-zigbuild writes the arm-features.h glibc lacks into zig's lib
+      # directory (ziglang/zig#3287), which the Nix store keeps read-only.
+      - name: Writable zig for 32-bit ARM
+        if: startsWith(matrix.target, 'armv7')
+        shell: bash
+        run: | # zizmor: ignore[github-env] a copy of the Nix store zig this job already runs.
+          zig=$(readlink -f "$(command -v zig)")
+          cp -rL --no-preserve=mode "$(dirname "$(dirname "$zig")")" "$RUNNER_TEMP/zig"
+          chmod +x "$RUNNER_TEMP/zig/bin/zig"
+          echo "CARGO_ZIGBUILD_ZIG_PATH=$RUNNER_TEMP/zig/bin/zig" >> "$GITHUB_ENV"
+
       - name: Build (release, glibc 2.34)
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          FEATURES: ${{ inputs.linux-features }}
         # Pin to glibc 2.34 so one binary covers Ubuntu 22.04+ (.deb)
         # and AlmaLinux/RHEL/Rocky 9+ (.rpm).
-        run: cargo zigbuild --locked --release --target ${{ matrix.target }}.2.34 -p "$CRATE"
+        run: cargo zigbuild --locked --release --target "$TARGET.2.34" -p "$CRATE" --features "$FEATURES"
 
       - name: Package release assets
         shell: bash
@@ -92,7 +122,7 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ steps.parse.outputs.version }}
-          ARCH: ${{ matrix.deb-arch }}
+          ARCH: ${{ steps.arch.outputs.deb }}
           BINARY_PATH: target/${{ matrix.target }}/release/${{ inputs.bin }}
         run: |
           just rs package-nfpm "packaging/$CRATE/nfpm.yaml" deb dist/
@@ -101,10 +131,11 @@ jobs:
           fi
 
       - name: Package .rpm
+        if: steps.arch.outputs.rpm != ''
         shell: bash
         env:
           VERSION: ${{ steps.parse.outputs.version }}
-          ARCH: ${{ matrix.rpm-arch }}
+          ARCH: ${{ steps.arch.outputs.rpm }}
           BINARY_PATH: target/${{ matrix.target }}/release/${{ inputs.bin }}
         run: just rs package-nfpm "packaging/$CRATE/nfpm.yaml" rpm dist/
 
@@ -180,9 +211,6 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
-
-      # aws-lc-rs assembles its x86_64 crypto with NASM on Windows.
-      - uses: ./.github/actions/nasm
 
       - name: Parse version
         id: parse

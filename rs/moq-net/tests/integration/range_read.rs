@@ -9,15 +9,16 @@ use crate::support;
 use std::time::Duration;
 
 use moq_net::track::{Delay, Order, Subscription};
-use moq_net::{Hop, Timestamp, Version};
+use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn write_group(track: &mut moq_net::track::Producer, sequence: u64) {
@@ -114,9 +115,7 @@ fn one_range(groups: std::ops::Range<u64>) -> Subscription {
 
 async fn history(version: Version, relay: bool, finished: bool) {
 	let (remote, track, _held) = fixture(version, relay).await;
-	if finished {
-		track.finish().unwrap();
-	}
+	let _finished = finished.then(|| track.clone().finish().unwrap());
 	let mut sub = remote.track("video").unwrap().subscribe(one_range(1..2)).await.unwrap();
 	assert_eq!(read(&mut sub).await, [1], "{version} relay={relay} finished={finished}");
 }

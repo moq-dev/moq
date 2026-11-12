@@ -361,7 +361,7 @@ encoder_packet audioPacket(std::vector<uint8_t> &payload, int64_t pts)
 // The output's broadcast as the relay serves it, or null once the wait times out.
 std::shared_ptr<moq::BroadcastConsumer> relayBroadcast(TestRelay &relay)
 {
-	auto announced = TestOk(relay.origin->consume()->follow("room", std::nullopt), "follow");
+	auto announced = TestOk(relay.origin->consume()->follow("room", nullptr), "follow");
 	auto available = announced->available();
 	if (available.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
 		return nullptr;
@@ -411,7 +411,7 @@ struct MoQOutputStatsTest {
 		const auto *present = std::get_if<moq::AnnounceEvent::kPresent>(&event->get_variant());
 		if (!present)
 			return std::nullopt;
-		return present->announce.route.instance;
+		return present->announce.route.instance->text();
 	}
 
 	static std::shared_ptr<moq::Session> Session(MoQOutput &output)
@@ -427,10 +427,13 @@ struct MoQOutputStatsTest {
 		stale.bytes_sent = 123;
 		return output.CommitConnectionStats(session, std::move(stale), accepted);
 	}
+	// Runs the continuations already queued, the last that can report once the attempt
+	// is retired.
+	static void Drain(MoQOutput &output) { ::Drain(output.worker); }
 	static void Disconnect(MoQOutput &output)
 	{
 		std::lock_guard<std::mutex> lock(output.mutex);
-		output.live = false;
+		output.link = MoQOutput::Link::kLost;
 	}
 	// A fast first connect and drop can coalesce before the UI observes Connected.
 	static bool ObserveCoalescedFirstConnect(MoQOutput &output)
@@ -440,13 +443,16 @@ struct MoQOutputStatsTest {
 		if (!current || !current->session)
 			return false;
 		current->pending.reset();
-		current->connected = false;
+		{
+			std::lock_guard<std::mutex> lock(output.mutex);
+			output.link = MoQOutput::Link::kPending;
+		}
 		output.connect_time_ms = 0;
 		auto state = current->session->state();
-		state.phase = moq::ConnectionPhase::kDisconnected;
-		state.version.reset();
+		state.phase = moq::ConnectionPhase::kDisconnected{};
 		output.OnState(current, std::move(state));
-		return current->connected && !current->live && output.GetConnectTime() > 0;
+		std::lock_guard<std::mutex> lock(output.mutex);
+		return output.link == MoQOutput::Link::kLost && output.GetConnectTime() > 0;
 	}
 
 	// Whether every audio and video track holds a reservation.
@@ -956,7 +962,8 @@ int main()
 		o.CopyLastFailure(&code, &reason);
 		CHECK(!reason.empty());
 		CHECK(!o.IsLiveSession());
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		// The failure retired the attempt, so nothing it queued can report again.
+		MoQOutputStatsTest::Drain(o);
 		CHECK(signalCount() == 1);
 	}
 	printf("fatal before connect: ok\n");
@@ -1001,8 +1008,9 @@ int main()
 	}
 	printf("names the failure while reconnecting: ok\n");
 
-	// While the first dial keeps failing, the dock names why instead of a bare
-	// "Connecting…". The relay is gone before the start, so nothing answers.
+	// A first dial that reaches no session fails the start for good rather than
+	// retrying: nothing has ever connected, so the cause is likely setup. The relay
+	// is gone before the start, so nothing answers.
 	{
 		std::string url;
 		{
@@ -1012,21 +1020,21 @@ int main()
 		reset(url);
 		MoQOutput o(nullptr, OUTPUT);
 		CHECK(o.Start());
-		std::string reason;
-		CHECK(WaitFor([&] {
-			int code = 0;
-			o.CopyLastFailure(&code, &reason);
-			return !reason.empty();
-		}));
-		// Still retrying rather than failed, so this is the first-dial path.
-		CHECK(!o.IsLiveSession());
-		CHECK(signalCount() == 0);
-		o.Stop();
+		CHECK(WaitFor([] { return signalCount() == 1; }));
+		// Never reached the server, so OBS must not retry the endpoint.
+		CHECK(signalAt(0).code == OBS_OUTPUT_CONNECT_FAILED);
+		CHECK(signalAt(0).begin_capture_at == 1);
+		CHECK(!signalAt(0).last_error.empty());
 		int code = 0;
+		std::string reason;
 		o.CopyLastFailure(&code, &reason);
-		CHECK(reason.empty());
+		CHECK(reason == signalAt(0).last_error);
+		CHECK(!o.IsLiveSession());
+		// The failure retired the attempt, so nothing it queued can report again.
+		MoQOutputStatsTest::Drain(o);
+		CHECK(signalCount() == 1);
 	}
-	printf("names the failure while the first dial retries: ok\n");
+	printf("a failing first dial fails the start: ok\n");
 
 	// Stopping while the connect is still pending cancels it: nothing but the stop
 	// reaches OBS, then or later.
@@ -1036,7 +1044,8 @@ int main()
 		MoQOutput o(nullptr, OUTPUT);
 		CHECK(o.Start());
 		o.Stop();
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		// The stop dropped the connect, so only a result it already queued could still run.
+		MoQOutputStatsTest::Drain(o);
 		CHECK(signalCount() == 1);
 		CHECK(signalAt(0).code == OBS_OUTPUT_SUCCESS);
 	}
@@ -1085,7 +1094,7 @@ int main()
 		CHECK(WaitFor([] { return signalCount() == 2; }));
 		CHECK(signalAt(0).begin_capture_at == 1);
 		CHECK(signalAt(1).begin_capture_at == 2);
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		MoQOutputStatsTest::Drain(o);
 		CHECK(signalCount() == 2);
 	}
 	printf("OBS-driven restart: ok\n");
@@ -1128,7 +1137,8 @@ int main()
 			const size_t starts = round % 2 ? 2 : 1;
 			CHECK(signalCount() <= starts + 1);
 		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		// A late report could only come from a continuation, and the destructor joined the
+		// worker that runs them.
 		CHECK(g_signals_after_destroy == 0);
 	}
 	printf("failures outliving the output: ok\n");
@@ -1142,6 +1152,10 @@ int main()
 		CHECK(signalAt(0).code == OBS_OUTPUT_ENCODE_ERROR);
 	}
 	printf("encode error: ok\n");
+
+	// Join moq-ffi's runtime threads as obs_module_unload does, or one that exited idle is
+	// still unjoined at exit, which ThreadSanitizer reports as a leak.
+	moq::shutdown();
 
 	if (g_failures) {
 		fprintf(stderr, "%d failure(s)\n", g_failures);

@@ -6,8 +6,8 @@
 // streams stay in flight and ranked against each other.
 
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
-import { accept, connect, type Established } from "./connection/index.ts";
+import { Duration } from "@moq/clock";
+import { accept, connect, type Session } from "./connection/index.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { FetchHeader } from "./ietf/fetch.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -24,7 +24,7 @@ import { wireOf } from "./wire.ts";
 const url = new URL("https://localhost:4443/test");
 
 // A budget covering every group these tests write, so expiry never decides what is sent.
-const MAX_DELAY = Milli(30_000);
+const MAX_DELAY = Duration.millis(30_000);
 
 // The send orders a subscription at priority 0 gives its streams, in the order they opened,
 // when stream `i` carries group `i` of `count` all still in flight.
@@ -117,13 +117,13 @@ async function aggregate(track: TrackProducer, predicate: (order: Order | undefi
 	while (!predicate(track.subscription.peek()?.order)) await track.subscription.changed();
 }
 
-interface Session {
-	client: Established;
-	server: Established;
+interface Pair {
+	client: Session;
+	server: Session;
 	transport: MockTransport;
 }
 
-async function session(protocol: string, origin: OriginProducer): Promise<Session> {
+async function session(protocol: string, origin: OriginProducer): Promise<Pair> {
 	const pair = createMockTransportPair(protocol);
 	const [client, server] = await Promise.all([
 		connect({ url, transport: pair.client }),

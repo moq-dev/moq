@@ -44,7 +44,7 @@ use ndk::media::media_codec::{
 use ndk::media::media_format::MediaFormat;
 use ndk::media_error::MediaError;
 
-use super::super::encoder::{Applied, Codec, Config, Gop};
+use super::super::encoder::{Applied, Codec, Config};
 use super::{Backend, Encoded};
 use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::{Error, Frame, I420};
@@ -149,9 +149,32 @@ pub(crate) struct MediaCodec {
 	/// Set while an IDR is owed: asked for by the caller, or by a flush that
 	/// dropped the reference frames the next picture would predict from.
 	keyframe_pending: bool,
-	/// True once end of input has been signalled and before the flush that takes
-	/// it back, since a codec in that state refuses input.
-	ended: bool,
+	/// Whether the codec still takes input. What it owes a flush is `pending`.
+	input: Input,
+	/// Access units the codec handed back and `receive` has not popped yet.
+	ready: VecDeque<Encoded>,
+}
+
+/// Whether the codec takes input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Input {
+	/// Taking frames, and back to it after every flush.
+	Open,
+	/// A flush could not take the codec back out of end of input, so it refuses
+	/// input for good.
+	Ended,
+}
+
+impl Input {
+	/// Fails once the codec can take no more input.
+	fn check(self) -> Result<(), Error> {
+		match self {
+			Input::Ended => Err(Error::codec(anyhow::anyhow!(
+				"the MediaCodec encoder has ended its stream and takes no more input"
+			))),
+			Input::Open => Ok(()),
+		}
+	}
 }
 
 impl MediaCodec {
@@ -164,7 +187,7 @@ impl MediaCodec {
 		};
 
 		let codec = media_codec::MediaCodec::from_encoder_type(mime)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("no MediaCodec encoder for {mime}")))?;
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("no MediaCodec encoder for {mime}")))?;
 		let format = encoder_format(config, mime)?;
 		codec
 			.configure(&format, None, MediaCodecDirection::Encoder)
@@ -189,7 +212,8 @@ impl MediaCodec {
 			last_timestamp: None,
 			frame_index: 0,
 			keyframe_pending: false,
-			ended: false,
+			input: Input::Open,
+			ready: VecDeque::new(),
 		}))
 	}
 
@@ -256,10 +280,10 @@ impl MediaCodec {
 		Ok(())
 	}
 
-	/// Collect every access unit the codec has ready, waiting `timeout` on each
+	/// Queue every access unit the codec has ready, waiting `timeout` on each
 	/// round. Returns whether it reported end of stream, which is the only thing
 	/// that says the tail is out rather than still coming.
-	fn drain(&mut self, timeout: Duration, out: &mut Vec<Encoded>) -> Result<bool, Error> {
+	fn drain(&mut self, timeout: Duration) -> Result<bool, Error> {
 		loop {
 			let taken = match self
 				.codec
@@ -297,7 +321,7 @@ impl MediaCodec {
 				} else {
 					unit
 				};
-				out.push(Encoded::new(payload, timestamp, keyframe));
+				self.ready.push_back(Encoded::new(payload, timestamp, keyframe));
 			}
 
 			if flags & FLAG_END_OF_STREAM != 0 {
@@ -306,7 +330,7 @@ impl MediaCodec {
 		}
 	}
 
-	/// Signal end of input and wait the codec's tail out, returning everything it
+	/// Signal end of input and wait the codec's tail out, queueing everything it
 	/// was still holding.
 	///
 	/// The wait is the point. An encoder that buffers won't part with the frames
@@ -314,28 +338,19 @@ impl MediaCodec {
 	/// happens to be ready already truncates the stream: that is one access unit
 	/// lost per group, and on a live track the frame does not vanish but
 	/// reappears ahead of the next group's keyframe.
-	fn drain_tail(&mut self) -> Result<Vec<Encoded>, Error> {
-		let mut out = Vec::new();
-		// Every frame fed has already come back out, so there is no tail to wait
-		// for and no reason to cycle the codec through end of stream. This is the
-		// common case: the format asks for a one-frame pipeline.
-		if self.ended || self.pending.is_empty() {
-			return Ok(out);
-		}
-
-		self.signal_end_of_input(&mut out)?;
-		self.ended = true;
+	fn drain_tail(&mut self) -> Result<(), Error> {
+		self.signal_end_of_input()?;
 
 		for _ in 0..DRAIN_ROUNDS {
-			if self.drain(DRAIN_TIMEOUT, &mut out)? {
+			if self.drain(DRAIN_TIMEOUT)? {
 				// Anything still outstanding was discarded by the codec rather than
 				// encoded, so it will never be paired with an output.
 				self.pending.clear();
-				return Ok(out);
+				return Ok(());
 			}
 		}
 
-		Err(Error::Codec(anyhow::anyhow!(
+		Err(Error::codec(anyhow::anyhow!(
 			"MediaCodec did not reach end of stream within {:?}",
 			DRAIN_TIMEOUT * DRAIN_ROUNDS
 		)))
@@ -345,7 +360,7 @@ impl MediaCodec {
 	///
 	/// ByteBuffer mode has no `AMediaCodec_signalEndOfInputStream`: that one is
 	/// for a codec fed through a surface.
-	fn signal_end_of_input(&mut self, out: &mut Vec<Encoded>) -> Result<(), Error> {
+	fn signal_end_of_input(&mut self) -> Result<(), Error> {
 		let sample_time = self.sample_time();
 		for _ in 0..DRAIN_ROUNDS {
 			let queued = match self
@@ -366,45 +381,60 @@ impl MediaCodec {
 			}
 			// Every input buffer is still with the codec; collecting its output is
 			// what frees one.
-			self.drain(OUTPUT_TIMEOUT, out)?;
+			self.drain(OUTPUT_TIMEOUT)?;
 		}
 
-		Err(Error::Codec(anyhow::anyhow!(
+		Err(Error::codec(anyhow::anyhow!(
 			"MediaCodec never freed an input buffer for the end of stream"
 		)))
 	}
 }
 
 impl Backend for MediaCodec {
-	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
-		let mut out = Vec::new();
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
+		self.input.check()?;
 		// Collect whatever the codec finished while the caller was elsewhere, so
 		// the input buffer asked for below isn't stuck behind an output nobody
 		// picked up.
-		self.drain(OUTPUT_TIMEOUT, &mut out)?;
+		self.drain(OUTPUT_TIMEOUT)?;
 		self.submit(frame, cut || self.keyframe_pending)?;
-		self.drain(OUTPUT_TIMEOUT, &mut out)?;
-		Ok(out)
+		self.drain(OUTPUT_TIMEOUT)?;
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-		let out = self.drain_tail()?;
-		if self.ended {
-			// End of input leaves the codec refusing input, and only a flush takes
-			// that back. Nothing more is needed in synchronous mode: the NDK
-			// documents the `AMediaCodec_start` after a flush as an asynchronous-mode
-			// requirement.
-			self.codec.flush().map_err(|e| codec_err("flush", e))?;
-			self.ended = false;
-			// A flush drops the reference frames, so the next picture has to be an
-			// IDR. Asked for rather than assumed: not every encoder inserts one.
-			self.keyframe_pending = true;
+	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
+		self.input.check()?;
+		// Every frame fed has already come back out, so there is no tail to wait
+		// for and no reason to cycle the codec through end of stream. This is the
+		// common case: the format asks for a one-frame pipeline.
+		if self.pending.is_empty() {
+			return Ok(());
 		}
-		Ok(out)
-	}
 
-	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-		self.drain_tail()
+		// Flushed whatever the drain did: end of input leaves the codec refusing
+		// input, a drain cut short included, and only a flush takes that back.
+		// Nothing more is needed in synchronous mode: the NDK documents the
+		// `AMediaCodec_start` after a flush as an asynchronous-mode requirement.
+		let tail = self.drain_tail();
+		// The flush discards whatever the codec still held, so none of it will be
+		// paired with an output.
+		self.pending.clear();
+		if let Err(err) = self.codec.flush() {
+			self.input = Input::Ended;
+			return Err(codec_err("flush", err));
+		}
+		// A flush drops the reference frames, so the next picture has to be an
+		// IDR. Asked for rather than assumed: not every encoder inserts one.
+		self.keyframe_pending = true;
+		// Android does not promise a flush restores an encoder whose drain failed.
+		if tail.is_err() {
+			self.input = Input::Ended;
+		}
+		tail
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
@@ -447,8 +477,7 @@ fn encoder_format(config: &Config, mime: &str) -> Result<MediaFormat, Error> {
 	// MediaCodec takes the keyframe interval in seconds rather than frames, and
 	// reads it as a float, so a sub-second GOP survives instead of rounding to
 	// zero (which would mean an IDR on every frame).
-	let Gop::Keyframe { interval } = config.gop;
-	format.set_f32(KEY_I_FRAME_INTERVAL, interval as f32 / config.framerate.as_f64() as f32);
+	format.set_f32(KEY_I_FRAME_INTERVAL, config.effective_join().as_secs_f32());
 	// Ask for the shortest pipeline the device offers: output a frame after
 	// input, and no B-frames, whose reorder delay a live track has no use for.
 	// Both are hints an older device drops, which is why `flush` still drains the
@@ -502,7 +531,7 @@ fn fill_nv12(buffer: &mut [MaybeUninit<u8>], i420: &I420, width: usize, height: 
 	let luma_len = width * height;
 	let needed = luma_len + luma_len / 2;
 	if buffer.len() < needed {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"MediaCodec input buffer is {} bytes, needs {needed} for {width}x{height} NV12",
 			buffer.len()
 		)));
@@ -617,7 +646,7 @@ fn opens_with_parameter_set(unit: &[u8], codec: Codec) -> bool {
 
 /// Wrap an NDK media error, naming the call that produced it.
 fn codec_err(what: &str, error: MediaError) -> Error {
-	Error::Codec(anyhow::anyhow!("failed to {what} on the MediaCodec encoder: {error}"))
+	Error::codec(anyhow::anyhow!("failed to {what} on the MediaCodec encoder: {error}"))
 }
 
 fn clamp_i32(value: u64) -> i32 {
@@ -696,11 +725,8 @@ mod tests {
 		let i420 = I420::new(size, vec![0x80; I420::len(size).unwrap()]).unwrap();
 		let frame = Frame::new(crate::Surface::I420(i420), timestamp(0));
 
-		let mut encoded = backend.encode(&frame, true).unwrap();
-		if encoded.is_empty() {
-			encoded = backend.flush().unwrap();
-		}
-
+		let mut encoded = backend.encode_all(&frame, true).unwrap();
+		encoded.extend(backend.flush_all().unwrap());
 		let annexb: Vec<u8> = encoded.iter().flat_map(|frame| frame.payload.iter().copied()).collect();
 		moq_mux::codec::h264::config(&annexb).expect("a keyframe carrying its own parameter sets");
 	}

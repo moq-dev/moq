@@ -251,7 +251,6 @@ pub struct TlsAcceptor {
 	tls: crate::tls::Serve,
 	qmux: qmux::tls::Server,
 	server: moq_net::Server,
-	timeout: Option<std::time::Duration>,
 }
 
 #[cfg(feature = "_certs")]
@@ -261,7 +260,6 @@ impl TlsAcceptor {
 		tls: crate::tls::Serve,
 		session: qmux::Config,
 		server: moq_net::Server,
-		timeout: Option<std::time::Duration>,
 	) -> Self {
 		let qmux = qmux::tls::Server::new(config.clone()).with_session_config(session);
 		Self {
@@ -269,7 +267,6 @@ impl TlsAcceptor {
 			tls,
 			qmux,
 			server,
-			timeout,
 		}
 	}
 
@@ -295,13 +292,13 @@ impl TlsAcceptor {
 	pub async fn accept<T>(
 		&self,
 		stream: tokio_rustls::server::TlsStream<T>,
-		active: moq_net::server::Active,
+		active: moq_net::server::Admitted,
 	) -> crate::Result<crate::server::Request>
 	where
 		T: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRef<tokio::net::TcpStream> + Send + Unpin + 'static,
 	{
 		crate::runtime::scope(async move {
-			let deadline = self.timeout.and_then(|timeout| kio::clock::now().checked_add(timeout));
+			let deadline = self.server.deadline(kio::clock::now());
 			let tcp: &tokio::net::TcpStream = stream.get_ref().0.as_ref();
 			let remote = tcp.peer_addr().ok();
 			let local = tcp.local_addr().ok();
@@ -322,7 +319,7 @@ impl TlsAcceptor {
 			let session = crate::server::within(deadline, handshake).await?;
 			let incoming = crate::server::Incoming::tcp(&session, Some(&self.tls), remote, local, deadline, active)
 				.with_alpn(alpn);
-			crate::server::accept_stream(&self.server, session, incoming).await
+			crate::server::Request::accept_qmux(&self.server, session, incoming).await
 		})
 		.await
 	}
@@ -413,13 +410,9 @@ impl Listener {
 	/// A failed `accept(2)` is handled here rather than yielded: it is classified,
 	/// counted, logged, and paced by [`accept_health`](Self::accept_health), then
 	/// retried, because the caller has no better answer than to ask again. A
-	/// per-connection *handshake* failure is still yielded as `Some(Err(..))`.
-	///
-	/// The `Option` no longer has a `None` case to report: nothing ends the accept
-	/// loop, so this always yields. It stays because dropping it is a breaking change
-	/// to a published signature.
-	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
-		crate::runtime::scope(async move { Some(self.accept_pending().await.await.map(|(session, _)| session)) }).await
+	/// per-connection *handshake* failure is still returned as an error.
+	pub async fn accept(&self) -> Result<qmux::Session> {
+		crate::runtime::scope(async move { self.accept_pending().await.await.map(|(session, _)| session) }).await
 	}
 
 	/// Accept a socket and return its independently driven qmux handshake.
@@ -670,13 +663,14 @@ mod tests {
 	/// through to the loopback listener within the stagger delay.
 	#[tokio::test]
 	async fn failover_recovers_from_blackhole_candidate() {
+		kio::clock::host_time(); // a real dial that blackholes
 		let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
 			.await
 			.expect("bind listener")
 			.with_protocols(["moq-test"]);
 		let addr = listener.local_addr().expect("local addr");
 
-		let accept = tokio::spawn(async move { listener.accept().await.expect("listener gone").expect("accept") });
+		let accept = tokio::spawn(async move { listener.accept().await.expect("accept") });
 
 		let blackhole: net::SocketAddr = "192.0.2.1:9".parse().unwrap();
 		let candidates = crate::resolve::Candidates::fixed([blackhole, addr]);
@@ -708,7 +702,7 @@ mod tests {
 			.expect("bind listener")
 			.with_protocols(["moq-test"]);
 		let addr = listener.local_addr().expect("local addr");
-		let accept = tokio::spawn(async move { listener.accept().await.expect("listener gone").expect("accept") });
+		let accept = tokio::spawn(async move { listener.accept().await.expect("accept") });
 		let candidates = crate::resolve::Candidates::fixed([addr]);
 		let client = connect_addrs(candidates, &["moq-test"], &crate::qmux_default(), Duration::ZERO)
 			.await

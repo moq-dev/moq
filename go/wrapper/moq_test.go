@@ -39,10 +39,7 @@ func newRoute(t *testing.T, origin *moq.OriginProducer, path string, options moq
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { runtime.KeepAlive(route) })
-	broadcast, err := route.Broadcast()
-	if err != nil {
-		t.Fatal(err)
-	}
+	broadcast := route.Broadcast()
 	return route, broadcast
 }
 
@@ -62,14 +59,11 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.RoutePrefix("", moq.RouteOptions{})
+	dynamic, err := origin.Claim("", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer dynamic.Cancel()
-	if _, err := dynamic.Broadcast(); err == nil {
-		t.Fatal("a prefix route owns no broadcast")
-	}
 
 	type result struct {
 		broadcast *moq.BroadcastConsumer
@@ -98,13 +92,10 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.KeepAlive(served)
-	if served.Instance() == dynamic.Instance() {
-		t.Fatal("a job's route serves a fresh instance")
+	if !served.Instance().Eq(dynamic.Instance()) {
+		t.Fatal("a job's route continues the instance its claim lends")
 	}
-	broadcast, err := served.Broadcast()
-	if err != nil {
-		t.Fatal(err)
-	}
+	broadcast := served.Broadcast()
 	track, err := broadcast.PublishTrack("status", timedInfo())
 	if err != nil {
 		t.Fatal(err)
@@ -149,10 +140,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The route hands out one broadcast, so closing it ends the route too.
-	again, err := served.Broadcast()
-	if err != nil {
-		t.Fatal(err)
-	}
+	again := served.Broadcast()
 	if _, err := again.PublishTrack("late", nil); !errors.Is(err, moq.ErrClosed) {
 		t.Fatalf("PublishTrack after close = %v, want ErrClosed", err)
 	}
@@ -738,8 +726,8 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fill.StartGroup() != 7 || fill.EndGroup() != 8 || fill.Priority() != 11 {
-		t.Fatalf("unexpected fill: start=%d end=%d priority=%d", fill.StartGroup(), fill.EndGroup(), fill.Priority())
+	if fill.Start() != (moq.Position{Group: 7, Frame: 0}) || fill.End() != 8 || fill.Priority() != 11 {
+		t.Fatalf("unexpected fill: start=%+v end=%d priority=%d", fill.Start(), fill.End(), fill.Priority())
 	}
 	if wanted := fill.Wanted(); wanted == nil || *wanted != 7 {
 		t.Fatalf("unexpected fill: wanted=%v", wanted)
@@ -803,9 +791,6 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	ann := nextAnnounced(t, ctx, announced)
 	if ann.Prefix != "live" {
 		t.Fatalf("prefix = %q, want %q", ann.Prefix, "live")
-	}
-	if len(ann.Route.Hops) != 0 {
-		t.Fatalf("route hops = %v, want empty for local origin", ann.Route.Hops)
 	}
 
 	bc, err := consumer.Request(ctx, ann.Prefix, nil)
@@ -1202,8 +1187,8 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	if mediaName != "requested-audio" {
 		t.Fatalf("media name = %q, want requested-audio", mediaName)
 	}
-	if _, err := request.Name(); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("request name after accept error = %v, want ErrClosed", err)
+	if _, err := request.Name(); !errors.Is(err, moq.ErrAlreadyResponded) {
+		t.Fatalf("request name after accept error = %v, want ErrAlreadyResponded", err)
 	}
 
 	var mediaConsumer *moqmedia.TrackConsumer
@@ -1255,10 +1240,10 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 }
 
 // TestRecvGroupCancelRace exercises the core bridge.Call path under -race:
-// the native RecvGroup runs on an internal goroutine while ctx expiry triggers a
+// the native RecvGroup runs on an internal goroutine while ctx ending triggers a
 // concurrent Cancel on the same consumer. No group is ever written, so each read
-// blocks until its short ctx fires. The race detector flags any unsynchronized
-// access between the in-flight call and the cancel.
+// blocks until the cancel. The race detector flags any unsynchronized access
+// between the in-flight call and the cancel.
 func TestRecvGroupCancelRace(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
@@ -1280,14 +1265,51 @@ func TestRecvGroupCancelRace(t *testing.T) {
 		wg.Add(1)
 		go func(c *moq.TrackConsumer) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-			defer cancel()
-			// Returns ctx.Err() once the deadline fires; we only care that it
-			// returns without a data race or panic.
-			_, _ = c.RecvGroup(ctx)
+			// Returns ctx.Err(); we only care that it returns without a data
+			// race or panic.
+			_, _ = c.RecvGroup(newCancelOnWait())
 		}(consumer)
 	}
 	wg.Wait()
+}
+
+// TestRecvGroupCancelKeepsConsumer confirms a cancelled read aborts only
+// itself: the same consumer still receives the next group.
+func TestRecvGroupCancelKeepsConsumer(t *testing.T) {
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Close()
+
+	track, err := broadcast.PublishTrack("x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := track.Consume(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Cancel()
+
+	if _, err := consumer.RecvGroup(newCancelOnWait()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled RecvGroup = %v, want context.Canceled", err)
+	}
+
+	group, err := track.AppendGroup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := consumer.RecvGroup(ctx)
+	if err != nil {
+		t.Fatalf("RecvGroup after cancel = %v", err)
+	}
+	if got == nil || got.Sequence() != group.Sequence() {
+		t.Fatalf("RecvGroup after cancel = %v, want group %d", got, group.Sequence())
+	}
 }
 
 // TestConsumerCancelConcurrent confirms Cancel is safe to call repeatedly from
@@ -1324,7 +1346,7 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 // that one request rather than the consumer it was made on.
 func TestRequestCancelKeepsTheOrigin(t *testing.T) {
 	origin := newOrigin(t)
-	dynamic, err := origin.RoutePrefix("", moq.RouteOptions{})
+	dynamic, err := origin.Claim("", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1431,7 +1453,7 @@ func TestSubscribeTrackCancelKeepsTheBroadcast(t *testing.T) {
 	case <-waitCtx.Done():
 		t.Fatal("SubscribeTrack did not return after its context was cancelled")
 	}
-	_ = pending.Abort(0)
+	_ = pending.Reject(0)
 
 	resolved := make(chan error, 1)
 	go func() {
@@ -1474,10 +1496,8 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if err := untilWanted(ctx, demand, true); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("untilWanted error = %v, want context.DeadlineExceeded", err)
+	if err := untilWanted(newCancelOnWait(), demand, true); !errors.Is(err, context.Canceled) {
+		t.Fatalf("untilWanted error = %v, want context.Canceled", err)
 	}
 
 	readCtx, readCancel := context.WithTimeout(context.Background(), testTimeout)
@@ -1572,7 +1592,7 @@ func TestCancelDoesNotLeakGoroutines(t *testing.T) {
 
 	runtime.KeepAlive(pending)
 	for _, request := range pending {
-		_ = request.Abort(0)
+		_ = request.Reject(0)
 	}
 }
 
@@ -1620,7 +1640,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	if err := route.Announce(); err != nil {
 		t.Fatal(err)
 	}
-	if ann := nextAnnounced(t, ctx, announced); ann.Route.Instance != route.Instance() {
+	if ann := nextAnnounced(t, ctx, announced); !ann.Route.Instance.Eq(route.Instance()) {
 		t.Fatalf("reannounce: ann=%+v, want instance %s", ann, route.Instance())
 	}
 	if _, err := consumer.Request(ctx, "live", nil); err != nil {
@@ -1728,9 +1748,9 @@ func TestNewRouteReachesFollowers(t *testing.T) {
 	defer following.Cancel()
 
 	route, _ := newRoute(t, origin, "instance", moq.RouteOptions{})
-	minted := nextAnnounced(t, ctx, announced).Route.Instance
-	if minted == "" || minted != route.Instance() {
-		t.Fatalf("present instance = %q, want the minted %q", minted, route.Instance())
+	fresh := nextAnnounced(t, ctx, announced).Route.Instance
+	if !fresh.Eq(route.Instance()) || fresh.IsMinted() {
+		t.Fatalf("present instance = %v, want the route's own %v", fresh, route.Instance())
 	}
 	if _, err := following.Available(ctx); err != nil {
 		t.Fatal(err)
@@ -1739,8 +1759,8 @@ func TestNewRouteReachesFollowers(t *testing.T) {
 	if err := route.SetCost(1); err != nil {
 		t.Fatal(err)
 	}
-	stable := "cam"
-	second, _ := newRoute(t, origin, "instance", moq.RouteOptions{Instance: &stable, Epoch: 1})
+	stable := parseInstance(t, "cam")
+	second, _ := newRoute(t, origin, "instance", moq.RouteOptions{Instance: stable, Epoch: 1})
 	if _, err := following.Available(ctx); err != nil {
 		t.Fatalf("follow after the instance change: %v", err)
 	}
@@ -1754,13 +1774,8 @@ func TestNewRouteReachesFollowers(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := nextRoute(t, ctx, announced)
-	if absent, ok := event.(moq.AnnounceEventAbsent); !ok || absent.Announce.Route.Instance != stable {
+	if absent, ok := event.(moq.AnnounceEventAbsent); !ok || !absent.Announce.Route.Instance.Eq(stable) {
 		t.Fatalf("event = %+v, want absent with instance %s", event, stable)
-	}
-
-	empty := ""
-	if _, err := origin.Route("refused", moq.RouteOptions{Instance: &empty}); !errors.Is(err, moq.ErrInvalidInstance) {
-		t.Fatalf("Route(empty instance) = %v, want ErrInvalidInstance", err)
 	}
 }
 
@@ -1802,23 +1817,108 @@ func TestPinnedFollowReportsTakeoverOffline(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	pinned := "cam"
-	following, err := origin.Consume().Follow("pinned", &pinned)
+	pinned := parseInstance(t, "cam")
+	following, err := origin.Consume().Follow("pinned", pinned)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer following.Cancel()
 
-	newRoute(t, origin, "pinned", moq.RouteOptions{Instance: &pinned})
+	newRoute(t, origin, "pinned", moq.RouteOptions{Instance: pinned})
 	if broadcast, err := following.Available(ctx); err != nil || broadcast == nil {
 		t.Fatalf("first Available = %v, %v; want a broadcast", broadcast, err)
 	}
 
-	other := "other"
-	newRoute(t, origin, "pinned", moq.RouteOptions{Instance: &other, Epoch: 1})
+	other := parseInstance(t, "other")
+	newRoute(t, origin, "pinned", moq.RouteOptions{Instance: other, Epoch: 1})
 	if broadcast, err := following.Available(ctx); err != nil || broadcast != nil {
 		t.Fatalf("Available after takeover = %v, %v; want nil", broadcast, err)
 	}
+}
+
+// Callers only name instances: the same text names the same one, and empty text names none.
+func TestParseInstance(t *testing.T) {
+	cam := parseInstance(t, "cam")
+	if cam.Text() != "cam" || cam.String() != "cam" || cam.IsMinted() {
+		t.Fatalf("parsed = %v (minted %v), want the named cam", cam, cam.IsMinted())
+	}
+	again := parseInstance(t, "cam")
+	if !cam.Eq(again) || cam.Hash() != again.Hash() || cam.Eq(parseInstance(t, "other")) {
+		t.Fatal("instances compare by text and the minted flag")
+	}
+	if _, err := moq.ParseInstance(""); !errors.Is(err, moq.ErrInvalidInstance) {
+		t.Fatalf("ParseInstance(empty) = %v, want ErrInvalidInstance", err)
+	}
+}
+
+// Over a wire that carries no instance, the session mints the announced one, and
+// passing it back as is pins Request and Follow to that stream.
+func TestMintedInstancePinsRequestAndFollow(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	const version = "moq-lite-06"
+	origin := newOrigin(t)
+	server, err := moq.Listen(ctx, "127.0.0.1:0", moq.WithTLSGenerate("localhost"), moq.WithServerVersions(version), moq.WithServerPublishOrigin(origin))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	go func() { _ = server.Serve(ctx) }()
+	newRoute(t, origin, "live", moq.RouteOptions{})
+
+	client, err := moq.Dial(ctx, "https://"+server.LocalAddr(), moq.ClientConfig{
+		TLS:      moq.ClientTLS{Insecure: true},
+		Versions: []string{version},
+		Once:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	announced, err := client.Announced(moq.AnnounceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer announced.Cancel()
+	minted := nextAnnounced(t, ctx, announced).Route.Instance
+	if !minted.IsMinted() {
+		t.Fatalf("announced instance %v over %s is not minted", minted, version)
+	}
+
+	if _, err := client.Request(ctx, "live", minted); err != nil {
+		t.Fatalf("Request(minted) = %v", err)
+	}
+	following, err := client.Follow("live", minted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer following.Cancel()
+	if broadcast, err := following.Available(ctx); err != nil || broadcast == nil {
+		t.Fatalf("Available(minted) = %v, %v; want a broadcast", broadcast, err)
+	}
+
+	// The same text, named, is another instance, which nothing serves.
+	named := parseInstance(t, minted.Text())
+	if named.Eq(minted) || named.IsMinted() {
+		t.Fatalf("parsed %v equals the minted %v", named, minted)
+	}
+	_, err = client.Request(ctx, "live", named)
+	if protocol, ok := moq.ProtocolError(err); !ok || protocol.Kind != moq.ProtocolKindUnroutable {
+		t.Fatalf("Request(named) = %v, want Unroutable", err)
+	}
+}
+
+// parseInstance names an instance, failing the test on an error.
+func parseInstance(t *testing.T, text string) *moq.Instance {
+	t.Helper()
+
+	instance, err := moq.ParseInstance(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return instance
 }
 
 // nextRoute returns the next announce event.
@@ -1852,7 +1952,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.RoutePrefix("live", moq.RouteOptions{})
+	dynamic, err := origin.Claim("live", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1888,7 +1988,7 @@ func TestCancellingAHiddenAnswerRefusesTheRequest(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.RoutePrefix("live", moq.RouteOptions{})
+	dynamic, err := origin.Claim("live", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1934,6 +2034,24 @@ func ts(us uint64) *moq.Timestamp { return &moq.Timestamp{Value: us, Scale: 1_00
 func timedInfo() *moq.TrackInfo {
 	scale := uint64(1_000_000)
 	return &moq.TrackInfo{Timescale: &scale}
+}
+
+// cancelOnWait is a context that cancels itself the moment a call starts
+// waiting on it, so the cancel always lands on a call already in flight.
+type cancelOnWait struct {
+	context.Context
+	once   sync.Once
+	cancel context.CancelFunc
+}
+
+func newCancelOnWait() *cancelOnWait {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &cancelOnWait{Context: ctx, cancel: cancel}
+}
+
+func (c *cancelOnWait) Done() <-chan struct{} {
+	c.once.Do(c.cancel)
+	return c.Context.Done()
 }
 
 // untilWanted blocks until some subscriber wants the track, or none does.

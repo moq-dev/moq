@@ -99,7 +99,7 @@ choice (`Auto` / `Hardware` / `Software` / a named backend).
 | Codec | Software | macOS | Windows | Linux | Android |
 |---|---|---|---|---|---|
 | H.264 | OpenH264 (feature `openh264`) | VideoToolbox | Media Foundation | NVENC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
-| H.265 | none | VideoToolbox | Media Foundation | NVENC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
+| H.265 | none | VideoToolbox | Media Foundation | NVENC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
 
 Every backend emits Annex-B with in-band parameter sets (SPS/PPS, plus VPS for
 H.265), so the matching `moq_mux::codec` importer handles framing and catalog
@@ -108,38 +108,41 @@ registration directly. There is no software H.265 encoder (it's hardware-only).
 `encode::Encoder::encode` takes a raw `Frame` (a timestamp plus a `Surface`
 holding the pixels) and returns `encode::Encoded`s: one whole access unit each,
 carrying the timestamp of the picture it was encoded from and whether it is a
-keyframe, forced by `cut()` or on the GOP cadence. The timestamp matters for a
+keyframe, forced by `cut()` or on the join cadence. The timestamp matters for a
 backend that buffers, which hands back an earlier frame's access unit while a
 later one goes in, and for the tail `finish()` drains. Bring your own pixels with
 `Surface::rgba(...)`, or feed a frame straight from capture or `decode`.
 
-Group boundaries are automatic: `Config::gop` says how the stream is divided
-(`Gop::Keyframe { interval }` places a keyframe every so many frames, and an
-interval of zero is refused at open), so an application never has to think
-about them. `Encoder::cut()` opens a group at the next frame when something
-outside the encoder needs a decodable starting point there: a source group
-boundary, a scene change, a source switch. The request is held until a frame
+Group boundaries are automatic: `Config::join` is the time between join points
+(a keyframe every two seconds by default, rounded to whole frames, and a join of
+zero is refused at open), so an application never has to think about them. It
+is measured by the frames' timestamps, so a source running slower than
+`Config::framerate` still keys every join.
+`Encoder::cut()` opens a group at the next frame when something outside the
+encoder needs a decodable starting point there: a source group boundary, a scene
+change, a source switch. The request is held until a frame
 arrives, so it is safe to call before you have one. It fails with
 `Error::CutUnsupported` on a backend that cannot force a boundary (a V4L2
 driver without the force-keyframe control), and queues nothing then: groups
-keep falling where `Config::gop` puts them. `encode::Sink` answers the same
+keep falling every `Config::join`'s worth of frames at `Config::framerate`. `encode::Sink` answers the same
 way, awaited.
 
 Public entry points:
 
-- `encode::publish_capture(...)` captures a webcam, encodes it, and publishes it:
+- `encode::publish_capture(...)` captures a webcam, encodes it, and publishes it,
+  returning a `Publication` that reports its state and the `Driver` to run:
   the track and catalog are advertised up front, and the camera stays open
   whether or not anyone is watching. With `Capture::on_demand`, the camera opens
   only while a subscriber is watching and is released when the last one leaves.
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 
-The default features are `nvidia` and `mediacodec`, so a default build has no
-software encoder. `openh264` adds the software H.264 fallback, the only H.264
-encoder on a GPU-less host, at the cost of compiling vendored C++; enable it
-wherever that fallback is expected. `nvidia` is Linux-only, `dlopen`s the
-driver at runtime, and needs no build-time toolkit. `vaapi` is opt-in because
-its bindgen needs libclang on the build host, while `v4l2` is opt-in only by
+The default features are `nvidia`, `vaapi`, and `mediacodec`, so a default
+build has no software encoder. `openh264` adds the software H.264 fallback, the
+only H.264 encoder on a GPU-less host, at the cost of compiling vendored C++;
+enable it wherever that fallback is expected. `nvidia` and `vaapi` are
+Linux-only, `dlopen` their drivers at runtime, and need no build-time toolkit
+(`moq-vaapi` checks its libva bindings in). `v4l2` is opt-in only by
 convention, since `moq-v4l` checks its bindings in. `vpx` is opt-in because
 libvpx comes from the build host through pkg-config (set `VPX_STATIC=1` to link
 the archive, as the Nix dev shell does). `render` is also opt-in so codec-only
@@ -193,19 +196,16 @@ it to take a GPU path for a representation you recognize, and fall back to
 is the mirror: free for a hardware-decoded frame, an upload for a CPU one.
 `Surface::into_i420()` returns typed pixels with size and color intact;
 `I420::into_data()` explicitly extracts the packed bytes. `Surface::to_rgba(config)`
-and `Surface::to_bgra(config)` are the portable exits for CPU
-image and UI toolkits, returning owned, tightly packed pixels with the surface's
-color metadata applied. Both orders are there because toolkits disagree and the
-conversion is a full pass over the frame: producing the order the caller wants
-costs nothing extra, while producing the other one and swapping two channels
-afterwards costs a second pass. They borrow the surface, so a frame held behind
-an `Arc` shared with something else converts without being unwrapped first.
+is the portable exit for CPU image and UI toolkits, returning owned, tightly
+packed pixels with the surface's color metadata applied. It borrows the surface,
+so a frame held behind an `Arc` shared with something else converts without
+being unwrapped first.
 Backends are tried hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux | Android |
 |---|---|---|---|---|---|
 | H.264 | OpenH264 (feature `openh264`) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
-| H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
+| H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
 | AV1 | none | none | none | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, when the device provides it) |
 | VP8, VP9 | libvpx (feature `vpx`) | none | none | none | none |
 
@@ -217,8 +217,8 @@ Direct3D11 device bound to it, so the decode happens on the GPU through DXVA
 no software decoder, so it needs the GPU path (on Windows, an HEVC decoder MFT:
 the inbox HEVC Video Extensions or a vendor one). On Linux, NVDEC decodes H.264,
 H.265, and 8-bit 4:2:0 AV1 to CUDA NV12 frames; AV1 is decode-only and is useful
-for AV1 source to H.264/H.265 transcode rungs. VAAPI decodes H.264 to DMA-BUF
-surfaces the renderer imports without a download. libvpx decodes VP8 and VP9
+for AV1 source to H.264/H.265 transcode rungs. VAAPI decodes H.264 and H.265
+Main to DMA-BUF surfaces the renderer imports without a download. libvpx decodes VP8 and VP9
 profile 0 to CPU I420 on every platform; other VP9 profiles (4:4:4, 10-bit) are
 refused rather than narrowed to 8-bit 4:2:0. Any other rendition yields
 `Error::UnsupportedCodec`.

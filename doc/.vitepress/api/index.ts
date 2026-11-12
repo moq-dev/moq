@@ -1,6 +1,6 @@
 // Renders the JS API reference from the TSDoc in every published `@moq/*` package's source:
 // one TypeDoc run over all of them, written as VitePress markdown with a sidebar.
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Application, type Reflection, type ReflectionGroup, ReflectionKind, type TypeDocOptions } from "typedoc";
@@ -23,6 +23,9 @@ export interface Reference {
 
 /** Render the reference, throwing on any TypeDoc warning, such as an unresolved link or an unexported type an export names. */
 export async function generate({ root, packages, out, docs }: Reference) {
+	// TypeScript reports sources by real path, so compare against real paths, such as macOS's `/var` -> `/private/var`.
+	root = realpathSync(root);
+	packages = packages.map((dir) => realpathSync(dir));
 	const plugin = (name: string) => fileURLToPath(import.meta.resolve(name));
 	// typedoc-vitepress-theme declares `docsRoot` without typing it.
 	const options: TypeDocOptions & PluginOptions & { docsRoot: string } = {
@@ -168,7 +171,7 @@ function newest(dirs: string[]): number {
 		found = Math.max(found, stat.mtimeMs);
 		if (!stat.isDirectory()) return;
 		for (const entry of readdirSync(path)) {
-			if (!["node_modules", "dist", "result", ".vite", "jsr.json"].includes(entry)) walk(join(path, entry));
+			if (!["node_modules", "dist", "result", ".vite"].includes(entry)) walk(join(path, entry));
 		}
 	};
 	for (const dir of dirs) walk(dir);

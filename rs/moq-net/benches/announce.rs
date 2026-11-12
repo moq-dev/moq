@@ -9,8 +9,11 @@
 //!
 //! - health: `<pid>/private/channel_N/stream-health-<ts>` from a few origins behind
 //!   a shared pair of relays, the shape that motivated compression.
-//! - unique: random single-segment paths and random two-hop chains, where nothing
-//!   is shared and every START pays the four zero base/keep bytes.
+//! - unique: random single-segment paths and random two-hop chains, where no path
+//!   is shared and every START pays the two zero base/keep bytes.
+//!
+//! The hop chains travel only on lite-06; lite-07 names each claim's route instead, so
+//! its streams carry none.
 //!
 //! The byte counts print once before the timings.
 //!
@@ -18,7 +21,7 @@
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{
-	Hop, Hops, Path, announce,
+	Path, announce,
 	fuzz::{AnnounceWriter, Announced, decode_announces, encode_announces},
 	origin,
 };
@@ -32,11 +35,14 @@ fn scanned(events: Vec<origin::RouteEvent>) -> Vec<announce::Announce> {
 	let mut initial: Vec<announce::Announce> = Vec::new();
 	for event in events {
 		let (update, active) = match event {
-			origin::RouteEvent::Start(update)
-			| origin::RouteEvent::Update(update)
-			| origin::RouteEvent::Restart(update)
-			| origin::RouteEvent::Takeover { announce: update, .. } => (update, true),
-			origin::RouteEvent::End(update) => (update, false),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
+				announce: update,
+			} => (update, true),
+			origin::RouteEvent {
+				kind: origin::RouteKind::End | origin::RouteKind::Offline,
+				announce: update,
+			} => (update, false),
 		};
 		initial.retain(|held| held.prefix != update.prefix);
 		if active {
@@ -52,12 +58,13 @@ fn initial(c: &mut Criterion) {
 		for updates in [1, 8, 32] {
 			let events: Vec<_> = (0..updates)
 				.flat_map(|cost| {
-					(0..routes).map(move |route| {
-						origin::RouteEvent::Update(announce::Announce {
+					(0..routes).map(move |route| origin::RouteEvent {
+						kind: origin::RouteKind::Update,
+						announce: announce::Announce {
 							prefix: moq_net::Path::new(&format!("route/{route}")).unwrap(),
 							captures: None,
-							route: moq_net::fuzz::route_info(moq_net::Hops::new(), cost, None),
-						})
+							route: moq_net::fuzz::route_info([], cost, None),
+						},
 					})
 				})
 				.collect();
@@ -103,27 +110,24 @@ fn id(seed: u64) -> u64 {
 	((z ^ (z >> 31)) & ((1 << 62) - 1)).max(1)
 }
 
-fn hops(ids: &[u64]) -> Hops {
-	Hops::try_from(ids.iter().map(|id| Hop::new(*id).unwrap()).collect::<Vec<_>>()).unwrap()
+/// Start route `n`, with its hop chain only on lite-06: a lite-07 claim names its route
+/// instead, and carries a chain only when it was learned over lite-06.
+fn start(route: fn(u64) -> (Path, Vec<u64>), n: u64, compress: bool) -> Announced {
+	let (path, hops) = route(n);
+	Announced::Start(path, if compress { Vec::new() } else { hops })
 }
 
 /// Announce `routes` routes, then replace `churn` of them, oldest first.
-fn stream(routes: u64, churn: u64, route: impl Fn(u64) -> (Path, Hops)) -> Vec<Announced> {
-	let mut announced: Vec<_> = (0..routes)
-		.map(|n| {
-			let (path, hops) = route(n);
-			Announced::Start(path, hops)
-		})
-		.collect();
+fn stream(routes: u64, churn: u64, route: fn(u64) -> (Path, Vec<u64>), compress: bool) -> Vec<Announced> {
+	let mut announced: Vec<_> = (0..routes).map(|n| start(route, n, compress)).collect();
 	for n in 0..churn {
 		announced.push(Announced::End(n));
-		let (path, hops) = route(routes + n);
-		announced.push(Announced::Start(path, hops));
+		announced.push(start(route, routes + n, compress));
 	}
 	announced
 }
 
-fn health(n: u64) -> (Path, Hops) {
+fn health(n: u64) -> (Path, Vec<u64>) {
 	let origin = n % ORIGINS;
 	let path = format!(
 		"{:x}/private/channel_{}/stream-health-{}",
@@ -131,26 +135,25 @@ fn health(n: u64) -> (Path, Hops) {
 		n % 16,
 		1_700_000_000 + n
 	);
-	(Path::new(&path).unwrap(), hops(&[id(origin), id(100), id(101)]))
+	(Path::new(&path).unwrap(), vec![id(origin), id(100), id(101)])
 }
 
-fn unique(n: u64) -> (Path, Hops) {
+fn unique(n: u64) -> (Path, Vec<u64>) {
 	(
 		moq_net::Path::new(&format!("{:x}", id(n))).unwrap(),
-		hops(&[id(n + 1_000_000), id(n + 2_000_000)]),
+		vec![id(n + 1_000_000), id(n + 2_000_000)],
 	)
 }
 
-type Workload = (&'static str, fn(u64) -> (Path, Hops));
+type Workload = (&'static str, fn(u64) -> (Path, Vec<u64>));
 const WORKLOADS: [Workload; 2] = [("health", health), ("unique", unique)];
 
 fn report() {
 	eprintln!("announce stream bytes (lite-06 literal -> lite-07 compressed):");
 	for (name, route) in WORKLOADS {
 		for (routes, churn) in SHAPES {
-			let announced = stream(routes, churn, route);
-			let literal = encode_announces(&announced, false).len();
-			let compressed = encode_announces(&announced, true).len();
+			let literal = encode_announces(&stream(routes, churn, route, false), false).len();
+			let compressed = encode_announces(&stream(routes, churn, route, true), true).len();
 			let starts = routes + churn;
 			eprintln!(
 				"  {name:>6} routes={routes:>5} churn={churn:>5}: {literal:>8} -> {compressed:>8} bytes, {:.1} -> {:.1} per START ({:+.0}%)",
@@ -169,17 +172,12 @@ fn bench(c: &mut Criterion) {
 		let mut group = c.benchmark_group(format!("announce_{name}"));
 
 		for routes in LIVE {
-			// A ring twice the live set, so the route started never collides with one
-			// still live.
-			let ring: Vec<_> = (0..2 * routes)
-				.map(|n| {
-					let (path, hops) = route(n);
-					Announced::Start(path, hops)
-				})
-				.collect();
 			group.throughput(Throughput::Elements(2));
 
 			for compress in [false, true] {
+				// A ring twice the live set, so the route started never collides with one
+				// still live.
+				let ring: Vec<_> = (0..2 * routes).map(|n| start(route, n, compress)).collect();
 				let version = if compress { "lite07" } else { "lite06" };
 				group.bench_function(BenchmarkId::new(format!("churn_{version}"), routes), |b| {
 					let mut writer = AnnounceWriter::new(compress);
@@ -199,9 +197,9 @@ fn bench(c: &mut Criterion) {
 		}
 
 		for (routes, churn) in SHAPES {
-			let announced = stream(routes, churn, route);
-			group.throughput(Throughput::Elements(announced.len() as u64));
 			for compress in [false, true] {
+				let announced = stream(routes, churn, route, compress);
+				group.throughput(Throughput::Elements(announced.len() as u64));
 				let version = if compress { "lite07" } else { "lite06" };
 				let encoded = encode_announces(&announced, compress);
 				group.bench_with_input(

@@ -10,7 +10,7 @@ use moq_net::track::Delay;
 use std::time::Duration;
 
 use moq_net::track::{Info, Subscription};
-use moq_net::{Hop, Timescale, Timestamp, Version};
+use moq_net::{Timescale, Timestamp, Version};
 use support::harness::{peer, subscribed};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -21,9 +21,10 @@ const BUDGET: Duration = Duration::from_millis(500);
 const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Publish an unfinished group 0 that stalls past the budget after its only frame, and

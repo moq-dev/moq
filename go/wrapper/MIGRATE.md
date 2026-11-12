@@ -118,7 +118,7 @@ A fixed audio playout delay `d` is `Delay: moq.Delay{Min: d, Max: max}` with `Es
 
 `moq.dev/moq/flate` is removed: publish opaque bytes on a `TrackProducer`.
 `SnapshotOptions` and `WindowOptions` lose `Compression`, and `StreamOptions` and `ConsumerOptions` are removed: `NewStreamProducer` and every JSON consumer constructor take only the track (and broadcast).
-Publish the track with `&moq.TrackInfo{Compress: true}` instead; a consumer reads a compressed track with no option of its own.
+Publish the track with `&moq.TrackInfo{Compression: &deflate}` (where `deflate := moq.CompressionDeflate`) instead; a consumer reads a compressed track with no option of its own.
 
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
@@ -237,9 +237,9 @@ Replace `request.Accept(broadcast)` with `request.Prepare()`, which returns a `*
 To answer with a broadcast you already hold, `request.Serve(consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to close.
 Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
 
-### `TrackInfo` gains `Compress` (#5928)
+### `TrackInfo` gains `Compression` (#5928)
 
-A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals need no change.
+A positional `TrackInfo{...}` literal adds a trailing `nil`; keyed literals need no change.
 
 ### Anchors can name a time (#6074)
 

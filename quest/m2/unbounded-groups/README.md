@@ -135,7 +135,7 @@ Decided 2026-10-16 (maintainer interview):
   (d854bf98b1), ahead of Front eviction, including `log::Writer::evict`
   advancing the base (`rs/kio/src/log.rs`). A ring buffer was rejected: an
   uncapped group has no size to give it. Numbers are in #6782 and the
-  [kio contention epic](/quest/m4/perf/kio-channel-contention/README.md).
+  [kio contention epic](/quest/m4/kio-channel-contention/README.md).
   Accepted 2026-11-03 (maintainer), from the lock profiles in
   [moq-dev/moq#7742](https://github.com/moq-dev/moq/pull/7742): no
   lock-contention regression attributable to #6782. The pre-epoch run on
@@ -177,9 +177,3 @@ owns the rest: a long compressed group through a small cache pool with a
 plain reader on a legacy wire, which
 [moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993) covered only at
 the model layer (maintainer, 2026-10-30).
-
-## Required
-
-- [Byte holes](/quest/m2/unbounded-groups/byte-holes.md) - segments inside a frame shed like front frames and flights start at `(frame, byte)` on the current lite wip; the frame cap goes
-- [JS byte holes](/quest/m2/unbounded-groups/js-byte-holes.md) - `@moq/net` mirrors the byte-offset wire and continues a frame cut off mid-way
-- [Compressed frames have no size cap and inflate as a bounded stream](/quest/m2/unbounded-groups/compressed-stream.md) - A compressed frame of any size publishes and is received in Rust and `@moq/net`, like a plain one

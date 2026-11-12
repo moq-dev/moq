@@ -1,19 +1,19 @@
-import { Milli, Nano, now, sleep } from "@moq/clock";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Duration, Instant, now, sleep } from "@moq/clock";
+import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 /**
  * How far playback trails the live edge.
  *
  * `"auto"` (the default) holds the largest playout target the registered decoders measure from how
- * late their frames arrive (see doc/concept/audio-jitter.md). A `Milli` fixes the delay at
- * exactly that number and disables adaptation.
+ * late their frames arrive (see doc/concept/audio-jitter.md). A `Duration` fixes the delay at
+ * exactly that value and disables adaptation.
  *
  * `"instant"` drops the buffer and the pacing together: nothing is held, and the wait before
  * presenting a frame never sleeps, so it presents as soon as it exists. It also overrides
- * {@link SyncInput.buffer}, since holding a lookahead would contradict holding nothing. Audio is
+ * {@link SyncInput.lookahead}, since holding a lookahead would contradict holding nothing. Audio is
  * off: a ring with no depth underruns, so the audio decoder unsubscribes and flushes its ring.
  */
-export type Delay = "instant" | "auto" | Milli;
+export type Delay = "instant" | "auto" | Duration;
 
 /** Signals the sync reads. */
 export type SyncInput = {
@@ -25,12 +25,14 @@ export type SyncInput = {
 	 *
 	 * Zero minimizes latency, the live default: playback re-anchors as soon as anything arrives
 	 * early. A larger value lets faster-than-real-time frames (a TTS response with future
-	 * timestamps) build up instead of being skipped. Always finite, so worst case the audio ring
-	 * drops its oldest samples rather than exhausting memory. With a nonzero buffer, the first video
-	 * frame is a poster until every enabled media track holds the resolved delay; `buffer` is
-	 * lookahead, not the amount required to start.
+	 * timestamps) build up instead of being skipped. Audio that falls behind, as after a stall,
+	 * catches up by playing faster, and skips only what trails by more than the lookahead. Always
+	 * finite, so worst case the audio ring drops its oldest samples rather than exhausting memory.
+	 * With a nonzero lookahead, the first video
+	 * frame is a poster until every enabled media track holds the resolved delay; `lookahead` is
+	 * the most held ahead, not the amount required to start.
 	 */
-	buffer: Getter<Milli>;
+	lookahead: Getter<Duration>;
 };
 
 /** Signals the sync derives. */
@@ -47,28 +49,28 @@ export type SyncOutput = {
 
 	// The resolved delay from the live edge to the playhead: the configured number, or in "auto" the
 	// largest registered playout target. Zero for "instant".
-	delay: Signal<Milli>;
+	delay: Signal<Duration>;
 
 	// The media timestamp of the most recently received frame.
-	timestamp: Signal<Milli | undefined>;
+	timestamp: Signal<Duration | undefined>;
 
 	// Derived: true when a lookahead is configured. Buffered playback lets the reference stay
 	// anchored so future-dated frames build up, re-anchoring (skipping ahead) only once they
 	// would sit further than `maxDelay` ahead of the playhead. See `reset()`.
 	buffered: Signal<boolean>;
 
-	// Derived: `delay + buffer`, the furthest a held frame may sit ahead of the playhead. Feeds the
+	// Derived: `delay + lookahead`, the furthest a held frame may sit ahead of the playhead. Feeds the
 	// transport subscription and the container consumer, which bound the same span. Always finite.
-	maxDelay: Signal<Milli>;
+	maxDelay: Signal<Duration>;
 };
 
 /** A decoded span from the opening of a track's timeline. @internal */
-export type Span = { start: Milli; end: Milli };
+export type Span = { start: Duration; end: Duration };
 
 /** What a track holds in the shared clock. @internal */
 export type TrackProps = {
 	/** The track's "auto" playout target, unset until it has one. */
-	target: Getter<Milli | undefined>;
+	target: Getter<Duration | undefined>;
 	/** For buffered startup: undefined is inactive, null is selected but has no playable span yet. */
 	startup?: Getter<Span | null | undefined>;
 };
@@ -84,7 +86,17 @@ export type Part = {
 	floor?: number;
 };
 
-const wall = (): Milli => Nano.toMilli(Nano(now()));
+/**
+ * Where the clock's current timeline stands. `idle` has not played and holds nothing back: it is
+ * unanchored, or anchored with no buffered startup. `starting` holds the media consumers until every
+ * startup span fills. `playing` has played, so turning on a lookahead does not start it over.
+ * @internal
+ */
+export type Phase = "idle" | "starting" | "playing";
+
+// The monotonic clock in milliseconds, the unit the reference offsets are kept in.
+const wall = (): number => millis(now());
+const millis = (at: Instant): number => at.since(Instant.ZERO).asMillis();
 
 /** The state a {@link Sync} and its track handles share. @internal */
 export class Clock {
@@ -92,15 +104,16 @@ export class Clock {
 	readonly out: SyncOutput = {
 		instant: new Signal<boolean>(false),
 		reference: new Signal<number | undefined>(undefined),
-		delay: new Signal<Milli>(Milli.zero),
-		timestamp: new Signal<Milli | undefined>(undefined),
+		delay: new Signal<Duration>(Duration.ZERO),
+		timestamp: new Signal<Duration | undefined>(undefined),
 		buffered: new Signal<boolean>(false),
-		maxDelay: new Signal<Milli>(Milli.zero),
+		maxDelay: new Signal<Duration>(Duration.ZERO),
 	};
 
 	readonly parts = new Signal<Part[]>([]);
-	readonly playing = new Signal(true);
-	started = false;
+	readonly phase = new Signal<Phase>("idle");
+	// Whether the media consumers are released.
+	readonly playing = new Derived([this.phase], (phase) => phase !== "starting");
 
 	// Bumped by every `reset()`. A frame that waited across a bump belongs to the previous timeline,
 	// even when the next frame restores the same reference value.
@@ -116,9 +129,10 @@ export class Clock {
 	owner?: Part;
 
 	constructor(props?: Inputs<SyncInput>) {
+		if (props && "buffer" in props) throw new Error("Watch.Sync: `buffer` was renamed to `lookahead`");
 		this.in = {
 			delay: getter(props?.delay ?? ("auto" as Delay)),
-			buffer: getter(props?.buffer ?? Milli.zero),
+			lookahead: getter(props?.lookahead ?? Duration.ZERO),
 		};
 	}
 
@@ -126,15 +140,16 @@ export class Clock {
 	// lower it (skip ahead) only as far as that budget requires.
 	fold(current: number | undefined, ref: number): number {
 		if (current === undefined || ref >= current) return current ?? ref;
-		const sleep = current - ref + this.out.delay.peek();
-		const cap = this.out.maxDelay.peek();
+		const delay = this.out.delay.peek().asMillis();
+		const sleep = current - ref + delay;
+		const cap = this.out.maxDelay.peek().asMillis();
 		if (sleep <= cap) return current;
-		return ref + cap - this.out.delay.peek();
+		return ref + cap - delay;
 	}
 
-	received(part: Part, timestamp: Milli, arrival: Milli): boolean {
-		this.out.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
-		const ref = arrival - timestamp;
+	received(part: Part, timestamp: Duration, arrival: Instant): boolean {
+		this.out.timestamp.update((current) => (current === undefined || timestamp.gt(current) ? timestamp : current));
+		const ref = millis(arrival) - timestamp.asMillis();
 		const current = this.out.reference.peek();
 		part.anchor = this.fold(part.anchor, ref);
 
@@ -152,7 +167,7 @@ export class Clock {
 		// Check if `wait()` would not sleep at all.
 		// NOTE: We check here instead of in `wait()` so we can identify when frames are received late.
 		// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
-		const delay = this.out.delay.peek();
+		const delay = this.out.delay.peek().asMillis();
 		const late = current - ref + delay < 0;
 
 		const reference = this.fold(current, ref);
@@ -198,7 +213,7 @@ export class Clock {
 		// passed over; moving forward is a skip.
 		this.floor = earliest.floor;
 		if (current !== undefined && reference < current && this.in.delay.peek() !== "instant") {
-			this.floor = wall() - reference - this.out.delay.peek();
+			this.floor = wall() - reference - this.out.delay.peek().asMillis();
 		}
 	}
 
@@ -207,9 +222,8 @@ export class Clock {
 	unanchor(): void {
 		this.epoch.update((epoch) => epoch + 1);
 		this.floor = undefined;
-		this.started = false;
 		this.owner = undefined;
-		this.playing.set(!this.out.buffered.peek());
+		this.phase.set(this.out.buffered.peek() ? "starting" : "idle");
 		this.out.reference.set(undefined);
 	}
 
@@ -221,24 +235,24 @@ export class Clock {
 		this.unanchor();
 	}
 
-	presentable(timestamp: Milli): boolean {
+	presentable(timestamp: Duration): boolean {
 		return this.out.reference.peek() !== undefined && !this.skipped(timestamp);
 	}
 
 	// Whether a playhead skip on this timeline passed over `timestamp`.
-	skipped(timestamp: Milli): boolean {
-		return this.floor !== undefined && timestamp < this.floor;
+	skipped(timestamp: Duration): boolean {
+		return this.floor !== undefined && timestamp.asMillis() < this.floor;
 	}
 
-	now(): Milli | undefined {
+	now(): Duration | undefined {
 		if (!this.playing.peek()) return undefined;
 		const reference = this.out.reference.peek();
 		if (reference === undefined) return undefined;
 		// Media time is nonnegative, so a playhead before the first frame's turn reads as zero.
-		return Milli(Math.max(0, wall() - reference - this.out.delay.peek()));
+		return Duration.millis(Math.max(0, wall() - reference - this.out.delay.peek().asMillis()));
 	}
 
-	async wait(part: Part, timestamp: Milli, signal?: AbortSignal): Promise<boolean> {
+	async wait(part: Part, timestamp: Duration, signal?: AbortSignal): Promise<boolean> {
 		const epoch = this.epoch.peek();
 		const own = part.epoch.peek();
 
@@ -262,7 +276,7 @@ export class Clock {
 			}
 
 			// NOTE: This function runs in parallel for each frame.
-			const sleep = reference + timestamp - wall() + this.out.delay.peek();
+			const sleep = reference + timestamp.asMillis() - wall() + this.out.delay.peek().asMillis();
 
 			// Skip the timer for small sleeps; the host's timer resolution (~4ms) would overshoot.
 			if (sleep < 5) return true;
@@ -282,14 +296,14 @@ export class Clock {
 				for (const dispose of disposes) dispose();
 				resolve();
 			};
-			if (ms !== undefined) void sleep(Nano.fromMilli(Milli(ms)), { signal: timer.signal }).then(wake, () => {});
+			if (ms !== undefined) void sleep(Duration.millis(ms), { signal: timer.signal }).then(wake, () => {});
 			const disposes = [
 				this.in.delay.changed(wake),
 				this.out.delay.changed(wake),
 				this.out.reference.changed(wake),
 				this.epoch.changed(wake),
 				this.closed.changed(wake),
-				this.playing.changed(wake),
+				this.phase.changed(wake),
 				part.epoch.changed(wake),
 			];
 			if (signal) {
@@ -317,7 +331,7 @@ export class Track {
 	}
 
 	/** Fold a received frame into the clock and report whether it arrived too late for its turn. */
-	received(timestamp: Milli, arrival = wall()): boolean {
+	received(timestamp: Duration, arrival: Instant = now()): boolean {
 		return this.#clock.received(this.#part, timestamp, arrival);
 	}
 
@@ -325,7 +339,7 @@ export class Track {
 	 * Whether a frame at `timestamp` is anchored on the current timeline and ahead of any skip, so it
 	 * may still present. Advisory, for showing a frame early; {@link Track.wait} decides on its own.
 	 */
-	presentable(timestamp: Milli): boolean {
+	presentable(timestamp: Duration): boolean {
 		return this.#clock.presentable(timestamp);
 	}
 
@@ -335,7 +349,7 @@ export class Track {
 	 * `true` presents the frame now. `false` drops it: it was unanchored, a skip passed over it, a
 	 * reset ended its timeline, or `close()` or `signal` released the wait.
 	 */
-	wait(timestamp: Milli, signal?: AbortSignal): Promise<boolean> {
+	wait(timestamp: Duration, signal?: AbortSignal): Promise<boolean> {
 		return this.#clock.wait(this.#part, timestamp, signal);
 	}
 
@@ -400,33 +414,32 @@ export class Sync {
 			return span === undefined ? [] : [{ part, span }];
 		});
 		if (!buffered || spans.length === 0) {
-			clock.playing.set(true);
+			clock.phase.set(reference === undefined ? "idle" : "playing");
 			return;
 		}
-		if (clock.started) return;
+		if (clock.phase.peek() === "playing") return;
 		const ready = spans.flatMap(({ part, span }) => (span ? [{ part, span }] : []));
 		if (
 			reference === undefined ||
 			ready.length !== spans.length ||
-			ready.some(({ span }) => span.end - span.start < delay)
+			ready.some(({ span }) => span.end.saturatingSub(span.start).lt(delay))
 		) {
-			clock.playing.set(false);
+			clock.phase.set("starting");
 			return;
 		}
 		// The track with the earliest opening holds the reference it anchors.
-		const earliest = ready.reduce((a, b) => (b.span.start < a.span.start ? b : a));
+		const earliest = ready.reduce((a, b) => (b.span.start.lt(a.span.start) ? b : a));
 		const first = earliest.span.start;
-		clock.started = true;
 		clock.owner = earliest.part;
 		// Anchor at the retained opening, not at its arrival: startup may have waited on another track.
 		// Every track's own anchor moves by the same offset, keeping the gaps between tracks that
 		// playing would have held, so a later handoff moves the playhead only by that gap.
-		const anchored = wall() - first - delay;
+		const anchored = wall() - first.asMillis() - delay.asMillis();
 		for (const part of clock.parts.peek()) {
 			if (part.anchor !== undefined) part.anchor += anchored - reference;
 		}
 		clock.out.reference.set(anchored);
-		clock.playing.set(true);
+		clock.phase.set("playing");
 	}
 
 	#runInstant(effect: Effect): void {
@@ -438,10 +451,10 @@ export class Sync {
 		const out = this.#clock.out;
 		const delay = effect.get(out.delay);
 		// "instant" holds nothing, so a configured lookahead doesn't apply.
-		const buffer = effect.get(out.instant) ? Milli.zero : effect.get(this.in.buffer);
+		const lookahead = effect.get(out.instant) ? Duration.ZERO : effect.get(this.in.lookahead);
 
-		out.buffered.set(buffer > 0);
-		out.maxDelay.set(Milli(delay + buffer));
+		out.buffered.set(!lookahead.isZero());
+		out.maxDelay.set(delay.add(lookahead));
 	}
 
 	// A fixed delay is taken literally and "auto" holds the deepest track's target, so every track
@@ -449,12 +462,12 @@ export class Sync {
 	#runDelay(effect: Effect): void {
 		const mode = effect.get(this.in.delay);
 
-		let delay = Milli.zero;
-		if (typeof mode === "number") {
+		let delay = Duration.ZERO;
+		if (mode instanceof Duration) {
 			delay = mode;
 		} else if (mode === "auto") {
 			for (const { props } of effect.get(this.#clock.parts)) {
-				delay = Milli(Math.max(delay, effect.get(props.target) ?? Milli.zero));
+				delay = delay.max(effect.get(props.target) ?? Duration.ZERO);
 			}
 		}
 
@@ -474,7 +487,7 @@ export class Sync {
 	 * The PTS that should be rendering right now, derived from the reference and delay; zero until
 	 * media time zero's turn. Undefined before ingress or while buffered startup is filling.
 	 */
-	now(): Milli | undefined {
+	now(): Duration | undefined {
 		return this.#clock.now();
 	}
 

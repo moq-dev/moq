@@ -6,7 +6,6 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
-use hang::moq_net;
 
 use super::MediaContainer;
 use super::listed::Listed;
@@ -61,13 +60,25 @@ struct Bandwidth {
 	watch_task: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Where a request pad's stream is, from its request to its release.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Phase {
+	/// Its stream is flowing, or has yet to start.
+	#[default]
+	Streaming,
+	/// Its stream reached EOS; a flush or a new stream starts it again. Unlike [`Status::Ended`], the
+	/// track may still be live: the element finalizes the tracks once every pad is here.
+	Eos,
+	/// Being released, or released. Nothing moves it out again.
+	Released,
+}
+
 /// Everything owned by one request pad, protected by one lock.
 pub(super) struct PadLifecycle {
 	settings: Settings,
 	pub(super) media: Pad,
 	bandwidth: Option<Bandwidth>,
-	pub(super) ended: bool,
-	pub(super) releasing: bool,
+	pub(super) phase: Phase,
 	/// This pad's link to its publication. `None` is no live session for the pad, which is why a buffer
 	/// arriving before one exists is refused rather than dropped.
 	pub(super) completion: Option<CompletionHandle>,
@@ -79,8 +90,7 @@ impl Default for PadLifecycle {
 			settings: Settings::default(),
 			media: Pad::new(),
 			bandwidth: None,
-			ended: false,
-			releasing: false,
+			phase: Phase::Streaming,
 			completion: None,
 		}
 	}
@@ -108,9 +118,9 @@ impl Bandwidth {
 		let mut grant = self.grant.clone();
 		// Activation emits the initial notification synchronously. Prime this clone so the task only
 		// reports subsequent changes instead of immediately duplicating that notification.
-		let _ = demand.poll_wanted_changed(&moq_net::kio::Waiter::noop());
+		let _ = demand.poll_wanted_changed(&kio::Waiter::noop());
 		if let Some(grant) = &mut grant {
-			let _ = grant.poll_changed(&moq_net::kio::Waiter::noop());
+			let _ = grant.poll_changed(&kio::Waiter::noop());
 		}
 		self.watch_task = Some(RUNTIME.spawn(async move {
 			loop {
@@ -219,7 +229,12 @@ impl Settings {
 }
 
 impl PadLifecycle {
-	/// The configured track name while this pad is not releasing.
+	/// Whether the pad is being released, or was: nothing changes it any more.
+	pub(super) fn is_released(&self) -> bool {
+		self.phase == Phase::Released
+	}
+
+	/// The configured track name.
 	pub(super) fn requested(&self) -> Option<&str> {
 		self.settings.requested.as_deref()
 	}
@@ -276,8 +291,8 @@ impl PadLifecycle {
 		pad: &MoqSinkPad,
 		listed: &Listed,
 	) -> Option<Notifications> {
-		// An ended pad reports nothing until it resumes; a failed one has no track left.
-		if self.ended || self.releasing {
+		// An ended pad reports nothing until it resumes; a released one has no track left.
+		if self.phase != Phase::Streaming {
 			return None;
 		}
 		self.restore_bandwidth(allocator, pad, listed)
@@ -345,7 +360,9 @@ impl PadLifecycle {
 		let status = self.settings.set_status(Status::Pending);
 		let demand = self.bandwidth.take().is_some();
 		self.media = Pad::new();
-		self.ended = false;
+		if self.phase == Phase::Eos {
+			self.phase = Phase::Streaming;
+		}
 		self.completion = None;
 		Notifications {
 			track,
@@ -435,7 +452,7 @@ impl ObjectImpl for MoqSinkPadImp {
 
 	fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
 		let mut lifecycle = self.lifecycle.lock().unwrap();
-		if lifecycle.releasing {
+		if lifecycle.is_released() {
 			gst::warning!(
 				CAT,
 				obj = self.obj(),
@@ -528,13 +545,12 @@ impl MoqSinkPad {
 		}
 	}
 
-	/// Reset a detached pad without asking GStreamer to remove it twice.
+	/// Reset and release a detached pad without asking GStreamer to remove it twice.
 	pub(super) fn reset_detached(&self) {
 		let changes = {
 			let mut lifecycle = self.lifecycle();
-			let changes = lifecycle.reset();
-			lifecycle.releasing = false;
-			changes
+			lifecycle.phase = Phase::Released;
+			lifecycle.reset()
 		};
 		self.notify_changes(changes);
 	}

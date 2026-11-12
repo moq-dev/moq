@@ -13,6 +13,16 @@ set -euo pipefail
 # `--fanout` counts the chat fan-out's instructions per delivered group on one thread,
 # for each BENCH_BASE revision and the current tree, independent of host load.
 
+# Reuse the paired relay suite without repeating unrelated Criterion measurements.
+RELAY_ONLY=false
+if [[ ${1:-} == --relay ]]; then
+    RELAY_ONLY=true
+    shift
+    if (($# > 1)) || [[ ${1:-} == --* ]]; then
+        printf 'usage: run.sh --relay [BASE]\n' >&2
+        exit 2
+    fi
+fi
 MODE=${1:-}
 ROUNDS=${BENCH_RUNTIME_ROUNDS:-3}
 if [[ ! $ROUNDS =~ ^[0-9]+$ ]] || ((10#$ROUNDS < 1)); then
@@ -128,6 +138,11 @@ case $MODE in
                 exit 1
             fi
         done
+        # Refuse at setup, after validating the selection but before creating evidence.
+        if [[ $(uname -s) != Linux ]]; then
+            printf 'relay profiling needs Linux for perf and /proc\n' >&2
+            exit 1
+        fi
         # Without frame pointers, perf's DWARF unwinder stops at the first relay frame,
         # and CPU stacks unwind by frame pointer alone.
         export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes"
@@ -185,6 +200,10 @@ case $MODE in
         RUNTIME_WORKERS=$((10#$RUNTIME_WORKERS))
         ;;
     *)
+        if (($# > 1)); then
+            printf 'usage: run.sh [BASE], or run.sh --relay [BASE]\n' >&2
+            exit 2
+        fi
         BASE=$MODE
         # Video stays on QUIC; chat (per-message cost) and fanout (per-byte cost) sweep the transports.
         RELAY_CASES=(quic/video)
@@ -200,7 +219,11 @@ esac
 ROOT=$(git rev-parse --show-toplevel)
 # shellcheck source=bench/lock.sh
 source "$ROOT/bench/lock.sh"
-bench_lock "$0" "$@"
+if [[ $RELAY_ONLY == true ]]; then
+    bench_lock "$0" --relay "$@"
+else
+    bench_lock "$0" "$@"
+fi
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target/bench}
 if [[ $TARGET != /* ]]; then
     TARGET=$ROOT/$TARGET
@@ -282,7 +305,11 @@ STDOUT_PID=$!
 exec 2> >(tee "$RUN/stderr.log" >&4)
 STDERR_PID=$!
 
-python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
+METADATA_MODE=$MODE
+if [[ $RELAY_ONLY == true ]]; then METADATA_MODE=--relay; fi
+python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$METADATA_MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
+# Record external load before this session's builds and measurements add their own.
+if [[ -r /proc/loadavg ]]; then cat /proc/loadavg >"$RUN/loadavg-start.txt"; fi
 cp -R "$ROOT/bench/workloads" "$RUN/workloads"
 cp -R "$ROOT/bench" "$RUN/harness"
 
@@ -447,6 +474,8 @@ unavailable() {
 # Measure the selected targets in quick mode. With a base, run each target's base build
 # beside it, alternating which goes first, then confirm the screen's worst slowdowns.
 # A failed current target fails the run; the base only marks its targets unavailable.
+# A base build byte-identical to the current one is not run: the runner's own drift
+# measured identical builds up to 12% apart, so comparing them can only raise false alarms.
 measure_criterion() {
     local current=$RUN/criterion-current.targets base=$RUN/criterion-base.targets
     local key side targets index=0 status=0
@@ -474,9 +503,13 @@ measure_criterion() {
             for key in "${targets[@]}"; do unavailable "$key" "base build failed"; done
         fi
     fi
+    : >"$RUN/paired-identical.txt"
     for key in "${targets[@]}"; do
-        local order=(current)
-        if [[ -n $(target_line "$base" "$key") ]]; then
+        local order=(current) base_line
+        base_line=$(target_line "$base" "$key")
+        if [[ -n $base_line ]] && cmp -s "$(target_line "$current" "$key" | cut -f3)" "$(cut -f3 <<<"$base_line")"; then
+            printf '%s\n' "$key" >>"$RUN/paired-identical.txt"
+        elif [[ -n $base_line ]]; then
             if ((index++ % 2)); then order=(current base); else order=(base current); fi
         fi
         for side in "${order[@]}"; do
@@ -497,23 +530,40 @@ measure_criterion() {
 
 # One quick run per side can land on noise, so each slowdown the screen flags is
 # re-measured in alternating rounds with the comparison settings before it can fail.
+# Round sides stop starting after CONFIRM_SECONDS, worst slowdown first, so a group of slow
+# cases cannot push the Nightly leg past its timeout. A case cut off mid-rounds is left out
+# of confirm.tsv, so it and every later case stay unconfirmed.
+CONFIRM_SECONDS=300
 confirm_criterion() {
-    local key benchmark round side index=0
-    python3 "$ROOT/bench/compare.py" --criterion-screen "$RUN" >"$RUN/confirm.tsv" || return 1
+    local key benchmark round side index=0 deadline=$((SECONDS + CONFIRM_SECONDS))
+    python3 "$ROOT/bench/compare.py" --criterion-screen "$RUN" >"$RUN/screen.tsv" || return 1
+    : >"$RUN/confirm.tsv"
     while IFS=$'\t' read -r key benchmark; do
         index=$((index + 1))
+        # compare.py ignores every case of an unavailable target, so its rounds would only spend the budget.
+        if [[ -f $RUN/paired-unavailable.tsv ]] &&
+            awk -F'\t' -v target="$key" '$1 == target { found = 1 } END { exit !found }' "$RUN/paired-unavailable.tsv"; then
+            printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
+            continue
+        fi
         for ((round = 1; round <= ROUNDS; round++)); do
             local order=(base current)
             if ((round % 2 == 0)); then order=(current base); fi
             for side in "${order[@]}"; do
+                if ((SECONDS >= deadline)); then
+                    printf 'Confirmation budget of %ds spent; later slowdowns stay unconfirmed\n' "$CONFIRM_SECONDS"
+                    break 3
+                fi
                 if ! criterion_exec "$RUN/criterion-$side.targets" "$RUN/confirm/$index/round-$round/$side" "$key" \
                     "${CRITERION_ARGS[@]}" "$benchmark" --exact; then
                     unavailable "$key" "confirmation failed"
+                    printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
                     continue 3
                 fi
             done
         done
-    done <"$RUN/confirm.tsv"
+        printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
+    done <"$RUN/screen.tsv"
     python3 "$ROOT/bench/compare.py" --criterion-paired "$RUN"
 }
 
@@ -920,10 +970,6 @@ run_shard_sweep() {
 }
 
 run_profiles() {
-    if [[ $(uname -s) != Linux ]]; then
-        printf 'relay profiling needs Linux for perf and /proc\n' >&2
-        return 1
-    fi
     # Refuse before the build when the host would refuse a capture.
     local mode
     for mode in $PROFILE_MODES; do
@@ -1280,9 +1326,11 @@ elif [[ -n $BASE ]]; then
         python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE_COMMIT" comparison-base
     )
 
-    printf 'Criterion comparison: %s (%s) versus current\n' "$BASE" "$BASE_COMMIT"
-    compare_criterion "$WORKTREE" "$ROOT"
-    report_set_changes
+    if [[ $RELAY_ONLY == false ]]; then
+        printf 'Criterion comparison: %s (%s) versus current\n' "$BASE" "$BASE_COMMIT"
+        compare_criterion "$WORKTREE" "$ROOT"
+        report_set_changes
+    fi
 
     printf '\nBuilding relay binaries...\n'
     (
@@ -1292,8 +1340,10 @@ elif [[ -n $BASE ]]; then
     cp "$BASE_TARGET/release/moq-relay" "$RUN/moq-relay-base"
     chmod +x "$RUN/moq-relay-base"
 else
-    printf 'Criterion current: %s\n' "$(git rev-parse --short HEAD)"
-    run_criterion "$ROOT" --discard-baseline
+    if [[ $RELAY_ONLY == false ]]; then
+        printf 'Criterion current: %s\n' "$(git rev-parse --short HEAD)"
+        run_criterion "$ROOT" --discard-baseline
+    fi
     printf '\nBuilding relay binaries...\n'
 fi
 generate_certificate

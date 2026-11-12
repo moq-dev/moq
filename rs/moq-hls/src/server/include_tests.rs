@@ -88,7 +88,7 @@ async fn request(server: &Server, uri: &str) -> (StatusCode, String) {
 }
 
 async fn master(server: &Server, contains: &str, present: bool) -> String {
-	let deadline = kio::clock::now() + Duration::from_secs(10);
+	let deadline = kio::clock::now().saturating_add(Duration::from_secs(10));
 	loop {
 		let (status, body) = request(server, "/room/live/master.m3u8?jwt=viewer").await;
 		if status == StatusCode::OK && body.contains(contains) == present {
@@ -194,7 +194,7 @@ async fn a_finished_parent_catalog_keeps_its_includes() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();
 	let child = Instance::random();
-	let mut parent = publish(&origin, "room/live", &root, &parent_catalog());
+	let parent = publish(&origin, "room/live", &root, &parent_catalog());
 	frames(&parent.video, 0);
 	frames(&parent.audio, 0);
 	let _include = publish(&origin, "room/ladder", &child, &catalog());
@@ -202,7 +202,7 @@ async fn a_finished_parent_catalog_keeps_its_includes() {
 	let listed = format!("include/rung%2Fa/video/same/@{child}");
 	master(&server, &listed, true).await;
 	// A clean end freezes the final catalog, entries included.
-	parent.catalog.finish().unwrap();
+	let _finished = parent.catalog.finish().unwrap();
 	kio::clock::sleep(Duration::from_secs(1)).await;
 	master(&server, &listed, true).await;
 }
@@ -225,7 +225,7 @@ async fn a_failed_parent_catalog_stops_its_includes() {
 	master(&server, "include/", true).await;
 	let uri = format!("/room/live/@{root}/include/rung%2Fa/video/same/@{child}/media.m3u8");
 	parent_catalog_track.abort(moq_net::Error::Cancel).unwrap();
-	let deadline = kio::clock::now() + Duration::from_secs(10);
+	let deadline = kio::clock::now().saturating_add(Duration::from_secs(10));
 	// A live include's playlist waits for media this test never writes, so bound each request.
 	while !matches!(
 		kio::clock::timeout(Duration::from_secs(1), request(&server, &uri)).await,
@@ -295,7 +295,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 		.update(moq_net::Timed::from(&value).at(Timestamp::ZERO))
 		.unwrap();
 	master(&server, "RESOLUTION=640x240", true).await;
-	include.video.finish().unwrap();
+	let _video = include.video.finish().unwrap();
 	let held = server
 		.router()
 		.oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
@@ -303,9 +303,9 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 		.unwrap();
 	assert_eq!(held.status(), StatusCode::OK);
 	frames(&next, 3);
-	next.finish().unwrap();
+	let _next = next.finish().unwrap();
 	drop(held);
-	let deadline = kio::clock::now() + Duration::from_secs(10);
+	let deadline = kio::clock::now().saturating_add(Duration::from_secs(10));
 	let ended = loop {
 		let (status, playlist) = request(&server, &uri).await;
 		if status == StatusCode::OK && playlist.contains("#EXT-X-ENDLIST") {
@@ -349,7 +349,7 @@ async fn an_include_rendition_whose_broadcast_failed_is_not_listed() {
 	frames(&parent.video, 0);
 	frames(&parent.audio, 0);
 	let other = origin
-		.route_prefix("room/other", moq_net::origin::RouteOptions::default())
+		.claim("room/other", moq_net::origin::RouteOptions::default())
 		.unwrap();
 	let child = Instance::random();
 	let mut value = catalog();
@@ -412,7 +412,7 @@ async fn an_include_rendition_is_listed_once_its_broadcast_resolves() {
 	frames(&parent.audio, 0);
 	// The include's only rendition reads a sibling whose route has not answered yet.
 	let other = origin
-		.route_prefix("room/other", moq_net::origin::RouteOptions::default())
+		.claim("room/other", moq_net::origin::RouteOptions::default())
 		.unwrap();
 	let child = Instance::random();
 	let mut value = catalog();
@@ -611,7 +611,7 @@ async fn a_refused_include_is_listed_once_announced() {
 	frames(&parent.audio, 0);
 	// An on-demand route that drops its prepared answer refuses the first resolution.
 	let claim = origin
-		.route_prefix("room/ladder", moq_net::origin::RouteOptions::default())
+		.claim("room/ladder", moq_net::origin::RouteOptions::default())
 		.unwrap();
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	let refuse = async {

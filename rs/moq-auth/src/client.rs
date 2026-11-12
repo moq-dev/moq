@@ -88,6 +88,9 @@ impl Client {
 	/// deadline is the bound, and dropping the future drops the request. Every later
 	/// request for the session ([`attach`](Self::attach), revalidate, end) is bounded
 	/// on its own, since nothing else bounds it.
+	///
+	/// The end POST runs on the tokio runtime after the lease drops; await
+	/// [`reported`](lease::Consumer::reported) before shutting the runtime down.
 	pub async fn connect(&self, request: Request) -> crate::Result<lease::Consumer> {
 		if request.auth.is_some() {
 			return Err(Error::Refused(Default::default()));
@@ -97,6 +100,8 @@ impl Client {
 	}
 
 	/// Verify another credential for this connection and report its own end when it closes.
+	///
+	/// Like [`connect`](Self::connect), the end POST needs the runtime alive after the lease drops.
 	pub async fn attach(&self, connection: &lease::Consumer, request: Request) -> crate::Result<lease::Consumer> {
 		let context = connection.context().ok_or(Error::Refused(Default::default()))?;
 		let context = context.attach(&request, &self.identity)?;
@@ -357,6 +362,8 @@ async fn admit<S: Post>(server: S, mut request: Request, context: Context) -> cr
 		producer: Some(producer),
 		started: Instant::now(),
 	};
+	// Spawned rather than returned: reqwest already needs a tokio runtime, and the driver must
+	// outlive the session to report its end.
 	tokio::spawn(driver.run());
 
 	Ok(consumer)
@@ -1326,13 +1333,13 @@ mod tests {
 		// somewhere inside `connect`, so bracket it: the bounds hold however long it takes.
 		let (wall, tick) = (kio::clock::wall(), kio::clock::now());
 		let consumer = script.connect().await.unwrap();
-		let earliest = tick + expires.checked_duration_since(kio::clock::wall()).unwrap();
-		let latest = kio::clock::now() + expires.checked_duration_since(wall).unwrap();
+		let earliest = tick.saturating_add(expires.checked_duration_since(kio::clock::wall()).unwrap());
+		let latest = kio::clock::now().saturating_add(expires.checked_duration_since(wall).unwrap());
 
 		// A millisecond either side for Tokio's timer resolution.
 		let tolerance = Duration::from_millis(1);
 		assert!(
-			kio::clock::timeout_at(earliest - tolerance, consumer.closed())
+			kio::clock::timeout_at(earliest.saturating_sub(tolerance), consumer.closed())
 				.await
 				.is_err(),
 			"an outage must not close before expires"
@@ -1343,7 +1350,7 @@ mod tests {
 			patterns(&["**"]),
 			"the grant stands through the outage"
 		);
-		let reason = kio::clock::timeout_at(latest + tolerance, consumer.closed())
+		let reason = kio::clock::timeout_at(latest.saturating_add(tolerance), consumer.closed())
 			.await
 			.expect("closed at expires, not later");
 		assert_eq!(reason, Reason::Expired);

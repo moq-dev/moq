@@ -715,7 +715,7 @@ fn addr_url(addr: SocketAddr) -> Option<Url> {
 /// refusing to start over one of those would be wrong; an error only decides the
 /// outcome if *nothing* announces.
 async fn announced(monitor: &mdns_sd::Receiver<mdns_sd::DaemonEvent>) -> Result<()> {
-	let deadline = kio::clock::now() + ANNOUNCE_TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(ANNOUNCE_TIMEOUT);
 	// Kept so a total failure reports why rather than just "timed out".
 	let mut failure = None;
 
@@ -1199,7 +1199,7 @@ mod tests {
 	/// has interfaces that cannot carry mDNS (a down VPN adapter, a container
 	/// bridge with multicast off). Treating the first error as fatal would refuse
 	/// to start a process whose real NIC was fine.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn announce_on_any_interface_is_enough() {
 		let (tx, rx) = flume::unbounded();
 		tx.send(mdns_sd::DaemonEvent::Error(mdns_sd::Error::Msg("eth1 is down".into())))
@@ -1336,20 +1336,19 @@ mod tests {
 		stopped(monitor).await;
 	}
 
-	/// Two processes under the same app and secret find each other over real mDNS;
-	/// two under different apps never do, even with the same secret.
+	/// Two processes under the same app and secret find each other over real mDNS.
 	///
-	/// The same-app pair is the positive control that multicast works. Once it
-	/// has resolved, a foreign-app record would already have arrived if the
-	/// subtype browse leaked, so a short wait is enough to assert isolation
-	/// without treating "the packet never came" as success.
+	/// Different apps never do, even with the same secret, but no wait on the
+	/// network can prove a record never came: every record is checked against
+	/// the app it arrived under, and `a_stolen_proof_does_not_transfer` proves a
+	/// record from another app fails that check.
 	///
 	/// Ignored because it multicasts on the host network; nightly runs it with
 	/// `just rs multicast`. A host where no interface can announce skips, unless
 	/// CI_STRICT makes that a failure.
 	#[tokio::test]
 	#[ignore = "needs multicast on the host network; run by just rs multicast"]
-	async fn apps_partition_discovery() {
+	async fn same_app_peers_find_each_other() {
 		let shared = unique_app();
 		let mut same_a = match discovery(shared.clone(), Some(KEY_A), "same-a").await {
 			Ok(discovery) => discovery,
@@ -1362,9 +1361,6 @@ mod tests {
 		let mut same_b = discovery(shared, Some(KEY_A), "same-b")
 			.await
 			.expect("a second advertiser on a working host");
-		let mut foreign = discovery(unique_app(), Some(KEY_A), "foreign")
-			.await
-			.expect("a foreign-app advertiser on a working host");
 
 		let (on_a, on_b) = tokio::join!(find(&mut same_a, "same-b"), find(&mut same_b, "same-a"));
 		assert!(same_b.verify_credential(&on_a.credential));
@@ -1374,26 +1370,6 @@ mod tests {
 			same_a.should_dial(&on_a.id),
 			same_b.should_dial(&on_b.id),
 			"exactly one side of the pair dials"
-		);
-
-		let leaked = kio::clock::timeout(std::time::Duration::from_secs(2), async {
-			loop {
-				match foreign.recv().await {
-					Some(Event::Found(peer))
-						if peer.fingerprint.as_deref() == Some("same-a")
-							|| peer.fingerprint.as_deref() == Some("same-b") =>
-					{
-						return true;
-					}
-					Some(_) => continue,
-					None => return false,
-				}
-			}
-		})
-		.await;
-		assert!(
-			!matches!(leaked, Ok(true)),
-			"a different app must not resolve this application's records"
 		);
 	}
 }

@@ -1,0 +1,94 @@
+/// Errors produced by the WebRTC <-> MoQ gateway.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	/// An SDP offer or answer failed to parse or was missing something required.
+	#[error("invalid SDP: {0}")]
+	InvalidSdp(String),
+
+	/// The negotiated payload used a codec this gateway can't bridge to MoQ.
+	#[error("unsupported codec: {0}")]
+	UnsupportedCodec(String),
+
+	/// ICE never connected before the establishment deadline, or before the DTLS
+	/// handshake gave up waiting for it.
+	#[error("ICE did not connect in time")]
+	IceTimeout,
+
+	/// A broadcast did not produce a catalog before the negotiation deadline.
+	#[error("catalog did not arrive before the negotiation deadline")]
+	CatalogTimeout,
+
+	/// The catalog track closed before publishing its first snapshot.
+	#[error("catalog closed before its first snapshot")]
+	CatalogClosed,
+
+	/// The catalog has no rendition this gateway can send over WebRTC.
+	#[error("catalog has no WebRTC-compatible renditions")]
+	NoRenditions,
+
+	/// The WebRTC engine produced no SDP changes for an offer.
+	#[error("no SDP changes to apply")]
+	NoSdpChanges,
+
+	/// I/O error on the media socket (bind, send, or receive).
+	#[error("io error: {0}")]
+	Io(#[from] std::io::Error),
+
+	/// The request named a broadcast path that is not a valid [`moq_net::Path`].
+	#[error("invalid path: {0}")]
+	InvalidPath(#[from] moq_net::path::Error),
+
+	/// Error from the underlying moq-net transport.
+	#[error("moq error: {0}")]
+	Moq(#[from] moq_net::Error),
+
+	/// Error from the moq-mux import/export layer bridging RTP and MoQ.
+	#[error("mux error: {0}")]
+	Mux(#[from] moq_mux::Error),
+
+	/// HTTP transport failed while dialing a WHIP or WHEP endpoint.
+	#[error("http error: {0}")]
+	Http(std::sync::Arc<reqwest::Error>),
+
+	/// A WHIP or WHEP endpoint rejected the HTTP request.
+	#[error("HTTP endpoint returned status {0}")]
+	HttpStatus(u16),
+
+	/// Error from the WebRTC engine (SDP negotiation, DTLS, media state).
+	#[error("rtc error: {0}")]
+	Rtc(String),
+
+	/// A capped WHIP publisher sent media past its cap plus burst, ignoring the steering
+	/// toward it. `cap` is the sustained rate it exceeded.
+	#[error("media exceeded the {} bps cap plus burst", cap.as_bps())]
+	RateLimited {
+		/// The cap's sustained rate.
+		cap: moq_net::bandwidth::Rate,
+	},
+
+	/// An internal video bridge could not be initialized.
+	#[error("video bridge initialization failed")]
+	BridgeFailed,
+
+	/// This CPU lacks a feature rind, the crypto under DTLS, SRTP, and HTTPS, requires.
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
+}
+
+impl From<reqwest::Error> for Error {
+	fn from(err: reqwest::Error) -> Self {
+		// reqwest prints the full URL in its error, and a dialed URL routinely
+		// carries the auth token in its query, or userinfo.
+		Self::Http(std::sync::Arc::new(err.without_url()))
+	}
+}
+
+impl Error {
+	pub(crate) fn rtc(err: impl std::fmt::Display) -> Self {
+		Self::Rtc(err.to_string())
+	}
+}
+
+/// Convenience alias for results from the WebRTC <-> MoQ gateway.
+pub type Result<T> = std::result::Result<T, Error>;

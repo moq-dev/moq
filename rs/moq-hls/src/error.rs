@@ -107,6 +107,15 @@ pub enum Error {
 		status: u16,
 	},
 
+	/// A playlist or init segment, which import must hold whole, was larger than it holds.
+	#[error("{url} is larger than the {limit} bytes import holds")]
+	ResourceTooLarge {
+		/// The resource, without its credentials.
+		url: url::Url,
+		/// The most bytes import holds for this kind of resource.
+		limit: usize,
+	},
+
 	/// An HLS media or discontinuity sequence was too large to pack into a MoQ group sequence.
 	#[error("HLS {kind} sequence {value} is too large to encode")]
 	SequenceOverflow {
@@ -179,17 +188,11 @@ pub enum Error {
 	},
 
 	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
-	#[error("unsupported CPU: {0}")]
-	UnsupportedCpu(String),
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 }
 
 impl Error {
-	/// Carries rind's message rather than its type, so rind stays out of this crate's API.
-	#[cfg(feature = "async")]
-	pub(crate) fn unsupported_cpu(err: rind::cpu::MissingFeature) -> Self {
-		Self::UnsupportedCpu(err.to_string())
-	}
-
 	/// The HTTP status the origin answered with, if it answered with one at all.
 	///
 	/// The import loop consults it: a `503` on a playlist fetch is worth another pass, a `404` is
@@ -199,6 +202,17 @@ impl Error {
 		match self {
 			Self::Reqwest(err) => err.status().map(|status| status.as_u16()),
 			_ => None,
+		}
+	}
+
+	/// Whether the source denied access to a broadcast or track, which a server answers with `403`.
+	pub fn is_denied(&self) -> bool {
+		match self {
+			Self::Moq(moq_net::Error::Unauthorized) | Self::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized)) => {
+				true
+			}
+			Self::CatalogFailed { source } | Self::MediaFailed { source, .. } => source.is_denied(),
+			_ => false,
 		}
 	}
 
@@ -255,6 +269,20 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
 	use super::*;
 
+	/// A denial stays one however the export wraps it.
+	#[test]
+	fn denial_survives_wrapping() {
+		let denied = Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized));
+		let wrapped = Error::CatalogFailed {
+			source: Box::new(Error::MediaFailed {
+				track: "video".into(),
+				source: Box::new(denied),
+			}),
+		};
+		assert!(wrapped.is_denied());
+		assert!(!Error::Moq(moq_net::Error::NotFound).is_denied());
+	}
+
 	#[tokio::test]
 	async fn http_error_redacts_url() {
 		// A freed port refuses the connection, so reqwest fails with the dialed URL attached.
@@ -263,9 +291,7 @@ mod tests {
 		drop(listener);
 
 		// reqwest reads rustls's process default, as the importer installs it.
-		let _ = rind_rustls::default_provider()
-			.expect("supported CPU")
-			.install_default();
+		moq_crypto::provider::install_default().expect("supported CPU");
 		let err: Error = reqwest::get(format!("http://user:pass@{address}/media.m3u8?jwt=secret"))
 			.await
 			.expect_err("dial a closed port")

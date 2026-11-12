@@ -44,19 +44,6 @@ impl Format {
 		}
 	}
 
-	/// Whether channels are stored planar (each channel contiguous) rather than interleaved.
-	pub fn is_planar(self) -> bool {
-		matches!(
-			self,
-			Self::U8Planar | Self::S16Planar | Self::S32Planar | Self::F32Planar
-		)
-	}
-
-	/// Whether the underlying sample type is floating-point.
-	pub fn is_float(self) -> bool {
-		matches!(self, Self::F32 | Self::F32Planar)
-	}
-
 	/// Convert a raw PCM buffer in this format to interleaved `f32` in `[-1.0, 1.0]`.
 	///
 	/// Returns a [`Cow::Borrowed`] when the input is already interleaved `f32`

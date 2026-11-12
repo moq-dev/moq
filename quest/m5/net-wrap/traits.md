@@ -37,8 +37,8 @@ the methods exactly as moq-net has them today.
     wrapper's own subscriber, so E2EE decrypts behind it; `Resolving` and
     `Fetching` resolve to the wrapper's logical metadata and groups.
   - Adapters: a subscriber's `ordered` returns its own `track::Ordered`
-    with the same group and control surface; datagrams leave stream tracks
-    with [Datagram tracks](/quest/m1/datagram-tracks/README.md). moq-json's snapshot
+    with the same group and control surface; datagrams live on their own
+    datagram tracks, apart from stream tracks. moq-json's snapshot
     and window consumers, moq-mux, and moq-stats read through `ordered()`,
     so without it they stay concrete.
   - Listing (maintainer, 2026-10-24): a broadcast consumer's `tracks`
@@ -67,6 +67,8 @@ Public API: new moq-net traits, plus the hidden test-wrapper feature. Wire: none
 
 Decided 2026-10-22 (maintainer): the traits break moq-net's public API, so
 they wait for the breaking release cut.
+
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): trait only what adopters call: the broadcast, track, group, and frame producer chain, `track::Consumer` to `Subscriber` to `Ordered`, `requests` with `requested_track`, `tracks`, and datagrams. `Fill`, `Fetching`, and `Resolving` stay concrete until a wrapped consumer needs them.
 
 ## Required
 

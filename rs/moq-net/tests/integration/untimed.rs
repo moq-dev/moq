@@ -12,7 +12,7 @@ use crate::support;
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Hop, Timescale, Timestamp, Version, datagram, origin, track};
+use moq_net::{Timescale, Timestamp, Version, datagram, origin, track};
 use support::harness::peer;
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -53,9 +53,9 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn millis(ms: u64) -> Timestamp {

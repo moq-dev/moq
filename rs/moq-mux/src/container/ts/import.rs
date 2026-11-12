@@ -243,9 +243,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	described: bool,
 	/// Carried PIDs already warned about a TS-scrambled packet.
 	scrambled: HashSet<u16>,
-	/// Whether [`finish`](Self::finish) or [`abort`](Self::abort) ended the input, even if finishing
-	/// failed part way.
-	finished: bool,
+	/// Whether input is still accepted: [`finish`](Self::finish) or [`abort`](Self::abort) ends it.
+	input: crate::container::Input,
 }
 
 impl<E: catalog::Catalog> Import<E> {
@@ -322,7 +321,7 @@ impl<E: catalog::Catalog> Import<E> {
 			alone: false,
 			described: false,
 			scrambled: HashSet::new(),
-			finished: false,
+			input: crate::container::Input::Open,
 		}
 	}
 
@@ -426,7 +425,11 @@ impl<E: catalog::Catalog> Import<E> {
 	/// half a group's bytes. A PAT naming another `transport_stream_id` or program number
 	/// restarts too, at that PAT. Every later call repeats the restart; [`finish`](Self::finish)
 	/// ends the instance before the step.
+	///
+	/// Input after [`finish`](Self::finish) is refused with [`Finished`](crate::Error::Finished),
+	/// or with the cause of a finish that failed.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
+		self.input.check()?;
 		let mut demux = std::mem::take(&mut self.demux);
 		let result = self.decode_with(&mut demux, data);
 		self.demux = demux;
@@ -1902,13 +1905,41 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 	}
 
-	/// Flush any buffered PES and finish every track.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	/// Flush any buffered PES, finish every track, and return the [`Finished`] import.
+	///
+	/// A finish that fails aborts every track with the cause, so it can't be retried.
+	pub fn finish(mut self) -> anyhow::Result<Finished<E>> {
+		self.finish_in_place()?;
+		Ok(Finished { import: self })
+	}
+
+	/// [`finish`](Self::finish) for an owner that keeps the importer, as
+	/// [`Programs`](super::Programs) keeps each program's. A finish that fails returns the cause to
+	/// every later call; one that succeeded does nothing when called again.
+	pub(super) fn finish_in_place(&mut self) -> anyhow::Result<()> {
+		match &self.input {
+			crate::container::Input::Open => {}
+			crate::container::Input::Finished => return Ok(()),
+			crate::container::Input::Refused(err) | crate::container::Input::Failed(err) => {
+				return Err(err.clone().into());
+			}
+		}
+		let result = self.end();
+		match &result {
+			Ok(()) => self.input = crate::container::Input::Finished,
+			// The copy keeps the whole chain in its message, since only the first report can move the
+			// original.
+			Err(err) => self.fail(crate::Error::from(anyhow::anyhow!("{err:#}"))),
+		}
+		result
+	}
+
+	/// Flush the input and finish every track, stopping at the first failure.
+	fn end(&mut self) -> anyhow::Result<()> {
 		// A step still being judged never completed: what it held routes as read.
-		if !self.finished && self.steps.settle() {
+		if self.steps.settle() {
 			self.decode(&[])?;
 		}
-		self.finished = true;
 		self.demux.finish();
 		for pid in self.headers.keys().copied().collect::<Vec<_>>() {
 			self.damage(pid, &anyhow::anyhow!("PES header truncated at end of input"))?;
@@ -2023,7 +2054,14 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Unlike a drop, this leaves the tracks' HLS records to the catalog, whose abort fails them
 	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
-		self.finished = true;
+		self.fail(err.into());
+	}
+
+	/// Abort every track with `cause`, which later calls report, and release the catalog: nothing
+	/// is left to wait for.
+	pub(super) fn fail(&mut self, cause: crate::Error) {
+		let err = cause.reason();
+		self.input = crate::container::Input::Failed(cause);
 		for stream in std::mem::take(&mut self.streams).into_values() {
 			stream.abort(err.clone());
 		}
@@ -2035,14 +2073,44 @@ impl<E: catalog::Catalog> Import<E> {
 			super::si::Capture::new(self.broadcast.clone(), self.catalog.clone()),
 		);
 		si.abort(err);
+		self.mux_rate_reservation = None;
+		self.initial_reservation = None;
+	}
+}
+
+/// A TS import that [finished](Import::finish): every track has ended, and they can still be
+/// read or aborted, but it takes no more input.
+///
+/// Dropping it releases the tracks and their catalog renditions, as dropping the [`Import`] does.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut import: moq_mux::container::ts::Finished) {
+/// import.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it releases the tracks and their catalog renditions"]
+pub struct Finished<E: catalog::Catalog = ()> {
+	import: Import<E>,
+}
+
+impl<E: catalog::Catalog> Finished<E> {
+	/// What every elementary stream delivered; see [`Import::stats`].
+	pub fn stats(&self) -> stats::Snapshot {
+		self.import.stats()
+	}
+
+	/// Release every track's cache, reporting `err` to readers that have not drained it; see
+	/// [`Import::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
 	}
 }
 
 impl<E: catalog::Catalog> Drop for Import<E> {
 	/// End the input unless it already ended.
 	fn drop(&mut self) {
-		if !self.finished
-			&& let Err(err) = self.finish()
+		if matches!(self.input, crate::container::Input::Open)
+			&& let Err(err) = self.finish_in_place()
 		{
 			tracing::warn!(%err, "failed to finish a dropped TS import");
 		}
@@ -2428,7 +2496,7 @@ impl<E: catalog::Catalog> SectionStream<E> {
 	}
 
 	fn finish(&mut self) -> anyhow::Result<()> {
-		self.track.finish()?;
+		self.track.end_with(None)?;
 		Ok(())
 	}
 
@@ -2680,7 +2748,7 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 	}
 
 	fn finish(&mut self) -> anyhow::Result<()> {
-		self.track.finish()?;
+		self.track.end_with(None)?;
 		Ok(())
 	}
 
@@ -5017,7 +5085,7 @@ pub(super) mod test {
 		});
 		import.damage(pid, &error).unwrap();
 		import.damage(pid, &error).unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 		assert_eq!(import.stats().streams[&0x61].damaged, 5);
 		drop(import);
 		logs_assert(|lines| {
@@ -5362,7 +5430,7 @@ pub(super) mod test {
 		bytes.extend_from_slice(&pes_packet(PCR_PID, 90_000));
 		bytes.extend_from_slice(&pcr_packet(PCR_PID, 27_000_000));
 		import.decode(&bytes).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		assert_eq!(
 			cue_tracks(&catalog.snapshot().ext.mpegts),
@@ -5415,7 +5483,7 @@ pub(super) mod test {
 		bytes.extend_from_slice(&pes_packet(PCR_PID, 90_000));
 		bytes.extend_from_slice(&pcr_packet(PCR_PID, 27_000_000));
 		import.decode(&bytes).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let first = kio::clock::timeout(Duration::from_secs(10), updates.next())
 			.await
@@ -5455,7 +5523,7 @@ pub(super) mod test {
 			),
 			"the CUEI PID routes to Ignored"
 		);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		// SCTE detection takes no lock here (video/audio would still publish later): the old
 		// discarding ScteStream took the lock and republished an empty catalog on this path.
 		assert!(
@@ -5530,7 +5598,7 @@ pub(super) mod test {
 		// The importer clears its verbatim entries from the catalog when it drops, so read the
 		// track name while it is still registered.
 		let name = track_on(&catalog.snapshot().ext.mpegts, SECTION_PID);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let track = consumer
 			.track(&name)
 			.unwrap()
@@ -5832,15 +5900,16 @@ pub(super) mod test {
 			}
 		}
 		import.decode(&bytes).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let exporter = crate::container::ts::export_test::open_ts(
 			crate::source::announced(&consumer).await,
 			crate::catalog::CatalogFormat::Hang,
+			RECORDING_MAX_AGE,
 		)
 		.await
 		.unwrap();
-		let mut exporter = exporter.with_delay(RECORDING_MAX_AGE).with_replay();
+		let mut exporter = exporter.with_replay();
 		let mut ts = Vec::new();
 		while let Ok(Some(frame)) = kio::clock::timeout(RECORDING_MAX_AGE * 3, exporter.next())
 			.await
@@ -6017,7 +6086,7 @@ pub(super) mod test {
 				.decode(&audio_pes_packet(PID, ((i + 1) % 16) as u8, pts, &frame))
 				.unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let snapshot = catalog.snapshot();
 		let config = snapshot.audio.renditions.values().next().unwrap();
 		assert!(config.bitrate.is_some(), "exercise a bitrate refinement");
@@ -6128,7 +6197,7 @@ pub(super) mod test {
 		}
 
 		import.decode(&bytes).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let snap = catalog.snapshot();
 		let aac = snap.audio.renditions.values().next().expect("an AAC rendition");
@@ -6183,7 +6252,7 @@ pub(super) mod test {
 		bytes.extend_from_slice(&audio_pes_packet(AAC_PID, 0, 270_000, &aac));
 
 		import.decode(&bytes).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let snap = catalog.snapshot();
 		assert_eq!(snap.audio.renditions.len(), 2, "AAC and MP2 renditions");
@@ -6264,7 +6333,7 @@ pub(super) mod test {
 			looped.ends_with(&restart.remainder) && restart.remainder.len() <= data.len(),
 			"the new instance starts at the wrap"
 		);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert!(!frames.is_empty(), "the pass before the wrap published");
@@ -6345,7 +6414,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(VIDEO_PID, 14, 450_000, &annexb_au(false)).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_video_frames(&consumer, &catalog).await;
 		assert!(
@@ -6394,7 +6463,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(AAC_PID, 13, 270_000, &normal).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(
@@ -6432,7 +6501,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(AAC_PID, 1, 270_000, &rest).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(frames.len(), 2, "the split frame is reassembled, not dropped");
@@ -6473,7 +6542,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(AAC_PID, 2, 450_000, &adts_frame(40, 0xDD)).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 
 		// The track carries raw AAC, so each published frame is its ADTS body.
 		let frames = read_audio_frames(&consumer, &catalog).await;
@@ -6534,7 +6603,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(AAC_PID, 2, 450_000, &adts_frame(40, 0xEE)).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		// The track carries raw AAC, so each published frame is its ADTS body.
 		let frames = read_audio_frames(&consumer, &catalog).await;
@@ -6576,7 +6645,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(AAC_PID, 1, 270_000, &split[25..]).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(
@@ -6632,7 +6701,7 @@ pub(super) mod test {
 			tokio::time::advance(Duration::from_millis(440) / (packets.len() - 1) as u32).await;
 			import.decode(packet).unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
 		let frames = read_track(&consumer, &name, crate::container::Kind::Audio).await;
 		assert_eq!(
@@ -6678,7 +6747,7 @@ pub(super) mod test {
 				.decode(&audio_pes_open(PID, 1, 180_000, rest.len(), &rest[..20]))
 				.unwrap();
 			import.decode(&ts_continuation(PID, 2, &rest[20..])).unwrap();
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			let frames = read_audio_frames(&consumer, &catalog).await;
 			assert_eq!(
 				frames
@@ -6715,7 +6784,7 @@ pub(super) mod test {
 			] {
 				import.decode(&audio_pes_packet(PID, cc, pts, &payload)).unwrap();
 			}
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			let frames = read_audio_frames(&consumer, &catalog).await;
 			assert_eq!(
 				frames
@@ -6761,7 +6830,7 @@ pub(super) mod test {
 				.decode(&audio_pes_open(PID, 2, 135_000, 20 + rest.len(), &b[40..60]))
 				.unwrap();
 			import.decode(&ts_continuation(PID, 3, &rest)).unwrap();
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			let frames = read_audio_frames(&consumer, &catalog).await;
 			let step = if stream_type == StreamType::AdtsAac {
 				21_333
@@ -6809,7 +6878,7 @@ pub(super) mod test {
 						.decode(&ts_continuation(PID, 1, &[junk, recovered].concat()))
 						.unwrap();
 				}
-				import.finish().unwrap();
+				let _finished = import.finish().unwrap();
 				let frames = read_audio_frames(&consumer, &catalog).await;
 				assert_eq!(frames.len(), 2, "{stream_type:?} carry={carry}");
 				let step = if stream_type == StreamType::AdtsAac {
@@ -6861,7 +6930,7 @@ pub(super) mod test {
 		let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
 		assert_ne!(name, &first, "the stereo frames publish under a new name");
 		assert_eq!(config.channel_count, 2);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(frames[0].payload, stereo(0xCC), "the new track starts at the change");
 	}
@@ -6921,7 +6990,7 @@ pub(super) mod test {
 			vec![name.clone()],
 			"the PID's mpegts entry moves to the new track"
 		);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(
 			frames[0].timestamp,
@@ -6961,7 +7030,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 13, 270_000, &normal).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(
@@ -7005,7 +7074,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &mp2_frame(0xDD)).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(
@@ -7065,7 +7134,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &mp2_frame(0xEE)).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		// The stale tail still carries an intact header claiming 72 bytes, so what gives the
@@ -7120,7 +7189,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &mp2_frame(0xEE)).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(
@@ -7161,7 +7230,7 @@ pub(super) mod test {
 		join.extend_from_slice(&mp2_frame(0xEE));
 		let err = import
 			.decode(audio_pes_packet(MP2_PID, 1, 89_910, &join).as_slice())
-			.and_then(|()| import.finish())
+			.and_then(|()| import.finish_in_place())
 			.expect_err("a PES PTS below the live edge is a restart");
 		assert!(is_rewind(&err), "{err:?}");
 	}
@@ -7191,7 +7260,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &mp2_frame(0xBB)[40..]).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(
@@ -7257,7 +7326,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &mp2_frame(0xDD)).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		// Without confirmation the planted header is published as a frame of payload bytes,
@@ -7301,7 +7370,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &real).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert!(
@@ -7349,7 +7418,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &real).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		// Only the four real frames: the fragment the seek landed inside is dropped rather
 		// than spliced onto the front of the first real frame after it.
@@ -7391,7 +7460,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 0, 270_000, &frame[..4]).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(
@@ -7435,7 +7504,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(AAC_PID, 0, 90_000, &aac).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 
 		// The importer is deliberately still alive here, as moq-srt leaves it after finish.
 		let track = consumer
@@ -7515,7 +7584,7 @@ pub(super) mod test {
 		let cc = mux.cc(AAC_PID);
 		let late = audio_pes_packet(AAC_PID, cc, 180_000, &[with.as_slice(), &bare, &with, &bare].concat());
 		import.decode(&late).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let audio = loop {
 			let update = kio::clock::timeout(Duration::from_millis(10), updates.next())
@@ -7578,7 +7647,7 @@ pub(super) mod test {
 		let cc = mux.cc(AAC_PID);
 		mux.out.extend(audio_pes_packet(AAC_PID, cc, 270_000, &bare));
 		import.decode(&mux.out).unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 		assert_eq!(import.stats().streams[&AAC_PID].damaged, 1);
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
@@ -7664,7 +7733,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &good).as_slice())
 			.expect("a clean stream after a seek must not inherit the pre-seek budget");
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(
@@ -7737,7 +7806,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &second).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(frames.len(), 2, "both frames must survive the split");
@@ -7784,7 +7853,7 @@ pub(super) mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 1, 900_000, &frame_b[2..]).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(frames.len(), 2, "both frames must survive the header split");
@@ -7832,7 +7901,7 @@ pub(super) mod test {
 		bytes.extend_from_slice(&pcr_packet(VIDEO_PID, 29_700_000));
 		import.decode(&bytes).unwrap();
 		let expected = 1_000_000 + (at - (2 * 188 + 10)) * 100_000 / (3 * 188);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let name = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 		let track = consumer
@@ -8085,7 +8154,7 @@ pub(super) mod test {
 		let anchored = catalog.snapshot().media.clock.expect("a clock");
 		assert_ne!(anchored, provisional, "the first PES anchors the clock");
 		assert!(clocks.drain().is_empty(), "rate measurement still holds the catalog");
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let published = clocks.drain();
 		assert!(!published.is_empty(), "EOF releases a program without PCR samples");
 		assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
@@ -8219,7 +8288,7 @@ pub(super) mod test {
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve()).with_program(2);
 		import.decode(&two_programs()).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let snapshot = catalog.snapshot();
 		let names: Vec<_> = snapshot.audio.renditions.keys().collect();
@@ -8353,7 +8422,7 @@ pub(super) mod test {
 		data.extend(mp2_pes(0x0062, 0, 90_000, [0xCC, 0xDD]));
 
 		import.decode(&data).unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 		assert_eq!(catalog.snapshot().audio.renditions.len(), 2, "both streams publish");
 		assert_eq!(import.stats().crc_error, 0);
 	}
@@ -8371,7 +8440,7 @@ pub(super) mod test {
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
 
 		import.decode(&data).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		assert_eq!(catalog.snapshot().audio.renditions.len(), 1);
 	}
 
@@ -8380,7 +8449,7 @@ pub(super) mod test {
 		let (catalog, import) = psi_import();
 		let mut import = import.with_program(50);
 		import.decode(&fifty_programs()).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		assert_eq!(catalog.snapshot().audio.renditions.len(), 1, "program 50 publishes");
 
 		// Unselected, the whole PAT is what refuses the input.
@@ -8432,7 +8501,7 @@ pub(super) mod test {
 		let mut data = psi_packets(0x0100, &mut pmt_cc, &[], &pmt_section(1, 2, &two));
 		data.extend(mp2_pes(0x0062, 0, 180_000, [0xCC, 0xDD]));
 		import.decode(&data).unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 		assert_eq!(
 			catalog.snapshot().audio.renditions.len(),
 			2,
@@ -8455,7 +8524,7 @@ pub(super) mod test {
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
 
 		import.decode(&data).unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 		assert!(catalog.snapshot().audio.renditions.is_empty());
 		assert_eq!(import.stats().crc_error, 1);
 		assert!(!import.stats().is_empty(), "a dropped section is something to report");
@@ -8553,7 +8622,7 @@ pub(super) mod test {
 		import.decode(packet(true, 2, 0, &CUE).as_slice()).unwrap();
 		import.decode(pes_packet(PCR_PID, 90_000).as_slice()).unwrap();
 		import.decode(pcr_packet(PCR_PID, 27_000_000).as_slice()).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let name = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 		let (frames, breaks) = read_breaks(&consumer, &name, crate::container::Kind::Data).await;
 		assert_eq!(frames.len(), 3);
@@ -8593,7 +8662,7 @@ pub(super) mod test {
 			import.last_pts.unwrap(),
 			Timestamp::from_scale((1 << 33) + 9_000, 90_000).unwrap()
 		);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	#[test]
@@ -8631,16 +8700,58 @@ pub(super) mod test {
 			import.decode(&pcr_packet(PCR_PID, 27_000_000)).unwrap();
 			import.decode(&packet(true, 0, 0, &CUE)).unwrap();
 			if clock == "none" {
-				let err = import.finish().unwrap_err();
+				let err = import.finish_in_place().unwrap_err();
 				assert!(err.to_string().contains("without a media timestamp"), "{clock}: {err}");
-				assert_eq!(import.sections[&0x21].held.len(), 1);
 			} else {
-				import.finish().unwrap();
+				import.finish_in_place().unwrap();
 				assert!(import.sections[&0x21].held.is_empty());
 				assert_eq!(import.stats().streams[&0x21].unplaced, 1, "{clock}: no PCR interval");
 			}
 			assert!(!import.published, "{clock}: no publication without an anchor");
 		}
+	}
+
+	/// A finish that fails is final: every track aborts with the cause rather than staying open,
+	/// and later calls report it instead of finishing again or accepting input.
+	#[tokio::test]
+	async fn a_failed_finish_aborts_every_track() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(
+				&[
+					(StreamType::Mpeg2Video, PCR_PID),
+					(StreamType::Dts8ChannelLosslessAudio, 0x21),
+				],
+				true,
+			))
+			.unwrap();
+		import.decode(&pcr_packet(PCR_PID, 27_000_000)).unwrap();
+		// A section no media timestamp ever places.
+		import.decode(&packet(true, 0, 0, &CUE)).unwrap();
+		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
+		let mut track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+
+		let err = import.finish_in_place().unwrap_err();
+		assert!(err.to_string().contains("without a media timestamp"), "{err}");
+		let ended = kio::clock::timeout(Duration::from_millis(50), track.recv_group())
+			.await
+			.expect("the track ends");
+		assert!(ended.is_err(), "the track aborts rather than finishing");
+
+		let retried = import.finish_in_place().unwrap_err();
+		assert!(retried.to_string().contains("without a media timestamp"), "{retried}");
+		let refused = import.decode(&pcr_packet(PCR_PID, 54_000_000)).unwrap_err();
+		assert!(refused.to_string().contains("without a media timestamp"), "{refused}");
 	}
 
 	#[test]
@@ -8686,7 +8797,7 @@ pub(super) mod test {
 				.decode(mp2_pes(pid, cc, 270_000, [0xEE, 0xFF]).as_slice())
 				.unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		for (_, breaks) in read_all_breaks(&consumer, &catalog).await {
 			assert_eq!(breaks, 1, "a retransmitted packet declared another break");
 		}
@@ -8709,7 +8820,7 @@ pub(super) mod test {
 				.decode(mp2_pes(pid, cc, 270_000, [0xEE, 0xFF]).as_slice())
 				.unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		for (_, breaks) in read_all_breaks(&consumer, &catalog).await {
 			assert_eq!(breaks, 1, "an incomplete frame was counted as publication");
 		}
@@ -8735,7 +8846,7 @@ pub(super) mod test {
 				.decode(mp2_pes(pid, 1, 90_000 + 20 * 90_000, [0xCC, 0xDD]).as_slice())
 				.unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		for (frames, breaks) in read_all_breaks(&consumer, &catalog).await {
 			assert_eq!(breaks, 1, "the timebase break did not reach this track");
@@ -8775,7 +8886,7 @@ pub(super) mod test {
 			}
 		);
 		assert_eq!(restart.remainder, after, "the new instance starts at the break");
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	/// Adaptation stuffing leaves exactly these bytes in a TS payload.
@@ -8859,7 +8970,7 @@ pub(super) mod test {
 						0,
 					)
 					.unwrap(),
-				_ => import.finish().unwrap(),
+				_ => import.finish_in_place().unwrap(),
 			}
 			assert!(!import.headers.contains_key(&pid));
 			if end == "start" {
@@ -8886,7 +8997,7 @@ pub(super) mod test {
 				.decode(&mp2_pes(PCR_PID, i as u8, pts % (1 << 33), [1, 2]))
 				.unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		assert!(!catalog.snapshot().audio.renditions.is_empty());
 	}
 
@@ -8918,7 +9029,7 @@ pub(super) mod test {
 			import.decode(&data).unwrap();
 			tokio::time::advance(Duration::from_millis(144)).await;
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let all = timeline(&consumer, &catalog).await;
 		let step = all[&21] - all[&19];
 		assert!(
@@ -8936,7 +9047,7 @@ pub(super) mod test {
 			import.decode(&source_pes(i, 4_000 + i * STEP)).unwrap();
 			tokio::time::advance(Duration::from_millis(144)).await;
 		}
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 		assert_eq!(import.stats().streams[&PEER_PID].unplaced, 1);
 		let all = timeline(&consumer, &catalog).await;
 		assert!(!all.contains_key(&0x80), "the peer's PES before the wrap is dropped");
@@ -9081,7 +9192,7 @@ pub(super) mod test {
 					.unwrap();
 			}
 			if end == "eof" {
-				import.finish().unwrap();
+				import.finish_in_place().unwrap();
 			} else {
 				let mut header = vec![0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5];
 				header.extend_from_slice(&pes_timestamp(2, 180_000));
@@ -9275,7 +9386,7 @@ pub(super) mod test {
 			import.decode(&data).unwrap();
 			tokio::time::advance(Duration::from_millis(144)).await;
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let frames = timeline(&consumer, &catalog).await;
 		let apart = frames[&31] - frames[&0x9e];
@@ -9416,7 +9527,7 @@ pub(super) mod test {
 		.unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import.decode(data)?;
-		import.finish()?;
+		import.finish_in_place()?;
 		Ok((consumer, catalog, import))
 	}
 
@@ -9604,12 +9715,13 @@ pub(super) mod test {
 					None => baseline = Some(observed.clone()),
 					Some(expected) => assert_eq!(&observed, expected, "{kind:?} {layout}"),
 				}
-				let mut export =
-					crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
-						.await
-						.unwrap()
-						.with_delay(Duration::from_secs(30))
-						.with_replay();
+				let mut export = crate::container::ts::export_test::open_export(
+					crate::source::announced(&consumer).await,
+					Duration::from_secs(30),
+				)
+				.await
+				.unwrap()
+				.with_replay();
 				let mut ts = Vec::new();
 				while let Ok(frame) = kio::clock::timeout(Duration::from_secs(100), export.next()).await {
 					let Some(frame) = frame.unwrap() else {
@@ -9769,7 +9881,7 @@ pub(super) mod test {
 		import
 			.decode(&mux.out[resume_at..])
 			.expect("next keyframe must recover");
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 		assert_eq!(import.stats().streams[&VIDEO].damaged, u64::from(damage != "clean"));
 		assert_eq!(import.stats().streams[&peer].damaged, 0);
 		for (pid, expected) in [
@@ -9896,7 +10008,7 @@ pub(super) mod test {
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import.decode(&data).expect("a damaged SPS stays local to its unit");
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
 		let frames = read_track(&consumer, &name, crate::container::Kind::Video).await;
 		assert_eq!(frames.len(), 4, "the bare keyframe after the damage recovers");
@@ -10025,7 +10137,7 @@ pub(super) mod test {
 		damaged[start + 6..start + 19].fill(0);
 		data.extend(damaged);
 		import.decode(&data).unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
 		assert_eq!(
 			import.stats().streams[&VIDEO].units,
@@ -10059,7 +10171,7 @@ pub(super) mod test {
 		flagged[3] |= 1;
 		data.extend(flagged);
 		import.decode(&data).unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 		assert_eq!(
 			import.stats().streams[&VIDEO].units,
 			1,
@@ -10087,7 +10199,7 @@ pub(super) mod test {
 			data.extend(packet);
 			import.decode(&data).unwrap();
 			assert_eq!(import.stats().streams[&VIDEO].damaged, 0, "PES has not ended yet");
-			import.finish().unwrap();
+			import.finish_in_place().unwrap();
 			assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
 			assert_eq!(import.stats().streams[&VIDEO].units, 0);
 			assert!(catalog.snapshot().video.renditions.is_empty());
@@ -10120,7 +10232,7 @@ pub(super) mod test {
 			data.extend(video_pes(VIDEO, cc, 90_000 + u64::from(cc) * FRAME, None, payload));
 		}
 		import.decode(&data).unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
 		assert_eq!(import.stats().streams[&VIDEO].units, 2);
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
@@ -10212,7 +10324,7 @@ pub(super) mod test {
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import.decode(&mux.out).unwrap();
-		import.finish().unwrap();
+		import.finish_in_place().unwrap();
 		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
 
 		// Each group as published, its empty end marker included.
@@ -10239,11 +10351,13 @@ pub(super) mod test {
 			"the first group ends at the break, one frame after its last picture"
 		);
 
-		let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
-			.await
-			.unwrap()
-			.with_delay(Duration::from_secs(30))
-			.with_replay();
+		let mut exporter = crate::container::ts::export_test::open_export(
+			crate::source::announced(&consumer).await,
+			Duration::from_secs(30),
+		)
+		.await
+		.unwrap()
+		.with_replay();
 		let mut ts = Vec::new();
 		while let Ok(res) = kio::clock::timeout(Duration::from_secs(100), exporter.next()).await {
 			let Some(frame) = res.expect("the exporter must take the open GOP after the break") else {
@@ -10792,7 +10906,7 @@ pub(super) mod test {
 		import.decode(&pcr_packet(PCR_PID, 0)).unwrap();
 		let waiter = kio::Waiter::noop();
 		assert!(updates.poll_next(&waiter).is_pending());
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
 			panic!("short recording finished without a catalog");
 		};
@@ -10866,7 +10980,7 @@ pub(super) mod test {
 		import
 			.decode(mp2_pes(PCR_PID, 1, 180_000, [0xCC, 0xDD]).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		for (_, breaks) in read_all_breaks(&consumer, &catalog).await {
 			assert_eq!(breaks, 0, "a counter jump is not a program timebase reset");
@@ -10886,7 +11000,7 @@ pub(super) mod test {
 		import
 			.decode(mp2_pes(PCR_PID, 7, 180_000, [0xCC, 0xDD]).as_slice())
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		for (_, breaks) in read_all_breaks(&consumer, &catalog).await {
 			assert_eq!(breaks, 0, "lost packets are not a signalled clock reset");
@@ -10906,7 +11020,7 @@ pub(super) mod test {
 				.unwrap();
 			import.decode(mp2_pes(pid, 1, 90_000, [0xCC, 0xDD]).as_slice()).unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		for (frames, breaks) in read_all_breaks(&consumer, &catalog).await {
 			assert_eq!(breaks, 0, "a rollover is not a break");
@@ -10936,7 +11050,7 @@ pub(super) mod test {
 				.decode(mp2_pes(pid, 1, 180_000, [0xCC, 0xDD]).as_slice())
 				.unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		for (_, breaks) in read_all_breaks(&consumer, &catalog).await {
 			assert_eq!(breaks, 1, "each flagged packet declared its own break");
@@ -10962,7 +11076,7 @@ pub(super) mod test {
 				.decode(mp2_pes(pid, 1, 180_000, [0xCC, 0xDD]).as_slice())
 				.unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		for (_, breaks) in read_all_breaks(&consumer, &catalog).await {
 			assert_eq!(breaks, 0, "a corrupt packet's adaptation field was trusted");
@@ -10980,7 +11094,7 @@ pub(super) mod test {
 		for pid in [PCR_PID, PEER_PID] {
 			import.decode(mp2_pes(pid, 0, 90_000, [0xAA, 0xBB]).as_slice()).unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		for (frames, breaks) in read_all_breaks(&consumer, &catalog).await {
 			assert_eq!(breaks, 0, "nothing had been published to break from");
@@ -11037,17 +11151,17 @@ pub(super) mod test {
 		// groups and their boundary. Queued media is drained on its deadlines, without
 		// generating output through an arbitrary silence before feeding the next phase.
 		let delay = std::time::Duration::from_millis((RESET_LEAP_TICKS + RESET_PES * RESET_PES_TICKS) / 90);
-		let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
-			.await
-			.unwrap()
-			.with_delay(delay)
-			.with_replay();
+		let mut exporter =
+			crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await, delay)
+				.await
+				.unwrap()
+				.with_replay();
 		// A discontinuity before anything went out moves no clock, so the media before the
 		// boundary goes out first, as it would live.
 		let (frames, before_flags) = exported_discontinuities(&mut exporter).await;
 		assert!(frames > 0, "media before the boundary must reach the output");
 		import.decode(&bytes::BytesMut::from(after)).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let (frames, after_flags) = exported_discontinuities(&mut exporter).await;
 		assert!(frames > 0, "media after the boundary must reach the output");
 		before_flags + after_flags
@@ -11164,7 +11278,7 @@ pub(super) mod test {
 			"the first snapshot carries the anchored clock"
 		);
 		import.decode(&pes_fragment(PID, false, 1, &body)).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	fn opus_extension(body: &[u8]) -> Vec<super::catalog::Descriptor> {
@@ -11286,7 +11400,7 @@ pub(super) mod test {
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import.decode(data).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		catalog.snapshot()
 	}
 
@@ -11356,7 +11470,7 @@ pub(super) mod test {
 			descriptors: Vec::new(),
 		});
 		import.handle_pmt(pmt).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		logs_assert(|lines| {
 			let streams: Vec<_> = lines
 				.iter()
@@ -11420,7 +11534,7 @@ pub(super) mod test {
 		import.handle_pmt(pmt(None, 0x05)).unwrap();
 		import.handle_pmt(pmt(Some(0x100), 0x0f)).unwrap();
 		import.handle_pmt(pmt(Some(0x100), 0x0f)).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		logs_assert(|lines| {
 			let streams: Vec<_> = lines
 				.iter()
@@ -11522,7 +11636,7 @@ pub(super) mod test {
 			import.handle_pmt(pmt(Some(Pid::new(PCR_PID).unwrap()))).unwrap();
 			let next = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 			assert_ne!(next, name, "restoring a stream publishes a new track");
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 		}
 	}
 
@@ -11623,7 +11737,7 @@ pub(super) mod test {
 			.clone();
 		assert_ne!(new, old);
 		assert_eq!(language(&after, &new).as_ref(), b"fra\0");
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	/// The program descriptors follow each PMT revision in place, and adding or removing the
@@ -11755,7 +11869,7 @@ pub(super) mod test {
 		mux.out.extend(mp2_pes(0x61, 1, 108_000, [0xAA, 0xBB]));
 		mux.out.extend(mp2_pes(0x62, 0, 108_000, [0xCC, 0xDD]));
 		import.decode(&mux.out).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		assert_eq!(pmt_pid(), Some(0x200));
 		assert_eq!(
 			catalog.snapshot().audio.renditions.len(),

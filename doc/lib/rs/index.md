@@ -25,26 +25,25 @@ missing required CPU feature before starting transport cryptography.
 | --- | --- |
 | [moq-net](/lib/rs/moq-net) | The pub/sub layer: sessions, origins, broadcasts, tracks, groups, frames. Transport-agnostic. |
 | [moq-pattern](https://docs.rs/moq-pattern) | Path patterns such as `room/**`. Re-exported by moq-net and moq-auth. |
-| [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebTransport, WebSocket, TCP, or Unix sockets, from config or CLI flags, and runs WebRTC data channels that the caller signals (`webrtc` feature). With default features off, `driver` builds a Tokio QUIC stack, with rind cryptography, without MoQ. |
+| [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebTransport, WebSocket, TCP, or Unix sockets, from config or CLI flags, and runs MoQ over a qmux session established elsewhere (`qmux` feature). With default features off, `driver` builds a Tokio QUIC stack, with rind cryptography, without MoQ. |
 | [qmux](https://docs.rs/qmux) | QUIC streams, datagrams, and flow control over TCP, TLS, WebSocket, and Unix sockets, on moq-quic's state machine. |
 | [moq-sock](https://docs.rs/moq-sock) | Socket binding and CPU pinning for thread-per-core listeners. |
-| [moq-ice](https://github.com/moq-dev/moq/tree/main/rs/moq-ice) | Internal infrastructure with no stability promise; the ICE agent behind native WebRTC: drives a str0m connection over UDP, with a STUN client. |
 | [moq-uring](https://docs.rs/moq-uring) | Experimental Linux io\_uring server for moq-lite. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
 | [moq-archive](https://docs.rs/moq-archive) | [Record and serve broadcasts](/concept/archives) on any `object_store` backend. |
 | [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
 | [moq-v4l](https://docs.rs/moq-v4l) | Safe Video4Linux 2 bindings. |
+| [moq-vaapi](https://docs.rs/moq-vaapi) | VA-API H.264 and H.265 hardware encode and decode, loading libva at runtime. |
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
 | [moq-auth](/lib/rs/moq-auth) | Relay authorization: JWT signing and verification, and the auth server contract. |
-| [moq-room](/lib/rs/moq-room) | Workspace-only native rooms; use the published JS room API for applications. |
 | [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
 | [moq-crypto](https://github.com/moq-dev/moq/tree/main/rs/moq-crypto) | Workspace-only end-to-end encryption of groups, datagrams, and track names, scoped to a publisher run's epoch, and per-frame Ed25519 signatures, so relays forward content they cannot read, forge, retime, or relocate. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
 | [kio](/lib/rs/kio) | The async primitives everything polls through, and one clock for time and timers on tokio and a deterministic test simulator. |
-| [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtsp](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp), [moq-rtc](https://docs.rs/moq-rtc) | The [gateways](/bin/), as libraries you can embed with your own auth. |
+| [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtsp](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp), [moq-webrtc](https://github.com/moq-dev/moq/tree/main/rs/moq-webrtc) | The [gateways](/bin/), as libraries you can embed with your own auth. moq-webrtc's `p2p` feature also runs MoQ over a data channel with a browser peer, signaled by the caller. |
 | [moq-ffi](https://docs.rs/moq-ffi), [moq-c](/lib/c/) | The UniFFI core behind the language bindings, and the C ABI. |
 | [moq-relay](/bin/relay/), [moq-cli](/bin/cli) | The binaries, also usable as crates. |
 | [web-transport](https://github.com/moq-dev/web-transport) | The WebTransport traits and the browser transport, in a sibling repository. |
@@ -61,7 +60,7 @@ let origin = moq_tokio::origin::spawn();
 let client = moq_tokio::connect::Config::default().init(Default::default())?;
 let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 // Reconnects on its own; `closed()` resolves when it gives up.
-let session = client.with_origin(origin.clone()).connect(url);
+let session = client.with_publisher(&origin).with_subscriber(origin.clone()).connect(url);
 
 // Subscribe: wait for a route, resolve the broadcast at its path, read the catalog.
 let consumer = origin.consume();
@@ -85,8 +84,8 @@ let route = origin.route("my-stream.hang", RouteOptions::default())?;
 // moq-mux (from a container) or moq-video / moq-audio (from a device) fill
 // `route.broadcast()`. Keep the route: dropping it, or closing its broadcast,
 // retracts it, and `withdraw()`/`announce()` hide and show the same stream. To
-// serve a whole subtree on demand instead, `origin.route_prefix("room", ..)?`
-// yields each requested path: answer with `request.route(..)`, `serve` a held
+// serve a whole subtree on demand instead, `origin.claim("room", ..)?` returns
+// a `Claim` that yields each requested path: answer with `request.route(..)`, `serve` a held
 // broadcast, or `reject`.
 ```
 

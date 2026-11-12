@@ -271,10 +271,33 @@ needs() {
     return 1
 }
 
+# The browsers whose tabs prove their route key to the relay (route-key.ts).
+ROUTE_KEY_ENGINES=(chromium firefox)
+
 # True if any browser/native JS client is in play (they share one bun install).
 needs_js() {
     needs js || needs js-native || needs js-native-node || needs js-native-bun
 }
+
+# js/net speaks the lite-07 wire from before the route layer until
+# quest/m2/cluster-routing/routes/js.md ports it and removes this: native JS dials its
+# defaults in the matrix, and a lane running it on moq-lite-07-wip is skipped.
+JS_LITE07_SKIP="JS speaks pre-route lite-07 until quest/m2/cluster-routing/routes/js.md"
+
+# js_lite07 <version> <clients...>: true if the lane runs native JS on moq-lite-07-wip.
+js_lite07() {
+    local version="$1" client
+    [[ "$version" == moq-lite-07-wip ]] || return 1
+    for client in "${@:2}"; do [[ "$client" != js-native-* ]] || return 0; done
+    return 1
+}
+
+for version in "${VERSION_LIST[@]}"; do
+    if [[ "$version" == moq-lite-07-wip ]] && needs_js; then
+        echo "error: $JS_LITE07_SKIP; pin moq-lite-07-wip without JS clients" >&2
+        exit 2
+    fi
+done
 
 # Released-wire compatibility (compat.sh) pins one version and may run released
 # binaries that predate AUTH, so it runs anonymous: it compares the wire, and the
@@ -285,11 +308,12 @@ COMPAT=0
 # The clients that print the grant they received as an `auth granted` line. The
 # Python, Go, and C++ clients read it through moq-ffi; moq-c's frozen ABI and
 # GStreamer expose none, and the browser's shared connection keeps its session private.
-# Grants are checked on $AUTH_VERSION, so only in the `auto` pass.
+# Native JS prints one too, but dials its defaults until it speaks lite-07's route
+# layer (see JS_LITE07_SKIP). Grants are checked on $AUTH_VERSION, so only in the `auto` pass.
 prints_grant() {
     [[ "$COMPAT" -eq 0 && "$VERSION" == auto ]] || return 1
     case "$1" in
-        rust | python | go | cpp | js-native-node | js-native-bun) return 0 ;;
+        rust | python | go | cpp) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -348,8 +372,9 @@ DROP_VERSIONS=(moq-lite-05 moq-lite-06 moq-lite-07-wip)
 # The lite drafts the compressed-track lanes cross: lite-07 carries the flag, lite-06 gets inflated bytes.
 COMPRESS_VERSIONS=(moq-lite-07-wip moq-lite-06)
 # The compressed catalog's concurrent readers: lite-07 carries the flag, and lite-06 and a
-# moq-transport reader that does not offer FLATE share the relay's one inflated copy.
-CATALOG_VERSIONS=(moq-lite-07-wip moq-lite-06 moq-transport-22)
+# moq-transport reader that does not offer FLATE share the relay's one inflated copy. The
+# lite-07 reader returns with quest/m2/cluster-routing/routes/js.md (see JS_LITE07_SKIP).
+CATALOG_VERSIONS=(moq-lite-06 moq-transport-22)
 
 # Every publisher in this checkout sends a tone per audio channel, and every subscriber decodes
 # AUDIO_MS of it for tone.py (the browser: its page) to check against the publisher's list. This
@@ -491,7 +516,7 @@ plan_cases() {
 
 # One version's share of plan_cases.
 plan_pass() {
-    local pub sub runtime version transport
+    local pub sub runtime version transport engine
     if [[ "$TAIL_ONLY" -eq 0 && "$FINISH_ONLY" -eq 0 ]]; then
         for pub in "${PUB_LIST[@]}"; do
             for sub in "${SUB_LIST[@]}"; do record "not run" case=media publisher="$pub" subscriber="$sub"; done
@@ -507,7 +532,12 @@ plan_pass() {
         if [[ "$AUDIO" -eq 1 && "$VERSION" == auto ]]; then
             for sub in "${SUB_LIST[@]}"; do record "not run" case="wrong tone" publisher=rust subscriber="$sub"; done
         fi
-        [[ "$VERSION" != auto ]] || ! needs js || record "not run" case="refused session" subscriber=js
+        if [[ "$VERSION" == auto ]] && needs js; then
+            record "not run" case="refused session" subscriber=js
+            for engine in "${ROUTE_KEY_ENGINES[@]}"; do
+                record "not run" case="route key $engine" subscriber=js version=moq-lite-07-wip
+            done
+        fi
     fi
     [[ "$IN_TREE" -eq 1 ]] || return 0
     if [[ "$TAIL_ONLY" -eq 0 ]]; then
@@ -709,7 +739,7 @@ prepare_js() {
         return
     fi
     echo "installing js clients (workspace @moq/* via bun)..."
-    if ! (cd "$WORKSPACE" && bun install --frozen-lockfile) >"$HARNESS_RUN/js-install.log" 2>&1; then
+    if ! uv run --no-project python "$WORKSPACE/sh/js/install.py" frozen >"$HARNESS_RUN/js-install.log" 2>&1; then
         for v in js js-native js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun install failed"; done
         sed 's/^/        /' "$HARNESS_RUN/js-install.log" >&2 || true
         return
@@ -976,9 +1006,10 @@ else
     METRICS_URL="http://127.0.0.1:${HARNESS_PORT}/metrics"
     printf '\n[internal]\nlisten = "127.0.0.1:%s"\n\n[stats]\nenabled = true\n' "$HARNESS_PORT" >>"$HARNESS_RUN/relay.toml"
 fi
-# Connection spans and clean closes must survive an inherited warn-only filter.
+# Connection spans and clean closes must survive an inherited warn-only filter. The route key lane
+# reads the relay's debug line for each verified proof.
 harness_spawn relay "$HARNESS_RUN/relay.log" env \
-    "RUST_LOG=${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info" \
+    "RUST_LOG=${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info,moq_net::lite::setup=debug" \
     "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2
@@ -1015,9 +1046,9 @@ rust_connect() {
 }
 
 # The pattern a cell's token grants its publisher, or its subscribers, on <broadcast>. The `auto`
-# pass mints patterns no prefix could carry, so AUTH must deliver them as minted. moq-transport's
-# AUTH extension carries prefixes alone and refuses a narrower grant, closing the
-# session, so a pinned pass grants the broadcast's subtree.
+# pass mints patterns no prefix could carry, so AUTH must deliver them as minted. A pinned
+# pass may be moq-transport, whose requests name prefixes alone, so it grants the
+# broadcast's subtree.
 publish_grant() {
     if [[ "$VERSION" == auto ]]; then printf '%s' "$1"; else printf '%s/**' "$1"; fi
 }
@@ -1573,6 +1604,11 @@ run_round() {
     sub_url=$(token_url --subscribe "$(subscribe_grant "$broadcast")")
     sub_grant=$(grant_line "" "**/$broadcast")
     for sub in "${SUB_LIST[@]}"; do
+        if [[ "$case" == media && "$publisher" == python && "$sub" == go ]]; then
+            echo "  SKIP  $pub -> $sub (quarantined)"
+            record skip case="$case" publisher="$publisher" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-python-go.md"
+            continue
+        fi
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
             record fail case="$case" publisher="$publisher" subscriber="$sub" detail="subscriber client unavailable"
@@ -1782,7 +1818,7 @@ run_finishes() {
     for pub in "${PUB_LIST[@]}"; do
         name="finish-$pub"
         # The fixture and its .health sibling share a parent, so one prefix grant covers both:
-        # moq-transport's AUTH extension carries prefixes alone.
+        # moq-transport requests name prefixes alone.
         broadcast="$name-$$-$RANDOM/fixture.hang"
         grant="${broadcast%/*}/**"
         ack="$LOGS/$name-ack"
@@ -1904,6 +1940,11 @@ run_drop_pair() {
     local name="drop-${version}-${pub}-${sub}"
     local fifo="$LOGS/tail-ack" broadcast="$name-$$-$RANDOM"
     local cell=(case=drop publisher="$pub" subscriber="$sub" version="$version" log="$LOGS/$name-sub.log")
+    if js_lite07 "$version" "$pub" "$sub"; then
+        echo "  SKIP  drop $version $pub -> $sub"
+        record skip "${cell[@]}" detail="$JS_LITE07_SKIP"
+        return
+    fi
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  drop $version $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
@@ -1975,6 +2016,11 @@ run_tail_pair() {
     fi
     local cell=(case="$kind" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
     [[ -z "${4:-}" ]] || cell+=(version="$version")
+    if js_lite07 "$version" "$pub" "$sub"; then
+        echo "  SKIP  $label $pub -> $sub"
+        record skip "${cell[@]}" detail="$JS_LITE07_SKIP"
+        return
+    fi
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  $label $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
@@ -2101,6 +2147,13 @@ run_fetch_round() {
     local label="CLI FETCH${3:+ $3}"
     local started=$SECONDS why=""
     local cell=(case="$label" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
+    # The relay fills its miss with an upstream FETCH, which a JS publisher refuses on
+    # moq-transport by design: it serves FETCH only over moq-lite.
+    if [[ "$VERSION" == moq-transport-* && "$pub" == js-native-* ]]; then
+        echo "  SKIP  $label $pub -> $sub (a JS publisher refuses moq-transport FETCH)"
+        record skip "${cell[@]}" detail="a JS publisher refuses moq-transport FETCH"
+        return
+    fi
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  $label $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
@@ -2202,6 +2255,11 @@ run_media() {
         # The measurements are the point even when nothing fails: a skew or frame rate creeping
         # toward its bound is worth seeing before it crosses.
         grep -E '^(  |=== )' "$log" || true
+        local marker quarantined detail
+        while IFS=$'\t' read -r marker quarantined detail; do
+            echo "  SKIP  $name: $quarantined: $detail"
+            record skip case="$name: $quarantined" publisher="$(media_publisher "$@")" subscriber=js detail="$detail" log="$log"
+        done < <(grep $'^QUARANTINE\t' "$log" || true)
     else
         echo "  FAIL  $name ($((SECONDS - started))s)"
         record fail "${cell[@]}" detail="media.ts exited $status"
@@ -2312,6 +2370,47 @@ run_matrix() {
             fi
         fi
     fi
+
+    # Each browser's lite-07 session proves its route key when that build can, and the relay
+    # verifies it. A build the lite-07 cut waits on skips, except under CI_STRICT (release PRs);
+    # route-key.ts passes one that connects unproven by design. The relay reads no version from
+    # the tab beyond lite-07's, so one pass covers it.
+    if [[ "$VERSION" == auto ]] && needs js; then
+        echo "=== browser route key ==="
+        local engine status
+        for engine in "${ROUTE_KEY_ENGINES[@]}"; do
+            log="$HARNESS_RUN/route-key-$engine.log"
+            if [[ -n "$JS_LITE07_SKIP" ]]; then
+                echo "  SKIP  route key $engine"
+                record skip case="route key $engine" subscriber=js version=moq-lite-07-wip detail="$JS_LITE07_SKIP"
+                continue
+            fi
+            if is_broken js; then
+                echo "  FAIL  route key $engine (browser client unavailable)"
+                record fail case="route key $engine" subscriber=js version=moq-lite-07-wip detail="browser client unavailable"
+                overall=1
+                continue
+            fi
+            started=$SECONDS
+            status=0
+            (cd "$CLIENTS/js" && bun route-key.ts --url "$(token_url --subscribe "route-key-$$")" \
+                --relay-log "$HARNESS_RUN/relay.log" --engine "$engine" --timeout "$TIMEOUT") >"$log" 2>&1 || status=$?
+            grep -m1 '^BROWSER ' "$log" | sed 's/^BROWSER /  /' || true
+            local cell=(case="route key $engine" subscriber=js version=moq-lite-07-wip seconds=$((SECONDS - started)) log="$log")
+            if [[ "$status" -eq 0 ]]; then
+                echo "  PASS  route key $engine ($((SECONDS - started))s)"
+                record pass "${cell[@]}"
+            elif [[ "$status" -eq 77 && -z "${CI_STRICT:-}" ]]; then
+                echo "  SKIP  route key $engine: $(grep -m1 '^SKIP ' "$log" | cut -c6-)"
+                record skip "${cell[@]}" detail="$(grep -m1 '^SKIP ' "$log" | cut -c6-)"
+            else
+                echo "  FAIL  route key $engine ($((SECONDS - started))s)"
+                record fail "${cell[@]}" detail="$(grep -m1 '^\(SKIP\|FAIL\) ' "$log" || echo "route-key.ts exited $status")"
+                sed 's/^/        /' "$log" >&2 || true
+                overall=1
+            fi
+        done
+    fi
 }
 
 # A publisher and fresh readers exercise on-demand claims through this run's relay.
@@ -2320,6 +2419,11 @@ run_claims_case() {
     local prefix="claims-$1-$2-$$-$RANDOM" command=(bun)
     local cell=(case="claims $transport" publisher="$runtime" subscriber="$runtime" version=moq-lite-07-wip log="$LOGS/$name.log")
     [[ "$runtime" != js-native-node ]] || command=(node --import tsx)
+    if js_lite07 moq-lite-07-wip "$runtime"; then
+        echo "  SKIP  claims $transport $runtime"
+        record skip "${cell[@]}" detail="$JS_LITE07_SKIP"
+        return
+    fi
     if is_broken "$runtime"; then
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
@@ -2377,6 +2481,11 @@ run_replacement_case() {
     local runtime="$1" transport="$2" name="replace-$1-$2" started=$SECONDS
     local prefix="replace-$1-$2-$$-$RANDOM"
     local cell=(case="track replacement $transport" publisher="$runtime" subscriber="$runtime" version=moq-lite-07-wip log="$LOGS/$name.log")
+    if js_lite07 moq-lite-07-wip "$runtime"; then
+        echo "  SKIP  track replacement $transport $runtime"
+        record skip "${cell[@]}" detail="$JS_LITE07_SKIP"
+        return
+    fi
     if is_broken "$runtime"; then
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
@@ -2440,7 +2549,7 @@ run_catalog_fanout() {
     exec 9<>"$fifo"
     from=$(relay_next_line)
     before=$(relay_inflated) || why="relay metrics unavailable"
-    # Subtree grants, which moq-transport's AUTH extension can carry too.
+    # Subtree grants, which a moq-transport request can name too.
     harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_catalog_publisher "$fifo" "$(token_url --publish "$broadcast/**")" "$broadcast"
     pid="$HARNESS_PID"
     for version in "${CATALOG_VERSIONS[@]}"; do
@@ -2449,8 +2558,8 @@ run_catalog_fanout() {
     done
     for reader in "${readers[@]}"; do harness_wait "$reader" || true; done
     for version in "${CATALOG_VERSIONS[@]}"; do
-        want="catalog compress=false video=hd,sd audio=en,fr"
-        [[ "$version" != moq-lite-07-wip ]] || want="catalog compress=true video=hd,sd audio=en,fr"
+        want="catalog compression=none video=hd,sd audio=en,fr"
+        [[ "$version" != moq-lite-07-wip ]] || want="catalog compression=deflate video=hd,sd audio=en,fr"
         # Like run_native, a verified result survives the NAPI addon's exit crash.
         grep -qx "$want" "$LOGS/$name-$version.log" || why="${why:-$version reader did not report: $want}"
     done
@@ -2461,7 +2570,7 @@ run_catalog_fanout() {
     got=$(relay_log_since "$from" | sed -n 's/.*conn{id=[0-9]* .*negotiated version=\([^ ]*\).*/\1/p' | sort | tr '\n' ' ')
     if [[ -z "$why" ]] && ! grep -qx 'catalog acknowledged' "$LOGS/$name-pub.log"; then
         why="publisher did not acknowledge"
-    elif [[ -z "$why" && "$got" != "moq-lite-06 moq-lite-07-wip moq-lite-07-wip moq-transport-22 " ]]; then
+    elif [[ -z "$why" && "$got" != "moq-lite-06 moq-lite-07-wip moq-transport-22 " ]]; then
         why="relay connections negotiated ${got:-nothing}"
     elif [[ -z "$why" && "$((after - before))" != "$bytes" ]]; then
         why="relay inflated $((after - before)) bytes, not the catalog's ${bytes:-?} once"

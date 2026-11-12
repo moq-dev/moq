@@ -22,7 +22,7 @@ export interface LocalProps {
 	cameraEnabled?: GetterInit<boolean>;
 	/** Capture the microphone. Pass a Signal to share it with the app. */
 	microphoneEnabled?: GetterInit<boolean>;
-	/** Prompt for and capture a screen. Pass a Signal to share it with the app. */
+	/** Prompt for and capture a screen; turns off when the share ends. Pass a Signal to share it with the app. */
 	screenEnabled?: GetterInit<boolean>;
 	/** Seed the published user.json fields. */
 	user?: UserProps;
@@ -33,7 +33,8 @@ export interface LocalProps {
  *
  * Enable {@link enabled} to join (announce `{identity}/camera.hang`). Camera and
  * microphone capture are separate knobs; the screenshare broadcast is
- * announced only while a share is live.
+ * announced only while joined and a share is live, so nothing is published
+ * before joining or after leaving.
  */
 export class Local {
 	/** Participant identity. */
@@ -46,7 +47,7 @@ export class Local {
 	readonly cameraEnabled: Signal<boolean>;
 	/** Capture the microphone. */
 	readonly microphoneEnabled: Signal<boolean>;
-	/** Prompt for and capture a screen. Unannounce when the share ends. */
+	/** Prompt for and capture a screen. Turns off when the share ends, and `share.out.state` says why. */
 	readonly screenEnabled: Signal<boolean>;
 
 	/** True while the local participant is composing a chat message. */
@@ -73,12 +74,31 @@ export class Local {
 	readonly cameraCapture: Publish.Video.Capture;
 	/** Shared capture feeding the screen renditions. */
 	readonly screenCapture: Publish.Video.Capture;
+	/** Microphone gain and captured audio graphs for analysis. */
+	readonly audio: {
+		/** Microphone gain and capture graph. */
+		readonly microphone: {
+			/** Linear gain applied before encoding, where 1 is unity. */
+			readonly volume: Signal<number>;
+			/** Raw microphone graph while capture is running; its context may render silently. */
+			readonly root: Getter<AudioNode | undefined>;
+		};
+		/** Screenshare capture graph. */
+		readonly screen: {
+			/** Raw screen audio graph while capture is running; its context may render silently. */
+			readonly root: Getter<AudioNode | undefined>;
+		};
+	};
+
 	#preview = new Signal<Preview>({});
 	#cameraVideo = new Signal<Publish.Video.Source | undefined>(undefined);
 	#cameraAudio = new Signal<Publish.Audio.Source | undefined>(undefined);
 	#screenVideo = new Signal<Publish.Video.Source | undefined>(undefined);
 	#screenAudioSource = new Signal<Publish.Audio.Source | undefined>(undefined);
 	#screenLive = new Signal(false);
+
+	// The screen broadcast and its encoders run only while joined and sharing.
+	#screenPublished = new Signal(false);
 
 	#signals = new Effect();
 
@@ -173,9 +193,13 @@ export class Local {
 		});
 		this.#signals.cleanup(() => this.camera.close());
 
+		this.#signals.run((effect) => {
+			this.#screenPublished.set(effect.get(this.enabled) && effect.get(this.#screenLive));
+		});
+
 		this.screen = new Publish.Broadcast({
 			origin,
-			enabled: this.#screenLive,
+			enabled: this.#screenPublished,
 			name: screenName,
 			display: this.screenCapture.out.display,
 		});
@@ -220,7 +244,7 @@ export class Local {
 		const screenHd = new Publish.Video.Encoder("video/hd", {
 			broadcast: this.screen,
 			capture: this.screenCapture,
-			enabled: this.#screenLive,
+			enabled: this.#screenPublished,
 			bandwidth,
 			config: { maxPixels: 1920 * 1080 },
 		});
@@ -229,7 +253,7 @@ export class Local {
 		const screenSd = new Publish.Video.Encoder("video/sd", {
 			broadcast: this.screen,
 			capture: this.screenCapture,
-			enabled: this.#screenLive,
+			enabled: this.#screenPublished,
 			bandwidth,
 			config: { maxPixels: 960 * 540 },
 		});
@@ -244,21 +268,25 @@ export class Local {
 		const screenAudio = new Publish.Audio.Encoder("audio", {
 			broadcast: this.screen,
 			capture: screenAudioCapture,
-			enabled: this.#screenLive,
+			enabled: this.#screenPublished,
 			bandwidth,
 		});
 		this.#signals.cleanup(() => screenAudio.close());
 
+		this.audio = {
+			microphone: { volume: cameraAudio.volume, root: cameraAudioCapture.out.root },
+			screen: { root: screenAudioCapture.out.root },
+		};
+
 		this.#signals.run((effect) => {
-			const source = effect.get(this.share.out.source);
-			effect.set(this.#screenVideo, source?.video);
-			effect.set(this.#screenAudioSource, source?.audio);
-			const live = !!source?.video || !!source?.audio;
-			const wasLive = this.#screenLive.peek();
-			this.#screenLive.set(live);
-			if (!live && wasLive) {
-				this.screenEnabled.set(false);
-			}
+			const state = effect.get(this.share.out.state);
+			const media = state.kind === "live" ? state.media : undefined;
+			effect.set(this.#screenVideo, media?.video);
+			effect.set(this.#screenAudioSource, media?.audio);
+			this.#screenLive.set(media !== undefined);
+			// A share that ended for any reason, including a dismissed picker, turns sharing off, so the
+			// next share takes a new toggle. `share.out.state` keeps the reason.
+			if (state.kind === "ended") this.screenEnabled.set(false);
 		});
 
 		this.#signals.run((effect) => {

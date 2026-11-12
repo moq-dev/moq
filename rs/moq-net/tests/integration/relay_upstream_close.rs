@@ -19,7 +19,7 @@ use moq_net::track::Delay;
 use std::time::Duration;
 
 use moq_net::track::Subscription;
-use moq_net::{Error, Hop, Timestamp, Version};
+use moq_net::{Error, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
@@ -49,9 +49,10 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// How the publisher's session to the relay ends.
@@ -154,7 +155,7 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 			}
 			group.finish().unwrap();
 		}
-		track.finish().unwrap();
+		let _finished = track.clone().finish().unwrap();
 	}
 
 	match end {

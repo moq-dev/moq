@@ -214,6 +214,8 @@ pub(crate) fn decode_end(body: &[u8], framing: super::Framing) -> Result<Decoded
 /// is negotiated.
 #[cfg(feature = "async")]
 pub(crate) struct Records {
+	/// Whether the Group State is written, which waits for the group's relay state.
+	stated: bool,
 	/// The previous record's Object ID, `None` before the first.
 	prior: Option<u64>,
 	/// The stream stops at a frame cap, so its Group State promised no END_OF_GROUP.
@@ -224,29 +226,33 @@ pub(crate) struct Records {
 
 #[cfg(feature = "async")]
 impl Records {
-	/// Buffer the Group State for a stream serving `group` from its current index, and
-	/// return the records its frames need.
-	///
-	/// `capped` when the stream stops before the group may end. Writes nothing and returns
-	/// `None` unless the session negotiated the extension.
-	pub fn start<W: crate::transport::poll::SendStream>(
-		writer: &mut crate::coding::Writer<W, Version>,
-		ietf: bool,
-		group: &group::Consumer,
-		capped: bool,
-		timescale: Option<Timescale>,
-	) -> Result<Option<Self>, Error> {
-		if !ietf {
-			return Ok(None);
-		}
-		let wire = group.wire();
-		let whole = group.index() <= group.first_frame();
-		writer.buffer_varint(encode_state(wire.as_ref(), whole, capped))?;
-		Ok(Some(Self {
+	/// The records a group stream needs, or `None` unless the session negotiated the
+	/// extension. `capped` when the stream stops before the group may end.
+	pub fn new(ietf: bool, capped: bool, timescale: Option<Timescale>) -> Option<Self> {
+		ietf.then_some(Self {
+			stated: false,
 			prior: None,
 			capped,
 			timescale,
-		}))
+		})
+	}
+
+	/// Buffer the Group State for a stream serving `group` from its current index, once the
+	/// ingest has settled its relay state. Call before any record.
+	pub fn poll_state<W: crate::transport::poll::SendStream>(
+		&mut self,
+		writer: &mut crate::coding::Writer<W, Version>,
+		group: &mut group::Consumer,
+		waiter: &kio::Waiter,
+	) -> std::task::Poll<Result<(), Error>> {
+		if self.stated {
+			return std::task::Poll::Ready(Ok(()));
+		}
+		let wire = std::task::ready!(group.poll_wire(waiter))?;
+		let whole = group.index() <= group.first_frame();
+		writer.buffer_varint(encode_state(wire.as_ref(), whole, self.capped))?;
+		self.stated = true;
+		std::task::Poll::Ready(Ok(()))
 	}
 
 	/// Buffer the record for the frame at `index`, ahead of its timestamp and size.
@@ -735,7 +741,7 @@ pub(crate) async fn test_hop(
 ) -> (crate::origin::Producer, [crate::Session; 2]) {
 	use crate::model::ProduceTest;
 	let version = crate::Version::Lite(Version::Lite07);
-	let downstream = crate::origin::Config::new(crate::Hop::new(3).unwrap()).produce();
+	let downstream = crate::origin::Config::new(std::num::NonZeroU64::new(3).unwrap()).produce();
 	let (client, server) = crate::transport::memory::pair(crate::transport::memory::Config {
 		protocol: Some(version.alpn().to_string()),
 		..Default::default()
@@ -874,7 +880,7 @@ mod hop_tests {
 	async fn relayed_state_crosses_while_the_group_is_open() {
 		for offer in [[true, true], [true, false], [false, true]] {
 			let negotiated = offer == [true, true];
-			let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+			let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 			let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
 			info.max_age = Some(Duration::from_secs(7));
@@ -981,7 +987,7 @@ mod hop_tests {
 
 	/// Subscribe across a negotiated hop to a track with `info`.
 	async fn subscribe_across_info(info: track::Info) -> Result<(), crate::Error> {
-		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 		let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let _track = broadcast.broadcast().create_track("video", info).unwrap();
 
@@ -1090,7 +1096,7 @@ mod hop_tests {
 	/// relay state appears on the way, nor a moq-transport draft.
 	#[kio::test]
 	async fn plain_media_crosses_unchanged() {
-		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 		let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let track = broadcast
 			.broadcast()
@@ -1130,7 +1136,7 @@ mod hop_tests {
 	async fn ietf_timestamps_keep_their_provenance_across_a_hop() {
 		for offer in [[true, true], [true, false], [false, true]] {
 			let negotiated = offer == [true, true];
-			let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+			let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 			let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let info = track::Info {
 				properties: draft22(Vec::new()),
@@ -1198,15 +1204,15 @@ mod hop_tests {
 	/// follows its Object Record.
 	#[kio::test]
 	async fn compressed_media_crosses_a_negotiated_hop() {
-		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 		let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let info = track::Info::timed()
 			.with_timescale(Timescale::MILLI)
-			.with_compress(true);
+			.with_compression(crate::track::Compression::Deflate);
 		let track = broadcast.broadcast().create_track("video", info).unwrap();
 		let (downstream, sessions) = test_hop(&upstream, "room", [true, true]).await;
 		let (_copy, mut subscriber) = subscribe(&downstream).await;
-		assert!(subscriber.info().compress);
+		assert_eq!(subscriber.info().compression, crate::track::Compression::Deflate);
 
 		let payload = |n: u8| vec![n; 300];
 		let mut group = track.append_group().unwrap();

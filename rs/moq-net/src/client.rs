@@ -17,11 +17,11 @@ pub struct Client {
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
 	stats: stats::Session,
-	versions: Versions,
+	pub(crate) versions: Versions,
 	url: Option<url::Url>,
 	setup_token: Option<setup::Token>,
 	cost: Option<u64>,
-	peer_hop: Option<crate::Hop>,
+	peer_hop: Option<std::num::NonZeroU64>,
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
 	auth: Option<crate::auth::Handle>,
@@ -59,14 +59,6 @@ impl Client {
 	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.stats = stats;
 		self
-	}
-
-	/// Set both publish and subscribe from one shared [`origin::Producer`].
-	///
-	/// Equivalent to [`with_publisher`](Self::with_publisher) and
-	/// [`with_subscriber`](Self::with_subscriber) with the same origin.
-	pub fn with_origin(self, origin: origin::Producer) -> Self {
-		self.with_publisher(&origin).with_subscriber(origin)
 	}
 
 	/// Cap what the server can make this session hold. Defaults to [`session::Limits::default`](crate::session::Limits::default).
@@ -125,6 +117,11 @@ impl Client {
 	pub fn with_url(mut self, url: url::Url) -> Self {
 		self.url = Some(url);
 		self
+	}
+
+	/// The URL [`with_url`](Self::with_url) set, if any.
+	pub fn url(&self) -> Option<&url::Url> {
+		self.url.as_ref()
 	}
 
 	/// The request target our SETUP carries: the dialed URL's path, plus `?` and the
@@ -224,8 +221,9 @@ impl Client {
 	/// moq-transport via the MoQ Cluster extension).
 	///
 	/// The dialer is the side that knows what a link costs, because it chose the peer:
-	/// use `0` for a sibling in the same datacenter and something large for another
-	/// region across a metered backbone. So this prices both directions. We add it to
+	/// use `1` for a sibling in the same datacenter and something large for another
+	/// region across a metered backbone. Zero is refused on moq-lite-07, whose routing
+	/// needs every link to cost something. So this prices both directions. We add it to
 	/// the route cost of every announcement the peer sends us, and declare it in our
 	/// SETUP so the peer adds it to every announcement we send, which is what a server
 	/// accepting an anonymous connection needs: it cannot tell a sibling from a
@@ -239,7 +237,7 @@ impl Client {
 		self
 	}
 
-	/// Assign the identity this peer's routes are attributed to, overriding the fresh
+	/// Assign the hop id this peer's routes are attributed to, overriding the fresh
 	/// per-dial default.
 	///
 	/// A dialed session whose peer declares no hop gets a random one for that
@@ -255,7 +253,7 @@ impl Client {
 	/// really are one peer reconnecting or running redundant links, and a bug
 	/// otherwise. Derive it from the authenticated identity, never from something
 	/// coarser like the remote address.
-	pub fn with_peer_hop(mut self, hop: crate::Hop) -> Self {
+	pub fn with_peer_hop(mut self, hop: std::num::NonZeroU64) -> Self {
 		self.peer_hop = Some(hop);
 		self
 	}
@@ -266,7 +264,7 @@ impl Client {
 	/// connection gets a fresh one, matching the per-session default an accepted
 	/// session already has.
 	fn assigned_hop(&self) -> crate::Hop {
-		self.peer_hop.unwrap_or_else(crate::Hop::random)
+		self.peer_hop.map_or_else(crate::Hop::random, crate::Hop::from)
 	}
 
 	/// The new session's side of its auth handle: the one from [`with_auth`](Self::with_auth),
@@ -274,7 +272,7 @@ impl Client {
 	fn link(&self, supported: bool, requests: bool) -> Result<crate::auth::Link, Error> {
 		match &self.auth {
 			Some(handle) => crate::auth::Link::attach(handle, supported, requests),
-			None if requests => Ok(crate::auth::Link::ietf(supported)),
+			None if requests => Ok(crate::auth::Link::ietf()),
 			None => Ok(crate::auth::Link::new(supported)),
 		}
 	}
@@ -327,12 +325,15 @@ impl Client {
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				node: None,
 				// Older versions carry the credential in the URL query instead.
 				token: self.setup_token.clone().filter(|_| version.has_auth()),
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
 				// Filled by `lite::start` from the attached origin handles.
 				route_key: None,
+				// Filled by `lite::start` from the version.
+				lite06_chain: false,
 			}
 		} else {
 			lite::Setup::default()
@@ -420,11 +421,10 @@ impl Client {
 
 				// SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				// The peer's SETUP decides whether AUTH is negotiated. A handle that does not
-				// offer it keeps the option out of our SETUP and presents no credential.
-				let auth = self.link(self.extensions.auth, true)?;
+				// moq-transport carries no AUTH: a token rides the requests that name it.
+				let auth = self.link(false, true)?;
 				let peer_implementation = setup::PeerImplementation::default();
-				let (protocol, goaway, credential) = ietf::start(ietf::Config {
+				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					stats: self.stats.clone(),
 					limits: self.limits,
@@ -448,7 +448,7 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Connect::Started(Session::new(
+				return Ok(Connect::Started(Box::new(Session::new(
 					runtime,
 					session,
 					v,
@@ -458,7 +458,7 @@ impl Client {
 						stats: self.stats.clone(),
 						goaway,
 						auth,
-						credential,
+						credential: None,
 						estimate: None,
 						peer_target: None,
 						bandwidth: self.allocator(),
@@ -466,7 +466,7 @@ impl Client {
 						peer_implementation,
 						datagrams_unrouted: None,
 					},
-				)));
+				))));
 			}
 			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_07_WIP)) => {
 				let version = match alpn {
@@ -477,7 +477,7 @@ impl Client {
 				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
 				return self
 					.start_lite(runtime, session, version, peer_hop)
-					.map(Connect::Started);
+					.map(|started| Connect::Started(Box::new(started)));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
@@ -485,7 +485,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 				return self
 					.start_lite(runtime, session, lite::Version::Lite04, peer_hop)
-					.map(Connect::Started);
+					.map(|started| Connect::Started(Box::new(started)));
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
@@ -493,7 +493,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 				return self
 					.start_lite(runtime, session, lite::Version::Lite03, peer_hop)
-					.map(Connect::Started);
+					.map(|started| Connect::Started(Box::new(started)));
 			}
 			// No ALPN, or `moql`: negotiate moq-lite in a bidi SETUP.
 			Some(ALPN_LITE) | None => self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?,
@@ -588,8 +588,9 @@ struct Negotiation {
 enum Connect {
 	/// Not polled yet: the transport's ALPN picks the path.
 	Start { runtime: Deadlines, session: Transport },
-	/// Started without waiting on the peer.
-	Started((Session, crate::Driver)),
+	/// Started without waiting on the peer. Boxed, being several times the size of the
+	/// handshake steps.
+	Started(Box<(Session, crate::Driver)>),
 	/// Waiting its turn for credit to open the bidi stream the SETUP is negotiated on.
 	Open {
 		negotiation: Negotiation,
@@ -616,6 +617,12 @@ impl Connect {
 	/// The started session, or the error the handshake failed with.
 	fn poll(&mut self, client: &Client, waiter: &kio::Waiter) -> Poll<Result<(Session, crate::Driver), Error>> {
 		let res = ready!(self.poll_step(client, waiter));
+		// A server that shares no version with us closes the session over our SETUP, and its
+		// close reason can lose the race to the stream's reset, so name the likely cause here.
+		if let (Err(err), Self::Exchange { negotiation, .. }) = (&res, &*self) {
+			let offered: Vec<String> = negotiation.supported.iter().map(ToString::to_string).collect();
+			tracing::warn!(%err, ?offered, "version negotiation failed; the server may accept none of the offered versions");
+		}
 		// Release what the handshake held, even on a failure.
 		*self = Self::Done;
 		Poll::Ready(res)
@@ -634,7 +641,7 @@ impl Connect {
 					let Self::Started(started) = std::mem::replace(self, Self::Done) else {
 						unreachable!("matched above");
 					};
-					return Poll::Ready(Ok(started));
+					return Poll::Ready(Ok(*started));
 				}
 				Self::Open { negotiation, open } => {
 					// The SETUP keeps lite-01's framing whichever version it offers.
@@ -1046,7 +1053,7 @@ mod tests {
 			.with_protocol(crate::version::ALPN_LITE_05);
 
 		// A subscribe origin is what makes the client open an announce stream at all.
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let client = Client::new()
 			.with_versions([Version::Lite(lite::Version::Lite05)].into())
 			.with_subscriber(origin);
@@ -1212,7 +1219,11 @@ mod tests {
 			let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 			let client = Client::new()
 				.with_versions(Version::Lite(lite::Version::Lite04).into())
-				.with_stats(registry.tier(Tier::default()).session(crate::Path::from_static("root")));
+				.with_stats(
+					registry
+						.tier(Tier::default())
+						.session(crate::stats::SessionInfo::new(crate::Path::from_static("root"))),
+				);
 			let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 			let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake)).unwrap();
 			session.abort(abort);
@@ -1244,7 +1255,11 @@ mod tests {
 		let registry = Registry::new(Default::default());
 		let client = Client::new()
 			.with_versions(Version::Lite(lite::Version::Lite04).into())
-			.with_stats(registry.tier(Tier::default()).session(crate::Path::from_static("root")));
+			.with_stats(
+				registry
+					.tier(Tier::default())
+					.session(crate::stats::SessionInfo::new(crate::Path::from_static("root"))),
+			);
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 		let task = Transport::new(FakeSession::new(Some(ALPN_LITE_04), Vec::new()));
 		let (session, mut driver) =

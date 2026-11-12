@@ -37,6 +37,8 @@ def report(root, directories):
                 found = lines.setdefault(source, {})
                 found[int(number)] = found.get(int(number), False) or int(count) > 0
     summary = {}
+    # Sources above are real paths; a symlinked root (macOS /var) must match them.
+    root = root.resolve()
     manifest = json.loads((root / "package.json").read_text())
     for directory in [root / "js/common", *(root / path for path in manifest["workspaces"] if path.startswith("js/"))]:
         sources = [
@@ -66,7 +68,9 @@ def main():
     (ROOT / "target/coverage/js/summary.json").unlink(missing_ok=True)
     for directory in selected:
         (ROOT / "target/coverage/js" / directory.name / "lcov.info").unlink(missing_ok=True)
-    subprocess.run(["bun", "install", "--frozen-lockfile"], cwd=ROOT, check=True)
+    subprocess.run(
+        ["uv", "run", "--no-project", "python", str(ROOT / "sh/js/install.py"), "frozen"], cwd=ROOT, check=True
+    )
     for directory in selected:
         out = ROOT / "target/coverage/js" / directory.name
         out.mkdir(parents=True, exist_ok=True)

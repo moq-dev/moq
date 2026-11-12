@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept as acceptSession, connect as connectSession } from "./connection/index.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import { hooks } from "./internal.ts";
+import { hooks, staleHole } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -306,16 +306,55 @@ test("fill: a refusal fails the readers waiting now, and a later reader asks aga
 	broadcast.close();
 });
 
+test("fill: a group arriving after a refusal reaches the reader the refusal named", async () => {
+	const { broadcast, track } = resumed(5n);
+	const requests = track.requests();
+	const waiting = wireOf(broadcast).fetchGroup("video", 2n);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	fill.refuseGroups(2n, 3n, new StreamError(StreamCode.Cancel, { message: "storage busy" }));
+	// Before the waiting fetch looks again.
+	const group = track.createGroup(2n);
+	group.writeFrame({ payload: enc.encode("late") });
+	group.finish();
+	fill.close();
+	expect(await frames(await waiting)).toEqual(["late"]);
+
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: the track's skip of a run a reader's fill refused is what the reader reports", async () => {
+	const { broadcast, track } = resumed(4n);
+	const requests = track.requests();
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }],
+		delay: { max: null },
+	});
+	const first = reader.recvGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	fill.refuseGroups(0n, 2n, new StreamError(StreamCode.Cancel, { message: "storage busy" }));
+	// The publisher declares the refused run never produced; its verdict wins, as in Rust.
+	track.skipGroups(0n, 2n);
+	expect(hooks.tryDrop(reader)).toMatchObject({ kind: "drop", start: 0n, end: 2n, skip: true });
+
+	fill.close();
+	requests.close();
+	broadcast.close();
+	await first.catch(() => undefined);
+});
+
 test("fill: a fill names the most urgent priority and loosest budget among its readers", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
-	const low = track.subscribe({ ...history, priority: 1, delay: { max: Milli(60_000) } });
+	const low = track.subscribe({ ...history, priority: 1, delay: { max: Duration.millis(60_000) } });
 	void drain(low);
 	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no fill");
 	expect([fill.start, fill.end]).toEqual([0n, 5n]);
 	expect(fill.priority).toBe(1);
-	expect(fill.maxDelay).toBe(Milli(60_000));
+	expect(fill.maxDelay).toEqual(Duration.millis(60_000));
 	expect(fill.order).toBe("ascending");
 
 	const high = track.subscribe({ ...history, priority: 7, order: "descending" });
@@ -330,6 +369,30 @@ test("fill: a fill names the most urgent priority and loosest budget among its r
 	high.close();
 	await yieldNow();
 	expect(fill.wanted()).toBeUndefined();
+
+	fill.close();
+	requests.close();
+	broadcast.close();
+});
+
+// A stale verdict settles only the readers it covers, so a fetch it does not settle keeps its fill.
+// Rust records a stale run without answering any fill.
+test("fill: a stale verdict leaves an outstanding fill owed", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	const requests = track.requests();
+	track.createGroup(3n).finish();
+	const fetching = wireOf(broadcast).fetchGroup("video", 2n);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	expect(fill.wanted()).toBe(2n);
+
+	hooks.dropTrackGroups(track, 2n, 3n, staleHole(500));
+	expect(fill.wanted()).toBe(2n);
+	const group = fill.accept(2n);
+	group.writeFrame({ payload: enc.encode("filled") });
+	group.finish();
+	expect(await frames(await fetching)).toEqual(["filled"]);
 
 	fill.close();
 	requests.close();
@@ -367,7 +430,7 @@ test("fill: an ordered reader stops waiting on an unanswered fill once its budge
 		const requests = track.requests();
 		const reader = track.subscribe({
 			ranges: [{ start: { absolute: 0n } }],
-			delay: { max: Milli(1000) },
+			delay: { max: Duration.millis(1000) },
 			order: "ascending",
 		});
 		const next = reader.ordered().nextGroup();
@@ -376,7 +439,7 @@ test("fill: an ordered reader stops waiting on an unanswered fill once its budge
 		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
 
 		// Group 5 arrived when the reader asked, so its budget gives up the holes below a second on.
-		await clock.advance(Nano.fromMilli(Milli(1001)));
+		await clock.advance(Duration.millis(1001));
 		expect((await next)?.sequence).toBe(5n);
 
 		fill?.close();
@@ -395,14 +458,17 @@ test("fill: an arrival-order reader stops waiting on an unanswered fill once its
 		const { broadcast, track } = resumed(5n);
 		track.finish();
 		const requests = track.requests();
-		const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Milli(1000) } });
+		const reader = track.subscribe({
+			ranges: [{ start: { absolute: 0n } }],
+			delay: { max: Duration.millis(1000) },
+		});
 		expect((await reader.recvGroup())?.sequence).toBe(5n);
 		const next = reader.recvGroup();
 		const fill = await requests.requestedFill();
 		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
 
 		// The fill never answers; the holes go past the budget, and the finished track ends the read.
-		await clock.advance(Nano.fromMilli(Milli(1001)));
+		await clock.advance(Duration.millis(1001));
 		expect(await next).toBeUndefined();
 		// The reader gave the stale holes up, so the handler hears it no longer waits on them.
 		expect(fill?.wanted()).toBeUndefined();
@@ -424,7 +490,7 @@ test("fill: a handler hears that a reader stopped wanting what it handed out pas
 		const requests = track.requests();
 		const reader = track.subscribe({
 			ranges: [{ start: { absolute: 0n } }],
-			delay: { max: Milli(1000) },
+			delay: { max: Duration.millis(1000) },
 			order: "ascending",
 		});
 		const next = reader.ordered().nextGroup();
@@ -435,7 +501,7 @@ test("fill: a handler hears that a reader stopped wanting what it handed out pas
 		const unwanted = fill.unwanted(0n);
 
 		// Past the budget the reader takes group 5, leaving the holes below it for good.
-		await clock.advance(Nano.fromMilli(Milli(1001)));
+		await clock.advance(Duration.millis(1001));
 		expect((await next)?.sequence).toBe(5n);
 		expect(await changed).toBeUndefined();
 		await unwanted;
@@ -463,12 +529,12 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 		};
 		// Holes 0-1 wait on group 2, which arrives first; holes 3-4 on group 5, half a second later.
 		write(2n);
-		await clock.advance(Nano.fromMilli(Milli(500)));
+		await clock.advance(Duration.millis(500));
 		write(5n);
 		const requests = track.requests();
 		const reader = track.subscribe({
 			ranges: [{ start: { absolute: 0n }, end: { absolute: 6n } }],
-			delay: { max: Milli(1000) },
+			delay: { max: Duration.millis(1000) },
 		});
 		expect((await reader.recvGroup())?.sequence).toBe(2n);
 		expect((await reader.recvGroup())?.sequence).toBe(5n);
@@ -484,7 +550,7 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 		]);
 
 		// Holes 0-1 are past the budget now, but 3-4 are not: the read waits on them.
-		await clock.advance(Nano.fromMilli(Milli(600)));
+		await clock.advance(Duration.millis(600));
 		const late = fills[1].accept(3n);
 		late.writeFrame({ payload: enc.encode("old 3") });
 		late.finish();
@@ -720,11 +786,156 @@ test("fill: a group the track gives up elsewhere answers the fill", async () => 
 
 	// An upstream SUBSCRIBE_DROP, say: the handler is no longer asked for it.
 	const cut = new StreamError(StreamCode.Cancel, { message: "cut upstream" });
-	hooks.dropTrackGroups(track, 2n, 3n, cut);
+	hooks.dropTrackGroups(track, 2n, 3n, { error: cut });
 	expect(fill.wanted()).toBeUndefined();
 	await expect(fetching).rejects.toBe(cut);
 
 	fill.close();
+	requests.close();
+	broadcast.close();
+});
+
+// A received stale run that does not settle a reader is unknown to it, so its fill is still asked:
+// here the upstream judged it under an open range, while the reader is capped. Mirrors the Rust
+// `Misses::unclaimed`.
+test("fill: a stale run that does not settle the reader is still asked for", async () => {
+	const { broadcast, track } = resumed(2n);
+	const requests = track.requests();
+	hooks.dropTrackGroups(track, 0n, 2n, staleHole(60_000));
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
+		delay: { max: Duration.millis(500) },
+	});
+	void drain(reader);
+	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(fill && [fill.start, fill.end]).toEqual([0n, 2n]);
+
+	fill?.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: a stale run that does not settle the reader leaves its own refusal reported", async () => {
+	const { broadcast, track } = resumed(2n);
+	const requests = track.requests();
+	hooks.dropTrackGroups(track, 0n, 2n, staleHole(60_000));
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
+		delay: { max: Duration.millis(500) },
+	});
+	const first = reader.recvGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	const refusal = new StreamError(StreamCode.Cancel, { message: "storage busy" });
+	fill.refuseGroups(0n, 2n, refusal);
+	expect(hooks.tryDrop(reader)).toMatchObject({ kind: "drop", start: 0n, end: 2n, error: refusal });
+
+	fill.close();
+	requests.close();
+	broadcast.close();
+	await first.catch(() => undefined);
+});
+
+test("fill: a stale run that does not settle the reader keeps its pending refusals", async () => {
+	const { broadcast, track } = resumed(6n);
+	const requests = track.requests();
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 6n } }],
+		delay: { max: Duration.millis(500) },
+	});
+	const first = reader.recvGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	const refusal = new StreamError(StreamCode.Cancel, { message: "storage busy" });
+	fill.refuseGroups(0n, 1n, refusal);
+	fill.refuseGroups(3n, 4n, refusal);
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 0n, end: 1n, error: refusal });
+	// Folded in as a change, over the refusal still to report.
+	hooks.dropTrackGroups(track, 2n, 5n, staleHole(60_000));
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 3n, end: 4n, error: refusal });
+
+	fill.close();
+	requests.close();
+	broadcast.close();
+	await first.catch(() => undefined);
+});
+
+// The upstream judged 0..2 and 4..6 under 500ms, and gave up both of them as stale.
+function judgedTwice() {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	hooks.receiveTrack(track);
+	const requests = track.requests();
+	hooks.supersedeStale(track, [
+		{ start: 0n, end: 2n },
+		{ start: 4n, end: 6n },
+	]);
+	hooks.dropTrackGroups(track, 0n, 2n, staleHole(500));
+	hooks.dropTrackGroups(track, 4n, 6n, staleHole(500));
+	const reader = (ranges: [bigint, bigint][]) =>
+		track.subscribe({
+			ranges: ranges.map(([start, end]) => ({ start: { absolute: start }, end: { absolute: end } })),
+			delay: { max: Duration.millis(500) },
+		});
+	return { broadcast, requests, reader };
+}
+
+// A stale verdict settles a reader that reads every range the upstream judged it against, however
+// many there are, with nothing received and no fill asked. Mirrors Rust.
+test("fill: a stale verdict settles a reader of every range it judged", async () => {
+	const { broadcast, requests, reader: subscribe } = judgedTwice();
+	const reader = subscribe([
+		[0n, 2n],
+		[4n, 6n],
+	]);
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 0n, end: 2n, stale: 500 });
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 4n, end: 6n, stale: 500 });
+	expect(hooks.tryRecvGroup(reader, false)).toEqual({ kind: "done" });
+	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(fill).toBeUndefined();
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+// A reader whose ranges only partly overlap the ones a stale verdict was judged against is settled
+// where it reads every judged group above the run, and asks a fill for the rest, even with nothing
+// received: no update brings it, since its ranges add nothing to the upstream's terms. Mirrors Rust.
+test("fill: a stale verdict settles a partly overlapping reader only where it reads above", async () => {
+	const { broadcast, requests, reader: subscribe } = judgedTwice();
+	// Reads every judged group above each run, and more past them: settled.
+	const wider = subscribe([
+		[1n, 2n],
+		[4n, 8n],
+	]);
+	expect(hooks.tryDrop(wider)).toMatchObject({ start: 1n, end: 2n, stale: 500 });
+	expect(hooks.tryDrop(wider)).toMatchObject({ start: 4n, end: 6n, stale: 500 });
+	expect(hooks.tryDrop(wider)).toBeUndefined();
+	expect(await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)])).toBeUndefined();
+	// Stops at 4, which the upstream judged against 5: its own newest, which no verdict convicts.
+	// Both runs are unknown to it, and asked for.
+	const narrower = subscribe([
+		[0n, 2n],
+		[4n, 5n],
+	]);
+	expect(hooks.tryRecvGroup(narrower, false)).toEqual({ kind: "idle" });
+	expect(hooks.tryDrop(narrower)).toBeUndefined();
+	const asked: bigint[][] = [];
+	for (;;) {
+		const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+		if (!fill) break;
+		asked.push([fill.start, fill.end]);
+	}
+	asked.sort((a, b) => Number(a[0] - b[0]));
+	expect(asked).toEqual([
+		[0n, 2n],
+		[4n, 5n],
+	]);
+
+	wider.close();
+	narrower.close();
 	requests.close();
 	broadcast.close();
 });

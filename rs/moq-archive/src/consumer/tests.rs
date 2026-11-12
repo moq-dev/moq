@@ -203,8 +203,8 @@ async fn a_recording_round_trips() {
 	group.write_frame(None, "a").unwrap();
 	group.finish().unwrap();
 	sleep(Duration::from_millis(10)).await;
-	video.finish().unwrap();
-	log.finish().unwrap();
+	let _video = video.finish().unwrap();
+	let _log = log.finish().unwrap();
 	sleep(Duration::from_millis(10)).await;
 	source.close();
 	recording.await.unwrap().unwrap();
@@ -566,10 +566,9 @@ async fn a_completed_archive_ends_as_recorded() {
 	);
 	assert_eq!(fetch(&broadcast, "errored", 0).await.unwrap(), expected(true, 0, 0..1));
 
-	// The sequence below the end replays as an empty group, and those before it as dropped.
+	// The sequences the archive holds nothing for are skipped, and the end settles over them.
 	let mut reader = subscribe(&broadcast, "tail").await;
 	assert_eq!(next(&mut reader).await.unwrap(), (0, expected(true, 0, 0..1)));
-	assert_eq!(next(&mut reader).await.unwrap(), (3, Vec::new()));
 	assert!(next(&mut reader).await.is_none());
 	assert_eq!(reader.finished().await.unwrap(), Position::group(4));
 }
@@ -613,7 +612,7 @@ async fn a_re_added_track_replays_both_runs() {
 			group.write_frame(pts, format!("run{run}/{sequence}")).unwrap();
 			group.finish().unwrap();
 		}
-		track.finish().unwrap();
+		let track = track.finish().unwrap();
 		sleep(Duration::from_secs(2)).await;
 		drop(track);
 		sleep(Duration::from_millis(10)).await;

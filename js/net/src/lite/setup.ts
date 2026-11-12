@@ -9,7 +9,7 @@ import { type Hop, HopSchema, wireHop } from "../hop.ts";
 import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
 import * as Message from "./message.ts";
-import { hasAuth, hasImplementation, hasRouteKey, hasSetupStream, type Version } from "./version.ts";
+import { hasAuth, hasImplementation, hasNodeId, hasRouteKey, hasSetupStream, type Version } from "./version.ts";
 
 const clientParameters = new WeakSet<Setup>();
 
@@ -24,8 +24,10 @@ const PARAM_PROBE = 0x1n;
 const PARAM_PATH = 0x2n;
 /** Setup Parameter id for the client's intended {@link Role} (client-only). */
 const PARAM_ROLE = 0x3n;
-/** Setup Parameter id for the endpoint's Hop ID. */
+/** Setup Parameter id for the endpoint's Hop ID, or from lite-07 its Node ID. */
 const PARAM_HOP = 0x5n;
+/** The top bit, which marks a Node ID a relay qualified; an endpoint never declares one. */
+const QUALIFIED = 1n << 63n;
 /** Setup Parameter id for the endpoint's implementation name and version. */
 const PARAM_IMPLEMENTATION = 0x6n;
 /** Setup Parameter id for the client's connection credential (client-only, lite-07+). */
@@ -218,7 +220,9 @@ export class Setup {
 	 * This endpoint's Hop ID. The peer uses it to filter announcements and
 	 * subscriptions whose route flows through this endpoint (lite-06 removed the
 	 * per-stream `exclude_hop` in its favor). `undefined` when the endpoint declares
-	 * no identity; a wire value of 0 decodes the same way.
+	 * no identity; a wire value of 0 decodes the same way. From lite-07 it is the
+	 * endpoint's Node ID instead, never 0 or with the top bit set, so a peer that
+	 * receives its own has reached itself.
 	 */
 	hop?: Hop;
 
@@ -270,6 +274,7 @@ export class Setup {
 			params.setVarint(PARAM_ROLE, this.role, version);
 		}
 		if (this.hop !== undefined && this.hop !== 0n) {
+			if (hasNodeId(version) && this.hop >= QUALIFIED) throw new Error("setup Node ID cannot be qualified");
 			params.setVarint(PARAM_HOP, wireHop(this.hop, version), version);
 		}
 		if (this.implementation) {
@@ -302,8 +307,12 @@ export class Setup {
 		const roleCode = await params.getVarint(PARAM_ROLE, version);
 		const role = roleCode === undefined ? Role.Both : roleFromCode(roleCode);
 
-		// 0 carries no identity (it cannot be excluded), so it decodes as absent.
+		// Before lite-07, 0 carries no identity (it cannot be excluded), so it decodes as
+		// absent. A lite-07 Node ID is never 0 or qualified.
 		const hopRaw = await params.getVarint(PARAM_HOP, version);
+		if (hopRaw !== undefined && hasNodeId(version) && (hopRaw === 0n || hopRaw >= QUALIFIED)) {
+			throw new Error("setup Node ID must be non-zero and unqualified");
+		}
 		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : HopSchema.parse(hopRaw);
 
 		// An older version does not know the token parameter, so it ignores it like any other.

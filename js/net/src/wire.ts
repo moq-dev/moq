@@ -11,7 +11,7 @@ import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
 import type * as datagram from "./datagram.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import type { RouteInfo } from "./hop.ts";
+import type { WireRoute } from "./hop.ts";
 import type * as Instance from "./instance.ts";
 import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
@@ -62,14 +62,14 @@ export interface OriginProducer {
 	/** Whether an advertised prefix overlaps the handle's allowed paths. */
 	accepts(prefix: Path.Valid): boolean;
 	/** Land a route a peer announced, taken as given and never forwarded back to a peer. */
-	receive(prefix: Path.Valid, route?: Partial<RouteInfo>): origin.Route;
+	receive(prefix: Path.Valid, route?: Partial<WireRoute>): origin.Claim;
 	attach(discovery: boolean): Dispose;
 	/**
 	 * Hold the origin's announcement streams overlapping `prefix` unsynced until
 	 * the returned dispose: a session holds one while its peer's initial set is in flight.
 	 */
 	snapshot(prefix: Path.Valid): Dispose;
-	readonly requests: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
+	readonly requests: Getter<ReadonlyMap<Path.Valid, RequestSlot>>;
 	changed(): GetPromise<unknown>;
 	/** Whether sessions should answer the request with a blind subscription right now. */
 	blind(slot: RequestSlot): boolean;
@@ -77,16 +77,22 @@ export interface OriginProducer {
 	routes(path: Path.Valid): boolean;
 }
 
-/** The protocol-facing operations behind an origin route. */
+/** The protocol-facing operations behind an origin route or claim. */
 export interface Route {
 	/** The metadata the route is advertised with, or undefined while hidden. */
-	readonly info: RouteInfo | undefined;
+	readonly info: WireRoute | undefined;
 	/**
 	 * Advertise the route with `info` as given, as a session's update does: a named instance
 	 * replaces the route's, which restarts its readers; otherwise it keeps the route's own.
 	 * Announces a hidden route.
 	 */
-	update(info: Partial<RouteInfo>): void;
+	update(info: Partial<WireRoute>): void;
+	/**
+	 * Close the route as its announcer withdrawing it, so readers see it end. Closing the handle
+	 * of a route a session received instead means the session lost it, and readers see it go
+	 * offline.
+	 */
+	end(): void;
 }
 
 /** The protocol-facing operations behind an origin consumer. */
@@ -103,7 +109,7 @@ export interface OriginConsumer {
 /** One originated advertisement exposed to the publishing wire. */
 export interface Advertised {
 	readonly identity: object;
-	readonly route: RouteInfo;
+	readonly route: WireRoute;
 	/** The paths a scoped route may serve beneath its prefix, relative like its key; unset for the whole subtree. */
 	readonly claim?: Path.Patterns;
 	/**
@@ -117,7 +123,7 @@ export interface Advertised {
 /** What names a stream: an advertisement, and the instance its route serves. */
 export interface Served {
 	readonly identity: object;
-	readonly route: Pick<RouteInfo, "instance">;
+	readonly route: Pick<WireRoute, "instance">;
 }
 
 /**
@@ -143,6 +149,12 @@ export interface Established {
 	 * discovery never holds two where one covers the other.
 	 */
 	readonly exclusive: boolean;
+	/**
+	 * Tell the peer this side is moving, with a GOAWAY naming no URI where the version carries
+	 * one, and stop taking new tokens, so the auth handle backs a replacement while this session
+	 * keeps serving.
+	 */
+	leave(): void;
 	// private: plumbing
 	/**
 	 * This session's side of its auth handle.
@@ -177,8 +189,8 @@ export function wireOf(handle: broadcast.Producer): Produced;
 export function wireOf(handle: broadcast.Producer | broadcast.Consumer): Broadcast;
 export function wireOf(handle: origin.Producer): OriginProducer;
 export function wireOf(handle: origin.Consumer): OriginConsumer;
-export function wireOf(handle: origin.Route): Route;
-export function wireOf(handle: import("./connection/established.ts").Established): Established;
+export function wireOf(handle: origin.Route | origin.Claim): Route;
+export function wireOf(handle: import("./connection/session.ts").Session): Established;
 /** Return the package-private view for a handle. */
 export function wireOf(handle: object): View {
 	const view = views.get(handle);

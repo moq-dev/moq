@@ -2,8 +2,11 @@
 //!
 //! `AVCaptureVideoDataOutput` delivers IOSurface-backed `CVPixelBuffer`s on a
 //! dispatch queue; the delegate wraps each as a [`Surface::PixelBuffer`] and pushes it
-//! into the shared [`FrameChannel`], which the encode loop awaits. Frames reach
-//! VideoToolbox with no copy and no color conversion.
+//! into the shared [`FrameChannel`], which the encode loop awaits. The output
+//! requests NV12, the one layout the encoder, the Metal import, and the CPU
+//! download all read, so a camera whose native format differs (a MacBook Air's
+//! `2vuy`) is converted by AVFoundation before the frame reaches us. Frames then
+//! reach VideoToolbox with no copy.
 //!
 //! Sample delivery is the only callback AVFoundation makes on the happy path, so
 //! the same delegate also observes the notifications that say the session died:
@@ -27,7 +30,10 @@ use objc2_av_foundation::{
 	AVError, AVFoundationErrorDomain, AVMediaType, AVMediaTypeVideo,
 };
 use objc2_core_media::CMSampleBuffer;
-use objc2_foundation::{NSError, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSString};
+use objc2_core_video::{kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange};
+use objc2_foundation::{
+	NSDictionary, NSError, NSNotification, NSNotificationCenter, NSNumber, NSObject, NSObjectProtocol, NSString,
+};
 
 use super::surface::surface_frame;
 use super::{Camera, Config, FrameChannel, Stream};
@@ -44,7 +50,7 @@ const ACCESS_TIMEOUT: Duration = Duration::from_secs(60);
 /// List the cameras. Unlike capture, enumeration needs no TCC grant: an
 /// unauthorized process still sees the devices, just not their frames.
 pub(super) fn cameras() -> Result<Vec<Camera>, Error> {
-	let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::Codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
+	let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
 	#[expect(
 		deprecated,
 		reason = "its replacement needs device-type constants that are macOS 14+, which would drop cameras on older systems"
@@ -61,7 +67,7 @@ pub(super) fn cameras() -> Result<Vec<Camera>, Error> {
 
 /// Open the default (or requested) camera and stream its frames.
 pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream, Error> {
-	let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::Codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
+	let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
 
 	// Gate on camera authorization before opening the device, so an unauthorized
 	// client gets a clear error (and a prompt on first run) instead of a silent
@@ -87,7 +93,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 	let device_id = unsafe { device.uniqueID() }.to_string();
 
 	let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }
-		.map_err(|e| Error::Codec(anyhow::anyhow!("camera input: {e:?}")))?;
+		.map_err(|e| Error::codec(anyhow::anyhow!("camera input: {e:?}")))?;
 
 	let chan = FrameChannel::new();
 	let delegate = Delegate::new(chan.clone(), device_id.clone());
@@ -95,6 +101,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 
 	let output = unsafe { AVCaptureVideoDataOutput::new() };
 	unsafe {
+		output.setVideoSettings(Some(&nv12_settings()));
 		// Drop late frames instead of queuing them; we want the newest.
 		output.setAlwaysDiscardsLateVideoFrames(true);
 		let proto = ProtocolObject::from_ref(&*delegate);
@@ -113,11 +120,11 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 	let configuration = SessionConfiguration::new(&session);
 	unsafe {
 		if !session.canAddInput(&input) {
-			return Err(Error::Codec(anyhow::anyhow!("cannot add camera input")));
+			return Err(Error::codec(anyhow::anyhow!("cannot add camera input")));
 		}
 		session.addInput(&input);
 		if !session.canAddOutput(&output) {
-			return Err(Error::Codec(anyhow::anyhow!("cannot add video output")));
+			return Err(Error::codec(anyhow::anyhow!("cannot add video output")));
 		}
 		session.addOutput(&output);
 	}
@@ -130,7 +137,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 		Ok(Ok(Some(frame))) => frame,
 		Ok(Err(error)) => return Err(error),
 		Ok(Ok(None)) | Err(_) => {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"no frames from camera {device_id} within {FIRST_FRAME_TIMEOUT:?} (permission denied?)"
 			)));
 		}
@@ -149,6 +156,15 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 		Some(first),
 		Box::new(guard),
 	))
+}
+
+/// The `videoSettings` that make the output deliver NV12. Without a pixel
+/// format AVFoundation passes the device's native one through.
+fn nv12_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
+	let key: &NSString = unsafe { kCVPixelBufferPixelFormatTypeKey }.as_ref();
+	let format = NSNumber::new_u32(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+	let format: &AnyObject = &format;
+	NSDictionary::from_slices(&[key], &[format])
 }
 
 /// Ensure the process is authorized to use the camera, prompting once if the
@@ -436,7 +452,7 @@ impl Delegate {
 /// grant, or a test-only hook in the capture path.
 #[cfg(test)]
 mod tests {
-	use objc2_foundation::{NSDictionary, NSInteger};
+	use objc2_foundation::NSInteger;
 
 	use super::*;
 
@@ -449,6 +465,17 @@ mod tests {
 		let dispatch = DispatchQueue::new("dev.moq.video.capture.test", None);
 		let guard = SessionGuard::new(session.clone(), delegate, dispatch);
 		(chan, session, guard)
+	}
+
+	/// CI has no camera, and `videoSettings` reads back nil until a device is
+	/// connected, so check the settings `open` hands the output.
+	#[test]
+	fn the_output_requests_nv12() {
+		let settings = nv12_settings();
+		let key: &NSString = unsafe { kCVPixelBufferPixelFormatTypeKey }.as_ref();
+		let format = settings.objectForKey(key).expect("pixel format requested");
+		let format = format.downcast::<NSNumber>().expect("pixel format is a number");
+		assert_eq!(format.as_u32(), kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
 	}
 
 	/// Teardown must never call `stopRunning` while configuration is open. This

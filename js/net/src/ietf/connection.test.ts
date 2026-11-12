@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { SessionCode } from "../error.ts";
@@ -8,6 +9,7 @@ import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { Connection } from "./connection.ts";
+import { Fetch, type FetchType } from "./fetch.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Group } from "./object.ts";
@@ -58,7 +60,7 @@ test("a padding stream is discarded", async () => {
 		await writer.closed;
 
 		// A session close would come from the same handler that read the stream.
-		await Bun.sleep(0);
+		await yieldNow();
 		expect(closed).toBe(false);
 	} finally {
 		connection.abort();
@@ -119,13 +121,16 @@ for (const [version, alpn] of [
 	}
 }
 
-/** We list no tracks by PUBLISH: each SUBSCRIBE_TRACKS gets NOT_SUPPORTED, and the session stays usable. */
+/**
+ * We serve neither FETCH (only a relay answers it, from its cache) nor SUBSCRIBE_TRACKS (we list
+ * no tracks by PUBLISH): each gets NOT_SUPPORTED on its own stream, and the session stays usable.
+ */
 for (const [version, alpn] of [
 	[Version.DRAFT_18, ALPN.DRAFT_18],
 	[Version.DRAFT_20, ALPN.DRAFT_20],
 	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const) {
-	test(`SUBSCRIBE_TRACKS is refused on its own stream on ${alpn}`, async () => {
+	test(`FETCH and SUBSCRIBE_TRACKS are refused on their own streams on ${alpn}`, async () => {
 		const pair = createMockTransportPair(alpn);
 		const control = await Stream.open(pair.server, { version });
 		const connection = new Connection({
@@ -136,16 +141,42 @@ for (const [version, alpn] of [
 			client: false,
 		});
 
-		try {
-			// A second listing of the same prefix is refused the same way, each spending its Request ID.
-			for (let i = 0; i < 2; i++) {
-				const stream = await Stream.open(pair.client, { version });
-				await stream.writer.u62(BigInt(SUBSCRIBE_TRACKS_ID));
-				await Message.encode(stream.writer, async (writer) => {
-					await writer.u62(BigInt(i * 2));
-					await Namespace.encode(writer, Path.from("prefix"));
-					await writer.u53(0);
+		const requests: ((writer: Writer, requestId: bigint) => Promise<void>)[] = [
+			async (writer, requestId) => {
+				await writer.u62(BigInt(SUBSCRIBE_TRACKS_ID));
+				await Message.encode(writer, async (body) => {
+					await body.u62(requestId);
+					await Namespace.encode(body, Path.from("prefix"));
+					await body.u53(0);
 				});
+			},
+			async (writer, requestId) => {
+				await writer.u62(BigInt(Fetch.id));
+				const type: FetchType =
+					version === Version.DRAFT_18
+						? {
+								kind: "standalone",
+								trackNamespace: Path.from("room"),
+								trackName: "video",
+								start: { group: 0n, object: 0n },
+								end: { group: 1n, object: 0n },
+							}
+						: {
+								kind: "filtered",
+								trackNamespace: Path.from("room"),
+								trackName: "video",
+								filter: { kind: "unfiltered" },
+							};
+				await new Fetch({ requestId, type }).encode(writer, version);
+			},
+		];
+		try {
+			// Each is refused again on a second request, spending its own Request ID.
+			let requestId = 0n;
+			for (const request of [...requests, ...requests]) {
+				const stream = await Stream.open(pair.client, { version });
+				await request(stream.writer, requestId);
+				requestId += 2n;
 				expect(await stream.reader.u53()).toBe(RequestError.id);
 				expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(0x3);
 				expect(await stream.reader.done()).toBe(true);
@@ -251,7 +282,7 @@ test("uni streams before SETUP are held until it lands", async () => {
 		// A STOP_SENDING would reject this; a clean close means the padding was read to its end.
 		await padding.closed;
 
-		await Bun.sleep(0);
+		await yieldNow();
 		expect(closed).toBe(false);
 	} finally {
 		connection.abort();

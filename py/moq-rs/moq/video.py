@@ -27,7 +27,6 @@ from .types import VideoCodec as Codec
 from .types import VideoEncoderInput as EncoderInput
 from .types import VideoEncoderKind as EncoderKind
 from .types import VideoEncoderOutput as EncoderOutput
-from .types import VideoGop as Gop
 from .types import VideoPixelFormat as PixelFormat
 
 Read = VideoDecodedFrame | Gap | End
@@ -132,7 +131,7 @@ class Producer:
     def cut(self) -> None:
         """Start a new group at the next written frame.
 
-        Optional: the encoder starts groups on its own per ``output.gop``. Raises
+        Optional: the encoder starts groups on its own per ``output.join``. Raises
         if the selected encoder cannot force a keyframe; groups keep their interval.
         """
         self._inner.cut()
@@ -197,9 +196,14 @@ class Encoder:
     def __init__(self, input: EncoderInput, output: EncoderOutput) -> None:
         self._inner = MoqVideoEncoder(input, output)
 
-    def encode(self, frame: Frame) -> list[Packet]:
-        """Encode one picture, returning zero or more access units."""
-        return [Packet._from_ffi(value) for value in self._inner.encode(frame._ffi())]
+    def encode(self, frame: Frame) -> None:
+        """Submit one picture, whose access units ``receive`` returns."""
+        self._inner.encode(frame._ffi())
+
+    def receive(self) -> Packet | None:
+        """Pop the oldest ready access unit, or ``None`` while the codec holds the rest; call until ``None``."""
+        value = self._inner.receive()
+        return None if value is None else Packet._from_ffi(value)
 
     def cut(self) -> None:
         """Start a group at the next encoded picture."""
@@ -209,13 +213,9 @@ class Encoder:
         """Retune the live encoder in bits per second."""
         self._inner.set_bitrate(bitrate)
 
-    def flush(self) -> list[Packet]:
-        """Drain buffered pictures while keeping the encoder open."""
-        return [Packet._from_ffi(value) for value in self._inner.flush()]
-
-    def finish(self) -> list[Packet]:
-        """Drain and close the encoder."""
-        return [Packet._from_ffi(value) for value in self._inner.finish()]
+    def flush(self) -> None:
+        """Mark the end of input, so ``receive`` returns every access unit the codec still holds."""
+        self._inner.flush()
 
 
 __all__ = [
@@ -229,7 +229,6 @@ __all__ = [
     "End",
     "Frame",
     "Gap",
-    "Gop",
     "Packet",
     "PixelFormat",
     "Producer",

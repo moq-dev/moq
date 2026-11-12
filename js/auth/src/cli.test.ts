@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { wall } from "@moq/clock";
 
 const CLI = join(import.meta.dir, `cli${extname(fileURLToPath(import.meta.url))}`);
 
@@ -54,5 +55,51 @@ describe.skipIf(process.platform === "win32")("generate permissions", () => {
 
 		run("generate", "--out", key, "--algorithm", "ES256", "--public", pub);
 		expect(mode(pub)).toBe(0o644);
+	});
+});
+
+describe("sign", () => {
+	let dir: string;
+	let key: string;
+
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "moq-auth-cli-"));
+		key = join(dir, "key.jwk");
+		run("generate", "--out", key);
+	});
+
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	function exp(...args: string[]): number | undefined {
+		const result = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--publish", "**", ...args]);
+		expect(result.exitCode).toBe(0);
+		const payload = result.stdout.toString().trim().split(".")[1];
+		return JSON.parse(Buffer.from(payload, "base64url").toString()).exp;
+	}
+
+	/** The `exp` `args` write, with the wall seconds bracketing the subprocess that wrote it. */
+	function bracketed(...args: string[]) {
+		const before = Math.floor(wall().asUnixMillis() / 1000);
+		const value = exp(...args) ?? 0;
+		const after = Math.floor(wall().asUnixMillis() / 1000);
+		return { before, value, after };
+	}
+
+	test("writes an hour of exp by default", () => {
+		const { before, value, after } = bracketed();
+		expect(value).toBeGreaterThanOrEqual(before + 3600);
+		expect(value).toBeLessThanOrEqual(after + 3600);
+	});
+
+	test("--ttl, --expires, and --unbounded pick the exp", () => {
+		const { before, value, after } = bracketed("--ttl", "1d");
+		expect(value).toBeGreaterThanOrEqual(before + 86400);
+		expect(value).toBeLessThanOrEqual(after + 86400);
+		expect(exp("--expires", "4102444800")).toBe(4102444800);
+		expect(exp("--unbounded")).toBeUndefined();
+		const conflict = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--unbounded", "--ttl", "1d"]);
+		expect(conflict.exitCode).not.toBe(0);
 	});
 });

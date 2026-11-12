@@ -14,6 +14,8 @@ use std::{
 
 use serde::Serialize;
 
+use crate::cluster::PeerKey;
+
 /// Outbound cluster peers by dial identity.
 #[derive(Clone, Default)]
 pub(crate) struct Nodes {
@@ -22,8 +24,8 @@ pub(crate) struct Nodes {
 
 #[derive(Default)]
 struct State {
-	/// Keyed by the dial set's peer identity, which may still carry userinfo.
-	peers: BTreeMap<String, Peer>,
+	/// Keyed by the dial set's peer identity.
+	peers: BTreeMap<PeerKey, Peer>,
 	/// Distinguishes the dials of one peer, so a replaced dial clears only its own session.
 	next_dial: u64,
 }
@@ -73,7 +75,7 @@ pub(crate) struct Connection {
 /// holds, but keeps the peer's history: [`Nodes::retain`] retires that.
 pub(crate) struct Dial {
 	nodes: Nodes,
-	peer: String,
+	peer: PeerKey,
 	id: u64,
 }
 
@@ -84,51 +86,40 @@ impl Nodes {
 
 	/// Register a dial of `peer`, the dial set's identity for it, keeping any
 	/// history an earlier dial of the same peer left.
-	pub(crate) fn dial(&self, peer: &str) -> Dial {
+	pub(crate) fn dial(&self, peer: &PeerKey) -> Dial {
 		let mut state = self.lock();
-		state.peers.entry(peer.to_string()).or_default();
+		state.peers.entry(peer.clone()).or_default();
 		let id = state.next_dial;
 		state.next_dial += 1;
 		Dial {
 			nodes: self.clone(),
-			peer: peer.to_string(),
+			peer: peer.clone(),
 			id,
 		}
 	}
 
 	/// Retire the history of every peer `keep` rejects, once it leaves the dial set.
-	pub(crate) fn retain(&self, mut keep: impl FnMut(&str) -> bool) {
+	pub(crate) fn retain(&self, mut keep: impl FnMut(&PeerKey) -> bool) {
 		self.lock().peers.retain(|peer, _| keep(peer));
 	}
 
 	pub(crate) fn snapshot(&self) -> Snapshot {
 		let state = self.lock();
-		// Two identities can share a label once userinfo is removed, so merge them.
-		let mut nodes = BTreeMap::<String, Node>::new();
-		for (peer, entry) in &state.peers {
-			let label = crate::cluster::canonicalize_peer_key(peer);
-			let node = nodes.entry(label.clone()).or_insert_with(|| Node {
-				node: label,
-				connections: Vec::new(),
-				last_connected_seconds_ago: None,
-			});
-			node.connections.extend(
-				entry
+		let nodes = state
+			.peers
+			.iter()
+			.map(|(peer, entry)| Node {
+				node: peer.to_string(),
+				// Sorted already: the map is keyed by `conn` id.
+				connections: entry
 					.connections
 					.iter()
-					.map(|(&id, &(_, transport))| Connection { id, transport }),
-			);
-			if let Some(age) = entry.last_connected.map(|at| at.elapsed().as_secs_f64()) {
-				node.last_connected_seconds_ago =
-					Some(node.last_connected_seconds_ago.map_or(age, |prev| prev.min(age)));
-			}
-		}
-		for node in nodes.values_mut() {
-			node.connections.sort_by_key(|connection| connection.id);
-		}
-		Snapshot {
-			nodes: nodes.into_values().collect(),
-		}
+					.map(|(&id, &(_, transport))| Connection { id, transport })
+					.collect(),
+				last_connected_seconds_ago: entry.last_connected.map(|at| at.elapsed().as_secs_f64()),
+			})
+			.collect();
+		Snapshot { nodes }
 	}
 }
 
@@ -143,11 +134,12 @@ impl Dial {
 		if let Some(at) = observation.last_connected {
 			peer.last_connected = Some(peer.last_connected.map_or(at, |prev| prev.max(at)));
 		}
-		match observation.transport {
-			Some(transport) => {
+		use moq_tokio::connection::Phase;
+		match observation.phase {
+			Phase::Connected { transport, .. } | Phase::Migrating { transport, .. } => {
 				peer.connections.insert(id, (self.id, transport));
 			}
-			None => {
+			Phase::Connecting { .. } | Phase::Disconnected { .. } | Phase::Closed { .. } => {
 				peer.connections.remove(&id);
 			}
 		}
@@ -171,25 +163,29 @@ impl Drop for Dial {
 mod tests {
 	use super::*;
 
+	fn key(peer: &str) -> PeerKey {
+		PeerKey::canonicalize(peer)
+	}
+
 	fn observation(transport: Option<moq_tokio::Transport>) -> moq_tokio::connection::Observation {
 		moq_tokio::connection::Observation {
 			revision: 1,
-			phase: match transport {
-				Some(_) => moq_tokio::connection::Phase::Connected,
-				None => moq_tokio::connection::Phase::Disconnected,
-			},
 			connects: 1,
-			failure: None,
-			version: None,
 			last_connected: Some(kio::clock::now()),
-			transport,
+			phase: match transport {
+				Some(transport) => moq_tokio::connection::Phase::Connected {
+					transport,
+					version: moq_net::Version::ALL[0],
+				},
+				None => moq_tokio::connection::Phase::Disconnected { failure: None },
+			},
 		}
 	}
 
 	#[test]
 	fn configured_peers_list_before_they_connect_without_credentials() {
 		let nodes = Nodes::default();
-		let _dial = nodes.dial("https://user:secret@peer.example//relay/");
+		let _dial = nodes.dial(&key("https://user:secret@peer.example//relay/"));
 
 		assert_eq!(
 			serde_json::to_value(nodes.snapshot()).unwrap(),
@@ -202,7 +198,7 @@ mod tests {
 	#[test]
 	fn history_survives_disconnects_and_a_replaced_dial() {
 		let nodes = Nodes::default();
-		let dial = nodes.dial("https://peer.example/");
+		let dial = nodes.dial(&key("https://peer.example/"));
 		dial.observe(2, &observation(Some(moq_tokio::Transport::WebSocket)));
 		assert_eq!(
 			serde_json::to_value(&nodes.snapshot().nodes[0].connections).unwrap(),
@@ -218,7 +214,7 @@ mod tests {
 
 		// A new cost or credential replaces the dial: the new one starts before
 		// the old one is dropped or after, and the history stays either way.
-		let replacement = nodes.dial("https://peer.example/");
+		let replacement = nodes.dial(&key("https://peer.example/"));
 		replacement.observe(4, &observation(Some(moq_tokio::Transport::Quic)));
 		drop(dial);
 		let snapshot = nodes.snapshot();
@@ -239,12 +235,12 @@ mod tests {
 	#[test]
 	fn retired_peers_drop_their_history() {
 		let nodes = Nodes::default();
-		let kept = nodes.dial("https://kept.example/");
-		let retired = nodes.dial("https://retired.example/");
+		let kept = nodes.dial(&key("https://kept.example/"));
+		let retired = nodes.dial(&key("https://retired.example/"));
 		retired.observe(1, &observation(Some(moq_tokio::Transport::Quic)));
 
 		drop(retired);
-		nodes.retain(|peer| peer == "https://kept.example/");
+		nodes.retain(|peer| peer == &key("https://kept.example/"));
 		let snapshot = nodes.snapshot();
 		assert_eq!(snapshot.nodes.len(), 1);
 		assert_eq!(snapshot.nodes[0].node, "https://kept.example/");
@@ -254,19 +250,5 @@ mod tests {
 		nodes.retain(|_| false);
 		kept.observe(3, &observation(Some(moq_tokio::Transport::Quic)));
 		assert!(nodes.snapshot().nodes.is_empty());
-	}
-
-	#[test]
-	fn identities_sharing_a_label_merge() {
-		let nodes = Nodes::default();
-		let first = nodes.dial("https://a@peer.example/");
-		let second = nodes.dial("https://b@peer.example/");
-		second.observe(7, &observation(Some(moq_tokio::Transport::Quic)));
-		first.observe(3, &observation(Some(moq_tokio::Transport::Quic)));
-
-		let snapshot = nodes.snapshot();
-		assert_eq!(snapshot.nodes.len(), 1);
-		let ids: Vec<u64> = snapshot.nodes[0].connections.iter().map(|c| c.id).collect();
-		assert_eq!(ids, [3, 7]);
 	}
 }

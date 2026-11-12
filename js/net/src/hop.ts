@@ -89,8 +89,8 @@ export const Cost = {
 };
 
 /**
- * The stream a received route serves, the path it took through the mesh, and what using it
- * costs: read-only facts on an announcement. Mirrors `RouteInfo` in rs/moq-net.
+ * The stream a received route serves and what using it costs: read-only facts on an
+ * announcement. Mirrors `RouteInfo` in rs/moq-net.
  *
  * Carried by an announce event. Applications never build one: an origin `Route` takes
  * `RouteOptions`, and the origin and the relays fill in the rest.
@@ -98,9 +98,44 @@ export const Cost = {
 export interface RouteInfo {
 	/**
 	 * The stream the route serves: routes with one instance serve one continuous sequence
-	 * space, so a subscription resumes from one to another. Always set on a route the origin
-	 * delivers; pass it to an origin `request` to pin this stream.
+	 * space, so a subscription resumes from one to another. Pass it to an origin `request` to
+	 * pin this stream.
 	 */
+	readonly instance?: Instance.Valid;
+	/** What pulling content via this route costs; lower wins. */
+	readonly cost: Cost;
+	/**
+	 * Whether a usable path reaches the route's origin. An unavailable route is held: the
+	 * network lost every path to it but may recover one, so the announcement stays. It ranks
+	 * with a draining route, below every available one, and requests through it may fail until
+	 * it recovers: request again once it turns available.
+	 */
+	readonly available: boolean;
+}
+
+/**
+ * The read-only facts an announcement shows of `route`, leaving its epoch, hop chain,
+ * credential, and drain state internal.
+ *
+ * @internal
+ */
+export function routeInfo(route: WireRoute): RouteInfo {
+	return {
+		instance: route.instance,
+		cost: route.cost,
+		available: route.available ?? true,
+	};
+}
+
+/**
+ * A route as the origin and sessions carry it: the {@link RouteInfo} facts plus the epoch that
+ * orders an instance's incarnations, the hop chain it took, the credential that advertises it,
+ * and whether it drains, which applications never see.
+ *
+ * @internal
+ */
+export interface WireRoute {
+	/** See {@link RouteInfo.instance}. Always set on a route the origin delivers. */
 	readonly instance?: Instance.Valid;
 	/**
 	 * Which incarnation of {@link instance} this is: among its routes at one prefix only the
@@ -122,15 +157,23 @@ export interface RouteInfo {
 	 * Swapping it renews the request with REQUEST_UPDATE. Local: a relay never forwards it.
 	 */
 	readonly auth?: Credential;
+	/**
+	 * The session it arrived on is going away (the peer sent a GOAWAY): it ranks below every
+	 * other eligible route, whatever its cost, yet still serves when nothing else does. A
+	 * preference state, never a saturated cost. Local: never forwarded, and readers never see it.
+	 */
+	readonly draining?: boolean;
+	/** See {@link RouteInfo.available}; unset means available. */
+	readonly available?: boolean;
 }
 
-/** Constructors and helpers for {@link RouteInfo}. @internal */
-export const RouteInfo = {
+/** Constructors and helpers for {@link WireRoute}. @internal */
+export const WireRoute = {
 	/** An empty hop chain at zero cost: what a publisher seeds for a live broadcast. */
-	default: { hops: [], cost: Cost.zero } as RouteInfo,
+	default: { hops: [], cost: Cost.zero } as WireRoute,
 
 	/** Fill route defaults and saturate the static price at the wire ceiling. */
-	normalize(route: Partial<RouteInfo> = {}): RouteInfo {
+	normalize(route: Partial<WireRoute> = {}): WireRoute {
 		const cost = route.cost ?? Cost.zero;
 		if (typeof cost !== "bigint" || cost < 0n) throw new RangeError("route cost must be a non-negative bigint");
 		const max = 2n ** 62n - 1n;
@@ -141,6 +184,8 @@ export const RouteInfo = {
 			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			cost: cost > max ? max : cost,
 			auth: route.auth,
+			draining: route.draining,
+			available: route.available,
 		};
 	},
 };
@@ -150,13 +195,20 @@ export const RouteInfo = {
  *
  * An empty chain is a local announcement, not the anonymous mark. Ingress fills a
  * received empty list with the anonymous hop before yielding it.
+ *
+ * @internal
  */
-export function isAnonymous(route: RouteInfo): boolean {
+export function isAnonymous(route: WireRoute): boolean {
 	return route.hops.includes(UNKNOWN_HOP);
 }
 
-/** Whether two routes name the same instance, epoch, hop chain, cost, and auth. */
-export function routesEqual(a: RouteInfo | undefined, b: RouteInfo | undefined): boolean {
+/**
+ * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state, and
+ * availability.
+ *
+ * @internal
+ */
+export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined): boolean {
 	if (a === b) return true;
 	if (!a || !b) return false;
 	return (
@@ -164,6 +216,8 @@ export function routesEqual(a: RouteInfo | undefined, b: RouteInfo | undefined):
 		a.epoch === b.epoch &&
 		a.cost === b.cost &&
 		a.auth === b.auth &&
+		(a.draining ?? false) === (b.draining ?? false) &&
+		(a.available ?? true) === (b.available ?? true) &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])
 	);

@@ -506,7 +506,7 @@ describe("Source viewer ceiling", () => {
 		const source = new Source({ broadcast, supported: async () => true });
 		try {
 			await settle();
-			// Over the selection margin, so an estimate that reaches it selects 1080p.
+			// Over the selection margin, so a rate that reaches it selects 1080p.
 			expect(source.out.ceiling.peek()).toBe(5_000_000);
 
 			catalog.set({
@@ -523,22 +523,37 @@ describe("Source viewer ceiling", () => {
 		}
 	});
 
-	it("is an estimate that selects that rendition", async () => {
-		const probe = new Signal<{ estimatedRecvRate: number } | undefined>(undefined);
-		const source = new Source({
-			broadcast: mockBroadcast(ladder()),
-			supported: async () => true,
-			probe: probe as never,
-		});
+	it("is a rate that selects that rendition", async () => {
+		const rate = new Signal<number | undefined>(undefined);
+		const source = new Source({ broadcast: mockBroadcast(ladder()), supported: async () => true, rate });
 		try {
 			await settle();
 			const ceiling = source.out.ceiling.peek() ?? 0;
-			probe.set({ estimatedRecvRate: ceiling });
+			rate.set(ceiling);
 			await settle();
 			expect(source.out.track.peek()).toBe("1080p");
-			probe.set({ estimatedRecvRate: ceiling - 1 });
+			rate.set(ceiling - 1);
 			await settle();
 			expect(source.out.track.peek()).toBe("720p");
+		} finally {
+			source.close();
+		}
+	});
+
+	it("holds the last rate while it is unknown, and ranks alone before the first", async () => {
+		const rate = new Signal<number | undefined>(undefined);
+		const source = new Source({ broadcast: mockBroadcast(ladder()), supported: async () => true, rate });
+		try {
+			await settle();
+			expect(source.out.track.peek()).toBe("1080p");
+
+			rate.set(1_000_000);
+			await settle();
+			expect(source.out.track.peek()).toBe("360p");
+
+			rate.set(undefined);
+			await settle();
+			expect(source.out.track.peek()).toBe("360p");
 		} finally {
 			source.close();
 		}
@@ -564,7 +579,7 @@ describe("Source viewer ceiling", () => {
 		}
 	});
 
-	it("stays within the target's caps, without margin when the estimate cannot steer", async () => {
+	it("stays within the target's caps, without margin when the rate cannot steer", async () => {
 		const target = new Signal<Target | undefined>({ height: 720 });
 		const source = new Source({ broadcast: mockBroadcast(ladder()), target, supported: async () => true });
 		try {
@@ -579,7 +594,7 @@ describe("Source viewer ceiling", () => {
 			await settle();
 			expect(source.out.ceiling.peek()).toBe(2_400_000);
 
-			// A zero bitrate is explicit too: the lowest rendition, not the estimate's pick.
+			// A zero bitrate is explicit too: the lowest rendition, not the rate's pick.
 			target.set({ bitrate: 0 });
 			await settle();
 			expect(source.out.ceiling.peek()).toBe(800_000);
@@ -589,32 +604,22 @@ describe("Source viewer ceiling", () => {
 	});
 });
 
-describe("Source probe observation", () => {
-	it("does not observe the probe without a selectable rendition", async () => {
-		let reads = 0;
-		const probe = new Signal(undefined);
-		const counted = {
-			peek: () => {
-				reads++;
-				return probe.peek();
-			},
-			subscribe: (fn: () => void) => {
-				reads++;
-				return probe.subscribe(fn);
-			},
-			changed: () => probe.changed(),
-		};
-		const source = new Source({
-			broadcast: mockBroadcast({ hd: config("avc1.640028", { bitrate: 1_000_000, enabled: false }) }),
-			supported: async () => true,
-			probe: counted as never,
-		});
-		try {
-			await settle();
-			expect(source.out.track.peek()).toBeUndefined();
-			expect(reads).toBe(0);
-		} finally {
-			source.close();
-		}
+it("defaults to the decoder's probe when no supported input is given", async () => {
+	const globals = globalThis as unknown as Record<string, unknown>;
+	const original = globals.VideoDecoder;
+	globals.VideoDecoder = {
+		isConfigSupported: async (c: VideoDecoderConfig) => ({ supported: c.codec === "avc1.42e01e", config: c }),
+	};
+	const source = new Source({
+		broadcast: mockBroadcast({ rejected: config("avc1.640028"), cam: config("avc1.42e01e") }),
 	});
+	try {
+		await settle();
+		expect(Object.keys(source.out.available.peek())).toEqual(["cam"]);
+		expect(source.out.track.peek()).toBe("cam");
+	} finally {
+		source.close();
+		if (original === undefined) delete globals.VideoDecoder;
+		else globals.VideoDecoder = original;
+	}
 });

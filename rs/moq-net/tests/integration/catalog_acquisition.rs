@@ -4,13 +4,13 @@
 
 use crate::support;
 
-use moq_net::{Error, Hop, Version, origin};
+use moq_net::{Error, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 fn origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, cost: u64) -> MockPair {
@@ -42,7 +42,10 @@ async fn acquisition(version: &str, carries_instance: bool) {
 		.unwrap();
 	let mut announced = subscriber.consume().routes();
 	let old_cost = match announced.next().await {
-		Some(moq_net::origin::RouteEvent::Start(announce)) => announce.route.cost(),
+		Some(moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::Start,
+			announce,
+		}) => announce.route.cost(),
 		other => panic!("expected the first route, got {other:?}"),
 	};
 	let mut pending = Box::pin(remote.track("catalog.json").unwrap().subscribe(None));
@@ -56,8 +59,14 @@ async fn acquisition(version: &str, carries_instance: bool) {
 	// A replacement under a minted instance restarts the advertisement; a carried one only
 	// updates it.
 	let new_cost = match announced.next().await {
-		Some(moq_net::origin::RouteEvent::Update(announce)) if carries_instance => announce.route.cost(),
-		Some(moq_net::origin::RouteEvent::Restart(announce)) if !carries_instance => announce.route.cost(),
+		Some(moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::Update,
+			announce,
+		}) if carries_instance => announce.route.cost(),
+		Some(moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::Restart,
+			announce,
+		}) if !carries_instance => announce.route.cost(),
 		other => panic!("{version}: unexpected route change {other:?}"),
 	};
 	assert!(new_cost < old_cost, "the cheaper session wins the route");

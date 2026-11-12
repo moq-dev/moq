@@ -419,7 +419,11 @@ impl Reader {
 				// nothing in between to wait on. A caller that treats a codec
 				// error as one lost picture and carries on then spins.
 				self.drained = true;
-				self.pending.extend(tail?.into_iter().map(Read::Frame));
+				// Queue what the flush readied before reporting its error, so a
+				// later read still hands those pictures over.
+				let received = self.receive();
+				tail?;
+				received?;
 				continue;
 			};
 
@@ -431,19 +435,25 @@ impl Reader {
 				continue;
 			}
 
-			let pictures = self
-				.decoder
+			self.decoder
 				.decode(mux_frame.payload, mux_frame.timestamp, mux_frame.keyframe)
 				.await?;
-			self.pending.extend(pictures.into_iter().map(Read::Frame));
+			self.receive()?;
 		}
+	}
+
+	/// Queue every picture the decoder has ready.
+	fn receive(&mut self) -> Result<(), Error> {
+		while let Some(picture) = self.decoder.receive()? {
+			self.pending.push_back(Read::Frame(picture));
+		}
+		Ok(())
 	}
 
 	/// Queue every picture the decoder still holds.
 	async fn drain(&mut self) -> Result<(), Error> {
-		let pictures = self.decoder.flush().await?;
-		self.pending.extend(pictures.into_iter().map(Read::Frame));
-		Ok(())
+		self.decoder.flush().await?;
+		self.receive()
 	}
 }
 
@@ -487,17 +497,20 @@ mod tests {
 			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
 		let rendition = config.probe().await.unwrap();
-		let reserved = source_catalog
-			.reserve()
-			.with_interval(config.gop.duration(config.framerate));
-		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
+		let reserved = source_catalog.reserve().with_interval(config.effective_join());
+		let track = source_broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut producer = EncodeProducer::new(track, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for index in 0..2 {
 			encoder.cut().unwrap();
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap());
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				producer.publish(&encoded).unwrap();
+			}
 		}
 
 		let origin = produce_origin();
@@ -509,15 +522,15 @@ mod tests {
 		// wide enough to read them: its REAL_TIME default keeps only the live edge, and
 		// the second `next()` would then block forever waiting for a group that was
 		// skipped.
-		let mut export =
-			moq_mux::container::fmp4::Export::new(source, catalog).with_max_delay(std::time::Duration::from_secs(30));
+		let mut export = moq_mux::container::fmp4::Export::new(source, catalog)
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let subscriber = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(true);
+		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(true);
 		import.decode(&init).unwrap();
 		import.decode(&fragment).unwrap();
 
@@ -574,7 +587,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -658,7 +671,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -731,7 +744,7 @@ mod tests {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -743,6 +756,7 @@ mod tests {
 			kind: Kind::Named(probe::NATIVE_NAME.into()),
 			output: crate::Output::Cpu,
 			scale_hint: Some(crate::Size::new(160, 120)),
+			..Default::default()
 		};
 		let max_delay = std::time::Duration::from_secs(10);
 		let mut consumer = pollster::block_on(Consumer::new(
@@ -841,7 +855,7 @@ mod tests {
 		consumer.reader(Lane::Min).track.set_delay(Delay::default());
 		write(12, &[3000]);
 		write(13, &[4000, 3800, 3900, 4100]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		got.clear();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			got.push(frame.timestamp.as_micros());
@@ -876,7 +890,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -975,7 +989,7 @@ mod tests {
 		read(&mut consumer).await;
 
 		producer.write(picture(200_000, b"new access unit")).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		read(&mut consumer).await;
 		read(&mut consumer).await;
 		assert_eq!(reads, ["frame 100000", "end 133333", "frame 200000", "none"]);
@@ -993,11 +1007,11 @@ mod tests {
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let subscriber = broadcast.consume();
-		let mut producer = moq_mux::container::Producer::new(
+		let producer = moq_mux::container::Producer::new(
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 		);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -1021,20 +1035,18 @@ mod tests {
 		.unwrap();
 
 		let mut read = Box::pin(consumer.next_frame());
-		let deadline = kio::clock::Instant::now() + std::time::Duration::from_secs(1);
-		loop {
+		let entered = async {
 			tokio::select! {
 				_result = &mut read => panic!("flush returned before cancellation"),
-				_ = kio::clock::sleep(std::time::Duration::from_millis(1)) => {
-					if probe::flush_entered() {
-						break;
-					}
-					if kio::clock::Instant::now() >= deadline {
-						probe::release_flush();
-						panic!("flush never reached the codec thread");
-					}
-				}
+				_ = probe::flush_entered() => {}
 			}
+		};
+		if kio::clock::timeout(std::time::Duration::from_secs(1), entered)
+			.await
+			.is_err()
+		{
+			probe::release_flush();
+			panic!("flush never reached the codec thread");
 		}
 		drop(read);
 		probe::release_flush();
@@ -1075,7 +1087,7 @@ mod tests {
 			}
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap());
-			for encoded in encoder.encode(&frame).unwrap() {
+			for encoded in encoder.encode_all(&frame).unwrap() {
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: encoded.timestamp,
@@ -1086,7 +1098,7 @@ mod tests {
 					.unwrap();
 			}
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let decode = Options {
 			decoder: Config {
@@ -1200,19 +1212,30 @@ mod tests {
 	/// Let the decoders run with nothing new to show until the max-delay one
 	/// has caught up, or fail after ten seconds of trying.
 	async fn catch_up(consumer: &mut Consumer) {
-		let deadline = kio::clock::Instant::now() + std::time::Duration::from_secs(10);
-		while consumer.selector.source() != Lane::Max {
-			assert!(
-				kio::clock::Instant::now() < deadline,
-				"the max-delay decoder never caught up"
-			);
-			if let Ok(frame) = kio::clock::timeout(std::time::Duration::from_millis(20), consumer.next_frame()).await {
-				panic!(
-					"nothing new was published, yet read returned {:?}",
-					frame.map(|f| f.map(|f| f.timestamp))
-				);
+		let mut sleep = None;
+		let caught_up = std::future::poll_fn(|cx| {
+			loop {
+				match consumer.poll_read(cx, &mut sleep) {
+					// Breaks carry no picture, so `next_frame` would skip them too.
+					Poll::Ready(Ok(Some(Read::Gap { .. } | Read::End { .. }))) => {}
+					Poll::Ready(read) => panic!(
+						"nothing new was published, yet read returned {:?}",
+						read.map(|read| read.map(|read| match read {
+							Read::Frame(frame) => frame.timestamp,
+							_ => unreachable!("matched above"),
+						}))
+					),
+					Poll::Pending => break,
+				}
 			}
-		}
+			match consumer.selector.source() {
+				Lane::Max => Poll::Ready(()),
+				Lane::Min => Poll::Pending,
+			}
+		});
+		kio::clock::timeout(std::time::Duration::from_secs(10), caught_up)
+			.await
+			.expect("the max-delay decoder never caught up");
 	}
 
 	/// A cold join shows the min-delay decoder's pictures at the live edge first,
@@ -1323,11 +1346,15 @@ mod tests {
 		// leading by more than a frame, so it is shown at once.
 		let mut live = group(&mut track, 2, &[8]);
 		shown.push(read(&mut consumer).await);
+		// Mocked time, so the timeout fires only once every task has run, well inside the
+		// sweep; no decode runs while the max-delay decoder waits on the stalled group.
+		tokio::time::pause();
 		assert!(
 			kio::clock::timeout(std::time::Duration::from_millis(100), consumer.next_frame())
 				.await
 				.is_err()
 		);
+		tokio::time::resume();
 		assert_eq!(
 			consumer.selector.source(),
 			Lane::Min,
@@ -1398,7 +1425,7 @@ mod tests {
 		let (broadcast, mut track) = live_track();
 		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
 		group(&mut track, 1, &[4, 5]).finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		// A budget past the whole 5 s backlog, so the start keeps every cached group and both
 		// decoders read them all.

@@ -1,34 +1,40 @@
-//! Intel/AMD VAAPI hardware H.264 decode via the opt-in `moq-vaapi` crate on Linux.
+//! Intel/AMD VAAPI hardware H.264 and H.265 decode via the `moq-vaapi` crate on Linux.
 //!
 //! The decode half of [`encode::backend::vaapi`](crate::encode). `moq-vaapi` is a
-//! focused VA-API H.264 codec vendored and trimmed from cros-libva +
+//! focused VA-API H.264 and H.265 codec vendored and trimmed from cros-libva +
 //! discord/cros-codecs. Its decoder takes one Annex-B access unit with the
 //! parameter sets inline and hands back tightly-packed NV12, which this
 //! deinterleaves to the CPU I420 the rest of the crate speaks.
 //!
 //! libva is `dlopen`'d at runtime, so a VAAPI-enabled build needs no libva at
 //! build time and the binary carries no `NEEDED libva`. A libva-less host, a
-//! missing render node, or a driver with no H.264 decode entrypoint makes
-//! `Decoder::new` return an error; under automatic selection
+//! missing render node, or a driver with no decode entrypoint for the codec
+//! makes `Decoder::new` return an error; under automatic selection
 //! [`backend::open`](super::open) then moves on to the next candidate, like the
 //! NVDEC backend. When every render node's driver answers that it has no decode
-//! entrypoint for the profile the catalog declares, that is a refusal of the
-//! stream rather than a fault. The render node is the one the encoder and the GPU resize
-//! share, which `MOQ_VAAPI_DEVICE` can name; see `frame::vaapi::device`.
+//! entrypoint for the profile the catalog declares, or for H.265 Main at all,
+//! that is a refusal of the stream rather than a fault. For H.265, which has no
+//! software decoder behind this one, that refusal is what lets a player pick
+//! another rendition. The render node is the one the encoder and the GPU resize
+//! share, unless that one cannot decode H.265, and `Config::vaapi` can name
+//! it; see `frame::vaapi::device`.
 //!
 //! Progressive 8-bit 4:2:0 only, which is everything a browser's `VideoEncoder`,
-//! WebRTC, or this crate's own encoders emit. The decoder rejects an interlaced or
-//! high-bit-depth sequence at its first SPS, which surfaces here as a decode
-//! error rather than wrong pixels. Left and top cropping are also rejected.
+//! WebRTC, or this crate's own encoders emit; H.265 is the Main profile. The
+//! decoder rejects an interlaced or high-bit-depth sequence at its first SPS,
+//! which surfaces here as a decode error rather than wrong pixels. Left and top
+//! cropping are also rejected.
 //!
-//! Unlike NVDEC, which cuvid lets us pin to zero display delay, output trails the
-//! input even without B-frames: H.264's DPB releases a picture only once a later
-//! one needs its slot, and the slot count comes from the sequence's reference and
-//! reorder limits rather than the reorder depth actually used. A stream coded with
-//! three reference frames therefore keeps three pictures in hand, which is why
-//! this backend implements [`Backend::flush`] and the layers above call it when
-//! the track ends. The decoded frames carry their own timestamps, so the delay
-//! itself needs nothing downstream.
+//! Unlike NVDEC, which cuvid lets us pin to zero display delay, H.264 output
+//! trails the input even without B-frames: its DPB releases a picture only once a
+//! later one needs its slot, and the slot count comes from the sequence's
+//! reference and reorder limits rather than the reorder depth actually used. A
+//! stream coded with three reference frames therefore keeps three pictures in
+//! hand, which is why this backend implements [`Backend::flush`] and the layers
+//! above call it when the track ends. H.265 releases a picture as soon as the
+//! SPS's reorder limit allows, so a stream without B-frames comes out as it
+//! decodes. The decoded frames carry their own timestamps, so the delay itself
+//! needs nothing downstream.
 //!
 //! Under [`Output::Native`](crate::Output::Native) each picture comes back as
 //! the zero-copy [`Surface::DmaBuf`] the hardware decoded it into. Measured on
@@ -50,6 +56,7 @@
 //! `moq-vaapi` keeps the surface alongside the descriptor and reads it back
 //! through `vaDeriveImage` rather than trying to read a tiled buffer as rows.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
@@ -65,46 +72,66 @@ pub(crate) const NAME: &str = "vaapi";
 
 pub(crate) struct Vaapi {
 	decoder: Decoder,
-	/// Whether pictures are handed out as DMA-BUFs rather than downloaded, from
-	/// [`Config::output`]. Cleared if the driver turns out not to export, so a
-	/// host that decodes but cannot share what it decoded loses the fast path
-	/// rather than the stream.
-	exporting: bool,
-	/// Whether a picture has ever come back as a descriptor, which is what
-	/// settles the question above. See [`Vaapi::exported`].
-	has_exported: bool,
+	export: Export,
+	ready: VecDeque<Frame>,
+}
+
+/// Whether pictures are handed out as DMA-BUFs rather than downloaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Export {
+	/// [`Config::output`] asked for shared pictures, and none has come back yet,
+	/// so a failure is read as the driver being unable to export. See
+	/// [`Vaapi::exported`].
+	Trying,
+	/// A picture has come back as a descriptor, which settles it.
+	Exporting,
+	/// Downloaded: asked for, or the driver turned out not to export, so a host
+	/// that decodes but cannot share what it decoded loses the fast path rather
+	/// than the stream.
+	Downloading,
 }
 
 impl Vaapi {
-	/// VA-API H.265 and AV1 decode exist but are not wired up in `moq-vaapi`, so
-	/// this handles H.264 only. `config` carries no hardware scaler request we can
+	/// VA-API AV1 decode exists but is not wired up in `moq-vaapi`, so this
+	/// handles H.264 and H.265. `config` carries no hardware scaler request we can
 	/// honor: VA-API's scaler is a separate VPP pipeline, so callers scale the
 	/// frames themselves.
 	pub(crate) fn open(stream: &Stream, config: &Config) -> Result<Box<dyn Backend>, Error> {
-		let codec = stream.codec;
-		if codec != Codec::H264 {
-			return Err(Error::Codec(anyhow::anyhow!("VAAPI cannot decode {}", codec.label())));
-		}
-
-		if let Some(profile_idc) = stream.h264_profile {
-			// `moq-vaapi` fails a profile it has no mapping for at the first SPS,
-			// whatever the driver offers, so a declared one is refused here.
-			let Some(profile) = va_profile(profile_idc) else {
-				return Err(Error::UnsupportedCodec(format!(
-					"VA-API decodes no H.264 profile_idc {profile_idc}"
-				)));
-			};
-			if offered(profile) == Some(false) {
-				return Err(Error::UnsupportedCodec(format!(
-					"no VA-API driver here decodes H.264 profile_idc {profile_idc}"
-				)));
+		let (codec, required) = match stream.codec {
+			Codec::H264 => {
+				let required = match stream.h264_profile {
+					// `moq-vaapi` fails a profile it has no mapping for at the first
+					// SPS, whatever the driver offers, so a declared one is refused
+					// here.
+					Some(profile_idc) => match va_profile(profile_idc) {
+						Some(profile) => Some((profile, format!("H.264 profile_idc {profile_idc}"))),
+						None => {
+							return Err(Error::UnsupportedCodec(format!(
+								"VA-API decodes no H.264 profile_idc {profile_idc}"
+							)));
+						}
+					},
+					None => None,
+				};
+				(moq_vaapi::Codec::H264, required)
 			}
+			Codec::H265 => (
+				moq_vaapi::Codec::H265,
+				Some((VAProfile::VAProfileHEVCMain, "H.265 Main".to_owned())),
+			),
+			other => return Err(Error::codec(anyhow::anyhow!("VAAPI cannot decode {}", other.label()))),
+		};
+		if let Some((profile, name)) = required
+			&& offered(codec, config.vaapi.as_deref(), profile) == Some(false)
+		{
+			return Err(Error::UnsupportedCodec(format!("no VA-API driver here decodes {name}")));
 		}
 
 		let vaapi = VaapiConfig {
-			device: vaapi::device().map(Path::to_path_buf),
+			codec,
+			device: vaapi::device(codec, config.vaapi.as_deref()),
 		};
-		let decoder = Decoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
+		let decoder = Decoder::new(vaapi).map_err(|e| Error::codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
 
 		// The renderer imports the NV12 this exports, so `Render` keeps it too
 		// in a build that has the renderer; without one it would only download.
@@ -113,18 +140,27 @@ impl Vaapi {
 			Output::Cpu => false,
 			Output::Render => cfg!(feature = "render"),
 		};
-		tracing::info!(decoder = NAME, exporting, "opened H.264 decoder");
+		let export = match exporting {
+			true => Export::Trying,
+			false => Export::Downloading,
+		};
+		tracing::info!(
+			decoder = NAME,
+			codec = stream.codec.label(),
+			exporting,
+			"opened decoder"
+		);
 		Ok(Box::new(Self {
 			decoder,
-			exporting,
-			has_exported: false,
+			export,
+			ready: VecDeque::new(),
 		}))
 	}
 
 	/// Decodes one access unit into GPU-resident frames, or `None` once the
 	/// driver has shown it will not export.
-	fn decode_shared(&mut self, access_unit: &Bytes, timestamp: u64) -> Option<Result<Vec<Frame>, Error>> {
-		if !self.exporting {
+	fn decode_shared(&mut self, access_unit: &Bytes, timestamp: u64) -> Option<Result<(), Error>> {
+		if self.export == Export::Downloading {
 			return None;
 		}
 
@@ -134,8 +170,8 @@ impl Vaapi {
 
 	/// The same for the stream's tail, so a track that ends does not switch to
 	/// downloading for its last few pictures.
-	fn flush_shared(&mut self) -> Option<Result<Vec<Frame>, Error>> {
-		if !self.exporting {
+	fn flush_shared(&mut self) -> Option<Result<(), Error>> {
+		if self.export == Export::Downloading {
 			return None;
 		}
 
@@ -143,8 +179,8 @@ impl Vaapi {
 		Some(self.exported(exported))
 	}
 
-	/// Hands back the pictures a shared decode produced, and decides what a
-	/// failure to produce any means.
+	/// Queues the pictures a shared decode produced, and decides what a failure
+	/// to produce any means.
 	///
 	/// A driver can decode without being able to share what it decoded, and
 	/// native output permits CPU pictures, so until one picture
@@ -157,26 +193,31 @@ impl Vaapi {
 	/// is a decode error rather than a verdict on the driver. Reporting it as
 	/// one keeps a corrupt access unit from silently costing the rest of the
 	/// session its fast path.
-	fn exported(&mut self, exported: anyhow::Result<Vec<Frame>>) -> Result<Vec<Frame>, Error> {
+	fn exported(&mut self, exported: anyhow::Result<Vec<Frame>>) -> Result<(), Error> {
 		match exported {
 			Ok(frames) => {
 				// An access unit whose pictures are all still in the DPB proves
 				// nothing about exporting, so only a non-empty answer counts.
-				self.has_exported |= !frames.is_empty();
-				Ok(frames)
+				if !frames.is_empty() {
+					self.export = Export::Exporting;
+				}
+				self.ready.extend(frames);
+				Ok(())
 			}
-			Err(err) if self.has_exported => Err(Error::Codec(err.context("VAAPI decode to a shared surface"))),
+			Err(err) if self.export == Export::Exporting => {
+				Err(Error::codec(err.context("VAAPI decode to a shared surface")))
+			}
 			Err(err) => {
 				tracing::warn!(%err, "VAAPI cannot hand out decoded surfaces; downloading them instead");
-				self.exporting = false;
-				Ok(Vec::new())
+				self.export = Export::Downloading;
+				Ok(())
 			}
 		}
 	}
 }
 
 impl Backend for Vaapi {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
 		// The timestamp rides through the decoder with the picture, so it
 		// survives the DPB reordering a stream with B-frames goes through.
 		let timestamp = timestamp.as_micros() as u64;
@@ -187,13 +228,17 @@ impl Backend for Vaapi {
 		let decoded = self
 			.decoder
 			.decode(&access_unit, timestamp)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI decode: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("VAAPI decode: {e:?}")))?;
 
-		convert(decoded)
+		self.convert(decoded)
 	}
 
-	/// Return the tail held by the DPB at the end of the stream.
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	/// Queue the tail held by the DPB at the end of the stream.
+	fn flush(&mut self) -> Result<(), Error> {
 		if let Some(frames) = self.flush_shared() {
 			return frames;
 		}
@@ -201,9 +246,9 @@ impl Backend for Vaapi {
 		let decoded = self
 			.decoder
 			.flush()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI flush: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("VAAPI flush: {e:?}")))?;
 
-		convert(decoded)
+		self.convert(decoded)
 	}
 
 	fn name(&self) -> &str {
@@ -223,15 +268,15 @@ fn va_profile(profile_idc: u8) -> Option<VAProfile::Type> {
 	}
 }
 
-/// Whether a render node the decoder could open offers VLD decode for
+/// Whether a render node a `codec` decoder could open offers VLD decode for
 /// `profile`.
 ///
 /// `Some(false)` only when every node answered and none does. A node that can't
 /// be asked, such as one whose VA driver is missing, leaves the answer unknown,
 /// since a missing driver is a fault rather than the device's refusal.
-fn offered(profile: VAProfile::Type) -> Option<bool> {
-	let nodes: Vec<PathBuf> = match vaapi::device() {
-		Some(node) => vec![node.to_path_buf()],
+fn offered(codec: moq_vaapi::Codec, named: Option<&Path>, profile: VAProfile::Type) -> Option<bool> {
+	let nodes: Vec<PathBuf> = match vaapi::device(codec, named) {
+		Some(node) => vec![node],
 		None => DrmDeviceIterator::default().collect(),
 	};
 	if nodes.is_empty() {
@@ -251,17 +296,17 @@ fn offered(profile: VAProfile::Type) -> Option<bool> {
 	Some(false)
 }
 
-/// Deinterleave each decoded picture's NV12 into the CPU I420 the rest of the
-/// crate speaks, keeping the timestamp the picture was coded with.
-fn convert(decoded: Vec<moq_vaapi::decode::Frame>) -> Result<Vec<Frame>, Error> {
-	decoded
-		.into_iter()
-		.map(|frame| {
+impl Vaapi {
+	/// Deinterleave each decoded picture's NV12 into the CPU I420 the rest of the
+	/// crate speaks, keeping the timestamp the picture was coded with.
+	fn convert(&mut self, decoded: Vec<moq_vaapi::decode::Frame>) -> Result<(), Error> {
+		for frame in decoded {
 			let i420 = I420::from_nv12(&frame.data, crate::Size::new(frame.width, frame.height))?;
 			let timestamp = Timestamp::from_micros(frame.timestamp).unwrap_or(Timestamp::ZERO);
-			Ok(Frame::new(Surface::I420(i420), timestamp))
-		})
-		.collect()
+			self.ready.push_back(Frame::new(Surface::I420(i420), timestamp));
+		}
+		Ok(())
+	}
 }
 
 /// Wrap each exported picture as the DMA-BUF surface a renderer imports, keeping
@@ -381,8 +426,8 @@ mod tests {
 			}
 			let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
-			for encoded in encoder.encode(&frame).unwrap() {
-				decoded.extend(decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap());
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				decoded.extend(decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap());
 			}
 		}
 
@@ -436,10 +481,10 @@ mod tests {
 			}
 			let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
-			for encoded in encoder.encode(&frame).unwrap() {
+			for encoded in encoder.encode_all(&frame).unwrap() {
 				let (payload, timestamp) = (encoded.payload, encoded.timestamp);
-				exported.extend(exporting.decode(payload.clone(), timestamp, i == 0).unwrap());
-				downloaded.extend(downloading.decode(payload, timestamp, i == 0).unwrap());
+				exported.extend(exporting.decode_all(payload.clone(), timestamp, i == 0).unwrap());
+				downloaded.extend(downloading.decode_all(payload, timestamp, i == 0).unwrap());
 			}
 		}
 		assert!(!exported.is_empty(), "VAAPI produced no frames");
@@ -524,8 +569,8 @@ mod tests {
 			}
 			let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
-			for encoded in encoder.encode(&frame).unwrap() {
-				streamed.extend(decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap());
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				streamed.extend(decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap());
 			}
 		}
 		assert!(
@@ -533,7 +578,7 @@ mod tests {
 			"the DPB held nothing back, so this test proves nothing"
 		);
 
-		let flushed = decoder.flush().unwrap();
+		let flushed = decoder.flush_all().unwrap();
 		let timestamps: Vec<u128> = streamed
 			.iter()
 			.chain(&flushed)
@@ -544,6 +589,6 @@ mod tests {
 
 		// A second flush has nothing left to hand back, so the drain is idempotent
 		// and a caller that flushes twice does not see a picture twice.
-		assert!(decoder.flush().unwrap().is_empty());
+		assert!(decoder.flush_all().unwrap().is_empty());
 	}
 }

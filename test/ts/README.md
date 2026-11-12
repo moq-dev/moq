@@ -201,8 +201,8 @@ sequence header opens each access unit.
 Opus is graded against ADTS's buffers for the same channel count: the Opus-in-TS
 draft gives Rx (2 Mb/s for 1-2 channels, matching ADTS) but leaves the buffer size
 unset, so that size is borrowed rather than specified. A stream with no parameters
-at all is refused by name rather than skipped, which fails the check: MPEG-1/2
-video, DVB E-AC-3, and HEVC beyond Main/Main 10. Sections and private data
+at all is refused by name rather than skipped, which fails the check: MPEG-1
+video, MPEG-4 part 2, and HEVC beyond Main/Main 10. Sections and private data
 (SCTE-35, teletext) are listed as not graded; passing elementary-stream buffers
 does not establish conformance for them.
 
@@ -756,9 +756,9 @@ Semantic loss also has paused-clock wire checks in `export_test.rs` and
 
 | Case | Contract | Test |
 |---|---|---|
-| Skipped groups, short or longer than PCR backfill | Only the next PCR flags the skip; PAT/PMT versions stay unchanged; importer Health reports no unflagged PCR jump | `a_skipped_group_flags_the_clock` |
-| Shared A/V outage, including different decode reserves | One program-level PCR flag for the overlapping losses | `a_short_outage_across_both_tracks_flags_once` |
-| Same-instance route handoff after a gap | The same PCR-only flag, with no program change | `a_follower_continues_through_a_same_instance_handoff_after_a_gap` |
+| Skipped groups, short or longer than PCR backfill | Padded continuing-clock holes stay unflagged; only the first PCR after skipped slots flags the jump; PAT/PMT versions stay unchanged; importer Health reports no unflagged PCR jump | `a_skipped_group_flags_the_clock` |
+| Disjoint A/V outages with different decode reserves | Padded continuing-clock holes carry no flag | `disjoint_outages_across_both_tracks_keep_the_clock` |
+| Same-instance route handoff after a gap | Only a clock jump flags the PCR, with no program change | `a_follower_continues_through_a_same_instance_handoff_after_a_gap` |
 
 These run in `just rs test -p moq-mux --lib` and the selected Rust CI gate.
 The raw lane retains the unchanged-packet loss contract below.

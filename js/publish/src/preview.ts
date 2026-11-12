@@ -1,4 +1,4 @@
-import { Micro, Milli, type Second } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import * as Video from "@moq/video";
 import type { Fanout } from "./fanout";
@@ -185,7 +185,7 @@ export class Renderer {
 	}
 }
 
-/** Signals the transcoder reads. */
+/** Signals the transcoder reads. @internal */
 export type TranscodeInput = {
 	// The captured frames to re-encode. We subscribe for our own copies and close them.
 	source: Getter<Fanout<VideoFrame> | undefined>;
@@ -195,10 +195,10 @@ export type TranscodeInput = {
 	settings: Getter<Encoder.Config | undefined>;
 };
 
-/** Constructor options for {@link Transcode}. */
+/** Constructor options for {@link Transcode}. @internal */
 export type TranscodeProps = Inputs<TranscodeInput>;
 
-/** Signals the transcoder derives. */
+/** Signals the transcoder derives. @internal */
 export type TranscodeOutput = {
 	// The decoded output frame. Owned here, closed on each update and on close().
 	frame: Signal<VideoFrame | undefined>;
@@ -207,6 +207,8 @@ export type TranscodeOutput = {
 /**
  * Encodes the captured frames with the live rendition settings and decodes the result, so the
  * output frame is what a viewer would actually see after transmission.
+ *
+ * @internal
  */
 export class Transcode {
 	/** The wired inputs, read-only. */
@@ -331,7 +333,8 @@ export class Transcode {
 		decoder.configure({ codec: config.codec, optimizeForLatency: true });
 
 		// Re-key on the same cadence as the real encoder so the decoder can start and recover.
-		let lastKeyframe: Micro | undefined;
+		// Microseconds.
+		let lastKeyframe: number | undefined;
 
 		effect.run((inner) => {
 			const fanout = inner.get(this.in.source);
@@ -356,11 +359,10 @@ export class Transcode {
 
 						// Mirror Encoder.serve: default to a 2s GOP unless the rendition overrides it.
 						const settings = this.in.settings.peek();
-						const interval = settings?.keyframeInterval ?? Milli.fromSecond(2 as Second);
+						const interval = (settings?.join ?? Duration.secs(2)).asMicros();
 
-						const timestamp = frame.timestamp as Micro;
-						const keyFrame =
-							lastKeyframe === undefined || lastKeyframe + Micro.fromMilli(interval) <= timestamp;
+						const timestamp = frame.timestamp;
+						const keyFrame = lastKeyframe === undefined || lastKeyframe + interval <= timestamp;
 						if (keyFrame) lastKeyframe = timestamp;
 
 						encoder.encode(frame, { keyFrame });

@@ -20,7 +20,7 @@ async fn export_echo_reports_where_the_import_solicits() {
 	let mut broadcast = publication.broadcast().clone();
 	let mut catalog_value = moq_mux::catalog::hang::Catalog::<ts::Ext>::default();
 	catalog_value.echo = Some(hang::catalog::Echo::new(
-		hang::moq_net::path::Relative::new("viewers").unwrap(),
+		moq_net::path::Relative::new("viewers").unwrap(),
 	));
 	let config = moq_mux::catalog::Config::default()
 		.with_catalog(catalog_value)
@@ -88,7 +88,7 @@ async fn export_echo_reports_where_the_import_solicits() {
 		}
 	}
 	import.decode(&CLIP[HALF..]).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 	catalog.finish().unwrap();
 
 	let final_report = loop {
@@ -164,7 +164,7 @@ fn written(clip: &[u8]) -> (BTreeMap<String, hang::stats::Rendition>, ts::stats:
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 	let mut import = ts::Import::new(broadcast, catalog.reserve());
 	import.decode(clip).unwrap();
-	import.finish().unwrap();
+	let import = import.finish().unwrap();
 	(catalog.stats(), import.stats())
 }
 

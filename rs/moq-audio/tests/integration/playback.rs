@@ -11,7 +11,8 @@
 //! Through the dev shell, not bare `cargo`: reaching the default device needs
 //! the ALSA plugin path the shell sets (see `alsaPlugins` in `flake.nix`).
 //! Nothing here asserts on what you hear, so muting the system volume is fine:
-//! the mix is metered before it reaches the device.
+//! the mix is metered before it reaches the device. The tests run on real time
+//! because the device pulls on its own clock, which no mocked clock can drive.
 
 #![cfg(feature = "playback")]
 
@@ -54,7 +55,7 @@ async fn open() -> playback::Engine {
 
 	// The first pull fills the device's buffer at once, so only a clock that
 	// keeps moving after it shows the device is playing.
-	let deadline = kio::clock::Instant::now() + Duration::from_secs(10);
+	let deadline = kio::clock::Instant::now().saturating_add(Duration::from_secs(10));
 	let mut first = None;
 	loop {
 		let clock = observer.read().expect("an observation").clock;
@@ -119,7 +120,7 @@ async fn plays_a_tone_through_the_default_device() {
 		let _ = sink.write(&tone).expect("write");
 		kio::clock::sleep(Duration::from_millis(100)).await;
 
-		peaked |= sink.peak() > 0.4;
+		peaked |= sink.control().peak() > 0.4;
 		// The device is consuming if the queue stays near the target latency
 		// rather than growing by a full chunk every write.
 		drained |= sink.buffered() < Duration::from_millis(250);
@@ -165,7 +166,7 @@ async fn mixes_two_sinks_and_honors_volume() {
 
 	let mut loud = engine.sink(input()).expect("a sink");
 	let mut quiet = engine.sink(input()).expect("a second sink");
-	quiet.set_volume(0.0);
+	quiet.control().set_volume(0.0);
 
 	let tone = tone(0.1);
 	let mut loud_peak: f32 = 0.0;
@@ -175,8 +176,8 @@ async fn mixes_two_sinks_and_honors_volume() {
 		let _ = loud.write(&tone).expect("write");
 		let _ = quiet.write(&tone).expect("write");
 		kio::clock::sleep(Duration::from_millis(100)).await;
-		loud_peak = loud_peak.max(loud.peak());
-		quiet_peak = quiet_peak.max(quiet.peak());
+		loud_peak = loud_peak.max(loud.control().peak());
+		quiet_peak = quiet_peak.max(quiet.control().peak());
 	}
 
 	assert!(loud_peak > 0.4, "the audible sink never registered: {loud_peak}");
@@ -242,7 +243,7 @@ async fn sink_outlives_its_engine() {
 	for _ in 0..5 {
 		let _ = sink.write(&tone).expect("write");
 		kio::clock::sleep(Duration::from_millis(100)).await;
-		peaked |= sink.peak() > 0.4;
+		peaked |= sink.control().peak() > 0.4;
 	}
 
 	assert!(peaked, "playback stopped when the engine was dropped");

@@ -16,10 +16,10 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # On by default: everything that costs the build nothing beyond cargo. Off by
 # default: every feature that needs libclang or a system library on the build
 # host, however cheap it is on other platforms, since a default is one setting
-# for every host. `vaapi` runs bindgen over its vendored libva headers and
-# `pipewire` links libpipewire; a consumer whose build host has those turns them
-# on. `capture` and `v4l2` no longer cost anything on Linux (moq-v4l checks its
-# bindings in) and stay opt-in only until every distribution ships them. The features exist so a consumer can pick what it wants, not to hide code
+# for every host. `pipewire` links libpipewire; a consumer whose build host has
+# it turns it on. `capture` and `v4l2` no longer cost anything on Linux (moq-v4l
+# checks its bindings in) and stay opt-in only until every distribution ships
+# them. The features exist so a consumer can pick what it wants, not to hide code
 # from the default compile (`just check` lints default features only, so the
 # opt-in ones are compiled by nightly's `just rs features` and platform.yml's
 # `just rs macos`).
@@ -28,7 +28,7 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # explicitly. Workspace consumers opt out at the root manifest
 # (`default-features = false`) and pick per crate, so the relay and the language
 # bindings never build device or rendering stacks.
-default = ["mediacodec", "nvidia"]
+default = ["mediacodec", "nvidia", "vaapi"]
 # Native camera and screen capture. Costs the build nothing on any platform:
 # Linux goes through moq-v4l (bindings checked in), macOS and Windows use OS
 # frameworks (Windows display/window capture requires Windows 10 2004+ WGC).
@@ -57,12 +57,12 @@ openh264 = ["dep:openh264", "dep:openh264-sys2"]
 # libvpx.so, which is what the Nix dev shell does. Decodes 8-bit 4:2:0 only (VP8,
 # and VP9 profile 0); anything else is refused rather than converted.
 vpx = ["dep:libvpx-native-sys"]
-# Intel/AMD VAAPI hardware codecs (Linux): the H.264 encoder and decoder. Off by
-# default because moq-vaapi's build script runs bindgen over its vendored libva
-# headers, so the build host needs libclang. At runtime libva is dlopen'd: the
-# binary carries no NEEDED libva and still starts on a libva-less host, where
-# automatic backend selection falls back to the next candidate. Both are
-# validated on Intel Meteor Lake.
+# Intel/AMD VAAPI hardware codecs (Linux): the H.264 and H.265 encoders and
+# decoders, and the GPU resize between them. On by default, like `nvidia`:
+# moq-vaapi checks its libva bindings in, so the build needs nothing beyond
+# cargo, and libva is dlopen'd at runtime, so the binary carries no NEEDED libva
+# and still starts on a libva-less host, where automatic backend selection falls
+# back to the next candidate.
 vaapi = ["dmabuf", "dep:moq-vaapi"]
 # The V4L2 stateful memory-to-memory hardware codecs on Linux: the H.264 encoder
 # and decoder most ARM SoCs expose (a Raspberry Pi's VideoCore, and the
@@ -138,14 +138,13 @@ openh264 = { version = "0.9.8", optional = true }
 # features it needs; cargo unifies this on the same version it depends on, so the
 # raw API types stay identical.
 openh264-sys2 = { version = "0.9.8", default-features = false, optional = true }
-scuffle-h265 = "0.2.2"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = { workspace = true }
 # GPU rendering behind the `render` feature. `wgpu::hal` is re-exported by wgpu
 # itself, so the zero-copy import paths reach the platform handles without a
 # separate wgpu-hal dependency that could drift to a different version.
-wgpu = { version = "30", optional = true }
+wgpu = { workspace = true, optional = true }
 # RGBA -> I420 color conversion (replaces ffmpeg swscale).
 yuv = "0.8.14"
 
@@ -207,12 +206,12 @@ moq-nvenc = { workspace = true, optional = true }
 # videodev2.h structs, `moq_v4l::v4l2::vidioc` for the request codes) rather
 # than a second V4L2 crate, so no ioctl struct is hand-rolled.
 moq-v4l = { workspace = true, optional = true }
-# Intel/AMD VAAPI hardware H.264 encoder and decoder, behind the opt-in `vaapi`
-# feature. As of moq-vaapi 0.0.3 libva is dlopen'd at runtime, so the binary carries
-# no NEEDED libva: the build needs no libva-dev (its build script's bindgen still
-# needs libclang), and a libva-less host still loads. Automatic backend selection
-# then falls back to the next candidate instead of failing at load, matching the
-# NVENC and NVDEC backends.
+# Intel/AMD VAAPI hardware H.264 and H.265 encoder and decoder, behind the
+# default `vaapi` feature. libva is dlopen'd at runtime, so the binary carries no
+# NEEDED libva, and the bindings are checked in, so the build needs neither
+# libva-dev nor libclang. A libva-less host still loads: automatic backend
+# selection then falls back to the next candidate instead of failing at load,
+# matching the NVENC and NVDEC backends.
 moq-vaapi = { workspace = true, optional = true }
 # PipeWire video stream for a portal's node or a camera node, behind the
 # `pipewire` feature.
@@ -276,8 +275,11 @@ cfg_aliases = "0.2.2"
 [dev-dependencies]
 # Native Vulkan producer for the opt-in Vulkan/CUDA interop hardware exercise.
 ash = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
 futures = { workspace = true }
+# `Manual::install`, a clock the capture-loop tests move while the encoder thread works.
+kio = { path = "../kio", features = ["manual"] }
 # `clock_gettime`, so the GPU workload test can report CPU time next to wall
 # latency. std has no CPU clock and the dependency is optional at build time.
 libc = { workspace = true }
@@ -287,6 +289,11 @@ pollster = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
+
+[[bench]]
+name = "openh264"
+harness = false
+required-features = ["openh264"]
 
 [lints]
 workspace = true

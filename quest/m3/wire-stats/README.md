@@ -16,7 +16,7 @@ excluded:
   ACKs, and retransmits.
 - **WebSocket:** the TCP stream's bytes, which include TLS, WebSocket, and
   qmux framing and retransmits.
-- **Gateways an embedder terminates:** SRT through moq-srt's source. moq-rtc
+- **Gateways an embedder terminates:** SRT through moq-srt's source. moq-webrtc
   exposes none since #6454 removed its unused one; it returns only with an
   adapter a consumer registers. An embedder terminating RTMP on its own socket
   registers that socket's `TCP_INFO` counts; moq-rtmp's own `Server` and
@@ -70,10 +70,3 @@ receive-side limitations.
 - **One source registry for sessions and embedders.** An embedder registers
   a gateway connection's wire source on a `stats::Session` from its stats
   handle's `session(label)`, the same path the relay's own sessions use.
-
-## Required
-
-- [qmux byte counters](/quest/m3/wire-stats/qmux.md) - a WebSocket session
-  reports its TCP bytes
-- [moq-srt wire source](/quest/m3/wire-stats/srt.md) - an SRT connection
-  reports its wire bytes

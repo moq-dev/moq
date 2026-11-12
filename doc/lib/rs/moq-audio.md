@@ -18,7 +18,7 @@ capture or playback is enabled.
 | `capture` | Microphones via CoreAudio, WASAPI, ALSA (and PipeWire/PulseAudio hosts), plus macOS system audio |
 | `encode` | PCM to Opus (mono or stereo, with DTX and voice activity) or raw PCM |
 | `decode` | Opus (up to 7.1), PCM, and AAC-LC (mono or stereo) back to PCM, resampled to the rate you want |
-| `playback` | One output device mixing every track in a call, with click-free volume ramps |
+| `playback` | One output device mixing every track in a call, with click-free volume ramps, each track's received audio stretched onto the caller's clock (`Sink::due`) |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's) for caller-supplied PCM or the built-in devices |
 | `bus` | Routes sources into several mixes, each with its own meter and mix-minus, advanced on the caller's clock |
 
@@ -37,14 +37,14 @@ without stalling the mix.
 Without a subscriber the encoder keeps raw PCM
 up to the track's `max_age`, then encodes the part of that history within the
 subscribers' max delay before continuing live when someone subscribes. With an unlimited `max_age` it keeps at most 30 seconds
-(about 11.5 MB for 48 kHz stereo f32). Set `encode::Capture::on_demand` to false
-to encode continuously instead. Stopping an encoder leaves the shared capture running, and the
-history it retained stays on the track until it is subscribed or expires; a device failure keeps
-it the same way before the encoder returns the error. Its consumer can be swapped without
-changing the track subscribers know. Opus packs 20 ms per packet by default,
+(about 11.5 MB for 48 kHz stereo f32). Set `encode::Capture::retain` to false
+to encode continuously instead. Dropping an encoder leaves the shared capture running. A device
+failure keeps the retained history on the track until it is subscribed or expires, then the
+encoder returns the error. Opus packs 20 ms per packet by default,
 or 10 ms with a shorter `frame_duration`. Groups carry at least 20 ms by default,
-so 10 ms packets pair up. `encode::Options::group_duration`
-changes that minimum; zero puts every packet in its own group. Longer groups
+so 10 ms packets pair up. `encode::Options::join`
+changes that minimum; a join shorter than a packet puts every packet in its own
+group, and zero is refused. Longer groups
 mean fewer streams per relay but coarser loss. There is no AAC encoder, so an
 AAC encode request is refused; AAC decode is for broadcasts from the ingest gateways.
 
