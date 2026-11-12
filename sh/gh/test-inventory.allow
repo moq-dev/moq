@@ -34,8 +34,3 @@ ignore moq-video::frame::tests::d3d11_resize_defaults_to_the_gpu /quest/m5/video
 ignore moq-video::frame::tests::d3d11_resize_matches_cpu /quest/m5/video-hardware.md
 ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m5/video-hardware.md
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m5/video-hardware.md
-
-# Quarantined flakes, re-enabled by the quest that fixes them.
-
-# Flaked under a loaded `just check`; disabled until fixed at its cause.
-ignore moq-gst::source::imp::session_tests::a_reannounced_sibling_instance_does_not_replay_its_finish /quest/m0/test-flakes-2/README.md
