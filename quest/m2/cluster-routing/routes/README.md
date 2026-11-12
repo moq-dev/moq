@@ -565,10 +565,6 @@ benchmarks.
   subscriptions through the radio mesh and the split refuses, and after a
   partition each island reaches the other through its uplink.
 
-## Required
-
-- [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - every ordering on 4-5 relay meshes with two origins and clients, with an announce budget and convergence
-
 ## Related
 
 - [Route wakes](/quest/m4/route-wakes.md) - index work follows the settled source-selection model
