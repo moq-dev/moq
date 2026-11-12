@@ -2389,8 +2389,15 @@ async fn a_broadcast_relayed_from_another_client_is_not_ours_to_check(version: &
 		let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 		sub.recv_group().await.unwrap().expect("a group");
 
-		kio::clock::sleep(Duration::from_secs(8)).await;
-		assert_eq!(pair.client_transport.close_reason(), None);
+		// The first broadcast refused is the one we published, not the one relayed to us.
+		let bad = local.route("bad/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		bad.announce().unwrap();
+		assert!(matches!(
+			pair.server.closed().await,
+			Error::Session(SessionError::Unauthorized)
+		));
+		let (_, reason) = pair.client_transport.close_reason().expect("closed");
+		assert_eq!(reason, "unauthorized: bad/x");
 	})
 	.await
 	.expect("timed out");

@@ -24,9 +24,10 @@ enforcement or in moq-ffi's origin wiring is in scope.
 
 Attempted 2026-11-11 without reproducing it: the cell passed 6 local runs of
 `--publishers python --subscribers rust,python,go,cpp,c --versions moq-lite-07-wip`
-(1 to 17 s), and all 24 of its runs in the scheduled Interop logs from
-2026-11-04 to 2026-11-09. The failure stalled for 6 s with no audio, while a
-passing cell finishes in about 1 s, so it needs whatever stalled that run.
+(1 to 17 s per run, each covering five subscriber cells), and all 24 of its
+runs in the scheduled Interop logs from 2026-11-04 to 2026-11-09. The failure
+stalled for 6 s with no audio, while a passing python-go cell finishes in about
+1 s, so it needs whatever stalled that run.
 `auth::lite_07::a_broadcast_relayed_from_another_client_is_not_ours_to_check`
 pins the three-party shape (publisher, relay, shared-origin subscriber) and passes.
 
