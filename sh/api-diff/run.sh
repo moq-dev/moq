@@ -66,9 +66,12 @@ breaks() {
         line ~ /^[[:space:]]*$/ { next }
         {
             match(line, /^[[:space:]]*/)
-            while (depth && indent[depth] >= RLENGTH) depth--
+            sibling = ""
+            while (depth && indent[depth] >= RLENGTH) { if (indent[depth] == RLENGTH) sibling = parent[depth]; depth-- }
             optional = line ~ /^[[:space:]]*(readonly[[:space:]]+)?[A-Za-z_$][A-Za-z0-9_$]*\?:/
-            if (mark == "+" && depth && parent[depth] == " " && !optional) { broke = 1; exit }
+            # A closing bracket ends the added line it lines up with, such as an optional property'"'"'s inline object type.
+            closes = sibling == "+" && line ~ /^[[:space:]]*[]})]/
+            if (mark == "+" && depth && parent[depth] == " " && !optional && !closes) { broke = 1; exit }
             indent[++depth] = RLENGTH
             parent[depth] = mark
         }
