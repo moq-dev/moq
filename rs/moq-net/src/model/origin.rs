@@ -3195,14 +3195,22 @@ impl RouteState {
 		self.announcement.route().is_some()
 	}
 
-	/// Apply `update` to the options, re-advertising a visible route in place.
+	/// Apply `update` to the options, re-advertising a visible route in place. A failed
+	/// change keeps the options as they were, so a closed route holds nothing it was given.
 	fn change(&self, update: impl FnOnce(&mut RouteOptions)) -> Result<(), Error> {
 		let mut control = self.control.lock();
+		let previous = control.options.clone();
 		update(&mut control.options);
-		if !self.announcement.is_live()? {
-			return Ok(());
+		// One rollback for both failures: closed before the check, or between it and the update.
+		let result = match self.announcement.is_live() {
+			Ok(true) => self.announcement.update_if(control.info(), None, |_| true).map(drop),
+			Ok(false) => Ok(()),
+			Err(err) => Err(err),
+		};
+		if result.is_err() {
+			control.options = previous;
 		}
-		self.announcement.update_if(control.info(), None, |_| true).map(|_| ())
+		result
 	}
 }
 
@@ -9993,6 +10001,28 @@ mod tests {
 			} => assert_eq!(update.route.auth, Some(second)),
 			other => panic!("should be an update: got {other:?}"),
 		}
+	}
+
+	/// A change to a closed route fails and keeps nothing, so the route holds no
+	/// credential it was refused.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_closed_route_keeps_no_refused_change() {
+		let handle = crate::auth::Link::ietf();
+		let token = handle.present(bytes::Bytes::from_static(b"token"), false).unwrap();
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().routes();
+		let route = producer.route("room", RouteOptions::hidden()).unwrap();
+		route.announce().unwrap();
+		announced.expect_next_active("room").await;
+		route.broadcast().close();
+		announced.expect_next_ended("room").await;
+
+		assert!(matches!(route.set_auth(Some(token.clone())), Err(Error::Closed)));
+		assert!(matches!(route.set_cost(7), Err(Error::Closed)));
+		let control = route.state.control.lock();
+		assert!(control.options.auth.is_none());
+		assert_eq!(control.options.cost, Cost::default());
 	}
 
 	/// A replacement under another instance from a cluster peer at equal cost and chain

@@ -95,3 +95,31 @@ public final class Tokens: Sendable {
         try await ffi.answered()
     }
 }
+
+/// A request token a session presents, which a `Route` or `Claim` names with `setAuth`.
+///
+/// Returned by `Session.credential(_:)`. It stays presented until `cancel()`, or until it
+/// is released and no route or claim names it, answered or not.
+public final class Credential: Sendable {
+    let ffi: MoqCredential
+
+    init(_ ffi: MoqCredential) {
+        self.ffi = ffi
+    }
+
+    /// Suspend until the peer's first verdict on the token: return once a peer accepts it, at
+    /// once on moq-transport, where only the requests that name it carry the token.
+    ///
+    /// Throws the peer's refusal as `MoqError.Protocol` carrying its code,
+    /// `MoqError.Unsupported` when nothing can carry a token (moq-lite without AUTH), and
+    /// `MoqError.Cancelled` once `cancel()` ran.
+    public func answered() async throws {
+        try await ffi.answered()
+    }
+
+    /// Release the credential now: withdrawn at once unless a route or claim still names it,
+    /// and every `answered()` call throws `MoqError.Cancelled`.
+    public func cancel() {
+        ffi.cancel()
+    }
+}

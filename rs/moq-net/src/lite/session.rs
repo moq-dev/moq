@@ -1074,7 +1074,7 @@ mod tests {
 		})
 		.unwrap();
 		let mut driver = start.driver;
-		let token = handle.present(bytes::Bytes::from_static(b"token")).unwrap();
+		let token = handle.add(bytes::Bytes::from_static(b"token")).unwrap();
 
 		let res = kio::clock::timeout(
 			std::time::Duration::from_secs(5),

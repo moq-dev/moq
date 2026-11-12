@@ -849,7 +849,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	#[ignore = "measures real codec CPU; run with just rs bench-playback"]
+	#[ignore = "measures real codec CPU; release benchmark, run by nightly"]
 	async fn benchmark_raw_audio() {
 		println!("tracks,retention_secs,always_on,idle_ms,catchup_ms");
 		for tracks in [1, 8] {

@@ -2,8 +2,8 @@
  * Replay a recorded arrival trace through the player's consumer and ring on a simulated clock.
  *
  * Every frame is written into its group at the instant the trace says it arrived, and the player's
- * real `Container.Consumer` decides what to deliver, wait for, and skip, at the max delay the delay
- * sets. Delivered frames go into the real ring, which carries on through a gap the way the decoder's
+ * real `Container.Consumer` decides what to deliver, wait for, and skip, at the hole wait and max delay
+ * the decoder sets. Delivered frames go into the real ring, which carries on through a gap the way the decoder's
  * does: a gap restarts only the codec. One render quantum is read every quantum's worth of that same
  * clock, which is what the AudioWorklet does. A real {@link Sync} resolves the delay from the playout target the decoder
  * registers, measured by that same consumer from the recorded catalog config, and the ring and the
@@ -210,13 +210,14 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const buffered = !lookahead.isZero();
 	const sync = new Sync({ delay: options.delay, lookahead });
 	const track = new Track.Producer("audio");
-	// The subscription's max delay, as the decoder sets it, which the consumer skips at too.
+	// The subscription's max delay, as the decoder sets it, which the consumer drops aged media at too.
 	const maxDelay = new Derived([sync.out.maxDelay], (max) =>
 		options.delay === "auto" ? max.max(AUTO_MAX_DELAY) : max,
 	);
 	const consumer = new Container.Consumer(track.subscribe({ delay: { max: WIRE_MAX_DELAY } }), {
 		format: new Container.Legacy.Format("audio"),
 		delay: new Derived([sync.out.delay, maxDelay], (min, max) => ({ min, max })),
+		wait: sync.out.maxDelay,
 	});
 
 	// Match the decoder: a codec constant until a delivered packet states its own duration.

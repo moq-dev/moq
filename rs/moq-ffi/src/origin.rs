@@ -558,6 +558,18 @@ impl MoqRoute {
 		self.with(|route| route.set_cost(cost))
 	}
 
+	/// Swap the credential the route's announcing request carries, renewing that request in
+	/// place, or `None` to announce under the session's scope.
+	///
+	/// Only the session it was minted on carries it, a client session across every
+	/// reconnect; any other session announces the route under its own scope. Errors with
+	/// `Closed` once its broadcast closed, keeping the credential it had, and with
+	/// `Cancelled` for a cancelled credential.
+	pub fn set_auth(&self, credential: Option<Arc<crate::auth::MoqCredential>>) -> Result<(), MoqError> {
+		let credential = credential.map(|credential| credential.credential()).transpose()?;
+		self.with(|route| route.set_auth(credential))
+	}
+
 	/// Retract the route and release it here, not when the handle is.
 	///
 	/// Terminal: later calls fail with `Cancelled`. The broadcast lives on for its other
@@ -629,6 +641,17 @@ impl MoqClaim {
 	/// hidden claim keeps the price for when it next announces.
 	pub fn set_cost(&self, cost: u64) -> Result<(), MoqError> {
 		self.with(|claim| claim.set_cost(cost))
+	}
+
+	/// Swap the credential the claim's announcing request carries, renewing that request in
+	/// place, or `None` to announce under the session's scope.
+	///
+	/// Only the session it was minted on carries it, a client session across every
+	/// reconnect; any other session announces the claim under its own scope. Errors with
+	/// `Cancelled` for a cancelled credential.
+	pub fn set_auth(&self, credential: Option<Arc<crate::auth::MoqCredential>>) -> Result<(), MoqError> {
+		let credential = credential.map(|credential| credential.credential()).transpose()?;
+		self.with(|claim| claim.set_auth(credential))
 	}
 
 	/// Wait for the next broadcast a consumer requests beneath this claim.

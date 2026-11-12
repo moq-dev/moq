@@ -14,7 +14,7 @@ use crate::quic::web::CloseReason;
 
 /// A stream that can be used to receive bytes. See [`crate::quic::driver::recv::Stream`].
 ///
-/// Dropping it before the end stops it with code 0.
+/// Dropping it before the end stops it with code 0, or WT_SESSION_GONE once the session closed.
 #[derive(Debug)]
 pub struct Stream {
 	/// Taken when moq-net stops through its mutable poll trait.
@@ -24,9 +24,7 @@ pub struct Stream {
 }
 
 impl Stream {
-	pub(crate) fn new(mut stream: recv::Stream, close: Arc<CloseReason>) -> Self {
-		// The driver's raw 0 is outside the HTTP/3 range, so a WebTransport peer can't decode it.
-		stream.set_drop_stop(close.encode_stream_code(0));
+	pub(crate) fn new(stream: recv::Stream, close: Arc<CloseReason>) -> Self {
 		Self {
 			id: stream.id(),
 			inner: Some(stream),
@@ -42,7 +40,11 @@ impl Stream {
 	pub fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<recv::Lease<'_>, Error>> {
 		let close = &self.close;
 		match &mut self.inner {
-			Some(inner) => inner.poll_lease(waiter, want).map_err(|e| map_error(close, e)),
+			Some(inner) => match inner.poll_lease(waiter, want) {
+				Poll::Ready(Ok(lease)) => Poll::Ready(Ok(lease)),
+				Poll::Ready(Err(e)) => poll_error(close, waiter, e).map(Err),
+				Poll::Pending => Poll::Pending,
+			},
 			None => Poll::Ready(Err(Error::ClosedStream)),
 		}
 	}
@@ -57,8 +59,8 @@ impl Stream {
 		};
 		match ready!(inner.poll_received_reset(waiter)) {
 			Ok(None) => Poll::Pending,
-			Ok(Some(code)) => Poll::Ready(map_error(close, recv::Error::Reset(code))),
-			Err(err) => Poll::Ready(map_error(close, err)),
+			Ok(Some(code)) => poll_error(close, waiter, recv::Error::Reset(code)),
+			Err(err) => poll_error(close, waiter, err),
 		}
 	}
 
@@ -92,41 +94,50 @@ impl Stream {
 		};
 		match ready!(inner.poll_closed(waiter)) {
 			Ok(None) => Poll::Ready(Ok(())),
-			Ok(Some(code)) => Poll::Ready(Err(map_error(close, recv::Error::Reset(code)))),
-			Err(err) => Poll::Ready(Err(map_error(close, err))),
+			Ok(Some(code)) => poll_error(close, waiter, recv::Error::Reset(code)).map(Err),
+			Err(err) => poll_error(close, waiter, err).map(Err),
 		}
 	}
 
 	/// Poll for some bytes without retaining the destination buffer.
 	pub fn poll_read(&mut self, waiter: &kio::Waiter, mut buf: &mut [u8]) -> Poll<Result<Option<usize>, Error>> {
 		let close = self.close.clone();
-		self.inner()?
-			.poll_read_buf(waiter, &mut buf)
-			.map_err(|err| map_error(&close, err))
+		match ready!(self.inner()?.poll_read_buf(waiter, &mut buf)) {
+			Ok(n) => Poll::Ready(Ok(n)),
+			Err(err) => poll_error(&close, waiter, err).map(Err),
+		}
 	}
 
 	/// Read some data into `buf` and return the amount read. See [`recv::Stream::read`].
 	pub async fn read(&mut self, buf: &mut impl BufMut) -> Result<Option<usize>, Error> {
-		let result = self.inner()?.read(buf).await;
-		result.map_err(|e| map_error(&self.close, e))
+		match self.inner()?.read(buf).await {
+			Ok(res) => Ok(res),
+			Err(e) => Err(error(&self.close, e).await),
+		}
 	}
 
 	/// Fill the entire buffer with data. See [`recv::Stream::read_exact`].
 	pub async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Error> {
-		let result = self.inner()?.read_exact(buf).await;
-		result.map_err(|e| map_error(&self.close, e))
+		match self.inner()?.read_exact(buf).await {
+			Ok(res) => Ok(res),
+			Err(e) => Err(error(&self.close, e).await),
+		}
 	}
 
 	/// Read a chunk of data from the stream. See [`recv::Stream::read_chunk`].
 	pub async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, Error> {
-		let result = self.inner()?.read_chunk(max).await;
-		result.map_err(|e| map_error(&self.close, e))
+		match self.inner()?.read_chunk(max).await {
+			Ok(res) => Ok(res),
+			Err(e) => Err(error(&self.close, e).await),
+		}
 	}
 
 	/// Read until the end of the stream or the limit is hit. See [`recv::Stream::read_to_end`].
 	pub async fn read_to_end(&mut self, limit: usize) -> Result<Vec<u8>, Error> {
-		let result = self.inner()?.read_to_end(limit).await;
-		result.map_err(|e| map_error(&self.close, e))
+		match self.inner()?.read_to_end(limit).await {
+			Ok(res) => Ok(res),
+			Err(e) => Err(error(&self.close, e).await),
+		}
 	}
 
 	/// Block until the stream has been reset and return the error code. See
@@ -140,11 +151,11 @@ impl Stream {
 		};
 		match inner.received_reset().await {
 			Ok(None) => Ok(None),
-			Ok(Some(code)) => match map_error(&self.close, recv::Error::Reset(code)) {
+			Ok(Some(code)) => match error(&self.close, recv::Error::Reset(code)).await {
 				Error::Reset(code) => Ok(Some(code)),
 				err => Err(err),
 			},
-			Err(err) => Err(map_error(&self.close, err)),
+			Err(err) => Err(error(&self.close, err).await),
 		}
 	}
 
@@ -162,13 +173,13 @@ impl Stream {
 }
 
 /// Decode the peer's reset code, and report a session error, or a reset for a session
-/// that is gone, as the session's close reason.
-fn map_error(close: &CloseReason, e: recv::Error) -> Error {
-	match e {
+/// that is gone, as the session's close reason, pending until that reason is known.
+fn poll_error(close: &CloseReason, waiter: &kio::Waiter, e: recv::Error) -> Poll<Error> {
+	Poll::Ready(match e {
 		recv::Error::Reset(code) => match close.decode_stream_code(code) {
 			Some(code) => Error::Reset(code),
-			None => match close.session_gone(code) {
-				Some(err) => Error::Session(err),
+			None => match close.poll_session_gone(waiter, code) {
+				Some(err) => return err.map(Error::Session),
 				None => Error::InvalidReset(code),
 			},
 		},
@@ -176,6 +187,21 @@ fn map_error(close: &CloseReason, e: recv::Error) -> Error {
 			Error::Session(e) => Error::Session(close.map(e)),
 			e => e,
 		},
+	})
+}
+
+/// [`poll_error`] as a future.
+async fn error(close: &CloseReason, e: recv::Error) -> Error {
+	kio::wait(|waiter| poll_error(close, waiter, e.clone())).await
+}
+
+impl Drop for Stream {
+	fn drop(&mut self) {
+		// Chosen at drop, since the session may have closed since the stream opened. The
+		// driver's raw 0 is outside the HTTP/3 range, so a WebTransport peer can't decode it.
+		if let Some(inner) = &mut self.inner {
+			inner.set_drop_stop(self.close.encode_stream_code(0));
+		}
 	}
 }
 

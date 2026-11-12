@@ -130,6 +130,14 @@ public final class Route: Sendable {
         try ffi.setCost(cost: cost)
     }
 
+    /// Swap the credential the route's announcing request carries, renewing that request in
+    /// place, or `nil` to announce under the session's scope. Only the session it was minted
+    /// on carries it. Throws `Closed` once its broadcast closed, keeping the credential it
+    /// had, and `Cancelled` for a cancelled credential.
+    public func setAuth(_ credential: Credential?) throws {
+        try ffi.setAuth(credential: credential?.ffi)
+    }
+
     /// Retract the route now: later calls throw `Cancelled`. Its broadcast lives on until
     /// closed.
     public func cancel() {
@@ -170,6 +178,13 @@ public final class Claim: AsyncSequence, Sendable {
     /// Re-price the claim in place: lower wins among routes covering the same prefix.
     public func setCost(_ cost: UInt64) throws {
         try ffi.setCost(cost: cost)
+    }
+
+    /// Swap the credential the claim's announcing request carries, renewing that request in
+    /// place, or `nil` to announce under the session's scope. Only the session it was minted
+    /// on carries it. Throws `Cancelled` for a cancelled credential.
+    public func setAuth(_ credential: Credential?) throws {
+        try ffi.setAuth(credential: credential?.ffi)
     }
 
     /// The next broadcast requested beneath this claim, or `nil` once the claim is retracted

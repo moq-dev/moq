@@ -16,8 +16,7 @@ export interface ConsumerProps {
 	 * for it when the newest group arrives first; an unstated (`null`) `min` reads as zero. A `min`
 	 * past `max` starts at `max`, since the publisher serves nothing older. `max` is measured as
 	 * the span from the oldest buffered frame to the newest, so it bounds how long a late group is
-	 * waited for. A missing sequence also expires this much monotonic time after the first group
-	 * past it arrived, even when the next group is a marker on a paused track. It is the local
+	 * waited for, and a missing one unless {@link ConsumerProps.wait} is shorter. It is the local
 	 * half of the subscription's `delay.max`; both measure the same budget, one on the wire and one
 	 * as frames are read. It bounds a join's lateness too: a backlog that landed before the first
 	 * read starts at the first group whose first frame is within it, plus any warmup, of the
@@ -26,6 +25,16 @@ export interface ConsumerProps {
 	 */
 	// Read-only: a Getter (e.g. another component's output) is accepted directly.
 	delay?: GetterInit<Moq.Track.Delay>;
+	/**
+	 * How long a missing group is waited for before the consumer skips past it, at most `delay.max`
+	 * (default: `delay.max`). It expires once where the first group past it begins falls this far
+	 * behind the newest content, or this much monotonic time after that group arrived, even when
+	 * it is a marker on a paused track. Groups that did arrive still play until they age past
+	 * `delay.max`, so a player can wait on holes for its playout delay alone while still receiving
+	 * the late media it catches up on.
+	 */
+	// Read-only: a Getter (e.g. another component's output) is accepted directly.
+	wait?: GetterInit<Duration | undefined>;
 	/**
 	 * Cap the bytes of decoded frames held ahead of the reader, counting the whole wire payload they
 	 * share and each frame's and group's own overhead (default: one group at the transport's size
@@ -173,6 +182,7 @@ export class Consumer {
 	#track: Moq.Track.Subscriber;
 	#format: Format;
 	#delay: Getter<Moq.Track.Delay>;
+	#wait: Getter<Duration | undefined>;
 	#maxBuffer: number;
 	// How much further than the min delay the start reaches, and the age skip tolerates while warming.
 	#warmup: Duration;
@@ -247,6 +257,7 @@ export class Consumer {
 		this.#track = track;
 		this.#format = props.format;
 		this.#delay = getter(props.delay ?? {});
+		this.#wait = getter(props.wait);
 		this.#maxBuffer = props.maxBuffer ?? DEFAULT_MAX_BUFFER;
 		this.#warmup = props.warmup ?? Duration.ZERO;
 		this.#jitter = props.predecessor ? props.predecessor.#jitter.fork() : new Jitter();
@@ -838,8 +849,8 @@ export class Consumer {
 			// Otherwise promote #active when the first buffered group continues the timeline we left off at,
 			// when a completed empty group can be walked (empty groups mean nothing), or when the hole
 			// is proven: everything a missing group could still present ends where the first group past
-			// it begins, so once that start falls a whole max delay behind the newest content, all of it
-			// would arrive too old to play. Mirrors Rust's `aged`. Where presentation left off proves only
+			// it begins, so once that start falls the whole wait behind the newest content, all of it
+			// would arrive too late to play. Mirrors Rust's `aged`. Where presentation left off proves only
 			// the oldest of it stale, and groups go out newest first, so a flush's newest group lands just
 			// ahead of the groups behind it, which would then arrive below the cursor and never play.
 			// Proving it here matters: #checkMaxDelay would instead drop the head, the very group to play
@@ -857,11 +868,11 @@ export class Consumer {
 					const startup = this.#start === undefined && !this.#floored;
 					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp.asMicros());
 					const empty = head.empty && head.consumer.done;
-					const maxDelay = maxMicros(this.#delay.peek());
+					const wait = this.#holeWait(this.#delay.peek(), this.#wait.peek());
 					const bound = this.#groups.find((group) => group.start !== undefined)?.start;
 					const edge = this.#liveEdge();
-					const aged = bound !== undefined && edge !== undefined && edge - bound >= maxDelay;
-					const elapsed = now().since(this.#hole).asMicros() >= maxDelay;
+					const aged = bound !== undefined && edge !== undefined && edge - bound >= wait;
+					const elapsed = now().since(this.#hole).asMicros() >= wait;
 					// The ranges ask for nothing in between, so nothing there is owed.
 					const next = this.#track.nextInRange(this.#active);
 					const excluded = next === undefined || next >= head.consumer.sequence;
@@ -977,8 +988,9 @@ export class Consumer {
 				timer = new Effect();
 				timer.run((effect) => {
 					const delay = effect.get(this.#delay);
-					// The start waits out its reach, and a hole the max delay, which an unlimited one never does.
-					const budget = starting === undefined ? maxMicros(delay) : this.#reach(delay);
+					// The start waits out its reach, and a hole the wait, which an unlimited one never does.
+					const budget =
+						starting === undefined ? this.#holeWait(delay, effect.get(this.#wait)) : this.#reach(delay);
 					if (!Number.isFinite(budget)) return;
 					effect.timer(() => this.#notify?.(), Duration.micros(budget).saturatingSub(now().since(since)));
 				});
@@ -997,6 +1009,12 @@ export class Consumer {
 			this.#notify = undefined;
 			if (aborted) return undefined;
 		}
+	}
+
+	// How long a missing group is waited for, in microseconds: the wait, at most the max delay.
+	#holeWait(delay: Moq.Track.Delay, wait: Duration | undefined): number {
+		const max = maxMicros(delay);
+		return wait === undefined ? max : Math.min(wait.asMicros(), max);
 	}
 
 	// How far behind the live edge the start reaches, in microseconds: the min delay plus the warmup.
