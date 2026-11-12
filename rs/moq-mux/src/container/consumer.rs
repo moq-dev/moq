@@ -328,9 +328,9 @@ pub struct Playout {
 	pub warmup: std::time::Duration,
 }
 
-/// The most catalog `warmup` a reader reaches back for, so a publisher cannot hold a reader's media
-/// without bound. Matches `moq_audio::playback::Input::LATENCY_MAX` and `@moq/watch`'s cap.
-pub const WARMUP_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+/// The longest playout delay: it caps a reader's latency and how far catalog `warmup` reaches back,
+/// so a publisher cannot hold a reader's media without bound. Mirrored by `@moq/hang`'s `DELAY_MAX`.
+pub const DELAY_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Playout {
 	/// Play at `delay`, starting `warmup` further back.
@@ -361,9 +361,9 @@ impl Playout {
 			.with_max(self.delay.max.map(|max| max.saturating_add(self.reach())))
 	}
 
-	/// The warmup, capped at [`WARMUP_MAX`].
+	/// The warmup, capped at [`DELAY_MAX`].
 	fn reach(&self) -> std::time::Duration {
-		self.warmup.min(WARMUP_MAX)
+		self.warmup.min(DELAY_MAX)
 	}
 }
 
@@ -3946,9 +3946,9 @@ mod tests {
 		);
 		assert_eq!(
 			subscribed(&consumer).subscription().delay.max,
-			Some(Duration::from_millis(200) + WARMUP_MAX)
+			Some(Duration::from_millis(200) + DELAY_MAX)
 		);
-		assert_eq!(consumer.warmup, WARMUP_MAX);
+		assert_eq!(consumer.warmup, DELAY_MAX);
 	}
 
 	/// An unlimited max delay keeps the subscription unlimited, and the min delay still sets the
