@@ -83,13 +83,18 @@ pub enum Source {
 	/// A camera / webcam. `None` opens the default camera.
 	///
 	/// The identifiers from [`cameras`] are an AVFoundation `uniqueID` on macOS,
-	/// a `/dev/videoN` path on Linux, and a Media Foundation symbolic link on
-	/// Windows. Bare numeric indices remain accepted on Linux and Windows.
+	/// a Media Foundation symbolic link on Windows, and on Linux a `/dev/videoN`
+	/// path or, with the `pipewire` feature, a `pipewire:<node name>` id. Bare
+	/// numeric indices remain accepted on Linux and Windows.
 	///
-	/// With the `pipewire` feature, Linux also lists PipeWire camera nodes as
-	/// `pipewire:<node name>`, and `pipewire` alone opens the camera with the
+	/// With the `pipewire` feature, Linux lists a webcam that a PipeWire node
+	/// fronts by the node's id, since PipeWire shares the camera with other
+	/// clients while a V4L2 open holds it exclusively. Only devices no node
+	/// fronts list as `/dev/videoN`. `pipewire` alone opens the camera with the
 	/// highest session priority, which the session manager treats as default.
-	/// The id picks the backend: a `/dev/videoN` path always opens V4L2, and a
+	///
+	/// The id picks the backend: a `/dev/videoN` path always opens V4L2, listed
+	/// or not, so an id saved from an earlier listing keeps working, and a
 	/// `pipewire` id always opens PipeWire. `None` opens `/dev/video0`, except
 	/// inside a sandbox (Flatpak or Snap), where it opens PipeWire's default
 	/// camera through the camera portal.
@@ -532,10 +537,12 @@ async fn open_source(config: &Config) -> Result<Stream, Error> {
 /// List the available cameras and the identifiers [`Source::Camera`] accepts.
 ///
 /// On Linux, V4L2 lists only devices offering YUYV or MJPEG. With the `pipewire`
-/// feature, PipeWire camera nodes follow, excluding V4L2 paths already listed.
-/// PipeWire-only cameras remain visible. A session without PipeWire lists V4L2
-/// alone. Inside a sandbox the PipeWire nodes come through the camera portal,
-/// which may ask the user for camera access.
+/// feature, PipeWire camera nodes come first, and a V4L2 device that a listed
+/// node fronts is listed only as that node, since PipeWire shares the device
+/// with other clients while a V4L2 open holds it exclusively. V4L2 devices no
+/// node fronts remain visible. A session without PipeWire, or one whose daemon
+/// does not answer, lists V4L2 alone. Inside a sandbox the PipeWire nodes come
+/// through the camera portal, which may ask the user for camera access.
 pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	#[cfg(target_os = "macos")]
 	{
@@ -545,10 +552,7 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	{
 		let cameras = blocking(v4l2::cameras).await?;
 		#[cfg(feature = "pipewire")]
-		let cameras = {
-			let pipewire = pipewire::camera::cameras(&cameras).await?;
-			[cameras, pipewire].concat()
-		};
+		let cameras = pipewire::camera::cameras(cameras).await?;
 		Ok(cameras)
 	}
 	#[cfg(target_os = "windows")]

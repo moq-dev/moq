@@ -37,8 +37,26 @@ use crate::{Error, FrameRate, Size};
 /// answers in milliseconds, so running out means it is stuck.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// List the PipeWire cameras as [`Camera`]s with `pipewire:<node name>` ids.
-pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, Error> {
+/// Merges the PipeWire cameras, with `pipewire:<node name>` ids, into the V4L2
+/// listing `v4l2`, as [`merge`] describes.
+///
+/// A host without a PipeWire session gets `v4l2` back unchanged, and so does
+/// one whose daemon or camera portal fails to answer, unless `v4l2` is empty
+/// and the failure is all there is to report.
+pub(in crate::capture) async fn cameras(v4l2: Vec<Camera>) -> Result<Vec<Camera>, Error> {
+	match nodes().await {
+		Ok(nodes) => Ok(merge(nodes, v4l2)),
+		Err(error) if !v4l2.is_empty() => {
+			tracing::warn!(%error, "listing PipeWire cameras failed; listing V4L2 cameras only");
+			Ok(v4l2)
+		}
+		Err(error) => Err(error),
+	}
+}
+
+/// Lists the PipeWire camera nodes with a format this backend converts, none
+/// on a host without a PipeWire session.
+async fn nodes() -> Result<Vec<Node>, Error> {
 	let sandboxed = ashpd::is_sandboxed();
 	let remote = if sandboxed {
 		match portal().await? {
@@ -49,8 +67,7 @@ pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, 
 	} else {
 		None
 	};
-	let v4l2 = v4l2.to_vec();
-	let nodes = crate::capture::blocking(move || {
+	crate::capture::blocking(move || {
 		pw::init();
 		let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| err("pipewire main loop", e))?;
 		let context = pw::context::ContextRc::new(&mainloop, None).map_err(|e| err("pipewire context", e))?;
@@ -65,7 +82,7 @@ pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, 
 			Err(error) => return Err(err("pipewire connect", error)),
 		};
 		let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
-		let nodes = unlisted(scan(&mainloop, &core, &registry)?, &v4l2);
+		let nodes = scan(&mainloop, &core, &registry)?;
 		// Hide a node with no format we convert, as the V4L2 listing does: an IR
 		// camera that offers only GREY would list an id `open` refuses. A node
 		// whose formats cannot be read stays, since `open` reports why.
@@ -92,26 +109,30 @@ pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, 
 			})
 			.collect())
 	})
-	.await?;
+	.await
+}
 
-	Ok(nodes
+/// Lists the PipeWire cameras first, then the V4L2 cameras no node fronts.
+///
+/// A V4L2 device that a node fronts is listed only as that node: PipeWire
+/// shares the device with other clients, while a V4L2 open holds it
+/// exclusively.
+fn merge(nodes: Vec<Node>, v4l2: Vec<Camera>) -> Vec<Camera> {
+	let v4l2: Vec<Camera> = v4l2
+		.into_iter()
+		.filter(|camera| {
+			!nodes
+				.iter()
+				.any(|node| node.v4l2_path.as_deref() == Some(camera.id.as_str()))
+		})
+		.collect();
+	nodes
 		.into_iter()
 		.map(|node| Camera {
 			id: format!("{PIPEWIRE}:{}", node.name),
 			name: node.description,
 		})
-		.collect())
-}
-
-/// Drop the nodes the V4L2 listing already enumerated.
-fn unlisted(nodes: Vec<Node>, v4l2: &[Camera]) -> Vec<Node> {
-	nodes
-		.into_iter()
-		.filter(|node| {
-			!v4l2
-				.iter()
-				.any(|camera| node.v4l2_path.as_deref() == Some(camera.id.as_str()))
-		})
+		.chain(v4l2)
 		.collect()
 }
 
@@ -853,35 +874,44 @@ mod tests {
 	];
 
 	#[test]
-	fn listing_hides_only_v4l2_paths_already_enumerated() {
+	fn listing_puts_pipewire_first_and_hides_the_v4l2_paths_it_fronts() {
+		let v4l2 = vec![Camera {
+			id: "/dev/video0".into(),
+			name: "Integrated Camera".into(),
+		}];
+		let ids = |nodes: &[Node]| -> Vec<String> {
+			merge(nodes.to_vec(), v4l2.clone())
+				.into_iter()
+				.map(|camera| camera.id)
+				.collect()
+		};
+		let fronted = ["pipewire:v4l2_input.pci-0000_00_14.0-usb-0_4_1.0"];
+		let both = ["pipewire:v4l2_input.pci-0000_00_14.0-usb-0_4_1.0", "/dev/video0"];
+
 		let mut props = WEBCAM.to_vec();
 		props.extend([("device.api", "v4l2"), ("api.v4l2.path", "/dev/video0")]);
 		let webcam = node(&props).unwrap();
-		let v4l2 = [Camera {
-			id: "/dev/video0".into(),
-			name: webcam.description.clone(),
-		}];
-		assert!(unlisted(vec![webcam.clone()], &v4l2).is_empty());
-		assert_eq!(unlisted(vec![webcam.clone()], &[]).len(), 1);
+		assert_eq!(ids(std::slice::from_ref(&webcam)), fronted);
+		assert_eq!(ids(&[]), ["/dev/video0"]);
 		// An identical label on another device must not hide it.
 		props.pop();
 		props.push(("api.v4l2.path", "/dev/video2"));
-		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(ids(&[node(&props).unwrap()]), both);
 		// Missing paths and non-V4L2 backends are not proof of duplication.
 		props.pop();
-		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(ids(&[node(&props).unwrap()]), both);
 		props.pop();
 		props.extend([("device.api", "libcamera"), ("api.v4l2.path", "/dev/video0")]);
-		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(ids(&[node(&props).unwrap()]), both);
 		props.remove(props.len() - 2);
-		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(ids(&[node(&props).unwrap()]), both);
 		// A registry global names the device only in `object.path`.
 		let mut global = WEBCAM.to_vec();
 		global.push(("object.path", "v4l2:/dev/video0"));
-		assert!(unlisted(vec![node(&global).unwrap()], &v4l2).is_empty());
+		assert_eq!(ids(&[node(&global).unwrap()]), fronted);
 		global.pop();
 		global.push(("object.path", "libcamera:/base/soc/i2c0mux"));
-		assert_eq!(unlisted(vec![node(&global).unwrap()], &v4l2).len(), 1);
+		assert_eq!(ids(&[node(&global).unwrap()]), both);
 		// Listing never removes nodes from explicit or priority-based resolution.
 		assert_eq!(
 			resolve(std::slice::from_ref(&webcam), Some(&webcam.name)).unwrap(),
@@ -1271,7 +1301,7 @@ mod tests {
 			eprintln!("skipping: listing inside a sandbox would ask the camera portal");
 			return;
 		}
-		let cameras = cameras(&[]).await.expect("listing PipeWire cameras");
+		let cameras = cameras(Vec::new()).await.expect("listing PipeWire cameras");
 		for camera in &cameras {
 			assert!(camera.id.starts_with("pipewire:"), "{}", camera.id);
 			assert!(!camera.name.is_empty());
@@ -1311,7 +1341,7 @@ mod tests {
 			eprintln!("skipping: capturing inside a sandbox would ask the camera portal");
 			return;
 		}
-		let cameras = cameras(&[]).await.expect("listing PipeWire cameras");
+		let cameras = cameras(Vec::new()).await.expect("listing PipeWire cameras");
 		if cameras.is_empty() {
 			eprintln!("skipping: no PipeWire camera");
 			return;
@@ -1359,4 +1389,5 @@ mod tests {
 		let stream = capture(&config).await.expect("default PipeWire camera");
 		assert_eq!(stream.label(), PIPEWIRE);
 	}
+
 }
