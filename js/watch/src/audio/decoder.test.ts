@@ -7,13 +7,14 @@ import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { supportCacheKey } from "../support-probe";
-import { type Delay, Sync } from "../sync";
+import { DELAY_MAX, type Delay, STRETCH, Sync } from "../sync";
 import { Decoder as VideoDecoder } from "../video/decoder";
 import { Source as VideoSource } from "../video/source";
 import { decoderConfigKey } from "./config";
 import type { Message, State, Terms } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 import { Source } from "./source";
+import { Terminal } from "./terminal";
 
 // Bun cannot load the blob-URL worklet import.
 mock.module("./render-worklet.ts?worklet", () => ({ default: async () => "blob:fake-render" }));
@@ -341,7 +342,8 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	Object.assign(supportProbes, { [supportCacheKey]: decoderConfigKey });
 	const source = new Source({ broadcast, supported: supportProbes });
 	const lookahead = new Signal(Duration.millis(buffered ? 1000 : 0));
-	const sync = new Sync({ delay, lookahead });
+	const stretch = new Signal(STRETCH);
+	const sync = new Sync({ delay, lookahead, stretch });
 	// The decoder's own switch, which a mute or pause turns off.
 	const decoding = new Signal(true);
 	const decoder = new Decoder({ source, sync, enabled: decoding });
@@ -363,6 +365,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		supportProbes,
 		delay,
 		lookahead,
+		stretch,
 		sync,
 		push,
 		queued,
@@ -632,6 +635,44 @@ describe("Decoder across a broadcast disable", () => {
 });
 
 describe("Decoder across a delay change", () => {
+	it("reaches back and trims the join for a catalog warmup no further than the delay cap", async () => {
+		const trims = spyOn(Terminal.prototype, "clear");
+		// The max delay each subscribe and update asked the publisher for, in order.
+		const asked: (Duration | null | undefined)[] = [];
+		const subscribe = Moq.Track.Consumer.prototype.subscribe;
+		const update = Moq.Track.Subscriber.prototype.update;
+		const subscribes = spyOn(Moq.Track.Consumer.prototype, "subscribe").mockImplementation(function (
+			this: Moq.Track.Consumer,
+			...args: Parameters<typeof subscribe>
+		) {
+			asked.push(args[0]?.delay?.max);
+			return subscribe.apply(this, args);
+		});
+		const updates = spyOn(Moq.Track.Subscriber.prototype, "update").mockImplementation(function (
+			this: Moq.Track.Subscriber,
+			...args: Parameters<typeof update>
+		) {
+			asked.push(args[0]?.delay?.max);
+			return update.apply(this, args);
+		});
+		const playback = await play(Duration.millis(100));
+		try {
+			await playback.play();
+			const base = asked.at(-1);
+			if (!base) throw new Error("no subscription");
+			playback.restore({ warmup: 3_600_000 });
+			await microtasks();
+			await playback.play();
+			expect(asked.at(-1)).toEqual(base.add(DELAY_MAX));
+			expect(trims.mock.calls.at(-1)?.[1]).toBe(DELAY_MAX.asMicros());
+		} finally {
+			trims.mockRestore();
+			subscribes.mockRestore();
+			updates.mockRestore();
+			playback.close();
+		}
+	});
+
 	for (const initial of [Duration.millis(100), "auto"] as const) {
 		it(`keeps the subscription and ring when ${initial} becomes a number`, async () => {
 			const playback = await play(initial);
@@ -1711,6 +1752,28 @@ it.each([false, true])("releases shared startup across a hole in queued audio (C
 	}
 });
 
+// Audio may trail the clock by the stretch, or a buffered player's whole lookahead when that is longer,
+// and a zero stretch turns the time stretch off in either mode.
+for (const buffered of [false, true]) {
+	it(`bounds ${buffered ? "buffered" : "live"} audio's lag by the stretch`, async () => {
+		const playback = await play(Duration.millis(100), buffered);
+		try {
+			await playback.play(12);
+			const bound = () => worklets.at(-1)?.terms?.bound;
+			expect(bound()).toBe(2000);
+			playback.stretch.set(Duration.millis(300));
+			await microtasks();
+			expect(bound()).toBe(buffered ? 1000 : 300);
+			playback.stretch.set(Duration.ZERO);
+			await microtasks();
+			expect(bound()).toBe(0);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+}
+
 for (const cmaf of [false, true]) {
 	for (const buffered of [false, true]) {
 		it(`switches a running ${cmaf ? "CMAF" : "legacy"} player to ${buffered ? "buffered" : "live"} audio`, async () => {
@@ -1730,9 +1793,9 @@ for (const cmaf of [false, true]) {
 					(buffered ? [0, 20, 40, 60, 80] : [140, 160]).map((ms) => start + ms * 1000),
 				);
 
-				// Either ring keeps what it receives and plays onto the clock. Buffered audio may trail it
-				// by the lookahead; live audio at a fixed delay by nothing the subscription still delivers.
-				expect(worklets.at(-1)?.terms).toEqual({ latency: 100, target: 100, bound: buffered ? 1000 : 0 });
+				// Either ring keeps what it receives and plays onto the clock, which audio may trail by the
+				// larger of the lookahead and the default stretch, even at a fixed delay.
+				expect(worklets.at(-1)?.terms).toEqual({ latency: 100, target: 100, bound: 2000 });
 			} finally {
 				playback.close();
 				await microtasks();

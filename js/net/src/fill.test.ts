@@ -3,6 +3,7 @@ import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept as acceptSession, connect as connectSession } from "./connection/index.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
+import { rejectGroups } from "./fill.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { hooks, staleHole } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
@@ -200,6 +201,249 @@ test("fill: a fetch cancelled while its fill awaits a reply withdraws the fill",
 	expect(await frames(await later)).toEqual(["late"]);
 
 	requests.close();
+	broadcast.close();
+});
+
+// As in Rust: a failed fill answer holds nothing the feed promised, so it never holds the end.
+test("fill: an answer aborted below the end does not hold the end open", async () => {
+	for (const parked of [false, true]) {
+		const { broadcast, track } = resumed(1n);
+		const requests = track.requests();
+		const fetching = wireOf(broadcast).fetchGroup("video", 0n);
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill");
+		const group = fill.accept(0n);
+		group.writeFrame({ payload: enc.encode("backfill") });
+		if (parked) {
+			track.finishAt({ group: 2n, frame: 0 });
+			await yieldNow();
+			expect(track.closed.peek()).toBeUndefined();
+		}
+		group.abort(new StreamError(StreamCode.Cancel));
+		fill.close();
+		await fetching.catch(() => undefined);
+		if (!parked) track.finishAt({ group: 2n, frame: 0 });
+		await yieldNow();
+		expect(track.closed.peek()).toBeNull();
+		track.abort(new Error("boom"));
+		expect(track.closed.peek()).toBeNull();
+
+		requests.close();
+		broadcast.close();
+	}
+});
+
+// A fill's answer is no feed arrival: one that fails leaves the gap the live feed still owes holding
+// the end and the ordered reader, as the Rust track records arrivals only for the groups its feed
+// delivers and serves no failed fetch-only slot. Mirrors Rust `a_failed_fill_answer_holds_an_ordered_reader`.
+test("fill: a failed answer to a gap the feed owes holds the end and the ordered reader", async () => {
+	for (const error of [new StreamError(StreamCode.Cancel), new Error("archive failed")]) {
+		await failedAnswerHoldsTheEnd(error);
+	}
+});
+
+async function failedAnswerHoldsTheEnd(error: Error) {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	hooks.receiveTrack(track);
+	const reader = track.subscribe({ delay: { max: null } });
+	const ordered = reader.ordered();
+	for (const sequence of [0n, 2n]) hooks.receiveGroup(track, { sequence, start: 0 }).finish();
+	expect((await ordered.nextGroup())?.sequence).toBe(0n);
+	const requests = track.requests();
+	const fetching = wireOf(broadcast).fetchGroup("video", 1n);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	fill.accept(1n).abort(error);
+	fill.close();
+	await fetching.catch(() => undefined);
+	hooks.endTrack(track, { group: 3n, frame: 0 });
+	await yieldNow();
+	expect(track.closed.peek()).toBeUndefined();
+
+	// A subscriber arriving after the failure is not handed the failed answer either.
+	const late = track.subscribe({ delay: { max: null } });
+	const lateOrdered = late.ordered();
+	expect((await lateOrdered.nextGroup())?.sequence).toBe(0n);
+	const lateNext = lateOrdered.nextGroup();
+	expect(await Promise.race([lateNext.then(() => "moved"), yieldNow().then(() => "waiting")])).toBe("waiting");
+
+	// The failed answer is no verdict on group 1, so an ordered reader still waits for it rather
+	// than moving on to group 2, and gets it once the feed delivers it.
+	const next = ordered.nextGroup();
+	expect(await Promise.race([next.then(() => "moved"), yieldNow().then(() => "waiting")])).toBe("waiting");
+	hooks.receiveGroup(track, { sequence: 1n, start: 0 }).finish();
+	expect((await next)?.sequence).toBe(1n);
+	expect((await ordered.nextGroup())?.sequence).toBe(2n);
+	expect((await lateNext)?.sequence).toBe(1n);
+
+	reader.close();
+	late.close();
+	requests.close();
+	broadcast.close();
+}
+
+// Withheld as it fails, so a read in the same turn cannot take it either.
+test("fill: a failed answer is withheld from a subscribed reader that reads at once", async () => {
+	for (const dispositions of [false, true]) {
+		const broadcast = new BroadcastProducer();
+		const track = broadcast.createTrack("video", { maxAge: null });
+		hooks.receiveTrack(track);
+		hooks.receiveGroup(track, { sequence: 2n, start: 0 }).finish();
+		const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: null } });
+		const requests = track.requests();
+		const fetching = wireOf(broadcast).fetchGroup("video", 1n);
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill");
+		fill.accept(1n).abort(new Error("archive failed"));
+		const seen: unknown[] = [];
+		for (let recv = hooks.tryRecvGroup(reader, dispositions); recv.kind !== "idle"; ) {
+			seen.push(recv.kind === "group" ? recv.group.sequence : recv);
+			recv = hooks.tryRecvGroup(reader, dispositions);
+		}
+		expect(seen).toEqual([2n]);
+		fill.close();
+		await fetching.catch(() => undefined);
+		reader.close();
+		requests.close();
+		broadcast.close();
+	}
+});
+
+// A failed fill answer leaves the cache, but a reader already holding it keeps what it buffered and
+// sees the fill's own failure, never a cache eviction.
+test("fill: a held answer that fails keeps its frames and its failure", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	const requests = track.requests();
+	const fetching = wireOf(broadcast).fetchGroup("video", 1n);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	const answer = fill.accept(1n);
+	answer.writeFrame({ payload: enc.encode("fill 1") });
+	const group = await fetching;
+	const failure = new Error("archive failed");
+	answer.abort(failure);
+	fill.close();
+	await yieldNow();
+
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("fill 1");
+	await expect(group.readFrame()).rejects.toBe(failure);
+
+	requests.close();
+	broadcast.close();
+});
+
+// A reader judges each sequence once, so one it judged held and then lost is judged again: a fill
+// answer that fails after a probe saw it is asked once more. Mirrors the Rust `Misses` inbox.
+test("fill: an answer withheld after a probe judged it is asked again", async () => {
+	const { broadcast, track } = resumed(4n);
+	const requests = track.requests();
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 6n } }],
+		delay: { max: null },
+	});
+	const ordered = reader.ordered();
+	const first = ordered.nextGroup();
+	const fill = await requests.requestedFill();
+	expect(fill && [fill.start, fill.end]).toEqual([0n, 4n]);
+	if (!fill) throw new Error("no fill");
+	fill.accept(0n).finish();
+	const answer = fill.accept(2n);
+	answer.writeFrame({ payload: enc.encode("fill 2") });
+	expect((await first)?.sequence).toBe(0n);
+	// Waiting on group 1, the bounded window probes everything it names, group 2 held among it.
+	const second = ordered.nextGroup();
+	await yieldNow();
+	answer.abort(new Error("archive failed"));
+	fill.accept(1n).finish();
+	expect((await second)?.sequence).toBe(1n);
+
+	const third = ordered.nextGroup();
+	const again = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(again && [again.start, again.end]).toEqual([2n, 3n]);
+	if (again) serve(again, new Map([[2n, ["again"]]]));
+	expect((await third)?.sequence).toBe(2n);
+
+	fill.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+// A gap a probe judged stale by its successor is judged again once that successor fails, past a
+// failed group below it, which was no successor.
+test("fill: a gap below a group that fails after a probe is asked", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	const requests = track.requests();
+	const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Duration.millis(0) } });
+	const ordered = reader.ordered();
+	const failed = track.createGroup(2n);
+	const group = track.createGroup(4n);
+	group.writeFrame({ payload: enc.encode("live 4") });
+	failed.abort(new StreamError(StreamCode.Cancel));
+	await yieldNow();
+	// Judged stale against group 4, so not asked.
+	await reader.start();
+	group.abort(new StreamError(StreamCode.Cancel));
+	await yieldNow();
+	const next = ordered.nextGroup();
+	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(fill && [fill.start, fill.end]).toEqual([0n, 2n]);
+
+	fill?.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+	await next.catch(() => undefined);
+});
+
+// What lay above the newest group when a probe judged it is judged again once the feed passes it.
+test("fill: a gap the newest group rises over after a probe is asked", async () => {
+	const { broadcast, track } = resumed(2n);
+	const requests = track.requests();
+	const reader = track.subscribe({ ranges: [{ start: { absolute: 2n } }], delay: { max: null } });
+	expect(reader.tryRecvGroup()?.sequence).toBe(2n);
+	expect(reader.tryRecvGroup()).toBeUndefined();
+	const group = track.createGroup(5n);
+	group.writeFrame({ payload: enc.encode("live 5") });
+	group.finish();
+	expect(reader.tryRecvGroup()?.sequence).toBe(5n);
+	reader.tryRecvGroup();
+	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(fill && [fill.start, fill.end]).toEqual([3n, 5n]);
+
+	fill?.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+// A miss judged while a fill was out but no handler open is asked once one opens.
+test("fill: a miss judged with no handler open is asked once one opens", async () => {
+	const { broadcast, track } = resumed(2n);
+	const first = track.requests();
+	const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: null } });
+	expect(reader.tryRecvGroup()?.sequence).toBe(2n);
+	reader.tryRecvGroup();
+	const out = await first.requestedFill();
+	expect(out && [out.start, out.end]).toEqual([0n, 2n]);
+	first.close();
+	const group = track.createGroup(5n);
+	group.finish();
+	expect(reader.tryRecvGroup()?.sequence).toBe(5n);
+	reader.tryRecvGroup();
+
+	const second = track.requests();
+	reader.tryRecvGroup();
+	const fill = await Promise.race([second.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(fill && [fill.start, fill.end]).toEqual([3n, 5n]);
+
+	fill?.close();
+	out?.close();
+	reader.close();
+	second.close();
 	broadcast.close();
 });
 
@@ -650,6 +894,33 @@ test("fill: a group no reader reads any more stays withdrawn, and widening back 
 	broadcast.close();
 });
 
+test("fill: a refusal under an old budget is asked afresh on each widening, never spending the eviction refill", async () => {
+	const { broadcast, track } = resumed(5n);
+	const requests = track.requests();
+	const terms = (max: number): Subscription => ({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 5n } }],
+		delay: { max: Duration.millis(max) },
+		order: "ascending",
+	});
+	const reader = track.subscribe(terms(60_000));
+	void drain(reader);
+	const old = new StreamError(StreamCode.Old, { message: "old" });
+	// Each widening past the last refusal's budget asks a new fill for the run.
+	for (const budget of [60_000, 120_000, 240_000]) {
+		const fill = await requests.requestedFill();
+		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
+		if (!fill) throw new Error("no fill");
+		rejectGroups(fill, 0n, 5n, old, { budget, everyone: false });
+		fill.close();
+		reader.update(terms(budget * 2));
+	}
+	expect(await requests.requestedFill()).toMatchObject({ start: 0n, end: 5n });
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: what a reader's sequence cursor passes, a fill no longer owes it", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
@@ -811,6 +1082,39 @@ test("fill: a stale run that does not settle the reader is still asked for", asy
 	expect(fill && [fill.start, fill.end]).toEqual([0n, 2n]);
 
 	fill?.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+// The stale runs above the newest group a reader cannot trust are memoized, and what the track
+// gives up after a probe is judged on the next: a run given up later is asked too. Mirrors the
+// Rust `Misses::unknown`.
+test("fill: a stale run given up after a probe is asked on the next", async () => {
+	const { broadcast, track } = resumed(2n);
+	const requests = track.requests();
+	hooks.dropTrackGroups(track, 5n, 7n, staleHole(60_000));
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 2n }, end: { absolute: 20n } }],
+		delay: { max: Duration.millis(500) },
+	});
+	expect(reader.tryRecvGroup()?.sequence).toBe(2n);
+	reader.tryRecvGroup();
+	const asked = async () => {
+		const fills: bigint[][] = [];
+		for (;;) {
+			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+			if (!fill) return fills;
+			fills.push([fill.start, fill.end]);
+			fill.close();
+		}
+	};
+	expect(await asked()).toEqual([[5n, 7n]]);
+
+	hooks.dropTrackGroups(track, 9n, 10n, staleHole(60_000));
+	reader.tryRecvGroup();
+	expect(await asked()).toEqual([[9n, 10n]]);
+
 	reader.close();
 	requests.close();
 	broadcast.close();
@@ -1069,4 +1373,63 @@ test("fill: a lite-07 ranged subscription reads history the publisher never cach
 	} finally {
 		peer.close();
 	}
+});
+
+// A fill's OLD answer under the publisher's max age binds every reader, so the track holds it as
+// a stale verdict under that age rather than a loss for good: the readers waiting now are refused,
+// a later reader no wider is settled without asking, and once new terms forget the verdict a
+// reader asks again. Mirrors the Rust `a_fills_old_answer_under_the_max_age_is_held_until_forgotten`.
+test("fill: an OLD answer under the max age is held as stale until forgotten", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: Duration.millis(10_000) });
+	const live = track.createGroup(3n);
+	live.writeFrame({ payload: enc.encode("live 3") });
+	live.finish();
+	const requests = track.requests();
+	const terms: Subscription = {
+		ranges: [{ start: { absolute: 0n } }],
+		delay: { max: Duration.millis(60_000) },
+		order: "ascending",
+	};
+	const asked = async () => {
+		const fills: bigint[][] = [];
+		for (;;) {
+			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+			if (!fill) return fills;
+			fills.push([fill.start, fill.end]);
+			fill.close();
+		}
+	};
+	const reader = track.subscribe(terms);
+	expect(reader.tryRecvGroup()?.sequence).toBe(3n);
+	reader.tryRecvGroup();
+	// A reader of the run alone, which the verdict does not settle, waits on the same fill.
+	const bounded = track.subscribe({ ...terms, ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }] });
+	bounded.tryRecvGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	expect([fill.start, fill.end]).toEqual([0n, 3n]);
+	const old = new StreamError(StreamCode.Old, { message: "old" });
+	rejectGroups(fill, 0n, 3n, old, { budget: 10_000, everyone: true });
+	expect(hooks.tryDrop(bounded)).toMatchObject({ kind: "drop", start: 0n, end: 3n, error: old });
+	fill.close();
+
+	const later = track.subscribe(terms);
+	expect(later.tryRecvGroup()?.sequence).toBe(3n);
+	later.tryRecvGroup();
+	expect(hooks.tryDrop(later)).toMatchObject({ kind: "drop", start: 0n, end: 3n, stale: 10_000 });
+	expect(await asked()).toEqual([]);
+
+	expect(hooks.supersedeStale(track, undefined)).toEqual([{ start: 0n, end: 3n }]);
+	const again = track.subscribe(terms);
+	expect(again.tryRecvGroup()?.sequence).toBe(3n);
+	again.tryRecvGroup();
+	expect(await asked()).toEqual([[0n, 3n]]);
+
+	reader.close();
+	bounded.close();
+	later.close();
+	again.close();
+	requests.close();
+	broadcast.close();
 });

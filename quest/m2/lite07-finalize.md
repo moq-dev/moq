@@ -133,7 +133,6 @@ transcript freezes at the cut and a flaw in it can only be fixed on the wire.
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
 - [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - may change START per update on lite-07
 - [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - may add the warm-route message to lite-07; leaves this list if the proof places it in a SETUP extension
-- [Route latency in js/net](/quest/m2/route-latency.md) - js/net reads and writes ROUTE's RTT
 
 ## Related
 

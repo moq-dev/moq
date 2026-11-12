@@ -65,7 +65,7 @@ test("a listing shows a route's facts, never its epoch, hops, credential, or dra
 		captures: undefined,
 		route: { instance, cost: 5n, available: true },
 	});
-	expect(Object.keys(event?.route ?? {}).sort()).toEqual(["available", "cost", "instance"]);
+	expect(Object.keys(event?.route ?? {}).sort()).toEqual(["available", "cost", "instance", "rtt"]);
 });
 
 test("a listing reports availability flips and tells an offline path from an absent one", async () => {

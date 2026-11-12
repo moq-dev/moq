@@ -21,10 +21,10 @@ import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { type Group, Time, Track } from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
-import { type Delay, Sync } from "../sync";
+import { type Delay, STRETCH, Sync } from "../sync";
 import { Backpressure } from "./buffer";
 import { frameDuration } from "./config";
-import { AUTO_MAX_DELAY, ringHold, target } from "./latency";
+import { maxDelay as audioMaxDelay, bound, ringHold, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
 
 /** An AudioWorklet render quantum, in frames. */
@@ -62,6 +62,8 @@ export interface Options {
 	delay: Exclude<Delay, "instant">;
 	/** The configured lookahead, in ms: nonzero plays in buffered mode, as the decoder does. */
 	lookahead?: number;
+	/** The configured stretch, in ms, as the element takes it (default: the element's). */
+	stretch?: number;
 	/** The rendition as the catalog described it: its advertised jitter, delay, and codec. */
 	config: Catalog.AudioConfig;
 	/**
@@ -97,6 +99,70 @@ export interface Quantum {
 	accelerated: number;
 }
 
+/**
+ * A seeded speech-like signal, a pure function of media time so every replay hears the same audio.
+ *
+ * A constant gives the stretch's pitch search its shortest period everywhere, so catching up removes
+ * one 2.5 ms period a window; speech's longer, varying periods and pauses let it catch up as fast as
+ * a real talker does. Syllables of 120 to 300 ms glide the fundamental between 90 and 220 Hz under a
+ * raised-cosine level, with pauses of 100 to 400 ms between some. The floor stays above the harness's
+ * -60 dBFS silence classifier, and no sample is exactly zero, which the output tap reads as missing.
+ */
+export class Speech {
+	readonly #rate: number;
+	readonly #origin: number;
+	#samples = new Float32Array(0);
+	#length = 0;
+	#phase = 0;
+	#seed = 0x5eed;
+
+	/** `origin` is the earliest media timestamp read, in ms. */
+	constructor(rate: number, origin: number) {
+		this.#rate = rate;
+		this.#origin = origin;
+	}
+
+	/** `count` samples starting at media timestamp `timestamp`, in ms. */
+	read(timestamp: number, count: number): Float32Array {
+		const start = Math.round(((timestamp - this.#origin) * this.#rate) / 1000);
+		if (start < 0) throw new Error(`speech read at ${timestamp} ms, before its ${this.#origin} ms origin`);
+		while (this.#length < start + count) this.#syllable();
+		return this.#samples.slice(start, start + count);
+	}
+
+	/** Mulberry32: uniform in [lo, hi). */
+	#random(lo: number, hi: number): number {
+		this.#seed = (this.#seed + 0x6d2b79f5) | 0;
+		let t = this.#seed;
+		t = Math.imul(t ^ (t >>> 15), t | 1);
+		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+		return lo + (((t ^ (t >>> 14)) >>> 0) / 4294967296) * (hi - lo);
+	}
+
+	#syllable() {
+		const FLOOR = 0.03;
+		const pause = this.#random(0, 1) < 0.25;
+		const count = Math.round((this.#rate * (pause ? this.#random(100, 400) : this.#random(120, 300))) / 1000);
+		const from = this.#random(90, 220);
+		const to = this.#random(90, 220);
+		const peak = pause ? FLOOR : this.#random(0.1, 0.5);
+		if (this.#samples.length < this.#length + count) {
+			const grown = new Float32Array(Math.max(2 * this.#samples.length, this.#length + count));
+			grown.set(this.#samples.subarray(0, this.#length));
+			this.#samples = grown;
+		}
+		for (let i = 0; i < count; i++) {
+			const x = i / count;
+			this.#phase += (2 * Math.PI * (from + (to - from) * x)) / this.#rate;
+			const level = FLOOR + (peak - FLOOR) * 0.5 * (1 - Math.cos(2 * Math.PI * x));
+			const p = this.#phase;
+			const value = level * (Math.sin(p) + 0.5 * Math.sin(2 * p) + 0.25 * Math.sin(3 * p)) * 0.6;
+			this.#samples[this.#length + i] = Math.abs(value) < 1e-6 ? 1e-6 : value;
+		}
+		this.#length += count;
+	}
+}
+
 /** Samples as the milliseconds `AudioBuffer` posts to the worklet. */
 const millis = (rate: number, samples: number) => (samples / rate) * 1000;
 
@@ -115,7 +181,7 @@ const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
  * Play `trace` in simulated real time, yielding every render quantum from the first arrival to the
  * end of the observation.
  *
- * A group's stream finishes with its last recorded frame. The audio is a constant, never zero, so
+ * A group's stream finishes with its last recorded frame. The audio is {@link Speech}, never zero, so
  * what the ring did not supply is exactly the zeros at the end of a quantum, which is how the
  * harness's output tap reads a real page.
  */
@@ -137,17 +203,20 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 	// Where each group's stream finishes.
 	const ends = new Map<number, number>();
+	const origin = trace.reduce((min, a) => Math.min(min, a.timestamp), Infinity);
+	const speech = new Speech(rate, origin);
 	trace.forEach((arrival, i) => {
 		ends.set(arrival.group, i);
 	});
 
 	const lookahead = Duration.millis(options.lookahead ?? 0);
 	const buffered = !lookahead.isZero();
-	const sync = new Sync({ delay: options.delay, lookahead });
+	const stretch = options.stretch !== undefined ? Duration.millis(options.stretch) : STRETCH;
+	const sync = new Sync({ delay: options.delay, lookahead, stretch });
 	const track = new Track.Producer("audio");
 	// The subscription's max delay, as the decoder sets it, which the consumer drops aged media at too.
-	const maxDelay = new Derived([sync.out.maxDelay], (max) =>
-		options.delay === "auto" ? max.max(AUTO_MAX_DELAY) : max,
+	const maxDelay = new Derived([sync.out.delay, sync.out.maxDelay], (delay, max) =>
+		audioMaxDelay({ delay, maxDelay: max, stretch }),
 	);
 	const consumer = new Container.Consumer(track.subscribe({ delay: { max: WIRE_MAX_DELAY } }), {
 		format: new Container.Legacy.Format("audio"),
@@ -183,7 +252,10 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	await settle();
 
 	let delay = sync.out.delay.peek();
-	const terms = () => ({ target: delay.asMillis(), bound: maxDelay.peek().saturatingSub(delay).asMillis() });
+	const terms = () => ({
+		target: delay.asMillis(),
+		bound: bound({ delay, maxDelay: sync.out.maxDelay.peek(), stretch }).asMillis(),
+	});
 	// The decode gate, and the worklet's ring on the floor it sets, the way `AudioBuffer` drives both.
 	const gate = new Backpressure(rate, buffered, delay);
 	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, gate.floor), ...terms() });
@@ -233,7 +305,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			ring.received(timestamp + micros(entry.duration));
 			await gate.wait(timestamp, abort.signal);
 			if (abort.signal.aborted) return;
-			const pcm = new Float32Array(Math.round((entry.duration * rate) / 1000)).fill(0.5);
+			const pcm = speech.read(entry.timestamp, Math.round((entry.duration * rate) / 1000));
 			ring.write(timestamp, [pcm]);
 			// The decoder reports each output to the gate the way `AudioBuffer` and `Decoder.#emit` do.
 			const end = timestamp + micros((pcm.length / rate) * 1000);

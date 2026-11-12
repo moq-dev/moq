@@ -472,7 +472,7 @@ export function hasCompression(version: Version): boolean {
 	}
 }
 
-/** Whether ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a live announcement. Added in lite-07. */
+/** Whether ANNOUNCE_START may copy a path head from a live announcement. Added in lite-07. */
 export function hasAnnounceCompression(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
@@ -691,8 +691,12 @@ export function hasSynced(version: Version): boolean {
 	}
 }
 
-/** Whether SETUP's 0x5 parameter carries a Node ID rather than a Hop ID, from lite-07. */
-export function hasNodeId(version: Version): boolean {
+/**
+ * Whether the announce stream carries lite-07's route layer: ROUTE messages and floors, claims
+ * naming a Route ID instead of a hop chain, requests naming the origin node, and SETUP's 0x5
+ * parameter carrying a Node ID rather than a Hop ID.
+ */
+export function hasRoutes(version: Version): boolean {
 	// Explicitly list older versions so future versions default to carrying it.
 	switch (version) {
 		case Version.DRAFT_01:

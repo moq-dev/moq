@@ -8,7 +8,7 @@ import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import { decodePin, encodePin } from "./instance.ts";
+import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { hasDatagrams, hasDatagramTracks, hasPadding, type Version, wireTimescale } from "./version.ts";
@@ -113,6 +113,8 @@ export class Datagrams {
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. */
 	instance?: Instance.Valid;
+	/** The origin node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
+	node: bigint;
 	/** The datagram track's name. */
 	track: string;
 	/** The subscriber priority, higher first. */
@@ -122,10 +124,12 @@ export class Datagrams {
 		id: bigint;
 		broadcast: Path.Valid;
 		instance?: Instance.Valid;
+		node?: bigint;
 		track: string;
 		priority: number;
 	}) {
 		this.instance = properties.instance;
+		this.node = properties.node ?? 0n;
 		this.id = properties.id;
 		this.broadcast = properties.broadcast;
 		this.track = properties.track;
@@ -139,6 +143,7 @@ export class Datagrams {
 			await w.u62(this.id);
 			await w.string(Path.encode(this.broadcast));
 			await encodePin(w, version, this.instance);
+			await encodeNode(w, version, this.node);
 			await w.string(this.track);
 			await w.u8(toWire(this.priority));
 		});
@@ -154,6 +159,7 @@ export class Datagrams {
 					id: await r.u62(),
 					broadcast: Path.decode(await r.string()),
 					instance: await decodePin(r, version),
+					node: await decodeNode(r, version),
 					track: await r.string(),
 					priority: fromWire(await r.u8()),
 				}),

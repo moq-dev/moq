@@ -99,3 +99,10 @@ path = "junit.xml"
 slow-timeout = { period = "300s", terminate-after = 3 }
 retries = 0
 failure-output = "immediate-final"
+
+# A sweep run past its gate count on purpose, such as `MOQ_ROUTE_SCENARIOS=20000
+# just rs test -P sweep ...`, takes minutes. Still bounded, so a lost wakeup
+# ends in a TIMEOUT rather than a wedge.
+[profile.sweep]
+slow-timeout = { period = "60s", terminate-after = 60 }
+retries = 0

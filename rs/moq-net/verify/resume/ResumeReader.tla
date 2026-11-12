@@ -482,15 +482,6 @@ CopiesBounded ==
         Cardinality({i \in 1 .. Len(rd.copies) :
                         rd.copies[i].t = t /\ rd.copies[i].done = "no"}) <= 2
 
-\* Chart.cfg's story, for `/statechart`: route 1 carries only the newest group
-\* and route 2 lands every group newest first, with no route failing, so a
-\* switch has to ask route 2 for the older group.
-Story ==
-    /\ Landed(1) \subseteq {G - 1}
-    /\ \A t \in Tracks : ~trk[t].failed
-    /\ ~trk[1].fin
-    /\ \A i \in 1 .. Len(trk[2].arr) : trk[2].arr[i] = G - i
-
 TypeOK ==
     /\ rd.ended \in {"no", "ok", "err"}
     /\ rd.dlv \subseteq Groups

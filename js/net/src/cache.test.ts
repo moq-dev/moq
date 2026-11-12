@@ -4,6 +4,7 @@ import * as cache from "./cache.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
 import { RUN_OVERHEAD as ARRIVAL_OVERHEAD } from "./ledger.ts";
+import { Tail } from "./tail.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 // Run `fn` on a manual clock, stepped in milliseconds.
@@ -309,15 +310,154 @@ test("a drop flood stays within the pool", () => {
 			reported.push(first.start);
 		}
 	}
+	const used = pool.used;
+	// A probe's record bills too: an unbounded pool lets it read every run without shedding one.
+	pool.resize();
 	const held = dropsHeld(producer);
+	pool.resize(capacity);
 	// Each drop is accounted in the arrivals too, whose gaps are folded before any run is shed.
 	expect(hooks.arrivalRuns(producer)).toBeLessThanOrEqual(2);
-	expect(pool.used).toBe(held.length * cache.RUN_OVERHEAD + (hooks.arrivalRuns(producer) - 1) * ARRIVAL_OVERHEAD);
+	expect(used).toBe(held.length * cache.RUN_OVERHEAD + (hooks.arrivalRuns(producer) - 1) * ARRIVAL_OVERHEAD);
 	expect(held[0]).toBeGreaterThan(0n);
 	expect(held.every((start, i) => i === 0 || start === held[i - 1] + 2n)).toBe(true);
 	expect(held[held.length - 1]).toBe(2n * (runs - 1n));
 	for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader)) reported.push(run.start);
-	expect(reported.slice(1)).toEqual(held);
+	// Billing the reader's record shed the track's lowest runs before it reported them.
+	pool.resize();
+	expect(reported.slice(1)).toEqual(dropsHeld(producer));
+});
+
+// A flood a reader reported, fragmented into runs alternating with upstream skips, bills its
+// record too. Once the pool shrinks under it and its track has shed what it can, the reader folds
+// the final runs and the groups it read into its floor and stays within the pool, while one
+// holding stale reports an update would reopen ends with TooFarBehind rather than forgo the
+// re-offer. Mirrors Rust
+// `a_reported_flood_folds_or_ends_the_reader`.
+for (const stale of [false, true]) {
+	test(`a reported flood ${stale ? "ends" : "folds into"} the reader`, () => {
+		const runs = 1000n;
+		const budget = 1000;
+		const pool = new cache.Pool({ capacity: 1 << 30 });
+		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		const reader = producer.subscribe({ delay: { max: Duration.millis(budget) } });
+		const hole = stale ? staleHole(budget) : { error: new StreamError(StreamCode.Cancel) };
+		const flood = (run: bigint) => {
+			hooks.dropTrackGroups(producer, 2n * run, 2n * run + 1n, hole);
+			producer.skipGroups(2n * run + 1n, 2n * run + 2n);
+		};
+		for (let run = 0n; run < runs; run++) flood(run);
+		let reported = 0n;
+		for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader)) reported += run.end - run.start;
+		expect(reported).toBe(2n * runs);
+		expect(reader.tryRecvGroup()).toBeUndefined();
+		expect(pool.used).toBeGreaterThanOrEqual(Number(2n * runs) * cache.READER_RUN_OVERHEAD);
+
+		// The pool shrinks, and groups the reader reads above the flood accrue its debt: the track
+		// sheds its own drop set first, then the reader pays.
+		const capacity = 64 * cache.RUN_OVERHEAD;
+		pool.resize(capacity);
+		let error: unknown;
+		for (let sequence = 2n * runs; sequence < 2n * runs + 64n && error === undefined; sequence++) {
+			const group = producer.createGroup(sequence);
+			group.writeFrame({ payload: new Uint8Array(16 * 1024) });
+			group.finish();
+			try {
+				expect(reader.tryRecvGroup()?.sequence).toBe(sequence);
+			} catch (err) {
+				error = err;
+			}
+		}
+		if (stale) expect(error).toBeInstanceOf(TooFarBehind);
+		else {
+			expect(error).toBeUndefined();
+			expect(hooks.tryDrop(reader)).toBeUndefined();
+		}
+		expect(pool.used).toBeLessThanOrEqual(capacity + 2 * (16 * 1024 + cache.ENTRY_OVERHEAD));
+		reader.close();
+	});
+}
+
+// A reader that closes while a read waits releases its record's bill for good: the read that wakes
+// after the close bills nothing again.
+test("a closed reader bills nothing from a read still pending", async () => {
+	const pool = new cache.Pool({ capacity: 1 << 30 });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const reader = producer.subscribe({ delay: { max: null } });
+	for (let run = 0n; run < 64n; run++) {
+		hooks.dropTrackGroups(producer, 2n * run, 2n * run + 1n, { error: new StreamError(StreamCode.Cancel) });
+		producer.skipGroups(2n * run + 1n, 2n * run + 2n);
+	}
+	while (hooks.tryDrop(reader));
+	const billed = pool.used;
+	const read = reader.recvGroup();
+	reader.close();
+	await read;
+	expect(pool.used).toBeLessThan(billed - 32 * cache.READER_RUN_OVERHEAD);
+});
+
+// A subscription's tail, recording a fragmented run of finished streams between updates, bills it to
+// its track's account. Under the pool's debt it forgets them and stays within the pool. Mirrors Rust
+// `a_tail_forgets_its_finished_streams_under_debt`.
+test("a tail forgets its finished streams under debt", () => {
+	const runs = 4000n;
+	const pool = new cache.Pool({ capacity: 1 << 30 });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const tail = new Tail({ bill: hooks.billTrack(producer) });
+	for (let run = 0n; run < runs; run++) tail.finish(2n * run);
+	expect(tail.unfinished(0n, 2n * runs).length).toBe(Number(runs));
+	expect(pool.used).toBeGreaterThanOrEqual(Number(runs) * cache.READER_RUN_OVERHEAD);
+
+	// The pool shrinks, and groups written above them accrue the track's debt, which its own groups
+	// cannot pay: the tail pays it by forgetting what finished.
+	const capacity = 64 * cache.RUN_OVERHEAD;
+	pool.resize(capacity);
+	for (let i = 0; i < 64; i++) finished(producer, 16 * 1024);
+	tail.finish(2n * runs);
+	expect(tail.unfinished(0n, 2n * runs + 1n).length).toBeLessThanOrEqual(2);
+	expect(pool.used).toBeLessThanOrEqual(capacity + 2 * (16 * 1024 + cache.ENTRY_OVERHEAD));
+	// A stale drop inside what the fold forgot is owed again only where the ledger had not accounted
+	// for it: there a stream may have finished and overtaken the drop.
+	tail.open(2n)();
+	expect(tail.overtaken(0n, 4n)).toEqual([{ start: 2n, end: 3n }]);
+	expect(tail.overtaken(2n * runs, 2n * runs + 1n)).toEqual([]);
+	tail.updated();
+	expect(tail.overtaken(0n, 4n)).toEqual([]);
+	tail.close();
+});
+
+// Whatever a bill frees pays its readers' debt, however it shrank, and the debt is forgiven once
+// the pool is back within its capacity. A closed tail never bills again. Mirrors Rust
+// `a_debt_is_paid_by_any_shrink_and_forgiven_without_pressure`.
+test("a reader's debt is paid by any shrink and forgiven without pressure", () => {
+	const unit = cache.READER_RUN_OVERHEAD;
+	const pool = new cache.Pool({ capacity: 1 << 30 });
+	const producer = pooled(pool);
+	const bill = hooks.billTrack(producer);
+	bill.set(4 * unit);
+	pool.resize(2 * unit);
+	// Nothing else is cached, so the debt the track accrues falls to its readers.
+	producer.createGroup(0n).abort(new Error("gone"));
+	bill.set(5 * unit);
+	const owed = bill.debt;
+	expect(owed).toBeGreaterThan(unit);
+	bill.set(4 * unit);
+	expect(bill.debt).toBe(owed - unit);
+	pool.resize(1 << 30);
+	expect(bill.debt).toBe(0);
+	pool.resize(2 * unit);
+	expect(bill.debt).toBe(0);
+	bill.close();
+
+	const tail = new Tail({ bill: hooks.billTrack(producer) });
+	tail.finish(0n);
+	tail.finish(2n);
+	tail.close();
+	const used = pool.used;
+	tail.finish(4n);
+	expect(pool.used).toBe(used);
 });
 
 // A peer fragmenting its arrivals under a grace that never folds a gap bills each run to the pool,
@@ -441,6 +581,20 @@ test("a kept local skip expires once the edge passes it or the track closes", as
 	});
 });
 
+// A final drop ends a group still arriving, but leaves one that finished here to every reader, as a
+// group arriving after its drop replaces it. Mirrors Rust `a_final_drop_leaves_a_finished_group`.
+test("a final drop leaves a finished group", async () => {
+	const producer = pooled(new cache.Pool({ capacity: 1 << 30 }));
+	hooks.receiveTrack(producer);
+	producer.createGroup(0n).finish();
+	const open = producer.createGroup(1n);
+	hooks.dropTrackGroups(producer, 0n, 2n, { error: new StreamError(StreamCode.Cancel) });
+
+	expect(dropsHeld(producer)).toEqual([1n]);
+	expect(open.closed.peek()).toBeInstanceOf(Error);
+	expect(await cached(producer)).toContain(0n);
+});
+
 // A received stale run the pool forgets is accounted for, as an evicted group is: no reader waits
 // on it from the live feed, so a reader that wants it asks a fill. Mirrors Rust
 // `a_reader_asks_a_fill_for_a_forgotten_run_it_judged`.
@@ -475,6 +629,48 @@ test("a forgotten stale run is asked of a fill", async () => {
 		requests.close();
 		await next.catch(() => undefined);
 	});
+});
+
+// A failed fill answer's drop accounts nothing the feed owes, even once the pool forgets it: the gap
+// stays owed until the feed delivers it or the tail's grace passes, as Rust records no drop for it.
+test("a forgotten failed fill answer leaves its gap owed", async () => {
+	await withClock(async (clock) => {
+		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
+		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
+		for (const sequence of [0n, 2n]) hooks.receiveGroup(producer, { sequence, start: 0 }).finish();
+		hooks.receiveGroup(producer, { sequence: 1n, start: 0, fill: true }).abort(new Error("archive failed"));
+		hooks.endTrack(producer, { group: 3n, frame: 0 });
+		await yieldNow();
+		// A failed fill answer says nothing of the feed, so it records no drop, as in Rust.
+		expect(dropsHeld(producer)).toEqual([]);
+		expect(producer.closed.peek()).toBeUndefined();
+
+		await clock.advance(3_000);
+		expect(dropsHeld(producer)).toEqual([]);
+		expect(producer.closed.peek()).toBeUndefined();
+		reader.close();
+	});
+});
+
+// A failed fill answer a reader still holds stays billed, and reclaimable by the pool, while the
+// reader keeps its frames: it leaves delivery, not the cache, as Rust keeps a spent fetch-only slot
+// until its scan reclaims it.
+test("a held failed fill answer stays billed", async () => {
+	const pool = new cache.Pool({});
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
+	const answer = hooks.receiveGroup(producer, { sequence: 1n, start: 0, fill: true });
+	answer.writeFrame({ payload: new Uint8Array(10_000) });
+	const group = await reader.recvGroup();
+	expect(group?.sequence).toBe(1n);
+	answer.abort(new Error("archive failed"));
+	await yieldNow();
+	expect(pool.used).toBeGreaterThanOrEqual(10_000);
+	expect((await group?.readFrame())?.payload.byteLength).toBe(10_000);
+	reader.close();
 });
 
 // A received copy that reached its end through a skip stays ended once the pool forgets the skip,

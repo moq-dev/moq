@@ -36,7 +36,7 @@ just test route-key-model
 just rs tamarin moq-net/verify/route-key/RouteKey.spthy -D=NO_SIDE
 ```
 
-The first proves the model and checks every variant's `Breaks:` line, in about ten seconds; Nightly runs it. The second proves one variant. To read a counterexample, run `nix shell --inputs-from . nixpkgs#tamarin-prover --command tamarin-prover interactive rs/moq-net/verify/route-key/` and open the falsified lemma.
+The first proves the model and checks every variant's `Breaks:` line, in seconds; Nightly runs it. The second proves one variant. To read a counterexample, run `nix shell --inputs-from . nixpkgs#tamarin-prover --command tamarin-prover interactive rs/moq-net/verify/route-key/` and open the falsified lemma.
 
 ## Reading a failure
 
@@ -44,7 +44,7 @@ A falsified lemma is an attack path, not yet a bug. Check that each rule it fire
 
 ## Coverage
 
-Sync commit: `23898b48f46cb54da19007279504b2b6ecdf80cf`. Run `git log 23898b48f4.. -- rs/moq-net/src/route/proof.rs js/net/src/lite/route_key.ts` and the files below to see what changed since. After a change to a covered function, mirror it in the model, rerun `just test route-key-model`, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `23898b48f46cb54da19007279504b2b6ecdf80cf`. Run `git log 23898b48f4.. -- rs/moq-net/src/route/proof.rs js/net/src/lite/route_key.ts` and the files below to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function, rerunning `just test route-key-model`.
 
 | Code | Model |
 | --- | --- |

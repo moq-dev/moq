@@ -40,6 +40,13 @@ Settled with this epic:
 - Kept, as rejected in the same interview: lite-07's `ietf` object extension
   and moq-lite 01 to 04.
 - Not here: `ietf/flate.rs`; compression removal has its own work.
+- Narrowed 2026-11-12 (maintainer, `/quest-import` of
+  [moq-dev/moq#8577](https://github.com/moq-dev/moq/issues/8577)): a Rust
+  publisher may answer a multi-group FETCH whose every group is cached or
+  proven never produced, using only draft-defined markers (Prior Group ID Gap
+  in, End of Non-Existent Range out). [Range FETCH over known
+  holes](/quest/m4/ietf-range-fetch.md) owns it; until it lands, the docs
+  state joining FETCH only.
 
 Our moq-transport extensions, decided 2026-11-10 (maintainer, on
 [moq-dev/moq#8444](https://github.com/moq-dev/moq/pull/8444)):

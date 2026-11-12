@@ -7,10 +7,10 @@
 # name stays announced with nothing behind it. Explicit withdrawals still consume
 # the handle, so only the implicit retraction on session loss is removed.
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
-index 45654a5656..8af799f04c 100644
+index 085c27fd18..c976671e9d 100644
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -9749,7 +9749,7 @@ impl Announced {
+@@ -9891,7 +9891,7 @@ impl Announced {
  		};
  		self.held.pop();
  		if let Held::Attached(entry) = held {
@@ -19,7 +19,7 @@ index 45654a5656..8af799f04c 100644
  		}
  	}
  
-@@ -9831,7 +9831,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry
+@@ -9973,7 +9973,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry
  		let validity = if subscriber.version.has_instance() {
  			Default::default()
  		} else {
@@ -28,7 +28,7 @@ index 45654a5656..8af799f04c 100644
  		};
  		let source = subscriber.origin.create_source(path.clone(), validity);
  		// The handler exists before the requester sees the source, so a track it
-@@ -9859,7 +9859,8 @@ struct AnnouncedRoute<K = Path> {
+@@ -10001,7 +10001,8 @@ struct AnnouncedRoute<K = Path> {
  	/// without recomputing the chain.
  	route: crate::origin::RouteInfo,
  	/// Dropping it retracts the route and rejects its queued requests.
@@ -38,7 +38,7 @@ index 45654a5656..8af799f04c 100644
  	/// Closes as the route goes, which closes every source it minted.
  	live: kio::Producer<()>,
  	/// Queues this route on its prefix's ready set when its request queue wakes.
-@@ -9877,7 +9878,7 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
+@@ -10019,7 +10020,7 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
  	) -> Self {
  		Self {
  			route,
@@ -48,10 +48,10 @@ index 45654a5656..8af799f04c 100644
  			waker: std::task::Waker::from(wake.clone()),
  			wake,
 diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subscriber/routed.rs
-index 20fe66dd38..91675a0b9b 100644
+index ee42ed8829..1cad960cf8 100644
 --- a/rs/moq-net/src/lite/subscriber/routed.rs
 +++ b/rs/moq-net/src/lite/subscriber/routed.rs
-@@ -402,7 +402,7 @@ impl Routed {
+@@ -423,7 +423,7 @@ impl Routed {
  				if let Some(served) = self.served.remove(&(id, claim))
  					&& ended
  				{
@@ -60,3 +60,12 @@ index 20fe66dd38..91675a0b9b 100644
  				}
  			}
  			// The ROUTE_END echo goes out as the peer's ROUTE_END is read, and a stream
+@@ -457,7 +457,7 @@ impl Routed {
+ 		{
+ 			tracing::debug!(route = %subscriber.log_path(&path), node = id, "dropping looped claim");
+ 			for entry in self.previous.remove(&key).into_iter().chain(self.served.remove(&key)) {
+-				entry.route.dynamic.withdrawn();
++				std::mem::ManuallyDrop::into_inner(entry.route.dynamic).withdrawn();
+ 			}
+ 			return;
+ 		}

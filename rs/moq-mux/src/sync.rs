@@ -347,7 +347,12 @@ impl Track {
 
 	/// End this track's timeline at a discontinuity, such as lost media or a
 	/// rewind: its arrivals stop holding the clock until the next one.
+	///
+	/// Media after the break was not held behind any tail, so its arrivals are
+	/// the live edge again. Keeping the hold would anchor the clock that much
+	/// late and make the media wait for it.
 	pub fn reset(&self) {
+		self.mapping.lock().unwrap().held = Duration::ZERO;
 		if self.clock.state.lock().unwrap().reset(self.role) {
 			self.clock.wake();
 		}
@@ -1081,6 +1086,28 @@ mod tests {
 			);
 		}
 		assert_eq!(clock.state.lock().unwrap().due(ms(10_500)), unchanged);
+	}
+
+	/// Media after a reset was not held behind the tail, so it plays one delay
+	/// after it arrives rather than waiting out the old hold too.
+	#[tokio::test]
+	async fn a_reset_drops_the_hold_behind_a_tail() {
+		tokio::time::pause();
+		let start = kio::clock::now();
+		let clock = Arc::new(Clock::new(DELAY));
+		let audio = Track::new(clock.clone(), Kind::Audio);
+		audio.received(ms(10_000), start);
+		let transition = audio.declare();
+		audio.end(ms(10_100)).unwrap();
+		audio.plan(transition, ms(0), Some(DELAY));
+		let mapping = audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap();
+		audio.apply(transition, mapping);
+
+		audio.reset();
+		let now = kio::clock::now();
+		let next = audio.map(ms(1_000)).unwrap();
+		audio.received(next, now);
+		assert_eq!(clock.state.lock().unwrap().due(next), now.checked_add(DELAY));
 	}
 
 	#[tokio::test]
