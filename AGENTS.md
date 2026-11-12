@@ -50,6 +50,7 @@ just fix     # Auto-fix lint/formatting, same scope
 Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.
 The `quest` binary and its skills come from the moq-dev/quest flake input; change them upstream and bump the input.
 `quest init` refuses Claude Code's worktree hooks: drop them from `.claude/settings.json` for its run, then restore them.
+Review locally with one reviewer, not the pair: `quest review --harness codex`, or `--harness claude` when Codex wrote the change last. Pullfrog's online review already supplies the DeepSeek pass.
 
 # Cross-Package Sync
 
