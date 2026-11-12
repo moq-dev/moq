@@ -1711,6 +1711,53 @@ mod tests {
 		assert!(matches!(bi, crate::quic::web::send::Error::Stopped(0)), "{bi:?}");
 	}
 
+	/// Streams released after a close are reset and stopped with WT_SESSION_GONE, so the peer
+	/// reads the close's code and reason from them, whether the reset or the capsule lands first.
+	#[tokio::test]
+	async fn streams_after_close_carry_the_close_reason() {
+		let (client_conn, server_conn, _endpoints) = pair().await;
+		let (client, server) = tokio::join!(
+			Session::connect(client_conn, url::Url::parse("https://localhost/").unwrap()),
+			async { crate::quic::web::Request::accept(server_conn).await.unwrap().ok().await },
+		);
+		let (client, server) = (client.unwrap(), server.unwrap());
+
+		let mut send = server.open_uni(Default::default()).await.unwrap();
+		send.write_all(&b"setup"[..]).await.unwrap();
+		let mut client_send = client.open_uni(Default::default()).await.unwrap();
+		client_send.write_all(&b"setup"[..]).await.unwrap();
+		let mut recv = client.accept_uni().await.unwrap();
+		let mut server_recv = server.accept_uni().await.unwrap();
+		server_recv.read_chunk(usize::MAX).await.unwrap();
+
+		server.close(21, "version");
+		drop((send, server_recv));
+
+		let read = async {
+			let read = loop {
+				match recv.read_chunk(usize::MAX).await {
+					Ok(Some(_)) => {}
+					res => break res,
+				}
+			};
+			let write = loop {
+				if let Err(err) = client_send.write(&mut &b"more"[..]).await {
+					break err;
+				}
+			};
+			(read, write)
+		};
+		let (read, write) = kio::clock::timeout(Duration::from_secs(10), read).await.unwrap();
+		assert!(
+			matches!(&read, Err(crate::quic::web::recv::Error::Session(Error::Closed(21, reason))) if reason == "version"),
+			"{read:?}"
+		);
+		assert!(
+			matches!(&write, crate::quic::web::send::Error::Session(Error::Closed(21, reason)) if reason == "version"),
+			"{write:?}"
+		);
+	}
+
 	/// A stream that names another session is dropped, and the session's own stream after it
 	/// still arrives.
 	#[tokio::test]

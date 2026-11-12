@@ -2379,7 +2379,8 @@ mod tests {
 		let session = auth_session();
 		let (handle, log) = (&session.handle, &session.log);
 
-		let auth = kio::clock::timeout(std::time::Duration::from_secs(1), handle.handle().add("token"))
+		let auth = handle.handle().add("token").unwrap();
+		kio::clock::timeout(std::time::Duration::from_secs(1), auth.answered())
 			.await
 			.expect("resolved promptly")
 			.expect("kept for requests");

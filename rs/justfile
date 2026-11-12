@@ -584,14 +584,10 @@ codspeed:
     # replaces only its own packages' benches, so `cargo codspeed run` runs both.
     cd rs/moq-auth && VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation --bench jwt
 
-# Held feed FETCH readiness across independent request and track counts.
+# Run the tests the arguments select in a release build, printing their output; benchmarks add `--run-ignored only`.
 [positional-arguments]
-bench-feed-fetch *args:
-    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-net --lib --run-ignored only -E 'test(benchmark_feed_fetch_wakes)' --success-output immediate "$@"
-
-# Device-free mixer and resampler cost, swept over fanout, packetization, and layout.
-bench-playback:
-    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler) | test(benchmark_raw_audio)' --success-output immediate
+bench-tests *args:
+    bash sh/rs/nextest.sh cargo nextest run --locked --release --success-output immediate "$@"
 
 # Sweep retained RTMP chunk-stream IDs independently of message and chunk sizes.
 [positional-arguments]
@@ -607,10 +603,6 @@ bench-relay-auth *args:
 [positional-arguments]
 bench-stats *args:
     bash sh/local.sh cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode --bench aggregate -- "$@"
-
-# Sweep latency observations against writer count and report density.
-bench-latency:
-    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-bench --run-ignored only -E 'test(benchmark_observation_contention)' --success-output immediate
 
 # Exact TS receiver scheduling across PID and queued-unit fanout.
 [positional-arguments]

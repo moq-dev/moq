@@ -286,6 +286,8 @@ export class Decoder {
 
 	// Count a received frame and whether it arrived too late for playout.
 	#receive(key: Key, frame: Container.ReceivedFrame, timestamp: Duration, late: boolean): void {
+		// How far the playhead trails what arrived, decoded or not, is the level the ring steers on.
+		this.#ring.peek()?.received(timestamp.add(this.#frame.peek() ?? Duration.ZERO));
 		const bytes = frame.payload.byteLength;
 		const arrived = arrivedAt(frame.arrival);
 		this.#tally.arrive(key, timestamp, arrived);
@@ -320,16 +322,26 @@ export class Decoder {
 	}
 
 	// A group the relay expires is never observed, so a subscription cut to the target would cap the
-	// estimate at the target it already holds. The container consumer keeps the shared max delay as its
-	// local skip, since it observes each frame before applying it, and carves out the warmup the
-	// subscription adds once it has warmed, as Rust's does. See doc/concept/audio-jitter.md.
+	// estimate at the target it already holds. The container consumer drops aged media at the same max
+	// delay, since it observes each frame before applying it, so audio the ring could still catch up on
+	// is delivered, and carves out the warmup the subscription adds once it has warmed, as Rust's does.
+	// It waits on a missing group only for the delay plus the lookahead: past that the group would play
+	// late, and a reordered backlog's holes waited out to the max would read as jitter to the estimator.
+	// See doc/concept/audio-jitter.md.
 	#runSubscribeMaxDelay(effect: Effect): void {
 		const delay = effect.get(this.sync.out.delay);
+		const max = this.#maxDelay(effect);
+		const warmup = Duration.millis(effect.get(this.source.out.config)?.warmup ?? 0);
+		this.#delay.set({ min: delay, max });
+		this.#subscribeMaxDelay.set(max.add(warmup));
+	}
+
+	// The subscription's max delay, less warmup: the shared max delay, at least the estimator's ceiling
+	// for "auto".
+	#maxDelay(effect: Effect): Duration {
 		const maxDelay = effect.get(this.sync.out.maxDelay);
 		const auto = effect.get(this.sync.in.delay) === "auto";
-		const warmup = Duration.millis(effect.get(this.source.out.config)?.warmup ?? 0);
-		this.#delay.set({ min: delay, max: maxDelay });
-		this.#subscribeMaxDelay.set((auto ? maxDelay.max(AUTO_MAX_DELAY) : maxDelay).add(warmup));
+		return auto ? maxDelay.max(AUTO_MAX_DELAY) : maxDelay;
 	}
 
 	#runShape(effect: Effect): void {
@@ -402,6 +414,7 @@ export class Decoder {
 				rate: sampleRate,
 				delay: this.sync.out.delay.peek(),
 				buffered,
+				clock: this.sync,
 				playing: this.sync.playing,
 			});
 			effect.cleanup(() => ring.close());
@@ -494,10 +507,10 @@ export class Decoder {
 		const ring = effect.get(this.#ring);
 		if (!ring) return;
 
-		// A rise parks playback until the queued media covers the new target, which is what keeps
-		// audio in step with video. The measured target moves a bucket at a time, and a rise the
-		// buffered slack already covers costs no silence at all.
-		ring.setLatency(effect.get(this.sync.out.delay));
+		// The ring plays onto the shared clock, slowing down onto a rise and speeding up onto a fall,
+		// and skips only audio trailing it past what the subscription still delivers.
+		const delay = effect.get(this.sync.out.delay);
+		ring.setLatency(delay, this.#maxDelay(effect).saturatingSub(delay));
 	}
 
 	#runDecoder(effect: Effect): void {
@@ -841,6 +854,7 @@ export class Decoder {
 		const consumer = new Container.Consumer(sub, {
 			format,
 			delay: this.#delay,
+			wait: this.sync.out.maxDelay,
 			warmup: Duration.millis(config.warmup ?? 0),
 			predecessor: continues ? outgoing.consumer : undefined,
 		});
@@ -870,12 +884,17 @@ export class Decoder {
 			const pending = inner.get(read);
 			const network = inner.get(consumer.buffered);
 			let newest = pending.newest;
+			// What the consumer holds has arrived too, so its newest end is how far the received audio
+			// reaches, though the gate keeps it encoded.
+			let arrived: Duration | undefined;
 			for (const { end } of network) {
 				const micro = end.asMicros();
 				if (newest === undefined || micro > newest) newest = micro;
+				if (arrived === undefined || end.gt(arrived)) arrived = end;
 			}
 			inner.set(this.#queued, Container.mergeBufferedRanges(network, pending.buffered));
 			ring.queued(newest);
+			if (arrived !== undefined) ring.received(arrived);
 		});
 
 		// Feed the arrival estimate into the playout target. It outlives this consumer, so the target

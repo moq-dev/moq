@@ -1072,6 +1072,54 @@ class SmokeTest {
             }
     }
 
+    /** A credential is answered by the peer, names a route and a claim, and cancels. */
+    @Test
+    fun `session credential lifecycle`() = runTest {
+        val version = listOf("moq-lite-07-wip")
+        Server.listen(
+                ServerConfig(
+                    bind = "127.0.0.1:0",
+                    versions = version,
+                    tls = ServerTls(generate = listOf("localhost")),
+                )
+            )
+            .use { server ->
+                val accepted = async { server.server.accept()!!.accept() }
+                val moq =
+                    Moq.connect(
+                        "https://${server.localAddr}",
+                        ClientConfig(
+                            bind = "127.0.0.1:0",
+                            versions = version,
+                            tls = ClientTls(insecure = true),
+                            once = true,
+                        ),
+                    )
+                moq.use {
+                    val session = accepted.await()
+                    assertFailsWith<MoqException.Config> { moq.credential("") }
+                    val credential: Credential = moq.credential("extra")
+                    // The server verifies no tokens of its own, so it refuses this one.
+                    assertFailsWith<MoqException.Unsupported> { credential.answered() }
+
+                    val route = moq.route("room/x", RouteOptions(hidden = true))
+                    val claim = moq.session.publish().claim("live", RouteOptions(hidden = true))
+                    route.setAuth(credential)
+                    claim.setAuth(credential)
+                    route.setAuth(null)
+                    claim.setAuth(null)
+
+                    credential.cancel()
+                    assertFailsWith<MoqException.Cancelled> { credential.answered() }
+                    assertFailsWith<MoqException.Cancelled> { route.setAuth(credential) }
+                    assertFailsWith<MoqException.Cancelled> { claim.setAuth(credential) }
+                    route.cancel()
+                    claim.cancel()
+                    session.cancel(0u)
+                }
+            }
+    }
+
     /**
      * Over moq-lite-06, whose wire carries no instance, the session mints one: passing it back pins
      * `request` and `follow`, while its text parsed is another, named instance that nothing serves.

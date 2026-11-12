@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use url::Url;
 
-use crate::auth::MoqGrantConsumer;
+use crate::auth::{MoqCredential, MoqGrantConsumer};
 use crate::bandwidth::MoqAllocator;
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -1105,6 +1105,30 @@ impl MoqSession {
 			Inner::Connection(connection) => connection.auth(),
 			Inner::Session(session) => session.auth(),
 		}))
+	}
+
+	/// Present a request token on this session, for a route or claim to carry with
+	/// `set_auth`.
+	///
+	/// On moq-transport it rides each naming route's announcing request as its
+	/// `AUTHORIZATION TOKEN`; on moq-lite it needs AUTH, where it earns a grant on the
+	/// session. A client session presents it again on every reconnect, and with no session
+	/// live it waits for the next one. Learn the peer's verdict with
+	/// [`MoqCredential::answered`].
+	///
+	/// Errors with `Config` for an empty token, and with the session's end once it closed.
+	pub fn credential(&self, token: String) -> Result<Arc<MoqCredential>, MoqError> {
+		let _guard = crate::ffi::enter();
+		if token.is_empty() {
+			return Err(MoqError::Config {
+				reason: "a token cannot be empty".into(),
+			});
+		}
+		let auth = match &self.inner {
+			Inner::Connection(connection) => connection.auth(),
+			Inner::Session(session) => session.auth(),
+		};
+		Ok(Arc::new(MoqCredential::new(auth.add(token)?)))
 	}
 
 	/// The credentials a client session presents, to replace while it runs.

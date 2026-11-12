@@ -153,8 +153,9 @@ struct Feed {
 
 /// Where a channel's audio waits to be mixed.
 enum Queue {
-	/// A [`Live`]'s jitter buffer, filled without the mixer's lock.
-	Live(ring::Consumer),
+	/// A [`Live`]'s jitter buffer, filled without the mixer's lock. Boxed,
+	/// since it dwarfs a positioned queue.
+	Live(Box<ring::Consumer>),
 	/// A [`Positioned`] channel's interleaved samples, the first of which is
 	/// mixed at the bus's next position. Filled under the mixer's lock, so a
 	/// write sees exactly where the mix is.
@@ -379,7 +380,7 @@ impl Bus {
 				comfort: false,
 			},
 		);
-		let port = self.open(input, strip, Queue::Live(cons))?;
+		let port = self.open(input, strip, Queue::Live(Box::new(cons)))?;
 		Ok(Live { prod, port })
 	}
 

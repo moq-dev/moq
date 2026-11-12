@@ -150,7 +150,7 @@ async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 	within(async {
 		let (mut pair, client_origin, _server_origin) = connect_route_auth(MOQT_22).await;
 		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
-		let first = pair.client.auth().add("first").await.expect("kept for requests");
+		let first = added(&pair.client.auth(), "first").await.expect("kept for requests");
 		let broadcast = client_origin
 			.route("room/x", origin::RouteOptions::default().with_auth(first))
 			.unwrap();
@@ -163,7 +163,7 @@ async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 		let (token, _again) = tokens.next().await.expect("offered again after the cancel");
 		assert_eq!(token, b"first");
 		kio::clock::sleep(Duration::from_secs(1)).await;
-		let second = pair.client.auth().add("second").await.expect("kept for requests");
+		let second = added(&pair.client.auth(), "second").await.expect("kept for requests");
 		broadcast.set_auth(Some(second)).unwrap();
 		let (token, _second) = tokens.next().await.expect("announced again");
 		assert_eq!(token, b"second");
@@ -182,13 +182,13 @@ async fn moqt_22_a_cancelled_renewal_keeps_the_session() {
 		let mut tokens = serve(pair.requests.take().unwrap(), |token| {
 			(token == b"first").then(Grant::all)
 		});
-		let first = pair.client.auth().add("first").await.expect("kept for requests");
+		let first = added(&pair.client.auth(), "first").await.expect("kept for requests");
 		let broadcast = client_origin
 			.route("room/x", origin::RouteOptions::default().with_auth(first))
 			.unwrap();
 		let (_, first) = tokens.next().await.expect("the announce's token");
 
-		let second = pair.client.auth().add("second").await.expect("kept for requests");
+		let second = added(&pair.client.auth(), "second").await.expect("kept for requests");
 		broadcast.set_auth(Some(second)).unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		drop(first);
@@ -207,7 +207,7 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 	within(async {
 		let (mut pair, client_origin, server_origin) = connect_route_auth(MOQT_22).await;
 		let mut requests = pair.requests.take().unwrap();
-		let first = pair.client.auth().add("first").await.expect("kept for requests");
+		let first = added(&pair.client.auth(), "first").await.expect("kept for requests");
 		let broadcast = client_origin
 			.route("room/x", origin::RouteOptions::default().with_auth(first))
 			.unwrap();
@@ -218,7 +218,7 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 			.accept(Grant::all());
 		wait_announced(&server_origin.consume(), "room/x", true).await;
 
-		let second = pair.client.auth().add("second").await.expect("kept for requests");
+		let second = added(&pair.client.auth(), "second").await.expect("kept for requests");
 		broadcast.set_auth(Some(second)).unwrap();
 		let renewal = requests.next().await.expect("the renewal's token");
 		assert_eq!(renewal.token().as_ref(), b"second");
@@ -281,7 +281,7 @@ async fn a_route_auth_survives_a_reconnect(version: &'static str) {
 		let server_origin = produce_origin(1);
 		let mut first = connect_route_auth_on(version, &client_origin, &server_origin, Some(handle.clone())).await;
 		let mut tokens = serve(first.requests.take().unwrap(), |_| Some(Grant::all()));
-		let token = handle.add("first").await.expect("kept for requests");
+		let token = added(&handle, "first").await.expect("kept for requests");
 		let _route = client_origin
 			.route("room/x", origin::RouteOptions::default().with_auth(token))
 			.unwrap();
@@ -308,7 +308,7 @@ async fn a_route_auth_renews_its_announce(version: &'static str) {
 		let (mut pair, client_origin, server_origin) = connect_route_auth(version).await;
 		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
 
-		let first = pair.client.auth().add("first").await.expect("kept for requests");
+		let first = added(&pair.client.auth(), "first").await.expect("kept for requests");
 		let route = client_origin
 			.route("room/x", origin::RouteOptions::default().with_auth(first))
 			.unwrap();
@@ -316,7 +316,7 @@ async fn a_route_auth_renews_its_announce(version: &'static str) {
 		assert_eq!(token, b"first");
 		wait_announced(&server_origin.consume(), "room/x", true).await;
 
-		let second = pair.client.auth().add("second").await.expect("kept for requests");
+		let second = added(&pair.client.auth(), "second").await.expect("kept for requests");
 		route.set_auth(Some(second)).unwrap();
 		let (token, _second) = tokens.next().await.expect("the renewal's token");
 		assert_eq!(token, b"second");
@@ -658,7 +658,7 @@ async fn an_unanswered_token_holds_the_check(version: &'static str) {
 		let _setup = requests.next().await.unwrap().accept(grant(&["baz"], &[]));
 		assert_eq!(granted(&pair.client).await, grant(&["baz"], &[]));
 		let auth = pair.client.auth();
-		let pending = kio::clock::sim::spawn(async move { auth.add("new").await });
+		let pending = kio::clock::sim::spawn(async move { added(&auth, "new").await });
 		let unanswered = requests.next().await.unwrap();
 		let broadcast = publisher
 			.route("foo/bar", moq_net::origin::RouteOptions::hidden())
@@ -704,7 +704,7 @@ async fn a_broadcast_withdrawn_while_its_token_waits_is_not_refused(version: &'s
 		let _setup = requests.next().await.unwrap().accept(grant(&["baz"], &[]));
 		assert_eq!(granted(&pair.client).await, grant(&["baz"], &[]));
 		let auth = pair.client.auth();
-		let pending = kio::clock::sim::spawn(async move { auth.add("new").await });
+		let pending = kio::clock::sim::spawn(async move { added(&auth, "new").await });
 		let unanswered = requests.next().await.unwrap();
 		let withdrawn = publisher
 			.route("foo/bar", moq_net::origin::RouteOptions::hidden())
@@ -753,7 +753,7 @@ async fn tokens_union_and_withdrawing_one_shrinks_it(version: &'static str) {
 		});
 		let (_, _setup) = issued.next().await.unwrap();
 
-		let t1 = pair.client.auth().add("t1").await.expect("t1 granted");
+		let t1 = added(&pair.client.auth(), "t1").await.expect("t1 granted");
 		let (_, t1_issued) = issued.next().await.unwrap();
 		assert_eq!(t1.grant().peek(), Some(grant(&["b"], &[])));
 		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
@@ -917,7 +917,7 @@ async fn an_update_replaces_one_tokens_grant(version: &'static str) {
 			_ => None,
 		});
 		let (_, _setup) = issued.next().await.unwrap();
-		let t1 = pair.client.auth().add("t1").await.unwrap();
+		let t1 = added(&pair.client.auth(), "t1").await.unwrap();
 		let (_, t1_issued) = issued.next().await.unwrap();
 
 		t1_issued.update(grant(&["c"], &["c"]));
@@ -960,7 +960,7 @@ async fn a_revoked_grant_withdraws_and_can_be_restored(version: &'static str) {
 		crate::support::announced(&publisher.consume(), "a/x").await;
 		assert_eq!(pair.client_transport.close_reason(), None);
 
-		let _again = pair.client.auth().add("again").await.expect("re-authorized");
+		let _again = added(&pair.client.auth(), "again").await.expect("re-authorized");
 		wait_announced(&served, "a/x", true).await;
 	})
 	.await
@@ -992,9 +992,9 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 			}
 		});
 
-		let err = pair.client.auth().add("forged").await.expect_err("refused");
+		let err = added(&pair.client.auth(), "forged").await.expect_err("refused");
 		assert!(matches!(err, Error::Session(SessionError::Unauthorized)), "{err:?}");
-		let err = pair.client.auth().add("opaque").await.expect_err("refused");
+		let err = added(&pair.client.auth(), "opaque").await.expect_err("refused");
 		assert!(matches!(err, Error::Unsupported), "{err:?}");
 	})
 	.await
@@ -1083,7 +1083,7 @@ async fn dropping_the_requests_refuses_queued_tokens(version: &'static str) {
 		let first = requests.next().await.expect("setup token");
 		drop(first.accept(Grant::default()));
 		let auth = pair.client.auth();
-		let pending = kio::clock::sim::spawn(async move { auth.add("queued").await.map(drop) });
+		let pending = kio::clock::sim::spawn(async move { added(&auth, "queued").await.map(drop) });
 		// Give the second token time to reach the queue before dropping it.
 		kio::clock::sleep(Duration::from_millis(50)).await;
 		drop(requests);
@@ -1151,7 +1151,7 @@ async fn a_reset_auth_stream_reports_unsupported(version: &'static str) {
 		.await;
 		granted(&pair.client).await;
 
-		let err = pair.client.auth().add("token").await.expect_err("no acceptor");
+		let err = added(&pair.client.auth(), "token").await.expect_err("no acceptor");
 		assert!(matches!(err, Error::Unsupported), "{err:?}");
 		assert_eq!(pair.client_transport.close_reason(), None);
 	})
@@ -1167,9 +1167,12 @@ async fn older_versions_have_no_grant(version: &'static str) {
 		let (pair, _broadcast) = connect_announced(version).await;
 		assert_eq!(pair.client.auth().grant().peek(), None);
 		match version.starts_with("moq-lite") {
-			true => assert!(matches!(pair.client.auth().add("token").await, Err(Error::Unsupported))),
+			true => assert!(matches!(
+				added(&pair.client.auth(), "token").await,
+				Err(Error::Unsupported)
+			)),
 			false => {
-				let auth = pair.client.auth().add("token").await.expect("kept for requests");
+				let auth = added(&pair.client.auth(), "token").await.expect("kept for requests");
 				assert_eq!(auth.grant().peek(), None);
 				assert_eq!(pair.client.auth().grant().peek(), None);
 			}
@@ -1276,7 +1279,7 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 		let mut requests = pair.requests.take().unwrap();
 		let _setup = requests.next().await.unwrap().accept(Grant::default());
 		let auth = pair.client.auth();
-		let (first, first_grant) = futures::join!(auth.add("first"), async {
+		let (first, first_grant) = futures::join!(added(&auth, "first"), async {
 			requests.next().await.unwrap().accept(grant(&[], &["room"]))
 		});
 		let first = first.unwrap();
@@ -1299,7 +1302,7 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 			.await
 			.unwrap();
 		subscription.recv_group().await.unwrap().unwrap();
-		let (renewed, _renewed_grant) = futures::join!(auth.add("renewal"), async {
+		let (renewed, _renewed_grant) = futures::join!(added(&auth, "renewal"), async {
 			requests.next().await.unwrap().accept(grant(&[], &["room"]))
 		});
 		let _renewed = renewed.unwrap();
@@ -1509,7 +1512,7 @@ async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'stat
 			Some(grant(if token.is_empty() { &["a"] } else { &["b"] }, &[]))
 		});
 		let (_, _setup) = issued.next().await.unwrap();
-		let token = pair.client.auth().add("update").await.unwrap();
+		let token = added(&pair.client.auth(), "update").await.unwrap();
 		let (_, updated) = issued.next().await.unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
 		let huge: Patterns = (0..20)
@@ -1559,7 +1562,7 @@ async fn pattern_grants_arrive_exactly(version: &'static str) {
 
 		let mut held = Vec::new();
 		for token in ["exact", "wildcard", "mixed", "root"] {
-			let added = pair.client.auth().add(token).await.expect(token);
+			let added = added(&pair.client.auth(), token).await.expect(token);
 			assert_eq!(added.grant().peek(), table(token.as_bytes()), "{token}");
 			held.push(added);
 		}
@@ -2127,9 +2130,9 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 async fn a_shared_handle_presents_its_token_on_every_session(version: &'static str) {
 	within(async {
 		let handle = auth::Handle::new();
-		let added = kio::clock::sim::spawn({
+		let adding = kio::clock::sim::spawn({
 			let handle = handle.clone();
-			async move { handle.add("token").await }
+			async move { added(&handle, "token").await }
 		});
 		let options = || Options {
 			version: Some(version),
@@ -2144,7 +2147,7 @@ async fn a_shared_handle_presents_its_token_on_every_session(version: &'static s
 			b"" => Some(Grant::default()),
 			_ => Some(grant(&["first"], &[])),
 		});
-		let token = added.await.expect("joined").expect("granted on the first session");
+		let token = adding.await.expect("joined").expect("granted on the first session");
 		let _first = presented(&mut tokens).await;
 		wait_for(token.grant(), |g| g == &Some(grant(&["first"], &[]))).await;
 
@@ -2201,9 +2204,9 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 		};
 		let mut first = connect(options()).await;
 		let mut first_requests = first.requests.take().unwrap();
-		let added = kio::clock::sim::spawn({
+		let adding = kio::clock::sim::spawn({
 			let handle = handle.clone();
-			async move { handle.add("token").await }
+			async move { added(&handle, "token").await }
 		});
 		let mut first_issued = Vec::new();
 		let unanswered = loop {
@@ -2234,7 +2237,7 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 		let mut second = connect(options()).await;
 		let mut second_tokens = serve(second.requests.take().unwrap(), |_| Some(Grant::all()));
 		let _second_issued = presented(&mut second_tokens).await;
-		let _token = added.await.expect("joined").expect("granted on the second session");
+		let _token = adding.await.expect("joined").expect("granted on the second session");
 
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
@@ -2248,7 +2251,7 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 			"the draining session dropped its late grant"
 		);
 
-		let later = handle.add("later").await.expect("granted on the second session");
+		let later = added(&handle, "later").await.expect("granted on the second session");
 		let (token, _later) = second_tokens.next().await.expect("the active session presents it");
 		assert_eq!(token, b"later");
 		assert!(
@@ -2281,7 +2284,7 @@ async fn a_token_queued_before_our_goaway_rides_only_the_successor(version: &'st
 		assert!(setup.is_empty());
 
 		// Its first poll queues the token; the driver runs only once this side drains.
-		let mut adding = Box::pin(handle.add("late"));
+		let mut adding = Box::pin(added(&handle, "late"));
 		assert!(adding.as_mut().now_or_never().is_none());
 		first.client.drain().send(moq_net::goaway::Goaway::new()).unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
@@ -2328,7 +2331,7 @@ async fn a_transient_refusal_is_presented_again(version: &'static str) {
 				}
 			}
 		});
-		let token = pair.client.auth().add("token").await.expect("granted on the retry");
+		let token = added(&pair.client.auth(), "token").await.expect("granted on the retry");
 		assert_eq!(token.grant().peek(), Some(Grant::default()));
 		let _setup = issued.next().await;
 		let _token = issued.next().await;
@@ -2391,4 +2394,11 @@ async fn a_broadcast_relayed_from_another_client_is_not_ours_to_check(version: &
 	})
 	.await
 	.expect("timed out");
+}
+
+/// Present `token` on `handle` and wait for its first verdict.
+async fn added(handle: &auth::Handle, token: impl Into<bytes::Bytes>) -> moq_net::Result<auth::Credential> {
+	let credential = handle.add(token)?;
+	credential.answered().await?;
+	Ok(credential)
 }

@@ -15,6 +15,8 @@ type Vars = {
 	acks: Record<string, number>;
 	up: number[][];
 	own: Record<string, number>;
+	burst: number;
+	churn: number;
 };
 
 const ORIGIN = "0";
@@ -52,17 +54,22 @@ const relay = (n: string, s: Node) => {
 	return `${how}${shows ? ", shows it" : ""}`;
 };
 
-const sessions = (v: Vars) => {
-	const down = ["0,1", "0,2", "1,2"].filter((l) => !v.up.some((u) => [...u].sort().join(",") === l));
-	return down.length === 0 ? "all open" : down.map((l) => `${l.replace(",", "–")} closed`).join(", ");
-};
+const sessions = (v: Vars) =>
+	v.up
+		.map((l) => [...l].sort((a, b) => a - b).join("–"))
+		.sort()
+		.join(", ") || "none";
 
-export const title = "One origin identity across a triangle of relays";
+export const title = "One origin identity across a mesh of relays";
 
 export const state = (v: Vars) => ({
-	Sessions: sessions(v),
-	"Relay 1": relay("1", v.st["1"]),
-	"Relay 2": relay("2", v.st["2"]),
+	"Open sessions": sessions(v),
+	...Object.fromEntries(
+		Object.keys(v.st)
+			.filter((n) => n !== ORIGIN)
+			.map((n) => [`Relay ${n}`, relay(n, v.st[n])]),
+	),
+	"Messages this burst": `${v.burst} for ${v.churn} change${v.churn === 1 ? "" : "s"}`,
 });
 
 const len = (s: Record<string, unknown> | undefined) => (s ? Object.keys(s).length : 0);
