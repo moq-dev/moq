@@ -884,7 +884,7 @@ fn every_rule_settles_after_churn() {
 
 /// Loops, stale routes, and messages under the same churn, per rule.
 #[test]
-#[ignore = "a benchmark; the route rules quest reports it"]
+#[ignore = "a benchmark; Nightly reports it"]
 fn benchmark_route_churn() {
 	println!("rule,steps,loops,stale,dark,msgs,items,claims,offline,unavailable");
 	for rule in Rule::ALL {
@@ -958,7 +958,7 @@ fn the_rules_differ_as_reported() {
 
 /// Per change, mesh size, and rule, over fixed seeds: the mean of what converging cost.
 #[test]
-#[ignore = "a benchmark; the route rules quest reports it"]
+#[ignore = "a benchmark; Nightly reports it"]
 fn benchmark_route_rules() {
 	println!("shape,relays,change,rule,msgs,items,claims,rounds,stale,dark,loops,offline,unavailable");
 	for relays in [3, 6, 12, 24] {

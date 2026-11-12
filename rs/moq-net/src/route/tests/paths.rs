@@ -1062,11 +1062,6 @@ impl Relay {
 		route.path.as_ref().map(|_| route.cost)
 	}
 
-	/// Whether this relay holds `id` with no route to it.
-	pub fn held(&self, id: Id) -> bool {
-		self.routes.get(&id).is_some_and(|route| route.path.is_none())
-	}
-
 	/// Whether this relay shows `claim` from `id`, and whether it is available.
 	pub fn shows(&self, id: Id, claim: &Path) -> Option<bool> {
 		self.shown.get(&(id, claim.clone())).map(|(_, available)| *available)
@@ -1185,16 +1180,6 @@ impl PathSim {
 		self.nodes[node].leaf = leaf;
 	}
 
-	/// Re-open every configured link of `node`.
-	pub fn reconnect(&mut self, node: Node) {
-		let peers: Vec<Node> = (0..self.nodes.len())
-			.filter(|&peer| self.links[node][peer].is_some() && !self.connected(node, peer))
-			.collect();
-		for peer in peers {
-			self.connect(node, peer);
-		}
-	}
-
 	pub fn originate(&mut self, node: Node, id: Id) {
 		self.nodes[node].originate(id);
 		self.flush();
@@ -1228,10 +1213,6 @@ impl PathSim {
 
 	pub fn hold(&mut self, from: Node, to: Node) {
 		self.held.insert((from, to));
-	}
-
-	pub fn release(&mut self, from: Node, to: Node) {
-		self.held.remove(&(from, to));
 	}
 
 	pub fn queued(&self, from: Node, to: Node) -> usize {
