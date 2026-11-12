@@ -124,14 +124,15 @@ export class Floors {
 
 	/**
 	 * A route to `node` applied a batch at its floor: every other route to it is shown anew.
-	 * Returns whether any other view of the node exists, in which case the route's own unchanged
-	 * claims may have changed state too.
+	 * Returns whether any other view of the node existed, in which case the route's own unchanged
+	 * claims may have changed state too, even if this floor pruned it.
 	 */
 	floor(node: bigint, carrier: Carrier): boolean {
 		const entry = this.#nodes.get(node);
 		if (!entry) return false;
+		const retained = entry.retained.length;
 		this.#prune(entry);
-		if (entry.carriers.size === 1 && entry.retained.length === 0) return false;
+		if (entry.carriers.size === 1 && retained === 0) return false;
 		for (const other of entry.carriers) if (other !== carrier) other.reshow();
 		return true;
 	}
@@ -160,6 +161,31 @@ export class Floors {
 		const theirs = presented(best, path, path === view.prefix);
 		if (theirs?.instance !== claim.instance || theirs.epoch !== claim.epoch) return undefined;
 		return theirs;
+	}
+
+	/**
+	 * Whether a claim of `node` at `at` may serve a consume of `path` below it. The newest view
+	 * certifying `path`, the most specific of those alike, certifies what covers it there: a claim
+	 * above that view's region is older knowledge, as `covering` in rs/moq-net's `route/view.rs`.
+	 */
+	covers(node: bigint, at: Path.Valid, path: Path.Valid): boolean {
+		const entry = this.#nodes.get(node);
+		if (!entry || at === path) return true;
+		let best: View | undefined;
+		const consider = (view: View) => {
+			if (!certifies(view, path)) return;
+			if (
+				best === undefined ||
+				// biome-ignore lint/style/noNonNullAssertion: certifies() checked both revisions.
+				view.revision! > best.revision! ||
+				(view.revision === best.revision && view.prefix.length > best.prefix.length)
+			)
+				best = view;
+		};
+		for (const carrier of entry.carriers) consider(carrier.view);
+		// As in shows(): a retained view counts only where a live floor still certifies.
+		if (best !== undefined) for (const view of entry.retained) consider(view);
+		return best === undefined || Path.hasPrefix(best.prefix, at);
 	}
 
 	// Drop each retained view that decides no claim a route holds: one another view supersedes, or

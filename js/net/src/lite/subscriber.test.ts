@@ -3743,6 +3743,99 @@ test("a lite-07 uncertified claim shows once its last certifier ends", async () 
 	subscriber.close();
 });
 
+// A route's kept floor that a later one prunes re-shows the claims it held back, though the
+// pruning floor carries no batch.
+test("a lite-07 claim a pruned floor held back shows without a batch", async () => {
+	const { subscriber, announced, send } = await routedStream();
+	const x = Path.from("live/x");
+	const y = Path.from("live/y");
+	const w = Path.from("live/w");
+	const a = Instance.parse("a");
+
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: y, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: y, kind: "start" });
+	// An older revision adds live/x: the kept revision 1 holds it back.
+	await send({ status: "active", suffix: x, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	// A floor that certifies nothing leaves no floor to decide live/x, so it shows.
+	await send({ status: "floor", id: 0n });
+	// Another node's claim marks the floors as applied.
+	await send({ status: "routeStart", node: NODE_B, advert: ADVERT });
+	await send({ status: "active", suffix: w, route: 1n, instance: a });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
+
+	announced.close();
+	subscriber.close();
+});
+
+// A claim above a newer floor's region is older knowledge there: a consume below that region does
+// not select it, as Rust's `covering` presents no claim above the newest certifier.
+test("a lite-07 consume skips a claim above a newer floor's region", async () => {
+	const { subscriber, announced, send, trackRequest, another } = await routedStream();
+	const x = await another(1, Path.Pattern.subtree(Path.from("live/x")));
+	const root = Path.from("live");
+	const a = Instance.parse("a");
+
+	// NODE_A claims live at revision 0; a dearer NODE_B claims it too.
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: root, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: root, kind: "start", route: { node: NODE_A } });
+	await send({ status: "routeStart", node: NODE_B, advert: { ...ADVERT, metric: 5n } });
+	await send({ status: "active", suffix: root, route: 1n, instance: a });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	// NODE_A's revision 1 presents only live/x/m under live/x: it withdrew live.
+	await x.send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await x.send({ status: "active", suffix: Path.from("m"), route: 0n, instance: a });
+	await x.send({ status: "floor", id: 0n, revision: 1n });
+	expect(await x.announced.next()).toMatchObject({ prefix: Path.from("live/x/m"), kind: "start" });
+
+	const pick = await trackRequest(Path.from("live/x"), 2);
+	expect(pick.request).toMatchObject({ instance: a, node: NODE_B });
+
+	pick.consumed.close();
+	x.announced.close();
+	announced.close();
+	subscriber.close();
+	await pick.info;
+});
+
+// A route that cannot be used for a while keeps its claims' place in a tie, so the announcements
+// and the consumes still agree once it recovers, as a Rust entry keeps its id.
+test("a lite-07 tie keeps its winner across a route's unusable spell", async () => {
+	const { subscriber, announced, send, trackRequest } = await routedStream();
+	const x = Path.from("live/x");
+	const a = Instance.parse("a");
+
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: x, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
+	await send({ status: "routeStart", node: NODE_B, advert: ADVERT });
+	await send({ status: "active", suffix: x, route: 1n, instance: a });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "update", route: { node: NODE_B } });
+	// NODE_A's route crosses this session, then recovers.
+	await send({ status: "routeUpdate", id: 0n, advert: { ...ADVERT, hops: [subscriber.hop] } });
+	await send({ status: "routeUpdate", id: 0n, advert: ADVERT });
+	// Another claim marks the updates as applied.
+	const w = Path.from("live/w");
+	await send({ status: "active", suffix: w, route: 1n, instance: a });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: w, kind: "start" });
+
+	const pick = await trackRequest(x, 1);
+	expect(pick.request).toMatchObject({ instance: a, node: NODE_B });
+
+	pick.consumed.close();
+	announced.close();
+	subscriber.close();
+	await pick.info;
+});
+
 // A lagging stream's copy of a claim takes the cost the newest certifying floor gives it, so a
 // re-priced origin does not keep winning on the cost it had.
 test("a lite-07 lagging copy carries the cost a newer floor certified", async () => {

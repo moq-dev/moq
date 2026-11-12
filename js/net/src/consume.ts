@@ -47,16 +47,29 @@ class Blind implements Selection {
 	readonly validity = new Validity();
 }
 
+/** Which claims above a consumed path may serve it: lite-07's floors. @internal */
+export interface Covering {
+	/** Whether the claim of origin `node` at `at` may serve a consume of `path` below it. */
+	covers(node: bigint, at: Path.Valid, path: Path.Valid): boolean;
+}
+
+type Advertised = { identity: object; route: WireRoute; parked?: boolean };
+
 /** Consumed broadcasts shared only within the selected serving instance. @internal */
 export class BroadcastCache {
 	#cache = new Map<
 		Path.Valid,
 		Map<Instance.Valid | object, { consumer: broadcast.Consumer; selection: Selection }>
 	>();
-	#announced = new Map<Path.Valid, Map<object, { identity: object; route: WireRoute }>>();
+	#announced = new Map<Path.Valid, Map<object, Advertised>>();
 	#blind = new Map<Path.Valid, Blind>();
 	#blindPrefixes = new Map<Path.Valid, Set<Path.Valid>>();
 	#paths = new Map<Path.Valid, Set<Path.Valid>>();
+	readonly #covering?: Covering;
+
+	constructor(covering?: Covering) {
+		this.#covering = covering;
+	}
 
 	/** Record this interest's live advertisement, preserving identity across route updates. */
 	announce(path: Path.Valid, owner: object, route: WireRoute, restart = false): void {
@@ -75,6 +88,22 @@ export class BroadcastCache {
 		this.#update(path);
 	}
 
+	/**
+	 * Keep this interest's advertisement in its place among a tie while no consume may select it,
+	 * until it is announced again without a restart: a lite-07 route that cannot be used for now.
+	 */
+	park(path: Path.Valid, owner: object): void {
+		const entry = this.#announced.get(path)?.get(owner);
+		if (!entry || entry.parked) return;
+		entry.parked = true;
+		this.#update(path);
+	}
+
+	/** Re-check every consume's selection, once what covers a path changed without an announcement. */
+	revalidate(): void {
+		for (const path of this.#cache.keys()) this.#check(path);
+	}
+
 	/** Withdraw this interest's advertisement without disturbing another interest's routes. */
 	withdraw(path: Path.Valid, owner: object): void {
 		const entries = this.#announced.get(path);
@@ -86,9 +115,7 @@ export class BroadcastCache {
 	/** Resolve the same most-specific-prefix and route preference as the origin. */
 	instance(path: Path.Valid): Selection {
 		for (const prefix of coveringPrefixes(path)) {
-			const entries = this.#announced.get(prefix);
-			if (!entries) continue;
-			const best = bestCandidate(path, prefix, entries.values(), (entry) => entry.route);
+			const best = bestCandidate(path, prefix, this.#eligible(path, prefix), (entry) => entry.route);
 			if (best) {
 				const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
 				// A minted instance names the announcement, not the publisher's stream, so a
@@ -113,9 +140,7 @@ export class BroadcastCache {
 	 */
 	pinned(path: Path.Valid, instance: Instance.Valid): Selection {
 		for (const prefix of coveringPrefixes(path)) {
-			const entries = [...(this.#announced.get(prefix)?.values() ?? [])].filter(
-				(entry) => entry.route.instance === instance,
-			);
+			const entries = this.#eligible(path, prefix).filter((entry) => entry.route.instance === instance);
 			const best = bestCandidate(path, prefix, entries, (entry) => entry.route);
 			if (best) return best;
 		}
@@ -199,13 +224,28 @@ export class BroadcastCache {
 		}
 	}
 
+	// The advertisements at `prefix` a consume of `path` may select, oldest first.
+	#eligible(path: Path.Valid, prefix: Path.Valid): Advertised[] {
+		const covering = this.#covering;
+		return [...(this.#announced.get(prefix)?.values() ?? [])].filter(
+			(entry) =>
+				!entry.parked &&
+				(prefix === path ||
+					entry.route.node === undefined ||
+					!covering ||
+					covering.covers(entry.route.node, prefix, path)),
+		);
+	}
+
 	#update(prefix: Path.Valid): void {
-		for (const path of this.#paths.get(prefix) ?? []) {
-			const selected = this.instance(path);
-			for (const entry of this.#cache.get(path)?.values() ?? []) {
-				const same = sameInstance(entry.selection, selected);
-				entry.selection.validity?.update(same, !same && !(selected instanceof Blind));
-			}
+		for (const path of this.#paths.get(prefix) ?? []) this.#check(path);
+	}
+
+	#check(path: Path.Valid): void {
+		const selected = this.instance(path);
+		for (const entry of this.#cache.get(path)?.values() ?? []) {
+			const same = sameInstance(entry.selection, selected);
+			entry.selection.validity?.update(same, !same && !(selected instanceof Blind));
 		}
 	}
 }

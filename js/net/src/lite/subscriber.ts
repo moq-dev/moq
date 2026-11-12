@@ -332,10 +332,10 @@ export class Subscriber {
 	#pending = new Map<bigint, Promise<SubscribeEntry | undefined>>();
 	#subscribeNext = 0n;
 
-	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
-	#consumes = new BroadcastCache();
 	// Lite-07: what this session's announce streams certify of each origin node's claims.
 	#floors = new Floors();
+	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
+	#consumes = new BroadcastCache(this.#floors);
 	#consumeNext = 0;
 
 	// Dedup in-flight one-shot fetches, keyed by [consume, broadcast, instance, track, sequence].
@@ -953,12 +953,13 @@ export class Subscriber {
 
 		// File the route's claim at `path` in the consume cache, or take it out. Every route's claim
 		// stays there, so each consume ranks them for its own path and its epochs. `restart` marks
-		// another instance or epoch, whose consumes subscribe fresh.
+		// another instance or epoch, whose consumes subscribe fresh. An unusable route's claim is
+		// parked, keeping its place in a tie as `byPath` does, unless it just moved to the newest.
 		const serve = (wire: Route, path: Path.Valid, restart: boolean) => {
 			const claim = wire.shown.get(path);
-			if (claim && visible(path) && usable(wire))
-				this.#consumes.announce(path, wire.owner, candidate(wire, claim), restart);
-			else this.#consumes.withdraw(path, wire.owner);
+			if (!claim || !visible(path) || (!usable(wire) && restart)) this.#consumes.withdraw(path, wire.owner);
+			else if (!usable(wire)) this.#consumes.park(path, wire.owner);
+			else this.#consumes.announce(path, wire.owner, candidate(wire, claim), restart);
 		};
 
 		// Report the best claim at `path`, or with `perNode` each origin node's, and each one's end.
@@ -1028,8 +1029,7 @@ export class Subscriber {
 		};
 		const refreshRoute = (wire: Route, lost: boolean) => {
 			for (const path of wire.view.claims.keys()) {
-				if (lost) this.#consumes.withdraw(path, wire.owner);
-				else serve(wire, path, false);
+				serve(wire, path, false);
 				refresh(path, lost);
 			}
 		};
@@ -1101,7 +1101,9 @@ export class Subscriber {
 						// What its last floor certified stays, so no other stream's lagging claim revives.
 						this.#floors.leave(wire.node, wire.carrier);
 						for (const path of wire.view.claims.keys()) byPath.get(path)?.delete(msg.id);
+						wire.shown.clear();
 						refreshRoute(wire, true);
+						this.#consumes.revalidate();
 						for (const path of wire.view.claims.keys())
 							if (byPath.get(path)?.size === 0) byPath.delete(path);
 						await encodeAnnounceReply(stream.writer, { kind: "echo", id: msg.id }, this.version);
@@ -1140,7 +1142,10 @@ export class Subscriber {
 						wire.view.revision = msg.revision;
 						// Every other route to the node is shown anew first; with one, this route's
 						// unchanged claims may change state too.
-						show(wire, touched, this.#floors.floor(wire.node, wire.carrier));
+						const others = this.#floors.floor(wire.node, wire.carrier);
+						show(wire, touched, others);
+						// Another view of the node may now cover a consumed path differently.
+						if (others) this.#consumes.revalidate();
 						break;
 					}
 					case "active": {
@@ -1201,6 +1206,7 @@ export class Subscriber {
 				this.#floors.leave(wire.node, wire.carrier);
 				for (const path of wire.view.claims.keys()) this.#consumes.withdraw(path, wire.owner);
 			}
+			if (routes.size > 0) this.#consumes.revalidate();
 			reported.clear();
 			claims.clear();
 			routes.clear();
