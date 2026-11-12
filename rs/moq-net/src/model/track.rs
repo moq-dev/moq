@@ -42,7 +42,7 @@ pub(crate) use hole::Hole;
 pub(crate) use fill::{GroupFill, Readers as FillReaders};
 
 use std::{
-	collections::{BTreeMap, BTreeSet, VecDeque},
+	collections::{BTreeMap, BTreeSet, VecDeque, btree_map},
 	ops::{self, Bound, RangeBounds},
 	sync::Arc,
 	sync::OnceLock,
@@ -583,6 +583,9 @@ pub(crate) struct TrackState {
 	// the readers riding them; see [`Self::board`]. Held weakly, so the last rider leaving
 	// frees one, and pruned as they are looked up.
 	flights: BTreeMap<u64, Vec<group::Detached>>,
+	// How many received copies wait on another copy of each sequence still arriving (see
+	// [`Hold`]), which a reader of that copy waits out when it fails; see [`Self::successor`].
+	holds: BTreeMap<u64, usize>,
 
 	// Publisher-produced groups in arrival order as (sequence, stamp), walked by
 	// subscriptions; an entry only resolves while its stamp matches the slot's.
@@ -3780,6 +3783,33 @@ impl TrackState {
 	}
 }
 
+/// The copy of its group `reader` continues on once the copy it reads failed: one holding the
+/// group from the reader's frame, once no re-offer of it is still held (see [`Hold`]). A
+/// group's name fixes its content, so any such copy continues it.
+pub(super) fn successor(
+	track: &kio::Producer<TrackState>,
+	reader: &group::Consumer,
+	waiter: &kio::Waiter,
+) -> Poll<Option<group::Consumer>> {
+	let sequence = reader.sequence;
+	let found = track.poll_ref(waiter, |state| {
+		if state.holds.contains_key(&sequence) {
+			return Poll::Pending;
+		}
+		Poll::Ready(
+			state
+				.covering_group(sequence, reader.index())
+				.filter(|copy| !copy.is_read_by(reader))
+				.and_then(group::Handle::try_consume),
+		)
+	});
+	Poll::Ready(match found {
+		Poll::Ready(Ok(copy)) => copy,
+		Poll::Ready(Err(_closed)) => None,
+		Poll::Pending => return Poll::Pending,
+	})
+}
+
 /// Where a reader at a frame its copy shed goes: see [`board`].
 pub(super) enum Board {
 	/// Ride this copy, a flight or a cached copy, which holds the frame.
@@ -3996,7 +4026,41 @@ pub(crate) enum Received {
 	/// Another copy of the sequence that is still arriving: whether this one is needed
 	/// depends on how that one settles.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	Held(group::Handle),
+	Held(Hold),
+}
+
+/// A received copy waiting on another copy of its sequence still arriving. While it waits,
+/// a reader of that copy that fails waits for this one to take the group instead of failing.
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+pub(crate) struct Hold {
+	arriving: group::Handle,
+	track: kio::Weak<TrackState>,
+	sequence: u64,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+impl Hold {
+	/// The copy still arriving.
+	pub(crate) fn arriving(&self) -> &group::Handle {
+		&self.arriving
+	}
+}
+
+impl Drop for Hold {
+	fn drop(&mut self) {
+		let Some(track) = self.track.upgrade() else {
+			return;
+		};
+		let Ok(mut state) = track.write() else {
+			return;
+		};
+		if let btree_map::Entry::Occupied(mut holds) = state.holds.entry(self.sequence) {
+			*holds.get_mut() -= 1;
+			if *holds.get() == 0 {
+				holds.remove();
+			}
+		}
+	}
 }
 
 /// A producer for a track, used to create new groups.
@@ -4152,10 +4216,16 @@ impl Producer {
 		let start = received.unwrap_or(0);
 		let content = if received.is_some() {
 			if let Some(holding) = state.holding_group(info.sequence, start) {
-				return match holding.is_settled() {
-					true => Err(Error::Duplicate),
-					false => Ok(Received::Held(holding.clone())),
-				};
+				if holding.is_settled() {
+					return Err(Error::Duplicate);
+				}
+				let arriving = holding.clone();
+				*state.holds.entry(info.sequence).or_default() += 1;
+				return Ok(Received::Held(Hold {
+					arriving,
+					track: self.state.downgrade(),
+					sequence: info.sequence,
+				}));
 			}
 			state.content_for_copy(info.sequence)?
 		} else {
@@ -17098,6 +17168,56 @@ mod test {
 		producer.received();
 		elapse(&producer, Duration::ZERO);
 		producer
+	}
+
+	/// A reader on a received copy that fails waits out a re-offer still held for its group,
+	/// then continues on it from its frame with nothing repeated or missed. A released hold
+	/// leaves the failure, as does a re-offer starting past the reader's frame.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_failed_copy_continues_on_its_held_reoffer() {
+		for case in ["reoffer", "released", "past"] {
+			let producer = received_producer(Info::timed());
+			let at = |millis| Timestamp::from_millis(millis).unwrap();
+			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the first copy opens");
+			};
+			first.write_frame(at(300), &b"a"[..]).unwrap();
+			let mut reader = first.consume();
+			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a", "{case}");
+
+			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the re-offer waits on the copy still arriving");
+			};
+			first.abort(Error::Cancel).unwrap();
+			let waiter = kio::Waiter::noop();
+			assert!(
+				reader.poll_read_frame(&waiter).is_pending(),
+				"{case}: waits on the held re-offer"
+			);
+
+			if case == "released" {
+				drop(hold);
+				assert!(reader.read_frame().await.is_err(), "{case}");
+				continue;
+			}
+			let start = if case == "past" { 2 } else { 0 };
+			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { sequence: 3 }, start) else {
+				panic!("the re-offer takes the group");
+			};
+			drop(hold);
+			if case == "past" {
+				assert!(reader.read_frame().await.is_err(), "{case}: frame 1 is in no copy");
+				continue;
+			}
+			// Parked on frame 1, which the re-offer has yet to write.
+			assert!(reader.poll_read_frame(&waiter).is_pending());
+			again.write_frame(at(300), &b"a"[..]).unwrap();
+			again.write_frame(at(301), &b"b"[..]).unwrap();
+			again.finish().unwrap();
+			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"b");
+			assert!(reader.read_frame().await.unwrap().is_none());
+		}
 	}
 
 	/// Create and finish group `sequence`, with one frame at `millis` on a timed track.

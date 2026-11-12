@@ -393,6 +393,14 @@ export interface GroupRecover {
 	replace(index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement>;
 }
 
+/** A copy of a group still arriving, held for a duplicate that waits on it. */
+export interface Arriving {
+	/** How the copy ends. */
+	readonly settled: GetPromise<Error | null>;
+	/** Stop holding it, once the duplicate took the group or gave up. Idempotent. */
+	release(): void;
+}
+
 /** A candidate copy of a group, committed only once the read can use it. */
 export interface Replacement {
 	readonly group: GroupConsumer;
@@ -621,8 +629,12 @@ export const hooks: {
 	 * fill's subscription answered, which the feed never promised. Assigned by `track.ts`.
 	 */
 	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number; fill?: boolean }) => GroupProducer;
-	/** How the copy of `sequence` still arriving ends, if one is, for a duplicate to wait on. Assigned by `track.ts`. */
-	arrivingGroup: (producer: Producer, sequence: bigint) => GetPromise<Error | null> | undefined;
+	/**
+	 * Hold the copy of `sequence` still arriving, if one is, for a duplicate to wait on: until
+	 * released, a reader of that copy that fails waits for the duplicate to take the group. Assigned
+	 * by `track.ts`.
+	 */
+	arrivingGroup: (producer: Producer, sequence: bigint) => Arriving | undefined;
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
@@ -900,6 +912,13 @@ export const hooks: {
 	 * out, so its `closed` never settles on a failure the recovery continues past.
 	 */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
+	/**
+	 * Mark `group` a received copy, which a later copy of its sequence may take over once it fails,
+	 * and `failed`, if given, as the copy it took over from. Assigned by `group.ts`.
+	 */
+	receivedGroup: (group: GroupProducer, failed?: GroupProducer) => void;
+	/** Hold a received copy still arriving for a duplicate: see {@link Arriving}. Assigned by `group.ts`. */
+	holdGroup: (group: GroupProducer) => () => void;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
@@ -1170,6 +1189,12 @@ export const hooks: {
 	},
 	arrivingGroup: () => {
 		throw new Error("track.ts not loaded");
+	},
+	receivedGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	holdGroup: () => {
+		throw new Error("group.ts not loaded");
 	},
 	groupOffset: () => {
 		throw new Error("group.ts not loaded");

@@ -27,6 +27,7 @@ import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import {
+	type Arriving,
 	bestCandidate,
 	type DropRun,
 	hiddenBelow,
@@ -3126,6 +3127,7 @@ export class Subscriber {
 
 		const { track, timescale, tail } = entry;
 		let producer: netGroup.Producer | undefined;
+		let arriving: Arriving | undefined;
 		const read = tail.open(group.sequence);
 		this.#reoffered(track, group.sequence, group.sequence + 1n);
 
@@ -3142,18 +3144,25 @@ export class Subscriber {
 			}
 			// A duplicate of a copy still arriving, such as a lite-07 re-offer that overtook the reset
 			// of the stream it replaces, waits unread, which flow control bounds. Created once that copy
-			// ends, it is refused as a duplicate if the copy finished and takes the group if it failed.
-			// Its own reset ends the wait; a clean end leaves it on the copy alone.
-			for (let arriving = hooks.arrivingGroup(track, group.sequence); arriving !== undefined; ) {
-				const settled = arriving;
+			// ends, it is refused as a duplicate if the copy finished and takes the group if it failed,
+			// continuing the reads of that copy, which wait while it is held. Its own reset ends the
+			// wait; a clean end leaves it on the copy alone.
+			arriving = hooks.arrivingGroup(track, group.sequence);
+			while (arriving !== undefined) {
+				const settled = arriving.settled;
 				await race([settled, stream.closed.then(() => settled)]);
-				arriving = hooks.arrivingGroup(track, group.sequence);
+				const next = hooks.arrivingGroup(track, group.sequence);
+				if (next === undefined) break;
+				arriving.release();
+				arriving = next;
 			}
 			producer = hooks.receiveGroup(track, {
 				sequence: group.sequence,
 				start: group.frameStart,
 				fill: entry.filling,
 			});
+			// Released once this copy took the group, so the failed copy's readers find it.
+			arriving?.release();
 
 			const reading = readFrames(stream, producer, { scale: timescale, compress: entry.compress });
 			await (entry.filling ? untilAbandoned(producer, reading) : reading);
@@ -3174,6 +3183,7 @@ export class Subscriber {
 			producer?.abort(e);
 			stream.stop(e);
 		} finally {
+			arriving?.release();
 			read();
 		}
 	}

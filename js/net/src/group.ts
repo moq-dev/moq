@@ -130,10 +130,21 @@ class GroupState {
 	// Tells the group this copy was mirrored from whether its reader will still read it, so a
 	// copy buffered for a reader that passed it stops keeping the group wanted.
 	reads?: (reads: boolean) => void;
+	// A received copy's, shared with every mirror: what may take the group over once it fails.
+	succession?: Succession;
 
 	constructor(sequence: bigint) {
 		this.sequence = sequence;
 	}
+}
+
+// Another copy of a received group's sequence that may take the group over once this one fails,
+// so its readers continue there (see `Consumer.#succeed`). A group's name fixes its content.
+class Succession {
+	// Duplicates waiting on this copy while it arrives (see `hooks.holdGroup`).
+	readonly holds = new Signal(0);
+	// The copy that took the sequence after this one failed.
+	next?: Producer;
 }
 
 // A written frame and when it landed. It keeps the writer's frame rather than copying it, so a
@@ -300,6 +311,23 @@ export class Producer {
 			if (state.closed.peek() !== undefined) flate.finish();
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
+		hooks.receivedGroup = (group, failed) => {
+			group.#state.succession = new Succession();
+			if (failed === undefined) return;
+			const succession = failed.#state.succession;
+			if (succession) succession.next = group;
+		};
+		hooks.holdGroup = (group) => {
+			const holds = group.#state.succession?.holds;
+			if (!holds) return () => {};
+			holds.update((n) => n + 1);
+			let held = true;
+			return () => {
+				if (!held) return;
+				held = false;
+				holds.update((n) => n - 1);
+			};
+		};
 		hooks.startGroup = (group, start) => {
 			if (!Number.isSafeInteger(start) || start < 0) throw new RangeError("invalid group frame start");
 			const state = group.#state;
@@ -390,6 +418,7 @@ export class Producer {
 		dst.flate = this.#state.flate;
 		dst.compressed = this.#state.compressed;
 		dst.charge = this.#state.charge;
+		dst.succession = this.#state.succession;
 		// A track restamps its own mirror with when the group joined it.
 		dst.arrived = this.#state.arrived;
 		if (this.#state.start === this.#state.offset && !headShed(this.#state.frames.peek().first)) {
@@ -983,9 +1012,36 @@ export class Consumer {
 		return closed instanceof Error && !this.#recovers(closed) ? closed : undefined;
 	}
 
-	// Whether a failure of the copy being read may still be continued from another route.
+	// Whether a failure of the copy being read may still be continued from another copy.
 	#recovers(failed: Error): boolean {
-		return !this.#verdict.peek() && !this.#torn() && this.#recover?.wants(failed) === true;
+		return !this.#verdict.peek() && !this.#torn() && (this.#succeeds() || this.#recover?.wants(failed) === true);
+	}
+
+	// Whether another copy in the track may take over the failed one being read: one is held, or took it.
+	#succeeds(): boolean {
+		const succession = this.#state.succession;
+		return succession !== undefined && (succession.holds.peek() > 0 || succession.next !== undefined);
+	}
+
+	// Continue on the copy that took this group's sequence in its track once the one being read
+	// failed, waiting out a duplicate still held for it. Returns whether the read should look again.
+	async #succeed(): Promise<boolean> {
+		const succession = this.#state.succession;
+		if (!succession || this.#verdict.peek() || this.#torn()) return false;
+		while (succession.holds.peek() > 0) {
+			await Signal.race(succession.holds, this.#verdict);
+			if (this.#verdict.peek()) return true;
+		}
+		const next = succession.next;
+		if (!next) return false;
+		const group = next.mirror();
+		// It starts past the frame read next, which no copy holds now.
+		if (group.#state.start > this.#index()) {
+			group.close();
+			return false;
+		}
+		this.#switch(group, this.#expiry);
+		return true;
 	}
 
 	// Whether a frame handed out to stream was cut short.
@@ -1173,11 +1229,17 @@ export class Consumer {
 			return;
 		}
 		replacement.adopt();
+		this.#switch(replacement.group, replacement.expiry);
+	}
+
+	// Read the rest of the group from `group`, which starts at or below the frame this one reached.
+	#switch(group: Consumer, expiry: Expiry | undefined): void {
+		const index = this.#index();
 		// The copy left behind stops teeing into the state this consumer read.
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(null);
 		this.#arrived ??= this.#state.arrived;
-		this.#state = next;
-		this.#expiry = replacement.expiry;
+		this.#state = group.#state;
+		this.#expiry = expiry;
 		this.#skip = index;
 		this.#closed?.refresh();
 		this.#expired?.refresh();
@@ -1370,9 +1432,11 @@ export class Consumer {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) {
+				if (await this.#succeed()) continue;
 				if (await this.#resume(closed)) continue;
 				this.#abandon();
-				throw closed;
+				// Ends the reader, whose failure a copy that might have taken over left open.
+				throw this.#fail(closed);
 			}
 			if (closed !== undefined) {
 				// The copy finished the group: a replacement asked for meanwhile is moot.

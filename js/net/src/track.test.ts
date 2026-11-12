@@ -3402,6 +3402,62 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 	producer.close();
 });
 
+// A reader on a received copy that fails waits out a duplicate still held for its group, then
+// continues on it from its frame with nothing repeated or missed. A released hold leaves the
+// failure, as does a duplicate starting past the reader's frame.
+test.each(["reoffer", "released", "past"])("a failed copy continues on its held re-offer (%p)", async (kind) => {
+	const producer = new TrackProducer("video").accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const first = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+	first.writeFrame({ payload: enc.encode("a") });
+	const reader = first.consume();
+	expect(await reader.readString()).toBe("a");
+
+	const arriving = hooks.arrivingGroup(producer, 3n);
+	expect(arriving).toBeDefined();
+	const failed = new Error("reset");
+	first.abort(failed);
+	let read: string | undefined | Error;
+	const reading = reader.readString().then(
+		(frame) => {
+			read = frame;
+		},
+		(err: Error) => {
+			read = err;
+		},
+	);
+	await settle();
+	expect(read).toBeUndefined();
+	expect(reader.closed.peek()).toBeUndefined();
+
+	if (kind === "released") {
+		arriving?.release();
+		await reading;
+		expect(read).toBe(failed);
+		expect(await reader.closed).toBe(failed);
+		producer.close();
+		return;
+	}
+	const again = hooks.receiveGroup(producer, { sequence: 3n, start: kind === "past" ? 2 : 0 });
+	arriving?.release();
+	if (kind === "past") {
+		await reading;
+		expect(read).toBe(failed);
+		producer.close();
+		return;
+	}
+	await settle();
+	expect(read).toBeUndefined();
+	again.writeFrame({ payload: enc.encode("a") });
+	again.writeFrame({ payload: enc.encode("b") });
+	again.finish();
+	await reading;
+	expect(read).toBe("b");
+	expect(await reader.readString()).toBeUndefined();
+	expect(await reader.closed).toBeNull();
+	producer.close();
+});
+
 test("a drop below the window is reported once the window lowers to it", () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer

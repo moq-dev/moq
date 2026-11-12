@@ -1337,10 +1337,12 @@ export class Producer {
 		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#wire = { starts, served: producer.#wire?.served };
 		};
-		hooks.receiveGroup = (producer, { sequence, start, fill }) => producer.#createGroup(sequence, start, fill);
+		hooks.receiveGroup = (producer, { sequence, start, fill }) =>
+			producer.#createGroup(sequence, start, fill, true);
 		hooks.arrivingGroup = (producer, sequence) => {
-			const closed = producer.#cached.get(sequence)?.group.closed;
-			return closed?.peek() === undefined ? closed : undefined;
+			const group = producer.#cached.get(sequence)?.group;
+			if (!group || group.closed.peek() !== undefined) return undefined;
+			return { settled: group.closed, release: hooks.holdGroup(group) };
 		};
 		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
 		fillFloor = (producer, named) => producer.#fillFloor(named);
@@ -2176,7 +2178,7 @@ export class Producer {
 		return this.#createGroup(sequence, 0);
 	}
 
-	#createGroup(sequence: bigint, start: number, fetched = false): GroupProducer {
+	#createGroup(sequence: bigint, start: number, fetched = false, received = false): GroupProducer {
 		this.#writable(sequence);
 		// A skip says the sequence will never be produced, so it is final. A drop is not: a
 		// publisher may re-create a group it cut or aborted.
@@ -2194,6 +2196,8 @@ export class Producer {
 		const group = new GroupProducer(sequence);
 		// Mirrors copy the absolute indices, so set them before publishing to any sink.
 		hooks.startGroup(group, start);
+		// Before any mirror, which shares it: the failed copy's readers continue on this one.
+		if (received) hooks.receivedGroup(group, existing?.group);
 		this.#bind(group);
 		this.#cap(group);
 		this.#publish(group, fetched);
