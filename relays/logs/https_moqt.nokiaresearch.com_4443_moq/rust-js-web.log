@@ -14,4 +14,6 @@
 [page] connection error: AggregateError: All promises were rejected
 [page] Failed to establish a connection to https://moqt.nokiaresearch.com:4443/moq: net::ERR_QUIC_PROTOCOL_ERROR.
 [page] connection error: AggregateError: All promises were rejected
-decoded 0 frames from smoke-rust-4728-17113.hang (vite)
+[page] Failed to establish a connection to https://moqt.nokiaresearch.com:4443/moq: net::ERR_QUIC_PROTOCOL_ERROR.
+[page] connection error: AggregateError: All promises were rejected
+decoded 0 frames from smoke-rust-4130-29790.hang (vite)
