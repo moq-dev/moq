@@ -1,4 +1,4 @@
-// Labels for `/statechart` on Failover.tla: how many relays are up, where the viewer's connection
+// Statechart labels for Failover.tla: how many relays are up, where the viewer's connection
 // is, whether the relays reach the origin, and what the viewer's screen shows. The two relays are
 // alike, so labels name them by role ("your relay", "the other relay") rather than by number.
 

@@ -1,4 +1,4 @@
-// Labels for `/statechart` on Publish.tla: what the publisher's badge says, and whether viewers
+// Statechart labels for Publish.tla: what the publisher's badge says, and whether viewers
 // can find the broadcast, with each step as the publisher or the network makes it happen.
 
 type Vars = {

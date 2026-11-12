@@ -1,4 +1,4 @@
-// Labels for `/statechart` on Watch.tla: the relay connection, the publisher, and what the
+// Statechart labels for Watch.tla: the relay connection, the publisher, and what the
 // viewer's screen shows, with each step as the viewer or the network makes it happen.
 
 type Vars = {

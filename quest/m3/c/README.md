@@ -36,7 +36,7 @@ Decided earlier, still standing:
   typedef, and unnamed variant fields are `v1`, as in C++.
 - The generated package takes over the `moq-c` name and `moq::c` target at
   the shared minor of the cut that ships it, after the hand-written crate's
-  0.22 (CONTRIBUTING.md's [Versions](/CONTRIBUTING.md#versions),
+  0.22 (RELEASE.md's [Versions](/RELEASE.md#versions),
   [moq-dev/moq#7610](https://github.com/moq-dev/moq/pull/7610)).
 - Docs change inline: the consumer quest rewrites `doc/lib/c`, and its Impact
   bullet carries the move for the package's `MIGRATE.md`.
