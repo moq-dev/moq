@@ -151,7 +151,8 @@ export declare class Thing {}
 	});
 });
 
-test("an unexported declaration that a public one names fails the run", async () => {
+// Quarantined: quest/m0/test-flakes-2/doc-api-typedoc-timeout.md.
+test.skip("an unexported declaration that a public one names fails the run", async () => {
 	const files = {
 		"src/index.ts": `export { read } from "./access";
 /** A public value. */

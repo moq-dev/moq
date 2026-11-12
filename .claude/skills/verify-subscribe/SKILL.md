@@ -24,9 +24,9 @@ Each rule is an INVARIANT; the harm says why it matters.
 ## Run
 
 ```sh
-just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla
-just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/Continuation.cfg
-just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/StreamWins.cfg
+quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla
+quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/Continuation.cfg
+quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/StreamWins.cfg
 ```
 
 The first checks every rule but `StreamWins` and `ContinuesWithinHeld` under `Pressure`, with one YIELDED reset and frames left out: about 76.5M distinct states, five minutes on 24 workers. The second gives the group one frame and two YIELDED resets, without `Pressure` and over two updates, so it also checks where each continuation starts: about 29.4M distinct states, two to three minutes. Both pass. The third checks `StreamWins` without `Pressure` or YIELDED and fails on the open finding below. `just test tla rs/moq-net/verify/subscribe` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes. One group is enough: groups share only the order of the Subscribe Stream, and a second group multiplies the states (60M and more) without adding a race.

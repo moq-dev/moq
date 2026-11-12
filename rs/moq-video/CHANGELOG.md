@@ -16,10 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `capture::portal::Selection::restore_token` watches the portal restore token (`RestoreTokenConsumer::changed` reports the latest token, or `None` once cleared, coalescing changes in between), and `with_restore_token` seeds one, so a caller can persist a screen-cast grant across processes and skip the picker on a compositor that keeps grants. `RestoreToken` redacts itself in `Debug` output.
 - `encode::Config::resize` scales a frame at another size inside the encoder, so a `Sink` does it on its own thread rather than the caller's.
 
 ### Changed
 
+- The ScreenCast portal grant now lasts until the user revokes it (`PersistMode::ExplicitlyRevoked`) instead of ending with the process, so a persisted restore token can skip the picker in a later process on a compositor that keeps grants.
 - With the `pipewire` feature, `capture::cameras()` lists a webcam that a PipeWire node fronts as `pipewire:<node name>`, ahead of the V4L2 devices, instead of as `/dev/videoN`, since PipeWire shares the camera while V4L2 holds it exclusively. A `/dev/videoN` id still opens V4L2.
 - With the `pipewire` feature, `Source::Camera(None)` opens PipeWire's default camera outside a sandbox when PipeWire lists a camera, and `/dev/video0` otherwise.
 - [**breaking**] `encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the catalog, so a caller declares the encoder's GOP with `reserve().with_timeline_hint(gop)`.

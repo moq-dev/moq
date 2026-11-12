@@ -843,7 +843,10 @@ impl Subscriber {
 			| lite::AnnounceBroadcast::RouteUpdate { .. }
 			| lite::AnnounceBroadcast::RouteHold { .. }
 			| lite::AnnounceBroadcast::RouteEnd { .. }
-			| lite::AnnounceBroadcast::Floor { .. } => return Err(Error::ProtocolViolation),
+			| lite::AnnounceBroadcast::Floor { .. }
+			| lite::AnnounceBroadcast::WarmStart { .. }
+			| lite::AnnounceBroadcast::WarmUpdate { .. }
+			| lite::AnnounceBroadcast::WarmEnd { .. } => return Err(Error::ProtocolViolation),
 		}
 		Ok(())
 	}

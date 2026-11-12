@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::{
-	Message, Version,
+	Message, Serves, Version,
 	message::{MAX_MESSAGE_SIZE, decode_size},
 };
 
@@ -28,6 +28,10 @@ const ROUTE_END: u64 = 8;
 const ANNOUNCE_FLOOR: u64 = 9;
 const ROUTE_REQUEST: u64 = 10;
 const ROUTE_HOLD: u64 = 11;
+// lite-07: warm routes, one hop toward the subscriber.
+const WARM_START: u64 = 12;
+const WARM_UPDATE: u64 = 13;
+const WARM_END: u64 = 14;
 
 /// Whether the negotiated version can update a live advertisement's metadata. On lite-05 an
 /// update travels as a duplicate ANNOUNCE (a second `active` for an already-announced path); on
@@ -112,6 +116,35 @@ pub enum AnnounceBroadcast {
 	/// with this id, certifying them across the whole requested prefix at the origin's
 	/// revision, or certifying nothing (`None`).
 	Floor { id: u64, revision: Option<route::Rev> },
+	/// WARM_START (lite-07+): under the route with Route ID `route`, the sender keeps its
+	/// copy of the broadcast at `suffix` whether or not the receiver pulls through it, and
+	/// assigns it the next Warm ID. `serves` is never [`Serves::Unknown`].
+	WarmStart {
+		route: u64,
+		suffix: Path,
+		instance: Instance,
+		serves: Serves,
+		cost: u64,
+	},
+	/// WARM_UPDATE (lite-07+): the warm route with this id serves `serves` at `cost` now.
+	WarmUpdate { id: u64, serves: Serves, cost: u64 },
+	/// WARM_END (lite-07+): the sender withdrew the warm route with this id.
+	WarmEnd { id: u64 },
+}
+
+/// Encode whom a warm route's copy serves, which it always names.
+fn encode_warm_serves(w: &mut Encoder<'_>, serves: Serves) -> Result<(), EncodeError> {
+	match serves {
+		Serves::Unknown => Err(EncodeError::InvalidState),
+		serves => serves.encode(w),
+	}
+}
+
+fn decode_warm_serves(r: &mut Decoder<'_>) -> Result<Serves, DecodeError> {
+	match Serves::decode(r)? {
+		Serves::Unknown => Err(DecodeError::InvalidValue),
+		serves => Ok(serves),
+	}
 }
 
 /// ROUTE_START and ROUTE_UPDATE flag: the route is down-only.
@@ -345,11 +378,17 @@ impl Encode<Version> for AnnounceBroadcast {
 				Self::RouteHold { .. } if version.has_routes() => ROUTE_HOLD,
 				Self::RouteEnd { .. } if version.has_routes() => ROUTE_END,
 				Self::Floor { .. } if version.has_routes() => ANNOUNCE_FLOOR,
+				Self::WarmStart { .. } if version.has_warm() => WARM_START,
+				Self::WarmUpdate { .. } if version.has_warm() => WARM_UPDATE,
+				Self::WarmEnd { .. } if version.has_warm() => WARM_END,
 				Self::RouteStart { .. }
 				| Self::RouteUpdate { .. }
 				| Self::RouteHold { .. }
 				| Self::RouteEnd { .. }
-				| Self::Floor { .. } => return Err(EncodeError::Version),
+				| Self::Floor { .. }
+				| Self::WarmStart { .. }
+				| Self::WarmUpdate { .. }
+				| Self::WarmEnd { .. } => return Err(EncodeError::Version),
 				// The pre-lite-06 path-form retraction has no place on lite-06.
 				Self::Ended { .. } => return Err(EncodeError::Version),
 				// Decode-only: an unknown type is never sent.
@@ -407,6 +446,25 @@ impl Encode<Version> for AnnounceBroadcast {
 				}
 				Self::RouteHold { id } | Self::RouteEnd { id } => w.varint(*id)?,
 				Self::Floor { id, revision } => encode_floor(w, *id, *revision)?,
+				Self::WarmStart {
+					route,
+					suffix,
+					instance,
+					serves,
+					cost,
+				} => {
+					w.varint(*route)?;
+					suffix.encode(w, version)?;
+					super::instance::encode_copy(w, instance)?;
+					encode_warm_serves(w, *serves)?;
+					w.varint(*cost)?;
+				}
+				Self::WarmUpdate { id, serves, cost } => {
+					w.varint(*id)?;
+					encode_warm_serves(w, *serves)?;
+					w.varint(*cost)?;
+				}
+				Self::WarmEnd { id } => w.varint(*id)?,
 				Self::Ended { .. } | Self::Skipped => unreachable!("refused above"),
 			}
 			if w.since(&prefix) > MAX_MESSAGE_SIZE {
@@ -450,7 +508,10 @@ impl Encode<Version> for AnnounceBroadcast {
 			| Self::RouteUpdate { .. }
 			| Self::RouteHold { .. }
 			| Self::RouteEnd { .. }
-			| Self::Floor { .. } => {
+			| Self::Floor { .. }
+			| Self::WarmStart { .. }
+			| Self::WarmUpdate { .. }
+			| Self::WarmEnd { .. } => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -531,6 +592,19 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 					ROUTE_HOLD if version.has_routes() => Self::RouteHold { id: body.varint()? },
 					ROUTE_END if version.has_routes() => Self::RouteEnd { id: body.varint()? },
 					ANNOUNCE_FLOOR if version.has_routes() => decode_floor(&mut body)?,
+					WARM_START if version.has_warm() => Self::WarmStart {
+						route: body.varint()?,
+						suffix: Path::decode(&mut body, version)?,
+						instance: super::instance::decode_copy(&mut body)?,
+						serves: decode_warm_serves(&mut body)?,
+						cost: body.varint()?,
+					},
+					WARM_UPDATE if version.has_warm() => Self::WarmUpdate {
+						id: body.varint()?,
+						serves: decode_warm_serves(&mut body)?,
+						cost: body.varint()?,
+					},
+					WARM_END if version.has_warm() => Self::WarmEnd { id: body.varint()? },
 					// Unknown types are skipped by length so an earlier Lite06 build
 					// negotiating the same ALPN does not kill the announce stream.
 					_ => {
@@ -1179,6 +1253,59 @@ mod tests {
 			}),
 			[3, 6, 7, 1, b'a', 0, 5, 6]
 		);
+	}
+
+	/// The draft's warm route layouts, byte for byte: WARM_START is the Route ID, the path
+	/// suffix, the instance and its minted flag, whom the copy serves, and the cost;
+	/// WARM_UPDATE the Warm ID, serves, and cost; WARM_END the Warm ID. A warm route always
+	/// names whom it serves, and lite-06 skips the types as unknown.
+	#[test]
+	fn lite07_warm_route_layout() {
+		let encode = |msg: &AnnounceBroadcast, version: Version| {
+			let mut buf = Vec::new();
+			msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
+				.map(|()| buf)
+		};
+		let start = AnnounceBroadcast::WarmStart {
+			route: 3,
+			suffix: Path::from_static("c"),
+			instance: "a".parse().unwrap(),
+			serves: Serves::Relay(9),
+			cost: 4,
+		};
+		let update = AnnounceBroadcast::WarmUpdate {
+			id: 7,
+			serves: Serves::Alone,
+			cost: 4,
+		};
+		let end = AnnounceBroadcast::WarmEnd { id: 7 };
+		let layouts: [(&AnnounceBroadcast, &[u8]); 3] = [
+			(&start, &[12, 9, 3, 1, b'c', 1, b'a', 0, 2, 9, 4]),
+			(&update, &[13, 3, 7, 1, 4]),
+			(&end, &[14, 1, 7]),
+		];
+		for (msg, wire) in layouts {
+			assert_eq!(encode(msg, Version::Lite07).unwrap(), wire);
+			assert_eq!(&broadcast_round_trip(msg, Version::Lite07), msg);
+			assert!(matches!(encode(msg, Version::Lite06), Err(EncodeError::Version)));
+			let got =
+				crate::coding::decode_buf(&mut &wire[..], Version::Lite06, |r, v| AnnounceBroadcast::decode(r, v));
+			assert_eq!(got.unwrap(), AnnounceBroadcast::Skipped);
+		}
+
+		let unknown = AnnounceBroadcast::WarmUpdate {
+			id: 7,
+			serves: Serves::Unknown,
+			cost: 4,
+		};
+		assert!(matches!(
+			encode(&unknown, Version::Lite07),
+			Err(EncodeError::InvalidState)
+		));
+		let decode = |wire: &[u8]| {
+			crate::coding::decode_buf(&mut &wire[..], Version::Lite07, |r, v| AnnounceBroadcast::decode(r, v))
+		};
+		assert!(decode(&[13, 3, 7, 0, 4]).is_err());
 	}
 
 	/// Lite-07 carries a lite-06 chain after the cost, only when it is not empty, so an

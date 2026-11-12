@@ -1377,7 +1377,11 @@ mod tests {
 			.ready()
 			.await
 			.unwrap();
-		assert!(Instant::now() >= last, "audio resumed over the video tail");
+		// It maps one delay early, so its first write plays as the tail ends.
+		assert!(
+			Instant::now() >= last.checked_sub(delay).unwrap(),
+			"audio resumed over the video tail"
+		);
 	}
 
 	#[tokio::test]
@@ -1606,6 +1610,7 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 		);
+		// No durations: the declared end is the last picture's own timestamp.
 		for ms in [0, 33, 66] {
 			producer.write(frame(ms, ms == 0)).unwrap();
 		}
@@ -1625,16 +1630,16 @@ mod tests {
 		for _ in 0..1_000 {
 			tokio::task::yield_now().await;
 			if let Some(timestamp) = media.output.present(&media) {
-				shown.push(timestamp.as_millis());
+				shown.push(timestamp.as_micros());
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
 		task.await.unwrap().unwrap();
-		assert_eq!(&shown[..3], [0, 33, 66]);
+		assert_eq!(&shown[..3], [0, 33_000, 66_000]);
 		assert_eq!(shown.len(), 6);
 		assert!(shown[3] > shown[2], "the resumed segment follows every old picture");
-		assert_eq!(shown[4] - shown[3], 33);
-		assert_eq!(shown[5] - shown[4], 33);
+		assert_eq!(shown[4] - shown[3], 33_000);
+		assert_eq!(shown[5] - shown[4], 33_000);
 		assert_eq!(
 			*flushed.lock().unwrap(),
 			2,

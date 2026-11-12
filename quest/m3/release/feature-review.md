@@ -10,9 +10,10 @@ the cut, or a recorded decision to ship it as is.
 
 ## Plan
 
-Recurs once per major release (decided 2026-10-19). The [release
-cut](/quest/m3/release/cut.md) re-creates this quest for the next release when
-it shifts the milestones, so the PR finishing this run adds no successor.
+Recurs once per API or wire cut (decided 2026-10-19; per breaking cut
+2026-11-09). The [release cut](/quest/m3/release/cut.md) re-creates this quest
+when the maintainer names the next API or wire cut, so the PR finishing this
+run adds no successor.
 Record what this run learned (inventory method, findings, what to check first)
 in the cut's PR notes or a follow-up quest, so the next run starts from it.
 Only `/quest-delete` ends the recurrence.

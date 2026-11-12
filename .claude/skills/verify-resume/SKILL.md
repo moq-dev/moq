@@ -24,8 +24,8 @@ Each rule is an INVARIANT; the harm says why it matters.
 ## Run
 
 ```sh
-just rs tla moq-net/verify/resume/ResumeReader.tla
-just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net/verify/resume/ThreeRoutes.cfg
+quest gate just rs tla moq-net/verify/resume/ResumeReader.tla
+quest gate just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net/verify/resume/ThreeRoutes.cfg
 ```
 
 The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 14.3M distinct states, in minutes. The second trades a group for a third route, so a route can come up after another failed: about 7.1M states, in minutes. Both pass at the sync commit. `just test tla rs/moq-net/verify/resume` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes.
