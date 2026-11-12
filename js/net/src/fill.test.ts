@@ -371,6 +371,28 @@ test("fill: an answer withheld after a probe judged it is asked again", async ()
 	broadcast.close();
 });
 
+// A gap a probe judged stale by its successor is judged again once that successor fails.
+test("fill: a gap below a group that fails after a probe is asked", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	const group = track.createGroup(2n);
+	const requests = track.requests();
+	const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Duration.millis(0) } });
+	const ordered = reader.ordered();
+	await reader.start();
+	group.abort(new StreamError(StreamCode.Cancel));
+	await yieldNow();
+	const next = ordered.nextGroup();
+	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(fill && [fill.start, fill.end]).toEqual([0n, 2n]);
+
+	fill?.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+	await next.catch(() => undefined);
+});
+
 // What lay above the newest group when a probe judged it is judged again once the feed passes it.
 test("fill: a gap the newest group rises over after a probe is asked", async () => {
 	const { broadcast, track } = resumed(2n);

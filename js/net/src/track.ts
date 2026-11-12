@@ -647,11 +647,13 @@ function intersect(runs: readonly Run[], start: bigint, end: bigint): Run[] {
 // How many runs a sink's `lost` keeps apart before folding them into one span.
 const LOST_KEPT = 16;
 
-// Record that `sink`'s timeline lost group `sequence`, for its reader's fill probe.
+// Record that `sink`'s timeline lost group `sequence`, for its reader's fill probe: the group, and
+// the gap below it, whose staleness it judged as their successor.
 function lose(sink: TrackState, sequence: bigint): void {
 	const lost = sink.lost;
 	if (!lost) return;
-	insertRun(lost, sequence, sequence + 1n);
+	const at = timelineIndex(sink.timeline, sequence);
+	insertRun(lost, at > 0 ? sink.timeline[at - 1].sequence + 1n : 0n, sequence + 1n);
 	if (lost.length > LOST_KEPT) lost.splice(0, lost.length, { start: lost[0].start, end: (lost.at(-1) as Run).end });
 }
 
@@ -718,7 +720,8 @@ class TrackState {
 	// arrival, searches it instead of scanning the whole retained window.
 	timeline: GroupConsumer[] = [];
 	// The groups `timeline` lost since this sink's reader last probed its fills (evicted, withheld,
-	// or failed), which its probe judges again; undefined until it first probes. Past LOST_KEPT
+	// or failed), with the gap below each, which its probe judges again; undefined until it first
+	// probes. Past LOST_KEPT
 	// runs they fold into the span covering them all, judged again whole.
 	lost?: Run[];
 	// First timestamps mutate group state rather than track state, so held groups
