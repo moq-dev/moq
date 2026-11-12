@@ -430,7 +430,8 @@ jobs:
         # The largest models get a runner each, and the route model's two
         # largest configs (about 45 and 70 minutes on 4 workers) one per
         # config; the `route` and `rest` legs take every other config, so a
-        # new one is checked without editing this list.
+        # new one is checked without editing this list. sh/gh/nightly.test.py
+        # fails on a path that no longer exists.
         include:
           - name: resume
             paths: rs/moq-net/verify/resume
