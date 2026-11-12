@@ -42,7 +42,11 @@ age budget.
 Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
 group skipped for age is never observed, and a frame queued behind a stalled
-group is observed when the stall clears. A caller that estimates keeps the budget
+group is observed when the stall clears. A missing group, one that has delivered
+no frame, is waited for only the playout delay plus any lookahead, since past that
+it would play late: a reordered backlog's holes waited out to the whole budget
+would delay the frames behind them, which the estimator would measure as
+jitter. A caller that estimates keeps the budget
 at least as long as the estimate's ceiling, which is why `moq play` waits 2 s on
 a stalled group under `--delay auto`. The observation is also only as honest as
 the caller is prompt: `read()` is timed when it resolves, so a player drains it
