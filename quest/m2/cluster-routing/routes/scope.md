@@ -42,6 +42,8 @@ Work:
   publisher's routes as the model has it. Keep the reader's view a function
   of what the router holds, computed incrementally the way `show` is today,
   with the test build comparing it against the whole computation.
+- Keep a session's teardown about linear in the prefixes it held, as
+  [the relay session hour](/quest/m0/ci/nightly-relay-session-hour.md) makes it.
 - Remove what #8487 added to work around the old rule: `recompute`'s `prune`
   switch, which skips pruning on a change of hops or RTT alone. Keep the
   qualified-key test in `infeasible` unless the new rule makes it moot, and
