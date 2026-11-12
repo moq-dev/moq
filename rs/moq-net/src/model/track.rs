@@ -4491,7 +4491,7 @@ impl Producer {
 		if groups.is_empty() {
 			return RangeSet::new();
 		}
-		let (runs, open, carried, cache): (_, Vec<group::Handle>, Vec<group::Handle>, _) = match self.modify() {
+		let (runs, open, carried, cache): (_, Vec<group::Handle>, Vec<u64>, _) = match self.modify() {
 			Ok(mut state) => {
 				let stale = hole.stale_budget().is_some();
 				let mut left = RangeSet::new();
@@ -4528,7 +4528,7 @@ impl Producer {
 						{
 							slot.dropped = Some(Error::Stream(error.clone()));
 							head.carry_drop();
-							carried.push(head.clone());
+							carried.push(sequence);
 						}
 					}
 				}
@@ -4547,14 +4547,21 @@ impl Producer {
 		for group in open {
 			group.abort_open(Error::Stream(error.clone()));
 		}
-		// A head that died before the live copy above ended announced its drop while that copy
-		// still served, so a cursor may have passed it by: announce it again now that it is
-		// the cut. Pairs with the fence in the head's abort: a head this misses announces
-		// after it, seeing the live copy ended.
-		std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-		for head in carried {
-			if head.is_aborted() && head.fate().failed() {
-				cache.aborted(head.sequence, true);
+		// A head, or one replacing it, that died before the live copy above ended announced its
+		// drop while that copy still served, so a cursor may have passed it by: announce every
+		// drop the slot now shows as its cut. Pairs with the fence in a head's abort: a head
+		// this misses announces after it, with the live copy ended.
+		if !carried.is_empty() {
+			std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+			let cut: Vec<u64> = {
+				let state = self.state.read();
+				carried
+					.into_iter()
+					.filter(|sequence| state.lookup.get(sequence).and_then(Slot::cut).is_some())
+					.collect()
+			};
+			for sequence in cut {
+				cache.aborted(sequence, true);
 			}
 		}
 		runs
