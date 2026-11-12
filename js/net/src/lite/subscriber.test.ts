@@ -3568,22 +3568,26 @@ test("a cancelled legacy datagram lookup cannot refuse a stream answer arriving 
 });
 
 // A lite-07 peer's announce stream, after the request: what the peer writes, and the replies
-// the subscriber sends back.
+// the subscriber sends back. `another` opens a further one on the session as its `index`th stream.
 async function routedStream(options?: RouteOptions) {
 	const version = Version.DRAFT_07;
 	const { quic, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const announced = subscriber.routes(undefined, options);
-	const stream = await opened(0);
-	const peer = new Writer(
-		new WritableStream<Uint8Array>({ write: (chunk) => stream.inbound.enqueue(new Uint8Array(chunk)) }),
-		version,
-	);
-	const replies = new Reader(stream.outbound, undefined, version);
-	expect(await replies.u53()).toBe(StreamId.Announce);
-	await AnnounceRequest.decode(replies, version);
-	await new AnnounceOk(PEER, 0).encode(peer, version);
-	const send = (msg: AnnounceBroadcast) => encodeAnnounceBroadcast(peer, msg, version);
+	const another = async (index: number, scope?: Path.Pattern) => {
+		const announced = subscriber.routes(scope, options);
+		const stream = await opened(index);
+		const peer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => stream.inbound.enqueue(new Uint8Array(chunk)) }),
+			version,
+		);
+		const replies = new Reader(stream.outbound, undefined, version);
+		expect(await replies.u53()).toBe(StreamId.Announce);
+		await AnnounceRequest.decode(replies, version);
+		await new AnnounceOk(PEER, 0).encode(peer, version);
+		const send = (msg: AnnounceBroadcast) => encodeAnnounceBroadcast(peer, msg, version);
+		return { announced, send, replies };
+	};
+	const { announced, send, replies } = await another(0);
 	// The TRACK request a consume of `path` opens as its `index`th stream.
 	const trackRequest = async (path: Path.Valid, index: number, pin?: Instance.Valid) => {
 		const consumed = subscriber.consume(path, pin);
@@ -3597,8 +3601,74 @@ async function routedStream(options?: RouteOptions) {
 		const request = await Track.decode(reader, version);
 		return { request, consumed, info };
 	};
-	return { subscriber, announced, send, replies, version, trackRequest };
+	return { subscriber, announced, send, replies, version, trackRequest, another };
 }
+
+// Two streams carry one origin's claims, and a withdrawal reaches one first. Of the floors that
+// certify a claim, the newest decides whether it exists, so the lagging stream's copy is held back
+// rather than selected and refused: also once the newer stream's route ends.
+test("a lite-07 claim another stream's newer floor withdrew is not selected", async () => {
+	const { subscriber, announced, send, trackRequest, another } = await routedStream();
+	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+	const x = Path.from("live/x");
+	const a = Instance.parse("a");
+	const b = Instance.parse("b");
+	const y = Instance.parse("y");
+
+	// NODE_A claims live/x and live/y, cheaply, on both streams at revision 0.
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: x, route: 0n, instance: a });
+	await send({ status: "active", suffix: Path.from("live/y"), route: 0n, instance: y });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	await live.send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await live.send({ status: "active", suffix: Path.from("x"), route: 0n, instance: a });
+	await live.send({ status: "active", suffix: Path.from("y"), route: 0n, instance: y });
+	await live.send({ status: "floor", id: 0n, revision: 0n });
+	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
+	expect(await live.announced.next()).toMatchObject({ prefix: Path.from("live/y"), kind: "start" });
+	// A dearer NODE_B claims live/x on the first stream only.
+	await send({ status: "routeStart", node: NODE_B, advert: { ...ADVERT, metric: 5n } });
+	await send({ status: "active", suffix: x, route: 1n, instance: b });
+	await send({ status: "floor", id: 1n, revision: 0n });
+
+	// NODE_A withdraws live/x at revision 1, which only the first stream has delivered.
+	await send({ status: "endedId", id: 0n });
+	await send({ status: "floor", id: 0n, revision: 1n });
+	// The lagging stream ends its copy, and keeps the claim it still agrees on.
+	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "end", route: { node: NODE_A } });
+	const first = await trackRequest(x, 2);
+	expect(first.request).toMatchObject({ instance: b, node: NODE_B });
+
+	// The first stream lets its route to NODE_A go, and a third stream, as far behind, then lands
+	// its copy: what the ended route's floor certified still holds, so a fresh pick of live/x
+	// still passes over the cheaper copy.
+	const exact = await another(3, Path.Pattern.subtree(x));
+	await send({ status: "routeEnd", id: 0n });
+	await exact.send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await exact.send({ status: "active", suffix: Path.empty(), route: 0n, instance: a });
+	await exact.send({ status: "floor", id: 0n, revision: 0n });
+	await exact.send({ status: "routeStart", node: NODE_B, advert: { ...ADVERT, metric: 5n } });
+	await exact.send({ status: "active", suffix: Path.empty(), route: 1n, instance: b });
+	await exact.send({ status: "floor", id: 1n, revision: 0n });
+	expect(await exact.announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_B } });
+	const second = await trackRequest(x, 4);
+	expect(second.request).toMatchObject({ instance: b, node: NODE_B });
+
+	// The lagging stream catches up and reports nothing more for live/x.
+	await live.send({ status: "endedId", id: 0n });
+	await live.send({ status: "floor", id: 0n, revision: 1n });
+	await live.send({ status: "active", suffix: Path.from("z"), route: 0n, instance: y });
+	await live.send({ status: "floor", id: 0n, revision: 2n });
+	expect(await live.announced.next()).toMatchObject({ prefix: Path.from("live/z"), kind: "start" });
+
+	first.consumed.close();
+	second.consumed.close();
+	exact.announced.close();
+	live.announced.close();
+	announced.close();
+	subscriber.close();
+	await Promise.all([first.info, second.info]);
+});
 
 test("a lite-07 consume names the node now serving its instance", async () => {
 	const { subscriber, announced, send, trackRequest } = await routedStream();

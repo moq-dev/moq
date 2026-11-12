@@ -70,6 +70,7 @@ import {
 import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
+import { type Carrier, type Claim, Floors } from "./floors.ts";
 import { type Group as GroupMessage, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
@@ -333,6 +334,8 @@ export class Subscriber {
 
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
+	// Lite-07: what this session's announce streams certify of each origin node's claims.
+	#floors = new Floors();
 	#consumeNext = 0;
 
 	// Dedup in-flight one-shot fetches, keyed by [consume, broadcast, instance, track, sequence].
@@ -544,7 +547,7 @@ export class Subscriber {
 			}
 
 			if (hasRoutes(this.version)) {
-				await this.#receiveRouted(stream, announced, prefix, scope, visible, claims);
+				await this.#receiveRouted(stream, announced, { prefix, scope, hidden, visible, perNode: claims });
 				announced.close();
 				stream.close();
 				return;
@@ -859,28 +862,37 @@ export class Subscriber {
 
 	// Lite-07: the peer's routes and the claims under each, every route's claim changes applied
 	// whole at its floor. Each path reports the best claim the stream holds for it, ranked as the
-	// origin ranks routes, and a consume pins its requests to that claim's origin node. Mirrors
-	// `subscriber/routed.rs` in rs/moq-net for a node that forwards nothing: it holds no
-	// feasibility distance, so it never sends a ROUTE_REQUEST.
+	// origin ranks routes, and a consume pins its requests to that claim's origin node. A claim
+	// another stream's newer floor withdrew or replaced is held back until this stream catches up
+	// (see `Floors`). Mirrors `subscriber/routed.rs` in rs/moq-net for a node that forwards
+	// nothing: it holds no feasibility distance, so it never sends a ROUTE_REQUEST.
 	async #receiveRouted(
 		stream: Stream,
 		announced: announce.Producer,
-		prefix: Path.Valid,
-		scope: Path.Pattern,
-		visible: (path: Path.Valid) => boolean,
-		perNode: boolean,
+		request: {
+			prefix: Path.Valid;
+			scope: Path.Pattern;
+			hidden: boolean;
+			visible: (path: Path.Valid) => boolean;
+			perNode: boolean;
+		},
 	): Promise<void> {
-		type Claim = { instance: Instance.Valid; epoch: bigint; cost: Cost };
+		const { prefix, scope, hidden, visible, perNode } = request;
 		type Route = {
+			id: bigint;
 			node: bigint;
 			advert: Advert;
 			// ROUTE_HOLD: no usable path to the origin, until the next ROUTE_UPDATE.
 			held: boolean;
 			// The Announce ID of each live claim, by path: one per path, checked by lookup.
 			claims: Map<Path.Valid, bigint>;
-			// How the claims differ from `committed`, applied whole at the next floor.
+			// How the claims differ from the view's, applied whole at the next floor.
 			pending: Map<Path.Valid, Claim | undefined>;
-			committed: Map<Path.Valid, Claim>;
+			// The claims as of the last floor, and the revision it certified them at, if any.
+			view: { prefix: Path.Valid; hidden: boolean; revision: bigint | undefined; claims: Map<Path.Valid, Claim> };
+			// The view's claims no other stream's newer floor withdrew or replaced.
+			shown: Set<Path.Valid>;
+			carrier: Carrier;
 			// Who the route's claims are filed under in the consume cache, which keeps every
 			// route's claim so a consume ranks them for its own path.
 			owner: object;
@@ -914,7 +926,7 @@ export class Subscriber {
 		// The claim at `path` under `id` is now `claim`, pending the route's next floor.
 		const change = (id: bigint, path: Path.Valid, claim: Claim | undefined) => {
 			const wire = route(id);
-			if (same(wire.committed.get(path), claim)) wire.pending.delete(path);
+			if (same(wire.view.claims.get(path), claim)) wire.pending.delete(path);
 			else wire.pending.set(path, claim);
 		};
 
@@ -940,8 +952,8 @@ export class Subscriber {
 		// stays there, so each consume ranks them for its own path and its epochs. `restart` marks
 		// another instance or epoch, whose consumes subscribe fresh.
 		const serve = (wire: Route, path: Path.Valid, restart: boolean) => {
-			const claim = wire.committed.get(path);
-			if (claim && visible(path) && usable(wire))
+			const claim = wire.view.claims.get(path);
+			if (claim && wire.shown.has(path) && visible(path) && usable(wire))
 				this.#consumes.announce(path, wire.owner, candidate(wire, claim), restart);
 			else this.#consumes.withdraw(path, wire.owner);
 		};
@@ -956,8 +968,8 @@ export class Subscriber {
 				const candidates: WireRoute[] = [];
 				for (const id of byPath.get(path) ?? []) {
 					const wire = route(id);
-					const claim = wire.committed.get(path);
-					if (claim && usable(wire)) candidates.push(candidate(wire, claim));
+					const claim = wire.view.claims.get(path);
+					if (claim && wire.shown.has(path) && usable(wire)) candidates.push(candidate(wire, claim));
 				}
 				if (perNode) {
 					for (const next of candidates) now.set(next.node, next);
@@ -987,8 +999,32 @@ export class Subscriber {
 			if (now.size > 0) reported.set(path, now);
 			else reported.delete(path);
 		};
+		// Show or hide the route's claims at `touched`, each marked whether it restarted, or with
+		// `all` every claim it holds, once another stream's floor may have moved what is current.
+		const show = (wire: Route, touched: ReadonlyMap<Path.Valid, boolean>, all: boolean) => {
+			const paths = all
+				? new Set([...touched.keys(), ...wire.shown, ...wire.view.claims.keys()])
+				: touched.keys();
+			for (const path of paths) {
+				const now = this.#floors.shows(wire.node, wire.view, path);
+				const was = wire.shown.has(path);
+				const restart = touched.get(path);
+				if (now === was && restart === undefined) continue;
+				if (now) wire.shown.add(path);
+				else wire.shown.delete(path);
+				// A claim shown anew or restarted iterates last, as the newest; a re-price keeps its
+				// place, as the consume cache does. See bestCandidate.
+				const ids = byPath.get(path);
+				if (now && ids && (!was || restart)) {
+					ids.delete(wire.id);
+					ids.add(wire.id);
+				}
+				serve(wire, path, restart ?? false);
+				refresh(path, false);
+			}
+		};
 		const refreshRoute = (wire: Route, lost: boolean) => {
-			for (const path of wire.committed.keys()) {
+			for (const path of wire.view.claims.keys()) {
 				if (lost) this.#consumes.withdraw(path, wire.owner);
 				else serve(wire, path, false);
 				refresh(path, lost);
@@ -1013,16 +1049,28 @@ export class Subscriber {
 					case "routeStart": {
 						if (nodes.has(msg.node)) throw new ProtocolViolation(`second route to node ${msg.node}`);
 						const id = nextRoute++;
-						routes.set(id, {
+						const view: Route["view"] = { prefix, hidden, revision: undefined, claims: new Map() };
+						const wire: Route = {
+							id,
 							node: msg.node,
 							advert: msg.advert,
 							held: false,
 							claims: new Map(),
 							pending: new Map(),
-							committed: new Map(),
+							view,
+							shown: new Set(),
+							carrier: {
+								view,
+								// Another stream's floor runs this: a closed reader is about to let go.
+								reshow: () => {
+									if (announced.closed.peek() === undefined) show(wire, new Map(), true);
+								},
+							},
 							owner: {},
-						});
+						};
+						routes.set(id, wire);
 						nodes.add(msg.node);
+						this.#floors.join(msg.node, wire.carrier);
 						break;
 					}
 					case "routeUpdate": {
@@ -1047,48 +1095,45 @@ export class Subscriber {
 						}
 						routes.delete(msg.id);
 						nodes.delete(wire.node);
-						for (const path of wire.committed.keys()) byPath.get(path)?.delete(msg.id);
+						// What its last floor certified stays, so no other stream's lagging claim revives.
+						this.#floors.leave(wire.node, wire.carrier);
+						for (const path of wire.view.claims.keys()) byPath.get(path)?.delete(msg.id);
 						refreshRoute(wire, true);
-						for (const path of wire.committed.keys()) if (byPath.get(path)?.size === 0) byPath.delete(path);
+						for (const path of wire.view.claims.keys())
+							if (byPath.get(path)?.size === 0) byPath.delete(path);
 						await encodeAnnounceReply(stream.writer, { kind: "echo", id: msg.id }, this.version);
 						break;
 					}
 					case "floor": {
-						// The batch applies whole. One stream's floors certify only its own claims, so
-						// the revision orders nothing here.
+						// The batch applies whole, at the revision its floor certifies.
 						const wire = route(msg.id);
-						const touched: [Path.Valid, boolean][] = [];
+						const touched = new Map<Path.Valid, boolean>();
 						for (const [path, claim] of wire.pending) {
 							// Another instance or epoch: what was consumed through the claim may be stale.
-							const was = wire.committed.get(path);
+							const was = wire.view.claims.get(path);
 							const restart =
 								!!was && !!claim && (was.instance !== claim.instance || was.epoch !== claim.epoch);
-							touched.push([path, restart]);
+							touched.set(path, restart);
 							if (claim) {
-								wire.committed.set(path, claim);
+								wire.view.claims.set(path, claim);
 								let ids = byPath.get(path);
 								if (!ids) {
 									ids = new Set();
 									byPath.set(path, ids);
 								}
-								// A new or restarted claim iterates last, as the newest; a re-price keeps its
-								// place, as the consume cache does. See bestCandidate.
-								if (!was || restart) {
-									ids.delete(msg.id);
-									ids.add(msg.id);
-								}
+								ids.add(msg.id);
 							} else {
-								wire.committed.delete(path);
+								wire.view.claims.delete(path);
 								const ids = byPath.get(path);
 								ids?.delete(msg.id);
 								if (ids?.size === 0) byPath.delete(path);
 							}
 						}
 						wire.pending.clear();
-						for (const [path, restart] of touched) {
-							serve(wire, path, restart);
-							refresh(path, false);
-						}
+						wire.view.revision = msg.revision;
+						// Every other route to the node is shown anew first; with one, this route's
+						// unchanged claims may change state too.
+						show(wire, touched, this.#floors.floor(wire.node, wire.carrier));
 						break;
 					}
 					case "active": {
@@ -1145,7 +1190,8 @@ export class Subscriber {
 		} finally {
 			stopDrain?.();
 			for (const wire of routes.values()) {
-				for (const path of wire.committed.keys()) this.#consumes.withdraw(path, wire.owner);
+				this.#floors.leave(wire.node, wire.carrier);
+				for (const path of wire.view.claims.keys()) this.#consumes.withdraw(path, wire.owner);
 			}
 			reported.clear();
 			claims.clear();
