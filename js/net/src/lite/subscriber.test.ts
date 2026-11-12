@@ -3583,9 +3583,10 @@ test("a cancelled legacy datagram lookup cannot refuse a stream answer arriving 
 
 // A lite-07 peer's announce stream, after the request: what the peer writes, and the replies
 // the subscriber sends back. `another` opens a further one on the session as its `index`th stream.
-async function routedStream(options?: RouteOptions) {
+async function routedStream(options?: RouteOptions, getStats?: () => Promise<unknown>) {
 	const version = Version.DRAFT_07;
 	const { quic, opened } = fakeSession();
+	if (getStats) Object.assign(quic, { getStats });
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const another = async (index: number, scope?: Path.Pattern) => {
 		const announced = subscriber.routes(scope, options);
@@ -4064,6 +4065,30 @@ test("a lite-07 consume pinned to an instance names its route's node", async () 
 });
 
 // Forwarding code asks for each origin node's claim at a path as its own route.
+// A route's RTT is the relay's sum plus this link's own min RTT, unknown while either is, and it
+// moves no pick: it only updates the route reported.
+test("a lite-07 route reports its rtt as the relay's sum plus this link's", async () => {
+	const smoothedRtt = 10.2;
+	const { subscriber, announced, send } = await routedStream(undefined, async () => ({ smoothedRtt }));
+	const x = Path.from("x");
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: x, route: 0n, instance: Instance.parse("a") });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	let next = (await announced.next()) as { kind: string; route: WireRoute };
+	// The link's first read may land after the claim: then an update carries the sum.
+	if (next.route.rtt === undefined) next = (await announced.next()) as { kind: string; route: WireRoute };
+	expect(next.route.rtt?.asMillis()).toBe(31);
+
+	// The relay could not measure a link on the path: the sum is unknown.
+	await send({ status: "routeUpdate", id: 0n, advert: { ...ADVERT, seqno: 2n, rtt: undefined } });
+	next = (await announced.next()) as { kind: string; route: WireRoute };
+	expect(next).toMatchObject({ kind: "update", route: { node: NODE_A } });
+	expect(next.route.rtt).toBeUndefined();
+
+	announced.close();
+	subscriber.close();
+});
+
 test("a lite-07 stream reports each node's claim with claims", async () => {
 	const { subscriber, announced, send } = await routedStream({ claims: true });
 	const pool = Path.from("pool");

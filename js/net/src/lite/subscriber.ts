@@ -1,11 +1,11 @@
-import { Duration, yieldNow } from "@moq/clock";
+import { Duration, sleep, yieldNow } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
-import type { Probe as ProbeStats } from "../connection/stats.ts";
+import { type Probe as ProbeStats, transportStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
@@ -74,6 +74,7 @@ import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { type Carrier, type Claim, Floors } from "./floors.ts";
 import { type Group as GroupMessage, readFrames } from "./group.ts";
+import { LinkRtt } from "./link_rtt.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
@@ -933,6 +934,40 @@ export class Subscriber {
 		let synced = false;
 		// Set once the stream lets go of its routes, which then show nothing anew.
 		let closing = false;
+		// This link's min RTT, read once a second while the peer has a route, as Rust's
+		// `Routed::sample`: no route, no timer, and a pause restarts the window.
+		let link = new LinkRtt();
+		let linkRtt: Duration | undefined;
+		let sampler: AbortController | undefined;
+		const sample = () => {
+			if (routes.size === 0 && sampler) {
+				sampler.abort();
+				sampler = undefined;
+				link = new LinkRtt();
+				linkRtt = undefined;
+			} else if (routes.size > 0 && !sampler) {
+				const ctrl = new AbortController();
+				sampler = ctrl;
+				void readLink(ctrl.signal, link);
+			}
+		};
+		const readLink = async (signal: AbortSignal, window: LinkRtt) => {
+			try {
+				while (!signal.aborted && window.reading) {
+					const rtt = (await transportStats(this.#quic)).rtt;
+					if (signal.aborted || closing || announced.closed.peek() !== undefined) return;
+					// A transport reporting 0 has not measured one.
+					const now = window.read(rtt?.isZero() ? undefined : rtt);
+					if (now !== linkRtt) {
+						linkRtt = now;
+						for (const wire of routes.values()) refreshRoute(wire, false);
+					}
+					await sleep(LinkRtt.INTERVAL, { signal });
+				}
+			} catch {
+				// Aborted: the routes went or the stream ended.
+			}
+		};
 
 		const route = (id: bigint): Route => {
 			const found = routes.get(id);
@@ -966,6 +1001,11 @@ export class Subscriber {
 					cost: claim.cost + wire.advert.metric + 1n,
 					node: wire.node,
 					available: !wire.held,
+					// The relay's sum plus this link's own, unknown while either is.
+					rtt:
+						wire.advert.rtt !== undefined && linkRtt !== undefined
+							? linkRtt.checkedAdd(Duration.millis(Number(wire.advert.rtt)))
+							: undefined,
 				}),
 			);
 
@@ -1090,6 +1130,7 @@ export class Subscriber {
 							owner: {},
 						};
 						routes.set(id, wire);
+						sample();
 						nodes.add(msg.node);
 						this.#floors.join(msg.node, wire.carrier);
 						break;
@@ -1115,6 +1156,7 @@ export class Subscriber {
 							claims.delete(id);
 						}
 						routes.delete(msg.id);
+						sample();
 						nodes.delete(wire.node);
 						// What its last floor certified stays, so no other stream's lagging claim revives.
 						this.#floors.leave(wire.node, wire.carrier);
@@ -1220,6 +1262,7 @@ export class Subscriber {
 		} finally {
 			stopDrain?.();
 			closing = true;
+			sampler?.abort();
 			for (const wire of routes.values()) {
 				this.#floors.leave(wire.node, wire.carrier);
 				for (const path of wire.view.claims.keys()) this.#consumes.withdraw(path, wire.owner);
