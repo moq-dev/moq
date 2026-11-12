@@ -14,6 +14,7 @@ import { decoderConfigKey } from "./config";
 import type { Message, State, Terms } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 import { Source } from "./source";
+import { Terminal } from "./terminal";
 
 // Bun cannot load the blob-URL worklet import.
 mock.module("./render-worklet.ts?worklet", () => ({ default: async () => "blob:fake-render" }));
@@ -634,7 +635,8 @@ describe("Decoder across a broadcast disable", () => {
 });
 
 describe("Decoder across a delay change", () => {
-	it("reaches back for a catalog warmup no further than the delay cap", async () => {
+	it("reaches back and trims the join for a catalog warmup no further than the delay cap", async () => {
+		const trims = spyOn(Terminal.prototype, "clear");
 		// The max delay each subscribe and update asked the publisher for, in order.
 		const asked: (Duration | null | undefined)[] = [];
 		const subscribe = Moq.Track.Consumer.prototype.subscribe;
@@ -662,7 +664,9 @@ describe("Decoder across a delay change", () => {
 			await microtasks();
 			await playback.play();
 			expect(asked.at(-1)).toEqual(base.add(DELAY_MAX));
+			expect(trims.mock.calls.at(-1)?.[1]).toBe(DELAY_MAX.asMicros());
 		} finally {
+			trims.mockRestore();
 			subscribes.mockRestore();
 			updates.mockRestore();
 			playback.close();

@@ -53,9 +53,10 @@ Findings:
   `moq_audio::playback::Input::LATENCY_MAX`. The browser's `DELAY_MAX` and
   `moq-mux`'s `WARMUP_MAX` are pinned to it by comment alone, since no test
   builds them together.
-- The warmup cap bounds what a reader buffers. A decoder's trim of a huge
-  `warmup` still discards that much of the publisher's own audio, which hurts
-  only its broadcast.
+- The warmup cap also bounds each decoder's join trim (the browser's audio
+  terminal, `moq-audio`'s decoder, `moq-gst`'s Opus clip): the subscription
+  reaches back only the ceiling, so trimming further would hold playback
+  silent past it.
 
 Public API: `moq_mux::container::WARMUP_MAX` (10 s) is exported so every
 Rust reader of catalog `warmup` shares one ceiling; the browser's `DELAY_MAX`

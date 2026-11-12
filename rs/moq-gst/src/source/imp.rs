@@ -2058,7 +2058,9 @@ impl OpusClip {
 				Some(u64::from(config.pre_skip))
 			})
 			.unwrap_or(0);
-		// Rounded up, so presentation never starts inside the warmup.
+		// Rounded up, so presentation never starts inside the warmup. Capped like the delay it widens,
+		// so an advertised warmup can't hold playback silent past the ceiling.
+		let warmup = warmup.min(moq_mux::container::WARMUP_MAX);
 		let warmup = u64::try_from((warmup.as_nanos() * 48_000).div_ceil(1_000_000_000)).unwrap_or(u64::MAX);
 		(total > 0 || warmup > 0).then_some(Self {
 			total,
@@ -2431,6 +2433,12 @@ mod tests {
 		);
 		let headed = super::audio_caps(&config).unwrap();
 		assert!(super::OpusClip::new(&gst::Caps::new_empty_simple("video/x-h264"), warmup).is_none());
+		let hour = super::OpusClip::new(&bare, Duration::from_secs(3600)).unwrap();
+		assert_eq!(
+			hour.warmup,
+			moq_mux::container::WARMUP_MAX.as_secs() * 48_000,
+			"an hour of warmup clips only up to the ceiling"
+		);
 
 		// 20 ms (960-sample) CELT packets: (clipped samples, pts in microseconds) for each, after a
 		// join, and from the track's first packet.

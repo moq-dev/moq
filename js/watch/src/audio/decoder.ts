@@ -619,7 +619,12 @@ export class Decoder {
 	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, { config, failure, path, key }: Attempt): void {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
-		this.#terminal.clear(preSkip, (config.warmup ?? 0) * 1000);
+		this.#terminal.clear(
+			preSkip,
+			Duration.millis(config.warmup ?? 0)
+				.min(DELAY_MAX)
+				.asMicros(),
+		);
 		const format =
 			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
@@ -705,7 +710,12 @@ export class Decoder {
 		const init = Cmaf.decodeInitSegment(initSegment);
 		const opusDescription = config.description ? Util.Hex.toBytes(config.description) : init.description;
 		const preSkip = config.codec === "opus" && opusDescription ? Util.Opus.preSkip(opusDescription) : 0;
-		this.#terminal.clear(preSkip, (config.warmup ?? 0) * 1000);
+		this.#terminal.clear(
+			preSkip,
+			Duration.millis(config.warmup ?? 0)
+				.min(DELAY_MAX)
+				.asMicros(),
+		);
 		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
 		// The dOps box from the init segment is not a valid OGG Identification Header.
 		const description =
