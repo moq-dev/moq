@@ -747,6 +747,7 @@ mod tests {
 	}
 
 	/// A client certificate refuses every scheme that can't present it, before dialing.
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	#[tokio::test]
 	async fn client_cert_refuses_schemes_that_cannot_present_it() {
 		let mut config = crate::connect::Config::default();
