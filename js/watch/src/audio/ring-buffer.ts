@@ -251,6 +251,11 @@ export class AudioRingBuffer {
 			this.#writeIndex = start;
 			this.#anchored = true;
 			this.#level = Math.max(this.#received ?? start, start) - start;
+		} else if (Math.abs(start - this.#writeIndex) <= this.rate / 1000 + 2) {
+			// A frame starting within a millisecond and two samples of where the last one ended
+			// continues it: timestamps stamped in milliseconds, or rounded from another clock, land on
+			// either side of the exact boundary, and a hole there would play a few samples of silence.
+			start = this.#writeIndex;
 		}
 
 		// Ignore samples behind the read index, which runs ahead of the playhead by the staged window:
@@ -289,10 +294,6 @@ export class AudioRingBuffer {
 		// Fill gaps with zeros if there's a discontinuity
 		if (start > this.#writeIndex) {
 			const gapSize = Math.min(start - this.#writeIndex, this.#buffer[0].length);
-			if (gapSize === 1) {
-				console.warn("floating point inaccuracy detected");
-			}
-
 			for (let channel = 0; channel < this.channels; channel++) {
 				const dst = this.#buffer[channel];
 				for (let i = 0; i < gapSize; i++) {

@@ -113,6 +113,22 @@ describe("writing data", () => {
 		}
 	});
 
+	it("plays frames stamped within a millisecond of contiguous as contiguous", () => {
+		const buffer = exact({ rate: 48000, channels: 1, latency: 10 });
+		// 480 samples is 10 ms. The second frame is stamped 1 ms late, the third 2 samples early (of
+		// the second's actual end), and the fourth after a real 2 ms hole.
+		write(buffer, 0, 480, { value: 1 });
+		write(buffer, 11, 480, { value: 2 });
+		write(buffer, (960 - 2) / 48, 480, { value: 3 });
+		write(buffer, (1440 + 96) / 48, 480, { value: 4 });
+		expect(buffer.length).toBe(4 * 480 + 96);
+
+		const output = read(buffer, 4 * 480 + 96, 1)[0];
+		expect(output.subarray(0, 1440).every((v, i) => v === 1 + Math.floor(i / 480))).toBe(true);
+		expect(output.subarray(1440, 1536).every((v) => v === 0)).toBe(true);
+		expect(output.subarray(1536).every((v) => v === 4)).toBe(true);
+	});
+
 	// These drain the ring below its floor without refilling it, which the stretch slows down for, so
 	// they run exact.
 	it("should handle late-arriving samples (out-of-order writes)", () => {

@@ -761,7 +761,10 @@ encoded, and a buffered player its whole lookahead, while native playback
 decodes everything at once. The browser's decode gate releases a playing ring's
 next frame while what it was given, landed or still decoding, reaches less than
 its floor and one window past the playhead, so the ring always holds a full
-window to stretch, and a hole in the media plays as silence.
+window to stretch, and a hole in the media plays as silence. A frame stamped
+within a millisecond and two samples of where the last one ended continues it
+in both players: millisecond stamps, or ones rounded from another clock, land
+either side of the exact boundary, which is no hole.
 
 ### Pitch search and admission
 
