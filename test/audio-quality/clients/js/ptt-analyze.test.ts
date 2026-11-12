@@ -241,7 +241,7 @@ test("back-to-back native resumes that each re-buffer a playout delay fail the r
 		});
 	const { exitCode, stderr } = await analyze(result, native);
 	expect(exitCode).toBe(1);
-	expect(stderr).toContain("native: back-to-back press 2, 3, 4, 5, 6, 7, 8 added a playout delay");
+	expect(stderr).toContain("native: back-to-back presses grew the latency by a playout delay");
 });
 
 test("a native mute without comfort noise fails the run", async () => {

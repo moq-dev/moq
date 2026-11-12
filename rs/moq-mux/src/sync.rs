@@ -516,7 +516,7 @@ impl Track {
 		self.clock.wake();
 	}
 
-	/// Prepare a mapping after the old media drains; dropping the wait leaves the track unchanged.
+	/// Prepare a mapping one delay before the old media drains; dropping the wait leaves the track unchanged.
 	pub fn resume(&self, transition: Transition, source: Timestamp, delay: Option<Duration>) -> Resume<'_> {
 		Resume {
 			track: self,
@@ -564,7 +564,7 @@ pub struct Resume<'a> {
 }
 
 impl Resume<'_> {
-	/// The replacement's mapping, once all declared old media has drained.
+	/// The replacement's mapping, once all declared old media is due to drain within one delay.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<Mapping>> {
 		let _ = self.track.clock.changed.poll(waiter, |_| Poll::Pending);
@@ -581,10 +581,15 @@ impl Resume<'_> {
 			.filter_map(|boundary| state.due(media(boundary.end)))
 			.chain(state.tails.iter().copied())
 			.max();
-		if let Some(end) = tail.filter(|end| *end > now) {
-			let timer = self.timer.get_or_insert_with(|| kio::clock::sleep_until(end));
-			if timer.deadline() != end {
-				timer.reset(end);
+		// Wake one delay before the tail ends: media written then plays as it ends.
+		let lead = self.delay.unwrap_or(state.delay());
+		if let Some(wake) = tail
+			.map(|end| end.checked_sub(lead).unwrap_or(now))
+			.filter(|wake| *wake > now)
+		{
+			let timer = self.timer.get_or_insert_with(|| kio::clock::sleep_until(wake));
+			if timer.deadline() != wake {
+				timer.reset(wake);
 			}
 			std::task::ready!(waiter.poll_future(Pin::new(timer)));
 		}
@@ -1087,8 +1092,8 @@ mod tests {
 		let mapping = audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap();
 		audio.apply(transition, mapping);
 		assert!(
-			kio::clock::now() >= start.saturating_add(DELAY * 2),
-			"the replacement waited for the tail"
+			kio::clock::now() >= start.saturating_add(DELAY),
+			"the replacement waited until one delay before the tail ends"
 		);
 		let unchanged = clock.state.lock().unwrap().due(ms(10_500));
 		for frame in 0..10 {
@@ -1157,7 +1162,10 @@ mod tests {
 		audio.plan(transition, ms(0), Some(DELAY));
 		let mapping = audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap();
 		audio.apply(transition, mapping);
-		assert_eq!(clock.state.lock().unwrap().due(audio.map(ms(0)).unwrap()), arrived.checked_add(DELAY));
+		assert_eq!(
+			clock.state.lock().unwrap().due(audio.map(ms(0)).unwrap()),
+			arrived.checked_add(DELAY)
+		);
 	}
 
 	#[tokio::test]
@@ -1363,8 +1371,9 @@ mod tests {
 		let transition = video.declare();
 		video.end(ms(10_000)).unwrap();
 		video.plan(transition, ms(0), None);
+		// It may map one delay before the tail ends, so its media plays as the tail ends.
 		let resume = kio::clock::timeout(
-			DELAY + Duration::from_millis(150),
+			Duration::from_millis(150),
 			video.resume(transition, ms(0), None).ready(),
 		)
 		.await;
@@ -1407,7 +1416,7 @@ mod tests {
 		let transition = video.declare();
 		video.plan(transition, ms(0), None);
 		let resume = kio::clock::timeout(
-			Duration::from_millis(250),
+			Duration::from_millis(150),
 			video.resume(transition, ms(0), None).ready(),
 		)
 		.await;

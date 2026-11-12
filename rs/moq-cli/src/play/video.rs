@@ -1377,7 +1377,11 @@ mod tests {
 			.ready()
 			.await
 			.unwrap();
-		assert!(Instant::now() >= last, "audio resumed over the video tail");
+		// It maps one delay early, so its first write plays as the tail ends.
+		assert!(
+			Instant::now() >= last.checked_sub(delay).unwrap(),
+			"audio resumed over the video tail"
+		);
 	}
 
 	#[tokio::test]
@@ -1606,8 +1610,11 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 		);
+		// The old segment declares its last picture's duration, so its end follows that picture.
 		for ms in [0, 33, 66] {
-			producer.write(frame(ms, ms == 0)).unwrap();
+			let mut frame = frame(ms, ms == 0);
+			frame.duration = Some(moq_net::Timestamp::from_millis(33).unwrap());
+			producer.write(frame).unwrap();
 		}
 		producer.discontinuity().unwrap();
 		for ms in [100, 133, 166] {

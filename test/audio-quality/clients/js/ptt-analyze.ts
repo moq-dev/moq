@@ -232,16 +232,13 @@ if (presses.some((press) => !press.native.head)) failures.push("native: an utter
 if (presses.some((press, i) => i >= 8 && !press.native.comfort))
 	failures.push("native: a mute played no comfort noise");
 if (start === undefined || !windowed.length) failures.push("native: no playback from the first press");
-// Presses 1-8 follow each other with no gap, so each must continue the previous one's schedule. A
-// resume that re-buffers adds one playout delay to the lag, and repeated ones compound.
+// Presses 2-8 each follow the one before with no gap, so they share one schedule. A resume that
+// re-buffers adds up to a playout delay to its head's lag, and repeated ones compound, so the run
+// must end within one delay of where it started.
 const nativeDelay = summarize(native.map((sample) => sample.delay ?? null))?.median;
-const rebuffered = presses.slice(1, 8).filter((press, i) => {
-	const before = presses[i].native.lag;
-	const lag = press.native.lag;
-	return nativeDelay === undefined || before === null || lag === null || lag - before >= nativeDelay;
-});
-if (rebuffered.length) {
-	failures.push(`native: back-to-back press ${rebuffered.map((press) => press.press).join(", ")} added a playout delay`);
+const [firstLag, lastLag] = [presses[1].native.lag, presses[7].native.lag];
+if (nativeDelay === undefined || firstLag === null || lastLag === null || lastLag - firstLag >= nativeDelay) {
+	failures.push("native: back-to-back presses grew the latency by a playout delay");
 }
 if (failures.length) {
 	console.error(failures.join("; "));
