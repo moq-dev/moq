@@ -54,7 +54,8 @@ row() {
 # Whether a full-context diff on stdin breaks the baseline: it removes a line,
 # which includes changing one, or adds a line inside a declaration the baseline
 # has, such as a required field on an input interface or a C struct, since a line
-# diff cannot tell which of those break callers. A line's declaration is the
+# diff cannot tell which of those break callers, except an optional TypeScript
+# property (`name?: T`), which no caller must pass. A line's declaration is the
 # nearest line above it indented less, so only whole new declarations are
 # additions.
 breaks() {
@@ -65,8 +66,12 @@ breaks() {
         line ~ /^[[:space:]]*$/ { next }
         {
             match(line, /^[[:space:]]*/)
-            while (depth && indent[depth] >= RLENGTH) depth--
-            if (mark == "+" && depth && parent[depth] == " ") { broke = 1; exit }
+            sibling = ""
+            while (depth && indent[depth] >= RLENGTH) { if (indent[depth] == RLENGTH) sibling = parent[depth]; depth-- }
+            optional = line ~ /^[[:space:]]*(readonly[[:space:]]+)?[A-Za-z_$][A-Za-z0-9_$]*\?:/
+            # A closing bracket ends the added line it lines up with, such as an optional property'"'"'s inline object type.
+            closes = sibling == "+" && line ~ /^[[:space:]]*[]})]/
+            if (mark == "+" && depth && parent[depth] == " " && !optional && !closes) { broke = 1; exit }
             indent[++depth] = RLENGTH
             parent[depth] = mark
         }

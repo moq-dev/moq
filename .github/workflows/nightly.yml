@@ -89,6 +89,12 @@ jobs:
   oss-scanner:
     uses: ./.github/workflows/oss-scanner.yml
 
+  # Refuses a public API break on main while the cycle is additive, and skips
+  # otherwise (see RELEASE.md's Releases).
+  api-diff:
+    uses: ./.github/workflows/api-diff.yml
+    secrets: inherit
+
   # Each independent workload gets its own hour. Each benchmark group keeps one
   # build environment, so a benchmark reuses the dependencies its group already
   # compiled. The Rust benchmarks outgrew one hour, so they split by harness:

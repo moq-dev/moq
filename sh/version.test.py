@@ -28,7 +28,7 @@ class Versions(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.env = dict(os.environ, CARGO_NET_OFFLINE="true", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
-        self.config = {"minor": None, "exemptions": {"rust": ["independent"], "npm": ["@moq/qmux"]}}
+        self.config = {"minor": None, "phase": None, "exemptions": {"rust": ["independent"], "npm": ["@moq/qmux"]}}
         self.write("version.json", json.dumps(self.config))
         self.write("Cargo.toml", '[workspace]\nmembers = ["rs/*"]\nresolver = "2"\n')
         self.crate(
@@ -134,6 +134,12 @@ class Versions(unittest.TestCase):
         self.assertIn("disabled", self.check().stdout)
         for value in ("", "0.22.0", "0.0", "0.022"):
             self.write("version.json", json.dumps({**self.config, "minor": value}))
+            self.assertNotEqual(self.check(ok=False).returncode, 0)
+        for value in ("additive", "api", "wire"):
+            self.write("version.json", json.dumps({**self.config, "phase": value}))
+            self.assertIn("disabled", self.check().stdout)
+        for value in ("", "Additive", "breaking"):
+            self.write("version.json", json.dumps({**self.config, "phase": value}))
             self.assertNotEqual(self.check(ok=False).returncode, 0)
 
     def test_cut_promotes_only_published_library_dependencies_and_preserves_exemptions(self):

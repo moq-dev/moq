@@ -5,8 +5,8 @@
 Work that follows the next breaking release and has someone waiting on it:
 byte streams and the mesh libraries first, then release execution after the
 cut, quests a named consumer needs, including downstream deployments, and bug fixes in
-shipped code. Breaking and additive work mix here; the cut after m2's sorts
-them by kind.
+shipped code. Additive, API, and wire work mix here; the cut after m2's sorts
+them by kind into m1, m2, and m3.
 
 ## Plan
 
