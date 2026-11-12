@@ -848,7 +848,6 @@ async fn audio_raw_publish_rejects_bad_frames() {
 /// the decoder sits behind the read's lock, so the getter must not need it.
 #[cfg(feature = "audio")]
 #[tokio::test]
-#[ignore = "flaky: a decoded read sometimes never returns; quest/m0/test-flakes-2/ffi-raw-audio-decode-delay.md"]
 async fn raw_audio_decode_delay() {
 	use crate::audio::*;
 
@@ -893,10 +892,9 @@ async fn raw_audio_decode_delay() {
 			"microphone".into(),
 			rendition.clone(),
 			MoqAudioDecoderOutput {
-				delay: delay.map(|min| MoqDelay {
-					min: Some(min),
-					max: Some(Duration::ZERO),
-				}),
+				// No max delay: at zero, a read that runs late under load finds group 0
+				// stale and the mid-join warmup trims the rest, so the read never returns.
+				delay: Some(MoqDelay { min: delay, max: None }),
 				estimate: delay.is_none(),
 				..audio_output()
 			},
