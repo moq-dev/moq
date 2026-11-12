@@ -16,10 +16,8 @@ the same whichever neighbours the router believes. It has not been traced.
 Decided the same day (maintainer, /quest-plan): ✅ plan it.
 
 - Reproduce it: the sweep draws every scenario from one random stream, so run
-  the first 16,317. Record the scenario's steps as it runs and remove them
-  one at a time while the revival remains, as
-  [the false END](/quest/m2/cluster-routing/routes/widen-false-end.md) was
-  shrunk.
+  the first 16,317 with `MOQ_ROUTE_SCENARIOS=16317`. Record the scenario's
+  steps as it runs and remove them one at a time while the revival remains.
 - Decide whether it is a revival the contract forbids or one it excuses: a
   replay after a collection or a restart is allowed only until the
   withdrawal behind it lands
@@ -33,7 +31,3 @@ Decided the same day (maintainer, /quest-plan): ✅ plan it.
   router must pass it, instead of fixing it twice.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Widening an interest ends no live claim](/quest/m2/cluster-routing/routes/widen-false-end.md) - found the same way, and adds the way to run more scenarios

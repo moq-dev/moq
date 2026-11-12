@@ -122,4 +122,3 @@ Public API: none (the router is crate-private). Wire: none.
 ## Related
 
 - [lite-07 sessions run the path router](/quest/m2/cluster-routing/routes/switch.md) - deletes Babel's router; whichever lands second adapts
-- [Widening an interest ends no live claim](/quest/m2/cluster-routing/routes/widen-false-end.md) - a false END on an interest change today, which the edit in place may remove
