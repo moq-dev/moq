@@ -988,9 +988,12 @@ async fn play_audio<O: Output>(
 			// target, which playback holds unless another track asks for more.
 			let mut moved = role.received(mapped, arrived_at);
 			// The publisher's encoder delay is on top of the arrival jitter, so the
-			// clock holds both while the sink keeps sizing for jitter alone.
-			*jitter.lock().unwrap() = Some(input.latency);
-			moved |= role.set_target(input.latency + stated.borrow().unwrap_or_default());
+			// clock holds both while the sink keeps sizing for jitter alone. The
+			// clock holds the whole measured target, which the subscription follows,
+			// though the sink holds no more of it than its cap: the rest stays encoded.
+			let held = latency.max(delay.max(AUDIO_BUFFER_MIN));
+			*jitter.lock().unwrap() = Some(held);
+			moved |= role.set_target(held + stated.borrow().unwrap_or_default());
 			// The consumer releases media due further out than the sink holds only
 			// when its timeline ends before the media behind it covers the hold, so
 			// that little waits here instead of overflowing the sink.
@@ -1206,6 +1209,14 @@ mod tests {
 		let catalog = Duration::from_millis(150);
 		let sounded = first_sound(jitter, Duration::from_secs(1), Some(catalog), None).await;
 		assert_on_time(sounded, jitter + catalog);
+	}
+
+	/// A measured target past the budget the track opened with still sets the
+	/// clock: the subscription follows the delay, so the budget never caps it.
+	#[tokio::test]
+	async fn audio_holds_a_target_past_its_opening_budget() {
+		let jitter = Duration::from_millis(300);
+		assert_on_time(first_sound(jitter, Duration::from_millis(100), None, None).await, jitter);
 	}
 
 	fn assert_on_time(sounded: Duration, due: Duration) {
