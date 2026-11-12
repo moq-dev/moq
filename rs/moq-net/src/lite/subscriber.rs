@@ -274,8 +274,9 @@ enum Open {
 /// A group stream's group, opened in its subscription's copy for the stream to fill.
 struct Opened {
 	group: crate::recv::Group,
-	/// A continuation's frame its YIELDED reset cut short, which it completes.
-	partial: Option<frame::Producer>,
+	/// A continuation's frame its YIELDED reset cut short, which it completes. Boxed, as
+	/// most groups have none.
+	partial: Option<Box<frame::Producer>>,
 	/// The publisher owed the group when the stream arrived; see [`Yielding::owed`].
 	owed: bool,
 	track: track::Producer,
@@ -524,7 +525,7 @@ impl TrackEntry {
 		}
 		Some(Ok(Open::Group(Opened {
 			group,
-			partial,
+			partial: partial.map(Box::new),
 			owed: true,
 			track: producer.clone(),
 			framing: *framing,
@@ -1730,7 +1731,7 @@ impl GroupRecv {
 		// Guarded: dropping this machine mid-group is a cancellation, not a clean end.
 		let group: crate::recv::Group = group;
 		let track: track::Producer = track;
-		let mut ingest: FrameIngest = FrameIngest::new(framing, ietf, hdr.frame_start).yielding(yields, cut);
+		let mut ingest: FrameIngest = FrameIngest::new(framing, ietf, hdr.frame_start).yielding(yields, cut.map(|cut| *cut));
 		let reading: Reading = reading;
 
 		// Filling the group, bailing if the track or group dies first. The track or group
@@ -7363,10 +7364,10 @@ mod tests {
 			Err(_) => panic!("the entry holds the parked streams"),
 		};
 		assert_eq!(opened, [kept], "the withdrawn group is gone");
-		let Ok(Open::Group(Opened { group, .. })) = entry.unpark(kept) else {
+		let Ok(Open::Group(opened)) = entry.unpark(kept) else {
 			panic!("the kept group");
 		};
-		group.finish().unwrap();
+		opened.group.finish().unwrap();
 		let _track = track.finish().unwrap();
 		// Only the kept group reaches the subscriber: the withdrawn one ended, so nothing
 		// waits on it.
