@@ -20,13 +20,6 @@ cache-rev:
     fi
     echo "$rev"
 
-# Keep the newest cached commit's closures on nix.moq.dev past the bucket's expiry.
-cache-refresh:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    rev=$(just gh cache-rev)
-    just infra nix refresh nix-ci-moq-dev "$rev"
-
 # Build the runner image with a temporary policy on a disposable hosted runner.
 runner-vm-ci:
     #!/usr/bin/env bash
@@ -84,7 +77,9 @@ test:
     python3 sh/gh/gst-formula.test.py
     python3 sh/changed.test.py
     python3 sh/large-files.test.py
+    python3 sh/migrate.test.py
     python3 sh/text.test.py
+    python3 sh/coverage-tables.test.py
     python3 sh/dispatch-query.test.py
     python3 sh/gh/test-inventory.test.py
     bun test ./sh/gh/setup.test.ts
@@ -106,6 +101,7 @@ test:
     python3 sh/gh/nightly.test.py
     python3 sh/gh/pages-clean.test.py
     python3 sh/gh/bench-report.test.py
+    python3 sh/gh/rustc-cost.test.py
     python3 sh/gh/ts-paths.test.py
     sh/go/publish-wrapper.test.sh
     python3 sh/rs/uring.test.py
@@ -161,6 +157,10 @@ gst-formula *args:
 # Run related Nightly benchmarks in one build environment, reporting every failure.
 nightly group:
     sh/gh/nightly.sh {{ quote(group) }}
+
+# Measure the merge gate's build and test cost, cold and after a moq-net edit, for the benchmark history.
+gate-cost:
+    sh/gh/gate-cost.sh
 
 # Measure selected Criterion targets through the existing benchmark lifecycle.
 [positional-arguments]

@@ -73,6 +73,9 @@ count control-message bytes by `tier` and `class` (`session`, `announce`, `track
 `probe`, `auth`, `goaway`, `other`) to spot control-heavy sessions. They
 include message size prefixes but leave out media payload and transport
 overhead such as QUIC framing, ACKs, and retransmissions.
+`moq_relay_control_tx_messages_total` and `moq_relay_control_rx_messages_total`
+count the same messages by number, so an announce storm shows as a rate
+rather than as bytes.
 
 `moq_relay_sessions_connected` is a gauge of connected sessions by `tier` and
 `state`: `active` if media payload moved through the session, either way,

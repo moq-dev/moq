@@ -316,7 +316,7 @@ async fn follow_reservation(
 	target: moq_mux::rate::Target,
 ) {
 	let noop = kio::Waiter::noop();
-	let mut follower = moq_mux::rate::Follower::new(consumer, video_policy(ceiling, lower_ceiling(&lower, &noop)));
+	let mut follower = moq_mux::rate::Grant::new(consumer, video_policy(ceiling, lower_ceiling(&lower, &noop)));
 	follower.assume(target);
 	loop {
 		// Both ceilings are read on every wake, before the follower filters a grant against
@@ -360,7 +360,7 @@ async fn follow_reservation(
 /// `moq_encode_video_bitrate` already applied, instead. Returns the target applied, or
 /// `Err` with the name of an encoder that cannot follow at all.
 fn retune(
-	follower: &mut moq_mux::rate::Follower,
+	follower: &mut moq_mux::rate::Grant,
 	policy: moq_mux::rate::Policy,
 	target: moq_mux::rate::Target,
 	apply: impl FnOnce(moq_mux::rate::Target) -> Result<(), moq_video::Error>,
@@ -642,11 +642,11 @@ impl VideoEncoder {
 			return Ok(());
 		};
 		let frame = moq_video::Frame::new(surface, timestamp);
-		// A backend that pipelines hands back an earlier frame's output, so this is
-		// zero or more access units rather than one per call.
-		let encoded = block_on(encoder.encode(frame))?;
+		// A backend that pipelines readies an earlier frame's output, so `publish`
+		// drains zero or more access units rather than one per call.
+		block_on(encoder.encode(frame))?;
 		let before = self.producer.demand();
-		let published = self.producer.publish(&encoded);
+		let published = publish(encoder, &mut self.producer);
 		// A frame whose decoder identity changed, such as a resume at a ceiling past the declared
 		// level, moved the rendition to a newly named track, whose demand the claim has to watch.
 		// The claim moves even when publishing on the new track failed, so it never stays on the
@@ -702,7 +702,7 @@ impl VideoEncoder {
 				if let Some(encoder) = self.encoder.take() {
 					self.target = moq_mux::rate::Target::Disabled;
 					// The encoder is gone either way, so a lost tail only costs those frames.
-					let drained = block_on(encoder.finish()).and_then(|encoded| self.producer.publish(&encoded));
+					let drained = drain(encoder, &mut self.producer);
 					if let Err(err) = drained {
 						tracing::warn!(error = %err, "failed to drain a disabled rendition's encoder");
 					}
@@ -756,7 +756,7 @@ impl VideoEncoder {
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
 		let drained = match encoder {
-			Some(encoder) => block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded)),
+			Some(encoder) => drain(encoder, &mut producer),
 			None => Ok(()),
 		};
 		finalize(producer, drained, &children, crate::publish::Child::Video(id))?;
@@ -764,6 +764,26 @@ impl VideoEncoder {
 		// cleanly before the panic is reported.
 		follower.map_or(Ok(()), |follower| follower.check())
 	}
+}
+
+/// Publish every access unit `encoder` has ready.
+fn publish(
+	encoder: &mut moq_video::encode::Sink,
+	producer: &mut moq_video::encode::Producer,
+) -> Result<(), moq_video::Error> {
+	while let Some(encoded) = encoder.receive()? {
+		producer.publish(&encoded)?;
+	}
+	Ok(())
+}
+
+/// Flush `encoder` and publish its tail, closing it.
+fn drain(
+	mut encoder: moq_video::encode::Sink,
+	producer: &mut moq_video::encode::Producer,
+) -> Result<(), moq_video::Error> {
+	block_on(encoder.flush())?;
+	publish(&mut encoder, producer)
 }
 
 impl Video {
@@ -1667,7 +1687,7 @@ mod tests {
 mod follow_tests {
 	use std::time::Duration;
 
-	use moq_mux::rate::{Follower, Policy, Target};
+	use moq_mux::rate::{Grant, Policy, Target};
 	use moq_net::bandwidth::Rate;
 
 	use super::*;
@@ -1675,7 +1695,7 @@ mod follow_tests {
 	/// Retune through `set`, which only ever sees an enabled target: these policies set no
 	/// lower rendition, so nothing disables.
 	fn rate(
-		follower: &mut Follower,
+		follower: &mut Grant,
 		ceiling: Rate,
 		target: Target,
 		set: impl FnOnce(Rate) -> Result<(), moq_video::Error>,
@@ -1696,7 +1716,7 @@ mod follow_tests {
 			policy
 		};
 		let grant = moq_net::bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), policy(Rate::from_mbps(1)));
+		let mut follower = Grant::new(grant.consume(), policy(Rate::from_mbps(1)));
 		grant.set(Some(Rate::from_mbps(2))).unwrap();
 		let dropped = follower.next().await.unwrap();
 		let moved = retune(&mut follower, policy(Rate::from_kbps(900)), dropped, |_| {
@@ -1718,7 +1738,7 @@ mod follow_tests {
 	}
 
 	/// Retune at every target until the follower goes a minute without one.
-	async fn quiet(follower: &mut Follower, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
+	async fn quiet(follower: &mut Grant, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
 		while let Ok(bitrate) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
 			rate(follower, ceiling, bitrate.unwrap(), &mut set).unwrap();
 		}
@@ -1730,7 +1750,7 @@ mod follow_tests {
 	async fn a_quiet_grant_retries_a_failed_raise() {
 		let ceiling = Rate::from_mbps(4);
 		let grant = moq_net::bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(ceiling));
+		let mut follower = Grant::new(grant.consume(), Policy::new(ceiling));
 		let mut applied = Vec::new();
 		let mut refuse = Some(ceiling);
 		let mut set = |bitrate| {
@@ -1760,7 +1780,7 @@ mod follow_tests {
 		let old = Rate::from_mbps(4);
 		let lowered = Rate::from_mbps(2);
 		let grant = moq_net::bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(old));
+		let mut follower = Grant::new(grant.consume(), Policy::new(old));
 		let applied = std::cell::RefCell::new(Vec::new());
 		let set = |bitrate| {
 			applied.borrow_mut().push(bitrate);

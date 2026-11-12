@@ -1,44 +1,31 @@
 //! Dialing: everything one outgoing connection needs.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use super::{Connection, Error, Identity};
+use super::{Connection, Error};
 use crate::udp;
 
-/// How to dial: as whom, and who to trust.
+/// How to dial: the TLS policy and the transport settings.
 ///
 /// Where to dial is an argument to [`connect`] and
 /// [`Endpoint::connect`](super::Endpoint::connect), so one config serves every peer.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
-	/// ALPN protocols to offer, in preference order. Required: QUIC without an
-	/// application protocol is refused.
-	pub alpn: Vec<String>,
-	/// Verify the server's certificate against the roots below (default).
-	/// Turn it off only for tests or a pinned local deployment.
-	pub verify: bool,
-	/// PEM root certificate files to trust, on top of the system store.
-	pub roots: Vec<std::path::PathBuf>,
-	/// Trust the platform's root store as well, on by default. Turn it off to
-	/// trust only [`roots`](Self::roots), which is a real restriction here:
-	/// the trust store is built from scratch rather than added to.
-	pub system_roots: bool,
-	/// A certificate to present when the server asks for one (mTLS).
-	pub identity: Option<Identity>,
+	/// The TLS policy every dial uses: who to trust, any client certificate,
+	/// and the ALPNs to offer. It must allow TLS 1.3 and name at least one ALPN.
+	pub tls: Arc<rustls::ClientConfig>,
 	/// The per-connection transport settings (timeouts, stream limits,
 	/// congestion control).
 	pub transport: super::transport::Config,
 }
 
-impl Default for Config {
-	fn default() -> Self {
+impl Config {
+	/// Dial with `tls` and the default transport settings.
+	pub fn new(tls: Arc<rustls::ClientConfig>) -> Self {
 		Self {
-			alpn: Vec::new(),
-			verify: true,
-			roots: Vec::new(),
-			system_roots: true,
-			identity: None,
+			tls,
 			transport: super::transport::Config::default(),
 		}
 	}

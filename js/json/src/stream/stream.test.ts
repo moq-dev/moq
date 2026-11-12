@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { StreamCode, Time, Track } from "@moq/net";
 import * as z from "zod/mini";
 import { Consumer, Producer, Rolled } from "./index.ts";
@@ -99,7 +99,7 @@ test("a second group is reported while the first is still open", async () => {
 
 	// Ask for a replay window, so the first group is delivered rather than skipped by the
 	// subscriber's default max delay budget once a newer group exists.
-	const consumer = new Consumer<Rec>({ track: track.subscribe({ delay: { max: Milli(30_000) } }) });
+	const consumer = new Consumer<Rec>({ track: track.subscribe({ delay: { max: Duration.millis(30_000) } }) });
 	expect((await consumer.next())?.value).toEqual({ n: 0 });
 	await expect(consumer.next()).rejects.toBeInstanceOf(Rolled);
 
@@ -250,3 +250,15 @@ for (const compress of [false, true]) {
 		expect(await fast.next()).toBeUndefined();
 	});
 }
+
+// Mirrors the Rust `stream::Finished` doctest: the log `finish` returns takes no record, at
+// compile time and at run time.
+test("finishing returns a log that appends nothing", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Rec>({ track });
+	producer.append({ value: { n: 0 } });
+	const finished = producer.finish();
+	// @ts-expect-error a finished log appends no record
+	expect(() => finished.append({ value: { n: 1 } })).toThrow();
+	expect(await drain(track.subscribe())).toEqual([0]);
+});

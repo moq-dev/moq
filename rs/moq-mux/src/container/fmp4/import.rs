@@ -196,7 +196,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	fn close(&mut self) -> crate::Result<()> {
 		self.estimator.cut(None);
 		self.publish_estimate()?;
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 		Ok(())
@@ -204,7 +204,8 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 
 	/// Close the open group and finish the track, or abort both with the cause when that fails.
 	fn finish(&mut self) -> crate::Result<()> {
-		if let Err(err) = self.close().and_then(|()| Ok(self.track.finish()?)) {
+		// The importer keeps its own clone, whose appends the end refuses.
+		if let Err(err) = self.close().and_then(|()| Ok(self.track.clone().finish().map(drop)?)) {
 			if let Some(group) = self.group.take() {
 				let _ = group.abort(err.reason());
 			}
@@ -392,7 +393,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				let count = (needed - self.buffer.len()).min(data.len());
 				self.buffer.extend_from_slice(&data[..count]);
 				data = &data[count..];
-				let Some(header) = mp4_atom::Header::decode_maybe(&mut self.buffer.as_ref())? else {
+				let Some(header) =
+					mp4_atom::Header::decode_maybe(&mut self.buffer.as_ref()).map_err(crate::Error::mp4)?
+				else {
 					if data.is_empty() {
 						return Ok(());
 					}
@@ -493,9 +496,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		if kind == Moof::KIND && self.moof.is_some() {
 			return Err(Error::DuplicateMoof.into());
 		}
-		let size = size.ok_or(mp4_atom::Error::InvalidSize)?;
+		let size = size.ok_or(mp4_atom::Error::InvalidSize).map_err(crate::Error::mp4)?;
 		if size > super::MAX_METADATA_BYTES {
-			return Err(Error::MetadataTooLarge { kind, size }.into());
+			return Err(Error::MetadataTooLarge {
+				kind: kind.to_string(),
+				size,
+			}
+			.into());
 		}
 		Ok(Body::Metadata {
 			kind,
@@ -508,12 +515,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	fn end_metadata(&mut self, kind: mp4_atom::FourCC, body: Bytes, header_size: usize) -> Result<()> {
 		super::metadata::body(kind, &body)?;
 		if kind == Moov::KIND {
-			return self.init(Moov::decode_body(&mut body.as_ref())?);
+			return self.init(Moov::decode_body(&mut body.as_ref()).map_err(crate::Error::mp4)?);
 		}
 		if self.moof.is_some() {
 			return Err(Error::DuplicateMoof.into());
 		}
-		let moof = Moof::decode_body(&mut body.as_ref())?;
+		let moof = Moof::decode_body(&mut body.as_ref()).map_err(crate::Error::mp4)?;
 		self.moof = Some(moof);
 		self.moof_span = header_size.checked_add(body.len()).ok_or(Error::InvalidDataOffset)?;
 		Ok(())
@@ -749,8 +756,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			};
 
 			let mut buf = Vec::new();
-			ftyp.encode(&mut buf)?;
-			single_moov.encode(&mut buf)?;
+			ftyp.encode(&mut buf).map_err(crate::Error::mp4)?;
+			single_moov.encode(&mut buf).map_err(crate::Error::mp4)?;
 
 			Ok(Container::Cmaf { init: buf.into() })
 		}
@@ -850,8 +857,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					av01.spatial.as_deref(),
 				)
 			}
-			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(*unknown).into()),
-			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
+			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(unknown.to_string()).into()),
+			unsupported => return Err(Error::unsupported_codec(unsupported).into()),
 		};
 		// The codec config outranks the colr box a muxer added, which only fills its gaps.
 		for entry in colr {
@@ -886,7 +893,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		container: Container,
 	) -> Result<VideoConfig> {
 		let mut description = BytesMut::new();
-		avcc.encode_body(&mut description)?;
+		avcc.encode_body(&mut description).map_err(crate::Error::mp4)?;
 		let description = description.freeze();
 
 		// Start from everything the avcC's SPS signals, so no field is dropped by a copy list.
@@ -913,7 +920,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		container: Container,
 	) -> Result<VideoConfig> {
 		let mut description = BytesMut::new();
-		hvcc.encode_body(&mut description)?;
+		hvcc.encode_body(&mut description).map_err(crate::Error::mp4)?;
 
 		let mut config = VideoConfig::new(H265 {
 			in_band,
@@ -1028,8 +1035,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config.container = container;
 				config
 			}
-			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(*unknown).into()),
-			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
+			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(unknown.to_string()).into()),
+			unsupported => return Err(Error::unsupported_codec(unsupported).into()),
 		};
 
 		Ok(config)
@@ -1496,7 +1503,7 @@ fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::De
 	}
 
 	let mut moof_buf = Vec::new();
-	adjusted_moof.encode(&mut moof_buf)?;
+	adjusted_moof.encode(&mut moof_buf).map_err(crate::Error::mp4)?;
 	let new_moof_size = moof_buf.len();
 
 	// A payload past 4 GiB takes the 16-byte largesize header.
@@ -1505,7 +1512,8 @@ fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::De
 		kind: (*b"mdat").into(),
 		size: Some(run.samples.iter().map(|sample| sample.range.len()).sum()),
 	}
-	.encode(&mut mdat)?;
+	.encode(&mut mdat)
+	.map_err(crate::Error::mp4)?;
 
 	// Re-encode moof with corrected per-trun data_offset for the per-track fragment.
 	// Each trun's data_offset points to the start of that run's data within the new mdat.
@@ -1525,7 +1533,7 @@ fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::De
 	}
 
 	moof_buf.clear();
-	adjusted_moof.encode(&mut moof_buf)?;
+	adjusted_moof.encode(&mut moof_buf).map_err(crate::Error::mp4)?;
 	// Each data_offset was reserved above, so restating them keeps the moof's size.
 	debug_assert_eq!(moof_buf.len(), new_moof_size);
 	moof_buf.extend_from_slice(&mdat);
@@ -1595,7 +1603,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			return Err(crate::container::TimestampRewind { timestamp, floor }.into());
 		}
 		let group = if start_group {
-			if let Some(mut prev) = self.group.take() {
+			if let Some(prev) = self.group.take() {
 				prev.finish()?;
 			}
 			match self.pending_sequence.take() {
@@ -1680,16 +1688,19 @@ fn open_sample<E: crate::catalog::hang::CatalogExt>(
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
-	/// Finish all tracks, flushing current groups.
+	/// Finish all tracks, flushing current groups, and return the [`Finished`] import.
 	///
 	/// A fragment whose samples are still arriving was truncated: its open frames abort, failing
 	/// their groups, every track still finishes, and this returns
 	/// [`UnexpectedEof`](mp4_atom::Error::UnexpectedEof). After a decode error, this ends the
-	/// accepted media without reading more input; it does not clear that error for later decodes.
-	/// Either way every track has ended. A finish that failed returns the same error to every
-	/// later call; one that succeeded refuses later input with
-	/// [`Finished`](crate::Error::Finished), or with the decode error it followed.
-	pub fn finish(&mut self) -> Result<()> {
+	/// accepted media without reading more input. Either way every track has ended, so a failed
+	/// finish can't be retried.
+	pub fn finish(mut self) -> Result<Finished<E>> {
+		self.finish_in_place()?;
+		Ok(Finished { import: self })
+	}
+
+	fn finish_in_place(&mut self) -> Result<()> {
 		match &self.input {
 			crate::container::Input::Finished => return Ok(()),
 			crate::container::Input::Failed(err) => return Err(err.clone()),
@@ -1707,7 +1718,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			_ => false,
 		};
 		let mut result = match truncated {
-			true => Err(mp4_atom::Error::UnexpectedEof.into()),
+			true => Err(crate::Error::mp4(mp4_atom::Error::UnexpectedEof)),
 			false => Ok(()),
 		};
 		// End every track even on refusal, keeping the first error. A track whose finish fails
@@ -1842,6 +1853,29 @@ struct Deferred {
 	discontinuity: bool,
 }
 
+/// An fMP4 import that [finished](Import::finish): every track has ended, and they can still be
+/// read or aborted, but it takes no more input.
+///
+/// Dropping it retires the tracks and their catalog renditions, as dropping the [`Import`] does.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut import: moq_mux::container::fmp4::Finished) {
+/// import.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it retires the tracks and their catalog renditions"]
+pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
+	import: Import<E>,
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
+	/// Release every track's cache, reporting `err` to readers that have not drained it; see
+	/// [`Import::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
+	}
+}
+
 impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 	/// End each track, then retire its HLS records: every track takes a fresh name, so nothing
 	/// publishes it again, as when an HLS import replaces this init segment's importer.
@@ -1973,7 +2007,7 @@ mod tests {
 			assert!(matches!(err, crate::Error::Cmaf(Error::BackwardsDataOffset)), "{err:?}");
 			assert!(consumer.recv_group().now_or_never().is_none());
 			assert_eq!(import.decode(&[0xA5; 8]).unwrap_err().to_string(), err.to_string());
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			assert!(consumer.recv_group().now_or_never().unwrap().unwrap().is_none());
 		}
 	}
@@ -2007,12 +2041,8 @@ mod tests {
 			assert_eq!(import.cut().unwrap_err().to_string(), first);
 			assert_eq!(import.seek(100).unwrap_err().to_string(), first);
 			assert_eq!(import.discontinuity().unwrap_err().to_string(), first);
-			import.finish().unwrap();
-			assert_eq!(import.decode(&[]).unwrap_err().to_string(), first);
-			assert_eq!(
-				import.decode(&box_header(b"free", Some(0))).unwrap_err().to_string(),
-				first
-			);
+			// The accepted media still ends cleanly.
+			let _import = import.finish().unwrap();
 		}
 	}
 
@@ -2107,7 +2137,7 @@ mod tests {
 				import.decode(&box_header(b"mdat", Some(4))).unwrap_err().to_string(),
 				err.to_string()
 			);
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 		}
 
 		// A short moof declares one field-less sample per body byte past the base, and no more.
@@ -2316,7 +2346,7 @@ mod tests {
 						"unreferenced payload must not enter the output cache"
 					);
 				}
-				import.finish().unwrap();
+				let _finished = import.finish().unwrap();
 			}
 		}
 	}
@@ -2374,7 +2404,7 @@ mod tests {
 				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&sample).unwrap();
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			assert_eq!(groups(&mut consumer), [(100, Some(1))], "passthrough: {passthrough}");
 		}
 	}
@@ -2393,7 +2423,8 @@ mod tests {
 				.decode(&media_header(id, 1024, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&[0xA5; SIZE / 2]).unwrap();
-			let err = import.finish().unwrap_err();
+			// In place, so the tracks can be inspected after the failure.
+			let err = import.finish_in_place().unwrap_err();
 			assert!(matches!(err, crate::Error::Mp4(_)), "{err:?}");
 			assert_eq!(
 				groups(&mut consumer),
@@ -2429,7 +2460,7 @@ mod tests {
 				import.decode(&[0xA5; SIZE / 2]).unwrap_err().to_string(),
 				err.to_string()
 			);
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			assert_eq!(groups(&mut consumer), [(0, Some(1))], "passthrough: {passthrough}");
 		}
 	}

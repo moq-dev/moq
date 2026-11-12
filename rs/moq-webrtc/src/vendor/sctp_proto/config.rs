@@ -289,7 +289,6 @@ impl EndpointConfig {
 	///
 	/// While `get_` accessors are typically unidiomatic in Rust, we favor concision for setters,
 	/// which will be used far more heavily.
-	#[doc(hidden)]
 	pub fn get_max_payload_size(&self) -> u32 {
 		self.max_payload_size
 	}

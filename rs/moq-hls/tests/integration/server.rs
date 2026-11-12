@@ -18,7 +18,7 @@ async fn respond_serves_a_route_rewritten_into_scope() {
 	let mut route = Route::parse(&format!("/tenant{media}")).expect("media route");
 	route.broadcast = route.broadcast.strip_prefix("tenant/").expect("scoped").to_string();
 
-	let deadline = kio::clock::now() + TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(TIMEOUT);
 	let body = loop {
 		let response = server.respond(&route, Some("jwt=abc")).await;
 		if response.status() == StatusCode::OK {
@@ -66,7 +66,7 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 		let mut cursor = rendition.segments();
 		let mut next = std::pin::pin!(cursor.next());
 		// Waiting for its first segment, the cursor subscribes before any media exists.
-		let mut demand = publisher.media.demand();
+		let mut demand = publisher.media.as_ref().expect("open").demand();
 		let wanted = async {
 			while demand.wanted_changed().await?.is_none() {}
 			moq_net::Result::Ok(())

@@ -676,7 +676,7 @@ mod tests {
 			let pending = exporter.copy(&red, timestamp).unwrap().expect("a slot came back");
 			let frame = pending.wait().unwrap();
 			assert!(matches!(frame.surface, Surface::Vulkan(_)));
-			encoded.extend(encoder.encode(&frame).unwrap());
+			encoded.extend(encoder.encode_all(&frame).unwrap());
 			drop(frame);
 			let super::super::Slots::Vulkan(export) = &exporter.slots else {
 				unreachable!("checked the route above");
@@ -687,7 +687,7 @@ mod tests {
 				"a slot was replaced rather than reused"
 			);
 		}
-		encoded.extend(encoder.finish().unwrap());
+		encoded.extend(encoder.flush_all().unwrap());
 		assert_eq!(encoded.len(), Exporter::DEPTH * 4);
 		assert!(encoded[0].keyframe);
 	}

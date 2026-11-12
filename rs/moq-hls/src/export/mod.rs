@@ -840,8 +840,16 @@ mod tests {
 
 	/// The average bitrate encoded in a synthesized AAC init segment.
 	fn aac_avg_bitrate(init: &bytes::Bytes) -> u32 {
-		let wire = moq_mux::container::fmp4::Wire::from_init(init).unwrap();
-		let codec = &wire.trak().mdia.minf.stbl.stsd.codecs[0];
+		use mp4_atom::DecodeMaybe;
+
+		let mut cursor = std::io::Cursor::new(init.as_ref());
+		let moov = std::iter::from_fn(|| mp4_atom::Any::decode_maybe(&mut cursor).unwrap())
+			.find_map(|atom| match atom {
+				mp4_atom::Any::Moov(moov) => Some(moov),
+				_ => None,
+			})
+			.expect("no moov in init");
+		let codec = &moov.trak[0].mdia.minf.stbl.stsd.codecs[0];
 		let mp4_atom::Codec::Mp4a(mp4a) = codec else {
 			panic!("expected mp4a, got {codec:?}");
 		};
@@ -1599,7 +1607,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_stuck_init_leaves_the_manifest_to_its_siblings() {
 		let (origin, broadcast, _catalog, _video0) = inline_sibling().await;
-		let (_media, mut open) = open_tail(broadcast.broadcast(), "video1", 3);
+		let (_media, open) = open_tail(broadcast.broadcast(), "video1", 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
@@ -1646,7 +1654,7 @@ mod tests {
 			video0.gop(sequence);
 		}
 		// video1's only cached group is still open, so its init build parks on it.
-		let (video1, mut open) = open_tail(broadcast.broadcast(), "video1", 3);
+		let (video1, open) = open_tail(broadcast.broadcast(), "video1", 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
@@ -1743,14 +1751,14 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn an_ended_manifest_stays_dynamic_while_an_init_builds() {
 		let (origin, broadcast, mut catalog, mut video0) = inline_sibling().await;
-		let (media, mut open) = open_tail(broadcast.broadcast(), "video1", 3);
+		let (media, open) = open_tail(broadcast.broadcast(), "video1", 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").unwrap();
 		until_listed(&rendition, 3).await;
 		video0.finish();
-		media.finish().unwrap();
+		let _media = media.finish().unwrap();
 		catalog.finish().unwrap();
 		kio::clock::timeout(Duration::from_secs(5), async {
 			while !rendition.snapshot().finished {
@@ -1777,7 +1785,7 @@ mod tests {
 		// it lists nothing.
 		let (origin, broadcast, mut catalog, _video1) = inline_pair("video0").await;
 		// Its earlier groups already left the cache, so the open one is the only candidate.
-		let (_media, mut open) = open_tail(broadcast.broadcast(), "video0", 1);
+		let (_media, open) = open_tail(broadcast.broadcast(), "video0", 1);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
@@ -1891,7 +1899,7 @@ mod tests {
 			media.write(vp8_frame(micros, true)).unwrap();
 		}
 
-		let deadline = kio::clock::now() + Duration::from_secs(5);
+		let deadline = kio::clock::now().saturating_add(Duration::from_secs(5));
 		let new = loop {
 			let current = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 			if !Arc::ptr_eq(&current, &old) {
@@ -2370,7 +2378,7 @@ mod tests {
 		settle().await;
 
 		// PTS zero at exactly the moq epoch, so every timestamp maps to a fixed string.
-		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
+		let wall = kio::clock::Wall::MOQ_EPOCH;
 		let config = catalog_config()
 			.with_clock(moq_mux::Clock::at(moq_net::time::Instant::now(), wall).expect("a representable wall"));
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
@@ -2684,10 +2692,10 @@ mod tests {
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.represented()).await;
 
 		// A clean finish lists the open segment and ends the playlist.
-		media.finish().unwrap();
+		let media = media.finish().unwrap();
 		catalog.finish().unwrap();
 
-		let deadline = kio::clock::now() + Duration::from_secs(5);
+		let deadline = kio::clock::now().saturating_add(Duration::from_secs(5));
 		let manifest = loop {
 			let manifest = broadcaster.manifest(None).unwrap().expect("manifest renders");
 			if manifest.contains(" type=\"static\"") {
@@ -2833,7 +2841,7 @@ mod tests {
 		// The recorder drops the broadcaster before finalizing its uploads.
 		drop(broadcaster);
 
-		media.finish().unwrap();
+		let media = media.finish().unwrap();
 		catalog.finish().unwrap();
 
 		let mut listed = Vec::new();
@@ -2909,8 +2917,8 @@ mod tests {
 		} else {
 			broadcast.clone()
 		};
-		let mut media = write_routed_media(&mut target.broadcast().clone(), KEYFRAME, 0);
-		media.finish().unwrap();
+		let media = write_routed_media(&mut target.broadcast().clone(), KEYFRAME, 0);
+		let media = media.finish().unwrap();
 		settle().await;
 
 		let source = crate::resolved(&origin, "live").await;
@@ -2987,7 +2995,7 @@ mod tests {
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 			);
 			media.write(payload_frame(0, true, NEW)).unwrap();
-			media.finish().unwrap();
+			let _finished = media.finish().unwrap();
 			settle().await;
 
 			let fresh = crate::resolved(&ended.origin, path).await;
@@ -3520,9 +3528,13 @@ mod tests {
 		let mut segments = rendition.segments();
 		assert!(segments.init().await.unwrap().is_some(), "init is buildable");
 
-		// Sizing reports the segment's wire bytes before its media is built, without advancing.
-		let size = segments.next_size().await.unwrap();
-		assert_eq!(size, Some(5), "one 4-byte frame and its 1-byte timestamp");
+		// Peeking reports the segment's metadata and wire bytes before its media is built, without
+		// advancing.
+		let peek = segments.peek().await.unwrap().expect("a segment, not end");
+		assert_eq!(peek.segment, 0);
+		assert_eq!(peek.bytes, 5, "one 4-byte frame and its 1-byte timestamp");
+		assert_eq!(peek.duration, Duration::from_secs(2));
+		assert_eq!(peek.discontinuity, 0);
 
 		let first = kio::clock::timeout(Duration::from_secs(5), segments.next())
 			.await
@@ -3635,7 +3647,7 @@ mod tests {
 
 		/// The track ends cleanly, staying retained while the handle lives.
 		fn finish(&mut self) {
-			self.track.finish().unwrap();
+			drop(self.track.clone().finish().unwrap());
 		}
 	}
 

@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Session as QmuxSession } from "@moq/qmux";
 import { Effect } from "@moq/signals";
 import * as Ietf from "../ietf/index.ts";
@@ -34,7 +34,7 @@ test("transportStats maps the W3C dictionary and normalizes a null send rate", a
 			packetsLost: 6,
 		}),
 	);
-	expect(stats.rtt).toBe(Milli(25));
+	expect(stats.rtt).toEqual(Duration.millis(25));
 	expect(stats.estimatedSendRate).toBeUndefined();
 	expect(stats.bytesSent).toBe(1);
 	expect(stats.bytesReceived).toBe(2);
@@ -211,7 +211,7 @@ test("Reload exposes its established session stats and probe only while connecte
 test("a lite connection probes only while its estimate is observed", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
-	const drain = () => clock.advance(Nano.zero);
+	const drain = () => clock.advance(Duration.ZERO);
 	const pair = createMockTransportPair(Lite.ALPN_06, { stats: { estimatedSendRate: 1_000_000 } });
 	const open = pair.client.createBidirectionalStream.bind(pair.client);
 	let finished = 0;
@@ -246,7 +246,7 @@ test("a lite connection probes only while its estimate is observed", async () =>
 			values.push(effect.get(client.probe));
 		});
 		await drain();
-		await clock.advance(Nano.fromMilli(Milli(100)));
+		await clock.advance(Duration.millis(100));
 		expect(values.at(-1)).toMatchObject({ estimatedRecvRate: 1_000_000 });
 		// A reactive one-shot listener reattaches without dropping demand between updates.
 		expect(pair.client.sendStreams.bidi).toHaveLength(1);

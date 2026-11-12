@@ -148,9 +148,9 @@ impl Pacer {
 		}
 		self.slack += shift;
 		if let Some((anchor, _)) = self.anchor.as_mut() {
-			*anchor += shift;
+			*anchor = anchor.saturating_add(shift);
 		}
-		at + shift
+		at.saturating_add(shift)
 	}
 
 	/// How much of the producer's standing delivery lag the anchor has absorbed.
@@ -212,31 +212,31 @@ mod tests {
 		// Tune-in burst: the live edge (4132ms of media) is produced ~8ms after the
 		// first frame (1400ms). It must re-anchor to `now` rather than schedule
 		// ~2.7s into the future.
-		let start = Instant::ZERO + Duration::from_secs(1);
+		let start = Instant::ZERO.saturating_add(Duration::from_secs(1));
 		let mut pacer = Pacer::default();
 		assert_eq!(pacer.pace(ms(1_400), start), start, "the first frame anchors at now");
 
-		let now = start + Duration::from_millis(8);
+		let now = start.saturating_add(Duration::from_millis(8));
 		assert_eq!(pacer.pace(ms(4_132), now), now, "the live edge paces to now");
 
 		// The re-anchor moved the base up to the live edge (4132ms <-> now). A frame
 		// 33ms newer in MEDIA that arrives 80ms later in WALL-clock (jitter) paces
 		// from that carried-forward anchor: its media instant (+33ms off the edge),
 		// not its 80ms arrival instant.
-		let jittered = pacer.pace(ms(4_165), now + Duration::from_millis(80));
+		let jittered = pacer.pace(ms(4_165), now.saturating_add(Duration::from_millis(80)));
 		assert_eq!(
 			jittered,
-			now + Duration::from_millis(33),
+			now.saturating_add(Duration::from_millis(33)),
 			"a late frame keeps its media instant, not its arrival instant"
 		);
 
 		// A reordered B-frame can carry a timestamp before the re-anchored live
 		// edge. Keep that earlier media instant instead of flattening it onto the
 		// anchor.
-		let reordered = pacer.pace(ms(4_099), now + Duration::from_millis(100));
+		let reordered = pacer.pace(ms(4_099), now.saturating_add(Duration::from_millis(100)));
 		assert_eq!(
 			reordered,
-			now - Duration::from_millis(33),
+			now.saturating_sub(Duration::from_millis(33)),
 			"a reordered frame can pace before the anchor"
 		);
 	}
@@ -256,10 +256,16 @@ mod tests {
 
 		// A media frame 40ms later at 90 kHz (3600 ticks) paces on the same clock.
 		let media = Timestamp::from_scale(3_600, 90_000).unwrap();
-		assert_eq!(pacer.pace(media, start), start + Duration::from_millis(40));
+		assert_eq!(
+			pacer.pace(media, start),
+			start.saturating_add(Duration::from_millis(40))
+		);
 
 		// The next PCR slot, back at microsecond scale, lands on its own boundary.
-		assert_eq!(pacer.pace(ms(50), start), start + Duration::from_millis(50));
+		assert_eq!(
+			pacer.pace(ms(50), start),
+			start.saturating_add(Duration::from_millis(50))
+		);
 	}
 
 	/// Regression: the lead comparison must not construct `now + lead`, which
@@ -269,7 +275,10 @@ mod tests {
 		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_lead(Duration::MAX);
 		assert_eq!(pacer.pace(ms(0), start), start);
-		assert_eq!(pacer.pace(ms(40), start), start + Duration::from_millis(40));
+		assert_eq!(
+			pacer.pace(ms(40), start),
+			start.saturating_add(Duration::from_millis(40))
+		);
 	}
 
 	/// A producer that delivers a constant distance behind the media clock (the TS
@@ -284,13 +293,13 @@ mod tests {
 		assert_eq!(pacer.pace(ms(0), start), start, "the first frame anchors at now");
 
 		// Steady state: the producer is 40ms behind, so this frame is already due.
-		let now = start + Duration::from_millis(80);
+		let now = start.saturating_add(Duration::from_millis(80));
 		assert_eq!(pacer.pace(ms(40), now), now, "a late frame still goes out at once");
 
 		// The anchor absorbed those 40ms, so the next frame has room to be paced.
 		assert_eq!(
 			pacer.pace(ms(80), now),
-			now + Duration::from_millis(40),
+			now.saturating_add(Duration::from_millis(40)),
 			"the discovered lag becomes the sink's margin"
 		);
 	}
@@ -304,11 +313,11 @@ mod tests {
 		assert_eq!(pacer.pace(ms(0), start), start);
 
 		// 200ms behind, but only 50ms of that may be taken.
-		let now = start + Duration::from_millis(240);
-		assert_eq!(pacer.pace(ms(40), now), start + Duration::from_millis(90));
+		let now = start.saturating_add(Duration::from_millis(240));
+		assert_eq!(pacer.pace(ms(40), now), start.saturating_add(Duration::from_millis(90)));
 		assert_eq!(
 			pacer.pace(ms(80), now),
-			start + Duration::from_millis(130),
+			start.saturating_add(Duration::from_millis(130)),
 			"the anchor moved by the cap, not by the shortfall"
 		);
 	}
@@ -320,9 +329,9 @@ mod tests {
 		let mut pacer = Pacer::default();
 		assert_eq!(pacer.pace(ms(0), start), start);
 
-		let now = start + Duration::from_millis(80);
-		assert_eq!(pacer.pace(ms(40), now), start + Duration::from_millis(40));
-		assert_eq!(pacer.pace(ms(80), now), start + Duration::from_millis(80));
+		let now = start.saturating_add(Duration::from_millis(80));
+		assert_eq!(pacer.pace(ms(40), now), start.saturating_add(Duration::from_millis(40)));
+		assert_eq!(pacer.pace(ms(80), now), start.saturating_add(Duration::from_millis(80)));
 	}
 
 	#[test]
@@ -333,9 +342,9 @@ mod tests {
 
 		// A caller's stricter lag detection can force the re-anchor `pace` alone
 		// would not apply: the frame goes out at `now` and becomes the new base.
-		let now = start + Duration::from_millis(100);
+		let now = start.saturating_add(Duration::from_millis(100));
 		assert_eq!(pacer.hurry(ms(800), now), now);
-		assert_eq!(pacer.pace(ms(840), now), now + Duration::from_millis(40));
+		assert_eq!(pacer.pace(ms(840), now), now.saturating_add(Duration::from_millis(40)));
 	}
 
 	/// The delay shifts the schedule without entering the anchor, so the frame
@@ -346,14 +355,23 @@ mod tests {
 		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_delay(Duration::from_millis(100));
 
-		assert_eq!(pacer.pace(ms(0), start), start + Duration::from_millis(100));
+		assert_eq!(
+			pacer.pace(ms(0), start),
+			start.saturating_add(Duration::from_millis(100))
+		);
 		// 40ms of media arriving 40ms later: on the anchor, so it must not re-anchor.
-		let now = start + Duration::from_millis(40);
-		assert_eq!(pacer.pace(ms(40), now), start + Duration::from_millis(140));
+		let now = start.saturating_add(Duration::from_millis(40));
+		assert_eq!(
+			pacer.pace(ms(40), now),
+			start.saturating_add(Duration::from_millis(140))
+		);
 		// And another 40ms on, still on the original anchor rather than a re-anchor
 		// the delay provoked.
-		let now = start + Duration::from_millis(80);
-		assert_eq!(pacer.pace(ms(80), now), start + Duration::from_millis(180));
+		let now = start.saturating_add(Duration::from_millis(80));
+		assert_eq!(
+			pacer.pace(ms(80), now),
+			start.saturating_add(Duration::from_millis(180))
+		);
 	}
 
 	/// The headline player defect: a first frame that arrives late pins the delay
@@ -365,19 +383,22 @@ mod tests {
 		let mut pacer = Pacer::default().with_delay(Duration::from_millis(100));
 
 		// The first frame was produced 500ms ago; nothing here knows that yet.
-		assert_eq!(pacer.pace(ms(0), start), start + Duration::from_millis(100));
+		assert_eq!(
+			pacer.pace(ms(0), start),
+			start.saturating_add(Duration::from_millis(100))
+		);
 
 		// 40ms of media later, but the next frame took only 20ms to arrive, so the
 		// anchor is 480ms behind live. Re-anchor onto it, delay intact.
-		let now = start + Duration::from_millis(20);
-		assert_eq!(pacer.pace(ms(40), now), now + Duration::from_millis(100));
+		let now = start.saturating_add(Duration::from_millis(20));
+		assert_eq!(pacer.pace(ms(40), now), now.saturating_add(Duration::from_millis(100)));
 
 		// A frame that merely arrives late keeps its media instant instead: the
 		// delay is exactly the room it has to be late in.
-		let late = now + Duration::from_millis(70);
+		let late = now.saturating_add(Duration::from_millis(70));
 		assert_eq!(
 			pacer.pace(ms(80), late),
-			now + Duration::from_millis(140),
+			now.saturating_add(Duration::from_millis(140)),
 			"a late arrival must not re-anchor"
 		);
 	}
@@ -388,10 +409,16 @@ mod tests {
 	fn hurry_keeps_the_delay() {
 		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_delay(Duration::from_millis(100));
-		assert_eq!(pacer.hurry(ms(800), start), start + Duration::from_millis(100));
+		assert_eq!(
+			pacer.hurry(ms(800), start),
+			start.saturating_add(Duration::from_millis(100))
+		);
 
-		let now = start + Duration::from_millis(40);
-		assert_eq!(pacer.pace(ms(840), now), start + Duration::from_millis(140));
+		let now = start.saturating_add(Duration::from_millis(40));
+		assert_eq!(
+			pacer.pace(ms(840), now),
+			start.saturating_add(Duration::from_millis(140))
+		);
 	}
 
 	/// A player queues frames on arrival and asks again when it presents them, by
@@ -404,13 +431,19 @@ mod tests {
 		assert_eq!(pacer.due(ms(0)), None, "no anchor until the first frame");
 
 		pacer.pace(ms(0), start);
-		assert_eq!(pacer.due(ms(40)), Some(start + Duration::from_millis(140)));
-		assert_eq!(pacer.due(ms(40)), Some(start + Duration::from_millis(140)));
+		assert_eq!(
+			pacer.due(ms(40)),
+			Some(start.saturating_add(Duration::from_millis(140)))
+		);
+		assert_eq!(
+			pacer.due(ms(40)),
+			Some(start.saturating_add(Duration::from_millis(140)))
+		);
 
 		// Another track re-anchors, and the queued frame is due earlier for it.
-		let now = start + Duration::from_millis(10);
+		let now = start.saturating_add(Duration::from_millis(10));
 		pacer.hurry(ms(20), now);
-		assert_eq!(pacer.due(ms(40)), Some(now + Duration::from_millis(120)));
+		assert_eq!(pacer.due(ms(40)), Some(now.saturating_add(Duration::from_millis(120))));
 	}
 
 	#[test]
@@ -420,12 +453,21 @@ mod tests {
 		assert_eq!(pacer.pace(ms(0), start), start);
 
 		// An arrival burst within the lead window is spaced, not re-anchored.
-		assert_eq!(pacer.pace(ms(40), start), start + Duration::from_millis(40));
-		assert_eq!(pacer.pace(ms(500), start), start + Duration::from_millis(500));
+		assert_eq!(
+			pacer.pace(ms(40), start),
+			start.saturating_add(Duration::from_millis(40))
+		);
+		assert_eq!(
+			pacer.pace(ms(500), start),
+			start.saturating_add(Duration::from_millis(500))
+		);
 
 		// One step beyond the lead is a discontinuity: re-anchor to now.
 		assert_eq!(pacer.pace(ms(1_200), start), start);
 		// And later frames pace off the new anchor.
-		assert_eq!(pacer.pace(ms(1_240), start), start + Duration::from_millis(40));
+		assert_eq!(
+			pacer.pace(ms(1_240), start),
+			start.saturating_add(Duration::from_millis(40))
+		);
 	}
 }

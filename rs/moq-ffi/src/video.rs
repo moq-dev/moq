@@ -190,15 +190,14 @@ pub struct MoqVideoPacket {
 	pub keyframe: bool,
 }
 
-fn video_packets(packets: Vec<moq_video::encode::Encoded>) -> Vec<MoqVideoPacket> {
-	packets
-		.into_iter()
-		.map(|packet| MoqVideoPacket {
+impl From<moq_video::encode::Encoded> for MoqVideoPacket {
+	fn from(packet: moq_video::encode::Encoded) -> Self {
+		Self {
 			timestamp: packet.timestamp.into(),
 			data: packet.payload.to_vec(),
 			keyframe: packet.keyframe,
-		})
-		.collect()
+		}
+	}
 }
 
 fn video_encoder_config(
@@ -217,9 +216,13 @@ fn video_encoder_config(
 }
 
 /// A codec-only video encoder, independent of any broadcast.
+///
+/// Submit pictures with [`encode`](Self::encode) and pop access units with
+/// [`receive`](Self::receive) until it returns none. At the end of input,
+/// [`flush`](Self::flush) and receive the rest before releasing it.
 #[derive(uniffi::Object)]
 pub struct MoqVideoEncoder {
-	inner: std::sync::Mutex<Option<moq_video::encode::Sink>>,
+	inner: std::sync::Mutex<moq_video::encode::Sink>,
 	format: MoqVideoPixelFormat,
 	size: moq_video::Size,
 }
@@ -232,62 +235,71 @@ impl MoqVideoEncoder {
 		let config = video_encoder_config(&input, &output)?;
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 		Ok(Arc::new(Self {
-			inner: std::sync::Mutex::new(Some(encoder)),
+			inner: std::sync::Mutex::new(encoder),
 			format: input.format,
 			size: config.size(),
 		}))
 	}
 
-	/// Encode one raw picture and return any access units now available.
-	pub fn encode(&self, frame: MoqVideoFrame) -> Result<Vec<MoqVideoPacket>, MoqError> {
+	/// Submit one raw picture, whose access units `receive` returns.
+	pub fn encode(&self, frame: MoqVideoFrame) -> Result<(), MoqError> {
 		let surface = match self.format {
 			MoqVideoPixelFormat::I420 => moq_video::Surface::I420(moq_video::I420::new(self.size, frame.data)?),
 			MoqVideoPixelFormat::Rgba => moq_video::Surface::rgba(&frame.data, self.size)?,
 		};
 		let frame = moq_video::Frame::new(surface, frame.timestamp.try_into()?);
 		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
-		Ok(video_packets(block_on(
-			guard.as_mut().ok_or(MoqError::Closed)?.encode(frame),
-		)?))
+		block_on(guard.encode(frame))?;
+		Ok(())
+	}
+
+	/// Pop the oldest ready access unit, or none while the codec holds the rest; call until none.
+	pub fn receive(&self) -> Result<Option<MoqVideoPacket>, MoqError> {
+		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
+		Ok(guard.receive()?.map(MoqVideoPacket::from))
 	}
 
 	/// Force the next encoded picture to start a new group.
 	pub fn cut(&self) -> Result<(), MoqError> {
 		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
-		block_on(guard.as_mut().ok_or(MoqError::Closed)?.cut())?;
+		block_on(guard.cut())?;
 		Ok(())
 	}
 
 	/// Retune the live encoder in bits per second.
 	pub fn set_bitrate(&self, bitrate: u64) -> Result<(), MoqError> {
 		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
-		block_on(
-			guard
-				.as_mut()
-				.ok_or(MoqError::Closed)?
-				.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)),
-		)?;
+		block_on(guard.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)))?;
 		Ok(())
 	}
 
-	/// Drain buffered access units while keeping the encoder open.
-	pub fn flush(&self) -> Result<Vec<MoqVideoPacket>, MoqError> {
+	/// Mark the end of input, so `receive` returns every access unit the codec still
+	/// holds. The encoder stays open: the next picture starts new input.
+	pub fn flush(&self) -> Result<(), MoqError> {
 		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
-		Ok(video_packets(block_on(
-			guard.as_mut().ok_or(MoqError::Closed)?.flush(),
-		)?))
+		block_on(guard.flush())?;
+		Ok(())
 	}
+}
 
-	/// Drain and close the encoder.
-	pub fn finish(&self) -> Result<Vec<MoqVideoPacket>, MoqError> {
-		let encoder = self
-			.inner
-			.lock()
-			.map_err(|_| panic_error())?
-			.take()
-			.ok_or(MoqError::Closed)?;
-		Ok(video_packets(block_on(encoder.finish())?))
+/// Publish every access unit `encoder` has ready.
+fn publish(
+	encoder: &mut moq_video::encode::Sink,
+	producer: &mut moq_video::encode::Producer,
+) -> Result<(), moq_video::Error> {
+	while let Some(encoded) = encoder.receive()? {
+		producer.publish(&encoded)?;
 	}
+	Ok(())
+}
+
+/// Flush `encoder` and publish its tail, closing it.
+fn drain(
+	mut encoder: moq_video::encode::Sink,
+	producer: &mut moq_video::encode::Producer,
+) -> Result<(), moq_video::Error> {
+	block_on(encoder.flush())?;
+	publish(&mut encoder, producer)
 }
 
 /// End a video track, given the result of draining its encoder into it.
@@ -360,6 +372,10 @@ struct VideoProducer {
 	/// an allocator. Beside the encoder, so a move to a new track, a finish, and an abort
 	/// change all three together.
 	follow: Option<Following>,
+	/// Notified under this rendition's lock each time the follower retunes, so a test
+	/// awaits the follower instead of polling `target`.
+	#[cfg(test)]
+	retuned: Arc<std::sync::Condvar>,
 }
 
 /// A rendition's bandwidth claim on its current track, and the thread retuning the encoder
@@ -472,10 +488,10 @@ impl VideoProducer {
 			return Ok(());
 		};
 		let frame = moq_video::Frame::new(surface, frame.timestamp.try_into()?);
-		// A backend that pipelines hands back an earlier frame's output, so this is
-		// zero or more access units rather than one per call.
-		let encoded = block_on(encoder.encode(frame))?;
-		self.producer.publish(&encoded)?;
+		// A backend that pipelines readies an earlier frame's output, so `publish`
+		// drains zero or more access units rather than one per call.
+		block_on(encoder.encode(frame))?;
+		publish(encoder, &mut self.producer)?;
 		Ok(())
 	}
 
@@ -516,7 +532,7 @@ impl VideoProducer {
 				if let Some(encoder) = self.encoder.take() {
 					self.target = moq_mux::rate::Target::Disabled;
 					// The encoder is gone either way, so a lost tail only costs those frames.
-					let drained = block_on(encoder.finish()).and_then(|encoded| self.producer.publish(&encoded));
+					let drained = drain(encoder, &mut self.producer);
 					if let Err(err) = drained {
 						tracing::warn!(error = %err, "failed to drain a disabled rendition's encoder");
 					}
@@ -570,7 +586,7 @@ impl VideoProducer {
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
 		let drained = match encoder {
-			Some(encoder) => block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded)),
+			Some(encoder) => drain(encoder, &mut producer),
 			None => Ok(()),
 		};
 		(finalize(producer, drained, children), follower)
@@ -610,10 +626,26 @@ impl MoqVideoProducer {
 	/// The bitrate the encoder produces at, or 0 while disabled.
 	#[cfg(test)]
 	pub(crate) fn applied_bitrate(&self) -> u64 {
-		match self.inner.lock().unwrap().as_ref().map(|producer| producer.target) {
-			Some(moq_mux::rate::Target::Enabled(bitrate)) => bitrate.as_bps(),
-			_ => 0,
+		applied(self.inner.lock().unwrap().as_ref())
+	}
+
+	/// Block until the follower has retuned the encoder to `bitrate`.
+	#[cfg(test)]
+	pub(crate) fn wait_applied(&self, bitrate: u64) {
+		let mut guard = self.inner.lock().unwrap();
+		while applied(guard.as_ref()) != bitrate {
+			let retuned = guard.as_ref().expect("the rendition is open").retuned.clone();
+			guard = retuned.wait(guard).unwrap();
 		}
+	}
+}
+
+/// The bitrate `producer` encodes at, or 0 while disabled or gone.
+#[cfg(test)]
+fn applied(producer: Option<&VideoProducer>) -> u64 {
+	match producer.map(|producer| producer.target) {
+		Some(moq_mux::rate::Target::Enabled(bitrate)) => bitrate.as_bps(),
+		_ => 0,
 	}
 }
 
@@ -855,6 +887,8 @@ impl MoqVideoProducer {
 				priority,
 				target: moq_mux::rate::Target::Enabled(ceiling),
 				follow: None,
+				#[cfg(test)]
+				retuned: Arc::default(),
 			}))),
 			children: children.clone(),
 		};
@@ -969,7 +1003,7 @@ async fn follow_reservation(followed: Followed) {
 		target,
 	} = followed;
 	let noop = kio::Waiter::noop();
-	let mut follower = moq_mux::rate::Follower::new(consumer, video_policy(ceiling, lower_ceiling(&lower, &noop)));
+	let mut follower = moq_mux::rate::Grant::new(consumer, video_policy(ceiling, lower_ceiling(&lower, &noop)));
 	follower.assume(target);
 	loop {
 		// Both ceilings are read on every wake, before the follower filters a grant against
@@ -1000,6 +1034,8 @@ async fn follow_reservation(followed: Followed) {
 		let policy = video_policy(*producer.ceiling.read(), below);
 		let before = producer.producer.demand();
 		let retuned = retune(&mut follower, policy, target, |target| producer.apply(target));
+		#[cfg(test)]
+		producer.retuned.notify_all();
 		// A disable drains the encoder into the track, and output with a new decoder identity
 		// moves the rendition, so the claim moves with it. The replaced follower is this
 		// thread, which ends here, so it is detached rather than joined.
@@ -1014,7 +1050,7 @@ async fn follow_reservation(followed: Followed) {
 /// `MoqVideoProducer::set_bitrate` already applied, instead. Returns the target applied,
 /// or `Err` with the name of an encoder that cannot follow at all.
 fn retune(
-	follower: &mut moq_mux::rate::Follower,
+	follower: &mut moq_mux::rate::Grant,
 	policy: moq_mux::rate::Policy,
 	target: moq_mux::rate::Target,
 	apply: impl FnOnce(moq_mux::rate::Target) -> Result<(), moq_video::Error>,
@@ -1457,7 +1493,7 @@ mod finish_tests {
 
 	/// The codec-only encoder every wrapper exposes (`moq.video.Encoder` and
 	/// friends): a keyframe opens the stream, `cut` forces the next one, and
-	/// `finish` closes it. No test in any language had driven it.
+	/// `flush` readies the tail without closing it.
 	#[test]
 	fn encoder_emits_keyframes_where_asked() {
 		let (width, height) = (64u32, 48u32);
@@ -1490,20 +1526,28 @@ mod finish_tests {
 		};
 
 		let mut packets = Vec::new();
+		let receive = |packets: &mut Vec<MoqVideoPacket>| {
+			while let Some(packet) = encoder.receive().unwrap() {
+				packets.push(packet);
+			}
+		};
 		for i in 0..3 {
-			packets.extend(encoder.encode(picture(i)).unwrap());
+			encoder.encode(picture(i)).unwrap();
+			receive(&mut packets);
 		}
-		packets.extend(encoder.flush().unwrap());
+		encoder.flush().unwrap();
+		receive(&mut packets);
 		encoder.set_bitrate(250_000).unwrap();
 		encoder.cut().unwrap();
-		packets.extend(encoder.encode(picture(3)).unwrap());
-		packets.extend(encoder.finish().unwrap());
+		encoder.encode(picture(3)).unwrap();
+		encoder.flush().unwrap();
+		receive(&mut packets);
 
 		let keyframes: Vec<MoqTimestamp> = packets.iter().filter(|p| p.keyframe).map(|p| p.timestamp).collect();
 		assert_eq!(packets.len(), 4, "one access unit per picture");
 		assert_eq!(keyframes, [ntsc(0), ntsc(3)], "keyframes at the start and the cut");
 		assert!(packets.iter().all(|p| !p.data.is_empty()), "an empty access unit");
-		assert!(matches!(encoder.encode(picture(4)), Err(MoqError::Closed)));
+		assert!(encoder.receive().unwrap().is_none(), "flush readied everything");
 	}
 
 	#[tokio::test]
@@ -1662,6 +1706,7 @@ mod finish_tests {
 			ceiling: kio::Producer::new(moq_net::bandwidth::Rate::from_mbps(1)),
 			priority: hang::catalog::PRIORITY.video,
 			follow: None,
+			retuned: Arc::default(),
 		};
 		let (video, disabled) = tokio::task::spawn_blocking(move || {
 			video
@@ -1690,7 +1735,7 @@ mod finish_tests {
 mod follow_tests {
 	use std::time::Duration;
 
-	use moq_mux::rate::{Follower, Policy, Target};
+	use moq_mux::rate::{Grant, Policy, Target};
 	use moq_net::bandwidth::Rate;
 
 	use super::*;
@@ -1698,7 +1743,7 @@ mod follow_tests {
 	/// Retune through `set`, which only ever sees an enabled target: these policies set no
 	/// lower rendition, so nothing disables.
 	fn rate(
-		follower: &mut Follower,
+		follower: &mut Grant,
 		ceiling: Rate,
 		target: Target,
 		set: impl FnOnce(Rate) -> Result<(), moq_video::Error>,
@@ -1719,7 +1764,7 @@ mod follow_tests {
 			policy
 		};
 		let grant = moq_net::bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), policy(Rate::from_mbps(1)));
+		let mut follower = Grant::new(grant.consume(), policy(Rate::from_mbps(1)));
 		grant.set(Some(Rate::from_mbps(2))).unwrap();
 		let dropped = follower.next().await.unwrap();
 		let moved = retune(&mut follower, policy(Rate::from_kbps(900)), dropped, |_| {
@@ -1741,7 +1786,7 @@ mod follow_tests {
 	}
 
 	/// Retune at every target until the follower goes a minute without one.
-	async fn quiet(follower: &mut Follower, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
+	async fn quiet(follower: &mut Grant, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
 		while let Ok(bitrate) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
 			rate(follower, ceiling, bitrate.unwrap(), &mut set).unwrap();
 		}
@@ -1753,7 +1798,7 @@ mod follow_tests {
 	async fn a_quiet_grant_retries_a_failed_raise() {
 		let ceiling = Rate::from_mbps(4);
 		let grant = moq_net::bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(ceiling));
+		let mut follower = Grant::new(grant.consume(), Policy::new(ceiling));
 		let mut applied = Vec::new();
 		let mut refuse = Some(ceiling);
 		let mut set = |bitrate| {
@@ -1783,7 +1828,7 @@ mod follow_tests {
 		let old = Rate::from_mbps(4);
 		let lowered = Rate::from_mbps(2);
 		let grant = moq_net::bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(old));
+		let mut follower = Grant::new(grant.consume(), Policy::new(old));
 		let applied = std::cell::RefCell::new(Vec::new());
 		let set = |bitrate| {
 			applied.borrow_mut().push(bitrate);

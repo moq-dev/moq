@@ -1,4 +1,4 @@
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type { Timed } from "@moq/net";
 import * as Moq from "@moq/net";
 
@@ -43,7 +43,7 @@ export class Consumer<T> {
 			.subscribe({
 				...Moq.Track.Subscription.default(),
 				priority: config.priority ?? 0,
-				delay: { max: Milli.zero },
+				delay: { max: Duration.ZERO },
 			})
 			.ordered();
 		this.#decoder = new Decoder(config);

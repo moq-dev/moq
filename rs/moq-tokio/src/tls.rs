@@ -585,7 +585,8 @@ pub struct Connect {
 	/// Only certificates are extracted; any private keys in the file are ignored.
 	/// Must be paired with `--connect-tls-key`. With the `watch` feature, both files
 	/// are hot reloaded for new connections, retaining the last valid pair while a
-	/// rotation is missing, malformed, or mismatched.
+	/// rotation is missing, malformed, or mismatched. Dialing `http://`, `ws://`,
+	/// `tcp://`, or `unix://` with a client certificate fails, since none can present it.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "connect-tls-cert",
@@ -1074,6 +1075,12 @@ impl Connect {
 	#[cfg(feature = "quic")]
 	pub(crate) fn allows_http_bootstrap(&self) -> bool {
 		self.fingerprint.is_empty() && !self.insecure.unwrap_or_default()
+	}
+
+	/// Whether a dial presents an mTLS client certificate.
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
+	pub(crate) fn has_client_cert(&self) -> bool {
+		self.identity.is_some() || self.cert.is_some()
 	}
 
 	/// Parse the configured fingerprints into fixed-size SHA-256 digests.
@@ -3667,6 +3674,27 @@ mod tests {
 				.is_ok()
 		);
 		assert!(client_verifier.verify_client_cert(&client_b, &[], now).is_ok());
+	}
+
+	/// A root file holding several CAs trusts every one of them, not only the first.
+	#[cfg(all(feature = "watch", feature = "quic"))]
+	#[test]
+	fn a_root_bundle_is_loaded_whole() {
+		let (unrelated, _, _, _, _) = signed_certificates();
+		let (signer, server, _, _, _) = signed_certificates();
+		let dir = tempfile::TempDir::new().unwrap();
+		let bundle = dir.path().join("bundle.pem");
+		std::fs::write(&bundle, format!("{unrelated}{signer}")).unwrap();
+
+		let roots = read_roots(&[bundle]).unwrap();
+		assert_eq!(roots.len(), 2);
+		let verifier = Connect::build_root_server_verifier(&roots, false, &crypto::provider().unwrap()).unwrap();
+		let name = ServerName::try_from("localhost").unwrap();
+		assert!(
+			verifier
+				.verify_server_cert(&server, &[], &name, &[], UnixTime::now())
+				.is_ok()
+		);
 	}
 
 	#[test]

@@ -47,7 +47,7 @@ async fn settle() {
 /// A worker claiming `claim`, answering each request with an output whose `video` track
 /// carries the worker's name and how many outputs it made before.
 struct Worker {
-	claim: Rc<origin::Route>,
+	claim: Rc<origin::Claim>,
 	outputs: Rc<RefCell<Vec<(origin::Route, track::Producer)>>>,
 	origin: origin::Producer,
 }
@@ -55,7 +55,7 @@ struct Worker {
 impl Worker {
 	fn new(hop: u64, claim: &str, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(origin.route_prefix(claim, origin::RouteOptions::default()).unwrap());
+		let claim = Rc::new(origin.claim(claim, origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(kio::clock::sim::spawn(async move {
@@ -96,10 +96,26 @@ async fn drain(announced: &mut origin::Routes) -> Vec<(&'static str, String, Ins
 	let mut events = Vec::new();
 	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		let (kind, announce) = match event.expect("announce ended") {
-			origin::RouteEvent::Start(a) => ("start", a),
-			origin::RouteEvent::Update(a) => ("update", a),
-			origin::RouteEvent::Restart(a) => ("restart", a),
-			origin::RouteEvent::End(a) => ("end", a),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Start,
+				announce: a,
+			} => ("start", a),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Update,
+				announce: a,
+			} => ("update", a),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Restart,
+				announce: a,
+			} => ("restart", a),
+			origin::RouteEvent {
+				kind: origin::RouteKind::End,
+				announce: a,
+			} => ("end", a),
+			origin::RouteEvent {
+				kind: origin::RouteKind::Offline,
+				announce: a,
+			} => ("offline", a),
 		};
 		events.push((kind, announce.prefix.to_string(), announce.route.instance().clone()));
 	}

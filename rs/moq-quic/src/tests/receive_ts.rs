@@ -147,7 +147,7 @@ fn send(
 	loop {
 		let now = pair.time;
 		if let Some((at, rate)) = step
-			&& now >= start + at
+			&& now >= start.saturating_add(at)
 		{
 			pair.to_server.bottleneck.as_mut().unwrap().set_rate(rate);
 			step = None;
@@ -167,13 +167,13 @@ fn send(
 			chunks.finalize();
 		}
 
-		if now >= start + end {
+		if now >= start.saturating_add(end) {
 			return start;
 		}
 		let wakeups = [
 			pair.client.next_wakeup(),
 			pair.server.next_wakeup(),
-			step.map(|(at, _)| start + at),
+			step.map(|(at, _)| start.saturating_add(at)),
 		];
 		pair.time = pair.time.max(wakeups.into_iter().flatten().min().unwrap());
 	}

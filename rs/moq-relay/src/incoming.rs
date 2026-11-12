@@ -83,7 +83,7 @@ pub trait Sealed: Sized {
 	fn auth(&self) -> moq_net::auth::Handle;
 	fn requests(&mut self) -> moq_net::auth::Requests;
 	fn role(&self) -> Option<moq_net::setup::Role>;
-	/// The Hop ID the peer declared in its SETUP, if any.
+	/// The identity the peer declared in its SETUP, if any: its Hop ID, or from moq-lite-07 its Node ID.
 	fn peer_hop(&self) -> Option<std::num::NonZeroU64>;
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self;
 	fn with_limits(self, limits: moq_net::session::Limits) -> Self;
@@ -123,9 +123,9 @@ impl Sealed for moq_tokio::server::Request {
 
 	#[cfg(feature = "quic")]
 	fn pacer(&self) -> Option<auth::Pacer> {
-		let quic = moq_tokio::server::Request::quic(self)?.clone();
+		let quic = moq_tokio::server::Request::quic_limits(self)?;
 		Some(auth::Pacer::new(move |caps| {
-			if let Err(err) = quic.set_limits(caps.limits()) {
+			if let Err(err) = quic.set(caps.limits()) {
 				tracing::warn!(%err, "failed to apply bitrate caps");
 			}
 		}))

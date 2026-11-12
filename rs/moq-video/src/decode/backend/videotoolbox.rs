@@ -151,6 +151,8 @@ pub(crate) struct VideoToolbox {
 	/// VideoToolbox returns through the callback.
 	pending: VecDeque<(i64, Timestamp)>,
 	sink: Box<Sink>,
+	/// Pictures paired with their timestamps, waiting for `receive`.
+	ready: VecDeque<Frame>,
 }
 
 impl VideoToolbox {
@@ -180,6 +182,7 @@ impl VideoToolbox {
 			sample_index: 0,
 			pending: VecDeque::new(),
 			sink: Box::new(Sink::default()),
+			ready: VecDeque::new(),
 		};
 		if let Some(parameter_sets) = &stream.parameter_sets {
 			let split = Split::new(codec, parameter_sets.clone())?;
@@ -292,20 +295,24 @@ impl VideoToolbox {
 		Ok(self.pending.remove(index).expect("index found above").1)
 	}
 
-	/// Convert every callback result collected by the last decode or drain.
-	fn take_frames(&mut self) -> Result<Vec<Frame>, Error> {
-		std::mem::take(&mut self.sink.frames)
-			.into_iter()
-			.map(|(surface, sample_time)| {
-				let timestamp = self.take_timestamp(sample_time)?;
-				Ok(Frame::new(Surface::PixelBuffer(surface), timestamp))
-			})
-			.collect()
+	/// Queue every callback result collected by the last decode or drain.
+	fn take_frames(&mut self) -> Result<(), Error> {
+		// Taken out and put back so the callback's buffer keeps its capacity.
+		let mut frames = std::mem::take(&mut self.sink.frames);
+		let queued = frames.drain(..).try_for_each(|(surface, sample_time)| {
+			let timestamp = self.take_timestamp(sample_time)?;
+			self.ready
+				.push_back(Frame::new(Surface::PixelBuffer(surface), timestamp));
+			Ok(())
+		});
+		frames.clear();
+		self.sink.frames = frames;
+		queued
 	}
 }
 
 impl Backend for VideoToolbox {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
 		// Split the Annex-B access unit, pull out any parameter sets, and gather
 		// the slices into length-prefixed (4-byte) form.
 		let Split { vps, sps, pps, avcc } = Split::new(self.codec, access_unit)?;
@@ -317,7 +324,7 @@ impl Backend for VideoToolbox {
 		self.ensure_session(vps, sps, pps)?;
 		// No parameter sets yet (e.g. a delta frame before the first keyframe).
 		let Some(live) = &self.session else {
-			return Ok(Vec::new());
+			return Ok(());
 		};
 
 		// A parameter-set-only access unit has nothing to decode.
@@ -350,7 +357,11 @@ impl Backend for VideoToolbox {
 		self.take_frames()
 	}
 
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
 		self.sink.frames.clear();
 		self.sink.error = None;
 

@@ -151,15 +151,16 @@ impl Metrics for Untracked {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceiveWindow {
-	/// The connection-wide receive window, in bytes, or [`u64::MAX`] when streams share none.
-	pub connection: u64,
+	/// The connection-wide receive window, in bytes, or `None` when streams share none.
+	pub connection: Option<std::num::NonZeroU64>,
 	/// The most receive credit one stream may hold, in bytes.
 	pub stream: u64,
 }
 
 impl ReceiveWindow {
-	/// A connection-wide window of `connection` bytes, of which one stream holds at most `stream`.
-	pub fn new(connection: u64, stream: u64) -> Self {
+	/// A connection-wide window of `connection` bytes, if any, of which one stream holds at
+	/// most `stream`.
+	pub fn new(connection: Option<std::num::NonZeroU64>, stream: u64) -> Self {
 		Self { connection, stream }
 	}
 }

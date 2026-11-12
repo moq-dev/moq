@@ -1,25 +1,25 @@
 import { describe, expect, it } from "bun:test";
-import type { Micro, Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { ringCapacity, ringHold, ringSamples, target } from "./latency";
 
-const ms = (value: number) => value as Milli;
+const ms = (value: number) => Duration.millis(value);
 
 describe("target", () => {
 	it("adds one frame to the measured term", () => {
-		expect(target({ measured: ms(40), frame: ms(20) })).toBe(ms(60));
+		expect(target({ measured: ms(40), frame: ms(20) })).toEqual(ms(60));
 	});
 
 	it("floors the measured term at the advertised span instead of adding it", () => {
-		expect(target({ measured: ms(40), advertised: ms(200), frame: ms(20) })).toBe(ms(220));
-		expect(target({ measured: ms(300), advertised: ms(200), frame: ms(20) })).toBe(ms(320));
+		expect(target({ measured: ms(40), advertised: ms(200), frame: ms(20) })).toEqual(ms(220));
+		expect(target({ measured: ms(300), advertised: ms(200), frame: ms(20) })).toEqual(ms(320));
 	});
 
 	it("adds the catalog delay on top, since the measurement cancels a cross-track offset", () => {
-		expect(target({ measured: ms(40), advertised: ms(60), frame: ms(20), delay: ms(200) })).toBe(ms(280));
+		expect(target({ measured: ms(40), advertised: ms(60), frame: ms(20), delay: ms(200) })).toEqual(ms(280));
 	});
 
 	it("is the measured term alone when nothing else is known", () => {
-		expect(target({ measured: ms(100) })).toBe(ms(100));
+		expect(target({ measured: ms(100) })).toEqual(ms(100));
 	});
 });
 
@@ -48,12 +48,12 @@ describe("ringSamples", () => {
 
 describe("ringHold", () => {
 	it("holds the target above the cap", () => {
-		expect(ringHold(ms(1_500))).toBe(1_000_000 as Micro);
+		expect(ringHold(ms(1_500))).toEqual(Duration.micros(1_000_000));
 	});
 
 	// At 44.1 kHz this target's floor rounds to a sample count a few picoseconds short of it.
 	it("holds exactly nothing for a target within the cap", () => {
-		expect(ringHold(ms(203.21995464852608))).toBe(0 as Micro);
-		expect(ringHold(ms(500))).toBe(0 as Micro);
+		expect(ringHold(ms(203.21995464852608))).toEqual(Duration.micros(0));
+		expect(ringHold(ms(500))).toEqual(Duration.micros(0));
 	});
 });

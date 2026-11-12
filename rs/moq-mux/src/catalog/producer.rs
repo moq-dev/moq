@@ -1088,12 +1088,17 @@ impl<E: CatalogExt> Producer<E> {
 		if let Some(err) = &state.closed {
 			return Err(err.clone());
 		}
+		// The shared outputs keep their own clones, whose appends the end refuses.
 		let result = self
 			.outputs
 			.hang
+			.clone()
 			.finish()
 			.map_err(crate::Error::from)
-			.and_then(|_| self.outputs.msf_track.finish().map_err(crate::Error::from));
+			.and_then(|_| {
+				let msf = self.outputs.msf_track.clone().finish();
+				msf.map(drop).map_err(crate::Error::from)
+			});
 		match result {
 			Ok(()) => {
 				state.closed = Some(moq_net::Error::Closed.into());
@@ -1190,7 +1195,11 @@ impl<E: CatalogExt> Guard<'_, E> {
 			return Ok(());
 		}
 		let now = kio::clock::now();
-		if throttle && estimates.last.is_some_and(|last| now < last + ESTIMATE_WINDOW) {
+		if throttle
+			&& estimates
+				.last
+				.is_some_and(|last| now < last.saturating_add(ESTIMATE_WINDOW))
+		{
 			return Ok(());
 		}
 		self.updated = true;
@@ -2117,9 +2126,9 @@ mod test {
 	fn a_short_track_declares_its_interval_when_it_finishes() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut video = video0(&mut broadcast, &catalog, &[0, 500]);
+		let video = video0(&mut broadcast, &catalog, &[0, 500]);
 		assert_eq!(catalog.snapshot().media.join, None, "still measuring");
-		video.finish().unwrap();
+		let _finished = video.finish().unwrap();
 		assert_eq!(
 			catalog.snapshot().media.interval(),
 			Some(std::time::Duration::from_millis(500))
@@ -2176,7 +2185,7 @@ mod test {
 		use std::time::Duration;
 
 		let captured = kio::clock::now();
-		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
+		let wall = kio::clock::Wall::MOQ_EPOCH + Duration::from_millis(60_000);
 		let clock = crate::Clock::at(captured, wall).unwrap();
 		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
 		let front = origin
@@ -2304,7 +2313,7 @@ mod test {
 			}
 		}
 		away.block_on(async {
-			video.finish().unwrap();
+			let _finished = video.finish().unwrap();
 			catalog.finish().unwrap();
 		});
 
@@ -2346,8 +2355,8 @@ mod test {
 
 		kio::clock::sleep(Duration::from_secs(5)).await;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
-		let start = kio::clock::now() - Duration::from_secs(5);
+		let wall = kio::clock::Wall::MOQ_EPOCH + Duration::from_millis(60_000);
+		let start = kio::clock::now().saturating_sub(Duration::from_secs(5));
 		let config = Config::default().with_clock(crate::Clock::at(start, wall).expect("a representable wall"));
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
 
@@ -2515,9 +2524,7 @@ mod test {
 		use std::time::Duration;
 
 		let now = Duration::from_secs(86_400);
-		crate::clock::fake_host_wall(
-			kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS) + now,
-		);
+		crate::clock::fake_host_wall(kio::clock::Wall::MOQ_EPOCH + now);
 		let zero = moq_net::Timestamp::from_secs(now.as_secs() - 3600).unwrap();
 		hang::catalog::Clock::new(zero.convert(scale).unwrap()).unwrap()
 	}
@@ -2569,9 +2576,7 @@ mod test {
 
 		// The same mapping from `with_clock` agrees in any units, without reading the host's wall
 		// clock, which may be unset.
-		let zero = kio::clock::Wall::UNIX_EPOCH
-			+ Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS)
-			+ Duration::from_micros(input.wall.as_micros() as u64);
+		let zero = kio::clock::Wall::MOQ_EPOCH + Duration::from_micros(input.wall.as_micros() as u64);
 		let fixed = crate::Clock::at(kio::clock::now(), zero).unwrap();
 		seed.media.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
 		crate::clock::fake_host_wall(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
@@ -2658,7 +2663,7 @@ mod test {
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		assert_eq!(catalog.snapshot().media.clock, None);
 
-		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
+		let wall = kio::clock::Wall::MOQ_EPOCH;
 		let pts = moq_net::Timestamp::from_micros(1_000_000).unwrap();
 		assert!(matches!(
 			catalog.timebase().place(pts, wall),

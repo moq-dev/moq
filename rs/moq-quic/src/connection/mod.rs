@@ -58,7 +58,6 @@ pub use datagrams::Datagrams;
 
 mod mtud;
 #[cfg(feature = "mux")]
-#[doc(hidden)]
 pub mod mux;
 
 mod packet_builder;
@@ -81,7 +80,6 @@ mod receive_timestamps;
 
 mod sent_packets;
 #[cfg(feature = "fuzz")]
-#[doc(hidden)]
 pub use sent_packets::Bench as BenchSentPackets;
 mod slots;
 mod spaces;
@@ -1105,7 +1103,7 @@ impl Connection {
 			if sent.largest_acked.is_some() {
 				self.spaces[space_id].pending_acks.acks_sent();
 				self.timers.stop(Timer::MaxAckDelay);
-				self.next_bundled_ack_time = Some(now + self.next_bundled_ack_delay());
+				self.next_bundled_ack_time = Some(now.saturating_add(self.next_bundled_ack_delay()));
 			}
 
 			// Keep information about the packet around until it gets finalized
@@ -1308,6 +1306,13 @@ impl Connection {
 				first_decode,
 				remaining,
 			}) => {
+				// A datagram read after the idle deadline, as one buffered while this process was
+				// stopped, finds the connection already timed out: handling it first would restart
+				// the idle timer, and its ACKs would fold the stop into the RTT and so into 3 * PTO.
+				if self.timers.is_expired(Timer::Idle, now) {
+					self.handle_timeout(now);
+					return;
+				}
 				// If this packet could initiate a migration and we're a client or a server that
 				// forbids migration, drop the datagram. This could be relaxed to heuristically
 				// permit NAT-rebinding-like migration.
@@ -1693,8 +1698,8 @@ impl Connection {
 	}
 
 	/// The connection-wide receive window now in force; see [`Limits::receive_window`]
-	pub fn receive_window(&self) -> u64 {
-		self.streams.receive_window()
+	pub fn receive_window(&self) -> std::num::NonZeroU64 {
+		std::num::NonZeroU64::new(self.streams.receive_window()).expect("receive windows are non-zero limits")
 	}
 
 	/// The most receive credit one stream may hold: the largest per-stream window ever in force,
@@ -1993,7 +1998,8 @@ impl Connection {
 			.as_ref()
 			.expect("update not acknowledged yet")
 			.1;
-		self.timers.set(Timer::KeyDiscard, start + self.pto(space) * 3);
+		self.timers
+			.set(Timer::KeyDiscard, start.saturating_add(self.pto(space) * 3));
 	}
 
 	fn on_loss_detection_timeout(&mut self, now: Instant) {
@@ -2111,7 +2117,7 @@ impl Connection {
 					}
 				}
 			} else {
-				let next_loss_time = info.time_sent + loss_delay;
+				let next_loss_time = info.time_sent.saturating_add(loss_delay);
 				space.loss_time = Some(space.loss_time.map_or(next_loss_time, |x| cmp::min(x, next_loss_time)));
 				persistent_congestion_start = None;
 			}
@@ -2209,7 +2215,7 @@ impl Connection {
 				SpaceId::Handshake => SpaceId::Handshake,
 				_ => SpaceId::Initial,
 			};
-			return Some((now + duration, space));
+			return Some((now.saturating_add(duration), space));
 		}
 
 		let mut result = None;
@@ -2228,7 +2234,7 @@ impl Connection {
 			let Some(last_ack_eliciting) = self.spaces[space].time_of_last_ack_eliciting_packet else {
 				continue;
 			};
-			let pto = last_ack_eliciting + duration;
+			let pto = last_ack_eliciting.saturating_add(duration);
 			if result.is_none_or(|(earliest_pto, _)| pto < earliest_pto) {
 				result = Some((pto, space));
 			}
@@ -3356,7 +3362,7 @@ impl Connection {
 			.packet_received(now, number, ack_eliciting, &space.dedup)
 		{
 			self.timers
-				.set(Timer::MaxAckDelay, now + self.ack_frequency.max_ack_delay);
+				.set(Timer::MaxAckDelay, now.saturating_add(self.ack_frequency.max_ack_delay));
 			self.next_bundled_ack_time = Some(now);
 		}
 
@@ -3428,7 +3434,7 @@ impl Connection {
 
 		self.timers.set(
 			Timer::PathValidation,
-			now + 3 * cmp::max(self.pto(SpaceId::Data), prev_pto),
+			now.saturating_add(3 * cmp::max(self.pto(SpaceId::Data), prev_pto)),
 		);
 	}
 
@@ -3812,7 +3818,8 @@ impl Connection {
 	}
 
 	fn set_close_timer(&mut self, now: Instant) {
-		self.timers.set(Timer::Close, now + 3 * self.pto(self.highest_space));
+		self.timers
+			.set(Timer::Close, now.saturating_add(3 * self.pto(self.highest_space)));
 	}
 
 	/// Handle transport parameters received from the peer

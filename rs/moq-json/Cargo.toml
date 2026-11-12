@@ -19,6 +19,9 @@ features = ["async"]
 default = []
 # Generated async wrappers for the poll methods. Enable where you `.await` them.
 async = ["kio/async"]
+# Exposes the merge-patch diff to the codec bench, through the `bench` module. Off by
+# default.
+bench = []
 
 [dependencies]
 bytes = { workspace = true }
@@ -43,6 +46,7 @@ workspace-hack = { path = "../workspace-hack" }
 [[bench]]
 name = "codec"
 harness = false
+required-features = ["bench"]
 
 [[bench]]
 name = "allocations"

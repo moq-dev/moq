@@ -236,7 +236,7 @@ pub(crate) struct Protocol {
 	trigger: kio::Consumer<Option<Goaway>>,
 	/// Written by the driver's receive path when a GOAWAY is decoded.
 	received: kio::Producer<Option<Goaway>>,
-	/// Set alongside `received`; reprices this session's routes to the drain cost.
+	/// Set alongside `received`; ranks this session's routes last.
 	pub going_away: GoingAway,
 }
 
@@ -396,12 +396,15 @@ mod tests {
 			.producer()
 			.send(Goaway::new().with_timeout(Duration::from_secs(1)))
 			.unwrap();
-		let sent = crate::time::Instant::ZERO + Duration::from_secs(5);
+		let sent = crate::time::Instant::ZERO.saturating_add(Duration::from_secs(5));
 		runtime.advance(sent);
 		assert!(deadline.poll(&waiter).is_pending());
-		runtime.advance(sent + Duration::from_secs(1) - Duration::from_nanos(1));
+		runtime.advance(
+			sent.saturating_add(Duration::from_secs(1))
+				.saturating_sub(Duration::from_nanos(1)),
+		);
 		assert!(deadline.poll(&waiter).is_pending());
-		runtime.advance(sent + Duration::from_secs(1));
+		runtime.advance(sent.saturating_add(Duration::from_secs(1)));
 		assert_eq!(deadline.poll(&waiter), Poll::Ready(Some(Duration::from_secs(1))));
 	}
 

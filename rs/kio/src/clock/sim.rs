@@ -270,19 +270,18 @@ impl Wake for Flag {
 }
 
 /// Clears the thread's runtime when [`run`] returns or unwinds, printing the seed
-/// that replays an unwinding run.
+/// that replays an unwinding run when [`run`] seeded it.
 struct Enter {
-	seed: u64,
+	replay: Option<u64>,
 }
 
 impl Drop for Enter {
 	fn drop(&mut self) {
 		CURRENT.with(|current| current.borrow_mut().take());
-		if std::thread::panicking() {
-			eprintln!(
-				"kio::clock::sim run panicked; replay it with MOQ_SIM_SEED={}",
-				self.seed
-			);
+		if let Some(seed) = self.replay
+			&& std::thread::panicking()
+		{
+			eprintln!("kio::clock::sim run panicked; replay it with MOQ_SIM_SEED={seed}");
 		}
 	}
 }
@@ -298,12 +297,24 @@ impl Drop for Enter {
 /// exceeds the ready kio poll limit, a detached task panics, or `MOQ_SIM_SEED` is
 /// not a `u64`.
 pub fn run<F: IntoFuture>(future: F) -> F::Output {
-	run_seeded(seed_from_env(), future)
+	let seed = seed_from_env();
+	enter(seed, Some(seed), future)
 }
 
-fn run_seeded<F: IntoFuture>(seed: u64, future: F) -> F::Output {
+/// [`run`] with [`rng`](crate::clock::rng) and [`seed`](crate::clock::seed) drawn from
+/// `seed`, ignoring `MOQ_SIM_SEED`: for a sweep that derives each case's seed itself,
+/// so one setting replays a case.
+///
+/// # Panics
+///
+/// As [`run`] does, except on `MOQ_SIM_SEED`.
+pub fn run_seeded<F: IntoFuture>(seed: u64, future: F) -> F::Output {
+	enter(seed, None, future)
+}
+
+fn enter<F: IntoFuture>(seed: u64, replay: Option<u64>, future: F) -> F::Output {
 	let runtime = Runtime::enter(seed);
-	let enter = Enter { seed };
+	let enter = Enter { replay };
 
 	let mut future = pin!(future.into_future());
 	let mut output = None;
@@ -380,7 +391,7 @@ pub fn attach(deadlines: &Deadlines) {
 /// Outside [`run`].
 pub async fn advance(duration: Duration) {
 	let runtime = expect_current();
-	let at = runtime.now() + duration;
+	let at = runtime.now().saturating_add(duration);
 	runtime.advance_to(at);
 	yield_now().await;
 }
@@ -697,7 +708,7 @@ mod tests {
 	/// until that deadline, rather than waking itself and spinning.
 	#[crate::test]
 	async fn a_same_deadline_reset_does_not_wake() {
-		let at = crate::clock::now() + Duration::from_secs(1);
+		let at = crate::clock::now().saturating_add(Duration::from_secs(1));
 		let mut sleep = Box::pin(crate::clock::sleep(Duration::from_secs(1)));
 		let mut polls = 0;
 		std::future::poll_fn(|cx| {
@@ -808,7 +819,7 @@ mod tests {
 	}
 
 	fn at(secs: u64) -> Instant {
-		Instant::ZERO + Duration::from_secs(secs)
+		Instant::ZERO.saturating_add(Duration::from_secs(secs))
 	}
 
 	#[test]
@@ -1001,7 +1012,7 @@ mod tests {
 		assert_eq!(ticks.tick().await, at(3));
 		assert_eq!(
 			crate::clock::now(),
-			Instant::ZERO + Duration::from_millis(3500),
+			Instant::ZERO.saturating_add(Duration::from_millis(3500)),
 			"caught up at once"
 		);
 		assert_eq!(ticks.tick().await, at(4));
@@ -1023,7 +1034,10 @@ mod tests {
 		ticks.tick().await;
 		advance(Duration::from_millis(3500)).await;
 		assert_eq!(ticks.tick().await, at(1));
-		assert_eq!(ticks.tick().await, Instant::ZERO + Duration::from_millis(4500));
+		assert_eq!(
+			ticks.tick().await,
+			Instant::ZERO.saturating_add(Duration::from_millis(4500))
+		);
 	}
 
 	#[crate::test]
@@ -1166,7 +1180,7 @@ mod tests {
 				Pin::new(&mut *polled.borrow_mut()).poll(cx)
 			}));
 			yield_now().await;
-			let target = crate::clock::now() + Duration::from_secs(3);
+			let target = crate::clock::now().saturating_add(Duration::from_secs(3));
 			sleep.borrow_mut().reset(target);
 			task.await.unwrap();
 			assert_eq!(crate::clock::now(), target);
@@ -1193,7 +1207,7 @@ mod tests {
 		crate::clock::sleep(Duration::from_secs(1)).await;
 
 		let mut deadline = Deadline::new(&deadlines);
-		deadline.set(Some(crate::clock::now() + Duration::from_secs(1)));
+		deadline.set(Some(crate::clock::now().saturating_add(Duration::from_secs(1))));
 		assert_eq!(count.0.load(Ordering::SeqCst), 1, "the parked owner was not woken");
 	}
 
@@ -1245,7 +1259,7 @@ mod tests {
 			polls.push(now);
 			match polls.len() {
 				3 => Err("done"),
-				n => Ok(Some(now + Duration::from_secs(n as u64))),
+				n => Ok(Some(now.saturating_add(Duration::from_secs(n as u64)))),
 			}
 		})
 		.await;

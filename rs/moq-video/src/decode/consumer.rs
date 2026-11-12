@@ -419,7 +419,11 @@ impl Reader {
 				// nothing in between to wait on. A caller that treats a codec
 				// error as one lost picture and carries on then spins.
 				self.drained = true;
-				self.pending.extend(tail?.into_iter().map(Read::Frame));
+				// Queue what the flush readied before reporting its error, so a
+				// later read still hands those pictures over.
+				let received = self.receive();
+				tail?;
+				received?;
 				continue;
 			};
 
@@ -431,19 +435,25 @@ impl Reader {
 				continue;
 			}
 
-			let pictures = self
-				.decoder
+			self.decoder
 				.decode(mux_frame.payload, mux_frame.timestamp, mux_frame.keyframe)
 				.await?;
-			self.pending.extend(pictures.into_iter().map(Read::Frame));
+			self.receive()?;
 		}
+	}
+
+	/// Queue every picture the decoder has ready.
+	fn receive(&mut self) -> Result<(), Error> {
+		while let Some(picture) = self.decoder.receive()? {
+			self.pending.push_back(Read::Frame(picture));
+		}
+		Ok(())
 	}
 
 	/// Queue every picture the decoder still holds.
 	async fn drain(&mut self) -> Result<(), Error> {
-		let pictures = self.decoder.flush().await?;
-		self.pending.extend(pictures.into_iter().map(Read::Frame));
-		Ok(())
+		self.decoder.flush().await?;
+		self.receive()
 	}
 }
 
@@ -498,7 +508,9 @@ mod tests {
 			encoder.cut().unwrap();
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap());
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				producer.publish(&encoded).unwrap();
+			}
 		}
 
 		let origin = produce_origin();
@@ -510,8 +522,8 @@ mod tests {
 		// wide enough to read them: its REAL_TIME default keeps only the live edge, and
 		// the second `next()` would then block forever waiting for a group that was
 		// skipped.
-		let mut export =
-			moq_mux::container::fmp4::Export::new(source, catalog).with_max_delay(std::time::Duration::from_secs(30));
+		let mut export = moq_mux::container::fmp4::Export::new(source, catalog)
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 
@@ -575,7 +587,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -659,7 +671,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -732,7 +744,7 @@ mod tests {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -744,6 +756,7 @@ mod tests {
 			kind: Kind::Named(probe::NATIVE_NAME.into()),
 			output: crate::Output::Cpu,
 			scale_hint: Some(crate::Size::new(160, 120)),
+			..Default::default()
 		};
 		let max_delay = std::time::Duration::from_secs(10);
 		let mut consumer = pollster::block_on(Consumer::new(
@@ -842,7 +855,7 @@ mod tests {
 		consumer.reader(Lane::Min).track.set_delay(Delay::default());
 		write(12, &[3000]);
 		write(13, &[4000, 3800, 3900, 4100]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		got.clear();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			got.push(frame.timestamp.as_micros());
@@ -877,7 +890,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -976,7 +989,7 @@ mod tests {
 		read(&mut consumer).await;
 
 		producer.write(picture(200_000, b"new access unit")).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		read(&mut consumer).await;
 		read(&mut consumer).await;
 		assert_eq!(reads, ["frame 100000", "end 133333", "frame 200000", "none"]);
@@ -994,11 +1007,11 @@ mod tests {
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let subscriber = broadcast.consume();
-		let mut producer = moq_mux::container::Producer::new(
+		let producer = moq_mux::container::Producer::new(
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 		);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -1074,7 +1087,7 @@ mod tests {
 			}
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap());
-			for encoded in encoder.encode(&frame).unwrap() {
+			for encoded in encoder.encode_all(&frame).unwrap() {
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: encoded.timestamp,
@@ -1085,7 +1098,7 @@ mod tests {
 					.unwrap();
 			}
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let decode = Options {
 			decoder: Config {
@@ -1412,7 +1425,7 @@ mod tests {
 		let (broadcast, mut track) = live_track();
 		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
 		group(&mut track, 1, &[4, 5]).finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		// A budget past the whole 5 s backlog, so the start keeps every cached group and both
 		// decoders read them all.

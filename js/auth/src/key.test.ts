@@ -25,8 +25,8 @@ const testClaims = {
 	root: "test-path",
 	publish: ["test-pub/**"],
 	subscribe: ["test-sub/**"],
-	exp: Math.floor((wall() + 60 * 1000) / 1000), // 1 minute from now in seconds
-	iat: Math.floor(wall() / 1000), // now in seconds
+	exp: Math.floor(wall().asUnixMillis() / 1000 + 60), // 1 minute from now in seconds
+	iat: Math.floor(wall().asUnixMillis() / 1000), // now in seconds
 };
 
 type AsymmetricAlgorithm = Exclude<Algorithm, "HS256" | "HS384" | "HS512">;
@@ -56,7 +56,7 @@ async function generateAsymmetricKeyPair(
 
 test("verify refuses unsafe signed payloads without dropping their restrictions", async () => {
 	const clock = new Manual();
-	clock.stepWall(Wall(1_000_000));
+	clock.stepWall(Wall.unixMillis(1_000_000));
 	const installed = clock.install();
 	try {
 		const key = Key.parse(encodeJwk(testKey));
@@ -283,7 +283,7 @@ test("verify - invalid token format", async () => {
 test("verify - expired token", async () => {
 	const expiredClaims = {
 		...testClaims,
-		exp: Math.floor((wall() - 60 * 1000) / 1000), // 1 minute ago in seconds
+		exp: Math.floor(wall().asUnixMillis() / 1000 - 60), // 1 minute ago in seconds
 	};
 
 	const key = Key.parse(encodeJwk(testKey));
@@ -332,8 +332,8 @@ test("round-trip - sign and verify", async () => {
 		root: "test-path",
 		publish: ["test-pub/**"],
 		subscribe: ["test-sub/**"],
-		exp: Math.floor((wall() + 60 * 1000) / 1000),
-		iat: Math.floor(wall() / 1000),
+		exp: Math.floor(wall().asUnixMillis() / 1000 + 60),
+		iat: Math.floor(wall().asUnixMillis() / 1000),
 	};
 
 	const token = await Key.sign(key, originalClaims);
@@ -805,13 +805,15 @@ test("sign - subtree grants are written as legacy put/get", async () => {
 	expect(payload).toEqual({ root: "test-path", put: ["alice"], get: [""] });
 });
 
-test("sign - legacy-shaped input cannot slip past a key scope", async () => {
+test("sign - refuses the legacy put/get spelling, even within scope", async () => {
 	const scoped: Key = {
 		...Key.parse(encodeJwk(testKey)),
 		scope: { root: "demo", publish: ["inside/**"] },
 	};
-	const legacy = { root: "demo", put: ["outside"] } as unknown as Parameters<typeof Key.sign>[1];
-	await expect(Key.sign(scoped, legacy)).rejects.toThrow(/scope/);
+	const inside = { root: "demo", put: ["inside"] } as unknown as Claims;
+	await expect(Key.sign(scoped, inside)).rejects.toThrow("legacy put/get");
+	const outside = { root: "demo", put: ["outside"] } as unknown as Claims;
+	await expect(Key.sign(scoped, outside)).rejects.toThrow("legacy put/get");
 });
 
 test("key scope is enforced when signing and verifying", async () => {
@@ -881,7 +883,7 @@ async function signRaw(payload: Record<string, unknown>): Promise<string> {
 // might narrow the grant, and a misspelled `root` would widen it to everything.
 test("verify - only registered claims", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	const now = Math.floor(wall() / 1000);
+	const now = Math.floor(wall().asUnixMillis() / 1000);
 
 	const token = await signRaw({ root: "room", publish: ["**"], iss: "api", sub: "alice", jti: "1", iat: now });
 	const claims = await Key.verify(key, token);
@@ -900,7 +902,7 @@ test("verify - only registered claims", async () => {
 
 test("verify - enforces not before", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	const now = Math.floor(wall() / 1000);
+	const now = Math.floor(wall().asUnixMillis() / 1000);
 	expect((await Key.verify(key, await signRaw({ publish: ["**"], nbf: now - 60 }))).nbf).toBe(now - 60);
 	await expect(Key.verify(key, await signRaw({ publish: ["**"], nbf: now + 3600 }))).rejects.toThrow();
 });

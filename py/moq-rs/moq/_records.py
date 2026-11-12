@@ -339,10 +339,13 @@ def _track_info(info: TrackInfo | None) -> MoqTrackInfo | None:
 class Backoff:
     """Retry pacing for the automatic reconnect.
 
+    It applies only once a session has been established: a first dial that reaches no
+    session ends the connection with its error rather than retrying.
+
     The delay starts at ``initial``, multiplies by ``multiplier`` after each failed
     attempt, and caps at ``max``. After ``timeout`` of consecutive failures the
     connection gives up; ``timedelta(0)`` retries forever. ``None`` keeps each
-    default: 1s, x2, 5s, and a 10s window.
+    default: 1s, x2, 5s, and no give-up.
     """
 
     initial: timedelta | None = None

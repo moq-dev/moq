@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano } from "@moq/clock";
+import { Duration, type Instant } from "@moq/clock";
 import * as btree from "sorted-btree";
 import { max, min } from "./util/sequence.ts";
 
@@ -16,12 +16,17 @@ const compare = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 : 0);
  * so a stream opened before the end can still be in flight after it. This bounds the wait on
  * IETF, and on moq-lite when the subscription has no max delay to bound it with.
  */
-export const GRACE = Milli(1000);
+export const GRACE = Duration.millis(1000);
 
 /** The grace for a subscription with `delay.max`: how long it was willing to wait for a late group anyway, or {@link GRACE} without one. */
-export function grace(maxDelay: Milli): Milli {
-	return maxDelay > 0 ? maxDelay : GRACE;
+export function grace(maxDelay: Duration): Duration {
+	return maxDelay.isZero() ? GRACE : maxDelay;
 }
+
+// Bun 1.4's heap (bun:jsc `heapStats`) grows about 191 bytes per disjoint run of a ledger, its
+// age entry and timestamp included.
+/** Bookkeeping a track bills per run of its arrivals, so a peer fragmenting them costs what the cache would hold. */
+export const RUN_OVERHEAD = 192;
 
 // A run of accounted sequences `[start, end)`, and when the gap below it opened, which is
 // when its missing groups became late.
@@ -43,7 +48,7 @@ export class Ledger {
 	#runs = new BTree<bigint, Run>(undefined, compare);
 	// Demand can restart a gap below an older one. Index ages separately so expiring
 	// one gap never scans all the younger ones. Both indexes own exactly the same runs.
-	#ages = new BTree<Run, undefined>(undefined, (a, b) => a.since - b.since || compare(a.start, b.start));
+	#ages = new BTree<Run, undefined>(undefined, (a, b) => a.since.cmp(b.since) || compare(a.start, b.start));
 	#last?: Run;
 	// Exclude the leading gap, which has no lower run to fold into.
 	#next?: Run;
@@ -93,9 +98,8 @@ export class Ledger {
 	}
 
 	/** Fold every gap at least `grace` old into the runs around it. */
-	expire(at: Instant, grace: Milli): void {
-		const limit = Nano.fromMilli(grace);
-		while (this.#next && Instant.durationSince(at, this.#next.since) >= limit) {
+	expire(at: Instant, grace: Duration): void {
+		while (this.#next && at.since(this.#next.since).ge(grace)) {
 			const run = this.#next;
 			const below = this.#runs.nextLowerPair(run.start)?.[1];
 			if (!below) throw new Error("an expiring gap must have a lower run");
@@ -106,9 +110,31 @@ export class Ledger {
 		}
 	}
 
+	/**
+	 * Fold the oldest gap into the runs around it however young, giving up on it early, and
+	 * return the sequences it held; undefined when no gap is left to fold.
+	 */
+	foldOldest(): { start: bigint; end: bigint } | undefined {
+		const run = this.#next;
+		if (!run) return undefined;
+		const below = this.#runs.nextLowerPair(run.start)?.[1];
+		if (!below) throw new Error("a folding gap must have a lower run");
+		const gap = { start: below.end, end: run.start };
+		below.end = run.end;
+		this.#remove(run);
+		if (this.#last === run) this.#last = below;
+		this.#nextExpiry();
+		return gap;
+	}
+
 	/** Whether a gap separates two runs, so {@link expire} has anything to fold. */
 	hasGaps(): boolean {
 		return this.#runs.size > 1;
+	}
+
+	/** How many runs it holds: one more than its gaps. */
+	get size(): number {
+		return this.#runs.size;
 	}
 
 	/** The lowest sequence accounted for. */
@@ -120,6 +146,11 @@ export class Ledger {
 	runEnd(sequence: bigint): bigint | undefined {
 		const run = this.#runs.getPairOrNextLower(sequence)?.[1];
 		return run !== undefined && sequence < run.end ? run.end : undefined;
+	}
+
+	/** The exclusive end of the highest run starting at or below `sequence`. */
+	endBelow(sequence: bigint): bigint | undefined {
+		return this.#runs.getPairOrNextLower(sequence)?.[1].end;
 	}
 
 	/** Whether every sequence in `[start, end)` is accounted for. */

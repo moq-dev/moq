@@ -1,5 +1,4 @@
 /** Sweep failed group sends over independent publishers and subscribers. */
-import { Milli } from "@moq/clock";
 import { randomHop } from "../src/hop.ts";
 import { Publisher } from "../src/lite/publisher.ts";
 import { decodeSubscribeResponseMaybe, Subscribe } from "../src/lite/subscribe.ts";
@@ -25,7 +24,7 @@ try {
 					const origin = new OriginProducer();
 					const broadcastRoute = origin.route(Path.from("bench"));
 					const broadcast = broadcastRoute.broadcast;
-					const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+					const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 					for (let sequence = 0n; sequence < BigInt(groups); sequence++) {
 						const group = track.createGroup(sequence);
 						group.writeFrame(textFrame("frame"));
@@ -59,21 +58,22 @@ try {
 									broadcast: Path.from("bench"),
 									track: "video",
 									priority: 0,
-									maxDelay: Milli(30_000),
+									maxDelay: 30_000,
 									startGroup: 0n,
 								}),
 								server,
 							);
 							try {
+								// Lite-07 keeps the Subscribe Stream open past SUBSCRIBE_FINISH, so stop once every
+								// group is accounted for rather than waiting for its end.
 								let dropped = 0;
-								for (;;) {
+								while (dropped < groups) {
 									const response = await decodeSubscribeResponseMaybe(
 										client.reader,
 										Version.DRAFT_07,
 									);
 									if (!response) break;
-									if ("drop" in response)
-										dropped += Number(response.drop.end - response.drop.start + 1n);
+									if ("drop" in response) dropped += Number(response.drop.end - response.drop.start);
 								}
 								if (dropped !== groups) throw new Error(`dropped ${dropped}, expected ${groups}`);
 								client.writer.close();

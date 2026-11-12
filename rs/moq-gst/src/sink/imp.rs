@@ -1333,15 +1333,22 @@ mod tests {
 			.build()
 	}
 
-	struct CatalogRun(super::super::MoqSink);
+	/// A sink whose dial hangs for the whole test: a first dial that failed would end the
+	/// session, and the broadcast with it.
+	struct CatalogRun(
+		super::super::MoqSink,
+		#[allow(dead_code, reason = "held so the dial hangs")] std::net::TcpListener,
+	);
 
 	impl CatalogRun {
 		fn new() -> Self {
 			gst::init().unwrap();
+			// The kernel completes the TCP handshake, but nothing ever answers the session's.
+			let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
 			let sink = sink();
-			sink.set_property("url", "tcp://127.0.0.1:1");
+			sink.set_property("url", format!("tcp://{}", silent.local_addr().unwrap()));
 			sink.set_property("broadcast", "catalog-test");
-			Self(sink)
+			Self(sink, silent)
 		}
 
 		fn pad(&self, name: &str) -> gst::Pad {
@@ -1491,7 +1498,9 @@ mod tests {
 		};
 		assert_eq!(
 			first.media.clock.unwrap().wall.as_micros(),
-			((1_735_689_600 - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128,
+			(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(1_735_689_600))
+				.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+				.as_micros(),
 		);
 	}
 
@@ -1532,7 +1541,9 @@ mod tests {
 			};
 			assert_eq!(
 				clock.wall.as_micros(),
-				((zero - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128
+				(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(zero))
+					.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+					.as_micros()
 			);
 			for (name, kind, expected) in [
 				("video", moq_mux::container::Kind::Video, 3),
@@ -2460,7 +2471,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).unwrap();
 		track.append_group().unwrap().finish().unwrap();
-		track.finish().unwrap();
+		let track = track.finish().unwrap();
 		assert!(session.finish());
 		while bus.pop().is_some() {}
 
@@ -2625,7 +2636,7 @@ mod tests {
 
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let quic = super::super::session::quic_config(&resolved).resolve();
-		assert_eq!(quic.idle_timeout, Duration::from_secs(15));
+		assert_eq!(quic.idle_timeout, Some(Duration::from_secs(15)));
 		assert_eq!(quic.keep_alive, Some(Duration::from_secs(3)));
 		assert!(!sink.property::<bool>("quic-keylog"));
 		assert!(quic.keylog.is_none());
@@ -2635,8 +2646,8 @@ mod tests {
 		sink.set_property("quic-keylog", true);
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let quic = super::super::session::quic_config(&resolved).resolve();
-		assert_eq!(quic.idle_timeout, Duration::ZERO);
-		assert_eq!(quic.keep_alive, Some(Duration::ZERO));
+		assert_eq!(quic.idle_timeout, None);
+		assert_eq!(quic.keep_alive, None);
 		assert!(quic.keylog.is_some());
 	}
 

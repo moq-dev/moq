@@ -13,7 +13,7 @@ const PARAM_PATH: u64 = 0x2;
 const PARAM_ROLE: u64 = 0x3;
 /// Setup Parameter id for the link cost the dialer assigns to this connection.
 const PARAM_COST: u64 = 0x4;
-/// Setup Parameter id for the endpoint's Hop ID (before lite-07, which names routes instead).
+/// Setup Parameter id for the endpoint's Hop ID before lite-07, and its Node ID from lite-07.
 const PARAM_HOP: u64 = 0x5;
 /// Setup Parameter id for the sender's implementation, as `name/version` product tokens.
 const PARAM_IMPLEMENTATION: u64 = 0x6;
@@ -21,6 +21,9 @@ const PARAM_IMPLEMENTATION: u64 = 0x6;
 const PARAM_TOKEN: u64 = 0x7;
 /// Setup Parameter id for the sender's route key proof (lite-07+).
 const PARAM_ROUTE_KEY: u64 = 0x8;
+/// Setup Parameter id offering to receive the Lite-06 Chain on lite-07 announcements, a
+/// lite-06 compatibility extension that the lite-07 to lite-08 migration deletes.
+const PARAM_LITE06_CHAIN: u64 = 0x9;
 /// Setup Parameter id offering the `ietf` extension (draft-lcurley-moq-ietf): "IETF" in ASCII.
 const PARAM_IETF: u64 = 0x4945_5446;
 
@@ -198,9 +201,12 @@ pub struct Setup {
 	/// The peer uses it to serve this endpoint's subscriptions from a route that
 	/// does not flow through it (the same split horizon the announce filter
 	/// applies). `None` when the endpoint has no meaningful identity (a
-	/// leaf that never forwards); a wire value of 0 decodes as `None`. Lite-07 names
-	/// routes instead, so it never sends one and ignores one received.
+	/// leaf that never forwards); a wire value of 0 decodes as `None`. Lite-07 declares
+	/// [`node`](Self::node) instead, so it never sends one.
 	pub hop: Option<crate::Hop>,
+	/// This endpoint's own Node ID (lite-07+), the identity it originates routes under.
+	/// A peer that receives its own Node ID has reached itself. Never 0 or qualified.
+	pub node: Option<std::num::NonZeroU64>,
 	/// The connection credential (lite-07+), which the empty-token Auth Stream names.
 	/// Sent only by the client. The parameter carries no Token Type, so it is always
 	/// [`Token::OUT_OF_BAND`](crate::setup::Token::OUT_OF_BAND).
@@ -213,6 +219,9 @@ pub struct Setup {
 	pub implementation: Option<String>,
 	/// Proof that the sender holds its route key, bound to this session (lite-07+).
 	pub route_key: Option<crate::route::Proof>,
+	/// Whether the sender reads the Lite-06 Chain on lite-07 announcements, so the peer
+	/// sends it the chain of every claim learned over moq-lite-06. Lite-07 only.
+	pub lite06_chain: bool,
 }
 
 impl std::fmt::Debug for Setup {
@@ -227,10 +236,12 @@ impl std::fmt::Debug for Setup {
 			.field("role", &self.role)
 			.field("cost", &self.cost)
 			.field("hop", &self.hop)
+			.field("node", &self.node)
 			.field("token", &self.token)
 			.field("ietf", &self.ietf)
 			.field("implementation", &self.implementation)
 			.field("route_key", &self.route_key)
+			.field("lite06_chain", &self.lite06_chain)
 			.finish()
 	}
 }
@@ -270,6 +281,15 @@ impl<'a> Message<'a> for Setup {
 		if let Some(hop) = self.hop.filter(|_| !version.has_routes()) {
 			params.set_varint(PARAM_HOP, hop.wire_id(version.into()), version)?;
 		}
+		if let Some(node) = self.node {
+			if !version.has_routes() {
+				return Err(EncodeError::Version);
+			}
+			if node.get() & crate::route::QUALIFIED != 0 {
+				return Err(EncodeError::InvalidState);
+			}
+			params.set_varint(PARAM_HOP, node.get(), version)?;
+		}
 		if let Some(implementation) = &self.implementation {
 			params.set_bytes(PARAM_IMPLEMENTATION, implementation.as_bytes().to_vec());
 		}
@@ -295,6 +315,12 @@ impl<'a> Message<'a> for Setup {
 				return Err(EncodeError::Version);
 			}
 			params.set_bytes(PARAM_ROUTE_KEY, proof.to_bytes());
+		}
+		if self.lite06_chain {
+			if !version.has_routes() {
+				return Err(EncodeError::Version);
+			}
+			params.set_bytes(PARAM_LITE06_CHAIN, Vec::new());
 		}
 
 		params.encode(w, version)
@@ -336,15 +362,20 @@ impl<'a> Message<'a> for ReceivedSetup {
 		if cost == Some(0) && version.has_routes() {
 			return Err(DecodeError::InvalidValue);
 		}
-		// 0 is legal on the wire but carries no identity (it can't be excluded),
-		// so it decodes as "not declared" rather than an error. Lite-07 dropped the
-		// parameter, so it ignores one like any unknown parameter.
-		let hop = match version.has_routes() {
-			true => None,
-			false => params
-				.get_varint(PARAM_HOP, version)?
-				.and_then(std::num::NonZeroU64::new)
-				.map(crate::Hop::from),
+		// Before lite-07, 0 is legal on the wire but carries no identity (it can't be
+		// excluded), so it decodes as "not declared" rather than an error. A lite-07
+		// Node ID is never 0 or qualified.
+		let declared = params.get_varint(PARAM_HOP, version)?;
+		let (hop, node) = match version.has_routes() {
+			true => match declared {
+				None => (None, None),
+				Some(id) if id & crate::route::QUALIFIED != 0 => return Err(DecodeError::InvalidValue),
+				Some(id) => (
+					None,
+					Some(std::num::NonZeroU64::new(id).ok_or(DecodeError::InvalidValue)?),
+				),
+			},
+			false => (declared.and_then(std::num::NonZeroU64::new).map(crate::Hop::from), None),
 		};
 		let implementation = if version.has_implementation() {
 			crate::setup::decode_implementation(params.get_bytes(PARAM_IMPLEMENTATION))?
@@ -373,6 +404,11 @@ impl<'a> Message<'a> for ReceivedSetup {
 			}
 			_ => None,
 		};
+		let lite06_chain = match params.get_bytes(PARAM_LITE06_CHAIN) {
+			Some([]) if version.has_routes() => true,
+			Some(_) if version.has_routes() => return Err(DecodeError::InvalidValue),
+			_ => false,
+		};
 
 		Ok(Self {
 			role_present: role_code.is_some(),
@@ -382,10 +418,12 @@ impl<'a> Message<'a> for ReceivedSetup {
 				role,
 				cost,
 				hop,
+				node,
 				token,
 				ietf,
 				implementation,
 				route_key,
+				lite06_chain,
 			},
 		})
 	}
@@ -590,6 +628,12 @@ impl PeerSetup {
 		self.poll_get(waiter, |setup| setup.cost)
 	}
 
+	/// Poll whether the peer reads the Lite-06 Chain, waiting until its SETUP arrives.
+	/// Every lite-07 session offers it, so the peer's offer alone negotiates it.
+	pub fn poll_lite06_chain(&self, waiter: &kio::Waiter) -> std::task::Poll<bool> {
+		self.poll_get(waiter, |setup| setup.lite06_chain)
+	}
+
 	/// Poll for the [`Hop`](crate::Hop) id the peer declared in its SETUP `Hop`
 	/// parameter. `None` when it declared none: a leaf with no identity worth excluding.
 	pub fn poll_hop(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<crate::Hop>> {
@@ -777,6 +821,25 @@ mod tests {
 		valued.extend([1, 7]);
 		valued[0] += 1;
 		assert!(Setup::decode_slice(&valued, Version::Lite07).is_err());
+	}
+
+	/// The Lite-06 Chain offer is an empty parameter that only lite-07 sends, and lite-06
+	/// ignores like any unknown parameter.
+	#[test]
+	fn lite06_chain_offer_is_lite07_only() {
+		let msg = Setup {
+			lite06_chain: true,
+			..Default::default()
+		};
+		let buf = msg.encode_bytes(Version::Lite07).unwrap();
+		// Length, one parameter, its ID, and an empty value.
+		assert_eq!(buf, &[0x03, 0x01, 0x09, 0x00][..]);
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite07).unwrap().0, msg);
+		assert!(matches!(msg.encode_bytes(Version::Lite06), Err(EncodeError::Version)));
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite06).unwrap().0, Setup::default());
+
+		// A value it does not define is refused.
+		assert!(Setup::decode_slice(&[0x04, 0x01, 0x09, 0x01, 0x07], Version::Lite07).is_err());
 	}
 
 	/// Route key proofs are accepted only on lite-07 and must have the fixed wire size.
@@ -992,28 +1055,35 @@ mod tests {
 		assert_eq!(Setup::decode_slice(&buf, Version::Lite06).unwrap().0.hop, None);
 	}
 
-	/// Lite-07 names routes instead of hops: it never sends the Hop parameter, and ignores
-	/// one a peer sends like any unknown parameter.
+	/// Lite-07 carries the endpoint's Node ID in the parameter that names its Hop ID before.
 	#[test]
-	fn lite07_drops_the_hop() {
+	fn lite07_declares_the_node_instead_of_the_hop() {
 		let version = Version::Lite07;
 		let msg = Setup {
 			hop: Some(crate::Hop::new(42).unwrap()),
+			node: std::num::NonZeroU64::new(7),
 			..Default::default()
 		};
-		assert_eq!(
-			msg.encode_bytes(version).unwrap(),
-			Setup::default().encode_bytes(version).unwrap()
+		let got = Setup::decode_slice(&msg.encode_bytes(version).unwrap(), version)
+			.unwrap()
+			.0;
+		assert_eq!(got.hop, None);
+		assert_eq!(got.node, msg.node);
+		assert!(
+			msg.encode_bytes(Version::Lite06).is_err(),
+			"only lite-07 carries a Node ID"
 		);
 
-		let mut params = Parameters::default();
-		params.set_varint(super::PARAM_HOP, 42, version).unwrap();
-		let mut data = Vec::new();
-		let mut writer = Encoder::new(&mut data, version.into());
-		let prefix = writer.prefix_varint();
-		params.encode(&mut writer, version).unwrap();
-		writer.fill(prefix).unwrap();
-		assert_eq!(Setup::decode_slice(&data, version).unwrap().0.hop, None);
+		for id in [0, crate::route::QUALIFIED | 7] {
+			let mut params = Parameters::default();
+			params.set_varint(super::PARAM_HOP, id, version).unwrap();
+			let mut data = Vec::new();
+			let mut writer = Encoder::new(&mut data, version.into());
+			let prefix = writer.prefix_varint();
+			params.encode(&mut writer, version).unwrap();
+			writer.fill(prefix).unwrap();
+			assert!(Setup::decode_slice(&data, version).is_err(), "Node ID {id:#x}");
+		}
 	}
 
 	// A declared id of 0 carries no identity (it cannot be excluded), so it

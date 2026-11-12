@@ -16,17 +16,20 @@ same way so the cluster converges instead of flapping. Both wire protocols
 carry it: natively on moq-lite up to moq-lite-06, and via the
 [cluster extension](/draft/moq-cluster) on moq-transport.
 
-moq-lite-07-wip carries no hop list. Each publishing node declares a random
-routing identity, and relays run a distance-vector route to it, loop-free by
-Babel's feasibility condition, so every claim of one origin shares that route.
+moq-lite-07-wip carries the list once per publishing node instead of once per
+broadcast. Each publishing node declares a random routing identity, and relays
+run a distance-vector route to it, loop-free by Babel's feasibility condition,
+so every claim of one origin shares that route. The route names the relays it
+crossed, and a relay never uses one that names itself.
 The first relay a request reaches picks the origin node, by a hash of the path
 and the node's identity that every relay computes alike, and names it on the
 request so later hops follow their own route to that node. A relay running both
 versions translates: a moq-lite-06 peer's routes enter the route layer as the
-relay's own claims, and lite-07 routes reach a moq-lite-06 peer as a hop list
-that starts at their origin node. A relay drops a moq-lite-06 route whose hop
-list names its own routing identity, since that is one of its claims coming
-back.
+relay's own claims, keeping their hop list, which lite-07 carries alongside
+them. A lite-07 route reaches a moq-lite-06 peer as that hop list followed by
+its origin node. A relay drops a route whose hop list names it, by its hop or
+its routing identity, since that is one of its claims coming back, so a
+rolling upgrade's mix of versions ends a withdrawn broadcast everywhere.
 
 A track from a moq-transport publisher keeps its Object IDs, object properties,
 and END\_OF\_GROUP status objects across a moq-lite-07 link, since relays
@@ -109,8 +112,9 @@ max_hops = 6
 
 The same setting is `--cluster-max-hops` or `MOQ_CLUSTER_MAX_HOPS`. It covers
 moq-lite-03 through moq-lite-06 and moq-transport drafts 18 through 22 when
-the MoQ Cluster extension is negotiated. moq-lite-07-wip routes carry no hop
-path, so it does not bound them. A forwarded path counts this relay's
+the MoQ Cluster extension is negotiated. A moq-lite-07-wip route crosses at
+most 32 nodes whatever this is set to: it does not hunt for paths, so a lower
+cap would only hide a short path behind a cheaper long one. A forwarded path counts this relay's
 own hop even when its peer appends it on receipt. Older versions and peers
 without hop paths hide their depth, which this setting cannot bound.
 
@@ -181,7 +185,8 @@ the same one for a given path. A publisher connected straight to the relay is
 not hashed at its own path: its newest session wins, so a publisher that
 restarts takes over from its lingering old session at once.
 
-moq-lite-07-wip carries no hop list, so both hop-list steps drop out: the first
+moq-lite-07-wip keeps its hop list on the route to a publishing node, not on
+each broadcast, so both hop-list steps drop out: the first
 relay ranks the origin nodes announcing a path the same way otherwise, and
 remaining ties hash the path with each node's routing identity. Later hops
 follow their own route to the node it picked. Routes learned over an older
@@ -204,15 +209,33 @@ connect = [
 ```
 
 Prices aren't static. A publisher can re-price a live announcement, which is
-how a standby transcoder pool seeds a high cost and drops it once it's working,
-and a relay receiving a GOAWAY re-prices every route learned from that peer to
-the maximum so new subscriptions go elsewhere while existing ones finish. A
+how a standby transcoder pool seeds a high cost and drops it once it's working.
+A GOAWAY is not a price: a relay receiving one ranks every route learned from
+that peer below every other eligible route, whatever the costs say. New
+subscriptions go elsewhere when another route serves them, and an existing one
+moves to another route of the same stream if there is one, or else finishes on
+the draining peer. The drain is that relay's
+own state, so it still advertises the routes onward at their real cost. A
 relay keeps its session to a peer draining to restart until that peer closes
 it, and redials only then, so it reaches the replacement rather than the
 draining process.
 
 A route's price is the publisher's production cost plus the link costs it
 crosses. A live publisher seeds 0, and caching never changes it.
+
+## Route latency
+
+A moq-lite-07-wip route also carries its RTT: each relay adds its link's
+lowest smoothed RTT over the last 30 seconds to the sum it received, so an
+application reads the round trip through any number of relays to the route's
+origin node, the one the broadcast is published to, from the route it was
+announced on (`RouteInfo::rtt`). The publisher's own connection to that node is
+not included. The value is absent
+while any link on the path has no RTT measurement, and on a route this node
+serves itself, such as a broadcast published to it. It is informational and
+never picks a route; the link cost does that. A link's value changes only
+when its minimum moves past the larger of 5 ms and a quarter, so jitter and
+short queues send no route updates.
 
 ## LAN discovery
 
@@ -274,16 +297,19 @@ decides which relays receive the cluster token.
 
 ## Identity
 
-Each relay has a Hop ID: the value it adds to a route's hop list for loop
-detection and shortest-path routing. It is random on every start, so a
+Each relay has an identity that it uses for loop detection and routing, and
+declares in SETUP on moq-lite-05 and later: a Hop ID added to each route's hop
+list, or on the opt-in `moq-lite-07-wip` a Node ID naming the route's origin,
+which it also adds to the hops of each route it forwards. It is random on every start, so a
 restarted relay is a new node to the rest of the mesh, and there is no setting
 to pin it.
 
 A relay never dials its own `cluster.node`, so every relay can share one
 `cluster.connect` list or API response. Peer URLs that differ only in query,
 userinfo, fragment, or slashes name one peer and get one link. A relay
-refuses a session that declares its own Hop ID, which means a peer URL
-reaches the relay itself under another name, such as an IP for its hostname.
+refuses a session that declares its own identity (its Hop ID, or on
+`moq-lite-07-wip` its Node ID), which means a peer URL reaches the relay itself
+under another name, such as an IP for its hostname.
 
 ## Failure detection
 
@@ -347,8 +373,8 @@ services.moq-relay = {
 ```
 
 Each dialed session binds its own UDP socket on an ephemeral port of
-`connect.bind`'s address. Once `connect.backoff.timeout` (10s by default; `0`
-takes that default here) passes without a session, the redial leaves from a
+`connect.bind`'s address. Once `connect.backoff.timeout` (10s when unset or `0`,
+which would otherwise retry forever) passes without a session, the redial leaves from a
 fresh port, so a network path that drops one UDP flow can't hold a link down
 while other ports to the same peer would work. A fixed `connect.bind` port opts
 out: static and API peers then share one socket on that port, and a redial

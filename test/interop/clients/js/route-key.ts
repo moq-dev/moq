@@ -8,7 +8,8 @@
  * line (`moq_net::lite::setup`) on that connection means the proof verified, and a proof that fails
  * ends the session before it is admitted.
  *
- * Exits 77 with a `SKIP` line when this build cannot prove yet and sent no proof, as it must.
+ * Passes a build that connects unproven by design and sent no proof. Exits 77 with a `SKIP` line
+ * when this build cannot prove yet and sent no proof, as it must.
  *
  *     bun route-key.ts --url http://127.0.0.1:4443/?jwt=... --relay-log relay.log --engine firefox [--timeout 20]
  *
@@ -38,12 +39,16 @@ if (!url || !relayLog || (engine !== "chromium" && engine !== "firefox") || !(ti
 }
 
 /**
- * Why a tab on `engine` at `major` cannot prove its key yet, or `undefined` when it must. Such a
- * tab must send no proof, since the relay would end its session.
+ * Why a tab on `engine` at `major` cannot prove its key, or `undefined` when it must. Such a tab
+ * must send no proof, since the relay would end its session. A `pending` build holds the lite-07
+ * cut until it can prove; any other connects unproven, a supported state.
  */
-function uncovered(engine: Engine, major: number): string | undefined {
-	if (engine === "firefox") return "Firefox's exporter departs from the draft (a varint session ID in neqo)";
-	return major >= 158 ? undefined : "Chromium ships its exporter in 158; the Playwright bump covers it";
+function uncovered(engine: Engine, major: number): { why: string; pending: boolean } | undefined {
+	if (engine === "firefox") {
+		return { why: "Firefox's exporter departs from the draft (a varint session ID in neqo)", pending: false };
+	}
+	if (major >= 158) return undefined;
+	return { why: "Chromium ships its exporter in 158; the Playwright bump covers it", pending: true };
 }
 
 /** The relay's log so far, without colors. */
@@ -52,7 +57,7 @@ const relay = () => stripVTControlCharacters(readFileSync(relayLog, "utf8"));
 const server = serve();
 const browser = await launch([], engine);
 const version = browser.version();
-const why = uncovered(engine, Number.parseInt(version, 10));
+const gap = uncovered(engine, Number.parseInt(version, 10));
 console.log(`BROWSER ${engine} ${version}`);
 
 // Unique to this run, so no other session's SETUP is mistaken for this tab's. The relay records it
@@ -82,14 +87,15 @@ try {
 		`relay connection ${id}: ${proven ? "the tab proved its route key" : "the tab sent no route key proof"}`,
 	);
 
-	if (why === undefined && !proven) {
+	if (gap === undefined && !proven) {
 		console.error(`FAIL ${engine} ${version}: the tab sent no route key proof`);
-	} else if (why !== undefined && proven) {
-		console.error(`FAIL ${engine} ${version}: proved its route key, but ${why}; update this table`);
-	} else if (why !== undefined) {
-		console.log(`SKIP ${engine} ${version} cannot prove its route key: ${why}`);
+	} else if (gap !== undefined && proven) {
+		console.error(`FAIL ${engine} ${version}: proved its route key, but ${gap.why}; update this table`);
+	} else if (gap?.pending) {
+		console.log(`SKIP ${engine} ${version} cannot prove its route key: ${gap.why}`);
 		code = 77;
 	} else {
+		if (gap !== undefined) console.log(`${engine} ${version} connects unproven: ${gap.why}`);
 		code = 0;
 	}
 } catch (err) {

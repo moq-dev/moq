@@ -1273,7 +1273,7 @@ mod tests {
 
 		// The better rendition lives in a broadcast whose request is never answered.
 		let _handler = origin
-			.route_prefix("missing", moq_net::origin::RouteOptions::default())
+			.claim("missing", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.container = hang::catalog::Container::Legacy;
@@ -1338,15 +1338,24 @@ mod tests {
 
 		assert_eq!(clock.wallclock(MediaTime::from_millis(1_000), t0), t0);
 		assert_eq!(
-			clock.wallclock(MediaTime::from_millis(1_100), t0 + Duration::from_millis(100)),
-			t0 + Duration::from_millis(100)
+			clock.wallclock(
+				MediaTime::from_millis(1_100),
+				t0.saturating_add(Duration::from_millis(100))
+			),
+			t0.saturating_add(Duration::from_millis(100))
 		);
 
 		// Two tracks dequeue the same presentation time 50 ms apart. Their
 		// sender-report wallclocks must still agree.
-		let audio = clock.wallclock(MediaTime::from_millis(1_200), t0 + Duration::from_millis(250));
-		let video = clock.wallclock(MediaTime::from_millis(1_200), t0 + Duration::from_millis(300));
-		assert_eq!(audio, t0 + Duration::from_millis(200));
+		let audio = clock.wallclock(
+			MediaTime::from_millis(1_200),
+			t0.saturating_add(Duration::from_millis(250)),
+		);
+		let video = clock.wallclock(
+			MediaTime::from_millis(1_200),
+			t0.saturating_add(Duration::from_millis(300)),
+		);
+		assert_eq!(audio, t0.saturating_add(Duration::from_millis(200)));
 		assert_eq!(video, audio);
 	}
 
@@ -1363,7 +1372,10 @@ mod tests {
 		// Once the live edge is known, another track uses the same mapping even
 		// when its frames dequeue later.
 		assert_eq!(
-			clock.wallclock(MediaTime::from_millis(1_100), t0 + Duration::from_millis(50)),
+			clock.wallclock(
+				MediaTime::from_millis(1_100),
+				t0.saturating_add(Duration::from_millis(50))
+			),
 			t0
 		);
 	}

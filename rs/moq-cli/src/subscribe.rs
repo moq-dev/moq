@@ -4,6 +4,7 @@ use anyhow::Context;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_mux::select;
+use moq_net::track::Delay;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
@@ -362,7 +363,7 @@ impl Subscribe {
 		// yields moof+mdat fragments in timestamp order across tracks.
 		let stream = self.stream().await?;
 		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.source, stream)
-			.with_max_delay(self.args.max_delay)
+			.with_delay(Delay::default().with_max(self.args.max_delay))
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = fmp4.next().await? {
@@ -383,7 +384,7 @@ impl Subscribe {
 			() = finish.cancelled() => return Ok(()),
 		};
 		let mut mp4 = moq_mux::container::mp4::Export::new(self.source, stream)
-			.with_max_delay(self.args.max_delay)
+			.with_delay(Delay::default().with_max(self.args.max_delay))
 			.with_fragment_duration(self.args.fragment_duration);
 		let mut file = tokio::fs::File::create_new(&path)
 			.await
@@ -430,7 +431,11 @@ impl Subscribe {
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
 		let stream = self.stream().await?;
 		let mut mkv = moq_mux::container::mkv::Export::new(self.source, stream)
-			.with_delay(self.args.max_delay)
+			.with_delay(
+				Delay::default()
+					.with_min(self.args.max_delay)
+					.with_max(self.args.max_delay),
+			)
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = mkv.next().await? {
@@ -445,7 +450,8 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
+		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream)
+			.with_delay(Delay::default().with_max(self.args.max_delay));
 
 		while let Some(chunk) = h264.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -459,7 +465,8 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
+		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream)
+			.with_delay(Delay::default().with_max(self.args.max_delay));
 
 		while let Some(chunk) = h265.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -587,7 +594,11 @@ impl Subscribe {
 		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
 		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
 		let stream = self.stream().await?;
-		let mut flv = moq_mux::container::flv::Export::new(self.source, stream).with_delay(self.args.max_delay);
+		let mut flv = moq_mux::container::flv::Export::new(self.source, stream).with_delay(
+			Delay::default()
+				.with_min(self.args.max_delay)
+				.with_max(self.args.max_delay),
+		);
 
 		while let Some(chunk) = flv.next().await? {
 			stdout.write_all(&chunk).await?;

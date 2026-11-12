@@ -19,7 +19,7 @@ minimized corpus, and uploads failure inputs as workflow artifacts.
 
 ## How it fits together
 
-The target bodies are not in `fuzz_targets/`; they are in `moq-quic`'s hidden `fuzz`
+The target bodies are not in `fuzz_targets/`; they are in `moq-quic`'s `fuzz`
 module (`src/fuzz.rs`), and the files here are one-line shims. Two reasons:
 
 - The frame decoder and the stream state are private, so an outside crate cannot reach

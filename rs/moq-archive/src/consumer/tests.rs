@@ -203,8 +203,8 @@ async fn a_recording_round_trips() {
 	group.write_frame(None, "a").unwrap();
 	group.finish().unwrap();
 	sleep(Duration::from_millis(10)).await;
-	video.finish().unwrap();
-	log.finish().unwrap();
+	let _video = video.finish().unwrap();
+	let _log = log.finish().unwrap();
 	sleep(Duration::from_millis(10)).await;
 	source.close();
 	recording.await.unwrap().unwrap();
@@ -612,7 +612,7 @@ async fn a_re_added_track_replays_both_runs() {
 			group.write_frame(pts, format!("run{run}/{sequence}")).unwrap();
 			group.finish().unwrap();
 		}
-		track.finish().unwrap();
+		let track = track.finish().unwrap();
 		sleep(Duration::from_secs(2)).await;
 		drop(track);
 		sleep(Duration::from_millis(10)).await;

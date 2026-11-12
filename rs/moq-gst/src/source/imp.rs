@@ -1813,88 +1813,112 @@ impl Play {
 		let mut clip = OpusClip::new(&shape.caps, shape.warmup);
 		let mut first = true;
 		loop {
-			tokio::select! {
-				// The follower stopped this reader (the instance changed, the rendition was
-				// reshaped or delisted, or the run ended). An end or failure that arrived alongside
-				// is recorded as the arms below would, or the play queued behind this one would
-				// replay it.
-				_ = cancel.changed() => {
-					if let Some(end) = ended(&mut track) {
-						finished.insert(rendition, &shape.track, attached, end.is_err());
+			// The track wins over the cancel, so an end that arrived alongside one is still recorded.
+			let read = {
+				let mut cancelled = std::pin::pin!(cancel.changed());
+				kio::wait(|waiter| match track.poll_read(waiter) {
+					std::task::Poll::Ready(read) => std::task::Poll::Ready(Some(read)),
+					std::task::Poll::Pending => waiter.poll_future(cancelled.as_mut()).map(|_| None),
+				})
+				.await
+			};
+			// The follower stopped this reader (the instance changed, the rendition was reshaped or
+			// delisted, or the run ended).
+			let Some(read) = read else {
+				return;
+			};
+			match read {
+				Ok(Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. })) => {}
+				Ok(Some(moq_mux::container::Read::Frame { frame, group })) => {
+					// A frame yields to a cancel, so a backlog never keeps a stopped reader playing.
+					if cancel.has_changed().unwrap_or(true) {
+						return;
 					}
-					return;
-				}
-				frame = track.read() => match frame {
-					Ok(Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. })) => {}
-					Ok(Some(moq_mux::container::Read::Frame { frame, group })) => {
-						// Nothing precedes group 0, and a group delivers from its frame 0 or not at
-						// all, so a play that reads it first decodes from the encoder's first packet,
-						// which has no history to warm up from.
-						if std::mem::take(&mut first)
-							&& group == 0
-							&& let Some(clip) = &mut clip
-						{
-							clip.track_start();
-						}
-						let mut buffer = match build_buffer(frame, kind) {
-							Ok(buffer) => buffer,
-							Err(err) => {
-								if let Some(obj) = element.upgrade() {
-									gst::element_error!(obj, gst::StreamError::Format, ("track {name} has an invalid timestamp"), ["{err:#}"]);
-								}
-								return;
-							}
-						};
-						if let Some(clip) = &mut clip
-							&& let Err(err) = clip.apply(buffer.get_mut().unwrap())
-						{
+					// Nothing precedes group 0, and a group delivers from its frame 0 or not at
+					// all, so a play that reads it first decodes from the encoder's first packet,
+					// which has no history to warm up from.
+					if std::mem::take(&mut first)
+						&& group == 0 && let Some(clip) = &mut clip
+					{
+						clip.track_start();
+					}
+					let mut buffer = match build_buffer(frame, kind) {
+						Ok(buffer) => buffer,
+						Err(err) => {
 							if let Some(obj) = element.upgrade() {
-								gst::element_error!(obj, gst::StreamError::Format, ("track {name} has an invalid Opus packet"), ["{err:#}"]);
+								gst::element_error!(
+									obj,
+									gst::StreamError::Format,
+									("track {name} has an invalid timestamp"),
+									["{err:#}"]
+								);
 							}
 							return;
 						}
-						let segment = (!sent_segment).then(|| {
-							let base = element.upgrade().and_then(|obj| obj.current_running_time()).unwrap_or(gst::ClockTime::ZERO);
-							sent_segment = true;
-							gst::event::Segment::new(timeline.segment(buffer.pts().unwrap(), base))
-						});
-						// pad.push() blocks until downstream accepts the buffer (full queues, a
-						// clock-synced sink). block_in_place hands our sibling tasks to another
-						// worker so a stalled downstream can't pin a runtime thread and starve
-						// the session loop or other readers.
-						let pushed = tokio::task::block_in_place(|| {
-							if let Some(segment) = segment {
-								pad.push_event(segment);
-							}
-							pad.push(buffer)
-						});
-						match pushed {
-							Ok(_) => {}
-							Err(gst::FlowError::NotNegotiated) => {
-								if let Some(obj) = element.upgrade() {
-									gst::element_error!(obj, gst::StreamError::Format, ("track {name} was not negotiated"), ["caps {}", shape.caps]);
-								}
-								return;
-							}
-							Err(_) => return,
+					};
+					if let Some(clip) = &mut clip
+						&& let Err(err) = clip.apply(buffer.get_mut().unwrap())
+					{
+						if let Some(obj) = element.upgrade() {
+							gst::element_error!(
+								obj,
+								gst::StreamError::Format,
+								("track {name} has an invalid Opus packet"),
+								["{err:#}"]
+							);
 						}
-					}
-					// The track stopping with its instance is that instance's end, which idles the
-					// pad for the next one rather than ending the rendition.
-					Ok(None) | Err(_) if instance.is_closed() => return,
-					// Recorded before the actor takes the next play,
-					// so a reshape on this instance does not replay it.
-					Ok(None) => {
-						finished.insert(rendition, &shape.track, attached, false);
 						return;
 					}
-					// The instance may still hand a new subscription the groups already played,
-					// such as a relay's copy cut off by its publisher's session closing.
-					Err(err) => {
-						gst::warning!(CAT, "track {name} failed: {err:?}");
-						finished.insert(rendition, &shape.track, attached, true);
-						return;
+					let segment = (!sent_segment).then(|| {
+						let base = element
+							.upgrade()
+							.and_then(|obj| obj.current_running_time())
+							.unwrap_or(gst::ClockTime::ZERO);
+						sent_segment = true;
+						gst::event::Segment::new(timeline.segment(buffer.pts().unwrap(), base))
+					});
+					// pad.push() blocks until downstream accepts the buffer (full queues, a
+					// clock-synced sink). block_in_place hands our sibling tasks to another
+					// worker so a stalled downstream can't pin a runtime thread and starve
+					// the session loop or other readers.
+					let pushed = tokio::task::block_in_place(|| {
+						if let Some(segment) = segment {
+							pad.push_event(segment);
+						}
+						pad.push(buffer)
+					});
+					match pushed {
+						Ok(_) => {}
+						Err(gst::FlowError::NotNegotiated) => {
+							if let Some(obj) = element.upgrade() {
+								gst::element_error!(
+									obj,
+									gst::StreamError::Format,
+									("track {name} was not negotiated"),
+									["caps {}", shape.caps]
+								);
+							}
+							return;
+						}
+						Err(_) => return,
 					}
+				}
+				// Recorded before the actor takes the next play, so a reshape on this instance
+				// does not replay it, even when the instance closed before the end was read: the
+				// same instance announced again would hand a new subscription its last group.
+				Ok(None) => {
+					finished.insert(rendition, &shape.track, attached, false);
+					return;
+				}
+				// The track failing with its instance is that instance's end, which idles the
+				// pad for the next one rather than ending the rendition.
+				Err(_) if instance.is_closed() => return,
+				// The instance may still hand a new subscription the groups already played,
+				// such as a relay's copy cut off by its publisher's session closing.
+				Err(err) => {
+					gst::warning!(CAT, "track {name} failed: {err:?}");
+					finished.insert(rendition, &shape.track, attached, true);
+					return;
 				}
 			}
 		}
@@ -1966,24 +1990,6 @@ impl Timeline {
 			segment.set_base(base);
 			segment
 		})
-	}
-}
-
-/// The track's end, or its failure, if that is the next media item, without waiting for it.
-/// Markers ready before it are passed over; a frame or anything not ready yet means it has not
-/// ended.
-fn ended(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Container>) -> Option<moq_mux::Result<()>> {
-	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-	loop {
-		let mut read = std::pin::pin!(track.read());
-		match read.as_mut().poll(&mut cx) {
-			std::task::Poll::Ready(Ok(None)) => return Some(Ok(())),
-			std::task::Poll::Ready(Ok(Some(
-				moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. },
-			))) => continue,
-			std::task::Poll::Ready(Err(err)) => return Some(Err(err)),
-			std::task::Poll::Pending | std::task::Poll::Ready(Ok(Some(_))) => return None,
-		}
 	}
 }
 
@@ -2234,46 +2240,9 @@ fn opus_caps(config: &hang::catalog::AudioConfig, rate: i32, channels: i32) -> R
 
 #[cfg(test)]
 mod tests {
-	use super::{Timeline, ended};
+	use super::Timeline;
 	use moq_net::Timestamp;
 	use std::time::Duration;
-
-	/// A reader cancelled as its track ends or fails records it only when no media is left to read,
-	/// passing over the markers a publisher closes with.
-	#[test]
-	fn ended_sees_only_an_end_with_no_media_before_it() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("video", hang::container::track_info(0)).unwrap();
-		let legacy = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let mut producer = moq_mux::container::Producer::new(track, legacy());
-		let mut consumer = moq_mux::container::Consumer::new(producer.consume(), legacy());
-		assert!(ended(&mut consumer).is_none(), "an open track has not ended");
-
-		producer
-			.write(moq_mux::container::Frame {
-				timestamp: Timestamp::ZERO,
-				payload: bytes::Bytes::from_static(&[0]),
-				keyframe: true,
-				duration: None,
-			})
-			.unwrap();
-		assert!(ended(&mut consumer).is_none(), "a frame was still unread");
-
-		producer.discontinuity().unwrap();
-		producer.finish().unwrap();
-		assert!(
-			matches!(ended(&mut consumer), Some(Ok(()))),
-			"the closing marker hid the end"
-		);
-
-		let track = broadcast
-			.create_track("failed", hang::container::track_info(0))
-			.unwrap();
-		let producer = moq_mux::container::Producer::new(track, legacy());
-		let mut consumer = moq_mux::container::Consumer::new(producer.consume(), legacy());
-		producer.abort(moq_net::Error::Cancel);
-		assert!(matches!(ended(&mut consumer), Some(Err(_))), "a failure is an end too");
-	}
 
 	#[test]
 	fn video_caps_preserve_nal_framing() {
@@ -3264,7 +3233,7 @@ mod session_tests {
 
 		// End the served rendition and the broadcast, which answers for the reserved one.
 		catalog.finish().unwrap();
-		video.finish().unwrap();
+		let _video = video.finish().unwrap();
 		broadcast.close();
 
 		// No shutdown is sent: the run has to end on the media draining alone.
@@ -3402,7 +3371,7 @@ mod session_tests {
 		for i in HEAD..HEAD + TAIL {
 			write(i);
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		// The reader removes its pad on the way out, whichever way it goes.
 		for _ in 0..100 {
@@ -3532,8 +3501,8 @@ mod session_tests {
 		wait_for(HEAD + TAIL);
 
 		// Everything ends while listed, so the run ends on its own with the pads held.
-		producer.finish().unwrap();
-		audio.finish().unwrap();
+		let _finished = producer.finish().unwrap();
+		let _audio = audio.finish().unwrap();
 		catalog.finish().unwrap();
 		super::RUNTIME
 			.block_on(async { kio::clock::timeout(Duration::from_secs(10), session).await })
@@ -3637,7 +3606,7 @@ mod session_tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		// The reader owns its pad until it has pushed the whole track and read its end.
 		super::RUNTIME.block_on(pads.settled(&(TrackKind::Video, "video".to_string())));
@@ -3663,7 +3632,7 @@ mod session_tests {
 		);
 
 		// The run ends only once every reader drains, a replaying one included.
-		audio.finish().unwrap();
+		let _audio = audio.finish().unwrap();
 		catalog.finish().unwrap();
 		super::RUNTIME.block_on(session).unwrap().unwrap();
 
@@ -3758,8 +3727,8 @@ mod session_tests {
 		super::RUNTIME.block_on(async { while !adds.recv().await.unwrap().starts_with("audio_") {} });
 
 		// The run ends only once every reader drains, a replaying one included.
-		again.finish().unwrap();
-		audio.finish().unwrap();
+		let _finished = again.finish().unwrap();
+		let _audio = audio.finish().unwrap();
 		catalog.finish().unwrap();
 		super::RUNTIME.block_on(session).unwrap().unwrap();
 
@@ -3894,7 +3863,10 @@ mod session_tests {
 		route: Option<moq_net::origin::Route>,
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
-		video: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
+		/// Taken by [`Self::finish_video`] or an abort.
+		video: Option<moq_mux::container::Producer<moq_mux::catalog::hang::Container>>,
+		/// The video track once [`Self::finish_video`] finished it.
+		finished: Option<moq_mux::container::Finished<moq_mux::catalog::hang::Container>>,
 		/// The video track, for what its readers subscribe with.
 		track: moq_net::track::Producer,
 		start: kio::clock::Instant,
@@ -3949,7 +3921,8 @@ mod session_tests {
 				route: None,
 				broadcast,
 				catalog,
-				video,
+				video: Some(video),
+				finished: None,
 				track,
 				start: kio::clock::now(),
 			}
@@ -3959,7 +3932,12 @@ mod session_tests {
 		/// synced sink renders it on time.
 		fn write(&mut self, tag: u8) {
 			let frame = self.frame(tag);
-			self.video.write(frame).unwrap();
+			self.video.as_mut().unwrap().write(frame).unwrap();
+		}
+
+		/// Finish the video track, keeping it served.
+		fn finish_video(&mut self) {
+			self.finished = Some(self.video.take().unwrap().finish().unwrap());
 		}
 
 		/// The keyframe [`Self::write`] writes for `tag`.
@@ -3975,7 +3953,7 @@ mod session_tests {
 
 		/// Move the timestamps of later frames `by` ahead.
 		fn skip(&mut self, by: Duration) {
-			self.start -= by;
+			self.start = self.start.saturating_sub(by);
 		}
 	}
 
@@ -4377,7 +4355,7 @@ mod session_tests {
 
 	/// Block until someone reads the publisher's video, or until nobody does once `wanted` is false.
 	fn await_demand(publisher: &Publisher, wanted: bool) {
-		let mut demand = publisher.video.demand();
+		let mut demand = publisher.video.as_ref().unwrap().demand();
 		let changed = async { while demand.wanted_changed().await.expect("the track closed").is_some() != wanted {} };
 		super::RUNTIME
 			.block_on(async { kio::clock::timeout(Duration::from_secs(10), changed).await })
@@ -4394,7 +4372,13 @@ mod session_tests {
 	fn announced(origin: &moq_net::origin::Producer) -> moq_net::origin::Routes {
 		let mut follow = watch(origin, "room");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		follow
 	}
@@ -4445,9 +4429,7 @@ mod session_tests {
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let claim = origin
-			.route_prefix("", moq_net::origin::RouteOptions::default())
-			.unwrap();
+		let claim = origin.claim("", moq_net::origin::RouteOptions::default()).unwrap();
 		let (answers, answered) = std::sync::mpsc::channel();
 		let handler = super::RUNTIME.spawn(async move {
 			while let Some(request) = claim.requested().await {
@@ -4481,9 +4463,7 @@ mod session_tests {
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let pool = origin
-			.route_prefix("", moq_net::origin::RouteOptions::default())
-			.unwrap();
+		let pool = origin.claim("", moq_net::origin::RouteOptions::default()).unwrap();
 		let session = follow(&element, &origin);
 		let pending = super::RUNTIME.block_on(async {
 			kio::clock::timeout(Duration::from_secs(10), pool.requested())
@@ -4522,11 +4502,23 @@ mod session_tests {
 		let pad = recorder.written(&mut first, 1);
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		drop(first);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		let mut second = Publisher::sibling(&origin, Default::default());
@@ -4583,11 +4575,23 @@ mod session_tests {
 
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		drop(first);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 3), pad, "the return moved to another pad");
@@ -4679,18 +4683,36 @@ mod session_tests {
 
 		let mut first = Publisher::sibling(&origin, None);
 		let pad = recorder.written(&mut first, 1);
-		first.video.finish().unwrap();
+		first.finish_video();
 		await_finished(&first);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		first.route.as_ref().unwrap().withdraw();
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 		first.route.as_ref().unwrap().announce().unwrap();
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 
 		let mut second = Publisher::sibling(&origin, Default::default());
@@ -4706,6 +4728,60 @@ mod session_tests {
 		assert_eq!(recorder.count(|seen| *seen == Seen::Start(pad.clone())), 1, "{seen:?}");
 		recorder.assert_one_pad_held();
 		drop(first);
+	}
+
+	/// A track's end read after its instance closed is still recorded, with or without a cancel
+	/// alongside it: the same instance announced again would replay its last group to a new
+	/// subscription.
+	#[test]
+	fn an_end_read_after_its_instance_closed_is_recorded() {
+		let element = element();
+		for cancelled in [false, true] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let legacy = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+			let producer = moq_mux::container::Producer::new(
+				broadcast.create_track("video", hang::container::track_info(0)).unwrap(),
+				legacy(),
+			);
+			let track = moq_mux::container::Consumer::new(producer.consume(), legacy());
+			let _finished = producer.finish().unwrap();
+			let instance = broadcast.consume();
+			broadcast.close();
+			assert!(instance.is_closed());
+
+			let rendition = (TrackKind::Video, "video".to_string());
+			let finished = super::Finished::default();
+			let (cancelling, cancel) = watch::channel(false);
+			if cancelled {
+				cancelling.send_replace(true);
+			}
+			let (_shutdown, shutdown) = watch::channel(false);
+			let play = super::Play {
+				element: element.downgrade(),
+				shape: super::Shape {
+					caps: gst::Caps::new_empty_simple("video/x-h264"),
+					container: Container::Legacy,
+					track: "video".into(),
+					broadcast: None,
+					instance: None,
+					warmup: Duration::ZERO,
+				},
+				track,
+				instance,
+				attached: super::Attached { serial: 1, start: 1 },
+				timeline: Arc::default(),
+				finished: finished.clone(),
+				live: Arc::default(),
+				cancel,
+				shutdown,
+			};
+			let pad = gst::Pad::builder(gst::PadDirection::Src).build();
+			super::RUNTIME.block_on(play.stream(&pad, &rendition));
+			assert!(
+				finished.contains(&rendition, "video", super::Attached { serial: 1, start: 2 }),
+				"the end was not recorded for the instance's next start (cancelled: {cancelled})"
+			);
+		}
 	}
 
 	/// A track failing may be its instance going away before the instance reports closed, as a
@@ -4738,24 +4814,36 @@ mod session_tests {
 		let mut first = Publisher::sibling(&origin, None);
 		let pad = recorder.written(&mut first, 1);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		// The pad plays out the failure while the instance is still announced.
-		first.video.abort(moq_net::Error::Cancel);
+		first.video.take().unwrap().abort(moq_net::Error::Cancel);
 		super::RUNTIME.block_on(pads.settled(&(TrackKind::Video, "video".to_string())));
 		first.route.as_ref().unwrap().withdraw();
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		// The returning instance serves the track again, from a later group.
-		first.video = moq_mux::container::Producer::new(
+		first.video = Some(moq_mux::container::Producer::new(
 			first
 				.broadcast
 				.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 				.unwrap(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
-		);
+		));
 		first.route.as_ref().unwrap().announce().unwrap();
 		assert_eq!(
 			recorder.written(&mut first, 2),
@@ -4791,7 +4879,7 @@ mod session_tests {
 		recorder.written(&mut cam, 1);
 		// The delisted rendition plays out its track before its pad retires.
 		room.catalog.modify().unwrap().video.renditions.clear();
-		cam.video.finish().unwrap();
+		cam.finish_video();
 		for _ in 0..200 {
 			if pads(&element, "video_").is_empty() {
 				break;
@@ -4825,18 +4913,30 @@ mod session_tests {
 		room.catalog.finish().unwrap();
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		drop(first);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 2), pad, "the return moved to another pad");
 
 		// The catalog's broadcast ending lets go of the sibling it read.
-		let mut demand = second.video.demand();
+		let mut demand = second.video.as_ref().unwrap().demand();
 		drop(room);
 		let unwanted = async {
 			while demand.wanted_changed().await?.is_some() {}
@@ -4863,7 +4963,7 @@ mod session_tests {
 
 		let mut first = Publisher::sibling(&origin, Default::default());
 		let pad = recorder.written(&mut first, 1);
-		first.video.finish().unwrap();
+		first.finish_video();
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(
 			recorder.written(&mut second, 2),
@@ -4944,7 +5044,7 @@ mod session_tests {
 		}
 		assert_eq!(pads(&element, "audio_").len(), 2, "the relist never landed");
 
-		first.video.finish().unwrap();
+		first.finish_video();
 		await_finished(&first);
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(
@@ -4974,7 +5074,7 @@ mod session_tests {
 
 		let mut first = Publisher::sibling(&origin, Some(old));
 		let pad = recorder.written(&mut first, 1);
-		first.video.finish().unwrap();
+		first.finish_video();
 		await_finished(&first);
 
 		let mut second = Publisher::sibling(&origin, Some(new.clone()));
@@ -5028,7 +5128,7 @@ mod session_tests {
 			let pads = reached(seen, 1);
 			(pads.len() == 2).then_some(pads)
 		});
-		first.video.finish().unwrap();
+		first.finish_video();
 		await_finished(&first);
 
 		// Another instance wins the path, which only the unpinned rendition plays, then leaves it
@@ -5038,13 +5138,22 @@ mod session_tests {
 		let pad = played.into_iter().find(|pad| *pad != unpinned).unwrap();
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		drop(second);
 		await_event(&mut follow, |event| {
 			matches!(
 				event,
-				moq_net::origin::RouteEvent::Restart(_) | moq_net::origin::RouteEvent::Start(_)
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Restart | moq_net::origin::RouteKind::Start,
+					..
+				}
 			)
 		});
 
@@ -5090,11 +5199,23 @@ mod session_tests {
 		let pad = recorder.written(&mut first, 1);
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		drop(first);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		room.catalog.modify().unwrap().video.renditions.clear();
@@ -5111,7 +5232,13 @@ mod session_tests {
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		for _ in 0..10 {
 			second.write(2);
@@ -5138,11 +5265,23 @@ mod session_tests {
 		let pad = recorder.written(&mut first, 1);
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		drop(first);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		let listed = room.catalog.modify().unwrap().video.renditions.clone();
@@ -5218,17 +5357,35 @@ mod session_tests {
 		// does the new one leave, so the return is a resume rather than a missed restart.
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Start(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			)
 		});
 		let mut new = Publisher::sibling(&origin, Default::default());
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Restart(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Restart,
+					..
+				}
+			)
 		});
 		await_demand(&old, false);
 		new.write(2);
 		drop(new);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Restart(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Restart,
+					..
+				}
+			)
 		});
 
 		await_demand(&old, true);
@@ -5268,7 +5425,7 @@ mod session_tests {
 			moved,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 		);
-		let mut left = std::mem::replace(&mut room.video, moved);
+		let mut left = room.video.replace(moved).unwrap();
 		room.catalog
 			.modify()
 			.unwrap()
@@ -5328,7 +5485,13 @@ mod session_tests {
 
 		publisher.route.as_ref().unwrap().set_cost(5).unwrap();
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::origin::RouteEvent::Update(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Update,
+					..
+				}
+			)
 		});
 		recorder.written(&mut publisher, 2);
 		stop(session);
@@ -5507,13 +5670,19 @@ mod session_tests {
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut old, 1);
 
-		old.video.finish().unwrap();
+		old.finish_video();
 		// The media and the catalog travel apart, so their ends arrive apart too.
 		block(Duration::from_millis(100));
 		old.catalog.finish().unwrap();
 		drop(old);
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 
 		let mut new = Publisher::new(&origin, Default::default(), video_rendition());
@@ -5543,7 +5712,13 @@ mod session_tests {
 
 		old.route.as_ref().unwrap().withdraw();
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End,
+					..
+				}
+			)
 		});
 		drop(old);
 
@@ -5618,7 +5793,13 @@ mod session_tests {
 			let route = next.route.as_ref().unwrap();
 			route.withdraw();
 			await_event(&mut announced, |event| {
-				matches!(event, moq_net::origin::RouteEvent::End(_))
+				matches!(
+					event,
+					moq_net::origin::RouteEvent {
+						kind: moq_net::origin::RouteKind::End,
+						..
+					}
+				)
 			});
 			route.announce().unwrap();
 			assert_eq!(
@@ -6114,7 +6295,13 @@ mod session_tests {
 		let mut announced = announced(&relay.origin);
 		session.abort(moq_net::Error::App(1));
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Offline,
+					..
+				}
+			)
 		});
 
 		let mut new = Publisher::new(&relay.origin, Default::default(), video_rendition());
@@ -6193,7 +6380,7 @@ mod session_tests {
 		let errors = || {
 			[&publisher, &subscriber].map(|pipeline| pipeline.bus().unwrap().pop_filtered(&[gst::MessageType::Error]))
 		};
-		let deadline = kio::clock::now() + Duration::from_secs(30);
+		let deadline = kio::clock::now().saturating_add(Duration::from_secs(30));
 		let mut samples = Vec::new();
 		while samples.len() < FRAMES * CHANNELS {
 			assert!(

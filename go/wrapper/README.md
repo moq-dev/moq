@@ -55,6 +55,8 @@ for event, err := range announced.All(ctx) {
 		// Prefix stays origin-relative; Captures reports wildcard matches.
 		fmt.Println("broadcast online", event.Announce.Prefix)
 	case moq.AnnounceEventAbsent:
+		fmt.Println("broadcast ended", event.Announce.Prefix)
+	case moq.AnnounceEventOffline:
 		fmt.Println("broadcast offline", event.Announce.Prefix)
 	}
 }
@@ -139,7 +141,7 @@ import (
 )
 
 route, _ := client.Route("room", moq.RouteOptions{Hidden: true})
-broadcast, _ := route.Broadcast()
+broadcast := route.Broadcast()
 // Every JSON write is stamped, so the track is timed. JSON is small and repetitive, so
 // compress it on the wire.
 scale := uint64(1_000)

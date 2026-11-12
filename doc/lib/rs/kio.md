@@ -15,7 +15,10 @@ and in a simulator that tests drive.
 ## The clock
 
 `kio::clock::Instant` is a monotonic instant, counted in nanoseconds from the
-clock's origin, with the methods of `std::time::Instant`. `Wall` is wall
+clock's origin, with the methods of `std::time::Instant`. It has no `+` or `-`
+with a `Duration`, which would panic past the clock's range: pick
+`checked_add`/`checked_sub`, or `saturating_add`/`saturating_sub`, which stop
+at the clock's last instant (centuries out) or its origin. `Wall` is wall
 time from the same clock. It is a separate type because wall time can step
 forward or back without any time passing, so it never measures elapsed time.
 
@@ -76,7 +79,7 @@ async fn gives_up_after_five_seconds() {
         kio::clock::timeout(Duration::from_secs(5), std::future::pending::<()>()).await
     });
     assert!(task.await.unwrap().is_err());
-    assert_eq!(kio::clock::now(), kio::clock::Instant::ZERO + Duration::from_secs(5));
+    assert_eq!(kio::clock::now(), kio::clock::Instant::ZERO.saturating_add(Duration::from_secs(5)));
 }
 ```
 
@@ -91,8 +94,9 @@ timer is armed panics as a deadlock instead of hanging. `sim::advance()` and
 Draw jitter and other randomness from `kio::clock::rng()`. Inside the simulator
 it comes from one seed per run, picked at random or set with `MOQ_SIM_SEED`. A
 run that panics prints its seed, so rerunning the test with `MOQ_SIM_SEED` set to
-that seed replays it bit-exact. Outside the simulator `rng()` is rand's thread
-generator.
+that seed replays it bit-exact. A sweep that derives each case's seed itself
+passes it to `sim::run_seeded(seed, future)` instead, so one setting replays a
+case. Outside the simulator `rng()` is rand's thread generator.
 
 ## Driving a tokio runtime by hand
 

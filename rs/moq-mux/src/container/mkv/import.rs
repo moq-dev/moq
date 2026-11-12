@@ -906,14 +906,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Finish all tracks, flushing current groups.
+	/// Finish all tracks, flushing current groups, and return the [`Finished`] import.
 	///
 	/// Input that ends inside an element other than an unknown-size Segment or Cluster is refused as
 	/// truncated, but the tracks still end with what was accepted, as they do after a refused
-	/// [`decode`](Self::decode). Either way every track has ended. A finish that failed returns
-	/// the same error to every later call; one that succeeded refuses later input with
-	/// [`Finished`](crate::Error::Finished), or with the refusal it followed.
-	pub fn finish(&mut self) -> Result<()> {
+	/// [`decode`](Self::decode). Either way every track has ended, so a failed finish can't be
+	/// retried.
+	pub fn finish(mut self) -> Result<Finished<E>> {
+		self.finish_in_place()?;
+		Ok(Finished { import: self })
+	}
+
+	fn finish_in_place(&mut self) -> Result<()> {
 		let mut result = match &self.input {
 			crate::container::Input::Finished => return Ok(()),
 			crate::container::Input::Failed(err) => return Err(err.clone()),
@@ -966,6 +970,29 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		{
 			frame.abort(err);
 		}
+	}
+}
+
+/// An MKV import that [finished](Import::finish): every track has ended, and they can still be
+/// read or aborted, but it takes no more input.
+///
+/// Dropping it retires the tracks and their catalog renditions, as dropping the [`Import`] does.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut import: moq_mux::container::mkv::Finished) {
+/// import.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it retires the tracks and their catalog renditions"]
+pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
+	import: Import<E>,
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
+	/// Release every track's cache, reporting `err` to readers that have not drained it; see
+	/// [`Import::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
 	}
 }
 
@@ -1439,7 +1466,7 @@ fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).map_err(|_| Error::InvalidHvcc)?;
 
 	let mut description = BytesMut::new();
-	hvcc.encode_body(&mut description)?;
+	hvcc.encode_body(&mut description).map_err(crate::Error::mp4)?;
 
 	let mut config = VideoConfig::new(H265 {
 		in_band: false,
@@ -1467,7 +1494,7 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	}
 
 	let mut description = BytesMut::new();
-	av1c.encode_body(&mut description)?;
+	av1c.encode_body(&mut description).map_err(crate::Error::mp4)?;
 
 	let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av1c));
 	config.color = crate::codec::av1::color(&av1c.config_obus);
@@ -1628,9 +1655,7 @@ mod tests {
 			}
 			assert_eq!(import.cluster_timestamp, timestamp);
 		}
-		import.finish().unwrap();
-		import.finish().unwrap();
-		assert!(matches!(import.decode(&[0]), Err(crate::Error::Finished)));
+		let _import = import.finish().unwrap();
 	}
 
 	/// A WebM prefix declaring `entries`, leaving an unknown-size Segment and Cluster open.
@@ -1725,7 +1750,7 @@ mod tests {
 			read.extend_from_slice(&chunk);
 		}
 		assert_eq!(read.len(), 1 + SIZE);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	#[test]
@@ -1743,7 +1768,7 @@ mod tests {
 			import.decode(&[0]),
 			Err(crate::Error::Moq(moq_net::Error::FrameTooLarge))
 		));
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	#[test]
@@ -1838,7 +1863,7 @@ mod tests {
 			import.decode(&entry_ending_in(&header(id, SIZE), SIZE)).unwrap();
 			feed_unretained(&mut import, SIZE).unwrap();
 			assert_eq!(import.tracks.len(), 1, "{id:x?}");
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 		}
 	}
 
@@ -2072,7 +2097,7 @@ mod tests {
 			.unwrap();
 		feed_unretained(&mut import, SIZE).unwrap();
 		assert_eq!(import.tracks.len(), 1);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	#[tokio::test]
@@ -2094,7 +2119,7 @@ mod tests {
 		import.decode(b"key").unwrap();
 		let mut frame = first_frame(&catalog, &consumer).await;
 		assert_eq!(frame.read_all().await.unwrap(), b"\0key"[..]);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	/// Output nobody reads is evicted by its track, so the importer keeps accepting input.
@@ -2108,7 +2133,7 @@ mod tests {
 			import.decode(&simple_block(1, payload.len() as u64)).unwrap();
 			import.decode(&payload).unwrap();
 		}
-		import.finish().unwrap();
+		let _import = import.finish().unwrap();
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -2120,9 +2145,9 @@ mod tests {
 		import.decode(&simple_block(1, 1024)).unwrap();
 		import.decode(&[4; 512]).unwrap();
 		let mut frame = first_frame(&catalog, &consumer).await;
-		let err = import.finish().unwrap_err();
+		// In place, so the frame fails from the finish rather than from dropping the importer.
+		let err = import.finish_in_place().unwrap_err();
 		assert!(matches!(err, crate::Error::Mkv(Error::Truncated)));
-		// The importer is still owned, and the frame fails rather than waiting on it.
 		let read = frame.read_all().now_or_never().expect("the cut-short frame must fail");
 		assert!(matches!(
 			read,
@@ -2145,7 +2170,11 @@ mod tests {
 				for piece in data.chunks(chunk) {
 					import.decode(piece).unwrap();
 				}
-				assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+				// In place, so the catalog still lists the ended tracks.
+				assert!(matches!(
+					import.finish_in_place(),
+					Err(crate::Error::Mkv(Error::Truncated))
+				));
 				let snapshot = catalog.snapshot();
 				let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
 				let subscription = moq_net::track::Subscription::default()
@@ -2178,7 +2207,11 @@ mod tests {
 			.unwrap();
 		import.decode(&[0xec, 0x81]).unwrap();
 		assert!(clocks.drain().is_empty(), "no block has anchored the catalog yet");
-		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+		// In place, so the catalog still lists the ended tracks.
+		assert!(matches!(
+			import.finish_in_place(),
+			Err(crate::Error::Mkv(Error::Truncated))
+		));
 		assert!(
 			!clocks.drain().is_empty(),
 			"finish must release the initial catalog reservation"
@@ -2210,18 +2243,5 @@ mod tests {
 			let read = kio::clock::timeout(WAIT, frame.read_all()).await.unwrap();
 			assert!(read.is_err(), "a frame cut short must not read as complete: {read:?}");
 		}
-	}
-
-	/// A failed finish is final: later input and a retried finish report its cause.
-	#[test]
-	fn a_failed_finish_reports_its_cause() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-		let mut import = Import::new(broadcast, catalog.reserve());
-		// An EBML header declaring a byte it never sends.
-		import.decode(&[0x1a, 0x45, 0xdf, 0xa3, 0x81]).unwrap();
-		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
-		assert!(matches!(import.decode(&[0]), Err(crate::Error::Mkv(Error::Truncated))));
-		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
 	}
 }

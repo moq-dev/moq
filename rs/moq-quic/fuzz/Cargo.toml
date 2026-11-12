@@ -6,7 +6,7 @@
 # excluded from every gate that means "all of it" instead: libFuzzer needs a nightly
 # toolchain and sanitizer flags, so nothing in `check` or `test` may compile it.
 #
-# The target bodies live in `moq-quic`'s hidden `fuzz` module, not here: the frame
+# The target bodies live in `moq-quic`'s `fuzz` module, not here: the frame
 # decoder and stream state are private, and sharing the bodies is what lets the
 # crate's own tests replay the corpus on stable.
 [package]

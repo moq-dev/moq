@@ -8,11 +8,12 @@ type Variant = "live" | "loading" | "connecting" | "error";
 function deriveStatus(
 	url: URL | undefined,
 	connection: "connecting" | "connected" | "disconnected",
-	broadcast: "offline" | "loading" | "live" | "error" | "unsupported",
+	broadcast: "connecting" | "offline" | "loading" | "live" | "error" | "unsupported",
 ): { variant: Variant; text: string } {
 	if (!url) return { variant: "error", text: "No URL" };
 	if (connection === "disconnected") return { variant: "error", text: "Disconnected" };
-	if (connection === "connecting") return { variant: "connecting", text: "Connecting" };
+	// Connected but still hearing the relay's announcements reads the same to a viewer.
+	if (connection === "connecting" || broadcast === "connecting") return { variant: "connecting", text: "Connecting" };
 	if (broadcast === "offline") return { variant: "error", text: "Offline" };
 	if (broadcast === "error") return { variant: "error", text: "Refused" };
 	if (broadcast === "unsupported") return { variant: "error", text: "Update player" };
@@ -58,7 +59,7 @@ export function liveBadge(parent: Effect, watch: MoqWatch, state: UiState): HTML
 		// Show the total added latency (jitter buffer + codec frame overhead),
 		// which is what the viewer actually experiences.
 		const total = effect.get(watch.sync.out.delay);
-		latency.textContent = `+${formatMillis(total)} latency`;
+		latency.textContent = `+${formatMillis(total.asMillis())} latency`;
 	});
 
 	parent.event(button, "click", () => {

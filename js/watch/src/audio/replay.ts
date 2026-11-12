@@ -2,8 +2,8 @@
  * Replay a recorded arrival trace through the player's consumer and ring on a simulated clock.
  *
  * Every frame is written into its group at the instant the trace says it arrived, and the player's
- * real `Container.Consumer` decides what to deliver, wait for, and skip, at the max delay the delay
- * sets. Delivered frames go into the real ring, which carries on through a gap the way the decoder's
+ * real `Container.Consumer` decides what to deliver, wait for, and skip, at the hole wait and max delay
+ * the decoder sets. Delivered frames go into the real ring, which carries on through a gap the way the decoder's
  * does: a gap restarts only the codec. One render quantum is read every quantum's worth of that same
  * clock, which is what the AudioWorklet does. A real {@link Sync} resolves the delay from the playout target the decoder
  * registers, measured by that same consumer from the recorded catalog config, and the ring and the
@@ -16,16 +16,15 @@
  * @internal Test support, not part of the player.
  */
 
-import { Manual, type Micro, Milli, Nano, type Second } from "@moq/clock";
+import { Duration, Instant, Manual } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { type Group, Time, Track } from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
-import { type Arrival as Diagnostic, gap } from "../arrivals";
 import { type Delay, Sync } from "../sync";
 import { Backpressure } from "./buffer";
 import { frameDuration } from "./config";
-import { target } from "./latency";
+import { AUTO_MAX_DELAY, ringHold, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
 
 /** An AudioWorklet render quantum, in frames. */
@@ -33,9 +32,10 @@ export const QUANTUM = 128;
 
 /**
  * The replay's own subscription passes every recorded group through: the recorder's relay already
- * applied a wire max delay, so only the consumer's decisions are made again.
+ * applied a wire max delay, so only the consumer's decisions are made again. No subscriber limit
+ * leaves only the publisher's max age, which a replay never reaches.
  */
-const WIRE_MAX_DELAY = Milli(Number.MAX_SAFE_INTEGER);
+const WIRE_MAX_DELAY = null;
 
 /** Any non-empty payload: an empty one is the legacy container's end marker. */
 const PAYLOAD = new Uint8Array(1);
@@ -60,6 +60,8 @@ export interface Options {
 	rate: number;
 	/** The configured delay, as the element takes it. "instant" plays no audio, so it has no replay. */
 	delay: Exclude<Delay, "instant">;
+	/** The configured lookahead, in ms: nonzero plays in buffered mode, as the decoder does. */
+	lookahead?: number;
 	/** The rendition as the catalog described it: its advertised jitter, delay, and codec. */
 	config: Catalog.AudioConfig;
 	/**
@@ -71,8 +73,8 @@ export interface Options {
 
 /** One render quantum, as the worklet produced it. */
 export interface Quantum {
-	/** Every frame and gap the decoder received so far, in delivery order. Grows between yields. */
-	arrivals: readonly Diagnostic[];
+	/** Frames the decoder received so far. */
+	delivered: number;
 	/** When it finished rendering, on the trace's clock, in ms. */
 	at: number;
 	/** The quantum: what the ring supplied at the front, zeros after it. Reused between yields. */
@@ -89,13 +91,17 @@ export interface Quantum {
 	underruns: number;
 	/** The ring's cumulative skips, as the player's stats count them: each jump that dropped queued audio. */
 	skips: number;
+	/** The received audio those skips dropped, cumulative, in ms. */
+	trimmed: number;
+	/** The received audio the stretch removed by playing faster, cumulative, in ms. */
+	accelerated: number;
 }
 
 /** Samples as the milliseconds `AudioBuffer` posts to the worklet. */
-const millis = (rate: number, samples: number) => Milli.fromSecond((samples / rate) as Second);
+const millis = (rate: number, samples: number) => (samples / rate) * 1000;
 
-/** A trace's media timestamp as the container carries it. */
-const micros = (ms: number) => Math.round(ms * 1000) as Micro;
+/** A trace's media timestamp in the whole microseconds the container carries. */
+const micros = (ms: number) => Math.round(ms * 1000);
 
 /**
  * Run every microtask already queued, and every one those queue, before returning.
@@ -121,7 +127,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	if (end < last.at) throw new Error(`an arrival at ${last.at} ms is past the ${options.duration} ms observed`);
 
 	const { rate, config } = options;
-	const recorded = new Map<Micro, Arrival>();
+	const recorded = new Map<number, Arrival>();
 	for (const arrival of trace) {
 		if (!Number.isFinite(arrival.duration) || arrival.duration <= 0) {
 			throw new Error(`invalid recorded frame duration: ${arrival.duration}`);
@@ -135,11 +141,18 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		ends.set(arrival.group, i);
 	});
 
-	const sync = new Sync({ delay: options.delay });
+	const lookahead = Duration.millis(options.lookahead ?? 0);
+	const buffered = !lookahead.isZero();
+	const sync = new Sync({ delay: options.delay, lookahead });
 	const track = new Track.Producer("audio");
+	// The subscription's max delay, as the decoder sets it, which the consumer drops aged media at too.
+	const maxDelay = new Derived([sync.out.maxDelay], (max) =>
+		options.delay === "auto" ? max.max(AUTO_MAX_DELAY) : max,
+	);
 	const consumer = new Container.Consumer(track.subscribe({ delay: { max: WIRE_MAX_DELAY } }), {
 		format: new Container.Legacy.Format("audio"),
-		delay: new Derived([sync.out.delay, sync.out.maxDelay], (min, max) => ({ min, max })),
+		delay: new Derived([sync.out.delay, maxDelay], (min, max) => ({ min, max })),
+		wait: sync.out.maxDelay,
 	});
 
 	// Match the decoder: a codec constant until a delivered packet states its own duration.
@@ -148,33 +161,55 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const playout = signals.computed((effect) =>
 		target({
 			measured: effect.get(consumer.spread),
-			advertised: config.jitter !== undefined ? Milli(config.jitter) : undefined,
+			advertised: config.jitter !== undefined ? Duration.millis(config.jitter) : undefined,
 			frame: effect.get(frame),
-			delay: config.delay !== undefined ? Milli(config.delay) : undefined,
+			delay: config.delay !== undefined ? Duration.millis(config.delay) : undefined,
 		}),
 	);
-	const audio = sync.track({ target: playout });
+	// Buffered startup holds playback until the decoded span, plus whatever of the hold is queued
+	// encoded past it, covers the delay, the way the decoder reports its startup span.
+	const decoded = new Signal<{ start: Duration; end: Duration } | null>(null);
+	const newest = new Signal<number | undefined>(undefined);
+	const startup = buffered
+		? signals.computed((effect) => {
+				const span = effect.get(decoded);
+				if (!span) return null;
+				const queued = Duration.micros(effect.get(newest) ?? 0).saturatingSub(span.end);
+				return { start: span.start, end: span.end.add(queued.min(ringHold(effect.get(sync.out.delay)))) };
+			})
+		: undefined;
+	const audio = sync.track({ target: playout, startup });
 	signals.cleanup(() => audio.close());
 	await settle();
 
 	let delay = sync.out.delay.peek();
+	const terms = () => ({ target: delay.asMillis(), bound: maxDelay.peek().saturatingSub(delay).asMillis() });
 	// The decode gate, and the worklet's ring on the floor it sets, the way `AudioBuffer` drives both.
-	const gate = new Backpressure(rate, false, delay);
-	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, gate.floor) });
+	const gate = new Backpressure(rate, buffered, delay);
+	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, gate.floor), ...terms() });
 	const observe = () => gate.observe(ring.anchored ? ring.timestamp : undefined, ring.stalled);
 
 	// Arrived but not yet decoded media, read or still in the consumer, is what covers the part of the
-	// target held encoded, and what resumes a parked ring.
-	const read = new Signal<Micro | undefined>(undefined);
+	// target held encoded before playback starts.
+	// In microseconds, as the gate takes them.
+	const read = new Signal<number | undefined>(undefined);
+	// What the consumer holds has arrived too, so its newest end is how far the received audio reaches.
 	signals.run((effect) => {
-		let newest = effect.get(read);
-		for (const { end } of effect.get(consumer.buffered)) newest = Math.max(newest ?? 0, micros(end)) as Micro;
-		if (gate.queued(newest)) ring.setLatency(millis(rate, gate.floor));
+		let queued = effect.get(read);
+		let arrived: number | undefined;
+		for (const { end } of effect.get(consumer.buffered)) {
+			const micro = Math.round(end.asMicros());
+			queued = Math.max(queued ?? 0, micro);
+			arrived = Math.max(arrived ?? 0, micro);
+		}
+		newest.set(queued);
+		gate.queued(queued);
+		if (arrived !== undefined) ring.received(arrived);
 	});
 
 	// The decoder's read loop, with the codec taken out. Traces record no declared ends, so a gap is
 	// the only codec epoch a replay meets. A failure is rethrown at the next quantum.
-	const arrivals: Diagnostic[] = [];
+	let delivered = 0;
 	const delivery = Promise.withResolvers<void>();
 	if (options.decodeAfter === undefined) delivery.resolve();
 	let failure: { error: unknown } | undefined;
@@ -184,24 +219,26 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		for (;;) {
 			const next = await consumer.next();
 			if (!next) return;
-			if (next.kind === "gap") arrivals.push(gap(next));
 			if (next.kind !== "frame") continue;
+			delivered++;
 
-			const { timestamp, arrival } = next.frame;
+			const { timestamp: media, arrival } = next.frame;
+			const timestamp = media.asMicros();
 			read.set(timestamp);
-			const media = Milli.fromMicro(timestamp);
-			const late = audio.received(media, arrival);
-			arrivals.push({ kind: "frame", timestamp: media, arrival, late });
+			audio.received(media, arrival);
 			const entry = recorded.get(timestamp);
 			if (!entry) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);
-			frame.set(Milli(entry.duration));
+			frame.set(Duration.millis(entry.duration));
+			// The decoder tells the ring what arrived before it waits to decode it.
+			ring.received(timestamp + micros(entry.duration));
 			await gate.wait(timestamp, abort.signal);
 			if (abort.signal.aborted) return;
 			const pcm = new Float32Array(Math.round((entry.duration * rate) / 1000)).fill(0.5);
 			ring.write(timestamp, [pcm]);
 			// The decoder reports each output to the gate the way `AudioBuffer` and `Decoder.#emit` do.
-			const end = (timestamp + micros((pcm.length / rate) * 1000)) as Micro;
+			const end = timestamp + micros((pcm.length / rate) * 1000);
 			gate.inserted(timestamp, end);
+			decoded.update((span) => ({ start: span?.start ?? media, end: Duration.micros(end) }));
 			gate.decoded(end, end);
 		}
 	})().catch((error: unknown) => {
@@ -212,11 +249,14 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const step = (QUANTUM / rate) * 1000;
 	const output = new Float32Array(QUANTUM);
 	let next = 0;
+	// The shared clock's reference as the worklet last read it. One that moved earlier jumped the clock
+	// ahead, which the ring skips, the way `AudioBuffer` reports it.
+	let reference: number | undefined;
 
 	// The consumer stamps each arrival on the monotonic clock, which the estimator measures, so a
 	// manual clock reads the trace's time instead until the replay finishes.
 	const manual = new Manual();
-	const moveTo = (ms: number) => manual.jump(Nano(Nano.fromMilli(Milli(ms)) - manual.now()));
+	const moveTo = (ms: number) => manual.jump(Duration.millis(ms).saturatingSub(manual.now().since(Instant.ZERO)));
 	let clock = first.at;
 	moveTo(clock);
 	const installed = manual.install();
@@ -243,7 +283,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				}
 				const timestamp = micros(arrival.timestamp);
 				group.writeFrame({
-					payload: Container.Legacy.encodeFrame(PAYLOAD, timestamp),
+					payload: Container.Legacy.encodeFrame(PAYLOAD, Duration.micros(timestamp)),
 					timestamp: Time.Timestamp.fromMicros(timestamp),
 				});
 				if (ends.get(arrival.group) === next) {
@@ -264,27 +304,36 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			// The decoder moves the ring and the gate as the resolved delay moves, which only an arrival
 			// does.
 			const resolved = sync.out.delay.peek();
-			if (resolved !== delay) {
+			if (!resolved.eq(delay)) {
 				delay = resolved;
 				observe();
-				const park = gate.setLatency(delay);
-				ring.setLatency(millis(rate, gate.floor));
-				if (park) ring.park();
+				gate.setLatency(delay);
+				ring.setLatency(millis(rate, gate.floor), terms());
 			}
 
+			// The worklet reads nothing until startup releases it, then the shared clock as of the
+			// quantum's start, mapped onto its own time.
+			const shared = sync.now();
+			const moved = sync.out.reference.peek();
+			if (reference !== undefined && moved !== undefined && moved < reference)
+				ring.jumped((reference - moved) * 1000);
+			reference = moved;
+			ring.clock(shared !== undefined ? (shared.asMillis() - step) * 1000 : undefined);
 			output.fill(0);
-			ring.read([output]);
+			if (sync.playing.peek()) ring.read([output]);
 			observe();
 			yield {
-				arrivals,
+				delivered,
 				at: now,
 				output,
 				stalled: ring.stalled,
-				timestamp: Milli.fromMicro(ring.timestamp),
-				clock: sync.now(),
-				delay,
+				timestamp: ring.timestamp / 1000,
+				clock: sync.now()?.asMillis(),
+				delay: delay.asMillis(),
 				underruns: ring.underruns,
 				skips: ring.skips,
+				trimmed: ring.trimmed,
+				accelerated: ring.accelerated,
 			};
 		}
 	} finally {

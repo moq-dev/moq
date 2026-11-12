@@ -2,7 +2,7 @@
 //! forwards one it has no room to stamp.
 //!
 //! Only a peer's route arrives with hops, so the routes under test land through the
-//! hidden `fuzz` module as a session lands them.
+//! `fuzz` module as a session lands them.
 
 use crate::support::{
 	Kind, drain,
@@ -22,7 +22,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 }
 
 /// Land a peer's route at `path` on `origin`, as its session does.
-fn forward(origin: &origin::Producer, path: &str, route: origin::RouteInfo) -> origin::Route {
+fn forward(origin: &origin::Producer, path: &str, route: origin::RouteInfo) -> origin::Claim {
 	moq_net::fuzz::requests_route(origin, moq_net::Path::new(path).unwrap(), route).unwrap()
 }
 

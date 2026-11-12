@@ -199,9 +199,17 @@ impl<T: Serialize> Producer<T> {
 		take(&self.inner).cut()
 	}
 
-	/// Finish the track, closing any open group.
-	pub fn finish(&mut self) -> Result<()> {
-		take(&self.inner).finish()
+	/// Finish the track, closing any open group, and return the [`Finished`] value.
+	///
+	/// Clones sharing the track see it ended: their next [`modify`](Self::modify) or
+	/// [`update`](Self::update) fails. A finish that fails aborts the track with the cause, which
+	/// those clones then report.
+	pub fn finish(self) -> Result<Finished<T>> {
+		take(&self.inner).finish()?;
+		Ok(Finished {
+			inner: self.inner,
+			_marker: PhantomData,
+		})
 	}
 
 	/// Abort the track with the given error, which consumers see in place of any further value.
@@ -211,6 +219,40 @@ impl<T: Serialize> Producer<T> {
 	pub fn abort(self, err: moq_net::Error) -> Result<()> {
 		let mut inner = take(&self.inner);
 		inner.abort(err.into());
+		Ok(())
+	}
+}
+
+/// A value whose producer [finished](Producer::finish) it: it can still be read or aborted, but
+/// not published to.
+///
+/// Dropping the last handle sharing the track releases it, so new readers can no longer find it.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_update(value: moq_json::snapshot::Finished<u32>) {
+/// value.update(&1).unwrap();
+/// # }
+/// ```
+#[must_use = "dropping the last handle releases the track, which new readers can then no longer find"]
+pub struct Finished<T> {
+	inner: Arc<Mutex<Inner<T>>>,
+	_marker: PhantomData<fn(T)>,
+}
+
+impl<T> Finished<T> {
+	/// Create a subscriber for the underlying track.
+	pub fn consume(&self) -> moq_net::track::Subscriber {
+		take(&self.inner).track.inner.subscribe(None)
+	}
+
+	/// A watch-only handle to the underlying track's subscriber demand.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		take(&self.inner).track.inner.demand()
+	}
+
+	/// Release the track's cache, reporting `err` to readers that have not drained it.
+	pub fn abort(self, err: moq_net::Error) -> Result<()> {
+		take(&self.inner).abort(err.into());
 		Ok(())
 	}
 }
@@ -429,7 +471,7 @@ struct Track {
 impl Track {
 	/// Finish the open group without opening a replacement.
 	fn cut(&mut self) -> Result<()> {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 		Ok(())
@@ -465,7 +507,7 @@ impl Track {
 	/// Close the open group and write a snapshot as the first frame of a new one.
 	fn write_snapshot(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
 		// The previous group is complete; no more frames will be appended to it.
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 
@@ -483,7 +525,7 @@ impl Track {
 			// Keep the group open so future deltas can be appended to it.
 			true => self.group = Some(group),
 			// One frame per group, identical to a plain JSON track.
-			false => group.finish()?,
+			false => drop(group.finish()?),
 		}
 
 		Ok(())
@@ -499,12 +541,13 @@ impl Track {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
-		// Another handle may have declared the end already, which stands.
+		// Another handle may have declared the end already, which stands. This shared state
+		// keeps its own clone, whose appends the end refuses.
 		if self.inner.finished().is_none() {
-			self.inner.finish()?;
+			drop(self.inner.clone().finish()?);
 		}
 		Ok(())
 	}

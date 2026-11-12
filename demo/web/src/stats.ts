@@ -8,32 +8,26 @@
  * let you drill into one. A restarted relay announces a new instance at the same
  * path, which each node's follower hands out afresh, so its history starts over.
  *
- * Per node we read `group.json`, the whole node's group at the relay's default
- * `depth = 0`: `{ epoch, tiers: { <tier>: { paths, labels } } }`, a JSON snapshot
- * with merge-patch deltas. From the default tier we take each path's `publisher`
- * (egress, relay -> downstream viewers) and `subscriber` (ingress, upstream
- * publishers -> relay), and each stats label's sessions.
+ * Per node we read the whole node's bucket at the relay's default `depth = 0` through
+ * `@moq/stats`, which follows the track listing to each new counter run. From the default tier
+ * we take each path's `publisher` (egress, relay -> downstream viewers) and `subscriber`
+ * (ingress, upstream publishers -> relay), and each stats label's sessions.
  *
  * Counters are cumulative; "active" = started - ended. The relay includes every
  * entry it still holds counters for, idle ones too, so the latest frame is a
  * snapshot of now. We sample the aggregate on an interval to derive per-second
- * throughput rates for the charts. A relay built after the started/ended rename
- * still writes the legacy names beside the new ones; this dashboard prefers the
- * canonical spelling and falls back so it also reads an older relay.
+ * throughput rates for the charts.
  */
 
 import "./highlight";
-import { Milli, Nano, wall } from "@moq/clock";
+import { Duration, wall } from "@moq/clock";
 import { Net, Signals } from "@moq/hang";
-import * as Json from "@moq/json";
+import * as Stats from "@moq/stats";
 
 const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? "http://localhost:4443";
 
-// Broadcasts under this prefix are per-node stats broadcasts.
-const STATS_PREFIX = ".stats/node";
-
 // Rolling history window for the charts.
-const SAMPLE = Nano.fromMilli(Milli(1000));
+const SAMPLE = Duration.millis(1000);
 const MAX_SAMPLES = 90;
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -44,39 +38,8 @@ const $ = <T extends HTMLElement>(id: string): T => {
 
 // ---- Frame shapes (see module comment) ------------------------------------
 
-interface Snapshot {
-	announces_started?: number;
-	announced?: number;
-	announces_ended?: number;
-	announced_closed?: number;
-	// Broadcast-name bytes charged for each announce/unannounce, separate from payload `bytes`.
-	announced_bytes?: number;
-	broadcasts_started?: number;
-	broadcasts?: number;
-	broadcasts_ended?: number;
-	broadcasts_closed?: number;
-	subscriptions_started?: number;
-	subscriptions?: number;
-	subscriptions_ended?: number;
-	subscriptions_closed?: number;
-	// One-shot group fetches requested (counted at request time, not on resolution).
-	fetches?: number;
-	bytes?: number;
-	frames?: number;
-	groups?: number;
-	// Datagrams of datagram tracks: they belong to no group, so they count in neither
-	// `groups` nor `frames`, while their payload is in `bytes`.
-	datagrams?: number;
-}
-type BroadcastFrame = Record<string, Snapshot>;
-
-interface SessionCounters {
-	sessions_started?: number;
-	sessions?: number;
-	sessions_ended?: number;
-	sessions_closed?: number;
-}
-type SessionFrame = Record<string, SessionCounters>;
+type BroadcastFrame = Record<string, Stats.Traffic>;
+type SessionFrame = Record<string, Stats.Presence>;
 
 interface NodeStats {
 	egress: BroadcastFrame; // each path's `publisher`
@@ -84,41 +47,23 @@ interface NodeStats {
 	sessions: SessionFrame; // `labels`
 }
 
-// One tier of a `group.json` frame.
-interface GroupTier {
-	paths?: Record<string, { publisher?: Snapshot; subscriber?: Snapshot }>;
-	labels?: SessionFrame;
-}
+// A side that never moved is left off the wire and reads as zeros, so it lists no row.
+const moved = (t: Stats.Traffic) =>
+	Object.values(t).some((v) => (typeof v === "number" ? v !== 0 : Object.values(v).some((n) => n !== 0)));
 
-interface GroupFrame {
-	tiers?: Record<string, GroupTier>;
-}
-
-// The default tier's egress, ingress, and sessions from a group frame.
-function nodeStatsOf(frame: GroupFrame): NodeStats {
-	const tier = frame.tiers?.[""] ?? {};
+// The default tier's egress, ingress, and sessions from a bucket frame.
+function nodeStatsOf(frame?: Stats.BucketFrame): NodeStats {
+	const tier = frame?.tiers[""];
 	const egress: BroadcastFrame = {};
 	const ingress: BroadcastFrame = {};
-	for (const [path, usage] of Object.entries(tier.paths ?? {})) {
-		// The relay leaves out a side that never moved.
-		if (usage.publisher) egress[path] = usage.publisher;
-		if (usage.subscriber) ingress[path] = usage.subscriber;
+	for (const [path, usage] of Object.entries(tier?.paths ?? {})) {
+		if (moved(usage.publisher)) egress[path] = usage.publisher;
+		if (moved(usage.subscriber)) ingress[path] = usage.subscriber;
 	}
-	return { egress, ingress, sessions: tier.labels ?? {} };
+	return { egress, ingress, sessions: tier?.labels ?? {} };
 }
 
-// Canonical spelling wins when a frame carries both names.
-const edge = (started?: number, legacy?: number) => started ?? legacy ?? 0;
-const active = (started?: number, ended?: number) => (started ?? 0) - (ended ?? 0);
-
-const announcesStarted = (s: Snapshot) => edge(s.announces_started, s.announced);
-const announcesEnded = (s: Snapshot) => edge(s.announces_ended, s.announced_closed);
-const broadcastsStarted = (s: Snapshot) => edge(s.broadcasts_started, s.broadcasts);
-const broadcastsEnded = (s: Snapshot) => edge(s.broadcasts_ended, s.broadcasts_closed);
-const subscriptionsStarted = (s: Snapshot) => edge(s.subscriptions_started, s.subscriptions);
-const subscriptionsEnded = (s: Snapshot) => edge(s.subscriptions_ended, s.subscriptions_closed);
-const sessionsStarted = (s: SessionCounters) => edge(s.sessions_started, s.sessions);
-const sessionsEnded = (s: SessionCounters) => edge(s.sessions_ended, s.sessions_closed);
+const active = (started: number, ended: number) => started - ended;
 
 // Broadcasts whose path starts with "." are system broadcasts (e.g. the `.stats` feed
 // this dashboard itself reads). We exclude them from the user-facing counters.
@@ -132,7 +77,8 @@ const selectedNode = new Signals.Signal<string | undefined>(undefined);
 
 // The relay URL, editable at runtime (see the input binding below).
 const relayUrl = new Signals.Signal<URL | undefined>(new URL(RELAY_URL));
-const connection = new Net.Connection({ url: relayUrl });
+// Stats tracks are found through the broadcast's track listing, which only moq-lite-07 carries.
+const connection = new Net.Connection({ url: relayUrl, versions: ["moq-lite-07-wip"] });
 
 // ---- Discover nodes + subscribe to each -----------------------------------
 
@@ -142,9 +88,8 @@ discovery.run((effect) => {
 	nodeStats.set({});
 	if (!origin) return;
 
-	const prefix = Net.Path.from(STATS_PREFIX);
-	const announced = origin.announced(Net.Path.Pattern.subtree(prefix));
-	effect.cleanup(() => announced.close());
+	const nodes = new Stats.Nodes(origin);
+	effect.cleanup(() => nodes.close());
 
 	// One sub-effect per node so we can tear a node's subscriptions down when it
 	// goes away (e.g. a cluster peer disconnects).
@@ -155,27 +100,25 @@ discovery.run((effect) => {
 
 	effect.spawn(async () => {
 		for (;;) {
-			const entry = await effect.race(announced.next());
-			if (!entry) break;
-			const path = entry.prefix;
-			const node = Net.Path.stripPrefix(prefix, path);
-			if (!node) continue;
+			const event = await effect.race(nodes.next());
+			if (!event) break;
+			const node = event.node;
 
-			if (entry.kind === "absent") {
+			if (!event.active) {
 				subs.get(node)?.close();
 				subs.delete(node);
 				nodeStats.mutate((s) => {
 					delete s[node];
 				});
 				history.delete(node);
-				clusterMembership = "";
+				clusterMembership = undefined;
 				continue;
 			}
 			if (subs.has(node)) continue;
 
 			const ne = new Signals.Effect();
 			subs.set(node, ne);
-			subscribeNode(ne, origin, path, node);
+			subscribeNode(ne, origin, event.path, node);
 		}
 	});
 });
@@ -186,28 +129,45 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 	const following = origin.follow(path);
 	effect.cleanup(() => following.close());
 	effect.run((instance) => {
-		const consumer = instance.get(following.active);
-		nodeStats.mutate((s) => {
-			s[node] = {
-				egress: {},
-				ingress: {},
-				sessions: {},
-			};
-		});
-		history.delete(node);
-		// The aggregate spans every node, so a restarted node's counters must not splice into
-		// its history either.
-		clusterMembership = "";
-		if (!consumer) return;
+		const broadcast = instance.get(following.active);
+		// A new instance or run counts from zero, so neither its node series nor the aggregate
+		// (which spans every node) may splice onto the old counts.
+		const reset = () => {
+			nodeStats.mutate((s) => {
+				s[node] = nodeStatsOf();
+			});
+			history.delete(node);
+			clusterMembership = undefined;
+		};
+		reset();
+		if (!broadcast) return;
 
-		const group = new Json.Snapshot.Consumer<GroupFrame>({ track: consumer.track("group.json") });
-		instance.cleanup(() => group.close());
+		const bucket = new Stats.Consumer(broadcast).bucket("");
+		instance.cleanup(() => bucket.close());
 		instance.spawn(async () => {
+			let epoch: string | undefined;
 			for (;;) {
-				const state = await instance.race(group.latest());
-				if (state === undefined) break;
+				let update: Stats.BucketUpdate | undefined;
+				try {
+					update = await instance.race(bucket.next());
+				} catch (err) {
+					console.warn("stats: bucket track failed", node, err);
+					update = { kind: "ended" };
+				}
+				if (!update) break;
+				if (update.kind === "ended") {
+					// The run ended (unlisted, or aborted as too large): its counts are no longer live,
+					// and the next run's must not splice onto its series.
+					epoch = undefined;
+					reset();
+					continue;
+				}
+				// A new run (or the first after a gap) counts from zero, so its series starts afresh.
+				if (update.frame.epoch !== epoch) reset();
+				epoch = update.frame.epoch;
+				const stats = nodeStatsOf(update.frame);
 				nodeStats.mutate((s) => {
-					if (s[node]) s[node] = nodeStatsOf(state.value ?? {});
+					if (s[node]) s[node] = stats;
 				});
 			}
 		});
@@ -232,32 +192,31 @@ function aggregate(ingress: BroadcastFrame, egress: BroadcastFrame) {
 
 	for (const [path, s] of Object.entries(ingress)) {
 		if (isSystem(path)) continue;
-		if (active(announcesStarted(s), announcesEnded(s)) > 0) broadcasters++;
-		ingressBytes += s.bytes ?? 0;
-		announceBytes += s.announced_bytes ?? 0;
-		fetches += s.fetches ?? 0;
-		datagrams += s.datagrams ?? 0;
+		if (active(s.announces_started, s.announces_ended) > 0) broadcasters++;
+		ingressBytes += s.bytes;
+		announceBytes += s.announced_bytes;
+		fetches += s.fetches;
+		datagrams += s.datagrams;
 	}
 	for (const [path, s] of Object.entries(egress)) {
 		if (isSystem(path)) continue;
-		egressBytes += s.bytes ?? 0;
-		viewers += active(broadcastsStarted(s), broadcastsEnded(s));
-		tracks += active(subscriptionsStarted(s), subscriptionsEnded(s));
-		announceBytes += s.announced_bytes ?? 0;
-		fetches += s.fetches ?? 0;
-		datagrams += s.datagrams ?? 0;
+		egressBytes += s.bytes;
+		viewers += active(s.broadcasts_started, s.broadcasts_ended);
+		tracks += active(s.subscriptions_started, s.subscriptions_ended);
+		announceBytes += s.announced_bytes;
+		fetches += s.fetches;
+		datagrams += s.datagrams;
 	}
 	return { broadcasters, viewers, tracks, ingressBytes, egressBytes, announceBytes, fetches, datagrams };
 }
 
 const countSessions = (f: SessionFrame) =>
-	Object.values(f).reduce((n, s) => n + active(sessionsStarted(s), sessionsEnded(s)), 0);
+	Object.values(f).reduce((n, s) => n + active(s.sessions_started, s.sessions_ended), 0);
 
 // ---- Time-series history ---------------------------------------------------
 
 // One sample captures cumulative byte counters (for rate charts) plus the
-// instantaneous gauges. Keyed by node name, with "" reserved for the
-// cluster-wide aggregate.
+// instantaneous gauges, per node and for the cluster-wide aggregate.
 interface Sample {
 	t: number;
 	egress: number; // cumulative egress bytes
@@ -271,7 +230,9 @@ interface Sample {
 	sessions: number;
 }
 
+// Keyed by node name; a nodeless relay is "", so the aggregate lives apart.
 const history = new Map<string, Sample[]>();
+let cluster: Sample[] = [];
 // Bumped every sample so the chart effects re-render without making the whole
 // history map reactive.
 const clock = new Signals.Signal(0);
@@ -292,17 +253,16 @@ function sampleNode(t: number, stats: NodeStats): Sample {
 	};
 }
 
-function pushSample(key: string, s: Sample) {
-	const arr = history.get(key) ?? [];
+function pushSample(arr: Sample[], s: Sample): Sample[] {
 	arr.push(s);
 	if (arr.length > MAX_SAMPLES) arr.shift();
-	history.set(key, arr);
+	return arr;
 }
 
 // The set of nodes in the most recent cluster-aggregate sample. The aggregate
 // sums cumulative per-node counters, so when membership changes the summed
 // baseline jumps; we reset the aggregate series rather than splice the jump in.
-let clusterMembership = "";
+let clusterMembership: string | undefined;
 
 const sampler = new Signals.Effect();
 sampler.run((effect) => {
@@ -311,14 +271,15 @@ sampler.run((effect) => {
 	// samples onto stale ones across the downtime gap.
 	if (effect.get(connection.status) !== "connected") {
 		history.clear();
-		clusterMembership = "";
+		cluster = [];
+		clusterMembership = undefined;
 		clock.update((n) => n + 1);
 		return;
 	}
 	effect.interval(() => {
 		const all = nodeStats.peek();
 		const nodes = Object.keys(all).sort();
-		const t = wall();
+		const t = wall().asUnixMillis();
 
 		const agg: Sample = {
 			t,
@@ -334,7 +295,7 @@ sampler.run((effect) => {
 		};
 		for (const node of nodes) {
 			const s = sampleNode(t, all[node] as NodeStats);
-			pushSample(node, s);
+			history.set(node, pushSample(history.get(node) ?? [], s));
 			agg.egress += s.egress;
 			agg.ingress += s.ingress;
 			agg.announce += s.announce;
@@ -347,16 +308,16 @@ sampler.run((effect) => {
 		}
 		// A changed node set makes this aggregate's baseline incompatible with the
 		// previous one, so start the cluster series fresh instead of splicing.
-		const membership = nodes.join("\0");
+		const membership = nodes.map((n) => `${n}\0`).join("");
 		if (membership !== clusterMembership) {
-			history.delete("");
+			cluster = [];
 			clusterMembership = membership;
 		}
-		pushSample("", agg);
+		pushSample(cluster, agg);
 
 		// Drop history for nodes that have gone away.
 		for (const key of history.keys()) {
-			if (key !== "" && !nodes.includes(key)) history.delete(key);
+			if (!nodes.includes(key)) history.delete(key);
 		}
 
 		clock.update((n) => n + 1);
@@ -416,7 +377,7 @@ ui.run((effect) => {
 ui.run((effect) => {
 	const nodes = Object.keys(effect.get(nodeStats)).sort();
 	const cur = selectedNode.peek();
-	if (cur && nodes.includes(cur)) return;
+	if (cur !== undefined && nodes.includes(cur)) return;
 	selectedNode.set(nodes[0]);
 });
 
@@ -425,7 +386,6 @@ ui.run((effect) => {
 	effect.get(clock);
 	const all = nodeStats.peek();
 	const nodes = Object.keys(all);
-	const cluster = history.get("") ?? [];
 	const latest = cluster[cluster.length - 1];
 
 	$("kpi-nodes").textContent = String(nodes.length);
@@ -445,7 +405,6 @@ ui.run((effect) => {
 // Cluster throughput chart.
 ui.run((effect) => {
 	effect.get(clock);
-	const cluster = history.get("") ?? [];
 	const egress = rateSeries(cluster, "egress");
 	const ingress = rateSeries(cluster, "ingress");
 
@@ -482,14 +441,14 @@ ui.run((effect) => {
 	const all = effect.get(nodeStats);
 	const node = effect.get(selectedNode);
 	const detail = $("node-detail");
-	const stats = node ? all[node] : undefined;
+	const stats = node === undefined ? undefined : all[node];
 
-	if (!node || !stats) {
+	if (node === undefined || !stats) {
 		detail.hidden = true;
 		return;
 	}
 	detail.hidden = false;
-	$("node-title").textContent = node;
+	$("node-title").textContent = node || "(unnamed)";
 
 	const samples = history.get(node) ?? [];
 	renderChart($("chart-node-throughput"), [
@@ -506,57 +465,56 @@ ui.run((effect) => {
 	// column: only a consumer can fetch, so the counter is egress-only. The KPI
 	// total still sums both sides in case that ever changes.
 	const ingressRows = (frame: BroadcastFrame) =>
-		paths(frame).map((path) => {
-			const i = frame[path] ?? {};
+		paths(frame).flatMap((path) => {
+			const i = frame[path];
+			if (!i) return [];
 			return {
 				key: path,
 				cells: [
 					path,
-					active(announcesStarted(i), announcesEnded(i)) > 0 ? "yes" : "no",
-					String(active(subscriptionsStarted(i), subscriptionsEnded(i))), // live tracks
-					formatBytes(i.bytes ?? 0),
-					String(i.frames ?? 0),
-					String(i.groups ?? 0),
-					String(i.datagrams ?? 0),
-					formatBytes(i.announced_bytes ?? 0),
+					active(i.announces_started, i.announces_ended) > 0 ? "yes" : "no",
+					String(active(i.subscriptions_started, i.subscriptions_ended)), // live tracks
+					formatBytes(i.bytes),
+					String(i.frames),
+					String(i.groups),
+					String(i.datagrams),
+					formatBytes(i.announced_bytes),
 				],
 			};
 		});
 
 	// Viewers: what this node serves to downstream subscribers.
 	const egressRows = (frame: BroadcastFrame) =>
-		paths(frame).map((path) => {
-			const e = frame[path] ?? {};
+		paths(frame).flatMap((path) => {
+			const e = frame[path];
+			if (!e) return [];
 			return {
 				key: path,
 				cells: [
 					path,
-					String(active(broadcastsStarted(e), broadcastsEnded(e))), // viewers / peers
-					String(active(subscriptionsStarted(e), subscriptionsEnded(e))), // live tracks
-					formatBytes(e.bytes ?? 0), // egress
-					String(e.frames ?? 0),
-					String(e.groups ?? 0),
-					String(e.datagrams ?? 0),
-					String(e.fetches ?? 0),
-					formatBytes(e.announced_bytes ?? 0),
+					String(active(e.broadcasts_started, e.broadcasts_ended)), // viewers / peers
+					String(active(e.subscriptions_started, e.subscriptions_ended)), // live tracks
+					formatBytes(e.bytes), // egress
+					String(e.frames),
+					String(e.groups),
+					String(e.datagrams),
+					String(e.fetches),
+					formatBytes(e.announced_bytes),
 				],
 			};
 		});
 
 	// Sessions connected under each stats label, counted regardless of data flow.
-	const sessionRows = Object.keys(stats.sessions)
-		.sort()
-		.map((label) => {
-			const s = stats.sessions[label] ?? {};
-			return {
-				key: label,
-				cells: [
-					label || "(none)",
-					String(active(sessionsStarted(s), sessionsEnded(s))),
-					String(sessionsStarted(s)),
-				],
-			};
-		});
+	const sessionRows = Object.entries(stats.sessions)
+		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+		.map(([label, s]) => ({
+			key: label,
+			cells: [
+				label || "(none)",
+				String(active(s.sessions_started, s.sessions_ended)),
+				String(s.sessions_started),
+			],
+		}));
 
 	renderTable(
 		$("node-publishers"),
@@ -602,7 +560,7 @@ function nodeCard(effect: Signals.Effect, node: string, samples: Sample[], selec
 	head.className = "flex items-center justify-between gap-2 mb-2";
 	const name = document.createElement("span");
 	name.className = "font-mono text-sm text-neutral-200 truncate";
-	name.textContent = node;
+	name.textContent = node || "(unnamed)";
 	const rate = document.createElement("span");
 	rate.className = "text-sm font-semibold tabular-nums text-emerald-400 whitespace-nowrap";
 	rate.textContent = formatRate(lastRate(samples, "egress"));

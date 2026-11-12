@@ -765,12 +765,12 @@ mod tests {
 		let sdr = sps_color(fixtures::SPS_BT709).unwrap();
 		assert_eq!(
 			(sdr.primaries, sdr.transfer, sdr.matrix, sdr.range),
-			(Some(1), Some(1), Some(1), Some(hang::catalog::Range::Limited))
+			(Some(1), Some(1), Some(1), Some(hang::catalog::ColorRange::Limited))
 		);
 		let hdr = sps_color(fixtures::SPS_HDR10).unwrap();
 		assert_eq!(
 			(hdr.primaries, hdr.transfer, hdr.matrix, hdr.range),
-			(Some(9), Some(16), Some(9), Some(hang::catalog::Range::Limited))
+			(Some(9), Some(16), Some(9), Some(hang::catalog::ColorRange::Limited))
 		);
 		assert_eq!(sps_color(fixtures::SPS_IPB), None, "a VUI without a video signal type");
 	}

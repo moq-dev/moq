@@ -762,7 +762,7 @@ impl Scrape {
 		Ok(())
 	}
 
-	/// The per-tier session counters, plus control bytes split by message class.
+	/// The per-tier session counters, plus control bytes and messages split by message class.
 	fn encode_sessions(&self, encoder: &mut DescriptorEncoder) -> std::fmt::Result {
 		use moq_net::stats::{Presence, Totals};
 
@@ -836,6 +836,14 @@ impl Scrape {
 				"Control-message bytes decoded, including codec prefixes; excludes transport overhead.",
 				|b| b.rx,
 			),
+			(
+				"moq_relay_control_tx_messages",
+				"Control messages encoded for sending.",
+				|b| b.tx_messages,
+			),
+			("moq_relay_control_rx_messages", "Control messages decoded.", |b| {
+				b.rx_messages
+			}),
 		] {
 			let rows = control
 				.iter()
@@ -1330,10 +1338,17 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::origin::RouteEvent::Start(route)
-			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
-			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: route,
+			} => Some((route, true)),
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+				announce: route,
+			} => Some((route, false)),
 		}
 	}
 
@@ -2076,7 +2091,9 @@ mod tests {
 # TYPE moq_relay_announces_started_total counter
 # TYPE moq_relay_bytes_total counter
 # TYPE moq_relay_control_rx_bytes_total counter
+# TYPE moq_relay_control_rx_messages_total counter
 # TYPE moq_relay_control_tx_bytes_total counter
+# TYPE moq_relay_control_tx_messages_total counter
 # TYPE moq_relay_datagrams_total counter
 # TYPE moq_relay_draining_sessions gauge
 # TYPE moq_relay_fetches_total counter

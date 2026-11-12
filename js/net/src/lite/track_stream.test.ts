@@ -2,7 +2,7 @@
 // SUBSCRIBE is answered, and the publisher keeps the track wanted until the subscriber closes it.
 
 import { describe, expect, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { SessionCode } from "../error.ts";
 import { randomHop } from "../hop.ts";
 import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
@@ -28,7 +28,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const reader = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ delay: { max: Milli(100) } });
+			.subscribe({ delay: { max: Duration.millis(100) } });
 
 		const track = await Stream.accept(pair.server, version);
 		if (!track) throw new Error("the subscriber never asked for TRACK_INFO");
@@ -48,7 +48,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		using clock = manual();
 		const { subscriber, reader, track, sub } = await subscribing();
 		const fin = track.reader.done();
-		expect(await settlesWithin(fin, clock, Milli(50))).toBe(false);
+		expect(await settlesWithin(fin, clock, Duration.millis(50))).toBe(false);
 
 		await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0n]) }, version);
 		expect(await fin).toBe(true);
@@ -61,7 +61,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		using clock = manual();
 		const { subscriber, reader, track } = await subscribing();
 		const fin = track.reader.done();
-		expect(await settlesWithin(fin, clock, Milli(50))).toBe(false);
+		expect(await settlesWithin(fin, clock, Duration.millis(50))).toBe(false);
 
 		reader.close();
 		expect(await fin).toBe(true);
@@ -128,11 +128,11 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			await TrackInfo.decode(client.reader, version);
 			expect(await client.reader.done()).toBe(true);
 			if (!producer) throw new Error("the track was never answered");
-			expect(await settlesWithin(Promise.resolve(producer.closed), clock, Milli(50))).toBe(false);
+			expect(await settlesWithin(Promise.resolve(producer.closed), clock, Duration.millis(50))).toBe(false);
 
 			if (close === "FIN") client.writer.close();
 			else client.writer.reset(new Error("gone"));
-			expect(await settlesWithin(Promise.resolve(producer.closed), clock, Milli(1000))).toBe(true);
+			expect(await settlesWithin(Promise.resolve(producer.closed), clock, Duration.millis(1000))).toBe(true);
 
 			publisher.close();
 			broadcast.close();
@@ -204,7 +204,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 			if (close === "FIN") client.writer.close();
 			else client.writer.reset(new Error("gone"));
-			expect(await settlesWithin(Promise.resolve(producer.closed), clock, Milli(1000))).toBe(true);
+			expect(await settlesWithin(Promise.resolve(producer.closed), clock, Duration.millis(1000))).toBe(true);
 
 			publisher.close();
 			broadcast.close();
@@ -244,10 +244,10 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect(producers.length).toBe(1);
 
 		first.writer.close();
-		expect(await settlesWithin(released(0), clock, Milli(50))).toBe(false);
+		expect(await settlesWithin(released(0), clock, Duration.millis(50))).toBe(false);
 
 		second.writer.close();
-		expect(await settlesWithin(released(0), clock, Milli(1000))).toBe(true);
+		expect(await settlesWithin(released(0), clock, Duration.millis(1000))).toBe(true);
 
 		publisher.close();
 		broadcast.close();
@@ -282,15 +282,15 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const first = await open();
 		await TrackInfo.decode(first.reader, version);
 		first.writer.close();
-		expect(await settlesWithin(released(0), clock, Milli(1000))).toBe(true);
+		expect(await settlesWithin(released(0), clock, Duration.millis(1000))).toBe(true);
 
 		const second = await open();
 		await TrackInfo.decode(second.reader, version);
 		expect(producers.length).toBe(2);
-		expect(await settlesWithin(released(1), clock, Milli(50))).toBe(false);
+		expect(await settlesWithin(released(1), clock, Duration.millis(50))).toBe(false);
 
 		second.writer.close();
-		expect(await settlesWithin(released(1), clock, Milli(1000))).toBe(true);
+		expect(await settlesWithin(released(1), clock, Duration.millis(1000))).toBe(true);
 
 		publisher.close();
 		broadcast.close();
@@ -334,7 +334,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 			// The handler still gets an open track, and the answer lets it go.
 			const producer = request.accept({ timescale: Timescale.MILLI });
-			expect(await settlesWithin(Promise.resolve(producer.closed), clock, Milli(1000))).toBe(true);
+			expect(await settlesWithin(Promise.resolve(producer.closed), clock, Duration.millis(1000))).toBe(true);
 
 			publisher.close();
 			broadcast.close();
@@ -358,7 +358,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		pair.server.close();
 		// The handler still gets an open track, and the answer lets it go.
 		const producer = request.accept({ timescale: Timescale.MILLI });
-		expect(await settlesWithin(Promise.resolve(producer.closed), clock, Milli(1000))).toBe(true);
+		expect(await settlesWithin(Promise.resolve(producer.closed), clock, Duration.millis(1000))).toBe(true);
 
 		publisher.close();
 		broadcast.close();
@@ -382,13 +382,13 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 		// The next TRACK stream joins the request still waiting on the application.
 		const second = await requester(pair, publisher, "TRACK");
-		expect(await settlesWithin(wireOf(broadcast).requested(), clock, Milli(50))).toBe(false);
+		expect(await settlesWithin(wireOf(broadcast).requested(), clock, Duration.millis(50))).toBe(false);
 		const producer = request.accept({ timescale: Timescale.MILLI });
 		await TrackInfo.decode(second.reader, version);
-		expect(await settlesWithin(Promise.resolve(producer.closed), clock, Milli(50))).toBe(false);
+		expect(await settlesWithin(Promise.resolve(producer.closed), clock, Duration.millis(50))).toBe(false);
 
 		second.writer.close();
-		expect(await settlesWithin(Promise.resolve(producer.closed), clock, Milli(1000))).toBe(true);
+		expect(await settlesWithin(Promise.resolve(producer.closed), clock, Duration.millis(1000))).toBe(true);
 
 		publisher.close();
 		broadcast.close();

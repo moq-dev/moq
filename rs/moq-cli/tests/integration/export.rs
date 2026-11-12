@@ -588,7 +588,7 @@ async fn the_same_instance_within_the_follow_continues() {
 		clock,
 		"the capture keeps its catalog clock"
 	);
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 	catalog.finish().unwrap();
 	export.output_past(mark).await;
 	let (status, errors) = export.wait().await;
@@ -1064,7 +1064,10 @@ async fn next_instance(announced: &mut moq_net::origin::Routes) -> moq_net::Inst
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
-				moq_net::origin::RouteEvent::Start(announce) | moq_net::origin::RouteEvent::Restart(announce) => {
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Restart,
+					announce,
+				} => {
 					return announce.route.instance().clone();
 				}
 				_ => continue,

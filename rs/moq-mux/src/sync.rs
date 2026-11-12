@@ -364,6 +364,17 @@ impl Track {
 		moved
 	}
 
+	/// Wait until playback trails the reference by something other than `seen`, returning the new delay.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_delay_changed(&self, waiter: &kio::Waiter, seen: Duration) -> Poll<Duration> {
+		let mut delay = seen;
+		let _ = std::task::ready!(self.clock.changed.poll(waiter, |_| {
+			delay = self.clock.state.lock().unwrap().delay();
+			if delay == seen { Poll::Pending } else { Poll::Ready(()) }
+		}));
+		Poll::Ready(delay)
+	}
+
 	/// Stop while a tail still plays until `drained`, holding a declared end until
 	/// then. Dropping instead discards the tail with the end.
 	pub fn retire(self, drained: Option<Instant>) {
@@ -710,6 +721,11 @@ impl Consumer {
 		self.current.lock().unwrap().state.lock().unwrap().due(timestamp)
 	}
 
+	/// The media time the clock presents at `at`, or `None` before the first anchor.
+	pub fn position(&self, at: Instant) -> Option<Duration> {
+		self.current.lock().unwrap().state.lock().unwrap().position(at)
+	}
+
 	/// The newest due picture's index in presentation order, or `None` to repeat the previous one.
 	///
 	/// Pass queued timestamps in ascending order and discard entries through the
@@ -750,25 +766,25 @@ mod tests {
 	/// live edge without giving up the delay; late ones leave it alone.
 	#[test]
 	fn the_earliest_arrival_sets_the_schedule() {
-		let start = Instant::ZERO + Duration::from_secs(1);
+		let start = Instant::ZERO.saturating_add(Duration::from_secs(1));
 		let clock = Producer::new(DELAY);
 		let video = clock.track(Kind::Video);
 		assert_eq!(clock.due(ms(0)), None, "nothing anchors before the first frame");
 
 		assert!(video.received(ms(0), start), "the first anchor");
-		assert_eq!(clock.due(ms(0)), Some(start + DELAY));
+		assert_eq!(clock.due(ms(0)), Some(start.saturating_add(DELAY)));
 
 		// 40ms of media later, but only 20ms of wall clock: the first frame was
 		// 20ms late, so the schedule moves onto this one.
-		let now = start + Duration::from_millis(20);
+		let now = start.saturating_add(Duration::from_millis(20));
 		assert!(video.received(ms(40), now), "an early frame left the schedule alone");
-		assert_eq!(clock.due(ms(40)), Some(now + DELAY));
+		assert_eq!(clock.due(ms(40)), Some(now.saturating_add(DELAY)));
 
 		// A frame that merely arrives late keeps its media instant. The delay is
 		// the room it has to be late in.
-		let late = now + Duration::from_millis(70);
+		let late = now.saturating_add(Duration::from_millis(70));
 		assert!(!video.received(ms(80), late), "a late arrival moved the schedule");
-		assert_eq!(clock.due(ms(80)), Some(now + Duration::from_millis(140)));
+		assert_eq!(clock.due(ms(80)), Some(now.saturating_add(Duration::from_millis(140))));
 	}
 
 	/// The required decoupling: audio stalled by congestion arrives late, which
@@ -776,27 +792,30 @@ mod tests {
 	/// the steady state.
 	#[test]
 	fn stalled_audio_no_longer_holds_video() {
-		let start = Instant::ZERO + Duration::from_secs(1);
+		let start = Instant::ZERO.saturating_add(Duration::from_secs(1));
 		let clock = Producer::new(DELAY);
 		let audio = clock.track(Kind::Audio);
 		let video = clock.track(Kind::Video);
 		audio.received(ms(0), start);
 		video.received(ms(0), start);
 		let steady = clock.due(ms(1_000));
-		assert_eq!(steady, Some(start + DELAY + Duration::from_secs(1)));
+		assert_eq!(
+			steady,
+			Some(start.saturating_add(DELAY).saturating_add(Duration::from_secs(1)))
+		);
 
 		// Video keeps arriving on time while audio stalls for 500ms, then audio
 		// lands in a late burst and resets its timeline on a fresh sink.
 		for frame in 1..=25 {
-			let at = start + Duration::from_millis(frame * 40);
+			let at = start.saturating_add(Duration::from_millis(frame * 40));
 			assert!(!video.received(ms(frame * 40), at));
 		}
-		let resumed = start + Duration::from_millis(1_000);
+		let resumed = start.saturating_add(Duration::from_millis(1_000));
 		for frame in 0..25 {
 			assert!(!audio.received(ms(500 + frame * 20), resumed), "late audio moved video");
 		}
 		audio.reset();
-		assert!(!audio.received(ms(1_000), resumed + Duration::from_millis(100)));
+		assert!(!audio.received(ms(1_000), resumed.saturating_add(Duration::from_millis(100))));
 		assert_eq!(clock.due(ms(1_000)), steady, "stalled audio held video");
 	}
 
@@ -804,51 +823,54 @@ mod tests {
 	/// moves every track onto it, audio included.
 	#[test]
 	fn a_video_burst_moves_audio_onto_the_live_edge() {
-		let start = Instant::ZERO + Duration::from_secs(1);
+		let start = Instant::ZERO.saturating_add(Duration::from_secs(1));
 		let clock = Producer::new(DELAY);
 		let audio = clock.track(Kind::Audio);
 		let video = clock.track(Kind::Video);
 		audio.received(ms(1_000), start);
 		assert!(video.received(ms(4_000), start));
-		assert_eq!(clock.due(ms(4_000)), Some(start + DELAY));
+		assert_eq!(clock.due(ms(4_000)), Some(start.saturating_add(DELAY)));
 	}
 
 	/// A track that resets gives up its arrivals: the schedule falls back to the
 	/// earliest track left, and with none left the next frame anchors afresh.
 	#[test]
 	fn a_reset_hands_the_schedule_to_the_tracks_left() {
-		let start = Instant::ZERO + Duration::from_secs(1);
+		let start = Instant::ZERO.saturating_add(Duration::from_secs(1));
 		let clock = Producer::new(DELAY);
 		let audio = clock.track(Kind::Audio);
 		let video = clock.track(Kind::Video);
 		video.received(ms(0), start);
 		// Audio runs 30ms ahead of video, so it holds the schedule.
 		audio.received(ms(30), start);
-		assert_eq!(clock.due(ms(30)), Some(start + DELAY));
+		assert_eq!(clock.due(ms(30)), Some(start.saturating_add(DELAY)));
 
 		audio.reset();
-		assert_eq!(clock.due(ms(30)), Some(start + DELAY + Duration::from_millis(30)));
+		assert_eq!(
+			clock.due(ms(30)),
+			Some(start.saturating_add(DELAY).saturating_add(Duration::from_millis(30)))
+		);
 
 		video.reset();
 		assert_eq!(clock.due(ms(30)), None);
-		let now = start + Duration::from_secs(5);
+		let now = start.saturating_add(Duration::from_secs(5));
 		audio.received(ms(500), now);
-		assert_eq!(clock.due(ms(500)), Some(now + DELAY));
+		assert_eq!(clock.due(ms(500)), Some(now.saturating_add(DELAY)));
 
 		// The last track to go leaves its schedule for what it queued, until
 		// another anchors afresh.
 		drop(audio);
-		assert_eq!(clock.due(ms(500)), Some(now + DELAY));
-		let later = now + Duration::from_secs(5);
+		assert_eq!(clock.due(ms(500)), Some(now.saturating_add(DELAY)));
+		let later = now.saturating_add(Duration::from_secs(5));
 		video.received(ms(0), later);
-		assert_eq!(clock.due(ms(0)), Some(later + DELAY));
+		assert_eq!(clock.due(ms(0)), Some(later.saturating_add(DELAY)));
 	}
 
 	/// Playback holds the deepest target a live track asks for, and the default
 	/// while none asks.
 	#[test]
 	fn the_delay_is_the_largest_target_held() {
-		let start = Instant::ZERO + Duration::from_secs(1);
+		let start = Instant::ZERO.saturating_add(Duration::from_secs(1));
 		let clock = Producer::new(DELAY);
 		let reader = clock.consume();
 		let audio = clock.track(Kind::Audio);
@@ -858,7 +880,7 @@ mod tests {
 
 		assert!(audio.set_target(Duration::from_millis(60)));
 		assert_eq!(reader.delay(), Duration::from_millis(60));
-		assert_eq!(clock.due(ms(0)), Some(start + Duration::from_millis(60)));
+		assert_eq!(clock.due(ms(0)), Some(start.saturating_add(Duration::from_millis(60))));
 		assert!(video.set_target(Duration::from_millis(80)));
 		assert!(
 			!audio.set_target(Duration::from_millis(70)),
@@ -878,19 +900,31 @@ mod tests {
 		let reader = clock.consume();
 		let audio = clock.track(Kind::Audio);
 		let video = clock.track(Kind::Video);
-		let now = Instant::ZERO + Duration::from_secs(1);
+		let now = Instant::ZERO.saturating_add(Duration::from_secs(1));
 		video.received(ms(0), now);
 		let frames = [ms(0), ms(20), ms(40)];
 		assert_eq!(reader.present(frames, now), None);
-		assert_eq!(reader.present(frames, now + Duration::from_millis(60)), Some(1));
+		assert_eq!(
+			reader.present(frames, now.saturating_add(Duration::from_millis(60))),
+			Some(1)
+		);
 		// Audio arrives 40ms ahead; stale video deadlines no longer apply.
 		audio.received(ms(40), now);
 		assert_eq!(reader.present(frames, now), Some(0));
-		assert_eq!(reader.present(frames, now + Duration::from_millis(39)), Some(1));
-		assert_eq!(reader.present(frames, now + Duration::from_millis(40)), Some(2));
+		assert_eq!(
+			reader.present(frames, now.saturating_add(Duration::from_millis(39))),
+			Some(1)
+		);
+		assert_eq!(
+			reader.present(frames, now.saturating_add(Duration::from_millis(40))),
+			Some(2)
+		);
 		// Neither a stall nor a future-only queue invents a new picture.
-		assert_eq!(reader.present([], now + Duration::from_secs(1)), None);
-		assert_eq!(reader.present([ms(200)], now + Duration::from_millis(100)), None);
+		assert_eq!(reader.present([], now.saturating_add(Duration::from_secs(1))), None);
+		assert_eq!(
+			reader.present([ms(200)], now.saturating_add(Duration::from_millis(100))),
+			None
+		);
 	}
 
 	#[tokio::test]
@@ -910,7 +944,7 @@ mod tests {
 		// A JoinSet abort can leave these updates and drops until after the new track started.
 		drop(old);
 		previous.track(Kind::Audio).received(ms(10_000), now);
-		assert_eq!(reader.due(ms(0)), Some(now + DELAY));
+		assert_eq!(reader.due(ms(0)), Some(now.saturating_add(DELAY)));
 		let video = clock.track(Kind::Video);
 		let transition = video.declare();
 		video.plan(transition, ms(0), None);
@@ -945,7 +979,7 @@ mod tests {
 		let waiter = kio::Waiter::new(Waker::from(wakes.clone()));
 		let mut resume = video.resume(transition, ms(0), None);
 		assert!(resume.poll_ready(&waiter).is_pending());
-		let later = now + Duration::from_millis(20);
+		let later = now.saturating_add(Duration::from_millis(20));
 		video.received(ms(20), later);
 		audio.received(ms(20), later);
 		assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
@@ -1035,12 +1069,12 @@ mod tests {
 		let mapping = audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap();
 		audio.apply(transition, mapping);
 		assert!(
-			kio::clock::now() >= start + DELAY * 2,
+			kio::clock::now() >= start.saturating_add(DELAY * 2),
 			"the replacement waited for the tail"
 		);
 		let unchanged = clock.state.lock().unwrap().due(ms(10_500));
 		for frame in 0..10 {
-			let at = start + Duration::from_millis(frame * 20);
+			let at = start.saturating_add(Duration::from_millis(frame * 20));
 			assert!(
 				!audio.received(audio.map(ms(frame * 20)).unwrap(), at),
 				"held media moved the schedule"
@@ -1159,7 +1193,7 @@ mod tests {
 		);
 		video.apply(next, video.resume(next, ms(5_000), None).ready().await.unwrap());
 		// The later replacement maps onto the running clock, not the audio restart's.
-		let resumed = kio::clock::now() + DELAY;
+		let resumed = kio::clock::now().saturating_add(DELAY);
 		assert_eq!(
 			clock.state.lock().unwrap().due(video.map(ms(5_000)).unwrap()),
 			Some(resumed)
@@ -1183,7 +1217,7 @@ mod tests {
 			transition,
 			video.resume(transition, ms(40), None).ready().await.unwrap(),
 		);
-		let resumed = kio::clock::now() + DELAY;
+		let resumed = kio::clock::now().saturating_add(DELAY);
 		assert_eq!(
 			clock.state.lock().unwrap().due(video.map(ms(40)).unwrap()),
 			Some(resumed)
@@ -1246,7 +1280,7 @@ mod tests {
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
 		// The track closed, but its returned sink still plays the tail up to the end.
-		audio.retire(Some(now + Duration::from_millis(300)));
+		audio.retire(Some(now.saturating_add(Duration::from_millis(300))));
 		let transition = video.declare();
 		video.end(ms(10_000)).unwrap();
 		video.plan(transition, ms(0), None);
@@ -1265,7 +1299,7 @@ mod tests {
 		let (clock, audio, video) = anchored(now);
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
-		audio.retire(Some(now + Duration::from_millis(300)));
+		audio.retire(Some(now.saturating_add(Duration::from_millis(300))));
 		// A replacement rendition starts over at zero and anchors afresh.
 		let successor = Track::new(clock.clone(), Kind::Audio);
 		successor.received(ms(50), now);
@@ -1286,7 +1320,7 @@ mod tests {
 		let (clock, audio, video) = anchored(now);
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
-		audio.retire(Some(now + Duration::from_millis(300)));
+		audio.retire(Some(now.saturating_add(Duration::from_millis(300))));
 		// The next rendition fails while the retired sink still plays.
 		let successor = Track::new(clock.clone(), Kind::Audio);
 		successor.declare();
@@ -1331,7 +1365,7 @@ mod tests {
 		);
 		assert_eq!(
 			clock.state.lock().unwrap().due(audio.map(ms(0)).unwrap()),
-			Some(now + Duration::from_millis(200))
+			Some(now.saturating_add(Duration::from_millis(200)))
 		);
 	}
 }

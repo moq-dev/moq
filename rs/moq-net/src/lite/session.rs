@@ -265,6 +265,15 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			.or_else(|| subscribe.as_ref().map(|origin| origin.hop()))
 			.map(Hop::from);
 	}
+	// Lite-07 declares the Node ID our routes originate under instead, so a peer that is
+	// this same process recognizes itself. Read without creating the route node, which
+	// the session's route layer creates when it starts.
+	if version.has_routes() && our_setup.node.is_none() {
+		our_setup.node = publish
+			.as_ref()
+			.and_then(|origin| origin.node_id())
+			.or_else(|| subscribe.as_ref().and_then(|origin| origin.consume().node_id()));
+	}
 
 	// Prove our origin's route key, bound to this session, so a peer that scopes us files
 	// our routes under it. A transport without an exporter cannot bind a proof, so neither
@@ -281,6 +290,8 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	if let (Some(transcript), Some(key)) = (&transcript, route_key) {
 		our_setup.route_key = Some(transcript.prove(&key, client));
 	}
+	// Every lite-07 session reads the chain, so a claim learned over lite-06 keeps it.
+	our_setup.lite06_chain = version.has_routes();
 
 	// What the peer's connection credential earns by default: publishing what our
 	// subscribe half accepts, and subscribing to what our publish half serves. A
@@ -1063,7 +1074,7 @@ mod tests {
 		})
 		.unwrap();
 		let mut driver = start.driver;
-		let token = handle.present(bytes::Bytes::from_static(b"token")).unwrap();
+		let token = handle.add(bytes::Bytes::from_static(b"token")).unwrap();
 
 		let res = kio::clock::timeout(
 			std::time::Duration::from_secs(5),

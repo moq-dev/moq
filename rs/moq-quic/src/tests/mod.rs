@@ -657,7 +657,7 @@ fn reset_secret_resets_connections_each_millisecond() {
 		packet.extend_from_slice(&cids.generate_cid());
 		packet.resize(100, 0);
 
-		let now = start + interval * u32::from(i);
+		let now = start.saturating_add(interval * u32::from(i));
 		let event = endpoint.handle(
 			now,
 			Received {
@@ -674,7 +674,7 @@ fn reset_secret_resets_connections_each_millisecond() {
 			"connection {i} was not reset"
 		);
 		let event = endpoint.handle(
-			now + interval / 2,
+			now.saturating_add(interval / 2),
 			Received {
 				remote,
 				local_ip: None,
@@ -776,7 +776,7 @@ fn stateless_reset_after_draining_keeps_close_reason() {
 		pair.drive_server();
 		unread.append(&mut pair.client.inbound);
 		// The server sends at most one stateless reset per interval.
-		pair.time += pair.server.min_reset_interval();
+		pair.time = pair.time.saturating_add(pair.server.min_reset_interval());
 	}
 	assert_eq!(unread.len(), 3, "server should have sent two stateless resets");
 
@@ -864,7 +864,8 @@ fn stateless_reset_limit() {
 	);
 	assert!(event.is_none());
 	let event = endpoint.handle(
-		time + endpoint.min_reset_interval() - Duration::from_nanos(1),
+		time.saturating_add(endpoint.min_reset_interval())
+			.saturating_sub(Duration::from_nanos(1)),
 		Received {
 			remote,
 			local_ip: None,
@@ -876,7 +877,7 @@ fn stateless_reset_limit() {
 	);
 	assert!(event.is_none());
 	let event = endpoint.handle(
-		time + endpoint.min_reset_interval(),
+		time.saturating_add(endpoint.min_reset_interval()),
 		Received {
 			remote,
 			local_ip: None,
@@ -1190,10 +1191,10 @@ fn deferred_accept_uses_handshake_idle_timeout() {
 	let delayed = pair.server.waiting_incoming.pop().unwrap();
 
 	// Past the idle timeout, but within the handshake idle timeout.
-	pair.time = start + Duration::from_secs(3);
+	pair.time = start.saturating_add(Duration::from_secs(3));
 	assert!(pair.server.try_accept(delayed, pair.time).is_ok());
 
-	pair.time = start + Duration::from_secs(10);
+	pair.time = start.saturating_add(Duration::from_secs(10));
 	assert_matches!(pair.server.try_accept(late, pair.time), Err(ConnectionError::TimedOut));
 }
 
@@ -2161,6 +2162,66 @@ fn idle_timeout() {
 	assert_matches!(pair.server_conn_mut(server_ch).error(), Some(ConnectionError::TimedOut));
 }
 
+/// A client stopped past its idle timeout, as by SIGSTOP or a VM pause, times out on resuming
+/// rather than letting the datagrams buffered while it was stopped revive the connection.
+#[test]
+fn resumed_client_times_out() {
+	let _guard = subscribe();
+	const IDLE_TIMEOUT: Duration = Duration::from_millis(100);
+	let server = server::Config {
+		transport: transport::Config {
+			idle_timeout: Some(IDLE_TIMEOUT),
+			..transport::Config::default()
+		},
+		..server_config()
+	};
+	let mut pair = Pair::new(Default::default(), server);
+	pair.latency = Duration::from_millis(5);
+	let (client_ch, server_ch) = pair.connect();
+
+	// The client sends and stops: the server's ACKs and keep-alives queue at the client's
+	// socket until the server times out.
+	let stream = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, stream).write(&mut &b"hello"[..]).unwrap();
+	pair.drive_client();
+	let stopped = pair.time;
+	loop {
+		pair.drive_server();
+		if pair.server_conn_mut(server_ch).is_drained() {
+			break;
+		}
+		pair.time = pair.server.next_wakeup().expect("the server times out");
+	}
+	assert_matches!(pair.server_conn_mut(server_ch).error(), Some(ConnectionError::TimedOut));
+	assert!(!pair.client.inbound.is_empty());
+
+	// The client resumes and reads its socket before its overdue timer fires, as a driver that
+	// handles received datagrams before timers does.
+	let resumed = stopped.saturating_add(4 * IDLE_TIMEOUT);
+	pair.time = resumed;
+	let mut buf = Vec::new();
+	for (arrival, ecn, data) in mem::take(&mut pair.client.inbound) {
+		let received = Received {
+			remote: pair.server.addr,
+			local_ip: None,
+			ecn,
+			data,
+			arrival: Some(arrival),
+		};
+		if let Some(DatagramEvent::ConnectionEvent(_, event)) = pair.client.endpoint.handle(resumed, received, &mut buf)
+		{
+			pair.client_conn_mut(client_ch).handle_event(event);
+		}
+	}
+
+	let conn = pair.client_conn_mut(client_ch);
+	assert!(conn.is_drained());
+	assert_matches!(conn.error(), Some(ConnectionError::TimedOut));
+}
+
 #[test]
 fn unreachable_handshake_fails_with_no_viable_path() {
 	let _guard = subscribe();
@@ -2596,7 +2657,7 @@ fn keep_alive() {
 	let mut pair = Pair::new(Default::default(), server);
 	let (client_ch, server_ch) = pair.connect();
 	// Run a good while longer than the idle timeout
-	let end = pair.time + Duration::from_millis(20 * IDLE_TIMEOUT);
+	let end = pair.time.saturating_add(Duration::from_millis(20 * IDLE_TIMEOUT));
 	while pair.time < end {
 		if !pair.step()
 			&& let Some(time) = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup())
@@ -2616,7 +2677,7 @@ fn idle_keep_alive_gaps(
 	server_ch: ConnectionHandle,
 	idle_timeout: Duration,
 ) -> Vec<Duration> {
-	let end = pair.time + 20 * idle_timeout;
+	let end = pair.time.saturating_add(20 * idle_timeout);
 	let mut sent = pair.client_conn_mut(client_ch).stats().path.sent_packets;
 	let mut last = pair.time;
 	let mut gaps = Vec::new();
@@ -2758,7 +2819,7 @@ fn cid_rotation() {
 
 	let mut round: u64 = 1;
 	let mut stop = pair.time;
-	let end = pair.time + 5 * CID_TIMEOUT;
+	let end = pair.time.saturating_add(5 * CID_TIMEOUT);
 
 	use crate::LOC_CID_COUNT;
 	use crate::cid_queue::CidQueue;
@@ -2768,7 +2829,7 @@ fn cid_rotation() {
 	let mut right_bound = active_cid_num - 1;
 
 	while pair.time < end {
-		stop += CID_TIMEOUT;
+		stop = stop.saturating_add(CID_TIMEOUT);
 		// Run a while until PushNewCID timer fires
 		while pair.time < stop {
 			if !pair.step()
@@ -3699,7 +3760,7 @@ fn probe_through_outage(
 	pair.to_server.loss = 1.0;
 	pair.to_client.loss = if one_way { 0.0 } else { 1.0 };
 	let start = pair.time;
-	let end = start + outage;
+	let end = start.saturating_add(outage);
 	let mut next_ping = ping.map(|_| start);
 	let mut sent = client_probes(pair, client_ch);
 	let mut probes = Vec::new();
@@ -3708,7 +3769,7 @@ fn probe_through_outage(
 			&& at <= pair.time
 		{
 			pair.server_conn_mut(server_ch).ping();
-			next_ping = Some(at + every);
+			next_ping = Some(at.saturating_add(every));
 		}
 		pair.drive_client();
 		pair.drive_server();
@@ -3737,7 +3798,7 @@ fn probe_through_outage(
 fn settled_pair(mut pair: Pair) -> (Pair, ConnectionHandle, ConnectionHandle) {
 	pair.latency = Duration::from_millis(10);
 	let (client_ch, server_ch) = pair.connect();
-	pair.time += Duration::from_millis(100);
+	pair.time = pair.time.saturating_add(Duration::from_millis(100));
 	pair.drive();
 	pair.client_conn_mut(client_ch).ping();
 	pair.drive();
@@ -3839,7 +3900,7 @@ fn a_peer_heard_as_the_data_left_still_brings_the_probe_forward() {
 	let rtt = pair.latency * 2;
 	pair.server_conn_mut(server_ch).ping();
 	pair.drive_server();
-	pair.time += pair.latency;
+	pair.time = pair.time.saturating_add(pair.latency);
 	let s = pair
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
@@ -4117,7 +4178,11 @@ fn handshake_outlasts_short_idle_timeout() {
 	// The first flight is lost, and so is the first probe, which goes out 2ms late.
 	pair.drive_client();
 	pair.server.inbound.clear();
-	pair.time = pair.client.next_wakeup().unwrap() + Duration::from_millis(2);
+	pair.time = pair
+		.client
+		.next_wakeup()
+		.unwrap()
+		.saturating_add(Duration::from_millis(2));
 	loop {
 		pair.drive_client();
 		pair.server.inbound.clear();
@@ -4618,7 +4683,7 @@ fn connect_runs_mtud_again_after_600_seconds() {
 	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), 1389);
 
 	// The MTU changes after 600 seconds, because now MTUD runs for the second time
-	pair.time += Duration::from_secs(600);
+	pair.time = pair.time.saturating_add(Duration::from_secs(600));
 	pair.drive();
 	assert!(!pair.client_conn_mut(client_ch).is_closed());
 	assert!(!pair.server_conn_mut(client_ch).is_closed());
@@ -4761,7 +4826,10 @@ fn single_ack_eliciting_packet_triggers_ack_after_delay() {
 
 	// The time is start + max_ack_delay
 	let default_max_ack_delay_ms = TransportParameters::default().max_ack_delay.into_inner();
-	assert_eq!(pair.time, start + Duration::from_millis(default_max_ack_delay_ms));
+	assert_eq!(
+		pair.time,
+		start.saturating_add(Duration::from_millis(default_max_ack_delay_ms))
+	);
 
 	// The ACK delay is properly calculated
 	assert_eq!(pair.client.captured_packets.len(), 1);
@@ -4925,13 +4993,13 @@ fn ack_frequency_ack_delayed_from_first_of_flight() {
 	pair.client_conn_mut(client_ch).ping();
 	pair.drive_client();
 
-	pair.time += Duration::from_millis(5);
+	pair.time = pair.time.saturating_add(Duration::from_millis(5));
 	for _ in 0..2 {
 		pair.client_conn_mut(client_ch).ping();
 		pair.drive_client();
 	}
 
-	pair.time += Duration::from_millis(5);
+	pair.time = pair.time.saturating_add(Duration::from_millis(5));
 	// Server: receive the first ping and send no ACK
 	let server_stats_before = pair.server_conn_mut(server_ch).stats();
 	pair.drive_server();
@@ -4940,7 +5008,7 @@ fn ack_frequency_ack_delayed_from_first_of_flight() {
 	assert_eq!(server_stats_after.frame_tx.acks - server_stats_before.frame_tx.acks, 0);
 
 	// Server: receive the second and third pings and send no ACK
-	pair.time += Duration::from_millis(10);
+	pair.time = pair.time.saturating_add(Duration::from_millis(10));
 	let server_stats_before = pair.server_conn_mut(server_ch).stats();
 	pair.drive_server();
 	let server_stats_after = pair.server_conn_mut(server_ch).stats();
@@ -4948,7 +5016,7 @@ fn ack_frequency_ack_delayed_from_first_of_flight() {
 	assert_eq!(server_stats_after.frame_tx.acks - server_stats_before.frame_tx.acks, 0);
 
 	// Server: Send an ACK after ACK delay expires
-	pair.time += Duration::from_millis(20);
+	pair.time = pair.time.saturating_add(Duration::from_millis(20));
 	let server_stats_before = pair.server_conn_mut(server_ch).stats();
 	pair.drive_server();
 	let server_stats_after = pair.server_conn_mut(server_ch).stats();
@@ -4966,7 +5034,7 @@ fn ack_frequency_ack_sent_after_max_ack_delay() {
 	pair.drive_client();
 
 	// Server: receive the ping, send no ACK
-	pair.time += pair.latency;
+	pair.time = pair.time.saturating_add(pair.latency);
 	let server_stats_before = pair.server_conn_mut(server_ch).stats();
 	pair.drive_server();
 	let server_stats_after = pair.server_conn_mut(server_ch).stats();
@@ -4974,7 +5042,7 @@ fn ack_frequency_ack_sent_after_max_ack_delay() {
 	assert_eq!(server_stats_after.frame_tx.acks - server_stats_before.frame_tx.acks, 0);
 
 	// Server: send an ack after max_ack_delay has elapsed
-	pair.time += max_ack_delay;
+	pair.time = pair.time.saturating_add(max_ack_delay);
 	let server_stats_before = pair.server_conn_mut(server_ch).stats();
 	pair.drive_server();
 	let server_stats_after = pair.server_conn_mut(server_ch).stats();
@@ -4995,14 +5063,14 @@ fn ack_frequency_ack_sent_after_packets_above_threshold() {
 	pair.client_conn_mut(client_ch).ping();
 	pair.drive_client();
 
-	pair.time += Duration::from_millis(5);
+	pair.time = pair.time.saturating_add(Duration::from_millis(5));
 	for _ in 0..11 {
 		pair.client_conn_mut(client_ch).ping();
 		pair.drive_client();
 	}
 
 	// Server: receive the first ping, send no ACK
-	pair.time += Duration::from_millis(5);
+	pair.time = pair.time.saturating_add(Duration::from_millis(5));
 	let server_stats_before = pair.server_conn_mut(server_ch).stats();
 	pair.drive_server();
 	let server_stats_after = pair.server_conn_mut(server_ch).stats();
@@ -5010,7 +5078,7 @@ fn ack_frequency_ack_sent_after_packets_above_threshold() {
 	assert_eq!(server_stats_after.frame_tx.acks - server_stats_before.frame_tx.acks, 0);
 
 	// Server: receive the remaining pings, send ACK
-	pair.time += Duration::from_millis(5);
+	pair.time = pair.time.saturating_add(Duration::from_millis(5));
 	let server_stats_before = pair.server_conn_mut(server_ch).stats();
 	pair.drive_server();
 	let server_stats_after = pair.server_conn_mut(server_ch).stats();
@@ -5032,7 +5100,7 @@ fn ack_frequency_ack_sent_after_reordered_packets_below_threshold() {
 	pair.client_conn_mut(client_ch).ping();
 	pair.drive_client();
 
-	pair.time += Duration::from_millis(5);
+	pair.time = pair.time.saturating_add(Duration::from_millis(5));
 
 	// Send and lose an ack-eliciting packet
 	pair.mtu = 0;
@@ -5045,7 +5113,7 @@ fn ack_frequency_ack_sent_after_reordered_packets_below_threshold() {
 	pair.drive_client();
 
 	// Server: receive first ping, send no ACK
-	pair.time += Duration::from_millis(5);
+	pair.time = pair.time.saturating_add(Duration::from_millis(5));
 	let server_stats_before = pair.server_conn_mut(server_ch).stats();
 	pair.drive_server();
 	let server_stats_after = pair.server_conn_mut(server_ch).stats();
@@ -5053,7 +5121,7 @@ fn ack_frequency_ack_sent_after_reordered_packets_below_threshold() {
 	assert_eq!(server_stats_after.frame_tx.acks - server_stats_before.frame_tx.acks, 0);
 
 	// Server: receive second ping, send no ACK
-	pair.time += Duration::from_millis(5);
+	pair.time = pair.time.saturating_add(Duration::from_millis(5));
 	let server_stats_before = pair.server_conn_mut(server_ch).stats();
 	pair.drive_server();
 	let server_stats_after = pair.server_conn_mut(server_ch).stats();
@@ -5072,7 +5140,7 @@ fn ack_frequency_ack_sent_after_reordered_packets_above_threshold() {
 	pair.drive_client();
 
 	// Send and lose as many ack-eliciting packets as the default reordering threshold
-	pair.time += Duration::from_millis(5);
+	pair.time = pair.time.saturating_add(Duration::from_millis(5));
 	pair.mtu = 0;
 	for _ in 0..3 {
 		pair.client_conn_mut(client_ch).ping();
@@ -5085,7 +5153,7 @@ fn ack_frequency_ack_sent_after_reordered_packets_above_threshold() {
 	pair.drive_client();
 
 	// Server: receive first ping, send no ACK
-	pair.time += Duration::from_millis(5);
+	pair.time = pair.time.saturating_add(Duration::from_millis(5));
 	let server_stats_before = pair.server_conn_mut(server_ch).stats();
 	pair.drive_server();
 	let server_stats_after = pair.server_conn_mut(server_ch).stats();
@@ -5093,7 +5161,7 @@ fn ack_frequency_ack_sent_after_reordered_packets_above_threshold() {
 	assert_eq!(server_stats_after.frame_tx.acks - server_stats_before.frame_tx.acks, 0);
 
 	// Server: receive remaining ping, send ACK
-	pair.time += Duration::from_millis(5);
+	pair.time = pair.time.saturating_add(Duration::from_millis(5));
 	let server_stats_before = pair.server_conn_mut(server_ch).stats();
 	pair.drive_server();
 	let server_stats_after = pair.server_conn_mut(server_ch).stats();
@@ -5178,7 +5246,7 @@ fn silently_drop_rejected_initials() {
 	pair.server.assert_no_accept();
 	// `drive()` stops once the client's only remaining timer is its idle timeout; advance
 	// past it so the unanswered attempt gives up.
-	pair.time += Duration::from_secs(60);
+	pair.time = pair.time.saturating_add(Duration::from_secs(60));
 	pair.drive();
 	assert_matches!(
 		pair.client_conn_mut(client_ch).error(),
@@ -6220,7 +6288,7 @@ struct TestPacer {
 impl TestPacer {
 	fn on_sent(&mut self, now: Instant, bytes: u16, rate: u64) {
 		let start = self.next.map_or(now, |next| next.max(now));
-		self.next = Some(start + Duration::from_secs_f64(f64::from(bytes) / rate as f64));
+		self.next = Some(start.saturating_add(Duration::from_secs_f64(f64::from(bytes) / rate as f64)));
 	}
 
 	fn pace(&self, now: Instant) -> Option<Instant> {
@@ -6814,7 +6882,7 @@ fn untracked_largest_acked_skips_rtt_sample() {
 	let rtt = pair.client_conn_mut(client_ch).rtt();
 
 	// Long after the last sample, so timing from that packet's send would stand out.
-	pair.time += Duration::from_secs(1);
+	pair.time = pair.time.saturating_add(Duration::from_secs(1));
 	pair.client_conn_mut(client_ch).ping();
 	pair.drive_client();
 	pair.client_conn_mut(client_ch).ping();
@@ -6833,7 +6901,7 @@ fn check_starvation_reported_before_resumed_send(send: impl Fn(&mut Pair, Connec
 	send(&mut pair, client_ch);
 	pair.drive();
 
-	pair.time += Duration::from_millis(20);
+	pair.time = pair.time.saturating_add(Duration::from_millis(20));
 	let resumed_at = pair.time;
 	send(&mut pair, client_ch);
 	pair.drive_client();
@@ -6873,7 +6941,7 @@ fn check_blocked_backlog_is_not_app_limited(factory: PacketRecorderFactory) {
 	let (mut pair, client_ch, log) = recorded_pair(factory);
 	// The handshake can drain the pacer, and how far depends on its random sizes. Refill it so
 	// the backlog always starts sending before it is held back.
-	pair.time += Duration::from_millis(100);
+	pair.time = pair.time.saturating_add(Duration::from_millis(100));
 	pair.drive();
 	let before = log.lock().unwrap().len();
 
@@ -7200,7 +7268,7 @@ fn bbr_burst_after_long_idle_keeps_learned_bandwidth() {
 	upload(&mut pair, client_ch, server_ch, 4_000_000, |_| {});
 	let learned = metrics(&mut pair).bandwidth_estimate.unwrap();
 
-	let idle_end = pair.time + Duration::from_secs(300);
+	let idle_end = pair.time.saturating_add(Duration::from_secs(300));
 	while pair.time < idle_end {
 		if !pair.step() {
 			pair.time = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup())

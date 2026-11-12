@@ -247,7 +247,7 @@ async fn uring_relay() -> Option<(Relay, u16, tempfile::TempDir)> {
 	}
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path());
-	config.runtime.workers = Some(1);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 	config.runtime.pin = false;
 	config.runtime.io_uring = true;
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);

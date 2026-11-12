@@ -285,33 +285,44 @@ impl Driver {
 		let end = self.drive().await;
 		let mut producer = self.producer.take().unwrap();
 		let now = self.clock.now();
+		// Held until the state closes, so the track outlives its terminal status.
+		let mut finished = None;
 		let result = match end {
 			Ok(End::Failed(failure)) => {
 				// Retention already reports the failure. It stays the cause even when the track
 				// can no longer end cleanly, such as one aborted while it still retained audio.
-				let ended = producer
-					.set_active(false, now)
-					.and_then(|()| producer.fail(moq_net::Error::Transport(failure.to_string())));
-				if ended.is_err() {
-					producer.abort(moq_net::Error::Transport(failure.to_string()));
+				let cause = moq_net::Error::Transport(failure.to_string());
+				match producer.set_active(false, now) {
+					Ok(()) => finished = producer.fail(cause).ok(),
+					Err(_) => producer.abort(cause),
 				}
 				Err(failure)
 			}
 			// The track closed, or encoding or publishing failed.
-			end => match end.and_then(|_| producer.set_active(false, now).and_then(|()| producer.finish())) {
-				Ok(()) => {
-					self.update(Status::Ended);
-					Ok(())
+			end => {
+				let ended = match end.and_then(|_| producer.set_active(false, now)) {
+					// A finish that fails ends the track with an error itself.
+					Ok(()) => producer.finish().map(|track| finished = Some(track)),
+					Err(err) => {
+						producer.abort(moq_net::Error::Transport(err.to_string()));
+						Err(err)
+					}
+				};
+				match ended {
+					Ok(()) => {
+						self.update(Status::Ended);
+						Ok(())
+					}
+					Err(err) => {
+						self.update(Status::Failed(err.clone()));
+						Err(err)
+					}
 				}
-				Err(err) => {
-					self.update(Status::Failed(err.clone()));
-					producer.abort(moq_net::Error::Transport(err.to_string()));
-					Err(err)
-				}
-			},
+			}
 		};
 		self.publish_level(Level::default());
 		let _ = self.state.close();
+		drop(finished);
 		result
 	}
 
@@ -510,7 +521,7 @@ mod tests {
 		let (capture, samples) = capture::test_source();
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let epoch = Instant::now() - Duration::from_secs(1);
+		let epoch = Instant::now().saturating_sub(Duration::from_secs(1));
 		let clock = moq_mux::Clock::at(epoch, kio::clock::wall()).unwrap();
 		let catalog = moq_mux::catalog::Producer::new(
 			&mut broadcast,
@@ -702,7 +713,7 @@ mod tests {
 				let encode_task = tokio::spawn(driver.run());
 				let mut track = subscribe(&broadcast, Duration::ZERO).await;
 				for (index, gap) in [false, true, false].into_iter().enumerate() {
-					let captured = epoch + Duration::from_millis([100, 200, 220][index]);
+					let captured = epoch.saturating_add(Duration::from_millis([100, 200, 220][index]));
 					let value = (index + 1) as f32 / 8.0;
 					let mut block = Samples::plain(vec![value; 1920], gap);
 					block.captured = Some(captured);
@@ -735,7 +746,7 @@ mod tests {
 				bus_pcm.extend_from_slice(&mix(2400));
 				assert_eq!(&bus_pcm[4800..], expected);
 				drop(bus_run);
-				let captured = epoch + Duration::from_millis(240);
+				let captured = epoch.saturating_add(Duration::from_millis(240));
 				let mut block = Samples::plain(vec![0.625; 1920], false);
 				block.captured = Some(captured);
 				samples.try_push(Ok(block)).unwrap();
@@ -807,7 +818,7 @@ mod tests {
 					let encode_task = tokio::spawn(driver.run());
 					status(&mut publication, |status| matches!(status, Status::Waiting)).await;
 					let mut block = Samples::plain(vec![0.25; 1920], false);
-					block.captured = Some(epoch + Duration::from_millis(100));
+					block.captured = Some(epoch.saturating_add(Duration::from_millis(100)));
 					samples.try_push(Ok(block)).unwrap();
 					observer.read().await.unwrap();
 					retained(&publication).await;
@@ -853,7 +864,7 @@ mod tests {
 					let encode_task = tokio::spawn(driver.run());
 					status(&mut publication, |status| matches!(status, Status::Waiting)).await;
 					let mut block = Samples::plain(vec![0.25; 1920], false);
-					block.captured = Some(epoch + Duration::from_millis(100));
+					block.captured = Some(epoch.saturating_add(Duration::from_millis(100)));
 					samples.try_push(Ok(block)).unwrap();
 					observer.read().await.unwrap();
 					retained(&publication).await;
@@ -931,9 +942,9 @@ mod tests {
 					let mut track = subscribe(&broadcast, Duration::ZERO).await;
 					let now = Instant::now();
 					let (captured, expected) = match placement {
-						0 => (Some(now - Duration::from_millis(40)), 960_000),
-						1 => (Some(epoch - Duration::from_millis(10)), 0),
-						2 => (Some(now + Duration::from_secs(1)), 1_000_000),
+						0 => (Some(now.saturating_sub(Duration::from_millis(40))), 960_000),
+						1 => (Some(epoch.saturating_sub(Duration::from_millis(10))), 0),
+						2 => (Some(now.saturating_add(Duration::from_secs(1))), 1_000_000),
 						_ => (None, 1_000_000),
 					};
 					let mut block = Samples::plain(vec![0.25; 1920], false);

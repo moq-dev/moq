@@ -3,15 +3,13 @@
 ```ts
 import { AudioConfig } from "@moq/hang/catalog";
 import { Format as Format_1 } from "@moq/hang/container";
-import { Micro } from "@moq/clock";
-import { Milli } from "@moq/clock";
 import { Net } from "@moq/hang";
 import { Signals } from "@moq/hang";
 import { VideoConfig } from "@moq/hang/catalog";
 
 export interface BufferedRange {
-	end: Milli;
-	start: Milli;
+	end: Net.Clock.Duration;
+	start: Net.Clock.Duration;
 }
 
 export type BufferedRanges = BufferedRange[];
@@ -21,77 +19,82 @@ export class Consumer {
 	readonly buffered: Signals.Getter<BufferedRanges>;
 	close(): void;
 	next(): Promise<Read | undefined>;
-	readonly spread: Signals.Getter<Milli>;
+	readonly spread: Signals.Getter<Net.Clock.Duration>;
 }
 
 export interface ConsumerProps {
 	delay?: Signals.GetterInit<Net.Track.Delay>;
 	format: Format;
 	predecessor?: Consumer;
-	warmup?: Milli;
+	wait?: Signals.GetterInit<Net.Clock.Duration | undefined>;
+	warmup?: Net.Clock.Duration;
 }
 
 export interface Format {
 	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
-	end?(frame: Frame): Micro | undefined;
+	end?(frame: Frame): Net.Clock.Duration | undefined;
 	readonly kind?: "audio" | "video" | "data";
 }
 
 export interface Frame {
-	duration?: Micro;
+	duration?: Net.Clock.Duration;
 	keyframe: boolean;
 	payload: Uint8Array;
-	timestamp: Micro;
+	timestamp: Net.Clock.Duration;
 }
 
 export namespace Legacy {
 	export { BufferedRange };
 	export { BufferedRanges };
+	export interface Finished {
+		abort(err: Error): void;
+	}
 	export class Format implements Format_1 {
 		constructor(config: AudioConfig | VideoConfig | "audio" | "video" | "data");
 		decode(frame: Uint8Array): Frame[];
-		end(frame: Frame): Micro | undefined;
-		finishGroup(group: Net.Group.Producer, end?: Micro): void;
+		end(frame: Frame): Net.Clock.Duration | undefined;
+		finishGroup(group: Net.Group.Producer, end?: Net.Clock.Duration): void;
 		readonly kind: "audio" | "video" | "data";
 	}
 	export { Frame };
 	export class Producer {
 		constructor(track: Net.Track.Producer, format: Legacy.Format);
-		close(err?: Error): void;
-		discontinuity(end?: Micro): void;
-		encode(data: Uint8Array | Legacy.Source, timestamp: Micro, keyframe: boolean): void;
+		abort(err: Error): void;
+		discontinuity(endpoint?: Net.Clock.Duration): void;
+		encode(data: Uint8Array | Legacy.Source, pts: Net.Clock.Duration, keyframe: boolean): void;
+		finish(): Legacy.Finished;
 	}
 	export interface Source {
 		byteLength: number;
 		copyTo(buffer: Uint8Array): void;
 	}
-	export function encodeFrame(source: Uint8Array | Legacy.Source, timestamp: Micro): Uint8Array;
+	export function encodeFrame(source: Uint8Array | Legacy.Source, timestamp: Net.Clock.Duration): Uint8Array;
 }
 
 export * as Loc from "@moq/loc";
 
-export const MAX_AGE: Milli;
+export const MAX_AGE: Net.Clock.Duration;
 
 export type Read = {
 	frame: ReceivedFrame;
 	group: bigint;
 	kind: "frame";
 } | {
-	duration: Micro;
+	duration: Net.Clock.Duration;
 	kind: "gap";
-	timestamp: Micro;
+	timestamp: Net.Clock.Duration;
 } | {
-	end: Micro;
+	end: Net.Clock.Duration;
 	group: bigint;
 	kind: "end";
 };
 
 export interface ReceivedFrame extends Frame {
-	arrival: Milli;
+	arrival: Net.Clock.Instant;
 }
 
 export type TrackInfoOptions = {
-	maxAge?: Milli | null;
+	maxAge?: Net.Clock.Duration | null;
 	priority: number;
 };
 

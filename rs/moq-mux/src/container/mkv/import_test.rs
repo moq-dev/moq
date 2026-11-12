@@ -184,7 +184,7 @@ fn run(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 	let buf = bytes::BytesMut::from(data);
 	mkv.decode(&buf).expect("decode");
-	mkv.finish().expect("finish");
+	let _finished = mkv.finish().expect("finish");
 	catalog.snapshot()
 }
 
@@ -205,7 +205,7 @@ fn assert_out_of_range(track: MatroskaSpec, field: &str) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
-		let result = import.decode(&data).and_then(|()| import.finish());
+		let result = import.decode(&data).and_then(|()| import.finish().map(drop));
 		assert!(
 			matches!(&result, Err(crate::Error::Mkv(super::Error::ValueOutOfRange(name))) if *name == field),
 			"{field}, reverse {reverse}: {result:?}"
@@ -537,7 +537,7 @@ fn assert_invalid_aspect(data: &[u8], context: &str) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut import = super::Import::new(broadcast, catalog.reserve());
-	let result = import.decode(data).and_then(|()| import.finish());
+	let result = import.decode(data).and_then(|()| import.finish().map(drop));
 	assert!(
 		matches!(result, Err(crate::Error::Mkv(super::Error::InvalidAspect(_)))),
 		"{context}: {result:?}"
@@ -827,7 +827,7 @@ async fn public_container_preserves_loc_for_mkv() {
 	let reserved = catalog.reserve();
 	let mut import = super::Import::new(broadcast, reserved).with_container(hang::catalog::Container::Loc);
 	import.decode(&data).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	let (name, config) = snapshot.video.renditions.iter().next().unwrap();
@@ -983,7 +983,7 @@ async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
 		}
 	}
 	let after = kio::clock::wall();
-	mkv.finish().unwrap();
+	let _finished = mkv.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	Imported {
@@ -1120,29 +1120,8 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert!(!published.is_empty(), "the first block publishes the catalog");
 	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
 
-	mkv.finish().unwrap();
+	let _finished = mkv.finish().unwrap();
 	assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
-}
-
-/// A Tracks element after `finish()` is refused: its tracks would be declared but never finished.
-#[test]
-fn tracks_after_finish_are_refused() {
-	let data = MkvBuilder::new()
-		.header("webm")
-		.segment_start()
-		.info(1_000_000)
-		.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
-		.segment_end()
-		.build();
-
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
-
-	mkv.finish().unwrap();
-	let err = mkv.decode(&data).unwrap_err();
-	assert!(matches!(err, crate::Error::Finished), "{err:?}");
-	assert!(catalog.snapshot().audio.renditions.is_empty(), "no track was declared");
 }
 
 fn text_entry(number: u64, codec: &str, language: &str, name: &str) -> MatroskaSpec {
@@ -1197,7 +1176,7 @@ async fn laced_opus_frames() {
 			for piece in data.chunks(11) {
 				importer.decode(piece).unwrap();
 			}
-			importer.finish().unwrap();
+			let _finished = importer.finish().unwrap();
 			let snapshot = catalog.snapshot();
 			let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
 			let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
@@ -1311,7 +1290,7 @@ async fn unlaced_block_duration_does_not_use_track_default() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut importer = super::Import::new(broadcast, catalog.reserve());
 	importer.decode(&data).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 	let snapshot = catalog.snapshot();
 	let name = snapshot.video.renditions.keys().next().unwrap();
 	let mut track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
@@ -1366,7 +1345,7 @@ fn sps_color_outranks_colour_which_fills_its_gaps() {
 	let color = catalog.video.renditions.values().next().unwrap().color.clone().unwrap();
 	assert_eq!(
 		(color.primaries, color.transfer, color.matrix, color.range),
-		(Some(1), Some(1), Some(1), Some(hang::catalog::Range::Limited))
+		(Some(1), Some(1), Some(1), Some(hang::catalog::ColorRange::Limited))
 	);
 	assert_eq!(
 		(color.mastering, color.content_light),
@@ -1422,7 +1401,7 @@ fn import_result(data: &[u8], initial: bool) -> crate::Result<()> {
 			import.decode(chunk)?;
 		}
 	}
-	import.finish()
+	import.finish().map(drop)
 }
 
 #[test]
@@ -1895,7 +1874,7 @@ async fn a_seek_mid_block_waits_for_the_block() {
 	importer.decode(&data[..split]).unwrap();
 	importer.seek(100).unwrap();
 	importer.decode(&data[split..]).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	let name = snapshot.audio.renditions.keys().next().unwrap();
@@ -2159,10 +2138,10 @@ fn repeated_reinit_keeps_flat_state() {
 		let snapshot = catalog.snapshot();
 		assert_eq!(snapshot.video.renditions.len(), 1, "{label}");
 		assert_eq!(snapshot.audio.renditions.len(), 1, "{label}");
-		if generation % 2 == 1 {
-			mkv.finish().unwrap();
+		match generation % 2 == 1 {
+			true => drop(mkv.finish().unwrap()),
+			false => drop(mkv),
 		}
-		drop(mkv);
 		let snapshot = catalog.snapshot();
 		assert!(snapshot.video.renditions.is_empty(), "{label}");
 		assert!(snapshot.audio.renditions.is_empty(), "{label}");

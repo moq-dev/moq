@@ -55,7 +55,7 @@ pub(super) struct Due {
 impl Timer {
 	pub(super) fn new(handshake: Option<Duration>, now: Instant) -> Self {
 		Self {
-			handshake: handshake.map(|timeout| now + timeout),
+			handshake: handshake.map(|timeout| now.saturating_add(timeout)),
 			idle: None,
 			rtt_interval: None,
 			last_recv: now,
@@ -110,11 +110,13 @@ impl Timer {
 	/// The next instant [`Self::poll`] has something to do
 	pub(super) fn next(&self) -> Option<Instant> {
 		let idle = self.idle.map(|idle| match self.deferred {
-			Some(since) => since + idle,
-			None => self.last_activity() + idle,
+			Some(since) => since.saturating_add(idle),
+			None => self.last_activity().saturating_add(idle),
 		});
-		let keepalive = self.keepalive().map(|every| self.last_send.max(self.last_ping) + every);
-		let rtt = self.rtt_interval.map(|every| self.last_ping + every);
+		let keepalive = self
+			.keepalive()
+			.map(|every| self.last_send.max(self.last_ping).saturating_add(every));
+		let rtt = self.rtt_interval.map(|every| self.last_ping.saturating_add(every));
 		[self.handshake, idle, keepalive, rtt].into_iter().flatten().min()
 	}
 
@@ -126,8 +128,10 @@ impl Timer {
 
 		let keepalive = self
 			.keepalive()
-			.is_some_and(|every| now >= self.last_send.max(self.last_ping) + every);
-		let rtt = self.rtt_interval.is_some_and(|every| now >= self.last_ping + every);
+			.is_some_and(|every| now >= self.last_send.max(self.last_ping).saturating_add(every));
+		let rtt = self
+			.rtt_interval
+			.is_some_and(|every| now >= self.last_ping.saturating_add(every));
 		if keepalive || rtt {
 			// A ping cannot get past a stalled transport, and must not pile up behind it
 			due.ping = !self.backpressured;
@@ -135,11 +139,11 @@ impl Timer {
 		}
 
 		if let Some(idle) = self.idle
-			&& now >= self.last_activity() + idle
+			&& now >= self.last_activity().saturating_add(idle)
 		{
 			match self.deferred {
 				// A peer that died with our buffers full must not hang here forever
-				Some(since) => due.idle = now >= since + idle,
+				Some(since) => due.idle = now >= since.saturating_add(idle),
 				None if self.backpressured => self.deferred = Some(now),
 				None => due.idle = true,
 			}
