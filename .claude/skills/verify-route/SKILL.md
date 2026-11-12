@@ -61,7 +61,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `d3b6c2573a30541402d396f8080488646f673594`. Run `git log d3b6c2573a.. -- rs/moq-net/src/route/tests/paths.rs` to see what changed since. The model describes the prototype, extended with a route per prefix and with dead hops kept until their timer fires; `route::Router` does not run this rule yet. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `d3b6c2573a30541402d396f8080488646f673594`. Run `git log d3b6c2573a.. -- rs/moq-net/src/route/tests/paths.rs` to see what changed since. The model describes the prototype, extended with a route per prefix and with dead hops kept until their timer fires; `route::Router` does not run this rule yet. `Relay::collect` forgets a dead hop as soon as no route names it, so `NoStaleReturn` covers the rule the router is to run, not the prototype's. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |

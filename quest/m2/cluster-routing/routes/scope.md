@@ -52,8 +52,9 @@ route names the node, and a request can then loop while the news of three
 closed sessions is still on its way: `Loop.cfg` breaks `RequestsLoopFree` at
 depth 11 and is kept as that open finding. Keeping the doubt until its timer
 fires showed no loop on that mesh in 7.6M states, to depth 13, and costs a
-wait: every route through the doubted node sits out the timer, a publisher
-reconnecting through another relay included. Measure that reconnect delay on
+wait: no relay moves to a route through the doubted node until the timer
+fires, a publisher reconnecting through another relay included, though a
+relay keeps one it already has. Measure that reconnect delay on
 the prototype's meshes under both rules and put the two to the maintainer
 with the numbers. Recommended: keep the doubt, since the wait is bounded by
 the timer and a looping request is not bounded by anything the relay

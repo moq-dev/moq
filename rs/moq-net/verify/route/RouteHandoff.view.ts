@@ -8,6 +8,7 @@ type Route = { on: boolean; held: boolean; next: number; path: Path };
 type Node = {
 	rt: Record<string, Route>;
 	doubt: number[];
+	wait: number[];
 	shown: Record<string, { item: number; avail: boolean }>;
 };
 type Msg = { t: string; k: string; path: Path; hop: Hop; gone: boolean };
@@ -38,7 +39,10 @@ const relay = (s: Node) => {
 		.filter(([, x]) => x.item >= 0)
 		.map(([c, x]) => `${c} item ${x.item}${x.avail ? "" : " (unavailable)"}`);
 	const doubt = s.doubt.length ? `, doubts ${s.doubt.map(name).join(" and ")}` : "";
-	return `${routes.join("; ") || "no route"}${shows.length ? `, shows ${shows.join(", ")}` : ""}${doubt}`;
+	// A doubt no route names any more is forgotten before its timer fires.
+	const timers = s.wait.filter((x) => !s.doubt.includes(x));
+	const wait = timers.length ? `, timer running on ${timers.map(name).join(" and ")}` : "";
+	return `${routes.join("; ") || "no route"}${shows.length ? `, shows ${shows.join(", ")}` : ""}${doubt}${wait}`;
 };
 
 const sessions = (v: Vars) =>
