@@ -46,11 +46,12 @@ try {
 		let broadcast = request.active.peek();
 		while (!broadcast) broadcast = await request.active.changed();
 		assert(broadcast);
-		for (const i of ages.keys()) {
+		for (const [i, age] of ages.entries()) {
 			const track = broadcast.track(String(i)).subscribe();
 			// moq-transport never sends MAX_CACHE_DURATION (it would expire the newest group too),
-			// so every track arrives without a publisher limit.
-			assert.equal((await track.info()).maxAge?.asMillis(), undefined, `${protocol} track ${i}`);
+			// so only lite carries the publisher's limit.
+			const want = protocol.startsWith("moq-lite-") ? age?.asMillis() : undefined;
+			assert.equal((await track.info()).maxAge?.asMillis(), want, `${protocol} track ${i}`);
 			track.close();
 		}
 		request.close();
