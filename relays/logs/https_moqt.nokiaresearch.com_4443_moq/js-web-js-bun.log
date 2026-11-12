@@ -1,1 +1,1 @@
-error: timed out waiting for data
+error: failed to exchange h3 connect: protocol error: expected 200, got: Some(500)
