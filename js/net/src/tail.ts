@@ -3,6 +3,7 @@ import { type GetPromise, Signal } from "@moq/signals";
 import { READER_RUN_OVERHEAD, type Reader } from "./cache.ts";
 import { insertRun, type Run, runGaps } from "./internal.ts";
 import { GRACE, Ledger } from "./ledger.ts";
+import { max, min } from "./util/sequence.ts";
 
 /** How a {@link Tail} measures its grace. */
 export interface TailOptions {
@@ -61,9 +62,7 @@ export class Tail {
 			const start = this.#finished[0].start;
 			const end = this.#finished[this.#finished.length - 2].end;
 			const folded = this.#folded;
-			this.#folded = folded
-				? { start: folded.start < start ? folded.start : start, end: folded.end > end ? folded.end : end }
-				: { start, end };
+			this.#folded = folded ? { start: min(folded.start, start), end: max(folded.end, end) } : { start, end };
 			this.#finished = this.#finished.slice(-1);
 			bill.set(2 * READER_RUN_OVERHEAD);
 		}

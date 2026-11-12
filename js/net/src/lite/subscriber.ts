@@ -2637,7 +2637,8 @@ export class Subscriber {
 				for (const reopened of held) {
 					const start = max(run.start, reopened.start);
 					const end = min(run.end, reopened.end);
-					for (const part of runGaps(folded ? [folded] : [], start, end)) entry.tail.unaccount(part.start, part.end);
+					for (const part of runGaps(folded ? [folded] : [], start, end))
+						entry.tail.unaccount(part.start, part.end);
 				}
 			}
 			// Re-offered whether or not the copy still holds the stale verdict.
