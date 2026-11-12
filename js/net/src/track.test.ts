@@ -3404,9 +3404,9 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 
 // A reader on a received copy that fails waits out a duplicate still held for its group, then
 // continues on it from its frame with nothing repeated or missed. A released hold leaves the
-// failure, as does a duplicate starting past the reader's frame, and a reader closed while it waits
-// ends its read.
-test.each(["reoffer", "readable", "released", "closed", "past"])(
+// failure, as does a duplicate starting past the reader's frame. A reader closed while it waits ends
+// its read, and one closed with frames still buffered reads them first.
+test.each(["reoffer", "readable", "released", "leaving", "closed", "past"])(
 	"a failed copy continues on its held re-offer (%p)",
 	async (kind) => {
 		const producer = new TrackProducer("video").accept({ maxAge: null });
@@ -3419,6 +3419,17 @@ test.each(["reoffer", "readable", "released", "closed", "past"])(
 		const arriving = hooks.arrivingGroup(producer, 3n);
 		expect(arriving).toBeDefined();
 		const failed = new Error("reset");
+		if (kind === "closed") {
+			// A frame still buffered when the copy fails stays readable after a close.
+			first.writeFrame({ payload: enc.encode("c") });
+			first.abort(failed);
+			reader.close();
+			expect(await reader.readString()).toBe("c");
+			await expect(reader.readString()).rejects.toBe(failed);
+			arriving?.release();
+			producer.close();
+			return;
+		}
 		first.abort(failed);
 		let read: string | Uint8Array | undefined | Error;
 		// A readiness poll waits the same way, and adopts the re-offer rather than spinning on the
@@ -3437,7 +3448,7 @@ test.each(["reoffer", "readable", "released", "closed", "past"])(
 		expect(read).toBeUndefined();
 		expect(reader.closed.peek()).toBeUndefined();
 
-		if (kind === "closed") {
+		if (kind === "leaving") {
 			reader.close();
 			await reading;
 			expect(read).toBe(failed);

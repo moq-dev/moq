@@ -941,6 +941,8 @@ export class Consumer {
 	#expired?: Expired;
 	// Closed by its reader, which ends it whatever is left unread.
 	#released = false;
+	// Set once released, for a read waiting on a copy that may take the group over.
+	#leaving?: Once<true>;
 	// The arrival of the copy first read, kept once a replacement copy is adopted.
 	#arrived?: Instant;
 	// The last frame handed out to stream before it completed. Cut short, it is lost, so no
@@ -1020,16 +1022,23 @@ export class Consumer {
 	// Whether another copy in the track may take over the failed one being read: one is held, or took it.
 	#succeeds(): boolean {
 		const succession = this.#state.succession;
-		return succession !== undefined && (succession.holds.peek() > 0 || succession.next !== undefined);
+		return (
+			!this.#released &&
+			succession !== undefined &&
+			(succession.holds.peek() > 0 || succession.next !== undefined)
+		);
 	}
 
 	// Continue on the copy that took this group's sequence in its track once the one being read
 	// failed, waiting out a duplicate still held for it. Returns whether the read should look again.
 	async #succeed(): Promise<boolean> {
 		const succession = this.#state.succession;
-		if (!succession || this.#verdict.peek() || this.#torn()) return false;
+		if (!succession || this.#released || this.#verdict.peek() || this.#torn()) return false;
 		while (succession.holds.peek() > 0) {
-			await Signal.race(succession.holds, this.#verdict);
+			this.#leaving ??= new Once();
+			await Signal.race(succession.holds, this.#verdict, this.#leaving);
+			// A closed reader ends on the failure rather than continue elsewhere.
+			if (this.#released) return false;
 			if (this.#verdict.peek()) return true;
 		}
 		const next = succession.next;
@@ -1516,17 +1525,16 @@ export class Consumer {
 	// Release this reader, failing it with `abort` if given. Every reader owns its mirrored
 	// state, so closing that state drops its demand without touching the producer.
 	#release(abort: Error | undefined): void {
-		// A copy failure recovery was continuing past ends with the abort instead, and one a copy
-		// that might take over left open ends with it, which also ends a read waiting on that copy.
-		const failed = this.#state.closed.peek();
-		if (failed instanceof Error && (this.#succeeds() || (abort && this.#recover))) {
-			this.#fail(abort ?? failed);
+		// A copy failure recovery was continuing past ends with the abort instead.
+		if (abort && this.#recover && this.#state.closed.peek() instanceof Error) {
+			this.#fail(abort);
 		}
 		this.#abandon();
 		this.#recover?.close?.();
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
 		this.#released = true;
+		this.#leaving?.set(true);
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(abort ?? null);
 		this.#closed?.refresh();
 	}
