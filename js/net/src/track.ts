@@ -3560,7 +3560,7 @@ export class Subscriber {
 			const edge = min(end, max(this.#state.received.peek(), (fillEdge(producer) ?? -1n) + 1n));
 			const above = max(low, edge);
 			const unknown = this.#unknownRuns(budget, coverage);
-			const judged: Run[] = [];
+			const seen: Run[] = [];
 			const unjudged = this.#unjudged;
 			for (let at = runsFrom(unjudged, low); at < unjudged.length && unjudged[at].start < end; at++) {
 				const from = max(unjudged[at].start, low);
@@ -3572,7 +3572,7 @@ export class Subscriber {
 					insertRun(accounted, run.start, run.end);
 					if (run.folds !== undefined) this.#wakeAt(run.folds.since(Instant.ZERO).asNanos());
 				}
-				for (const run of runGaps(accounted, from, to)) judged.push(run);
+				for (const run of runGaps(accounted, from, to)) seen.push(run);
 				const spans: Run[] = from < min(to, edge) ? [{ start: from, end: min(to, edge) }] : [];
 				// A received stale run that does not settle this reader is unknown to it, so it is
 				// still asked for, as the Rust `Misses::unclaimed` judges it: the upstream accounted
@@ -3608,7 +3608,7 @@ export class Subscriber {
 					}
 				}
 			}
-			for (const run of judged) cutRun(this.#unjudged, run.start, run.end);
+			for (const run of seen) cutRun(this.#unjudged, run.start, run.end);
 		}
 		const asker = this.#state.asker;
 		if (!asker) return undefined;
@@ -3644,7 +3644,7 @@ export class Subscriber {
 		const at = this.#judgedAt;
 		const edge = max(state.received.peek(), (fillEdge(producer) ?? -1n) + 1n);
 		const opened = fills.opened.peek();
-		const removed = at?.drops === undefined ? undefined : state.drops.removedSince(at.drops);
+		const removed = at && state.drops.removedSince(at.drops);
 		if (
 			!at ||
 			!removed ||
