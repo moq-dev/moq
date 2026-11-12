@@ -725,9 +725,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The runner's home persists across jobs, so a Queue build's mbx Cargo
+      # shim and Cargo config are there, and the dev shell would put the shim
+      # back on PATH. A fresh home finds neither; the guest's Nix config is
+      # system-wide, so the cache still applies.
       - name: Measure the gate
         id: measure
-        run: nix develop --command just gh gate-cost
+        run: |
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          nix develop --command just gh gate-cost
       - name: Record benchmark outcome
         if: ${{ !cancelled() }}
         run: nix develop --command just gh benchmark-report status "${{ steps.measure.outcome }}" target/bench/nightly/gate-cost
