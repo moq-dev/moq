@@ -40,7 +40,7 @@ Decided with the maintainer, 2026-10-13:
   Reopened 2026-11-11 (maintainer, /quest-plan after
   [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)'s reviews):
   whether Babel's distance stays is
-  [the prototype](/quest/m2/cluster-routing/routes/stale-copies.md)'s to
+  [the prototype](/quest/m1/route-stale-copies.md)'s to
   measure, against paths alone with a withdrawal that names the hop that
   died. The distance refuses a longer way round until the publisher advances
   its seqno, and refuses a cached copy at a neighbour no closer to the
