@@ -47,6 +47,7 @@ pub struct Client {
 	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
 	/// can't diverge between transports.
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	pub(crate) versions: moq_net::Versions,
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
@@ -86,7 +87,7 @@ pub struct Client {
 	#[cfg(test)]
 	pub(crate) dialer: Option<std::sync::Arc<Dialer>>,
 	/// Replaces the QUIC transport a probe reaches in tests.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "websocket", feature = "quic"))]
 	pub(crate) prober: Option<std::sync::Arc<Prober>>,
 	/// Where every dial goes instead of the network, set by [`Self::with_network`].
 	#[cfg(feature = "sim")]
@@ -101,7 +102,7 @@ pub(crate) type Dialer = dyn Fn(crate::connect::Addr, moq_net::Client) -> std::p
 	+ Sync;
 
 /// A test stand-in for the QUIC transport [`Client::probe`] reaches, handed the address.
-#[cfg(test)]
+#[cfg(all(test, feature = "websocket", feature = "quic"))]
 pub(crate) type Prober = dyn Fn(crate::connect::Addr) -> std::pin::Pin<Box<dyn Future<Output = crate::Result<qmux::Session>> + Send>>
 	+ Send
 	+ Sync;
@@ -174,6 +175,7 @@ impl Client {
 		Ok(Self {
 			moq,
 			peer_hop: None,
+			#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 			versions,
 			connect: config.url,
 			tokens: config.tokens,
@@ -198,7 +200,7 @@ impl Client {
 			qmux,
 			#[cfg(test)]
 			dialer: None,
-			#[cfg(test)]
+			#[cfg(all(test, feature = "websocket", feature = "quic"))]
 			prober: None,
 			#[cfg(feature = "sim")]
 			network: None,
