@@ -39,3 +39,8 @@ resuming a reset group sends a second stream for the same group, which #7670's
 hold-the-duplicate rule rewrites.
 
 Public API: none. Wire: lite-07 group stream takeover.
+
+The draft specifies the wire ([Takeover](/drafts/draft-lcurley-moq-lite.md),
+GROUP_END, YIELDED): what remains is the Rust and JS publishers taking over
+and continuing paused Groups, the subscribers holding and continuing them,
+and the tests above.
