@@ -1,7 +1,7 @@
 //! A system-picked source and the grant owned by one logical publication.
 
 use std::fmt;
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 /// The type of source the user may choose in the system picker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,18 +175,18 @@ impl RestoreTokenConsumer {
 	/// Wait for the token to differ from the last one this consumer saw and
 	/// return it, `Some(None)` once cleared, or `None` after every clone of the
 	/// selection is dropped. Changes in between are coalesced into the latest.
-	pub async fn changed(&mut self) -> Option<Option<RestoreToken>> {
+	#[kio::wrapper]
+	pub fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<Option<RestoreToken>>> {
 		let seen = &self.seen;
-		let token = self
-			.state
-			.wait(|current| match **current != *seen {
-				true => Poll::Ready((**current).clone()),
-				false => Poll::Pending,
-			})
-			.await
-			.ok()?;
+		let result = ready!(self.state.poll(waiter, |current| match **current != *seen {
+			true => Poll::Ready((**current).clone()),
+			false => Poll::Pending,
+		}));
+		let Ok(token) = result else {
+			return Poll::Ready(None);
+		};
 		self.seen = token.clone();
-		Some(token)
+		Poll::Ready(Some(token))
 	}
 }
 
@@ -390,10 +390,6 @@ mod tests {
 	}
 
 	fn changed(watch: &mut RestoreTokenConsumer) -> Poll<Option<Option<RestoreToken>>> {
-		use std::future::Future;
-		let mut changed = Box::pin(watch.changed());
-		changed
-			.as_mut()
-			.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+		watch.poll_changed(&kio::Waiter::noop())
 	}
 }
