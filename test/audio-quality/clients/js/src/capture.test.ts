@@ -4,7 +4,6 @@ import * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
 import { Group, Error as NetError, Origin, Path, Time } from "@moq/net";
 import { Signal } from "@moq/signals";
-import type { Delay } from "@moq/watch";
 import { Broadcast } from "../../../../../js/watch/src/broadcast.ts";
 import { arrivals, Capture, format } from "./capture.ts";
 import type { Arrival } from "./schema.ts";
@@ -89,8 +88,9 @@ test("the observer shares playback demand and closes without ending playback", a
 			numberOfChannels: 1,
 			container: { kind: "legacy" },
 		} as Catalog.AudioConfig),
-		delay: new Signal<Delay>(Duration.millis(250)),
+		delay: new Signal(Duration.millis(250)),
 		maxDelay: new Signal(Duration.millis(250)),
+		stretch: new Signal(Duration.ZERO),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
@@ -117,7 +117,7 @@ test("the observer shares playback demand and closes without ending playback", a
 	}
 });
 
-test("at auto the observer asks for the decoder's 2 s budget, not the target", async () => {
+test("the observer asks for the decoder's delay plus its stretch, not the target", async () => {
 	// A capture cut to the target would drop the frames later than it, which are what the target
 	// is measured from, so a trace recorded that way can never show the player falling short.
 	const origin = new Origin.Producer();
@@ -135,12 +135,13 @@ test("at auto the observer asks for the decoder's 2 s budget, not the target", a
 			numberOfChannels: 1,
 			container: { kind: "legacy" },
 		} as Catalog.AudioConfig),
-		delay: new Signal<Delay>("auto"),
-		maxDelay: new Signal(Duration.millis(250)),
+		delay: new Signal(Duration.millis(100)),
+		maxDelay: new Signal(Duration.millis(100)),
+		stretch: new Signal(Duration.secs(2)),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		expect(track.subscription.peek()).toMatchObject({ delay: { max: Duration.millis(2000) } });
+		expect(track.subscription.peek()).toMatchObject({ delay: { max: Duration.millis(2100) } });
 	} finally {
 		await capture.close();
 		source.close();
@@ -165,8 +166,9 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 			numberOfChannels: 1,
 			container: { kind: "legacy" },
 		} as Catalog.AudioConfig),
-		delay: new Signal<Delay>(Duration.millis(250)),
+		delay: new Signal(Duration.millis(250)),
 		maxDelay: new Signal(Duration.millis(250)),
+		stretch: new Signal(Duration.ZERO),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
