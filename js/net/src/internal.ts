@@ -289,7 +289,8 @@ export function subtractRuns<R extends Run>(runs: readonly R[], cut: readonly Ru
 export function insertDrops(drops: readonly DropRun[], runs: readonly DropRun[]): DropRun[] {
 	if (runs.length === 0) return [...drops];
 	const next = subtractRuns(drops, runs);
-	next.push(...runs);
+	// Appended one by one: a peer controls how many runs there are, past any argument limit.
+	for (const run of runs) next.push(run);
 	next.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
 	const merged: DropRun[] = [];
 	for (const run of next) {

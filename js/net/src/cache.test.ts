@@ -378,6 +378,25 @@ for (const stale of [false, true]) {
 	});
 }
 
+// A reader that closes while a read waits releases its record's bill for good: the read that wakes
+// after the close bills nothing again.
+test("a closed reader bills nothing from a read still pending", async () => {
+	const pool = new cache.Pool({ capacity: 1 << 30 });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const reader = producer.subscribe({ delay: { max: null } });
+	for (let run = 0n; run < 64n; run++) {
+		hooks.dropTrackGroups(producer, 2n * run, 2n * run + 1n, { error: new StreamError(StreamCode.Cancel) });
+		producer.skipGroups(2n * run + 1n, 2n * run + 2n);
+	}
+	while (hooks.tryDrop(reader));
+	const billed = pool.used;
+	const read = reader.recvGroup();
+	reader.close();
+	await read;
+	expect(pool.used).toBeLessThan(billed - 32 * cache.READER_RUN_OVERHEAD);
+});
+
 // A subscription's tail, recording a fragmented run of finished streams between updates, bills it to
 // its track's account. Under the pool's debt it forgets them and stays within the pool. Mirrors Rust
 // `a_tail_forgets_its_finished_streams_under_debt`.

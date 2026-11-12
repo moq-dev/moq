@@ -919,7 +919,7 @@ function givenUp(
 	if (refused.length === 0) return found;
 	const own = refused.filter((run) => run.start < end && start < run.end);
 	const hiding = found.filter((run) => settles({ ...run, start: max(run.start, start) }));
-	found.push(...subtractRuns(own, hiding));
+	for (const run of subtractRuns(own, hiding)) found.push(run);
 	return found.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
 }
 
@@ -3139,6 +3139,8 @@ export class Subscriber {
 	// #fold). Mirrors the Rust `Record::settle`.
 	#settleRecord(handed?: bigint): TooFarBehind | undefined {
 		if (this.#lagged) return new TooFarBehind();
+		// A closed reader released its bill for good; a read still pending must not open another.
+		if (this.#left) return undefined;
 		const bytes = this.#recordRuns() * cache.READER_RUN_OVERHEAD;
 		if (!this.#bill && bytes === 0) return undefined;
 		const bill = this.#billOn(this.#bill);
