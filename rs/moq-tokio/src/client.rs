@@ -45,6 +45,7 @@ pub struct Client {
 	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
 	/// can't diverge between transports.
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	pub(crate) versions: moq_net::Versions,
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
@@ -52,6 +53,9 @@ pub struct Client {
 	pub(crate) tokens: Vec<moq_net::auth::Token>,
 	/// The connect deadline, backoff, and GOAWAY handling each [`Connection`] runs under.
 	pub(crate) policy: moq_net::reconnect::Config,
+	/// Whether dials present an mTLS client certificate, refusing schemes that can't.
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
+	client_cert: bool,
 	/// The resolved Happy Eyeballs timings, used by the `tcp://` and `tls://`
 	/// dials here; the QUIC backend captures its own copy from the config.
 	#[cfg(feature = "tcp")]
@@ -81,7 +85,7 @@ pub struct Client {
 	#[cfg(test)]
 	pub(crate) dialer: Option<std::sync::Arc<Dialer>>,
 	/// Replaces the QUIC transport a probe reaches in tests.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "websocket", feature = "quic"))]
 	pub(crate) prober: Option<std::sync::Arc<Prober>>,
 	/// Where every dial goes instead of the network, set by [`Self::with_network`].
 	#[cfg(feature = "sim")]
@@ -96,7 +100,7 @@ pub(crate) type Dialer = dyn Fn(crate::connect::Addr, moq_net::Client) -> std::p
 	+ Sync;
 
 /// A test stand-in for the QUIC transport [`Client::probe`] reaches, handed the address.
-#[cfg(test)]
+#[cfg(all(test, feature = "websocket", feature = "quic"))]
 pub(crate) type Prober = dyn Fn(crate::connect::Addr) -> std::pin::Pin<Box<dyn Future<Output = crate::Result<qmux::Session>> + Send>>
 	+ Send
 	+ Sync;
@@ -151,6 +155,8 @@ impl Client {
 		let tcp_tls = config.tls.clone();
 		#[cfg(feature = "websocket")]
 		let tls_host_name = config.tls.host_name.clone();
+		#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
+		let client_cert = config.tls.has_client_cert();
 		let mut policy = moq_net::reconnect::Config::default();
 		policy.backoff = config.backoff.resolve();
 		policy.goaway = config.goaway.resolve();
@@ -166,10 +172,13 @@ impl Client {
 
 		Ok(Self {
 			moq,
+			#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 			versions,
 			connect: config.url,
 			tokens: config.tokens,
 			policy,
+			#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
+			client_cert,
 			#[cfg(feature = "tcp")]
 			failover_delay,
 			#[cfg(feature = "tcp")]
@@ -188,7 +197,7 @@ impl Client {
 			qmux,
 			#[cfg(test)]
 			dialer: None,
-			#[cfg(test)]
+			#[cfg(all(test, feature = "websocket", feature = "quic"))]
 			prober: None,
 			#[cfg(feature = "sim")]
 			network: None,
@@ -249,6 +258,17 @@ impl Client {
 	#[cfg(feature = "sim")]
 	pub fn with_network(mut self, network: crate::sim::Network) -> Self {
 		self.network = Some(network);
+		self
+	}
+
+	/// Present `token` in SETUP on every session this client dials; see
+	/// [`moq_net::Client::with_token`].
+	///
+	/// For a credential [`connect.tokens`](crate::connect::Config::tokens) cannot hold:
+	/// one that is not text, or that needs its own Token Type, such as a CBOR token. A
+	/// connect token a dial presents in SETUP replaces it for that dial.
+	pub fn with_token(mut self, token: moq_net::setup::Token) -> Self {
+		self.moq = self.moq.with_token(token);
 		self
 	}
 
@@ -386,6 +406,12 @@ impl Client {
 		attempt: moq_net::reconnect::Attempt<crate::connect::Addr>,
 	) -> crate::Result<Dialed> {
 		let (addr, client) = self.attempt(&attempt);
+		// A configured certificate is never silently dropped. `http://` trusts a fingerprint
+		// fetched over plaintext and falls back to `ws://`, and `ws://`, `tcp://`, and
+		// `unix://` carry no TLS, so none can present it to an authenticated server.
+		if self.client_cert && matches!(addr.url().scheme(), "http" | "ws" | "tcp" | "unix") {
+			return Err(Error::ClientCertScheme(addr.url().scheme().to_string()));
+		}
 		#[cfg(test)]
 		if let Some(dialer) = &self.dialer {
 			return dialer(addr, client.moq.clone()).await;
@@ -733,6 +759,35 @@ mod tests {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
+	/// A client certificate refuses every scheme that can't present it, before dialing.
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
+	#[tokio::test]
+	async fn client_cert_refuses_schemes_that_cannot_present_it() {
+		let mut config = crate::connect::Config::default();
+		config.tls.identity = Some(crate::tls::Identity::generate(["client"]).unwrap());
+		let mut client = config.init(Default::default()).unwrap().with_reconnect(false);
+		let dialed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let record = dialed.clone();
+		client.dialer = Some(std::sync::Arc::new(move |addr: crate::connect::Addr, _| {
+			record.lock().unwrap().push(addr.url().scheme().to_string());
+			Box::pin(async { Err(Error::ConnectFailed) })
+		}));
+
+		for scheme in ["http", "ws", "tcp", "unix", "https", "wss", "moqt", "moql", "tls"] {
+			let url: Url = format!("{scheme}://relay.invalid:443/").parse().unwrap();
+			let Err(err) = client.connect(url).established().await else {
+				panic!("{scheme} connected");
+			};
+			let refused = matches!(err, Error::ClientCertScheme(_));
+			assert_eq!(
+				refused,
+				matches!(scheme, "http" | "ws" | "tcp" | "unix"),
+				"{scheme}: {err}"
+			);
+		}
+		assert_eq!(*dialed.lock().unwrap(), ["https", "wss", "moqt", "moql", "tls"]);
+	}
+
 	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn fixed_target_preserves_request_and_refuses_redirect() {
@@ -805,6 +860,62 @@ mod tests {
 		} else {
 			assert!(result.is_ok());
 		}
+	}
+
+	/// A token set on the client reaches the peer's SETUP with its type and bytes intact,
+	/// on every connection, unless a connect token takes its place.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_token_keeps_its_type_and_bytes() {
+		kio::clock::host_time(); // real TCP sockets
+		let version: moq_net::Version = "moq-transport-18".parse().unwrap();
+		let token = moq_net::setup::Token {
+			kind: 16,
+			value: vec![0xd8, 0x3d, 0xd2, 0x00, 0xff],
+		};
+
+		let mut config = crate::listen::Config::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.version = vec![version];
+		let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
+		let addr = listener.tcp_local_addr().unwrap();
+
+		let config = crate::connect::Config {
+			version: vec![version],
+			..Default::default()
+		};
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_reconnect(false)
+			.with_token(token.clone());
+		let url: Url = format!("tcp://{addr}/").parse().unwrap();
+
+		for round in 0..2 {
+			let connection = client.connect(url.clone());
+			let request = listener.accept().await.unwrap();
+			assert_eq!(request.token(), Some(&token), "round {round}");
+			let _session = request.ok().await.unwrap();
+			let _connection = connection.established().await.unwrap();
+		}
+
+		// A connect token takes its place in SETUP.
+		let mut config: crate::connect::Config = toml::from_str(r#"tokens = ["text"]"#).unwrap();
+		config.version = vec![version];
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_reconnect(false)
+			.with_token(token);
+		let connection = client.connect(url);
+		let request = listener.accept().await.unwrap();
+		let text = moq_net::setup::Token {
+			kind: moq_net::setup::Token::OUT_OF_BAND,
+			value: b"text".to_vec(),
+		};
+		assert_eq!(request.token(), Some(&text));
+		let _session = request.ok().await.unwrap();
+		let _connection = connection.established().await.unwrap();
 	}
 
 	/// A parser wrapping the config, since it derives `Args` (a flattened `Parser`

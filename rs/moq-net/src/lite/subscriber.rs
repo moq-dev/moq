@@ -286,6 +286,9 @@ impl Drop for ParkWait {
 
 impl TrackEntry {
 	fn new(copy: Option<Accepted>, tail: kio::Producer<Tail>) -> Self {
+		if let Some(copy) = &copy {
+			Self::bill_tail(&tail, copy);
+		}
 		Self {
 			copy,
 			parked: None,
@@ -317,7 +320,17 @@ impl TrackEntry {
 	}
 
 	/// Give the copy to the subscription, opening the groups of the streams parked on it.
+	/// Bill what the tail keeps to the copy's account.
+	fn bill_tail(tail: &kio::Producer<Tail>, copy: &Accepted) {
+		// Opened before the tail's lock, which is never held across the track's.
+		let bill = copy.producer.bill();
+		if let Ok(mut tail) = tail.write() {
+			tail.bill(bill);
+		}
+	}
+
 	fn accept(&mut self, copy: Accepted, version: Version, now: crate::time::Instant) {
+		Self::bill_tail(&self.tail, &copy);
 		self.copy = Some(copy);
 		let Some(parked) = self.parked.clone() else {
 			return;
@@ -1200,6 +1213,9 @@ impl Drop for SubscriberDriver {
 		// `abort` already recorded a session error when the driver failed. A driver
 		// dropped without that still has to name an end before its setup machines drop.
 		self.subscriber.note_end(&Error::Cancel);
+		// Every announce stream closes with the session: disconnect them together.
+		let _closing = self.subscriber.origin.route_closing();
+		self.announces = kio::Tasks::new();
 	}
 }
 
@@ -5669,6 +5685,21 @@ mod tests {
 			!covers(2..3),
 			"a drop under a later update is the publisher's to re-offer"
 		);
+
+		// Under the pool's debt the tail folds what finished, gaps and all. A group in the span
+		// whose stream arrived before its stale drop still wins over it; a gap there the drop
+		// accounted first is owed again.
+		for sequence in [3, 5, 7] {
+			arrive(&mut serving, sequence).await;
+		}
+		if let Ok(mut state) = tail.write() {
+			assert!(state.fold());
+		}
+		serving.apply_response(&serve, old(3, 3)).unwrap();
+		serving.apply_response(&serve, old(4, 3)).unwrap();
+		update(&mut serving);
+		assert!(covers(3..4), "the folded group that arrived stays accounted for");
+		assert!(!covers(4..5), "the folded gap is the publisher's to re-offer");
 	}
 
 	/// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it: an
@@ -11928,6 +11959,12 @@ impl ServeLoop {
 				// the publisher re-offers it or drops it again under the new number, so it is
 				// still owed, and a reader that wants it fills it by range meanwhile.
 				if !(stale && dropped.update < active.update) {
+					// Asked before this drop is accounted: what a fold forgot finishing that the
+					// ledger already accounted may be a stream this drop overtook.
+					let overtaken: Vec<_> = match stale {
+						true => active.tail.read().overtaken(groups.clone()).collect(),
+						false => Vec::new(),
+					};
 					if let Ok(mut tail) = active.tail.write() {
 						tail.account(groups.clone(), serve.subscriber.runtime.now());
 					}
@@ -11947,12 +11984,18 @@ impl ServeLoop {
 							for finished in active.tail.read().finished(groups.clone()) {
 								given.remove(finished);
 							}
+							let mut owed = rangemap::RangeSet::new();
 							for given in given.iter() {
-								let recorded = self
-									.serving
-									.give_up(given.clone(), track::Hole::stale(active.max_delay));
-								active.stale.extend(recorded);
+								owed.extend(
+									self.serving
+										.give_up(given.clone(), track::Hole::stale(active.max_delay)),
+								);
 							}
+							// Owed again by the next update, save what a stream may have won.
+							for overtaken in overtaken {
+								owed.remove(overtaken);
+							}
+							active.stale.extend(owed);
 						}
 						// Final, so no update reopens it, even where it replaces a stale drop.
 						false => {

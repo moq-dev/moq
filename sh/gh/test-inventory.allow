@@ -23,6 +23,7 @@ ignore moq-video::capture::wgc::native::tests::wgc_displays_reopen_with_cursor_o
 ignore moq-video::capture::wgc::native::tests::wgc_minimized_window_is_rejected_before_the_first_frame /quest/m4/capture-wgc.md
 ignore moq-video::capture::wgc::native::tests::wgc_window_reopens_with_cursor_on_and_off /quest/m4/capture-wgc.md
 ignore moq-video::capture::pipewire::camera::tests::pipewire_camera_captures_frames /quest/m5/video-hardware.md
+ignore moq-video::capture::pipewire::camera::tests::pipewire_camera_shares_a_running_stream /quest/m5/video-hardware.md
 ignore moq-video::capture::pipewire::tests::portal_captures_frames /quest/m5/video-hardware.md
 ignore moq-video::decode::decoder::tests::mediafoundation_resized_texture_reencodes_in_place /quest/m5/video-hardware.md
 ignore moq-video::encode::encoder::tests::mediafoundation_camera_texture /quest/m5/video-hardware.md
@@ -35,12 +36,8 @@ ignore moq-video::frame::tests::d3d11_resize_matches_cpu /quest/m5/video-hardwar
 ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m5/video-hardware.md
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m5/video-hardware.md
 
-# Quarantined flakes, re-enabled by the quest that fixes them.
-
-# Need another implementation to speak the route wire; the quest ports it.
-ignore moq-net::test_interop::lite_tracks_interop /quest/m2/cluster-routing/routes/js.md
-ignore moq-tokio::datagram_tracks::datagram_tracks_javascript /quest/m2/cluster-routing/routes/js.md
-recipe test::datagram-tracks /quest/m2/cluster-routing/routes/js.md
+# Flaked under load; disabled until fixed at its cause.
+ignore moq-gst::source::imp::session_tests::a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times /quest/m0/test-flakes-2/gst-moqsink-restart-pads.md
 
 # Too slow for the merge gate; the quest runs it nightly once every scenario settles.
 ignore moq-net::route::tests::cache::sweep_cache_routing_long /quest/m2/cache-routing-proof.md

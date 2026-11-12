@@ -281,26 +281,6 @@ needs_js() {
     needs js || needs js-native || needs js-native-node || needs js-native-bun
 }
 
-# js/net speaks the lite-07 wire from before the route layer until
-# quest/m2/cluster-routing/routes/js.md ports it and removes this: native JS dials its
-# defaults in the matrix, and a lane running it on moq-lite-07-wip is skipped.
-JS_LITE07_SKIP="JS speaks pre-route lite-07 until quest/m2/cluster-routing/routes/js.md"
-
-# js_lite07 <version> <clients...>: true if the lane runs native JS on moq-lite-07-wip.
-js_lite07() {
-    local version="$1" client
-    [[ "$version" == moq-lite-07-wip ]] || return 1
-    for client in "${@:2}"; do [[ "$client" != js-native-* ]] || return 0; done
-    return 1
-}
-
-for version in "${VERSION_LIST[@]}"; do
-    if [[ "$version" == moq-lite-07-wip ]] && needs_js; then
-        echo "error: $JS_LITE07_SKIP; pin moq-lite-07-wip without JS clients" >&2
-        exit 2
-    fi
-done
-
 # Released-wire compatibility (compat.sh) pins one version and may run released
 # binaries that predate AUTH, so it runs anonymous: it compares the wire, and the
 # default matrix covers auth.
@@ -310,12 +290,11 @@ COMPAT=0
 # The clients that print the grant they received as an `auth granted` line. The
 # Python, Go, and C++ clients read it through moq-ffi; moq-c's frozen ABI and
 # GStreamer expose none, and the browser's shared connection keeps its session private.
-# Native JS prints one too, but dials its defaults until it speaks lite-07's route
-# layer (see JS_LITE07_SKIP). Grants are checked on $AUTH_VERSION, so only in the `auto` pass.
+# Grants are checked on $AUTH_VERSION, so only in the `auto` pass.
 prints_grant() {
     [[ "$COMPAT" -eq 0 && "$VERSION" == auto ]] || return 1
     case "$1" in
-        rust | python | go | cpp) return 0 ;;
+        rust | python | go | cpp | js-native-node | js-native-bun) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -374,9 +353,8 @@ DROP_VERSIONS=(moq-lite-05 moq-lite-06 moq-lite-07-wip)
 # The lite drafts the compressed-track lanes cross: lite-07 carries the flag, lite-06 gets inflated bytes.
 COMPRESS_VERSIONS=(moq-lite-07-wip moq-lite-06)
 # The compressed catalog's concurrent readers: lite-07 carries the flag, and lite-06 and a
-# moq-transport reader that does not offer FLATE share the relay's one inflated copy. The
-# lite-07 reader returns with quest/m2/cluster-routing/routes/js.md (see JS_LITE07_SKIP).
-CATALOG_VERSIONS=(moq-lite-06 moq-transport-22)
+# moq-transport reader that does not offer FLATE share the relay's one inflated copy.
+CATALOG_VERSIONS=(moq-lite-07-wip moq-lite-06 moq-transport-22)
 
 # Every publisher in this checkout sends a tone per audio channel, and every subscriber decodes
 # AUDIO_MS of it for tone.py (the browser: its page) to check against the publisher's list. This
@@ -1956,11 +1934,6 @@ run_drop_pair() {
     local name="drop-${version}-${pub}-${sub}"
     local fifo="$LOGS/tail-ack" broadcast="$name-$$-$RANDOM"
     local cell=(case=drop publisher="$pub" subscriber="$sub" version="$version" log="$LOGS/$name-sub.log")
-    if js_lite07 "$version" "$pub" "$sub"; then
-        echo "  SKIP  drop $version $pub -> $sub"
-        record skip "${cell[@]}" detail="$JS_LITE07_SKIP"
-        return
-    fi
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  drop $version $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
@@ -2032,11 +2005,6 @@ run_tail_pair() {
     fi
     local cell=(case="$kind" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
     [[ -z "${4:-}" ]] || cell+=(version="$version")
-    if js_lite07 "$version" "$pub" "$sub"; then
-        echo "  SKIP  $label $pub -> $sub"
-        record skip "${cell[@]}" detail="$JS_LITE07_SKIP"
-        return
-    fi
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  $label $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
@@ -2396,11 +2364,6 @@ run_matrix() {
         local engine status
         for engine in "${ROUTE_KEY_ENGINES[@]}"; do
             log="$HARNESS_RUN/route-key-$engine.log"
-            if [[ -n "$JS_LITE07_SKIP" ]]; then
-                echo "  SKIP  route key $engine"
-                record skip case="route key $engine" subscriber=js version=moq-lite-07-wip detail="$JS_LITE07_SKIP"
-                continue
-            fi
             if is_broken js; then
                 echo "  FAIL  route key $engine (browser client unavailable)"
                 record fail case="route key $engine" subscriber=js version=moq-lite-07-wip detail="browser client unavailable"
@@ -2435,11 +2398,6 @@ run_claims_case() {
     local prefix="claims-$1-$2-$$-$RANDOM" command=(bun)
     local cell=(case="claims $transport" publisher="$runtime" subscriber="$runtime" version=moq-lite-07-wip log="$LOGS/$name.log")
     [[ "$runtime" != js-native-node ]] || command=(node --import tsx)
-    if js_lite07 moq-lite-07-wip "$runtime"; then
-        echo "  SKIP  claims $transport $runtime"
-        record skip "${cell[@]}" detail="$JS_LITE07_SKIP"
-        return
-    fi
     if is_broken "$runtime"; then
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
@@ -2497,11 +2455,6 @@ run_replacement_case() {
     local runtime="$1" transport="$2" name="replace-$1-$2" started=$SECONDS
     local prefix="replace-$1-$2-$$-$RANDOM"
     local cell=(case="track replacement $transport" publisher="$runtime" subscriber="$runtime" version=moq-lite-07-wip log="$LOGS/$name.log")
-    if js_lite07 moq-lite-07-wip "$runtime"; then
-        echo "  SKIP  track replacement $transport $runtime"
-        record skip "${cell[@]}" detail="$JS_LITE07_SKIP"
-        return
-    fi
     if is_broken "$runtime"; then
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
@@ -2586,7 +2539,7 @@ run_catalog_fanout() {
     got=$(relay_log_since "$from" | sed -n 's/.*conn{id=[0-9]* .*negotiated version=\([^ ]*\).*/\1/p' | sort | tr '\n' ' ')
     if [[ -z "$why" ]] && ! grep -qx 'catalog acknowledged' "$LOGS/$name-pub.log"; then
         why="publisher did not acknowledge"
-    elif [[ -z "$why" && "$got" != "moq-lite-06 moq-lite-07-wip moq-transport-22 " ]]; then
+    elif [[ -z "$why" && "$got" != "moq-lite-06 moq-lite-07-wip moq-lite-07-wip moq-transport-22 " ]]; then
         why="relay connections negotiated ${got:-nothing}"
     elif [[ -z "$why" && "$((after - before))" != "$bytes" ]]; then
         why="relay inflated $((after - before)) bytes, not the catalog's ${bytes:-?} once"

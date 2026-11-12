@@ -83,16 +83,26 @@ pub enum Source {
 	/// A camera / webcam. `None` opens the default camera.
 	///
 	/// The identifiers from [`cameras`] are an AVFoundation `uniqueID` on macOS,
-	/// a `/dev/videoN` path on Linux, and a Media Foundation symbolic link on
-	/// Windows. Bare numeric indices remain accepted on Linux and Windows.
+	/// a Media Foundation symbolic link on Windows, and on Linux a `/dev/videoN`
+	/// path or, with the `pipewire` feature, a `pipewire:<node name>` id. Bare
+	/// numeric indices remain accepted on Linux and Windows.
 	///
-	/// With the `pipewire` feature, Linux also lists PipeWire camera nodes as
-	/// `pipewire:<node name>`, and `pipewire` alone opens the camera with the
-	/// highest session priority, which the session manager treats as default.
-	/// The id picks the backend: a `/dev/videoN` path always opens V4L2, and a
-	/// `pipewire` id always opens PipeWire. `None` opens `/dev/video0`, except
-	/// inside a sandbox (Flatpak or Snap), where it opens PipeWire's default
-	/// camera through the camera portal.
+	/// With the `pipewire` feature, Linux lists a webcam that a PipeWire node
+	/// fronts by the node's id, since PipeWire shares the camera with other
+	/// clients while a V4L2 open holds it exclusively. Only devices no node
+	/// fronts list as `/dev/videoN`. `pipewire` alone opens the listed camera
+	/// with the highest session priority, which the session manager treats as
+	/// default.
+	///
+	/// The id picks the backend: a `/dev/videoN` path always opens V4L2, listed
+	/// or not, so an id saved from an earlier listing keeps working, and a
+	/// `pipewire` id always opens PipeWire.
+	///
+	/// With the `pipewire` feature, `None` opens PipeWire's default camera when
+	/// PipeWire lists a camera, and `/dev/video0` otherwise, such as on a host
+	/// without a PipeWire session. Inside a sandbox (Flatpak or Snap) it always
+	/// goes through the camera portal. Without the feature, `None` opens
+	/// `/dev/video0`.
 	Camera(Option<String>),
 
 	/// A whole display. `None` opens the main display.
@@ -458,6 +468,13 @@ async fn open_source(config: &Config) -> Result<Stream, Error> {
 			{
 				match LinuxCamera::select(device.as_deref(), sandboxed()) {
 					LinuxCamera::V4l2(device) => v4l2::open(config, device).await,
+					LinuxCamera::Default => {
+						#[cfg(feature = "pipewire")]
+						if pipewire::camera::present().await {
+							return pipewire::camera::open(config, None).await;
+						}
+						v4l2::open(config, None).await
+					}
 					#[cfg(feature = "pipewire")]
 					LinuxCamera::PipeWire(node) => pipewire::camera::open(config, node).await,
 					#[cfg(not(feature = "pipewire"))]
@@ -532,10 +549,12 @@ async fn open_source(config: &Config) -> Result<Stream, Error> {
 /// List the available cameras and the identifiers [`Source::Camera`] accepts.
 ///
 /// On Linux, V4L2 lists only devices offering YUYV or MJPEG. With the `pipewire`
-/// feature, PipeWire camera nodes follow, excluding V4L2 paths already listed.
-/// PipeWire-only cameras remain visible. A session without PipeWire lists V4L2
-/// alone. Inside a sandbox the PipeWire nodes come through the camera portal,
-/// which may ask the user for camera access.
+/// feature, PipeWire camera nodes come first, and a V4L2 device that a listed
+/// node fronts is listed only as that node, since PipeWire shares the device
+/// with other clients while a V4L2 open holds it exclusively. V4L2 devices no
+/// node fronts remain visible. A session without PipeWire, or one whose daemon
+/// does not answer, lists V4L2 alone. Inside a sandbox the PipeWire nodes come
+/// through the camera portal, which may ask the user for camera access.
 pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	#[cfg(target_os = "macos")]
 	{
@@ -545,10 +564,7 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	{
 		let cameras = blocking(v4l2::cameras).await?;
 		#[cfg(feature = "pipewire")]
-		let cameras = {
-			let pipewire = pipewire::camera::cameras(&cameras).await?;
-			[cameras, pipewire].concat()
-		};
+		let cameras = pipewire::camera::cameras(cameras).await?;
 		Ok(cameras)
 	}
 	#[cfg(target_os = "windows")]
@@ -584,6 +600,13 @@ pub async fn camera_modes(camera: Option<&str>) -> Result<Vec<Mode>, Error> {
 			LinuxCamera::V4l2(camera) => {
 				let camera = camera.map(str::to_string);
 				blocking(move || v4l2::modes(camera.as_deref())).await
+			}
+			LinuxCamera::Default => {
+				#[cfg(feature = "pipewire")]
+				if pipewire::camera::present().await {
+					return pipewire::camera::modes(None).await;
+				}
+				blocking(|| v4l2::modes(None)).await
 			}
 			#[cfg(feature = "pipewire")]
 			LinuxCamera::PipeWire(node) => pipewire::camera::modes(node).await,
@@ -663,10 +686,14 @@ const PIPEWIRE: &str = "pipewire";
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug, PartialEq, Eq)]
 enum LinuxCamera<'a> {
+	/// No camera named, outside a sandbox: PipeWire's default camera when the
+	/// `pipewire` feature is on and PipeWire lists a camera, else `/dev/video0`.
+	Default,
 	/// A V4L2 device, by path or index. `None` opens `/dev/video0`.
 	V4l2(Option<&'a str>),
-	/// A PipeWire camera, by `node.name`. `None` picks the camera with the
-	/// highest session priority, the one the session manager links by default.
+	/// A PipeWire camera, by `node.name`. `None` picks the listed camera with
+	/// the highest session priority, the one the session manager links by
+	/// default.
 	PipeWire(Option<&'a str>),
 }
 
@@ -677,7 +704,7 @@ impl<'a> LinuxCamera<'a> {
 	fn select(selector: Option<&'a str>, sandboxed: bool) -> Self {
 		match selector {
 			None if sandboxed => Self::PipeWire(None),
-			None => Self::V4l2(None),
+			None => Self::Default,
 			Some(PIPEWIRE) => Self::PipeWire(None),
 			Some(selector) => match selector.strip_prefix(PIPEWIRE).and_then(|rest| rest.strip_prefix(':')) {
 				Some(name) => Self::PipeWire(Some(name)),
@@ -739,7 +766,7 @@ mod tests {
 
 	#[test]
 	fn camera_selectors_name_their_backend() {
-		assert_eq!(LinuxCamera::select(None, false), LinuxCamera::V4l2(None));
+		assert_eq!(LinuxCamera::select(None, false), LinuxCamera::Default);
 		assert_eq!(LinuxCamera::select(None, true), LinuxCamera::PipeWire(None));
 		for sandboxed in [false, true] {
 			assert_eq!(

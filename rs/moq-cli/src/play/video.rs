@@ -827,6 +827,7 @@ mod tests {
 			broadcast: "room".into(),
 			args: Args {
 				delay: Delay::Fixed(delay),
+				stretch: Duration::ZERO.into(),
 				catalog_format: None,
 				metrics: None,
 				#[cfg(all(target_os = "linux", feature = "vaapi"))]

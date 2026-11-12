@@ -37,8 +37,39 @@ use crate::{Error, FrameRate, Size};
 /// answers in milliseconds, so running out means it is stuck.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// List the PipeWire cameras as [`Camera`]s with `pipewire:<node name>` ids.
-pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, Error> {
+/// Merges the PipeWire cameras, with `pipewire:<node name>` ids, into the V4L2
+/// listing `v4l2`, as [`merge`] describes.
+///
+/// A host without a PipeWire session gets `v4l2` back unchanged, and so does
+/// one whose daemon or camera portal fails to answer, unless `v4l2` is empty
+/// and the failure is all there is to report.
+pub(in crate::capture) async fn cameras(v4l2: Vec<Camera>) -> Result<Vec<Camera>, Error> {
+	match nodes().await {
+		Ok(nodes) => Ok(merge(nodes, v4l2)),
+		Err(error) if !v4l2.is_empty() => {
+			tracing::warn!(%error, "listing PipeWire cameras failed; listing V4L2 cameras only");
+			Ok(v4l2)
+		}
+		Err(error) => Err(error),
+	}
+}
+
+/// Returns whether PipeWire lists a camera, which decides whether the
+/// default camera opens through PipeWire. A host without a PipeWire session,
+/// or with a daemon that does not answer, lists none.
+pub(in crate::capture) async fn present() -> bool {
+	match nodes().await {
+		Ok(nodes) => !nodes.is_empty(),
+		Err(error) => {
+			tracing::debug!(%error, "listing PipeWire cameras failed");
+			false
+		}
+	}
+}
+
+/// Lists the PipeWire camera nodes with a format this backend converts, none
+/// on a host without a PipeWire session.
+async fn nodes() -> Result<Vec<Node>, Error> {
 	let sandboxed = ashpd::is_sandboxed();
 	let remote = if sandboxed {
 		match portal().await? {
@@ -49,8 +80,7 @@ pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, 
 	} else {
 		None
 	};
-	let v4l2 = v4l2.to_vec();
-	let nodes = crate::capture::blocking(move || {
+	crate::capture::blocking(move || {
 		pw::init();
 		let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| err("pipewire main loop", e))?;
 		let context = pw::context::ContextRc::new(&mainloop, None).map_err(|e| err("pipewire context", e))?;
@@ -65,53 +95,61 @@ pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, 
 			Err(error) => return Err(err("pipewire connect", error)),
 		};
 		let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
-		let nodes = unlisted(scan(&mainloop, &core, &registry)?, &v4l2);
-		// Hide a node with no format we convert, as the V4L2 listing does: an IR
-		// camera that offers only GREY would list an id `open` refuses. A node
-		// whose formats cannot be read stays, since `open` reports why.
-		let formats = match formats_each(&mainloop, &core, &registry, &nodes) {
-			Ok(formats) => formats,
-			Err(error) => {
-				tracing::debug!(%error, "could not list PipeWire camera formats");
-				return Ok(nodes);
-			}
-		};
-		Ok(nodes
-			.into_iter()
-			.zip(formats)
-			.filter_map(|(node, formats)| match formats {
-				Ok(formats) if formats.is_empty() => {
-					tracing::debug!(node = %node.name, "PipeWire camera offers no format we convert");
-					None
-				}
-				Ok(_) => Some(node),
-				Err(error) => {
-					tracing::debug!(node = %node.name, %error, "could not list PipeWire camera formats");
-					Some(node)
-				}
-			})
-			.collect())
+		let nodes = scan(&mainloop, &core, &registry)?;
+		let formats = formats_each(&mainloop, &core, &registry, &nodes)?;
+		Ok(convertible(nodes, formats).into_iter().map(|(node, _)| node).collect())
 	})
-	.await?;
+	.await
+}
 
-	Ok(nodes
+/// Pairs each of `nodes` with its `formats` and keeps the nodes that offer a
+/// mode this backend converts, as the V4L2 listing does: an IR camera that
+/// offers only GREY would list an id `open` refuses. A node whose formats
+/// cannot be read is dropped too, so it neither shadows a working default nor
+/// hides its V4L2 device; opening it by name still reports why.
+fn convertible(nodes: Vec<Node>, formats: Vec<Result<Vec<Format>, Error>>) -> Vec<(Node, Vec<Format>)> {
+	let want = Request {
+		size: Size::new(DEFAULT_WIDTH, DEFAULT_HEIGHT),
+		framerate: None,
+	};
+	nodes
+		.into_iter()
+		.zip(formats)
+		.filter_map(|(node, formats)| match formats {
+			Ok(formats) if select(&formats, want).is_some() => Some((node, formats)),
+			Ok(_) => {
+				tracing::debug!(node = %node.name, "PipeWire camera offers no mode we convert");
+				None
+			}
+			Err(error) => {
+				tracing::debug!(node = %node.name, %error, "could not list PipeWire camera formats");
+				None
+			}
+		})
+		.collect()
+}
+
+/// Lists the PipeWire cameras first, then the V4L2 cameras no node fronts.
+///
+/// A V4L2 device that a node fronts is listed only as that node: PipeWire
+/// shares the device with other clients, while a V4L2 open holds it
+/// exclusively.
+fn merge(nodes: Vec<Node>, v4l2: Vec<Camera>) -> Vec<Camera> {
+	let v4l2: Vec<Camera> = v4l2
+		.into_iter()
+		.filter(|camera| {
+			!nodes
+				.iter()
+				.any(|node| node.v4l2_path.as_deref() == Some(camera.id.as_str()))
+		})
+		.collect();
+	nodes
 		.into_iter()
 		.map(|node| Camera {
 			id: format!("{PIPEWIRE}:{}", node.name),
 			name: node.description,
 		})
-		.collect())
-}
-
-/// Drop the nodes the V4L2 listing already enumerated.
-fn unlisted(nodes: Vec<Node>, v4l2: &[Camera]) -> Vec<Node> {
-	nodes
-		.into_iter()
-		.filter(|node| {
-			!v4l2
-				.iter()
-				.any(|camera| node.v4l2_path.as_deref() == Some(camera.id.as_str()))
-		})
+		.chain(v4l2)
 		.collect()
 }
 
@@ -126,9 +164,7 @@ pub(in crate::capture) async fn modes(node: Option<&str>) -> Result<Vec<Mode>, E
 		let context = pw::context::ContextRc::new(&mainloop, None).map_err(|e| err("pipewire context", e))?;
 		let core = super::connect(&context, remote).map_err(|e| err("pipewire connect", e))?;
 		let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
-		let nodes = scan(&mainloop, &core, &registry)?;
-		let node = resolve(&nodes, node.as_deref())?;
-		let formats = formats(&mainloop, &core, &registry, node)?;
+		let (_, formats) = find(&mainloop, &core, &registry, node.as_deref())?;
 		Ok(mode::modes(formats.into_iter().flat_map(|format| {
 			format.sizes.into_iter().map(move |size| (size, format.rates.clone()))
 		})))
@@ -212,9 +248,7 @@ pub(super) fn choose(
 	want: Request,
 ) -> Result<(u32, Selected), Error> {
 	let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
-	let nodes = scan(mainloop, core, &registry)?;
-	let node = resolve(&nodes, name)?;
-	let formats = formats(mainloop, core, &registry, node)?;
+	let (node, formats) = find(mainloop, core, &registry, name)?;
 	let selected = select(&formats, want).ok_or_else(|| {
 		Error::codec(anyhow::anyhow!(
 			"PipeWire camera {} offers no YUY2, NV12, RGB, or MJPEG mode",
@@ -222,6 +256,28 @@ pub(super) fn choose(
 		))
 	})?;
 	Ok((node.id, selected))
+}
+
+/// Finds the camera named `name`, or the default camera, with the formats it
+/// offers that this backend converts.
+///
+/// The default comes from the cameras [`cameras`] lists, the same ones
+/// [`present`] counts, so a higher-priority camera with no format we convert
+/// (an IR camera that offers only GREY) does not shadow a webcam that works.
+fn find(
+	mainloop: &pw::main_loop::MainLoopRc,
+	core: &pw::core::CoreRc,
+	registry: &pw::registry::RegistryRc,
+	name: Option<&str>,
+) -> Result<(Node, Vec<Format>), Error> {
+	let nodes = scan(mainloop, core, registry)?;
+	if let Some(name) = name {
+		let node = resolve(&nodes, name)?;
+		let formats = formats(mainloop, core, registry, node)?;
+		return Ok((node.clone(), formats));
+	}
+	let formats = formats_each(mainloop, core, registry, &nodes)?;
+	highest(convertible(nodes, formats), |(node, _)| node.priority)
 }
 
 /// A PipeWire camera node.
@@ -260,13 +316,26 @@ impl Node {
 			name: name.to_string(),
 			description: description.to_string(),
 			priority,
-			v4l2_path: (prop("device.api") == Some("v4l2"))
-				.then(|| prop("api.v4l2.path"))
-				.flatten()
-				.filter(|path| !path.is_empty())
-				.map(str::to_string),
+			v4l2_path: v4l2_path(&prop).map(str::to_string),
 		})
 	}
+}
+
+/// The V4L2 device path behind a node, only when the node uses the V4L2 backend.
+///
+/// A registry global carries only the node's global properties: spa-v4l2
+/// names the device there as `object.path = "v4l2:/dev/videoN"`, while
+/// `device.api` and `api.v4l2.path` appear only in the full node info. The
+/// latter pair is still read for a session manager that does publish them.
+fn v4l2_path<'a>(prop: &impl Fn(&str) -> Option<&'a str>) -> Option<&'a str> {
+	let path = prop(*pw::keys::OBJECT_PATH)
+		.and_then(|path| path.strip_prefix("v4l2:"))
+		.or_else(|| {
+			(prop("device.api") == Some("v4l2"))
+				.then(|| prop("api.v4l2.path"))
+				.flatten()
+		});
+	path.filter(|path| !path.is_empty())
 }
 
 /// Run `mainloop` until the daemon has answered every request sent before
@@ -350,23 +419,24 @@ fn scan(
 	Ok(nodes.take())
 }
 
-/// The camera named `name`, or the one with the highest session priority,
-/// which is the camera the session manager links by default. Fails when the
-/// camera is not there, rather than leaving the stream unlinked until the
-/// format wait runs out.
-fn resolve<'a>(nodes: &'a [Node], name: Option<&str>) -> Result<&'a Node, Error> {
-	let Some(name) = name else {
-		// `max_by_key` keeps the last of equals; the registry's first is wanted.
-		return nodes
-			.iter()
-			.rev()
-			.max_by_key(|node| node.priority)
-			.ok_or_else(|| Error::SourceUnavailable("PipeWire has no camera".to_string()));
-	};
+/// The camera named `name`. Fails when the camera is not there, rather than
+/// leaving the stream unlinked until the format wait runs out.
+fn resolve<'a>(nodes: &'a [Node], name: &str) -> Result<&'a Node, Error> {
 	nodes.iter().find(|node| node.name == name).ok_or_else(|| {
 		let found: Vec<_> = nodes.iter().map(|node| node.name.as_str()).collect();
 		Error::SourceUnavailable(format!("no PipeWire camera named {name} (found: {})", found.join(", ")))
 	})
+}
+
+/// The camera with the highest session priority, which is the camera the
+/// session manager links by default, or the first of equals in registry order.
+fn highest<T>(cameras: Vec<T>, priority: impl Fn(&T) -> i32) -> Result<T, Error> {
+	// `max_by_key` keeps the last of equals.
+	cameras
+		.into_iter()
+		.rev()
+		.max_by_key(priority)
+		.ok_or_else(|| Error::SourceUnavailable("PipeWire has no camera".to_string()))
 }
 
 /// The raw formats `convert` turns into I420.
@@ -669,12 +739,13 @@ fn parse_format(value: &Value) -> Vec<Format> {
 			.find(|property| property.key == key.as_raw())
 			.map(|property| &property.value)
 	};
-	if property(FormatProperties::MediaType) != Some(&Value::Id(spa::utils::Id(MediaType::Video.as_raw()))) {
+	let property_id = |key: FormatProperties| property(key).and_then(id);
+	if property_id(FormatProperties::MediaType) != Some(spa::utils::Id(MediaType::Video.as_raw())) {
 		return Vec::new();
 	}
-	let encodings = match property(FormatProperties::MediaSubtype) {
-		Some(Value::Id(id)) if *id == spa::utils::Id(MediaSubtype::Mjpg.as_raw()) => vec![Encoding::Mjpeg],
-		Some(Value::Id(id)) if *id == spa::utils::Id(MediaSubtype::Raw.as_raw()) => {
+	let encodings = match property_id(FormatProperties::MediaSubtype) {
+		Some(id) if id == spa::utils::Id(MediaSubtype::Mjpg.as_raw()) => vec![Encoding::Mjpeg],
+		Some(id) if id == spa::utils::Id(MediaSubtype::Raw.as_raw()) => {
 			let formats = match property(FormatProperties::VideoFormat) {
 				Some(Value::Id(id)) => vec![*id],
 				Some(Value::Choice(ChoiceValue::Id(choice))) => listed(&choice.1),
@@ -742,6 +813,19 @@ fn parse_format(value: &Value) -> Vec<Format> {
 			rate_range,
 		})
 		.collect()
+}
+
+/// The id a property holds, plain or as a `None` choice.
+///
+/// A `None` choice holds exactly one value, like a plain property. PipeWire
+/// sends a format in that form to a stream that links to a node another
+/// stream already runs. The other properties parse through their choice arms,
+/// where [`listed`] reads a `None` choice as its value.
+fn id(value: &Value) -> Option<spa::utils::Id> {
+	match value {
+		Value::Id(id) | Value::Choice(ChoiceValue::Id(spa::utils::Choice(_, ChoiceEnum::None(id)))) => Some(*id),
+		_ => None,
+	}
 }
 
 /// The values a choice lists. A range lists none: it describes a continuum.
@@ -840,34 +924,47 @@ mod tests {
 	];
 
 	#[test]
-	fn listing_hides_only_v4l2_paths_already_enumerated() {
+	fn listing_puts_pipewire_first_and_hides_the_v4l2_paths_it_fronts() {
+		let v4l2 = vec![Camera {
+			id: "/dev/video0".into(),
+			name: "Integrated Camera".into(),
+		}];
+		let ids = |nodes: &[Node]| -> Vec<String> {
+			merge(nodes.to_vec(), v4l2.clone())
+				.into_iter()
+				.map(|camera| camera.id)
+				.collect()
+		};
+		let fronted = ["pipewire:v4l2_input.pci-0000_00_14.0-usb-0_4_1.0"];
+		let both = ["pipewire:v4l2_input.pci-0000_00_14.0-usb-0_4_1.0", "/dev/video0"];
+
 		let mut props = WEBCAM.to_vec();
 		props.extend([("device.api", "v4l2"), ("api.v4l2.path", "/dev/video0")]);
 		let webcam = node(&props).unwrap();
-		let v4l2 = [Camera {
-			id: "/dev/video0".into(),
-			name: webcam.description.clone(),
-		}];
-		assert!(unlisted(vec![webcam.clone()], &v4l2).is_empty());
-		assert_eq!(unlisted(vec![webcam.clone()], &[]).len(), 1);
+		assert_eq!(ids(std::slice::from_ref(&webcam)), fronted);
+		assert_eq!(ids(&[]), ["/dev/video0"]);
 		// An identical label on another device must not hide it.
 		props.pop();
 		props.push(("api.v4l2.path", "/dev/video2"));
-		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(ids(&[node(&props).unwrap()]), both);
 		// Missing paths and non-V4L2 backends are not proof of duplication.
 		props.pop();
-		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(ids(&[node(&props).unwrap()]), both);
 		props.pop();
 		props.extend([("device.api", "libcamera"), ("api.v4l2.path", "/dev/video0")]);
-		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(ids(&[node(&props).unwrap()]), both);
 		props.remove(props.len() - 2);
-		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(ids(&[node(&props).unwrap()]), both);
+		// A registry global names the device only in `object.path`.
+		let mut global = WEBCAM.to_vec();
+		global.push(("object.path", "v4l2:/dev/video0"));
+		assert_eq!(ids(&[node(&global).unwrap()]), fronted);
+		global.pop();
+		global.push(("object.path", "libcamera:/base/soc/i2c0mux"));
+		assert_eq!(ids(&[node(&global).unwrap()]), both);
 		// Listing never removes nodes from explicit or priority-based resolution.
-		assert_eq!(
-			resolve(std::slice::from_ref(&webcam), Some(&webcam.name)).unwrap(),
-			&webcam
-		);
-		assert_eq!(resolve(std::slice::from_ref(&webcam), None).unwrap(), &webcam);
+		assert_eq!(resolve(std::slice::from_ref(&webcam), &webcam.name).unwrap(), &webcam);
+		assert_eq!(highest(vec![webcam.clone()], |node| node.priority).unwrap(), webcam);
 	}
 
 	#[test]
@@ -918,21 +1015,61 @@ mod tests {
 			..webcam.clone()
 		};
 		let nodes = [infrared.clone(), webcam.clone()];
-		assert_eq!(resolve(&nodes, Some(&infrared.name)).unwrap().id, 79);
-		assert_eq!(resolve(&nodes, None).unwrap().id, 62);
+		let priority = |node: &Node| node.priority;
+		assert_eq!(resolve(&nodes, &infrared.name).unwrap().id, 79);
+		assert_eq!(highest(nodes.to_vec(), priority).unwrap().id, 62);
 		// Equal priorities keep the registry's order.
-		let tied = [
+		let tied = vec![
 			Node {
 				priority: 1000,
 				..infrared
 			},
 			webcam,
 		];
-		assert_eq!(resolve(&tied, None).unwrap().id, 79);
+		assert_eq!(highest(tied, priority).unwrap().id, 79);
 
-		let error = resolve(&nodes, Some("missing")).unwrap_err().to_string();
+		let error = resolve(&nodes, "missing").unwrap_err().to_string();
 		assert!(error.contains("v4l2_input.pci-0000_00_14.0-usb-0_4_1.0"), "{error}");
-		assert!(matches!(resolve(&[], None), Err(Error::SourceUnavailable(_))));
+		assert!(matches!(
+			highest(Vec::new(), priority),
+			Err(Error::SourceUnavailable(_))
+		));
+	}
+
+	/// The default camera comes from the listed cameras, so a higher-priority
+	/// camera that offers only GREY, or whose formats cannot be read, does not
+	/// shadow the webcam.
+	#[test]
+	fn the_default_camera_is_the_highest_priority_listed_one() {
+		let webcam = Node {
+			priority: 980,
+			..node(&WEBCAM).unwrap()
+		};
+		let infrared = Node {
+			id: 79,
+			name: "v4l2_input.pci-0000_00_14.0-usb-0_4_1.2".to_string(),
+			priority: 1000,
+			..webcam.clone()
+		};
+		let unreadable = Node {
+			id: 80,
+			name: "unreadable".to_string(),
+			priority: 1100,
+			..webcam.clone()
+		};
+		let grey = enum_format(MediaSubtype::Raw, Some(VideoFormat::GRAY8), rectangle(640, 360));
+		let listed = convertible(
+			vec![infrared, unreadable, webcam],
+			vec![
+				Ok(parse_format(&grey)),
+				Err(Error::SourceUnavailable("busy".to_string())),
+				Ok(webcam_formats()),
+			],
+		);
+		assert_eq!(listed.len(), 1);
+		let (node, formats) = highest(listed, |(node, _)| node.priority).unwrap();
+		assert_eq!(node.id, 62);
+		assert_eq!(formats, webcam_formats());
 	}
 
 	fn rectangle(width: u32, height: u32) -> spa::utils::Rectangle {
@@ -997,6 +1134,43 @@ mod tests {
 		assert_eq!(formats[0].sizes, [Size::new(1280, 720)]);
 		assert_eq!(formats[0].rates, [FrameRate::new(30, 1).unwrap()]);
 		assert_eq!(formats[3].encoding, Encoding::Raw(VideoFormat::YUY2));
+	}
+
+	/// The format a stream gets when it links to a camera another stream already
+	/// runs: every value wrapped in a `None` choice.
+	#[test]
+	fn a_format_of_none_choices_parses_like_a_plain_one() {
+		fn none<T: spa::pod::CanonicalFixedSizedPod>(value: T) -> spa::utils::Choice<T> {
+			spa::utils::Choice(spa::utils::ChoiceFlags::empty(), ChoiceEnum::None(value))
+		}
+		let property = |key: FormatProperties, value| spa::pod::Property::new(key.as_raw(), value);
+		let format = Value::Object(spa::pod::Object {
+			type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+			id: spa::param::ParamType::Format.as_raw(),
+			properties: vec![
+				property(
+					FormatProperties::MediaType,
+					Value::Choice(ChoiceValue::Id(none(spa::utils::Id(MediaType::Video.as_raw())))),
+				),
+				property(
+					FormatProperties::MediaSubtype,
+					Value::Choice(ChoiceValue::Id(none(spa::utils::Id(MediaSubtype::Mjpg.as_raw())))),
+				),
+				property(
+					FormatProperties::VideoSize,
+					Value::Choice(ChoiceValue::Rectangle(none(rectangle(1280, 720)))),
+				),
+				property(
+					FormatProperties::VideoFramerate,
+					Value::Choice(ChoiceValue::Fraction(none(ratio(30, 1)))),
+				),
+			],
+		});
+		let formats = parse_format(&format);
+		assert_eq!(formats.len(), 1);
+		assert_eq!(formats[0].encoding, Encoding::Mjpeg);
+		assert_eq!(formats[0].sizes, [Size::new(1280, 720)]);
+		assert_eq!(formats[0].rates, [FrameRate::new(30, 1).unwrap()]);
 	}
 
 	#[test]
@@ -1251,7 +1425,7 @@ mod tests {
 			eprintln!("skipping: listing inside a sandbox would ask the camera portal");
 			return;
 		}
-		let cameras = cameras(&[]).await.expect("listing PipeWire cameras");
+		let cameras = cameras(Vec::new()).await.expect("listing PipeWire cameras");
 		for camera in &cameras {
 			assert!(camera.id.starts_with("pipewire:"), "{}", camera.id);
 			assert!(!camera.name.is_empty());
@@ -1291,7 +1465,7 @@ mod tests {
 			eprintln!("skipping: capturing inside a sandbox would ask the camera portal");
 			return;
 		}
-		let cameras = cameras(&[]).await.expect("listing PipeWire cameras");
+		let cameras = cameras(Vec::new()).await.expect("listing PipeWire cameras");
 		if cameras.is_empty() {
 			eprintln!("skipping: no PipeWire camera");
 			return;
@@ -1338,5 +1512,41 @@ mod tests {
 		};
 		let stream = capture(&config).await.expect("default PipeWire camera");
 		assert_eq!(stream.label(), PIPEWIRE);
+	}
+
+	/// Opens the default PipeWire camera twice at once, the second at another
+	/// size, and checks both capture at the mode the first one runs. Ignored
+	/// because it turns the camera on:
+	/// `cargo test -p moq-video --features pipewire pipewire_camera_shares -- --ignored`.
+	///
+	/// Run it a second time while another client holds the camera in DMA-BUF,
+	/// to cover a join to buffers this stream did not negotiate, for example:
+	/// `gst-launch-1.0 pipewiresrc target-object=<node.name>
+	/// stream-properties="props,media.type=Video,media.category=Capture,media.role=Camera"
+	/// ! image/jpeg ! fakesink` (or `! video/x-raw,format=YUY2 ! fakesink`).
+	#[tokio::test]
+	#[ignore = "turns on the default PipeWire camera"]
+	async fn pipewire_camera_shares_a_running_stream() {
+		if ashpd::is_sandboxed() {
+			eprintln!("skipping: capturing inside a sandbox would ask the camera portal");
+			return;
+		}
+		if cameras(Vec::new()).await.expect("listing PipeWire cameras").is_empty() {
+			eprintln!("skipping: no PipeWire camera");
+			return;
+		}
+		let config = |width, height| Config {
+			source: crate::capture::Source::Camera(Some(PIPEWIRE.to_string())),
+			width: Some(width),
+			height: Some(height),
+			..Default::default()
+		};
+		let first = capture(&config(1280, 720)).await.expect("first open");
+		let second = capture(&config(640, 360)).await.expect("second open");
+		assert_eq!(
+			(second.width(), second.height()),
+			(first.width(), first.height()),
+			"a joining stream gets the running mode"
+		);
 	}
 }

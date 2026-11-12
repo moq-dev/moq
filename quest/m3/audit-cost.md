@@ -83,8 +83,9 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
   incremental state. In a warm edit the final binaries are about half the
   unit time. On the hybrid host use `perf stat --no-scale`.
 - Rows built with dev-dependencies shift across the cargo-hakari
-  workspace-hack ([moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985)).
-  Feature unification belongs to [hakari follow-ups](/quest/m0/ci/hakari-followups.md).
+  workspace-hack ([moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985)),
+  which excludes native media crates from unification
+  ([moq-dev/moq#7713](https://github.com/moq-dev/moq/pull/7713)).
 
 ### Check first: artifact size
 

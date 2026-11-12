@@ -12,7 +12,8 @@ const QUANTUM = 128;
  * Playback follows the decision rule in doc/concept/audio-jitter.md: each window of received PCM may
  * play faster to catch up with the shared clock once the buffer holds more than the target, or slower
  * while the buffer runs low or the playhead runs ahead of the clock. Only audio trailing the clock past
- * the subscription's max delay is skipped.
+ * the bound is skipped. A zero bound turns the stretch off: received audio plays unaltered, and a
+ * playhead more than a window off the clock skips ahead onto it or waits for it in silence.
  */
 export class AudioRingBuffer {
 	#buffer: Float32Array[];
@@ -29,6 +30,9 @@ export class AudioRingBuffer {
 	#skips = 0;
 	// Whether the last read skipped, so a run of reads skipping late audio counts once.
 	#skipping = false;
+	// Whether the last read padded silence toward the clock, which continues until the clock reaches the
+	// playhead.
+	#padding = false;
 	// Whether the ring has read on the clock since the last reset. Until it has, nothing trailing the
 	// clock was heard, so a join lands on it rather than at the bound.
 	#joined = false;
@@ -79,7 +83,8 @@ export class AudioRingBuffer {
 
 	// Un-stall threshold in samples (how much to buffer before playback starts).
 	#latencySamples: number;
-	// The playout delay and how far audio may trail the clock, in samples.
+	// The playout delay and how far audio may trail the clock, in samples. A zero bound turns the
+	// stretch off.
 	#target: number;
 	#bound: number;
 	// Whether the read/write indices have been anchored to the first inserted sample.
@@ -251,6 +256,11 @@ export class AudioRingBuffer {
 			this.#writeIndex = start;
 			this.#anchored = true;
 			this.#level = Math.max(this.#received ?? start, start) - start;
+		} else if (this.#contiguous(start)) {
+			// A frame starting within a millisecond and two samples of where the last one ended
+			// continues it: timestamps stamped in milliseconds, or rounded from another clock, land on
+			// either side of the exact boundary, and a hole there would play a few samples of silence.
+			start = this.#writeIndex;
 		}
 
 		// Ignore samples behind the read index, which runs ahead of the playhead by the staged window:
@@ -289,10 +299,6 @@ export class AudioRingBuffer {
 		// Fill gaps with zeros if there's a discontinuity
 		if (start > this.#writeIndex) {
 			const gapSize = Math.min(start - this.#writeIndex, this.#buffer[0].length);
-			if (gapSize === 1) {
-				console.warn("floating point inaccuracy detected");
-			}
-
 			for (let channel = 0; channel < this.channels; channel++) {
 				const dst = this.#buffer[channel];
 				for (let i = 0; i < gapSize; i++) {
@@ -320,6 +326,7 @@ export class AudioRingBuffer {
 		if (end > this.#writeIndex) {
 			this.#writeIndex = end;
 		}
+		this.#snapEnd();
 		// Decoded audio arrived too, if no message said so first.
 		this.received((end / this.rate) * 1_000_000);
 		this.#resume();
@@ -366,9 +373,22 @@ export class AudioRingBuffer {
 	 */
 	end(timestamp: number): void {
 		this.#end = Math.round((timestamp / 1_000_000) * this.rate);
+		this.#snapEnd();
 		// The end can arrive after the playhead already ran out at it, or before any audio, as for a
 		// listener that joins during a mute.
 		if (!this.#anchored || (this.#stalled && this.length <= 0 && this.#ended())) this.#silent = true;
+	}
+
+	// Whether `index` is within a millisecond and two samples of the write index: the jitter of
+	// timestamps stamped in milliseconds or rounded from another clock.
+	#contiguous(index: number): boolean {
+		return Math.abs(index - this.#writeIndex) <= this.rate / 1000 + 2;
+	}
+
+	// Move a declared end within that jitter of the written audio onto its end, since frames are placed
+	// contiguously rather than at their stamps.
+	#snapEnd(): void {
+		if (this.#anchored && this.#end !== undefined && this.#contiguous(this.#end)) this.#end = this.#writeIndex;
 	}
 
 	// Move the read index forward to `index`, dropping any queued audio it passes, staged included,
@@ -458,6 +478,7 @@ export class AudioRingBuffer {
 		this.#incoming = 0;
 		this.#jumped = 0;
 		this.#skipping = false;
+		this.#padding = false;
 	}
 
 	/**
@@ -482,8 +503,10 @@ export class AudioRingBuffer {
 		// Skip what trails the clock past its bound and one window, back to the bound, or the jumps of
 		// its reference past one window. Less than that is the stretch's to catch up. A join has the
 		// bound of nothing heard yet, so it lands on the clock past whatever backlog it was handed, and a
-		// jump before it was never heard. A finite tail plays as received.
+		// jump before it was never heard. A finite tail plays as received. With the stretch off, a
+		// playhead more than a window ahead of the clock pads silence until the clock reaches it.
 		let skip = 0;
+		let pad = 0;
 		if (this.#clock !== undefined) {
 			const inputs = this.#inputs(0);
 			const bound = this.#joined ? inputs.bound : 0;
@@ -496,6 +519,11 @@ export class AudioRingBuffer {
 			if (!this.#ending()) {
 				if (inputs.lag > bound + this.#stretch.window) skip = inputs.lag - bound;
 				if (this.#jumped > this.#stretch.window) skip = Math.max(skip, this.#jumped);
+				if (this.#bound === 0) {
+					const lead = Math.round(-inputs.lag);
+					this.#padding = lead > (this.#padding ? 0 : this.#stretch.window);
+					if (this.#padding) pad = Math.min(lead, output[0].length);
+				}
 			}
 		}
 		if (skip > 0) {
@@ -515,8 +543,9 @@ export class AudioRingBuffer {
 			this.#skipping = false;
 		}
 
+		for (const dst of output) dst.fill(0, 0, pad);
 		const stretch = this.#stretch;
-		let samples = 0;
+		let samples = pad;
 		while (samples < output[0].length) {
 			if (stretch.available === 0 && !this.#stage(output[0].length - samples, samples)) break;
 			const from = samples;
@@ -584,7 +613,7 @@ export class AudioRingBuffer {
 		const buffered = this.#writeIndex - this.#readIndex;
 		if (buffered <= 0) return false;
 		const quiet = pause !== undefined && pause.start <= this.#readIndex;
-		const enabled = !quiet && !this.#ending();
+		const enabled = !quiet && !this.#ending() && this.#bound > 0;
 		const window = this.#stretch.window;
 		let frames = Math.min(buffered, window, enabled ? buffered : need);
 		if (pause) frames = Math.min(frames, (quiet ? pause.end : pause.start) - this.#readIndex);

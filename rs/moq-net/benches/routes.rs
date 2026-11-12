@@ -16,12 +16,19 @@
 //!   another epoch, then back at the shared one, each confirmed. Swept over the claims
 //!   held and the streams answered: the streams axis is expected to grow, since each is
 //!   sent the claim; the claims axis is not.
+//! - teardown: a node following one origin on a stream per prefix, as a viewer session
+//!   holding many announce prefixes does, closes them all at once. Swept over the
+//!   prefixes followed and the claims each holds: both axes are expected to grow, no
+//!   faster than the claims held.
+//! - refollow: the same node closes one prefix's stream and opens it again. The claims
+//!   axis is expected to grow, since the stream hears its prefix's claims again; the
+//!   prefixes axis no faster than the prefixes held.
 //!
 //! The route layer is crate-private, so this reaches it through the `fuzz` module.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench routes`.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_net::fuzz;
 
 /// `(claims, streams)` shapes.
@@ -32,6 +39,9 @@ const RECEIVED: [(usize, usize); 4] = [(100, 1), (10_000, 1), (100, 100), (10_00
 
 /// `(claims, streams)` shapes for a relay holding back claims.
 const HELD: [(usize, usize); 4] = [(10, 10), (10_000, 10), (10, 100), (10_000, 100)];
+
+/// `(prefixes, claims)` shapes for a node following one origin per prefix.
+const FOLLOWED: [(usize, usize); 4] = [(16, 1), (1_024, 1), (16, 16), (1_024, 16)];
 
 /// `(claims, lag)` shapes for a relay hearing a stream that lags another.
 const LAGGING: [(usize, usize); 4] = [(100, 1), (10_000, 1), (100, 100), (10_000, 10_000)];
@@ -111,12 +121,43 @@ fn bench_confirmed(c: &mut Criterion) {
 	group.finish();
 }
 
+fn bench_teardown(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/teardown");
+	for (prefixes, claims) in FOLLOWED {
+		let id = BenchmarkId::from_parameter(format!("{prefixes}p_{claims}c"));
+		group.bench_function(id, |b| {
+			b.iter_batched(
+				|| fuzz::RouteFollower::new(prefixes, claims),
+				fuzz::RouteFollower::teardown,
+				BatchSize::PerIteration,
+			);
+		});
+	}
+	group.finish();
+}
+
+fn bench_refollow(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/refollow");
+	for (prefixes, claims) in FOLLOWED {
+		let id = BenchmarkId::from_parameter(format!("{prefixes}p_{claims}c"));
+		let mut fixture = None;
+		group.bench_function(id, |b| {
+			let follower = fixture.get_or_insert_with(|| fuzz::RouteFollower::new(prefixes, claims));
+			// The reopened stream serves its prefix's claims into the origin again.
+			b.iter(|| assert_eq!(follower.refollow(), claims));
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_watched,
 	bench_unwatched,
 	bench_received,
 	bench_lagging,
-	bench_confirmed
+	bench_confirmed,
+	bench_teardown,
+	bench_refollow
 );
 criterion_main!(benches);

@@ -30,9 +30,7 @@ just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reco
 just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/OfflineWhileServing.cfg
 ```
 
-The first checks every rule but the two with open findings, over four sessions: about 1.2M distinct states, under a minute on 32 cores. The second checks the same rules under `Restart::Wait` over three sessions: about 240k states. Both pass at the sync commit. The last two fail at the sync commit, each on its finding below, within seconds. `just test tla rs/moq-net/verify/reconnect` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
-
-Read a counterexample with `/statechart`, passing it the spec, a config, and `Handover.view.ts`, which labels what the handle reports, what the policy holds, and each step as the event that happens.
+The first checks every rule but the two with open findings, over four sessions: about 1.2M distinct states, under a minute. The second checks the same rules under `Restart::Wait` over three sessions: about 240k states. Both pass at the sync commit. The last two fail at the sync commit, each on its finding below, within seconds. `just test tla rs/moq-net/verify/reconnect` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
 
 ## Open findings
 
@@ -46,11 +44,11 @@ Read a counterexample with `/statechart`, passing it the spec, a config, and `Ha
 
 ## Reading a failure
 
-A counterexample is a path through the model, not yet a bug. Replay it on the policy with the helpers in `reconnect/tests.rs` (`next`, `handshake`, `on_fallback`, `probe`, `connected`, `failed`, `probed`, a server's `drain().send(..)`), one call per step, on the simulated clock. A path through `Shared` needs `moq-tokio`'s connection tests instead. If the code does not follow the path, the model is wrong: fix the model to match the code. If it does, report the path and the rule in the code's words. Do not weaken a rule, add a constraint, or shrink the bounds until the check passes.
+Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on the policy with the helpers in `reconnect/tests.rs` (`next`, `handshake`, `on_fallback`, `probe`, `connected`, `failed`, `probed`, a server's `drain().send(..)`), one call per step, on the simulated clock. A path through `Shared` needs `moq-tokio`'s connection tests instead.
 
 ## Coverage
 
-Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/reconnect.rs rs/moq-net/src/reconnect/ rs/moq-tokio/src/connection.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit. `just check` fails when a function or type the table names no longer exists in its file (`sh/coverage-tables.py`), so each Code cell starts with a repo-relative path, then the symbols in it.
+Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/reconnect.rs rs/moq-net/src/reconnect/ rs/moq-tokio/src/connection.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |

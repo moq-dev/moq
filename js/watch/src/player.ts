@@ -5,7 +5,7 @@ import { Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import { Broadcast, type CatalogFormat } from "./broadcast";
-import { type Delay, Sync } from "./sync";
+import { type Delay, STRETCH, Sync } from "./sync";
 import * as Text from "./text";
 import * as Video from "./video";
 import { holdViewer } from "./viewer";
@@ -30,6 +30,8 @@ export type PlayerInput = {
 	delay: Getter<Delay>;
 	/** Future-dated media held beyond the live edge. */
 	lookahead: Getter<Duration>;
+	/** How far audio may trail the clock before it skips ahead; zero turns the time stretch off. */
+	stretch: Getter<Duration>;
 	/** Video rendition and canvas output. */
 	video: {
 		/** Desired video rendition or quality limits. */
@@ -125,6 +127,7 @@ export class Player {
 			paused: getter(props.paused ?? false),
 			delay: getter(props.delay ?? "auto"),
 			lookahead: getter(props.lookahead ?? Duration.ZERO),
+			stretch: getter(props.stretch ?? STRETCH),
 			video: {
 				target: getter<Video.Target | undefined>(props.video?.target),
 				canvas: getter(props.video?.canvas),
@@ -168,7 +171,7 @@ export class Player {
 		this.text = new Text.Source({ broadcast: this.broadcast, target: this.in.text.target });
 		this.#signals.cleanup(() => this.text.close());
 
-		this.sync = new Sync({ delay: this.in.delay, lookahead: this.in.lookahead });
+		this.sync = new Sync({ delay: this.in.delay, lookahead: this.in.lookahead, stretch: this.in.stretch });
 		this.#signals.cleanup(() => this.sync.close());
 
 		this.video = new Video.Decoder({ source: videoSource, sync: this.sync, enabled: this.#videoEnabled });

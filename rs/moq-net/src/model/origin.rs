@@ -2353,6 +2353,13 @@ impl Producer {
 		self.consume().route_node()
 	}
 
+	/// See [`Consumer::route_closing`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn route_closing(&self) -> Option<crate::route::node::Closing> {
+		let node = self.shared.lock().route_node.clone();
+		node.map(|(node, _)| node.closing())
+	}
+
 	/// The lite-06 hop this node's route identity travels as, once a moq-lite-07
 	/// session created the route node: a relay translating this node's claims for a
 	/// lite-06 peer starts their chain with it. It is this origin's own hop until the
@@ -7391,6 +7398,15 @@ impl Consumer {
 		id.and_then(NonZeroU64::new)
 	}
 
+	/// Hold back the disconnect of every route stream dropped until the guard is
+	/// released, so a session closing its streams costs the route layer one recompute;
+	/// `None` while no session created the route node, which then has no streams.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn route_closing(&self) -> Option<crate::route::node::Closing> {
+		let node = self.shared.lock().route_node.clone();
+		node.map(|(node, _)| node.closing())
+	}
+
 	/// The route layer node every lite-07 session on this origin shares, created on
 	/// first use along with the task that feeds it the routes this node serves
 	/// itself: everything in the table the route layer did not select. It is caught up
@@ -9871,6 +9887,60 @@ mod tests {
 		assert_eq!(instance_key("pool/job-0", &"b".parse().unwrap()), 0x3df8f85a44f8f0ae);
 		assert_eq!(chain_key("pool/job-0", &hops(&[10])), 0xefb5e20a66101c32);
 		assert_eq!(chain_key("pool/job-0", &hops(&[11])), 0x0eb0a91370ff6653);
+	}
+
+	/// Pinned so `js/net` breaks a tie between lite-07 claims as this does: by the
+	/// rendezvous hash of each origin node under a claim, and at a claim's own path by the
+	/// newest claim, which a re-price leaves in place.
+	#[kio::test]
+	async fn lite07_ties_match_js() {
+		assert_eq!(fnv_key("pool/job", 0x7au64.to_le_bytes()), 0xc376be7bf47aebbf);
+		assert_eq!(fnv_key("pool/job", 0x8bu64.to_le_bytes()), 0x5813213b6508aaee);
+
+		let producer = origin(1).produce();
+		let claim = |node: u64, name: &str, cost: u64| {
+			RouteInfo::new()
+				.with_instance(name.parse().unwrap(), 0)
+				.with_cost(cost)
+				.with_node(Some(node))
+		};
+		let older = producer.forward("pool", claim(0x7a, "a", 5)).unwrap();
+		let _newer = producer.forward("pool", claim(0x8b, "b", 1)).unwrap();
+		older.update(older.route().unwrap().with_cost(1)).unwrap();
+
+		let best = |path: &str| {
+			let table = producer.shared.read();
+			table
+				.best_route(&Path::new(path).unwrap(), Horizon::default(), &HashSet::new(), |_| true)
+				.and_then(|entry| entry.node)
+		};
+		assert_eq!(best("pool"), Some(0x8b), "the newer claim keeps a tie a re-price made");
+		assert_eq!(
+			best("pool/job"),
+			Some(0x8b),
+			"the lower node hash wins under the claims"
+		);
+
+		// A lite-06 route keys on its instance and chain, a lite-07 claim on its node, each on
+		// its own: here the claim's is lower.
+		assert_eq!(instance_key("pool/job", &"b".parse().unwrap()), 0xd16a3821c67a2d25);
+		let producer = origin(1).produce();
+		let _claim = producer.forward("pool", claim(0x7a, "a", 1)).unwrap();
+		let legacy = RouteInfo::new()
+			.with_instance("b".parse().unwrap(), 0)
+			.with_hops(hops(&[11]))
+			.with_cost(1);
+		let _legacy = producer.forward("pool", legacy).unwrap();
+		let table = producer.shared.read();
+		let winner = table
+			.best_route(
+				&Path::new("pool/job").unwrap(),
+				Horizon::default(),
+				&HashSet::new(),
+				|_| true,
+			)
+			.and_then(|entry| entry.node);
+		assert_eq!(winner, Some(0x7a), "each route keyed on its own");
 	}
 
 	/// Equal-cost advertisers of one prefix share its paths: a set of requested

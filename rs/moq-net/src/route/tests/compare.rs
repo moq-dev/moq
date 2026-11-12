@@ -129,7 +129,7 @@ impl Net for Sim {
 			self.acks.remove(&key);
 			self.held.remove(&key);
 		}
-		self.nodes[peer].disconnect(node);
+		self.nodes[peer].disconnect([node]);
 		self.flush();
 		self.closed(peer);
 	}

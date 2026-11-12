@@ -25,11 +25,6 @@ run_socket_pair() {
     local name="socket-$protocol-$dialer-$acceptor-$version" prefix="socket-$protocol-$dialer-$acceptor-$version-$$-$RANDOM"
     local events="$LOGS/socket-events" ack="$LOGS/socket-ack"
     local cell=(case="socket $protocol" publisher="$dialer" subscriber="$acceptor" version="$version" log="$LOGS/$name-dial.log")
-    if js_lite07 "$version" "$dialer" "$acceptor"; then
-        echo "  SKIP  socket $protocol $dialer -> $acceptor $version"
-        record skip "${cell[@]}" detail="$JS_LITE07_SKIP"
-        return
-    fi
     if is_broken "$dialer" || is_broken "$acceptor"; then
         record fail "${cell[@]}" detail="client unavailable"
         overall=1

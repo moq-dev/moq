@@ -51,7 +51,9 @@ Decided with the maintainer, 2026-10-13:
   holds, and a timed doubt
   ([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27). A
   detour no longer waits on the publisher, and today's router keeps Babel
-  until [the router quest](/quest/m2/cluster-routing/routes/scope.md) lands.
+  until [the switch](/quest/m2/cluster-routing/routes/switch.md) lands. From
+  then, "feasible" in this Plan reads as: the route's path does not name the
+  relay and no doubt keeps the relay off it.
 - An origin declares its own routing identity, fresh per process or tab
   restart and shared across its live sessions. It is unverified. Decided 2026-11-02 (maintainer, /quest-unblock): no
   key proof is planned; if a use case needs a provable identity, moq-lite-07's

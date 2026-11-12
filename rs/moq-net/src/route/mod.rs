@@ -43,7 +43,7 @@ pub(crate) use proof::{Proof, Transcript};
 #[cfg(feature = "async")]
 pub(crate) use rtt::LinkRtt;
 pub(crate) use view::{View, within};
-use view::{ancestors, below, covering, narrow};
+use view::{above, ancestors, below, covering, narrow, within_any};
 
 /// An opaque routing identity, declared by an origin or derived by [`Scope`].
 pub(crate) type Id = u64;
@@ -242,6 +242,9 @@ pub(crate) struct Shown<A> {
 	/// Whether the node has a usable route to the claim's origin through a
 	/// neighbor certifying it.
 	pub available: bool,
+	/// Whether the claim sits at the root of a region its view was presented at,
+	/// where it stands for whichever claim covers that region.
+	pub presented: bool,
 }
 
 /// A change a node's announcement reader sees.
@@ -345,11 +348,15 @@ impl<A: Clone + Eq> Heard<A> {
 		let view = self.view();
 		let mut claims: BTreeSet<Path> = view.items.keys().cloned().collect();
 		if let Some(merged) = merged {
-			claims.extend(
-				(merged.items.keys())
-					.filter(|claim| view.floors.keys().any(|region| within(claim, region)))
-					.cloned(),
-			);
+			for region in view.floors.keys() {
+				let exact = merged.items.get_key_value(region);
+				claims.extend(
+					exact
+						.into_iter()
+						.chain(below(&merged.items, region))
+						.map(|(claim, _)| claim.clone()),
+				);
+			}
 		}
 		self.differs.clear();
 		for claim in &claims {
@@ -562,26 +569,34 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		Ok(())
 	}
 
-	/// The session to `neighbor` closed: everything learned on it goes, and it
-	/// counts as the echo of every ROUTE_END sent on it.
-	pub fn disconnect(&mut self, neighbor: N) {
-		if self.neighbors.remove(&neighbor).is_none() {
+	/// The sessions to `neighbors` closed: everything learned on them goes, and each
+	/// counts as the echo of every ROUTE_END sent on it. Closing them together
+	/// recomputes each identity once, rather than once per neighbor.
+	pub fn disconnect(&mut self, neighbors: impl IntoIterator<Item = N>) {
+		let gone: BTreeSet<N> = (neighbors.into_iter())
+			.filter(|neighbor| self.neighbors.remove(neighbor).is_some())
+			.collect();
+		if gone.is_empty() {
 			return;
 		}
 		let mut ids = BTreeSet::new();
 		for (id, routes) in self.rx.iter_mut() {
-			if routes.remove(&neighbor).is_some() {
+			let before = routes.len();
+			routes.retain(|next, _| !gone.contains(next));
+			if routes.len() != before {
 				ids.insert(*id);
 			}
 		}
 		self.rx.retain(|_, routes| !routes.is_empty());
 		for (id, pending) in self.pending.iter_mut() {
-			if pending.from.remove(&neighbor) {
+			let before = pending.from.len();
+			pending.from.retain(|from| !gone.contains(from));
+			if pending.from.len() != before {
 				ids.insert(*id);
 			}
 		}
 		let mut on = |(id, n): &(Id, N)| {
-			let on = *n == neighbor;
+			let on = gone.contains(n);
 			if on {
 				ids.insert(*id);
 			}
@@ -875,8 +890,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			let raw = std::mem::take(&mut heard.raw);
 			let kept = heard.kept.get_or_insert(raw);
 			let floors = &kept.floors;
-			kept.items
-				.retain(|claim, _| floors.keys().any(|region| within(claim, region)));
+			kept.items.retain(|claim, _| above(floors, claim).next().is_some());
 			// What it drops lay outside every floor, so nothing it differed in.
 			heard.ended = true;
 		}
@@ -993,7 +1007,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			};
 			if retired {
 				all = true;
-				let watch = [self.watch.clone()];
+				let watch = BTreeSet::from([self.watch.clone()]);
 				self.forgot_outside(id, &watch);
 				self.resync(id);
 			} else {
@@ -1070,7 +1084,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			self.heard.remove(&key);
 		}
 		self.pending.remove(&id);
-		self.forgot_outside(id, &[]);
+		self.forgot_outside(id, &BTreeSet::new());
 		self.mark_all(id);
 		self.update([id]);
 	}
@@ -1151,6 +1165,14 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	/// Whether a request for a claim at `claim` may go through `next`.
 	pub fn carries(&self, next: N, claim: &Path) -> bool {
 		self.neighbors.get(&next).is_some_and(|peer| peer.carries(claim))
+	}
+
+	/// The prefix this node asked `next` for, outside which it carries no claim: the
+	/// root when it asked for none.
+	pub fn asked(&self, next: N) -> Path {
+		(self.neighbors.get(&next))
+			.and_then(|peer| peer.asked.clone())
+			.unwrap_or_default()
 	}
 
 	#[cfg(test)]
@@ -1371,9 +1393,9 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	/// The regions of `id` that this node's certifiers certify, those whose
 	/// route is held only when `held`, or `None` while it holds no route or a
 	/// certifier has not yet answered the current interest.
-	fn certified(&self, id: Id, held: bool) -> Option<Vec<Path>> {
+	fn certified(&self, id: Id, held: bool) -> Option<BTreeSet<Path>> {
 		let routes = self.rx.get(&id)?;
-		let mut regions = Vec::new();
+		let mut regions = BTreeSet::new();
 		for next in self.certifiers(id) {
 			let heard = self
 				.heard
@@ -1399,10 +1421,8 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		let Some(merged) = self.views.get(&id) else {
 			return;
 		};
-		let lost = merged
-			.floors
-			.iter()
-			.filter(|(floor, _)| !regions.iter().any(|region| within(floor, region)))
+		let lost = (merged.floors.iter())
+			.filter(|(floor, _)| !within_any(floor, &regions))
 			.map(|(_, &rev)| rev)
 			.max();
 		let Some(lost) = lost else {
@@ -1420,7 +1440,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			for next in self.certifiers(id) {
 				rebuilt.merge(self.heard[&(id, next)].view());
 			}
-			(rebuilt, Vec::new())
+			(rebuilt, BTreeSet::new())
 		};
 		self.views.insert(id, rebuilt);
 		self.resync(id);
@@ -1449,10 +1469,10 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 
 	/// Count a forget against each shown claim of `id` overlapping none of `kept`.
 	#[cfg_attr(not(test), allow(unused_variables, reason = "only fixtures count forgets"))]
-	fn forgot_outside(&mut self, id: Id, kept: &[Path]) {
+	fn forgot_outside(&mut self, id: Id, kept: &BTreeSet<Path>) {
 		#[cfg(test)]
 		for ((key, claim), count) in self.forgot.iter_mut() {
-			if *key == id && !kept.iter().any(|region| within(claim, region)) {
+			if *key == id && !within_any(claim, kept) {
 				*count += 1;
 			}
 		}
@@ -1992,15 +2012,14 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 					}
 				}
 				None => {
-					let uncertified = regions
-						.as_ref()
-						.is_some_and(|regions| !regions.iter().any(|region| within(claim, region)))
+					let uncertified = regions.as_ref().is_some_and(|regions| !within_any(claim, regions))
 						|| !ctx.own && self.views.get(&id).is_none_or(|view| view.as_of(claim).is_none());
-					// A claim presented at a narrower interest moved up to the claim it
-					// stood for, which is still shown.
+					// A claim presented at a narrower region moved up to the claim it
+					// stood for, which is still shown. That claim may have changed
+					// meanwhile, so a presented claim needs only something shown above it.
 					let moved = ancestors(claim)
 						.filter(|above| above != claim)
-						.any(|above| shown(&above).is_some_and(|now| now.item == was.item));
+						.any(|above| shown(&above).is_some_and(|now| was.presented || now.item == was.item));
 					let kind = if !within(claim, &self.watch) {
 						Kind::Unwatched
 					} else if ctx.live && !uncertified && !moved {
@@ -2057,7 +2076,6 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			false => None,
 		};
 		let current = self.current.get(&id);
-		let within_any = |claim: &Path, regions: &[Path]| regions.iter().any(|region| within(claim, region));
 		let at = |claim: &Path| {
 			if !within(claim, &self.watch) {
 				return None;
@@ -2069,7 +2087,8 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 				false => None,
 			};
 			// A claim a stream answering the current interest carries is current.
-			let certified = loose.is_some() || current.is_none_or(|regions| within_any(claim, regions));
+			let certified =
+				loose.is_some() || current.is_none_or(|regions| regions.iter().any(|region| within(claim, region)));
 			if !certified {
 				return None;
 			}
@@ -2081,6 +2100,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			Some(Shown {
 				item: item.clone(),
 				available,
+				presented: merged.is_some_and(|merged| merged.floors.contains_key(claim)),
 			})
 		};
 		claims.map(|claim| (claim.clone(), at(claim))).collect()

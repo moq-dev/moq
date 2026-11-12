@@ -4414,6 +4414,32 @@ for (const reported of [false, true]) {
 	});
 }
 
+// The lite publisher unreports a stale skip below an idle SUBSCRIBE_START, which never went out.
+// An update between that START and the first group then neither reopens nor drops it again,
+// while a widening still re-offers its cached group.
+test("an update after an idle start leaves an unreported stale skip to a widening", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const subscriber = producer.subscribe({ delay: { max: Duration.millis(1500) } });
+	expect(hooks.tryDrop(subscriber)).toBeUndefined();
+	stampGroup(producer, 0n, 0);
+	stampGroup(producer, 1n, 1000);
+	stampGroup(producer, 2n, 6000);
+	// Groups 0 and 1 reach 1s and 6s; only group 0 is 1.5s behind the 6s edge.
+	expect(drainGroups(subscriber)).toEqual([1n, 2n]);
+	expect(hooks.tryDrop(subscriber)).toMatchObject({ start: 0n, end: 1n });
+
+	// SUBSCRIBE_START resolved at group 1 with the skip still held for it.
+	hooks.wire(subscriber).untell(0n, 1n);
+	// An update under the same budget reopens nothing below the start.
+	expect(hooks.reofferStale(subscriber)).toEqual([]);
+	expect(hooks.tryDrop(subscriber)).toBeUndefined();
+
+	subscriber.update({ delay: { max: Duration.millis(10_000) } });
+	expect(drainGroups(subscriber)).toEqual([0n]);
+	expect(hooks.tryDrop(subscriber)).toBeUndefined();
+	producer.close();
+});
+
 // A widening that covers only the newer of two skipped groups hands it out without folding the
 // older one into the delivered floor: a further widening still re-offers it.
 test("a partial maxDelay widening keeps the older skip owed", () => {

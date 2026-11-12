@@ -7,6 +7,7 @@
  *
  * @module
  */
+import type { Duration } from "@moq/clock";
 import * as z from "zod/mini";
 import type { Credential } from "./auth.ts";
 import type * as Instance from "./instance.ts";
@@ -111,6 +112,18 @@ export interface RouteInfo {
 	 * it recovers: request again once it turns available.
 	 */
 	readonly available: boolean;
+	/**
+	 * The round trip to the route's origin node over moq-lite-07, informational: it never ranks
+	 * or selects a route.
+	 *
+	 * Each link on the path adds its min RTT, the lowest smoothed RTT it measured over the last
+	 * 30 seconds, this session's own link included. Undefined on any other wire, on a route this
+	 * origin serves itself, and while any link on the path has no measurement.
+	 *
+	 * A listing reports it as of the event that carries the route: a change to the RTT alone is
+	 * no event.
+	 */
+	readonly rtt?: Duration;
 }
 
 /**
@@ -124,6 +137,7 @@ export function routeInfo(route: WireRoute): RouteInfo {
 		instance: route.instance,
 		cost: route.cost,
 		available: route.available ?? true,
+		rtt: route.rtt,
 	};
 }
 
@@ -165,6 +179,14 @@ export interface WireRoute {
 	readonly draining?: boolean;
 	/** See {@link RouteInfo.available}; unset means available. */
 	readonly available?: boolean;
+	/**
+	 * The origin node a lite-07 route reaches, which every request through it names. Unset on a
+	 * route announced here and on every other version. Local: requests name it, readers never
+	 * see it.
+	 */
+	readonly node?: bigint;
+	/** See {@link RouteInfo.rtt}. */
+	readonly rtt?: Duration;
 }
 
 /** Constructors and helpers for {@link WireRoute}. @internal */
@@ -186,6 +208,8 @@ export const WireRoute = {
 			auth: route.auth,
 			draining: route.draining,
 			available: route.available,
+			node: route.node,
+			rtt: route.rtt,
 		};
 	},
 };
@@ -203,8 +227,8 @@ export function isAnonymous(route: WireRoute): boolean {
 }
 
 /**
- * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state, and
- * availability.
+ * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state,
+ * availability, origin node, and RTT.
  *
  * @internal
  */
@@ -218,6 +242,8 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 		a.auth === b.auth &&
 		(a.draining ?? false) === (b.draining ?? false) &&
 		(a.available ?? true) === (b.available ?? true) &&
+		a.node === b.node &&
+		(a.rtt === b.rtt || (!!a.rtt && !!b.rtt && a.rtt.eq(b.rtt))) &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])
 	);

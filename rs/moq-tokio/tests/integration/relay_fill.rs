@@ -275,9 +275,7 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 #[tokio::test]
 #[ignore = "requires Bun; run by just test relay-fill in the interop workflow"]
 async fn relay_fill_javascript() {
-	// moq-lite-07-wip returns once js/net speaks its route layer
-	// (quest/m2/cluster-routing/routes/js.md).
-	for version in ["moq-lite-05", "moq-lite-06"] {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		kio::clock::timeout(TIMEOUT, relay(version.parse().unwrap()))
 			.await
 			.unwrap()

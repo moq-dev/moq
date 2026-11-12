@@ -113,8 +113,8 @@ configuration.
 
 `--capture` also writes `<tag>.arrivals.ndjson`: `[at, timestamp, group, duration]` on the same viewer clock as
 `<tag>.ndjson`, before the container orders or skips groups. The observer shares the player's
-connection and track, priority, and subscription max delay (at least 2 s at "auto", as the decoder
-asks, not the target), so it adds no upstream subscription demand and still sees a frame later than
+connection and track, priority, and subscription max delay (the delay plus the stretch, as the
+decoder asks, not the target), so it adds no upstream subscription demand and still sees a frame later than
 the target.
 Groups drain concurrently, so an earlier stalled group cannot hide a later arrival. Capture
 errors void the row. Capture adds local decoding and recording work; it is off by default and
@@ -234,10 +234,11 @@ writes the same samples a page does, so `analyze.ts` reduces both alike, and the
 and clock checks have nothing to void. Decoding is taken as instant. A replay is deterministic, so
 its budgets are exactly what it measured.
 
-The ring time-stretches live and buffered playback as the page's does, but the replay's audio is a constant, so
-every seam admits at the shortest pitch period, 2.5 ms. Accelerate therefore moves less per stretch
-than it would from speech; only fast accelerate, which takes every whole period that fits, moves its
-most.
+The ring time-stretches live and buffered playback as the page's does, on a seeded speech-like signal
+rather than the decoded audio: syllables of 120 to 300 ms glide a 90 to 220 Hz fundamental under a
+varying level, with pauses between some held above the silence classifier and no sample exactly
+zero. A seam therefore removes one speech-length pitch period, so a replay's catch-up after a stall
+moves at the pace speech would, not a constant tone's 2.5 ms a window.
 
 ```bash
 just test audio-quality-record                        # the three recorded lanes, 35 s each, needs the network

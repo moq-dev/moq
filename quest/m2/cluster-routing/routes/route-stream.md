@@ -4,11 +4,11 @@
 
 In a lite-07 session each endpoint opens at most one unidirectional Announce
 Stream and sends everything it says about routing on it, in order: the
-prefixes it wants, the routes, claims, floors, and SYNCED that answer the
-peer's prefixes, its ROUTE_END echoes, and its route requests. No routing
-message can overtake another, so production is the route model's one FIFO per
-direction by construction, and a ROUTE_END echo always arrives behind the
-routes its sender sent first. A change of token scope edits the prefix set
+prefixes it wants, and the routes, withdrawals, hold answers, claims, floors,
+and SYNCED that answer the peer's prefixes. No routing message can overtake
+another, so production is the route model's one FIFO per direction by
+construction, whatever prefixes a side asked for. A change of token scope
+edits the prefix set
 instead of reopening a request. `announced()` in Rust and `routes()` in JS keep their APIs,
 and lite-06 and older and moq-transport are untouched.
 
@@ -21,9 +21,20 @@ the streams its peer opened, and QUIC orders no stream against another. The
 first count to infinity the route model found is one message overtaking
 another across that split, and the router keys each stream as its own
 neighbour (`route/node.rs`), where the model and `Sim` have one neighbour per
-session. The fix does not rest on this: the hops a route carries
-([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)) hold with the echo unordered, on today's streams. This removes the ordering hazard as a class and makes a
+session. This removes the ordering hazard as a class and makes a
 token-scope change an edit.
+
+Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
+Babel): ✅ [the switch](/quest/m2/cluster-routing/routes/switch.md) to the
+path rule lands first, on today's streams, and this follows (rejected: this
+first, which builds the echo and ROUTE_REQUEST on the new stream and then
+deletes them; one wire change for both, which joins two XL quests). The path
+rule ([epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27) has
+no echo and no route request, and the switch puts the hold answer on the
+publisher half, so a side's routing messages for one prefix already share a
+stream. What is left for this quest is the order between a side's prefixes,
+which still ride a stream each, one neighbour per session in the router,
+and the edit.
 
 Settled:
 
@@ -55,19 +66,17 @@ departure is a choice to list there:
   reopening means no generation of streams to order against each other.
 - The bidirectional Announce stream leaves lite-07.
 - What a side sends as a subscriber: ANNOUNCE_REQUEST, now an edit (prefix
-  ids to remove, then prefixes to add, each with its `Hidden`), ROUTE_REQUEST,
-  and the echo. What it sends as a publisher: one ANNOUNCE_OK per edit it
-  applied, the marker where the edit takes effect, then ROUTE_START, UPDATE,
-  HOLD, and END, the ANNOUNCE messages, ANNOUNCE_FLOOR with a Prefix ID, and
-  SYNCED with a Prefix ID. ANNOUNCE_START names the Prefix ID its suffix is
-  relative to, and a compression base shares it.
-- The echo needs its own message type. Both sides' Route IDs now meet on one
-  stream, so a ROUTE_END for the sender's own route and the echo of the
-  peer's cannot share a type.
+  ids to remove, then prefixes to add, each with its `Hidden`). What it
+  sends as a publisher: one ANNOUNCE_OK per edit it applied, the marker where
+  the edit takes effect, then ROUTE_START, UPDATE, HOLD, and END, the
+  withdrawal that names a dead hop and the hold answer as
+  [the switch](/quest/m2/cluster-routing/routes/switch.md) shaped them, the
+  ANNOUNCE messages, ANNOUNCE_FLOOR with a Prefix ID, and SYNCED with a
+  Prefix ID. ANNOUNCE_START names the Prefix ID its suffix is relative to,
+  and a compression base shares it.
 - A side's Route IDs, Announce IDs, and Prefix IDs are one counter each per
   stream. A message names the peer's id where it answers the peer: a Prefix
-  ID in ANNOUNCE_START, ANNOUNCE_FLOOR, and SYNCED, and a Route ID in the
-  echo.
+  ID in ANNOUNCE_START, ANNOUNCE_FLOOR, and SYNCED.
 - A removed prefix may still be named until the ANNOUNCE_OK for the edit that
   removed it, and never after. The subscriber holds a removed prefix's claims
   against its cap until then.
@@ -96,9 +105,8 @@ Code this replaces, for lite-07 only:
 - `route::Node` registers one neighbour per session for both directions. Today `receive` and `answer` each take a fresh key (`route/node.rs`), so one session is two neighbours in the router; the interest set makes the router accept one key for both and this makes the sessions use it.
 - `js/net`: each `routes()` call opens its own stream today
   (`js/net/src/lite/subscriber.ts`), so JS gains the covering-prefix logic
-  `Discovery` has. [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443)
-  ports the route layer with per-stream state; whichever lands second
-  adapts, and if it has landed, this PR changes `js/net` too.
+  `Discovery` has. Its route layer keeps per-stream state, so this PR changes `js/net`
+  too.
 
 Also touching the same files, to merge around:
 [moq-dev/moq#8458](https://github.com/moq-dev/moq/pull/8458) (its
@@ -107,12 +115,12 @@ per-announce-stream timer becomes per session) and
 the Announce Stream).
 
 Tests: every ordering hazard the old shape had, on real sessions with mocked
-time. An echo never overtakes a route; a swap edit shows no claim offline and
+time. A hold answer never overtakes a route, across prefixes too; a swap edit shows no claim offline and
 re-sends nothing both sets cover; a narrowing edit drops only what it
 uncovers; a scope renewal that changes the region keeps every still-covered
 claim shown; a second Announce stream, a nested prefix, and a set over the
-size limit each close the session; a peer that withholds ANNOUNCE_OK or
-echoes holds no more than the announce cap. Replace
+size limit each close the session; a peer that withholds ANNOUNCE_OK or a
+hold answer holds no more than the announce cap. Replace
 `tests/integration/lazy_discovery.rs`'s two-stream cases with edits.
 
 Update the draft's Streams tables, Announce, Floors, Routing, the message
@@ -129,9 +137,9 @@ Public API: none expected. Wire: lite-07-wip only.
 ## Required
 
 - [The route model and router take an interest as an edited set of prefixes](/quest/m2/cluster-routing/routes/interest-set.md) - the edit rule proven in the model and the router that implements it
+- [lite-07 sessions run the path router](/quest/m2/cluster-routing/routes/switch.md) - the messages this moves onto one stream, with no echo or route request among them
 
 ## Related
 
-- [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - the JS side of the same wire
 - [Announce interest streams share one route table](/quest/m4/announce-interest-memory.md) - lite-07 then holds one interest stream per side; the bound still matters for older versions
 - [A regrant re-checks only the routes it can change](/quest/m4/regrant-route-recheck.md) - its per-stream product loses a factor on lite-07
