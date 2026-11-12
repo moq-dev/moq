@@ -5,8 +5,9 @@
 The route model (`rs/moq-net/verify/route/RouteHandoff.tla`) and the router
 (`rs/moq-net/src/route/`) treat a neighbour as one session, keyed once for
 both directions, whose interest is a set of prefixes edited in place. TLC
-checks every ordering of an edit against the routes, batches, floors, and
-echoes sharing one FIFO per direction, and the existing rules hold: an edit
+checks every ordering of an edit against the routes, withdrawals, batches,
+floors, and hold answers sharing one FIFO per direction, and the existing
+rules hold: an edit
 that swaps prefixes for a wider or narrower one keeps every claim both cover,
 ends nothing, revives nothing, and sends nothing twice. Nothing on the wire
 or in the sessions changes here; [the route stream](/quest/m2/cluster-routing/routes/route-stream.md)
@@ -17,6 +18,18 @@ carries it.
 Decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing). The model
 goes first because the set's edit rule is the one new rule in this redesign,
 and every earlier routing bug was an ordering nobody had enumerated.
+
+Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
+Babel): ✅ this edits the path router, after
+[the route per scope](/quest/m2/cluster-routing/routes/scope.md) builds it,
+and the model as
+[scope-model](/quest/m2/cluster-routing/routes/scope-model.md) leaves it
+(rejected: landing first on Babel's router, which
+[the switch](/quest/m2/cluster-routing/routes/switch.md) deletes). The path
+rule has no echo and no route request
+([epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27), so an edit
+is checked against a withdrawal that names a dead hop and against a hold and
+its answer instead.
 
 Settled:
 
@@ -62,19 +75,19 @@ The edit rule those three imply, to prove rather than assume:
   recommended: it replaces them, so there is one floor per route per prefix.
 - A route stays on the stream while some live prefix presents a claim of it
   (Plan item 15, over the set). One whose last claim an edit drops ends with
-  ROUTE_END after the marker, echoed as usual, with no floor first, since
-  nothing was withdrawn.
+  ROUTE_END after the marker, with no floor first, since nothing was
+  withdrawn.
 
 Work:
 
-- Start from the model and `Sim` with link costs and hops
-  ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)), and move the echo from its own queue onto the neighbour's FIFO, as
-  that PR's first commit (`81c0698295`) did: with one stream per side nothing
-  overtakes anything.
+- Start from the model and the router with the path rule. Everything a side
+  says to a neighbour shares one FIFO per direction, the hold answer
+  included: with one stream per side nothing overtakes anything.
 - The model has two prefixes and a scoped relay since
   [it has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md).
   Give it edits in flight: add, remove, widen, narrow, and an edit that
-  crosses a claim change, a route change, a ROUTE_END, and its echo. Keep it
+  crosses a claim change, a route change, a ROUTE_END, a withdrawal that
+  names a dead hop, and a hold with its answer. Keep it
   tractable by bounding edits as it bounds flaps. Where Settled item 1 says
   the merge rule is unchanged, read it as that quest's rule: a floor names
   its route's prefix, and the newest floor wins among one publisher's routes.
@@ -104,8 +117,9 @@ Public API: none (the router is crate-private). Wire: none.
 ## Required
 
 - [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - the two prefixes and the rule for whose claims a relay believes, which an edit must preserve
+- [The router runs the path rule with a route per scope](/quest/m2/cluster-routing/routes/scope.md) - the router this edits, with a floor per route
 
 ## Related
 
-- [The router keeps a route per scope](/quest/m2/cluster-routing/routes/scope.md) - rewrites how the router keeps a floor per prefix; whichever lands second adapts
+- [lite-07 sessions run the path router](/quest/m2/cluster-routing/routes/switch.md) - deletes Babel's router; whichever lands second adapts
 - [Widening an interest ends no live claim](/quest/m2/cluster-routing/routes/widen-false-end.md) - a false END on an interest change today, which the edit in place may remove

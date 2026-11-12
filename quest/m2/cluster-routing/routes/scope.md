@@ -1,19 +1,27 @@
-# [XL] The router keeps a route per scope
+# [XL] The router runs the path rule with a route per scope
 
 ## Goal
 
-`route::Router` keys a route by its publisher and the prefix it covers, and
-believes a route that did not cross it, as
-[the model](/quest/m2/cluster-routing/routes/scope-model.md) settled. A relay
-shows a claim exactly while such a route covers it and the newest revision a
-covering route gave it still has the claim, two relays never keep a
-dead route alive through each other, a change of path or seqno alone changes
-no claim a reader sees, and a relay behind a scoped neighbour reaches what a
+`route::Router` runs the rule
+[the model](/quest/m2/cluster-routing/routes/scope-model.md) settled, sans-IO,
+and `route::tests::Sim` drives it. A route is keyed by its publisher and the
+prefix it covers and carries its path. A relay uses the cheapest route whose
+path does not name it, drops every route through a hop a withdrawal names,
+holds its claims while the neighbours that learned a route from it have yet
+to answer, and stays off a node in doubt until the timer lifts it. It keeps
+no distance, seqno, route request, or echo.
+
+A relay shows a claim exactly while such a route covers it and the newest
+revision a covering route gave it still has the claim, two relays never keep
+a dead route alive through each other, a change of path alone changes no
+claim a reader sees, and a relay behind a scoped neighbour reaches what a
 farther one offers. The `residual_` tests in
-`rs/moq-net/src/route/tests/residual.rs` pass
-as plain tests, a sweep over meshes with scoped relays holds the rules at
-every quiet point, and the draft and the epic's contract say what the router
-does.
+`rs/moq-net/src/route/tests/residual.rs` pass as plain tests on it, and a
+sweep over meshes with scoped relays holds the rules at every quiet point.
+
+Sessions, the wire, the draft, and `js/net` keep today's router until
+[the switch](/quest/m2/cluster-routing/routes/switch.md), so nothing a peer
+or an application sees changes here.
 
 ## Plan
 
@@ -26,67 +34,69 @@ Decided 2026-11-11 (maintainer, on
 [moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533)): the route rule
 changes too. Babel's distance, the seqno, ROUTE_REQUEST, and the ROUTE_END
 echo go, for the rule in the
-[epic](/quest/m2/cluster-routing/routes/README.md)'s Plan item 27. That
-removal is not planned yet. Plan it with `/quest-plan` before this quest
-starts, as its own quest or as work here: it touches the wire (a session in
-each hop, a message that names a dead hop, no ROUTE_REQUEST and no echo),
-the draft, `js/net`, and most of `route/mod.rs`. The prototype
-(`route/tests/paths.rs`, `compare.rs`, `copies.rs`) is then promoted or
-deleted.
+[epic](/quest/m2/cluster-routing/routes/README.md)'s Plan item 27.
+
+Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
+Babel), asked how that removal is split: ✅ two quests in this epic. This one
+builds the router with no wire change, and
+[the switch](/quest/m2/cluster-routing/routes/switch.md) moves the sessions,
+the wire, the draft, and `js/net` onto it and deletes Babel's router
+(rejected: the same split with this quest in m1, since it breaks nothing;
+one quest for everything, which is one PR across the router, the wire, the
+draft, the Rust sessions, and `js/net`).
+
+The two rules share a tree until the switch. Pick how, and say why in the
+PR: the prototype (`route/tests/paths.rs`, `compare.rs`, `copies.rs`)
+promoted out of `tests/` into a second router, or one router generic over
+the rule. Either way the claim side is one implementation, not a copy: the
+views, floors, `show`, and the interest handling are what the fixtures of
+the last month fixed, and the rule changes only which routes feed them.
+Sessions construct today's rule and nothing on the wire changes. Whatever
+of the prototype the router replaces is deleted here.
 
 Work:
 
-- Key `rx`, the selection, `sent`, and the views in `route/mod.rs` by route.
-  A view then has one floor, so delete `certifiers`, `certified`, `prune`,
-  `loose`, and the per-region floors, and keep the newest floor among one
+- Route selection by the rule of the epic's Plan item 27, as the model
+  states it: the path with a session in each hop, the withdrawal naming a
+  dead hop and listing the routes that moved, holds and their answers, and
+  the doubt with its timer on the router's mocked clock. The timer's length
+  starts from the maintainer's 1 s; the model and the sweeps settle it.
+- Key `rx`, the selection, `sent`, and the views by route. A view then has
+  one floor, so `certifiers`, `certified`, `prune`, `loose`, and the
+  per-region floors have no counterpart, and the newest floor wins among one
   publisher's routes as the model has it. Keep the reader's view a function
   of what the router holds, computed incrementally the way `show` is today,
   with the test build comparing it against the whole computation.
 - Keep a session's teardown about linear in the prefixes it held, as
   [the relay session hour](/quest/m0/ci/nightly-relay-session-hour.md) makes it.
-- Remove what #8487 added to work around the old rule: `recompute`'s `prune`
-  switch, which skips pruning on a change of hops or RTT alone. Keep the
-  qualified-key test in `infeasible` unless the new rule makes it moot, and
-  say which.
-- Serve a request through the route the model's rule picks, in
-  `route/node.rs`'s `home`, in place of every feasible route whose neighbour
-  `carries` the claim.
-- Flip each `residual_` test, and add the review harness's scoped and
-  two-prefix families as a sweep beside
-  `sweep_no_route_outgrows_a_loop_free_path`, checking at every quiet point
-  that each relay shows what the rule says and nothing waits. Compare a few
-  thousand scripts against the router before this change and explain every
-  difference in the PR.
-- Wire (lite-07-wip): whatever the model settled for naming a route's
-  prefix. List it under Impact and run `just test interop --all`.
-- Draft: Routing says a route covers a prefix, and Floors says a floor
-  certifies its route's prefix. Replace the Floors condition "every peer
-  whose last advertised route to it is feasible here has answered the
-  current request" with the settled rule. The hold rule in Routing changes
-  with the route rule (epic Plan item 27). Add a changelog bullet.
-- Change js/net's route layer (`js/net/src/lite/publisher.ts`,
-  `js/net/src/lite/subscriber.ts`, `js/net/src/lite/floors.ts`,
-  `js/net/src/route.ts`) in the same PR.
-- Make js/net's origin apply the covering rule (`covering` in
-  `route/view.rs`) when it picks among a session's routes, as its consume
-  cache does through `Floors.covers`. Decided 2026-11-12 (maintainer, on
-  [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443)): ✅ leave it to
-  this rewrite (rejected: port the per-node merged view in #8443). Until then,
-  when a newer floor withdraws a node's claim above `live/x` while another
-  node claims `live` with a different instance, `forwardAnnounced` still
-  offers the withdrawn claim, and an origin request for `live/x` fails
-  `Unroutable` until the lagging stream's floor lands. Recommended: the
-  origin asks a session's route, per request, whether it covers the
-  requested path (the session's `Floors.covers`) and skips one that does not,
-  since an announcement at `live` cannot say it stops short of `live/x`.
-  Test it with the two-stream, two-instance case from #8443's review.
-- Rewrite the epic's bullet on who certifies as built, and update the
-  `verify-route` skill's coverage and sync commit.
-- Measure route and claim messages per change with
-  `rs/moq-net/tests/integration/mesh_sweep.rs`'s benchmark before and after.
+- What #8487 added to work around the old rule has no counterpart either:
+  `recompute`'s `prune` switch, which skips pruning on a change of hops or
+  RTT alone. Keep the qualified-key test in `infeasible` only if the new
+  rule still needs it, and say which.
+- Expose the route the model's rule picks for a request, as a crate-private
+  query, so the switch can serve a request through it in `route/node.rs`'s
+  `home`. `Sim` checks it reaches the publisher without a loop (`Reaches`).
+- Run the handoff fixtures and both sweeps on the new rule. Flip each
+  `residual_` test, and add the review harness's scoped and two-prefix
+  families as a sweep beside `sweep_no_route_outgrows_a_loop_free_path`,
+  checking at every quiet point that each relay shows what the rule says and
+  nothing waits. Compare a few thousand scripts against today's router and
+  explain every difference in the PR.
+- Report route and claim messages per change on `Sim` for both rules, on the
+  meshes `compare.rs` holds. The switch measures real sessions.
+- Update the `verify-route` skill's coverage and sync commit for the rule
+  `Sim` now runs.
 
-Public API: none (the router is crate-private). Wire: lite-07-wip.
+Left to [the switch](/quest/m2/cluster-routing/routes/switch.md): the wire,
+the draft, `route/node.rs` and the sessions, `js/net`, the epic's contract
+as built, and the deletion of today's router.
+
+Public API: none (the router is crate-private). Wire: none.
 
 ## Required
 
 - [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - the rule, proven on two prefixes and a scoped relay
+
+## Related
+
+- [lite-07 sessions run the path router](/quest/m2/cluster-routing/routes/switch.md) - puts this router on the wire and deletes the one it replaces

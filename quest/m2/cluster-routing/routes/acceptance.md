@@ -12,11 +12,18 @@ replace are retired.
 
 ## Plan
 
+Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
+Babel): acceptance is of the path rule
+([epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27), on the
+sessions [the switch](/quest/m2/cluster-routing/routes/switch.md) leaves.
+The seqno request fixtures are replaced below, since the rule has no seqno
+and no request.
+
 - Port the forwarding fixtures (`Forward`, `Aggregate`, pool ties, and the
   sweeps over them) to the implementation, then delete the model.
-- The earlier simulator persisted seqnos across restart. Re-run with the
-  settled fresh routing incarnation and the stale-state rules; do not carry
-  the old assumption into acceptance.
+- The earlier simulator persisted seqnos across restart, and the path rule
+  has none. Re-run with a fresh routing identity per restart and the
+  stale-state rules; do not carry the old assumption into acceptance.
 - Retire [moq-dev/moq#5375](https://github.com/moq-dev/moq/pull/5375)'s
   quarantine, [moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391)'s
   dedup, and the 300 ms hold only once the fixtures below demonstrate their
@@ -53,12 +60,15 @@ link flap with many broadcasts behind one origin costs one ROUTE change per
 link; a ring of three where a stale neighbour cannot revive an ended
 broadcast; a two-uplink mesh that never carries CDN routes back to the CDN;
 an island reached through the CDN after a partition; an unknown Route ID
-refused; a five-node ring whose preferred origin link fails recovers its
-longer backup through a seqno request, duplicates suppressed, while that
-backup never loses its session; a ring where a node's own preferred route
-points back at the requester forwards the request to it, which carries it
-on along its own route, and an unanswerable request stops once no usable
-route is left. Failover is measured
+refused; a five-node ring whose preferred origin link fails moves to its
+longer backup, at once where the backup's path avoids the far end of the
+closed link and once the doubt lifts where it runs through it, while that
+backup never loses its session; a relay with several neighbours that dies
+is named in one withdrawal per session, and no relay moves onto a route
+through it before the doubt lifts; two relays whose only routes run through
+each other both let go, neither holding for the other; and a relay that
+holds lets go once the neighbours behind it have answered, including one
+whose session closes without an answer. Failover is measured
 on broadcast liveness while the next hop changes, including a new next hop
 whose ROUTE arrives before its ANNOUNCE set, and reports per-path
 retractions and re-announcements beside the ROUTE budget; eventual route
@@ -85,7 +95,12 @@ per-broadcast table rewrites or poll unrelated fronts. Measure messages, bytes,
 wakes/select calls, CPU, replay work, and retained state. One broadcast per
 origin is an explicit case. Coordinate with Route wakes and Announce replay;
 benchmark smoke alone does not enforce complexity, so add operation-count
-regressions. Bound pending requests and freshness state under same-clock churn.
+regressions. Bound held routes, doubts, and remembered dead hops under
+same-clock churn.
+
+## Required
+
+- [lite-07 sessions run the path router](/quest/m2/cluster-routing/routes/switch.md) - the sessions and the route rule these fixtures accept
 
 ## Related
 
