@@ -1216,7 +1216,10 @@ mod tests {
 	#[tokio::test]
 	async fn audio_holds_a_target_past_its_opening_budget() {
 		let jitter = Duration::from_millis(300);
-		assert_on_time(first_sound(jitter, Duration::from_millis(100), None, None).await, jitter);
+		assert_on_time(
+			first_sound(jitter, Duration::from_millis(100), None, None).await,
+			jitter,
+		);
 	}
 
 	fn assert_on_time(sounded: Duration, due: Duration) {
