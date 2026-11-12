@@ -5,8 +5,9 @@
 An inductive invariant of the route model implies `NoRevival`, `NoFalseEnd`,
 `NoRegression`, `Truthful`, and the loop rule the model proves for the path
 rule: no relay uses a route whose path names it, and selected next hops loop
-only within the bound
-[the model](/quest/m2/cluster-routing/routes/scope-model.md) found. Apalache
+only within the bound the model (`rs/moq-net/verify/route/RouteHandoff.tla`)
+found: through a stale route whose news is on its way (`LoopsAreStale`,
+`StaleIsChased`). Apalache
 checks in Nightly that it holds initially and that every step preserves it
 from any state satisfying it, on each mesh shape of up to five relays. The
 rules then hold for runs of any length and any number of changes, where
@@ -55,16 +56,13 @@ stay constants the config states. Say both bounds in the `verify-route` skill.
   the invariant also says a route is held only from a node the holder shares
   a link with: every route sent adds its sender to hops that did not name it
   ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)). Start there.
-- Apalache checks safety. That every hold ends is a liveness rule the model
-  checks with TLC; leave it there and say so in the skill.
+- Apalache checks safety. That every hold ends is no checked rule: the
+  model has no fairness, and the `verify-route` skill argues it from
+  `Budget` and `QuietIsSettled`. Leave it there.
 - Run it through the `tla` recipes with Apalache from the flake. If five
   relays does not fit Nightly, record the largest mesh that does and its time.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - the rule for whose claims a relay believes, which the claim rules rest on; an invariant found before it is found for a rule about to go
 
 ## Related
 

@@ -22,8 +22,8 @@ and every earlier routing bug was an ordering nobody had enumerated.
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel): ✅ this edits the path router, after
 [the route per scope](/quest/m2/cluster-routing/routes/scope.md) builds it,
-and the model as
-[scope-model](/quest/m2/cluster-routing/routes/scope-model.md) leaves it
+and the model as it has a route per prefix
+(`rs/moq-net/verify/route/RouteHandoff.tla`)
 (rejected: landing first on Babel's router, which
 [the switch](/quest/m2/cluster-routing/routes/switch.md) deletes). The path
 rule has no echo and no route request
@@ -84,7 +84,7 @@ Work:
   says to a neighbour shares one FIFO per direction, the hold answer
   included: with one stream per side nothing overtakes anything.
 - The model has two prefixes and a scoped relay since
-  [it has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md).
+  it has a route per scope.
   Give it edits in flight: add, remove, widen, narrow, and an edit that
   crosses a claim change, a route change, a ROUTE_END, a withdrawal that
   names a dead hop, and a hold with its answer. Keep it
@@ -116,7 +116,6 @@ Public API: none (the router is crate-private). Wire: none.
 
 ## Required
 
-- [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - the two prefixes and the rule for whose claims a relay believes, which an edit must preserve
 - [The router runs the path rule with a route per scope](/quest/m2/cluster-routing/routes/scope.md) - the router this edits, with a floor per route
 
 ## Related

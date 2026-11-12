@@ -2,9 +2,9 @@
 
 ## Goal
 
-`route::Router` runs the rule
-[the model](/quest/m2/cluster-routing/routes/scope-model.md) settled, sans-IO,
-and `route::tests::Sim` drives it. A route is keyed by its publisher and the
+`route::Router` runs the rule the model
+(`rs/moq-net/verify/route/RouteHandoff.tla`) settled, sans-IO, and
+`route::tests::Sim` drives it. A route is keyed by its publisher and the
 prefix it covers and carries its path. A relay uses the cheapest route whose
 path does not name it, drops every route through a hop a withdrawal names,
 holds its claims while the neighbours that learned a route from it have yet
@@ -44,6 +44,22 @@ the wire, the draft, and `js/net` onto it and deletes Babel's router
 (rejected: the same split with this quest in m1, since it breaks nothing;
 one quest for everything, which is one PR across the router, the wire, the
 draft, the Rust sessions, and `js/net`).
+
+Open, from the model
+([moq-dev/moq#8541](https://github.com/moq-dev/moq/pull/8541)): how long a
+relay keeps its doubt about a node. As the rule stands the doubt goes once no
+route names the node, and a request can then loop while the news of three
+closed sessions is still on its way: `Loop.cfg` breaks `RequestsLoopFree` at
+depth 11 and is kept as that open finding. Keeping the doubt until its timer
+fires showed no loop on that mesh in 7.6M states, to depth 13, and costs a
+wait: no relay moves to a route through the doubted node until the timer
+fires, a publisher reconnecting through another relay included, though a
+relay keeps one it already has. Measure that reconnect delay on
+the prototype's meshes under both rules and put the two to the maintainer
+with the numbers. Recommended: keep the doubt, since the wait is bounded by
+the timer and a looping request is not bounded by anything the relay
+controls. If the rule changes,
+`Loop.cfg` passes and `RequestsLoopFree` joins the rules every config checks.
 
 The two rules share a tree until the switch. Pick how, and say why in the
 PR: the prototype (`route/tests/paths.rs`, `compare.rs`, `copies.rs`)
@@ -92,10 +108,6 @@ the draft, `route/node.rs` and the sessions, `js/net`, the epic's contract
 as built, and the deletion of today's router.
 
 Public API: none (the router is crate-private). Wire: none.
-
-## Required
-
-- [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - the rule, proven on two prefixes and a scoped relay
 
 ## Related
 
